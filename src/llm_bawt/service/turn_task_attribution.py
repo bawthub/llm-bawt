@@ -77,21 +77,24 @@ async def stamp_turn_task(store, *, turn_id, bot_id, user_id):
         return
     ref, source = None, "unavailable"
     try:
-        ref = await asyncio.to_thread(starting_delivery, engine, turn_id, bot_id, user_id)
-        if ref:
-            source = "delivery"
-        else:
-            from ..mcp_server.task_api import API_PREFIX, BASE_URL
+        # Accounting must not make an unhealthy task service hold model
+        # execution. One total budget, not an unbounded stack of IO timeouts.
+        async with asyncio.timeout(0.5):
+            ref = await asyncio.to_thread(starting_delivery, engine, turn_id, bot_id, user_id)
+            if ref:
+                source = "delivery"
+            else:
+                from ..mcp_server.task_api import API_PREFIX, BASE_URL
 
-            async with httpx.AsyncClient(
-                base_url=BASE_URL, timeout=2.0, auth=service_auth(),
-            ) as client:
-                response = await client.get(f"{API_PREFIX}/tasks", params={
-                    "agentBotId": bot_id, "status": "IN_PROGRESS",
-                    "archived": "false", "limit": 2,
-                })
-                response.raise_for_status()
-                ref, source = assigned_task(response.json(), bot_id)
+                async with httpx.AsyncClient(
+                    base_url=BASE_URL, timeout=0.5, auth=service_auth(),
+                ) as client:
+                    response = await client.get(f"{API_PREFIX}/tasks", params={
+                        "agentBotId": bot_id, "status": "IN_PROGRESS",
+                        "archived": "false", "limit": 2,
+                    })
+                    response.raise_for_status()
+                    ref, source = assigned_task(response.json(), bot_id)
     except Exception:
         logger.warning("Task accounting snapshot unavailable for %s", turn_id, exc_info=True)
     try:

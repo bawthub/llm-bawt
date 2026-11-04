@@ -55,7 +55,7 @@ def test_assignment_lookup_is_bounded_and_read_only(monkeypatch):
 
     class Client:
         def __init__(self, **kwargs):
-            assert kwargs["timeout"] == 2.0
+            assert kwargs["timeout"] == 0.5
 
         async def __aenter__(self):
             return self
