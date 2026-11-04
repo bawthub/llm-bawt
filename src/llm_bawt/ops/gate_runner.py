@@ -332,7 +332,9 @@ def run_gate(api, *, plan: GatePlan, source: GateSource, job_id: str, scratch_pa
                 if role == "pg":
                     api.request("POST", f"/containers/{ids[role]}/start")
                     _ready(api, ids[role])
-            stream = api.attach_stream(ids["runner"])
+            # The suite can be silent far longer than the Docker client timeout;
+            # the enclosing _bounded(_SECONDS) SIGALRM is the hard bound.
+            stream = api.attach_stream(ids["runner"], idle_timeout=None)
             try:
                 api.request("POST", f"/containers/{ids['runner']}/start")
                 output = stream.read(_MAX_OUTPUT + 1)

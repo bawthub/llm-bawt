@@ -59,8 +59,9 @@ class Docker:
                 "Config": {"Env": ["PGDATA=/var/lib/postgresql/data"],
                     "Volumes": {"/var/lib/postgresql/data": {}}}}}
 
-    def attach_stream(self, identity):
+    def attach_stream(self, identity, *, idle_timeout=...):
         self.calls.append(("ATTACH", identity, None))
+        self.attach_idle_timeout = idle_timeout
         assert self.containers[identity]["State"]["Running"] is False
         return Stream(self)
 
@@ -383,3 +384,35 @@ def test_invalid_internal_custody_nonce_refuses_before_docker(setup, nonce):
     with pytest.raises(runner.GateLaunchError, match="custody_identity_invalid"):
         runner.run_gate(api, **args, owner_nonce=nonce)
     assert not api.calls and not list(args["scratch_parent"].iterdir())
+
+
+def test_runner_attach_has_no_socket_idle_timeout(setup):
+    # TASK-1865: a 30s Docker client idle timeout killed a live suite that was
+    # silent for 30s; the _bounded SIGALRM is the only hard bound.
+    api, args = setup
+    runner.run_gate(api, **args)
+    assert api.attach_idle_timeout is None
+
+
+def test_docker_attach_idle_timeout_override(monkeypatch):
+    from llm_bawt.ops import worker
+    seen = []
+
+    class Conn:
+        def __init__(self, host, timeout):
+            seen.append(timeout)
+
+        def request(self, *a, **k):
+            pass
+
+        def getresponse(self):
+            return type("R", (), {"status": 200})()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(worker, "UnixHTTPConnection", Conn)
+    api = worker.DockerAPI(30.0)
+    api.attach_stream("c1")
+    api.attach_stream("c2", idle_timeout=None)
+    assert seen == [30.0, None]

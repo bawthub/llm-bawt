@@ -149,14 +149,19 @@ class DockerAPI:
         finally:
             conn.close()
 
-    def attach_stream(self, container_id: str):
+    def attach_stream(self, container_id: str, *, idle_timeout: float | None | object = ...):
         """Attach to a created container's stdout/stderr BEFORE it starts.
 
         Returns an object with ``read(limit)``/``close()`` over Docker's raw
         multiplexed stream, which ends when the container exits (TASK-1518
         Compose renderer: its log driver is ``none``, so this is the only copy).
+
+        ``idle_timeout`` defaults to the client timeout. Pass ``None`` only when
+        the caller holds its own hard OS deadline (the gate runner), because a
+        long-running container may legitimately stay silent past it.
         """
-        conn = UnixHTTPConnection("localhost", timeout=self.timeout)
+        timeout = self.timeout if idle_timeout is ... else idle_timeout
+        conn = UnixHTTPConnection("localhost", timeout=timeout)
         try:
             conn.request("POST", f"/containers/{quote(container_id, safe='')}/attach?"
                          + urlencode({"stream": 1, "stdout": 1, "stderr": 1}))
