@@ -291,7 +291,7 @@ def load_steer_jumper(conn, held_head, config):
 
 
 # Visible on a held head while later steer rows pass it (TASK-1758).
-WAITING_FOR_TURN_END = "Waiting for the target's running turn to end; later steers may pass"
+WAITING_FOR_TURN_END = "Waiting for the target's running turn to end"
 
 
 def mark_waiting_for_turn_end(conn, head_id: str) -> None:
