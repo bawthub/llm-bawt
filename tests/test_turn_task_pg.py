@@ -226,3 +226,71 @@ def test_snapshot_scope_and_starting_delivery_exclude_steers(rig):
     with rig.engine.connect() as conn:
         assert conn.execute(sa_text("SELECT task_ref FROM turn_logs WHERE id=:t"),
                             {"t": turn}).scalar_one() is None
+
+
+def test_retro_read_exact_turn_union_deduplicates_and_never_returns_content(rig):
+    from llm_bawt.service.task_retro_read import read_retro_turns
+    from llm_bawt.service.turn_task_attribution import write_attribution
+
+    sender, bot = rig.bot(), rig.bot()
+    delivery = _deliver(rig, sender, bot, "TASK-2019")
+    turn = _turn(rig.engine, bot, turn_id=delivery.turn_id, ended=True)
+    write_attribution(rig.engine, turn_id=turn, bot_id=bot, user_id="fixture-user",
+                      task_ref="cm-retro", source="active_assignment")
+    with rig.engine.begin() as conn:
+        conn.execute(sa_text("UPDATE turn_logs SET trigger_message_id='retro-trigger', "
+                             "token_usage_json=:usage WHERE id=:turn"), {
+            "turn": turn, "usage": json.dumps({"total_cost_usd": "1.23", "input_tokens": 999,
+                "turn_request_totals": {"input_tokens": 100, "cache_read_tokens": 80,
+                                        "cache_creation_tokens": 10, "requests": 2}})})
+    link = {"bot_id": bot, "trigger_message_id": "retro-trigger", "task_ref": "cm-retro"}
+    with rig.engine.connect() as conn:
+        result = read_retro_turns(conn, user="fixture-user", bots=[bot],
+                                  links=[link, link], refs=["TASK-2019", "cm-retro"])
+        invisible = read_retro_turns(conn, user="other-user", bots=[bot], links=[link], refs=["cm-retro"])
+    assert result["truncated"] is False and len(result["turns"]) == 1
+    row = result["turns"][0]
+    assert row["task_ref"] == "cm-retro" and row["attribution_source"] == "task_turn_link"
+    assert row["fresh_input_tokens"] == 20 and row["cost_usd"] == "1.23"
+    assert invisible["turns"] == []
+    assert not (set(row) & {"user_prompt", "request_json", "response_text", "tool_calls_json"})
+
+
+def test_retro_read_half_open_week_and_ambiguous_links(rig):
+    from llm_bawt.service.task_retro_read import read_retro_turns
+
+    bot = rig.bot()
+    turn = _turn(rig.engine, bot, ended=True)
+    start = datetime(2026, 11, 1, tzinfo=timezone.utc)
+    end = start + timedelta(days=7)
+    with rig.engine.begin() as conn:
+        conn.execute(sa_text("UPDATE turn_logs SET created_at=:at, trigger_message_id='multi' WHERE id=:id"),
+                     {"at": start, "id": turn})
+    links = [{"bot_id": bot, "trigger_message_id": "multi", "task_ref": ref}
+             for ref in ("cm-first", "cm-second")]
+    with rig.engine.connect() as conn:
+        result = read_retro_turns(conn, user="fixture-user", bots=[bot], links=links, start=start, end=end)
+        excluded = read_retro_turns(conn, user="fixture-user", bots=[bot], links=links,
+                                    start=start - timedelta(days=7), end=start)
+    assert len(result["turns"]) == 1
+    assert result["turns"][0]["task_ref"] is None
+    assert result["turns"][0]["attribution_source"] == "ambiguous"
+    assert excluded["turns"] == []
+
+
+def test_retro_messages_include_structured_steers_but_not_other_users(rig):
+    from llm_bawt.service.task_retro_read import read_retro_messages
+
+    sender, target = rig.bot(), rig.bot()
+    start = _deliver(rig, sender, target, "TASK-2019")
+    steer = _deliver(rig, sender, target, "TASK-2019")
+    with rig.engine.begin() as conn:
+        conn.execute(sa_text("UPDATE inter_bot_deliveries SET target_turn_id=:t WHERE id=:d"),
+                     {"t": start.turn_id, "d": steer.id})
+    with rig.engine.connect() as conn:
+        found = read_retro_messages(conn, user="fixture-user", bots=[sender, target], refs=["TASK-2019"])
+        invisible = read_retro_messages(conn, user="wrong", bots=[sender, target], refs=["TASK-2019"])
+        private_target = read_retro_messages(conn, user="fixture-user", bots=[sender], refs=["TASK-2019"])
+    assert {row["id"] for row in found["messages"]} == {start.id, steer.id}
+    assert found["messages_truncated"] is False
+    assert invisible["messages"] == private_target["messages"] == []

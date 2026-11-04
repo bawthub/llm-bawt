@@ -29,6 +29,7 @@ from .integrations import router as integrations_router
 from .settings import router as settings_router
 from .bot_purge_preview import router as bot_purge_preview_router
 from .turn_tasks import router as turn_tasks_router
+from .task_retros import router as task_retros_router
 from .setup import router as setup_router
 from .sessions import router as sessions_router
 from .skills import router as skills_router
@@ -85,6 +86,7 @@ all_routers = [
     settings_router,
     bot_purge_preview_router,
     turn_tasks_router,
+    task_retros_router,
     bot_tags_router,
     bot_grants_router,
     skills_router,
