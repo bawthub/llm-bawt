@@ -277,6 +277,10 @@ class Config(RuntimeTunables, BaseSettings):
         default="",
         description="Redis URL for bridge command/event transport (e.g. redis://redis:6379/0)",
     )
+    WORKSPACE_BRIDGE_URL: str = Field(
+        default="",
+        description="Internal workspace bridge HTTP base URL; global DB workspace.bridge_url takes precedence.",
+    )
 
     # --- Ops health (TASK-1171) --- #
     OPS_HEALTH_URL: str = Field(

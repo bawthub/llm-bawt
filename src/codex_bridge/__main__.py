@@ -24,7 +24,6 @@ Environment:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import signal
@@ -36,6 +35,7 @@ from agent_bridge.chatgpt_models import (
     parse_chatgpt_models,
 )
 from agent_bridge.publisher import RedisPublisher
+from agent_bridge.health_http import serve_health
 
 from .auth_broker import ensure_auth_file
 from .bridge import CodexBridge
@@ -123,66 +123,9 @@ async def _fetch_codex_models() -> list[dict]:
     return parse_chatgpt_models(resp.json())
 
 
-def _http_response(status: str, body: str) -> bytes:
-    return (
-        f"HTTP/1.1 {status}\r\n"
-        f"Content-Type: application/json\r\n"
-        f"Content-Length: {len(body)}\r\n"
-        f"\r\n"
-        f"{body}"
-    ).encode()
-
-
 async def _health_server(publisher: RedisPublisher, port: int) -> None:
-    """Minimal HTTP server for docker healthchecks + model discovery.
-
-    Routes:
-      * ``/health``  — 200 when Redis is connected, 503 otherwise. Mirrors the
-        shape of claude_code_bridge's health server so compose healthchecks
-        across bridges look identical.
-      * ``/models``  — live Codex model catalog as ``{"models": [{"id": ...}]}``,
-        503 on SDK/auth failure. Lets the app discover models without importing
-        the Codex SDK itself.
-    """
-
-    logger = logging.getLogger("codex_bridge.health")
-
-    async def handle(
-        reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-    ) -> None:
-        try:
-            request_line = await reader.readline()
-            try:
-                path = request_line.decode("latin1").split(" ", 2)[1]
-            except (IndexError, UnicodeDecodeError):
-                path = "/"
-            path = path.split("?", 1)[0]
-
-            if path.startswith("/models"):
-                try:
-                    models = await _fetch_codex_models()
-                    body = json.dumps({"models": models})
-                    status = "200 OK"
-                except Exception as e:  # auth expiry, offline, backend drift
-                    logger.warning("Codex /models fetch failed: %s", e)
-                    body = json.dumps({"error": str(e)})
-                    status = "503 Service Unavailable"
-            else:
-                redis_ok = publisher.connected
-                status = "200 OK" if redis_ok else "503 Service Unavailable"
-                body = f'{{"redis": {str(redis_ok).lower()}}}'
-
-            writer.write(_http_response(status, body))
-            await writer.drain()
-        except Exception:
-            pass
-        finally:
-            writer.close()
-
-    server = await asyncio.start_server(handle, "0.0.0.0", port)
-    logger.info("Health/models server listening on :%d", port)
-    async with server:
-        await server.serve_forever()
+    """Internal health, model discovery and workspace HTTP surface."""
+    await serve_health(publisher, port, _fetch_codex_models)
 
 
 def _redact(s: str | None, *, keep: int = 6) -> str:

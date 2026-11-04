@@ -57,6 +57,7 @@ services:
       # in the "Attached Images" prompt manifest. Same in-network address the
       # bridges already use for LLM_BAWT_API_URL.
       - LLM_BAWT_AGENT_ORIGIN=http://app:8642
+      - LLM_BAWT_WORKSPACE_BRIDGE_URL=${LLM_BAWT_WORKSPACE_BRIDGE_URL:-http://claude-code-bridge:8681}
       # TASK-701/793: trusted current-turn MCP tools write through BawtHub's
       # container-only association API, sending the BawtHub service bearer.
       - BAWTHUB_TASK_ASSOCIATION_INTERNAL_URL=${BAWTHUB_TASK_ASSOCIATION_INTERNAL_URL:-http://frontend-prod:3002}

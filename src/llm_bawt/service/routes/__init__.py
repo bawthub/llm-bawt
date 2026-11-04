@@ -53,6 +53,7 @@ from .usage import router as usage_router
 from .media import router as media_router
 from .uploads import router as uploads_router
 from .working_memory import router as working_memory_router
+from .workspace import router as workspace_router
 
 all_routers = [
     health_router,
@@ -102,6 +103,7 @@ all_routers = [
     media_router,
     uploads_router,
     working_memory_router,
+    workspace_router,
     bawthub_auth_secrets_router,
     internal_connections_router,
     admin_gates_router,

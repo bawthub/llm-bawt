@@ -11,6 +11,7 @@ import signal
 import sys
 
 from agent_bridge.publisher import RedisPublisher
+from agent_bridge.health_http import serve_health
 
 from .bootstrap import bootstrap_claude_home
 from .bridge import ClaudeCodeBridge
@@ -18,33 +19,8 @@ from .proxy import ProxyServer
 
 
 async def _health_server(bridge: ClaudeCodeBridge, publisher: RedisPublisher, port: int) -> None:
-    """Minimal TCP health check."""
-
-    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        try:
-            await reader.readline()
-            redis_ok = publisher.connected
-            status = "200 OK" if redis_ok else "503 Service Unavailable"
-            body = f'{{"redis": {str(redis_ok).lower()}}}'
-            resp = (
-                f"HTTP/1.1 {status}\r\n"
-                f"Content-Type: application/json\r\n"
-                f"Content-Length: {len(body)}\r\n"
-                f"\r\n"
-                f"{body}"
-            )
-            writer.write(resp.encode())
-            await writer.drain()
-        except Exception:
-            pass
-        finally:
-            writer.close()
-
-    server = await asyncio.start_server(handle, "0.0.0.0", port)
-    logger = logging.getLogger("claude_code_bridge.health")
-    logger.info("Health check listening on :%d", port)
-    async with server:
-        await server.serve_forever()
+    """Internal health and bridge-owned workspace HTTP surface."""
+    await serve_health(publisher, port)
 
 
 def main() -> None:

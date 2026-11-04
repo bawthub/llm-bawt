@@ -13,6 +13,7 @@ and a cached copy would be rejected as ``bad``. Values are never logged.
 from __future__ import annotations
 
 import logging
+import hmac
 import os
 from dataclasses import dataclass
 from typing import Mapping
@@ -59,3 +60,15 @@ def token(sender: Sender = BROKER, environ: Mapping[str, str] | None = None) -> 
 def headers(sender: Sender = BROKER, environ: Mapping[str, str] | None = None) -> dict[str, str]:
     value = token(sender, environ)
     return {HEADER: value} if value else {}
+
+
+def accepts(presented: str, sender: Sender = BROKER, environ: Mapping[str, str] | None = None) -> bool:
+    """Reverse internal HTTP gate, accepting both during the file migration.
+
+    Like legacy bridge gates, unconfigured installations remain network-only.
+    Tokens are read per request so root rotation takes effect without a restart.
+    """
+    env = os.environ if environ is None else environ
+    values = (token(sender, env), (env.get(sender.legacy_env) or "").strip())
+    matches = [hmac.compare_digest(value.encode(), presented.encode()) for value in values if value]
+    return not matches or any(matches)

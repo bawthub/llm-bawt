@@ -96,6 +96,7 @@ services:
       # agent bridges read — keep both.
       - LLM_BAWT_REDIS_URL=redis://redis:6379/0
       - REDIS_URL=redis://redis:6379/0
+      - LLM_BAWT_WORKSPACE_BRIDGE_URL=${LLM_BAWT_WORKSPACE_BRIDGE_URL:-http://claude-code-bridge:8681}
       # Memory embeddings (TASK-277) POST to this CPU endpoint. Optional for
       # boot: if unset/unreachable the stack still comes up; only memory/vector
       # writes degrade until an embed service is present. Default points at an
