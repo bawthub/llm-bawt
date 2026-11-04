@@ -30,6 +30,7 @@ from .inter_bot_delivery_user import resolve_delivery_user
 from .inter_bot_fanout_batch import FanoutBatch
 from .inter_bot_send_targets import Expansion, SelectorError, TargetExpander, TargetSelector
 from .inter_bot_send_types import DeliveryRefused, Principal  # noqa: F401  (re-exported)
+from .inter_bot_wait_admission import WaitAdmissionRefused
 from .inter_bot_steer_only import (
     NOT_NEEDED_PREFIX, STEER_ONLY, STEER_ONLY_KEY, STEER_OR_IDLE, WHEN_IDLE,
 )
@@ -562,6 +563,8 @@ class DeliverySender:
                 )
         except (IdentityConflict, InvalidIdentity, AdmissionUnavailable) as exc:
             raise DeliveryRefused(status_code=exc.status_code, detail=str(exc)) from exc
+        except WaitAdmissionRefused as exc:
+            raise DeliveryRefused(status_code=exc.status_code, detail=exc.detail) from exc
         except ValueError as exc:
             raise DeliveryRefused(status_code=409, detail=str(exc)) from exc
         if not duplicate and not target_exists:

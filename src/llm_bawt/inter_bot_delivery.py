@@ -256,6 +256,11 @@ class InterBotDeliveryStore:
                 from .service.system_gate_admission import admit_enqueue
 
                 admit_enqueue(conn, target, on_gate=on_gate)
+                if payload.get("reply_mode") == "waited":
+                    # One waiter per target, no 2-cycles (TASK-1253); same lock.
+                    from .inter_bot_wait_admission import refuse_waited_conflict
+
+                    refuse_waited_conflict(conn, sender=sender, target=target, delivery_id=record.id)
                 DeliveryTransitionEvents.stage(conn, record)
             return record, duplicate
 

@@ -308,7 +308,7 @@ async def _enqueue_durable(
         if isinstance(body, dict) and body.get("delivery_id"):
             return {**body, "status_code": exc.response.status_code}
         detail: Any = body.get("detail") if isinstance(body, dict) else exc.response.text
-        return {
+        refused = {
             "success": False,
             "queued": False,
             "delivery": delivery_name,
@@ -317,6 +317,10 @@ async def _enqueue_durable(
             "error": str(detail),
             "status_code": exc.response.status_code,
         }
+        if isinstance(detail, dict) and detail.get("message"):
+            # Typed refusals (e.g. TASK-1253 target_wait_in_progress) keep their code.
+            refused.update(detail, error=str(detail["message"]), error_code=detail.get("error"))
+        return refused
     except Exception as exc:
         return {
             "success": False,
