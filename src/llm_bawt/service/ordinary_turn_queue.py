@@ -118,6 +118,20 @@ def admit_ordinary_agent_turn(
     return decision
 
 
+def payload_has_media(payload: dict) -> bool:
+    """True when the last user message carries attachment IDs or image parts."""
+    for message in reversed(payload.get("messages") or []):
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        if message.get("attachment_ids"):
+            return True
+        content = message.get("content")
+        return isinstance(content, list) and any(
+            isinstance(part, dict) and part.get("type") == "image_url" for part in content
+        )
+    return bool(payload.get("attachment_ids"))
+
+
 class OrdinaryTurnQueue:
     """Enqueue the full request under the target lock, including idle work."""
 
@@ -193,6 +207,7 @@ class OrdinaryTurnQueue:
                 assistant_message_id=getattr(request, "assistant_message_id", None),
                 metadata=metadata,
                 producer="ordinary",
+                allow_media_only=payload_has_media(payload),
             )
             reason = read_wait_reason(conn, bot_id) if record.status == "QUEUED" else None
             capable = busy = None

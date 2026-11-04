@@ -167,3 +167,16 @@ def test_task425_attachment_only_turn_is_a_user_turn():
     assert has_user_turn("", [{"mimeType": "image/png", "content": "x"}], [])
     assert has_user_turn("hi", [], [])
     assert not has_user_turn("", [], [])
+
+
+def test_task425_payload_has_media_reads_last_user_message():
+    from llm_bawt.service.ordinary_turn_queue import payload_has_media
+
+    def p(content, **extra):
+        return {"messages": [{"role": "user", "content": content, **extra}]}
+
+    assert payload_has_media(p("", attachment_ids=["ma_x"]))
+    assert payload_has_media(p([{"type": "image_url", "image_url": {"url": "data:x"}}]))
+    assert not payload_has_media(p("hi"))
+    assert not payload_has_media(p("", attachment_ids=[]))
+    assert not payload_has_media({"messages": []})

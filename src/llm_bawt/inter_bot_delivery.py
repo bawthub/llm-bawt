@@ -199,8 +199,13 @@ class InterBotDeliveryStore:
         producer: str = "bot",
         on_gate: str = "deny",
         sender_turn_id: str | None = None,
+        allow_media_only: bool = False,
     ) -> tuple[DeliveryRecord, bool]:
-        """``on_gate``: under a deny gate (freeze) a new ``deny`` row raises
+        """``allow_media_only``: an ordinary chat turn whose payload carries
+        attachments may have empty text (TASK-425); the replayed request's own
+        user-turn guard still refuses it if no attachment loads.
+
+        ``on_gate``: under a deny gate (freeze) a new ``deny`` row raises
         ``SystemGateRefused``; ``hold`` rows are admitted and wait at the claim
         (TASK-1233). A caller passing ``connection`` must let that refusal
         propagate out of its transaction.
@@ -220,7 +225,7 @@ class InterBotDeliveryStore:
         body = message.strip()
         if not target:
             raise ValueError("target_bot_id is required")
-        if not body:
+        if not body and not allow_media_only:
             raise ValueError("message is required")
         idem = idempotency_key.strip() if idempotency_key and idempotency_key.strip() else None
         policy = SessionPolicy(str(session_policy))

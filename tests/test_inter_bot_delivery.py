@@ -1742,3 +1742,14 @@ def test_sender_turn_is_stored_and_a_keyed_replay_keeps_the_first(delivery_store
     assert first.to_api()["sender_turn_id"] == "turn-" + "a" * 32
     assert store.get(unsigned.id).sender_turn_id is None
 
+
+
+def test_task425_media_only_enqueue_needs_explicit_allowance(delivery_store):
+    store, sender, target = delivery_store
+    with pytest.raises(ValueError, match="message is required"):
+        store.enqueue(sender_bot_id=sender, target_bot_id=target, message="  ", payload={})
+    record, _ = store.enqueue(
+        sender_bot_id=sender, target_bot_id=target, message="", payload={},
+        allow_media_only=True,
+    )
+    assert record.status in {"QUEUED", "CLAIMED", "DELIVERED"}
