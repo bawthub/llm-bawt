@@ -253,9 +253,12 @@ not create another logical notice. A missed announcement is safe: the notice
 is already in the ordinary durable queue. No schema or separate scheduler is
 introduced, and existing UI lifecycle events remain unchanged.
 
-The notice is pinned to the initiating session after verifying its actual
-turn/message/session ownership. It waits for a safe idle turn, respects gates
-and user-stop holds, and never falls back to an unrelated current session.
+The initiating turn/message/session ownership is verified first, but the
+notice is not pinned to that session: like the cancel notice it leaves
+`session_id` unset, so ordinary delivery targets the initiating bot/user's
+current active session. An origin session archived since (`/new`, reset,
+rotation) is never reopened (TASK-2021). It waits for a safe idle turn and
+respects gates and user-stop holds.
 Missing/untrusted/deleted/foreign lineage and private/no-profile bots fail
 closed. Rows predating trusted origin capture are not retroactively broadcast.
 Existing explicit/restart retry children preserve their initiating provenance,

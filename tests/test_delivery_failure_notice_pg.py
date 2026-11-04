@@ -1,4 +1,4 @@
-"""Private-PostgreSQL regressions for initiating-session failure notices.
+"""Private-PostgreSQL regressions for initiating-bot failure notices.
 
 No dispatcher workers, model calls, sleeps or live database are involved. Every
 origin has a real owned session, trigger message and matching initiating turn.
@@ -134,8 +134,8 @@ def _assert_notice(ctx, source, notice, *, error_code):
     assert (stored["sender_bot_id"], stored["target_bot_id"], stored["message_kind"], stored["status"]) == (
         SYSTEM_BOT_ID, ctx.sender, NOTICE_KIND, "QUEUED",
     )
-    # The origin session was archived after the delegation: never reopen it;
-    # an unset session_id routes to the bot/user's current active session.
+    # Never pin the origin session (archived here after the delegation); an
+    # unset session_id lets normal delivery target the current active session.
     assert payload["session_id"] is None
     assert payload["user"] == ctx.origin.user_id != "worker-owner"
     assert payload["bot_id"] == ctx.sender and payload["prefer_steer"] is False
@@ -173,7 +173,7 @@ def test_failed_delivery_from_an_archived_origin_routes_to_the_active_session(no
         assert BotSessionState.resolve(conn, bot_id=notices.sender)["id"] == notices.current.session_id
 
 
-def test_failed_delivery_from_a_still_active_origin_keeps_that_session(notices):
+def test_failed_delivery_from_a_still_active_origin_is_not_pinned_either(notices):
     source, _ = _send(notices, caller=notices.current)
     claim = _claim(notices, source)
     assert notices.deliveries.fail_claim(source.id, claim.claim_token, "TimeoutError")
@@ -182,7 +182,7 @@ def test_failed_delivery_from_a_still_active_origin_keeps_that_session(notices):
 
     stored = _row(notices, notice.id)
     assert stored["target_bot_id"] == notices.sender
-    assert stored["payload_json"]["session_id"] == notices.current.session_id
+    assert stored["payload_json"]["session_id"] is None
     assert stored["metadata_json"]["initiating_turn_id"] == notices.current.turn_id
     with notices.store.engine.connect() as conn:
         assert conn.execute(text("SELECT status FROM sessions WHERE id=:id"),
@@ -245,7 +245,7 @@ def test_a_steers_own_failed_send_notifies_its_sender_without_blaming_the_shared
     [notice] = notices.pump.run_pass().notified
     stored = _row(notices, notice.id)
     assert stored["target_bot_id"] == caller.bot_id
-    assert stored["payload_json"]["session_id"] is None  # caller's origin is archived
+    assert stored["payload_json"]["session_id"] is None
     assert stored["metadata_json"]["failed_delivery_id"] == steer.id
     assert stored["metadata_json"]["failed_turn_id"] == claim.turn_id
     assert stored["metadata_json"]["turn_status"] == "unattributed"

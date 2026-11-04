@@ -1,4 +1,4 @@
-"""Prompt-registry seed only for the initiating-session failure notice."""
+"""Prompt-registry seed only for the initiating-bot failure notice."""
 
 PROMPT_KEY = "deliveries.failure_notice"
 DEFAULT_FAILURE_NOTICE = (
