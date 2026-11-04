@@ -361,7 +361,7 @@ def test_http_survives_blocked_reconciler_and_collectors_and_shutdown_is_bounded
         # timing-ok: real thread joins: close's 2s worker deadline vs collectors stalled for 10s
         assert time.monotonic() - before < 3.5
         assert not server.thread.is_alive()
-        assert len(runtime.workers) == 3
+        assert len(runtime.workers) == 4  # three producers plus the watchdog
     finally:
         release.set()
         server.close()
@@ -633,14 +633,14 @@ def test_fastapi_lifespan_owns_one_fixed_runtime_and_control_listener():
     runtime.control.start.assert_not_called()
     with TestClient(app) as client:
         assert entered.wait(HANG_GUARD_S)
-        assert len(runtime.workers) == 3
+        assert len(runtime.workers) == 4  # three producers plus the watchdog
         assert not runtime.stop.is_set()
         runtime.control.start.assert_called_once()
         for _ in range(3):
             response = client.get("/health/live")
             assert response.status_code == 200
             assert response.headers["cache-control"] == "no-store"
-        assert len(runtime.workers) == 3  # HTTP requests never spawn producers
+        assert len(runtime.workers) == 4  # HTTP requests never spawn producers
     assert runtime.stop.is_set()
     assert all(not worker.is_alive() for worker in runtime.workers)
     runtime.control.close.assert_called_once()

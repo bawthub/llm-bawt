@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import os
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -768,6 +769,31 @@ class OpsService:
         job = self.store.get_job(job_id)
         return outcome, attach_members(self.store.engine, [job.to_api(include_output=False)])[0]
 
+    WORKER_REAP_INTERVAL = 60.0
+
+    def _reap_finished_workers(self):
+        """Remove stopped per-job worker containers of finished jobs (TASK-1991).
+
+        At most once a minute; a failure is logged and retried next sweep. The
+        backlog drains in bounded batches the same way."""
+        now = time.monotonic()
+        if now - getattr(self, "_last_worker_reap", float("-inf")) < self.WORKER_REAP_INTERVAL:
+            return
+        self._last_worker_reap = now
+        def finished(job_id):
+            job = self.store.get_job(job_id)
+            return job is not None and job.state in JOB_TERMINAL_STATES
+        for executor in getattr(self, "_executors", {}).values():
+            reap = getattr(executor, "reap_finished_workers", None)
+            if reap is None:
+                continue
+            try:
+                removed = reap(finished)
+                if removed:
+                    logger.info("removed %d finished ops worker container(s)", removed)
+            except Exception:  # noqa: BLE001 - housekeeping never fails the pump
+                logger.exception("ops worker reap failed; retried next sweep")
+
     def reconcile_active_jobs(self, *, limit=100, offset=0):
         """Recovery pump for independent reconciler, safe for multiple processes.
 
@@ -777,6 +803,7 @@ class OpsService:
         jobs = self.store.find_active_jobs(limit=limit, offset=offset)
         for job in jobs:
             self.get_job_status(job.id)
+        self._reap_finished_workers()
         if self.quiesce_driver is not None:
             self.quiesce_driver.release_terminal()
         if self.gate_driver is not None:

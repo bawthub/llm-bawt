@@ -1,6 +1,6 @@
 # Ops service: current architecture and intended consolidation
 
-**Status:** TASK-1169–1173 activated and live-verified on 2026-11-03 (TASK-1173). The ops reconciler is the only Docker-socket holder among first-party services. Sections 3–5 still describe intended work that is **not** live: per-job worker containers remain, and an unhealthy ops container is marked unhealthy but not restarted automatically.
+**Status:** TASK-1169–1173 activated and live-verified on 2026-11-03 (TASK-1173). The ops reconciler is the only Docker-socket holder among first-party services. Sections 3–5 still describe intended work that is **not** live: jobs still run in per-job worker containers (finished ones are now removed, TASK-1991).
 
 **Updated:** 2026-11-04 (TASK-1173 activation and final reconciliation). **Accountable owner:** Snark.
 
@@ -72,7 +72,7 @@ app continuation outbox ──> reads the job (no reconcile), writes the outcome
 - **Deploy order:** reconciler first, then app. An app that records decisions only must not run without an admitting reconciler.
 - **Preflight deadline (TASK-1169 S1e):** an admitted job whose executor preflight fails stays QUEUED with `error_text`, and each reconcile pass retries it. Once `submitted_at` is older than `LLM_BAWT_OPS_PREFLIGHT_DEADLINE_SECONDS` (default 300) plus the snapshot's start delay, the next failing pass fails it with `preflight_failed: <last reason>` (`OpsStore.fail_stale_queued`, a QUEUED-only CAS on the DB clock that a claim committing first always wins). A per-job advisory try-lock (`OpsStore.preflight_lock`) keeps preflight passes from overlapping, so only the latest outcome is noted, expired or claimed on. A job waiting on a concurrency slot never expires. Its continuation completes on the terminal job; until then the blocked-ops notifier warns the agent.
 
-Each operation uses a short-lived Docker worker with an immutable request, deterministic identity and durable receipt. This allows execution to outlive app restarts. Workers have no network or DB credentials, but carry the privileged Docker socket. Isolation settings do not make a socket-owning worker safe for untrusted code. Exited workers and receipts remain for audit; ordinary jobs therefore leave container objects behind.
+Each operation uses a short-lived Docker worker with an immutable request, deterministic identity and durable receipt. Since TASK-1991 the reconciler removes stopped workers whose job is terminal (once a minute, bounded batches); dispatch refuses any job that already has a receipt, so a removed worker is never replaced. This allows execution to outlive app restarts. Workers have no network or DB credentials, but carry the privileged Docker socket. Isolation settings do not make a socket-owning worker safe for untrusted code. Receipts remain for audit.
 
 The durable ledger, approval snapshots, idempotency, recovery markers, bounded deadlines and receipt semantics are valuable. Their current physical distribution is not the desired boundary.
 
@@ -100,7 +100,7 @@ The HTTP handlers do not probe Docker/DB or dispatch jobs. This separation keeps
 
 ### Recovery behavior today
 
-Live (verified 2026-11-03, TASK-1173): `llm-bawt-ops-reconciler-1` runs `restart: unless-stopped` with the Compose readiness healthcheck active (`GET 127.0.0.1:8650/health/ready`), status healthy; the `8651` control listener is up and unpublished. Process exit triggers a Docker restart. A blocked background thread fails readiness and marks the container **unhealthy, but nothing restarts it**: there is no autoheal or stuck-loop restart. That remains open work (section 5), not a live guarantee.
+Live (verified 2026-11-03, TASK-1173): `llm-bawt-ops-reconciler-1` runs `restart: unless-stopped` with the Compose readiness healthcheck active (`GET 127.0.0.1:8650/health/ready`), status healthy; the `8651` control listener is up and unpublished. Process exit triggers a Docker restart. A blocked background thread fails readiness and marks the container unhealthy. **TASK-1991:** a watchdog thread exits the process (code 70) when any producer (database, docker, executor, reconciler loop) has published nothing for `LLM_BAWT_OPS_WEDGE_SECONDS` (default 180; 0 disables), and the restart policy brings it back. A producer that keeps reporting `down` (for example the database is unreachable) is an outage, not a wedge, and does not trigger it. Isolated workers and receipts survive the restart; process-mode children end with the process and are reconciled as after any reconciler restart.
 
 ### Direct Docker consumers (live state after TASK-1173)
 

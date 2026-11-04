@@ -8,6 +8,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import logging
 import os
 import re
 from abc import ABC, abstractmethod
@@ -49,8 +50,10 @@ from .self_target import (SELF_IDENTITY_UNKNOWN, SELF_TARGET_UNVERIFIABLE, Conta
                           is_full_container_id, self_target as classify_self_target)
 from .worker_launch import ABANDONED, ContainerLauncher, Liveness, RecoveryRefused, container_worker_name
 from .worker_slots import worker_concurrency
-from .worker import (QUIESCE_FENCE_LABEL, DockerAPI, atomic_json, is_ops_worker,
+from .worker import (OPS_JOB_LABEL, QUIESCE_FENCE_LABEL, DockerAPI, atomic_json, is_ops_worker,
                      target_selector, utcnow)
+
+logger = logging.getLogger(__name__)
 
 SUPPORTED_ACTIONS = frozenset({"restart", "start", "stop", "pull"})
 # Ops whose target configuration is compared with its Compose service (TASK-1518),
@@ -783,6 +786,34 @@ class DockerExecutor(Executor):
                 return None
             raise
 
+    def reap_finished_workers(self, is_finished, *, limit: int = 50) -> int:
+        """Remove stopped per-job worker containers whose job is finished.
+
+        The durable receipt and the job ledger are the record; the exited
+        container is not. Only a stopped container that carries a valid ops
+        job label matching its deterministic name, and whose job the ledger
+        reports terminal, is removed. Anything else (running, created, an
+        unknown or still-active job) stays. Returns the number removed."""
+        removed = 0
+        workers = self.client.containers.list(
+            all=True, filters={"label": OPS_JOB_LABEL, "status": ["exited", "dead"]})
+        for worker in workers[:max(0, limit)]:
+            job_id = (worker.labels or {}).get(OPS_JOB_LABEL, "")
+            try:
+                if worker.name != self.worker_name(job_id):
+                    continue
+            except ExecutorError:
+                continue
+            if not is_finished(job_id):
+                continue
+            try:
+                worker.remove(v=False, force=False)
+                removed += 1
+            except Exception as exc:  # noqa: BLE001 - retried on the next sweep
+                if getattr(exc, "status_code", None) != 404:
+                    logger.warning("ops worker %s not removed: %s", worker.name, exc)
+        return removed
+
     def dispatch(self, *, job_id: str, snapshot: dict, fence: dict | None = None, **_kwargs):
         self.worker_name(job_id)
         self.preflight(snapshot)
@@ -792,6 +823,10 @@ class DockerExecutor(Executor):
             fcntl.flock(lock, fcntl.LOCK_EX)
             if (directory / ABANDONED).exists():
                 raise ExecutorError("submission abandoned by recovery; never replay")
+            if (directory / "receipt.json").exists():
+                # A reaped worker leaves no container; its receipt still proves
+                # the job ran. Never create a replacement worker for it.
+                raise ExecutorError("worker receipt already exists; never replay")
             return self._dispatch_locked(job_id=job_id, snapshot=snapshot, fence=fence)
 
     def _dispatch_locked(self, *, job_id: str, snapshot: dict, fence: dict | None = None):

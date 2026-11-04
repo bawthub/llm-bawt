@@ -1,12 +1,17 @@
 """Fixed-worker lifecycle: health HTTP survives blocked reconciliation/collectors."""
 from __future__ import annotations
 
+import logging
+import math
+import os
 from contextlib import asynccontextmanager
 from threading import Event, Thread
 import time
 
 from .health_collector import OpsHealthCollector
 from .health_state import HealthSample, OpsHealthState
+
+logger = logging.getLogger(__name__)
 
 
 def database_engine():
@@ -60,10 +65,23 @@ def build_reconciler(interval):
                          admission=ApprovedOpsAdmission(approvals, service))
 
 
+WEDGE_EXIT_CODE = 70
+
+
+def _wedge_seconds() -> float:
+    """``LLM_BAWT_OPS_WEDGE_SECONDS`` (default 180; 0 disables the watchdog)."""
+    raw = os.getenv("LLM_BAWT_OPS_WEDGE_SECONDS", "180")
+    value = float(raw)
+    if not math.isfinite(value) or (0 < value < 60) or value < 0:
+        raise ValueError("LLM_BAWT_OPS_WEDGE_SECONDS must be 0 or at least 60")
+    return value
+
+
 class OpsHealthRuntime:
     def __init__(self, *, interval=5.0, state=None, collector=None,
                  reconciler_factory=build_reconciler,
-                 control_address=None, control_factory=build_control_service):
+                 control_address=None, control_factory=build_control_service,
+                 wedge_seconds=None, exit=None):
         self.state = state or OpsHealthState()
         self.stop = Event()
         self.collector = collector or OpsHealthCollector(self.state, database_engine)
@@ -78,6 +96,23 @@ class OpsHealthRuntime:
             from .control_http import OpsControlServer
             self.control = OpsControlServer(control_factory, control_address)
         self.workers: list[Thread] = []
+        self.wedge_seconds = wedge_seconds if wedge_seconds is not None else _wedge_seconds()
+        self.exit = exit or os._exit
+
+    def _watchdog(self):
+        """Exit the process when a producer stays silent past the limit.
+
+        A wedged thread keeps the HTTP health host alive but stops publishing;
+        Docker's healthcheck can only mark that unhealthy. Exiting lets the
+        container's restart policy recover it, with no extra Docker access
+        (TASK-1991). Workers and receipts are durable across the restart."""
+        while not self.stop.wait(min(self.interval, self.wedge_seconds)):
+            silent = self.state.silent(self.wedge_seconds)
+            if silent:
+                logger.critical("ops producers silent for over %ss (%s); exiting for restart",
+                                self.wedge_seconds, ", ".join(silent))
+                self.exit(WEDGE_EXIT_CODE)
+                return
 
     def _reconcile(self):
         while not self.stop.is_set():
@@ -112,7 +147,7 @@ class OpsHealthRuntime:
             ("ops-health-database", lambda: self.collector.run(self.collector.collect_storage, self.stop)),
             ("ops-health-docker", lambda: self.collector.run(self.collector.collect_docker, self.stop)),
             ("ops-reconciler", self._reconcile),
-        ):
+        ) + ((("ops-watchdog", self._watchdog),) if self.wedge_seconds > 0 else ()):
             worker = Thread(name=name, target=target, daemon=True)
             worker.start()
             self.workers.append(worker)

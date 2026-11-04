@@ -195,6 +195,19 @@ class OpsHealthState:
             return "observation timestamp is in the future"
         return None
 
+    def silent(self, max_age: float) -> list[str]:
+        """Producers that have published nothing for ``max_age`` seconds.
+
+        A published "down" is a reported outage, not silence; only a producer
+        that stopped publishing at all (a stuck thread) is listed. Monotonic
+        time only, so wall-clock steps never trip it."""
+        samples, _modes, stopping = self._read()
+        if stopping:
+            return []
+        now = self.clock()
+        return sorted(name for name, sample in samples.items()
+                      if now - sample.sampled.monotonic > max_age)
+
     def ready(self):
         samples, modes, stopping = self._read()
         now = self.sample_time()
