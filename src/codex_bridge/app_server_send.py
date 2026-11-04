@@ -223,10 +223,12 @@ class CodexAppServerMixin:
             close_task = client.close()
             if run is not None:
                 run.track_close(close_task)
-            detail = await asyncio.shield(close_task)
-            logger.info("codex app-server closed: request=%s %s", request_id, detail)
-            if run is not None and run.tmp_paths:
-                CodexEventMixin._cleanup_tmp_files(run.tmp_paths)
+            try:
+                detail = await asyncio.shield(close_task)
+                logger.info("codex app-server closed: request=%s %s", request_id, detail)
+            finally:
+                if run is not None and run.tmp_paths:
+                    CodexEventMixin._cleanup_tmp_files(run.tmp_paths)
         return seq, aborted, session_persisted, final_usage, thread
 
     async def _app_server_event(self, event: Any, **kwargs: Any) -> tuple[int, bool, Any]:
