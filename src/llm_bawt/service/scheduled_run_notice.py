@@ -36,7 +36,7 @@ def completion_notice(occurrence, record, turn, state, now):
     return {
         "run_id": occurrence.run_id, "schedule_id": occurrence.job_id,
         "schedule": str(snapshot.get("name") or "")[:120],
-        "tasks": list(dict.fromkeys(re.findall(r"\bTASK-\d+\b", snapshot.get("prompt", ""))))[:8],
+        "tasks": list(dict.fromkeys(re.findall(r"\bTASK-\d+\b", str(snapshot.get("prompt") or ""))))[:8],
         "prompt_excerpt": str(snapshot.get("prompt") or "")[:240],
         "scheduled_for": snapshot.get("scheduled_for"),
         "finished_at": (getattr(turn, "ended_at", None) or now).isoformat(),
@@ -92,7 +92,7 @@ def reconcile_finished(engine, service, bot_id, user_id):
             JOIN turn_logs t ON t.id=d.turn_id
             WHERE r.bot_id=:bot AND s.owner_user_id=:user
               AND o.state IN ('queued','running') AND t.ended_at IS NOT NULL
-            ORDER BY o.updated_at, o.run_id LIMIT :batch
+            ORDER BY o.updated_at DESC, o.run_id DESC LIMIT :batch
         """), {"bot": bot_id, "user": user_id, "batch": MAX_NOTICES}).scalars().all()
     worker = PromptDeliveryWorker(engine, service)
     for run_id in ids:
@@ -140,7 +140,7 @@ class ScheduledRunNotices:
                     .where(JobRun.bot_id == bot_id, PromptSchedule.owner_user_id == user_id,
                            PromptOccurrence.main_notice_json.is_not(None),
                            PromptOccurrence.main_notice_turn_id.is_(None))
-                    .order_by(PromptOccurrence.updated_at, PromptOccurrence.run_id)
+                    .order_by(PromptOccurrence.updated_at.desc(), PromptOccurrence.run_id.desc())
                     .limit(MAX_NOTICES + 1)
                 ).all()
                 selected = pending[:MAX_NOTICES]

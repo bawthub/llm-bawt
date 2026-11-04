@@ -103,10 +103,17 @@ def test_notice_never_leaks_or_is_consumed_by_wrong_turn(rig, case):
 
 
 def test_reply_is_capped_and_batch_overflow_is_deferred_not_dropped(rig):
-    for _ in range(notice.MAX_NOTICES + 2):
-        finish(rig, reply="x" * 5000)
+    runs = []
+    for i in range(notice.MAX_NOTICES + 2):
+        _, run, _ = finish(rig, reply="x" * 5000)
+        runs.append(run)
+        with Session(rig.engine) as session:
+            row = session.get(PromptOccurrence, run)
+            row.updated_at = NOW + timedelta(seconds=i)
+            session.add(row)
+            session.commit()
     first = prepare(rig)
-    assert len(first.run_ids) == notice.MAX_NOTICES
+    assert first.run_ids == list(reversed(runs))[:notice.MAX_NOTICES]
     assert "Additional pending receipts: at least 1" in first.body
     assert "x" * (notice.REPLY_CHARS + 1) not in first.body
     first_ids = set(first.run_ids)
@@ -167,6 +174,27 @@ def test_immediate_question_before_prompt_sweep_reconciles_finished_run(rig):
     pending = prepare(rig)
     assert "lantern count 17" in pending.body
     assert occurrence(rig, run).state == "succeeded"
+
+
+def test_optional_receipt_failure_cannot_rollback_terminal_transition(rig, monkeypatch):
+    def broken(*args):
+        raise ValueError("bad historical metadata")
+    monkeypatch.setattr(notice, "completion_notice", broken)
+    _, run, _ = finish(rig)
+    assert occurrence(rig, run).state == "succeeded"
+    assert occurrence(rig, run).main_notice_json is None
+
+
+def test_null_historical_prompt_is_safe(rig):
+    _, run = reserve(rig, once=True)
+    row = occurrence(rig, run)
+    row.session_id = "dedicated"
+    row.snapshot_json = {**row.snapshot_json, "prompt": None}
+    data = notice.completion_notice(
+        row, SimpleNamespace(user_message_id="user", assistant_message_id="reply"),
+        SimpleNamespace(ended_at=NOW, response_text="done"), "succeeded", NOW,
+    )
+    assert data["tasks"] == [] and data["prompt_excerpt"] == ""
 
 
 def test_default_prompt_is_registered():

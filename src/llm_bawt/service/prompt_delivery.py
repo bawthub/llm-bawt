@@ -299,9 +299,14 @@ class PromptDeliveryWorker:
             if state not in NONTERMINAL:
                 from .scheduled_run_notice import completion_notice
 
-                occurrence.main_notice_json = completion_notice(
-                    occurrence, record, self.service._turn_log_store.get_turn(record.turn_id), state, now,
-                )
+                try:
+                    occurrence.main_notice_json = completion_notice(
+                        occurrence, record, self.service._turn_log_store.get_turn(record.turn_id), state, now,
+                    )
+                except Exception:
+                    # An optional context receipt must never prevent the
+                    # canonical occurrence/run from reaching its terminal state.
+                    logger.warning("Completion notice failed for run %s", run_id, exc_info=True)
             transition(session, *rows, state, now, error=error, evidence=self._evidence(record))
             return record
 
