@@ -33,5 +33,11 @@ def compact_send_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
         if v is not None and k not in _DROP
         and not (k in _DEFAULTS and v == _DEFAULTS[k])
     }
+    # Pure duplicates: ``mode`` repeats ``reply_mode``; ``queued`` repeats a
+    # QUEUED ``status``.
+    if out.get("mode") == out.get("reply_mode"):
+        out.pop("mode", None)
+    if out.get("queued") is True and out.get("status") == "QUEUED":
+        out.pop("queued")
     out["full_receipt"] = "bots_delivery_get(delivery_id)"
     return out

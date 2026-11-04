@@ -175,7 +175,8 @@ async def test_catalog_token_budgets():
     # TASK-1781: compact task defaults and lossless detail/next-page guidance:
     # 4,546 (+47). Huge history now stays behind explicit bounded reads.
     # TASK-1778: explicit trusted-user history read/mutation ownership (+13).
-    assert sum(descriptions) <= 4559, f"Descriptions grew to {sum(descriptions)} tokens"
+    # TASK-1151: ops_list_operations slug= detail (compact list rows) (+3).
+    assert sum(descriptions) <= 4562, f"Descriptions grew to {sum(descriptions)} tokens"
     definitions = [{"name": f"mcp__bawthub__{t.name}", "description": t.description or "", "input_schema": t.inputSchema} for t in tools]
     total = len(encoder.encode(json.dumps(definitions, ensure_ascii=False, separators=(",", ":"))))
     # TASK-900: explicit X search adds ~160 tokens; measured catalog 11,239.
@@ -270,7 +271,9 @@ async def test_catalog_token_budgets():
     # TASK-1781: path/offset/budget/cursor/version on both task readers:
     # 17,173 (+429), replacing unbounded 170k+ task dumps.
     # TASK-1778: two optional owner args (+42) and scoped descriptions (+13).
-    assert total <= 17228, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-1151: ops_list_operations slug= (+23), so each catalog read drops
+    # ~15k chars of descriptions/schemas to compact rows.
+    assert total <= 17251, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 

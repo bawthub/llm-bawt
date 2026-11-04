@@ -25,8 +25,9 @@ def test_drops_null_internal_and_default_fields():
                 "attempt_count", "max_attempts", "session_policy", "duplicate"):
         assert key not in out
     for key in ("delivery_id", "status", "sender_bot_id", "target_bot_id", "turn_id",
-                "task_id", "success", "queued", "dispatched", "mode", "note", "created_at"):
+                "task_id", "success", "dispatched", "reply_mode", "note", "created_at"):
         assert key in out
+    assert "mode" not in out and "queued" not in out  # duplicates of reply_mode/status
     assert out["full_receipt"] == "bots_delivery_get(delivery_id)"
 
 
@@ -42,3 +43,8 @@ def test_keeps_non_default_state_that_changes_the_next_action():
 def test_refusals_without_delivery_pass_through_untouched():
     refusal = {"success": False, "dispatched": False, "error": "target_inactive", "x": None}
     assert compact_send_receipt(refusal) is refusal
+
+
+def test_keeps_mode_and_queued_when_they_differ():
+    out = compact_send_receipt({**_full(), "mode": "waited", "status": "RUNNING"})
+    assert out["mode"] == "waited" and out["queued"] is True

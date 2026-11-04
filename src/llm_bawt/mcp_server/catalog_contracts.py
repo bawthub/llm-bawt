@@ -119,7 +119,7 @@ TOOL_SUMMARIES: dict[str, str] = {
     "self_fwd": "Forward YOUR recent bubbles to target_bot_id; sender_bot_id must be your explicit slug. Async by default; force never authorizes concurrency.",
     "self_system_prompt": "Read your own durable persona (action=view) or fully replace it (edit, new_prompt). Use your bot_id; lands next turn, pinned sessions at next boundary; not harness wrapper.",
     "self_model": "View or persistently switch bot_id's model endpoint; applies next turn, not this one. continue_prompt queues one when_idle follow-up turn on the new model.",
-    "ops_list_operations": "Discover enabled ops and schemas before ops_run; include_disabled grants no execution permission.",
+    "ops_list_operations": "List ops before ops_run; slug= gives its schema; include_disabled grants no run permission.",
     "ops_run": "Run a discovered op with validated args and idempotency_key. Approval/queued is not success; verify ops_job_status and target health. Never bypass a denial.",
     "ops_job_status": "Read-only ops job state and exit code; the reconciler records progress. output_tail_bytes: bounded output.",
     "ops_quiesce_ack": "Answer the quiesce holding this turn: stopping|cannot_stop, optional note.",

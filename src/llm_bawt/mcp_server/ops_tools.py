@@ -66,22 +66,40 @@ def _get_ops_service():
 # ---------------------------------------------------------------------------
 
 @mcp.tool(name="ops_list_operations")
-async def ops_list_operations(include_disabled: bool = False) -> dict:
-    """List every operation the agent can invoke via ``ops_run``.
-
-    Args:
-        include_disabled: If True, include disabled rows (operator view).
-
-    Returns:
-        Dict with keys:
-          - ``operations``: list of ``{slug, title, description, risk_level,
-            category, target_host, timeout_seconds, args_schema,
-            args_defaults}``
-          - ``total``: count in the list
-    """
+async def ops_list_operations(include_disabled: bool = False, slug: str | None = None) -> dict:
+    """List ops you can invoke via ``ops_run``: compact rows (args ``*`` =
+    required). slug= returns that op's full row incl. args_schema."""
     ops = await asyncio.to_thread(_get_ops_service)
     rows = await asyncio.to_thread(ops.list_operations_for_agent, include_disabled=include_disabled)
-    return {"operations": rows, "total": len(rows)}
+    if slug is not None:
+        match = next((row for row in rows if row["slug"] == slug), None)
+        if match is None:
+            return {"error": f"unknown or disabled operation: {slug}"}
+        return {"operation": match}
+    return {
+        "operations": [_compact_operation(row) for row in rows],
+        "total": len(rows),
+        "detail": "ops_list_operations(slug=...) for description and args_schema",
+    }
+
+
+def _compact_operation(row: dict) -> dict:
+    """TASK-1151: the catalog repeats ~15k chars of descriptions and schemas
+    on every read; list rows keep what picks an operation, detail by slug."""
+    schema = row.get("args_schema") or {}
+    required = set(schema.get("required") or ())
+    args = [name + ("*" if name in required else "") for name in (schema.get("properties") or {})]
+    description = (row.get("description") or "").strip()
+    summary = description.split(". ", 1)[0].split("\n", 1)[0]
+    if len(summary) > 140:
+        summary = summary[:139].rstrip() + "…"
+    out = {"slug": row["slug"], "title": row.get("title"), "summary": summary,
+           "risk_level": row.get("risk_level"), "category": row.get("category")}
+    if args:
+        out["args"] = args
+    if row.get("enabled") is False:
+        out["enabled"] = False
+    return out
 
 
 # ---------------------------------------------------------------------------

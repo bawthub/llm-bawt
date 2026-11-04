@@ -200,7 +200,7 @@ def test_waited_enqueue_is_when_idle_with_target_budget(monkeypatch) -> None:
     assert call["prefer_steer"] is False
     assert call["reply_mode"] == "waited"
     assert call["timeout_seconds"] == 1800.0  # target turn is not killed by caller budget
-    assert result["wait"] == 60 and result["mode"] == "waited"
+    assert result["wait"] == 60 and result["reply_mode"] == "waited" and "mode" not in result
 
 
 def test_waited_inbound_turn_blocks_duplicate_callback_but_allows_distinct_followup(monkeypatch) -> None:
