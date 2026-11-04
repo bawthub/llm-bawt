@@ -21,6 +21,7 @@ import tempfile
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
+from .gate_receipt import check_gate_callback
 from .gate_runner import GateLaunchError, gate_container_labels, gate_container_names
 from .gate_trust import read_trusted_gate_request
 from .models import JOB_DISPATCHING, OpsJob, _iso_utc
@@ -110,10 +111,16 @@ def _submission(directory, *, create):
 def _request(job):
     if job is None or job.dispatched_at is None or job.retry_count != 0:
         raise GateCustodyError("gate_custody_claim_required")
-    # Do not reinterpret generic/legacy, approved, quiescing or callback jobs.
+    # Do not reinterpret generic/legacy, approved or quiescing jobs, or foreign callbacks.
     if (job.approval_request_id is not None or job.quiesce_gate_id is not None
-            or job.quiesce_fence_json is not None or job.receipt_callback_json is not None):
+            or job.quiesce_fence_json is not None):
         raise GateCustodyError("gate_custody_claim_required")
+    if job.receipt_callback_json is not None:
+        # The signed admission's own direct callback (TASK-1865); anything else refuses.
+        try:
+            check_gate_callback(job, json.loads(job.receipt_callback_json))
+        except (ValueError, TypeError):
+            raise GateCustodyError("gate_custody_claim_required") from None
     try:
         return read_trusted_gate_request(job)
     except (ValueError, TypeError):

@@ -48,9 +48,10 @@ def gate_callback(plan: GatePlan, *, bot_id: str, user_id: str, session_id: str)
             "session_id": session_id, "plan": plan.to_dict()}
 
 
-def frame_gate_receipt(job, callback: dict, receipt: dict) -> tuple[str, dict]:
-    """Check stored identity before enqueue; never infer runner success or retirement."""
-    if callback.keys() != _CALLBACK_FIELDS or callback.get("kind") != "batch_gate":
+def check_gate_callback(job, callback: dict) -> GatePlan:
+    """The stored direct callback must be the signed admission's own: batch-gate
+    kind, the job caller as destination, the job workload as plan, no approval."""
+    if not isinstance(callback, dict) or callback.keys() != _CALLBACK_FIELDS or callback.get("kind") != "batch_gate":
         raise ValueError("invalid batch gate callback")
     plan = GatePlan.from_dict(callback["plan"])
     gate_callback(plan, bot_id=callback["bot_id"], user_id=callback["user_id"], session_id=callback["session_id"])
@@ -60,4 +61,10 @@ def frame_gate_receipt(job, callback: dict, receipt: dict) -> tuple[str, dict]:
         raise ValueError("gate callback destination does not match the job caller")
     if GatePlan.from_dict(json.loads(job.args_json)) != plan:
         raise ValueError("gate callback plan does not match the job workload")
+    return plan
+
+
+def frame_gate_receipt(job, callback: dict, receipt: dict) -> tuple[str, dict]:
+    """Check stored identity before enqueue; never infer runner success or retirement."""
+    plan = check_gate_callback(job, callback)
     return gate_receipt_prompt(callback["bot_id"]), {**receipt, "gate_plan": plan.to_dict()}

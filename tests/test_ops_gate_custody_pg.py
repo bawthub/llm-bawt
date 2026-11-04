@@ -376,3 +376,30 @@ def test_dead_lock_holder_allows_observation_but_never_new_reservation(claimed):
         if child.is_alive():
             child.kill()
         child.join(timeout=HANG_GUARD)
+
+
+def test_signed_admission_direct_callback_can_reserve(configured, tmp_path):
+    # TASK-1865: ops_run admits with direct_callback=True; custody must accept
+    # exactly that callback and still refuse any other stored destination.
+    rig = configured.rig
+    job = helpers._create(configured, direct_callback=True, idempotency_key="fixture-direct-callback")
+    assert job.receipt_callback_json is not None
+    assert claim_trusted_gate_job(rig.store, job.id)
+    root = tmp_path / "receipts"
+    root.mkdir(mode=0o700)
+    with custody.reserve_gate_launch(rig.store, job.id, receipt_root=root) as ticket:
+        assert ticket.job_id == job.id
+    assert rig.store.get_job(job.id).receipt_callback_json == job.receipt_callback_json
+
+
+def test_tampered_direct_callback_cannot_reserve(configured, tmp_path):
+    rig = configured.rig
+    other = helpers._create(configured, direct_callback=True, idempotency_key="fixture-direct-callback-2")
+    assert claim_trusted_gate_job(rig.store, other.id)
+    forged = {**json.loads(other.receipt_callback_json), "bot_id": "someone-else"}
+    rig.sql("UPDATE ops_jobs SET receipt_callback_json=:cb WHERE id=:id", cb=json.dumps(forged), id=other.id)
+    other_root = tmp_path / "other"
+    with pytest.raises(custody.GateCustodyError, match="claim_required"):
+        with custody.reserve_gate_launch(rig.store, other.id, receipt_root=other_root):
+            pytest.fail("forged callback reservation yielded")
+    assert not other_root.exists()
