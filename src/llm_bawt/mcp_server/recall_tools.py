@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from functools import lru_cache
 
 from pydantic import ValidationError
@@ -54,14 +55,15 @@ async def context_recall(
     attempted repository clones (repo and destination only). task_ids narrows
     tasks/task_details. Follow-ups must repeat sources/task_ids, retain intent,
     and refresh evidence. All identity is inherited from the signed current-turn capability.
-    No raw results or model errors ever return through this adapter.
+    Synthesis timeouts return degraded, bounded source quotes, not a model answer.
     """
     try:
         context = current_task_turn_context()
+        deadline = time.monotonic() + MAX_SECONDS
         async with asyncio.timeout(MAX_SECONDS):
             database, service = _runtime()
             scope = await database.scope(context)
-            result = await service.recall(request, scope)
+            result = await service.recall(request, scope, deadline=deadline)
     except TaskTurnContextError:
         result = failure("unauthorized")
     except ValidationError:

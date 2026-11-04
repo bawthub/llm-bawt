@@ -154,6 +154,7 @@ class AnswerSet:
         self.unavailable = unavailable
         self.rejected = rejected
         self.omitted = 0
+        self.degraded = False
 
     def add(self, answer: GroundedAnswer) -> None:
         if any(answer.keys() <= item.keys() for item in self.answers):
@@ -177,7 +178,9 @@ class AnswerSet:
         self.answers.clear()
 
     def uncertainty(self) -> str:
-        return (UNCERTAINTY + (INCOMPLETE_NOTE if self.unavailable else "")
+        return (("Synthesis timed out; degraded retrieval-ranked quotes, not selected answers. "
+                 if self.degraded else "") + UNCERTAINTY
+                + (INCOMPLETE_NOTE if self.unavailable else "")
                 + (REJECTED_NOTE.format(self.rejected) if self.rejected else "")
                 + (SHORTENED_NOTE.format(self.shortened) if self.shortened else "")
                 + (OMITTED_NOTE.format(self.omitted) if self.omitted else ""))
@@ -210,8 +213,10 @@ class RecallService:
         self._slots = threading.BoundedSemaphore(4)
         self._ledger_writes: set[asyncio.Task] = set()
 
-    async def recall(self, request: RecallRequest, scope: RecallScope) -> dict:
+    async def recall(self, request: RecallRequest, scope: RecallScope, *,
+                     deadline: float | None = None) -> dict:
         start = time.monotonic()
+        deadline = min(deadline, start + MAX_SECONDS) if deadline is not None else start + MAX_SECONDS
         if not self._slots.acquire(blocking=False):
             return failure("busy")
         coverage = {}
@@ -221,8 +226,8 @@ class RecallService:
                 raise RecallError("unauthorized")
             if tokens(request.query) > MAX_QUERY_TOKENS:
                 raise RecallError("query_budget")
-            async with asyncio.timeout(MAX_SECONDS):
-                packet = await self._research(request, scope, start, coverage, read)
+            async with asyncio.timeout(max(0, deadline - time.monotonic())):
+                packet = await self._research(request, scope, start, coverage, read, deadline=deadline)
             self._record(packet, scope, read)
             return packet
         except RecallError as error:
@@ -275,7 +280,7 @@ class RecallService:
             await asyncio.gather(*self._ledger_writes, return_exceptions=True)
 
     async def _research(self, request: RecallRequest, scope: RecallScope, start: float,
-                        coverage: dict, read: list[dict] | None = None) -> dict:
+                        coverage: dict, read: list[dict] | None = None, *, deadline: float) -> dict:
         read = read if read is not None else []
         queries = self.handles.resolve(request, scope)
         # Explicitly retain the initial intent AND subsequent questions. Never
@@ -390,25 +395,42 @@ class RecallService:
         for candidate in follow_ons:
             if (candidate.source, candidate.follows) in admitted:
                 admit(candidate)
-        # Oldest-first so later corrections read as later; undated rows last.
+        # Keep provider ranking for a timeout fallback; the model gets the same
+        # admitted records oldest-first so corrections read as later.
+        ranked_evidence = list(evidence)
         evidence.sort(key=lambda row: (row.at is None, row.at or ""))
         answers = AnswerSet(bool(unavailable), 0)
         model_calls = 0
         model_output_tokens = 0
         if evidence:
             model_calls = 1
-            raw = await self.synthesizer.synthesize(system, question, evidence, request.output_tokens)
-            if not isinstance(raw, str) or len(raw.encode("utf-8")) > MAX_MODEL_BYTES:
-                raise RecallError("invalid_synthesis")
-            model_output_tokens = tokens(raw)
-            if model_output_tokens > request.output_tokens:
-                raise RecallError("invalid_synthesis")
             try:
-                parsed = Synthesis.model_validate_json(raw)
-            except (ValidationError, ValueError) as error:
-                raise RecallError("invalid_synthesis") from error
+                # Leave a small packing reserve inside the overall deadline.
+                # Transport timeouts (normally 22 s) and this remaining-budget
+                # timeout both preserve only already authorized/admitted evidence.
+                remaining = max(0, deadline - time.monotonic() - 0.25)
+                async with asyncio.timeout(remaining):
+                    raw = await self.synthesizer.synthesize(system, question, evidence, request.output_tokens)
+            except (TimeoutError, RecallError) as error:
+                if isinstance(error, RecallError) and error.code != "timeout":
+                    raise
+                answers.degraded = True
+                proposed_findings = [{"source": row.source, "id": row.id,
+                                      "quote": cap_span(row.text.lstrip(), MAX_QUOTE_CHARS, MAX_QUOTE_TOKENS)}
+                                     for row in ranked_evidence]
+            else:
+                if not isinstance(raw, str) or len(raw.encode("utf-8")) > MAX_MODEL_BYTES:
+                    raise RecallError("invalid_synthesis")
+                model_output_tokens = tokens(raw)
+                if model_output_tokens > request.output_tokens:
+                    raise RecallError("invalid_synthesis")
+                try:
+                    parsed = Synthesis.model_validate_json(raw)
+                except (ValidationError, ValueError) as error:
+                    raise RecallError("invalid_synthesis") from error
+                proposed_findings = parsed.findings
             index = {(item.source, item.id): item for item in evidence}
-            for proposed in parsed.findings:
+            for proposed in proposed_findings:
                 try:
                     finding = Finding.model_validate(proposed)
                 except ValidationError:
@@ -431,6 +453,9 @@ class RecallService:
                 entries = []
                 for position, quote in parts:
                     entry = {"source": finding.source, "id": finding.id, "quote": quote}
+                    if answers.degraded and (len(span) < len(item.text) or item.truncated):
+                        entry["truncated"] = True
+                        clipped = True
                     if provenance:
                         entry["provenance"] = provenance
                     if len(parts) > 1 or item.start_char or offset:
@@ -467,6 +492,8 @@ class RecallService:
                 "elapsed_ms": round((time.monotonic() - start) * 1000),
             },
         }
+        if answers.degraded:
+            packet.update(status="partial", degraded=True, error_code="timeout")
         admitted_keys = {(row.source, row.id) for row in evidence}
         for entry in read:
             entry["admitted"] = (entry["source"], entry["id"]) in admitted_keys
@@ -491,7 +518,7 @@ class RecallService:
     @staticmethod
     def _fit(packet: dict, budget: int, answers: AnswerSet):
         # Count exactly the compact JSON returned by the MCP tool, including
-        # citations, coverage, handle and measurements. Never return raw fallback.
+        # citations, coverage, handle and measurements, including degraded quotes.
         while True:
             for _ in range(5):
                 count = tokens(compact_json(packet))
@@ -513,6 +540,6 @@ class RecallService:
                 packet["findings"] = []
                 packet["uncertainty"] = answers.uncertainty()
                 packet["truncated"] = True
-                packet["status"] = "insufficient_evidence"
+                packet["status"] = "partial" if answers.degraded else "insufficient_evidence"
             else:
                 raise RecallError("retrieval_budget")
