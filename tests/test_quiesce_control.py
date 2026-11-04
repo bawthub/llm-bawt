@@ -19,7 +19,7 @@ from llm_bawt.service import quiesce_control as qc
 from llm_bawt.service import system_gate_admission as gates
 from llm_bawt.service.leader_side_pumps import CONTROL_RECHECK_CAP_SECONDS, LeaderSidePumps
 from llm_bawt.service.system_gate_admission import ControlGrantRefused, ControlTarget
-from llm_bawt.steer_capabilities import ALL_STEER_CAPS, NEXT
+from llm_bawt.steer_capabilities import ALL_STEER_CAPS, LEGACY_STEER_CAPS, NEXT
 from tests.steer_session_fixture import steer_store_factory  # noqa: F401
 
 GRANT = DeliveryControlGrant(bot_id="bot", turn_id="turn", delivery_id="d1", claim_token="tok")
@@ -167,13 +167,13 @@ def test_check_steer_refuses_a_grant_for_another_bot_or_turn_or_off_postgresql()
 
 @pytest.mark.parametrize("member,expected", [
     ({"agent_request_id": None}, None),
-    # Legacy rows (no caps recorded) decode from the pinned backend.
+    # Legacy rows (no caps recorded) decode from the pinned backend, without TASK-774 images.
     ({"agent_request_id": "r1", "backend": "claude-code", "agent_session_key": "s1",
       "turn_request_id": "r2", "turn_backend": "codex", "turn_session_key": "s2"},
-     ControlTarget("r1", "claude-code", "s1", ALL_STEER_CAPS)),
+     ControlTarget("r1", "claude-code", "s1", LEGACY_STEER_CAPS)),
     ({"agent_request_id": "r1", "backend": None, "agent_session_key": None,
       "turn_request_id": "r1", "turn_backend": "claude-code", "turn_session_key": "s1"},
-     ControlTarget("r1", "claude-code", "s1", ALL_STEER_CAPS)),
+     ControlTarget("r1", "claude-code", "s1", LEGACY_STEER_CAPS)),
     ({"agent_request_id": "r1", "backend": None, "agent_session_key": None,
       "turn_request_id": "r2", "turn_backend": "claude-code", "turn_session_key": "s2"},
      ControlTarget("r1", None, None)),
