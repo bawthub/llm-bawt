@@ -34,8 +34,9 @@ _PLAIN_READERS = frozenset({
 # name -> (rejected long/word options, rejected short option letters).
 _REJECTED_OPTIONS: dict[str, tuple[frozenset[str], str]] = {
     "rg": (frozenset({"--pre", "--pre-glob"}), ""),
-    "sort": (frozenset({"--output"}), "o"),
-    "tree": (frozenset(), "o"),
+    "sort": (frozenset({"--output", "--compress-program"}), "o"),
+    # -R reruns tree with -o 00Tree.html in each directory.
+    "tree": (frozenset(), "oR"),
     "file": (frozenset({"--compile"}), "C"),
     "find": (frozenset({"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf", "-fls"}), ""),
 }
@@ -58,7 +59,19 @@ _GIT_LISTING = {
     "reflog": frozenset({"show"}),
     "config": frozenset({"--get", "--get-all", "--list", "-l", "--show-origin", "--get-regexp"}),
 }
-_GIT_REJECTED_PREFIXES = ("--output", "--ext-diff", "--open-files-in-pager", "-O")
+_GIT_REJECTED_LONG = frozenset({"--output", "--output-directory", "--ext-diff", "--open-files-in-pager"})
+
+
+def _rejected_option(arg: str, words: frozenset[str], letters: str) -> bool:
+    """Exact word options, abbreviated long options, and short-option clusters."""
+    if arg in words:
+        return True
+    if arg.startswith("--"):
+        name = arg.split("=", 1)[0]
+        # GNU getopt and git accept any unambiguous prefix (--out=x is --output).
+        return len(name) > 2 and any(word.startswith(name) for word in words if word.startswith("--"))
+    # A short-option cluster (-ro, -ofile) containing a rejected letter.
+    return bool(letters) and arg.startswith("-") and len(arg) > 1 and any(letter in arg[1:] for letter in letters)
 
 
 def is_read_only_tool_call(tool_name: str, tool_input: Any) -> bool:
@@ -151,13 +164,7 @@ def _segment_read_only(segment: list[str]) -> bool:
         return True
     if name in _REJECTED_OPTIONS:
         words_rejected, letters = _REJECTED_OPTIONS[name]
-        for arg in args:
-            if arg in words_rejected or arg.split("=", 1)[0] in words_rejected:
-                return False
-            # A short-option cluster (-ro, -ofile) that contains a rejected letter.
-            if letters and arg.startswith("-") and not arg.startswith("--") and any(letter in arg[1:] for letter in letters):
-                return False
-        return True
+        return not any(_rejected_option(arg, words_rejected, letters) for arg in args)
     if name == "sed":
         return _sed_read_only(args)
     if name == "git":
@@ -186,7 +193,8 @@ def _git_read_only(args: list[str]) -> bool:
     if index >= len(args):
         return False
     sub, rest = args[index], args[index + 1:]
-    if any(arg.startswith(_GIT_REJECTED_PREFIXES) for arg in rest):
+    # -O (orderfile / open-in-pager), including inside clusters like -nO.
+    if any(_rejected_option(arg, _GIT_REJECTED_LONG, "O") for arg in rest):
         return False
     if sub in _GIT_READ_SUBCOMMANDS:
         return True
@@ -200,7 +208,11 @@ def _git_read_only(args: list[str]) -> bool:
     if sub == "worktree":
         return bool(rest) and all(arg in allowed for arg in rest)
     if sub == "remote":
-        return not rest or rest[0] in allowed
+        if not rest:
+            return True
+        if rest[0] in ("-v", "--verbose"):
+            return len(rest) == 1
+        return rest[0] in ("show", "get-url") and not any(arg in ("add", "set-url", "remove", "rm", "rename") for arg in rest[1:])
     if sub == "config":
         scopes = {"--show-origin", "--global", "--local", "--system", "--null", "-z", "--name-only"}
         return bool(rest) and rest[0] in allowed and all(not arg.startswith("-") or arg in scopes or arg in allowed for arg in rest[1:])
