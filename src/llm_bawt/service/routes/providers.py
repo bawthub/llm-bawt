@@ -25,7 +25,7 @@ from ...task_turn_context import (
 from .. import bridge_gate
 from ..dependencies import get_service
 from ..providers.base import AUTH_API_KEY, AUTH_CLI_OAUTH, AUTH_DEVICE_OAUTH
-from ..providers.github import GitHubAdapter, GitHubConfigError, parse_repository
+from ..providers.github import GitHubAdapter, GitHubConfigError, GitHubNotConnectedError, parse_repository
 from ..providers.registry import all_adapters, get_adapter
 
 logger = logging.getLogger(__name__)
@@ -49,7 +49,7 @@ class SelectReposRequest(BaseModel):
 
 
 class ApiKeyRequest(BaseModel):
-    api_key: str
+    api_key: SecretStr
 
 
 class GitHubAppConfigRequest(BaseModel):
@@ -234,7 +234,7 @@ async def browser_login_cancel(provider_id: str, body: BrowserLoginRequest):
 
 # --- API-key connect (openrouter, any future AUTH_API_KEY adapter) ----------
 @router.post("/v1/providers/{provider_id}/connect/api-key")
-async def connect_api_key(provider_id: str, body: ApiKeyRequest):
+async def connect_api_key(provider_id: str, request: Request, response: Response):
     """Validate and persist an API key for a key-auth provider.
 
     The adapter probes the key upstream before saving; a bad key never lands
@@ -243,10 +243,19 @@ async def connect_api_key(provider_id: str, body: ApiKeyRequest):
     adapter = _adapter_or_404(provider_id)
     if not adapter.supports(AUTH_API_KEY):
         raise HTTPException(status_code=400, detail=f"{provider_id} has no api-key auth")
+    # Parse here, rather than FastAPI's default validation response, which
+    # includes invalid input (potentially the credential) in its error body.
+    response.headers["Cache-Control"] = "no-store"
     try:
-        result = await run_in_threadpool(adapter.set_api_key, body.api_key)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("api-key connect failed for %s: %s", provider_id, e)
+        body = ApiKeyRequest.model_validate(await request.json())
+    except (ValueError, TypeError):
+        raise HTTPException(
+            status_code=400, detail="Invalid provider credential", headers={"Cache-Control": "no-store"},
+        ) from None
+    try:
+        result = await run_in_threadpool(adapter.set_api_key, body.api_key.get_secret_value())
+    except Exception:  # noqa: BLE001 — storage/upstream errors may contain credentials
+        logger.warning("api-key connect failed for %s", provider_id)
         raise HTTPException(status_code=502, detail="provider error")
     if not result.ok:
         raise HTTPException(status_code=400, detail=result.detail or "invalid API key")
@@ -467,8 +476,10 @@ async def git_identity(request: Request, response: Response):
 
 
 @router.get("/v1/providers/github/git-credential")
-async def github_git_credential(request: Request, repository: str | None = None):
-    """Internal: mint a fresh installation token in git-credential format.
+async def github_git_credential(
+    request: Request, repository: str | None = None, host: str = "github.com",
+):
+    """Internal: return App or encrypted tenant PAT git credentials.
 
     The tenant bridge configures ``credential.helper`` to curl this endpoint.
     Reachable only within the deployment's internal network: the app talks to
@@ -477,7 +488,8 @@ async def github_git_credential(request: Request, repository: str | None = None)
     ``X-Bridge-Token`` git-credential gate (``bridge_gate``) adds a token check.
     With ``repository=OWNER/REPO``, resolve the App installation for that repo
     and restrict the token to it, without changing global installation state.
-    Omission retains the legacy selected-installation behavior.
+    Omission retains the legacy selected-installation behavior in App mode.
+    Only deployments with no App configuration use the connected PAT.
     """
     no_store = {"Cache-Control": "no-store"}
     try:
@@ -485,6 +497,8 @@ async def github_git_credential(request: Request, repository: str | None = None)
     except HTTPException as error:
         error.headers = {**(error.headers or {}), **no_store}
         raise
+    if host != "github.com":
+        raise HTTPException(status_code=400, detail="GitHub credentials require host=github.com", headers=no_store)
     if repository is not None:
         try:
             parse_repository(repository)
@@ -497,9 +511,14 @@ async def github_git_credential(request: Request, repository: str | None = None)
         raise HTTPException(status_code=404, detail="github not available", headers=no_store)
     try:
         if repository is None:
-            token = await run_in_threadpool(adapter.mint_installation_token)
+            token = await run_in_threadpool(adapter.git_credential_token)
         else:
-            token = await run_in_threadpool(adapter.mint_installation_token, repository=repository)
+            token = await run_in_threadpool(adapter.git_credential_token, repository=repository)
+    except GitHubNotConnectedError:
+        raise HTTPException(
+            status_code=503, detail="GitHub not connected — connect GitHub in setup or provider settings",
+            headers=no_store,
+        ) from None
     except GitHubConfigError:
         raise HTTPException(status_code=503, detail="GitHub App configuration unavailable", headers=no_store) from None
     except Exception:  # noqa: BLE001 — never log upstream bodies or credentials

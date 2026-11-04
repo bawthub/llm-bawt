@@ -157,7 +157,7 @@ def app_stub():
 
 def _helper(op: str, url: str, **env: str) -> subprocess.CompletedProcess[str]:
     base = {"PATH": os.environ["PATH"], "LLM_BAWT_API_URL": url}
-    return subprocess.run([str(HELPER), op], env={**base, **env}, input="protocol=https\n\n",
+    return subprocess.run([str(HELPER), op], env={**base, **env}, input="protocol=https\nhost=github.com\n\n",
                           text=True, capture_output=True, timeout=10)
 
 
@@ -178,7 +178,7 @@ def test_git_helper_token_precedence(app_stub, tmp_path):
         result = _helper("get", url, **env)
         assert result.returncode == 0, result.stderr
         assert "password=t" in result.stdout
-        assert requests[-1] == {"path": "/v1/providers/github/git-credential", "token": expected}
+        assert requests[-1] == {"path": "/v1/providers/github/git-credential?host=github.com", "token": expected}
     assert len(requests) == len(cases)
 
 
@@ -188,3 +188,46 @@ def test_git_helper_ignores_non_get_ops(app_stub, op):
     url, requests = app_stub
     result = _helper(op, url, BRIDGE_GIT_CREDENTIAL_TOKEN=LEGACY)
     assert result.returncode == 0 and requests == []
+
+
+@pytest.mark.real_process(reason="checks the real shell helper rejects foreign credential requests")
+@pytest.mark.parametrize("fields", [
+    "protocol=https\nhost=gitlab.com\n\n",
+    "protocol=https\nhost=github.com.attacker.example\n\n",
+    "protocol=http\nhost=github.com\n\n",
+    "protocol=https\n\n",
+    "",
+])
+def test_git_helper_never_requests_credentials_for_other_hosts(app_stub, fields):
+    url, requests = app_stub
+    result = subprocess.run(
+        [str(HELPER), "get"], input=fields, text=True, capture_output=True, timeout=10,
+        env={"PATH": os.environ["PATH"], "LLM_BAWT_API_URL": url},
+    )
+    assert result.returncode == 0 and result.stdout == "" and requests == []
+
+
+@pytest.mark.real_process(reason="real git credential negotiation through the image helper and local broker")
+def test_git_uses_scoped_helper_for_github_only(app_stub, tmp_path):
+    url, requests = app_stub
+    env = {
+        "PATH": os.environ["PATH"], "HOME": str(tmp_path), "LLM_BAWT_API_URL": url,
+        "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_TERMINAL_PROMPT": "0",
+    }
+    command = [
+        "git", "-c", "credential.helper=",
+        "-c", f"credential.https://github.com.helper=!{HELPER}",
+        "credential", "fill",
+    ]
+    github = subprocess.run(
+        command, env=env, input="protocol=https\nhost=github.com\npath=Owner/Private.git\n\n",
+        cwd=tmp_path, text=True, capture_output=True, timeout=10,
+    )
+    assert github.returncode == 0 and "password=t\n" in github.stdout
+    assert len(requests) == 1
+    foreign = subprocess.run(
+        command, env=env, input="protocol=https\nhost=attacker.example\npath=repo.git\n\n",
+        cwd=tmp_path, text=True, capture_output=True, timeout=10,
+    )
+    assert foreign.returncode != 0 and "password=" not in foreign.stdout
+    assert len(requests) == 1

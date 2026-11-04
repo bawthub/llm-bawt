@@ -298,7 +298,7 @@ async def client(adapter, monkeypatch):
 @pytest.mark.asyncio
 async def test_route_optional_query_preserves_protocol_and_does_not_cache(client, adapter, monkeypatch):
     mint = Mock(return_value="test-installation-token")
-    monkeypatch.setattr(adapter, "mint_installation_token", mint)
+    monkeypatch.setattr(adapter, "git_credential_token", mint)
     for params, kwargs in ((None, {}), ({"repository": "Other/Project"}, {"repository": "Other/Project"})):
         response = await client.get("/v1/providers/github/git-credential", params=params)
         assert response.status_code == 200
@@ -343,7 +343,7 @@ async def test_route_scopes_each_request_independently_and_preserves_selection(c
 @pytest.mark.parametrize("repository", ["", "Owner/Repo/extra", "Owner/Repo?x=secret"])
 async def test_route_bad_query_is_400_without_mint(client, adapter, monkeypatch, repository):
     mint = Mock()
-    monkeypatch.setattr(adapter, "mint_installation_token", mint)
+    monkeypatch.setattr(adapter, "git_credential_token", mint)
     response = await client.get("/v1/providers/github/git-credential", params={"repository": repository})
     assert response.status_code == 400 and response.headers["cache-control"] == "no-store"
     assert response.json() == {"detail": "repository must be OWNER/REPO"}
@@ -353,7 +353,7 @@ async def test_route_bad_query_is_400_without_mint(client, adapter, monkeypatch,
 @pytest.mark.asyncio
 async def test_git_gate_is_checked_before_repository_validation_or_mint(client, adapter, monkeypatch):
     mint = Mock()
-    monkeypatch.setattr(adapter, "mint_installation_token", mint)
+    monkeypatch.setattr(adapter, "git_credential_token", mint)
     response = await client.get(
         "/v1/providers/github/git-credential?repository=",
         headers={providers.bridge_gate.HEADER: "bad-test-token"},
@@ -365,7 +365,7 @@ async def test_git_gate_is_checked_before_repository_validation_or_mint(client, 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("error, status", [(github.GitHubConfigError, 503), (RuntimeError, 502)])
 async def test_mint_errors_do_not_leak_secret_to_response_or_logs(client, adapter, monkeypatch, caplog, error, status):
-    monkeypatch.setattr(adapter, "mint_installation_token", Mock(side_effect=error("test-sensitive-value")))
+    monkeypatch.setattr(adapter, "git_credential_token", Mock(side_effect=error("test-sensitive-value")))
     response = await client.get("/v1/providers/github/git-credential?repository=Other/Project")
     assert response.status_code == status and response.headers["cache-control"] == "no-store"
     assert "test-sensitive-value" not in response.text + caplog.text
@@ -421,6 +421,143 @@ async def test_config_route_returns_no_fields_or_secrets_and_does_not_touch_oaut
     assert adapter.store.rows["github"] == before
     for secret in ("123456", "test-client-id", "PRIVATE KEY"):
         assert secret not in response.text + caplog.text
+
+
+def test_no_app_descriptor_reuses_pat_form_without_inference_balance(adapter):
+    descriptor = adapter.descriptor()
+    assert descriptor["id"] == "github"
+    assert descriptor["auth_methods"] == ["api_key"]
+    assert descriptor["category"] == "git" and adapter.is_configured()
+    assert "Contents: Read" in descriptor["credential_help"]
+    assert "personal access token" in descriptor["credential_label"]
+
+
+def pat_probe(monkeypatch, status=200):
+    get = Mock(return_value=httpx.Response(
+        status, json={"login": "test-user"},
+        request=httpx.Request("GET", "https://api.github.com/user"),
+    ))
+    monkeypatch.setattr(github.httpx, "get", get)
+    return get
+
+
+@pytest.mark.asyncio
+async def test_no_app_pat_connect_encrypted_broker_and_validate(client, adapter, monkeypatch, caplog):
+    get = pat_probe(monkeypatch)
+    token = "test-private-pat"
+    response = await client.post("/v1/providers/github/connect/api-key", json={"api_key": f" {token} "})
+    assert response.status_code == 200 and response.headers["cache-control"] == "no-store"
+    assert response.json()["connection"]["auth_method"] == "api_key"
+    assert response.json()["account"] == "test-user"
+    assert get.call_args.kwargs["headers"]["Authorization"] == f"Bearer {token}"
+    record = adapter.store.load("github")
+    assert record.secret == {"api_key": token}
+    assert adapter.validate(record).ok
+    assert token not in json.dumps(adapter.store.rows) + response.text + caplog.text
+    get.reset_mock()
+    for params in ({}, {"repository": "Owner/Private"}):
+        credentials = await client.get("/v1/providers/github/git-credential", params=params)
+        assert credentials.status_code == 200
+        assert credentials.headers["cache-control"] == "no-store"
+        assert credentials.text == f"username=x-access-token\npassword={token}\n"
+    get.assert_not_called()
+    github.httpx.post.assert_not_called()
+
+
+@pytest.mark.parametrize("key", ["", " \n ", "test\ninjection=value", "test\tpat", "test\x00pat", "test\x7fpat"])
+def test_pat_protocol_injection_is_rejected_before_probe_or_storage(adapter, key):
+    assert not adapter.set_api_key(key).ok
+    assert adapter.store.rows == {}
+    github.httpx.get.assert_not_called()
+
+
+def test_pat_requires_persistent_encryption_before_probe(adapter):
+    adapter.store.durable_key_problem = lambda: "ephemeral_root"
+    assert not adapter.set_api_key("test-private-pat").ok
+    assert adapter.store.rows == {}
+    github.httpx.get.assert_not_called()
+
+
+@pytest.mark.parametrize("status", [401, 403, 500])
+def test_rejected_pat_is_not_saved(adapter, monkeypatch, status):
+    pat_probe(monkeypatch, status)
+    result = adapter.set_api_key("test-private-pat")
+    assert not result.ok and "test-private-pat" not in result.detail
+    assert adapter.store.rows == {}
+
+
+@pytest.mark.parametrize("name", ["GITHUB_APP_ID", "GITHUB_APP_CLIENT_ID", "GITHUB_APP_PRIVATE_KEY", "GITHUB_APP_PRIVATE_KEY_PATH"])
+def test_any_app_config_presence_prevents_pat_fallback(adapter, monkeypatch, name):
+    adapter.store.save(ConnectionRecord(
+        provider="github", status="connected", auth_method="api_key", secret={"api_key": "test-private-pat"},
+    ))
+    monkeypatch.setenv(name, "unusable-test-app-config")
+    assert adapter.auth_methods == ("device_oauth",)
+    assert not adapter.set_api_key("replacement-pat").ok
+    assert "PAT inactive" in adapter.health()["detail"]
+    with pytest.raises(github.GitHubConfigError):
+        adapter.git_credential_token(repository="Owner/Private")
+
+
+def test_stored_app_outranks_pat_and_does_not_use_it_on_app_failure(adapter, app_key, monkeypatch):
+    pat_probe(monkeypatch)
+    assert adapter.set_api_key("test-private-pat").ok
+    configure(adapter, app_key)
+    _, post = upstream(monkeypatch, status=403)
+    with pytest.raises(httpx.HTTPStatusError):
+        adapter.git_credential_token(repository="Owner/Private")
+    post.assert_not_called()
+    assert adapter.auth_methods == ("device_oauth",)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("record", [
+    None,
+    ConnectionRecord(provider="github", status="disconnected", auth_method="api_key"),
+    ConnectionRecord(provider="github", status="connected", auth_method="device_oauth", secret={"user_token": "test-oauth-token"}),
+    ConnectionRecord(provider="github", status="connected", auth_method="api_key", secret={"api_key": "test\ninjection=value"}),
+    ConnectionRecord(provider="github", status="connected", auth_method="api_key"),
+])
+async def test_no_usable_pat_returns_clear_disconnected_state(client, adapter, record):
+    if record:
+        adapter.store.save(record)
+    response = await client.get("/v1/providers/github/git-credential")
+    assert response.status_code == 503 and "GitHub not connected" in response.json()["detail"]
+    assert response.headers["cache-control"] == "no-store"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("host", ["gitlab.com", "github.com.attacker.example", "github.com:443", ""])
+async def test_broker_rejects_foreign_host_before_credential_read(client, adapter, monkeypatch, host):
+    read = Mock(side_effect=AssertionError("must not read credential"))
+    monkeypatch.setattr(adapter, "git_credential_token", read)
+    response = await client.get("/v1/providers/github/git-credential", params={"host": host})
+    assert response.status_code == 400 and response.headers["cache-control"] == "no-store"
+    read.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", [
+    '{"api_key": {"secret": "test-private-pat"}}',
+    '{"api_key": "test-private-pat",',
+    '["test-private-pat"]',
+])
+async def test_pat_invalid_input_never_echoed(client, adapter, caplog, payload):
+    response = await client.post(
+        "/v1/providers/github/connect/api-key", content=payload, headers={"Content-Type": "application/json"},
+    )
+    assert response.status_code == 400 and response.headers["cache-control"] == "no-store"
+    assert "test-private-pat" not in response.text + caplog.text
+    assert adapter.store.rows == {}
+
+
+@pytest.mark.asyncio
+async def test_pat_storage_error_never_logged(client, adapter, monkeypatch, caplog):
+    pat_probe(monkeypatch)
+    monkeypatch.setattr(adapter.store, "save", Mock(side_effect=RuntimeError("test-private-pat")))
+    response = await client.post("/v1/providers/github/connect/api-key", json={"api_key": "test-private-pat"})
+    assert response.status_code == 502
+    assert "test-private-pat" not in response.text + caplog.text
 
 
 @pytest.mark.asyncio

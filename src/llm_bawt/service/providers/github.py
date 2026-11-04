@@ -1,7 +1,10 @@
-"""GitHub provider adapter — device-flow OAuth + GitHub App installation tokens.
+"""GitHub provider adapter — App/device OAuth, or an encrypted tenant PAT.
 
-Auth model (locked with Nick): a single ``bawthub`` GitHub App, authorized by
-each tenant user via **device flow** (no callback URL needed). The user approves
+App deployments use a GitHub App, authorized by **device flow** (no callback
+URL needed). Tenants without App configuration connect a personal access token
+through the existing API-key form. Both use encrypted CredentialStore records;
+only the app holds the credentials. App configuration always wins over a PAT.
+The App user approves
 once at ``github.com/login/device``; we then read their App installations, let
 them pick repos, and mint **short-lived installation tokens** on demand for git
 over HTTPS. App configuration is app-side only, encrypted in the existing
@@ -28,14 +31,18 @@ from typing import Any
 import httpx
 
 from .base import (
+    AUTH_API_KEY,
     AUTH_DEVICE_OAUTH,
+    HEALTH_BROKEN,
     STATUS_CONNECTED,
     ConnectionRecord,
     DeviceFlowStart,
     DevicePollResult,
-    ProviderAdapter,
     ValidateResult,
+    health_block,
 )
+from .api_key import ApiKeyAdapter
+from .github_deploy import _GitHubTokenAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -111,17 +118,97 @@ def _app_jwt(app_id: str | None = None, private_key: str | None = None) -> str:
     return jwt.encode(payload, private_key or _private_key(), algorithm="RS256")
 
 
-class GitHubAdapter(ProviderAdapter):
+class GitHubNotConnectedError(RuntimeError):
+    """No usable tenant GitHub credential is connected."""
+
+
+class GitHubAdapter(ApiKeyAdapter):
     id = "github"
     label = "GitHub"
-    auth_methods = (AUTH_DEVICE_OAUTH,)
+
+    def uses_app(self) -> bool:
+        """Configuration presence selects App mode, even when it is broken.
+
+        Never bypass a configured App's repository restrictions with a PAT.
+        """
+        return self.store.load(_APP_CONFIG_PROVIDER) is not None or any(
+            os.getenv(name) for name in (
+                "GITHUB_APP_CLIENT_ID", "GITHUB_APP_ID",
+                "GITHUB_APP_PRIVATE_KEY", "GITHUB_APP_PRIVATE_KEY_PATH",
+            )
+        )
+
+    @property
+    def auth_methods(self) -> tuple[str, ...]:
+        return (AUTH_DEVICE_OAUTH,) if self.uses_app() else (AUTH_API_KEY,)
+
+    def descriptor(self) -> dict[str, Any]:
+        return {
+            **super().descriptor(),
+            "category": "git",
+            "credential_label": "GitHub personal access token",
+            "credential_help": (
+                "Use a fine-grained token restricted to your repositories with "
+                "Contents: Read for cloning, or Read and write for pushing. "
+                "The token keeps its selected permissions; it is not narrowed per request. "
+                "Stored encrypted; never copied into the bridge environment or files."
+            ),
+            "setup_url": "https://github.com/settings/personal-access-tokens/new",
+        }
+
+    def _probe(self, key: str) -> tuple[str | None, str | None]:
+        return _GitHubTokenAdapter._probe(key)
+
+    def set_api_key(self, api_key: str) -> ValidateResult:
+        if self.uses_app():
+            return ValidateResult(ok=False, detail="This deployment uses a GitHub App, not a personal access token")
+        key = (api_key or "").strip()
+        if not key or any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in key):
+            return ValidateResult(ok=False, detail="Enter a GitHub personal access token without whitespace")
+        if self.store.durable_key_problem() is not None:
+            return ValidateResult(ok=False, detail="Persistent provider encryption unavailable")
+        return super().set_api_key(key)
+
+    def git_credential_token(self, *, repository: str | None = None) -> str:
+        if repository is not None:
+            parse_repository(repository)
+        if self.uses_app():
+            if repository is None:
+                return self.mint_installation_token()
+            return self.mint_installation_token(repository=repository)
+        record = self.store.load(self.id)
+        token = record.secret.get("api_key") if record else None
+        if (
+            not record or record.status != STATUS_CONNECTED or record.auth_method != AUTH_API_KEY
+            or not isinstance(token, str) or not token
+            or any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in token)
+        ):
+            raise GitHubNotConnectedError("GitHub not connected — connect GitHub in setup or provider settings")
+        # GitHub enforces the PAT's repository/Contents permissions. Unlike an
+        # App installation token it cannot be narrowed per request.
+        return token
 
     def is_configured(self) -> bool:
+        if not self.uses_app():
+            return True  # PAT entry needs no operator App configuration.
         try:
             self._device_client_id()
             return True
         except GitHubConfigError:
             return False
+
+    def health(self) -> dict[str, Any]:
+        record = self.store.load(self.id)
+        if record and record.auth_method == AUTH_API_KEY and self.uses_app():
+            return health_block(
+                HEALTH_BROKEN, detail="PAT inactive while a GitHub App is configured; connect the App",
+                fix="reconnect",
+            )
+        if record and record.status == STATUS_CONNECTED and record.auth_method == AUTH_API_KEY:
+            token = record.secret.get("api_key")
+            if not isinstance(token, str) or not token:
+                return health_block(HEALTH_BROKEN, detail="GitHub token unreadable; reconnect", fix="reconnect")
+        return super().health()
 
     def configure_app(self, app_id: str, client_id: str, private_key: str) -> None:
         """Install a complete runtime copy, without touching OAuth/selection state.
@@ -328,6 +415,8 @@ class GitHubAdapter(ProviderAdapter):
         return rec
 
     def validate(self, record: ConnectionRecord) -> ValidateResult:
+        if record.auth_method == AUTH_API_KEY:
+            return super().validate(record)
         token = record.secret.get("user_token")
         if not token:
             return ValidateResult(ok=False, detail="no stored token")

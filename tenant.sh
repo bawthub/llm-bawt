@@ -12,9 +12,8 @@
 #   ./tenant.sh seed    [name]          apply the idempotent infrastructure seed
 #                                       (schema, access paths, prompt defaults — no bots;
 #                                       the wizard creates the first bot after a provider connects)
-#   ./tenant.sh bridge-git-setup [name] [container]  wire agent-bridge git auth
-#                                       to the provider-connect credential helper
-#                                       (run after GitHub is connected in wizard)
+#   GitHub auth: connect in setup/settings; the supported bootstrap installer
+#   configures the image-baked helper automatically.
 #   ./tenant.sh destroy [name]          DELETE the VM + disk + forward (irreversible)
 #
 # Defaults: name=bawthub-inst1  fwd_port=8830  (forward lives on echo -> VM:3000)
@@ -100,36 +99,10 @@ start_forward() {
     /usr/bin/socat "TCP-LISTEN:${FWD_PORT},fork,reuseaddr" "TCP:${IP}:3000"
 }
 
-# bridge-git-setup: point a tenant agent-bridge container at the provider-connect
-# git-credential endpoint instead of a hand-made SSH deploy key. After the tenant
-# user connects GitHub in the wizard (device flow → GitHub App installation),
-# git over HTTPS pulls/pushes with auto-refreshing installation tokens minted by
-# the app — zero static secret on disk. Replaces the old deploy/.bridge-ssh gap.
-#   ./tenant.sh bridge-git-setup [name] [bridge_container]
-BRIDGE_CONTAINER_DEFAULT="llm-bawt-claude-code-bridge"
+# Compatibility notice only: never overwrite the image's current helper.
 cmd_bridge_git_setup() {
-  local IP BRIDGE HELPER_B64
-  IP="$(vm_ip)"; BRIDGE="${4:-$BRIDGE_CONTAINER_DEFAULT}"
-  [ -n "$IP" ] || { echo "VM not reachable"; exit 1; }
-  echo "==> installing git credential helper in '$BRIDGE' on $IP"
-  # Install a tiny helper script instead of an inline git config value — avoids
-  # fragile nested quoting through ssh -> docker exec -> container sh. git calls
-  # `git-credential-bawthub get`; it curls the app's internal endpoint, which
-  # mints a fresh GitHub App installation token and returns credential lines.
-  # BRIDGE_GIT_CREDENTIAL_TOKEN (if present in the bridge env) satisfies the
-  # optional X-Bridge-Token guard. base64 keeps the script body quoting-safe.
-  HELPER_B64="$(cat <<'HELPER' | base64 -w0
-#!/bin/sh
-# git-credential-bawthub — provider-connect credential helper (auto-refreshing
-# GitHub App installation tokens). Only answers the 'get' operation.
-[ "$1" = get ] || exit 0
-curl -s -H "X-Bridge-Token: ${BRIDGE_GIT_CREDENTIAL_TOKEN:-}" \
-  http://app:8642/v1/providers/github/git-credential
-HELPER
-)"
-  $SSH "bawthub@$IP" "docker exec '$BRIDGE' sh -c 'echo $HELPER_B64 | base64 -d > /usr/local/bin/git-credential-bawthub && chmod +x /usr/local/bin/git-credential-bawthub && git config --global credential.helper bawthub && git config --global url.\"https://github.com/\".insteadOf git@github.com: && git config --global --list | grep -Ei \"credential.helper|insteadof\"'" \
-    || { echo "  bridge container '$BRIDGE' not running/reachable — run this after the bridge is up + GitHub is connected."; exit 1; }
-  echo "==> done. verify:  docker exec $BRIDGE git ls-remote https://github.com/<owner>/<repo>"
+  echo "bridge-git-setup retired: use bawthub/deploy/bootstrap.sh and connect GitHub in setup/settings." >&2
+  return 1
 }
 
 cmd_up()   { local IP; IP="$(vm_ip)"; $SSH "bawthub@$IP" 'docker compose -f docker-compose.prod.yml up -d'; start_forward "$IP"; echo "http://${LAN_IP}:${FWD_PORT}"; }

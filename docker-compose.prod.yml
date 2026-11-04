@@ -163,7 +163,7 @@ services:
       # image stays inert on the dev host, where bridges push over SSH.
       # The insteadOf rewrite makes `git@github.com:` clones work with no key.
       - GIT_CONFIG_COUNT=2
-      - GIT_CONFIG_KEY_0=credential.helper
+      - GIT_CONFIG_KEY_0=credential.https://github.com.helper
       - GIT_CONFIG_VALUE_0=bawthub
       - "GIT_CONFIG_KEY_1=url.https://github.com/.insteadOf"
       # Quoted: the trailing colon would otherwise make YAML read this entry as
