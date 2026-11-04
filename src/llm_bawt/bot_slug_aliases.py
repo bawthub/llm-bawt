@@ -12,6 +12,13 @@ delete of a bot that still has aliases is refused instead of orphaning them.
 Rows are operator data; product code only reads them. The insert trigger
 takes the same advisory lock as bot create and refuses an alias whose key a
 live profile already occupies, so a create and an alias insert serialize.
+
+Operator procedure: insert or remove alias rows only while no delete or purge
+of the target bot is running. The delete route checks aliases before purging
+and again inside the profile delete, but those are separate transactions; an
+alias inserted between them leaves the bot's data purged and its profile
+refused (never orphaned). Alias writes are rare manual steps, so this is a
+procedural exclusion, not online rename machinery.
 """
 
 from __future__ import annotations
