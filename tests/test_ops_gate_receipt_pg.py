@@ -154,3 +154,30 @@ def test_approved_gate_job_does_not_also_send_direct_callback(gate_rig):
     with pytest.raises(ValueError, match="approval continuation"):
         rig.sender().deliver(job.id)
     assert rig.rows() == []
+
+
+def test_green_run_real_docker_frames_reach_pass_callback(gate_rig):
+    # TASK-1865: real Docker non-TTY attach bytes (captured from the gate runner
+    # image via DockerAPI.attach_stream; stdout+stderr frames, >64KiB) once failed
+    # the terminal write with a NUL error and left a green run LOST.
+    from pathlib import Path
+
+    from llm_bawt.ops.gate_driver import _tail
+
+    raw = (Path(__file__).parent / "fixtures" / "docker_attach_frames_gate.bin").read_bytes()
+    assert b"\0" in raw and len(raw) > 65536
+    rig = gate_rig
+    job = rig.job()
+    rig.store.mark_running(job.id)
+    rig.store.mark_terminal(job.id, state="succeeded", exit_code=0, output_tail=_tail(raw))
+    stored = rig.store.get_job(job.id)
+    assert stored.state == "succeeded" and stored.exit_code == 0
+    # Real Docker may deliver stderr frames after stdout; content, not order.
+    assert "\0" not in stored.output_tail and "11563 passed, 2 warnings in 210.00s" in stored.output_tail
+    assert "warn 1500" in stored.output_tail
+    assert rig.sender().deliver_due() == [job.id]
+    [delivery] = rig.rows()
+    receipt = json.loads(delivery["message"].split("\n", 1)[1])
+    assert receipt["state"] == "succeeded" and receipt["exit_code"] == 0
+    assert receipt["gate_plan"] == rig.plan.to_dict()
+    assert "11563 passed" in receipt["output_tail"] and "\0" not in receipt["output_tail"]
