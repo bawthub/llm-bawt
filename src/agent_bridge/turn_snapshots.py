@@ -19,6 +19,8 @@ Git tree at the start of the turn and again at the end, and diff the two.
   turn's bot* (author name or email local part); those stay in the diff. Any
   other HEAD movement — a rebase, checkout, a fast-forward of someone else's
   commits — makes the tree ineligible rather than attributing others' work.
+* Tool calls that provably cannot write (``readonly_commands``) register no
+  marker, so a reviewer's ``git diff`` or Read does not make the tree busy.
 * Only registered bridge turns are visible to the concurrency rule.  An
   *uncommitted* edit by any other writer (a host shell, a process outside the
   bridges) during the turn is still attributed to the turn.
@@ -47,6 +49,8 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
+
+from .readonly_commands import is_read_only_tool_call
 
 logger = logging.getLogger(__name__)
 
@@ -253,13 +257,24 @@ class TurnSnapshotObserver:
         bot_id: str | None,
         tool_input: Any,
         cwd: str | None,
+        tool_name: str | None = None,
     ) -> None:
-        """Make every tree this tool call references a candidate (PreToolUse)."""
+        """Make every tree this tool call references a candidate (PreToolUse).
+
+        A call that provably cannot write (TASK-2024: Read/Grep/Glob, or a shell
+        command on the conservative read-only allowlist) registers nothing, so
+        a reviewer reading a worktree does not make its owner's turn busy.
+        Anything unclassifiable still registers.
+        """
         if not request_id:
             return
         turn = self._turn(request_id, bot_id)
+        read_only = tool_name is not None and is_read_only_tool_call(tool_name, tool_input)
         with turn.lock:
             if turn.finished:
+                return
+            if read_only:
+                self._refresh_markers(turn)
                 return
             for path in referenced_paths(tool_input, cwd):
                 try:

@@ -95,6 +95,7 @@ class ChangedFileLifecycleMixin:
                     bot_id=(session_key or "").split(":", 1)[0] or None,
                     tool_input=input_data.get("tool_input"),
                     cwd=input_data.get("cwd"),
+                    tool_name=tool_name,
                 ),
                 timeout=TURN_SNAPSHOT_HOOK_TIMEOUT_SECONDS,
             )
