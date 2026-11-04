@@ -45,6 +45,9 @@ from .event_ops import CodexEventMixin
 
 logger = logging.getLogger(__name__)
 
+# TASK-1689: only shell tool cards get ~ display shortening.
+SHELL_TOOL_NAMES = frozenset({"shell"})
+
 
 
 # --- Bridge -----------------------------------------------------------------
@@ -314,9 +317,11 @@ class CodexBridge(
         token_usage: dict | None = None,
         extra_raw: dict | None = None,
     ) -> None:
-        text = self._shorten_paths(text)
-        tool_result = self._shorten_paths(tool_result)
-        tool_arguments = self._shorten_paths_in_dict(tool_arguments)
+        # TASK-1689: shorten only shell tool-card display; prose and other
+        # tools' args/results round-trip byte-identical.
+        if tool_name in SHELL_TOOL_NAMES:
+            tool_result = self._shorten_paths(tool_result)
+            tool_arguments = self._shorten_paths_in_dict(tool_arguments)
         event_id = synthesize_event_id(
             session_key, kind.value,
             {"text": text, "tool": tool_name, "seq": seq},

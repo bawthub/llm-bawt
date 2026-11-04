@@ -630,17 +630,6 @@ class CodexEventMixin:
         return seq
 
     @staticmethod
-    def _shorten_result_paths(value: Any) -> Any:
-        """Recursive path shortening for a JSON-shaped result (strings, dicts, lists)."""
-        if isinstance(value, str):
-            return value.replace("/home/bridge/", "~/").replace("/home/bridge", "~")
-        if isinstance(value, dict):
-            return {k: CodexEventMixin._shorten_result_paths(v) for k, v in value.items()}
-        if isinstance(value, (list, tuple)):
-            return [CodexEventMixin._shorten_result_paths(v) for v in value]
-        return value
-
-    @staticmethod
     def _tool_result_payload(result: Any) -> ToolResultPayload:
         """TASK-1585: serialize the provider's own result value.
 
@@ -651,7 +640,8 @@ class CodexEventMixin:
         dump = getattr(result, "model_dump", None)
         if callable(dump) and not isinstance(result, (str, dict, list)):
             result = dump(mode="json")
-        return ToolResultPayload.from_producer(CodexEventMixin._shorten_result_paths(result))
+        # TASK-1689: non-shell results round-trip unchanged (no ~ rewrite).
+        return ToolResultPayload.from_producer(result)
 
     def _publish_tool_end(
         self,

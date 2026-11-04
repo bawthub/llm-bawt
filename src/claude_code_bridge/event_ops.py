@@ -66,6 +66,9 @@ from ._bridge_helpers import (
 
 logger = logging.getLogger("claude_code_bridge.bridge")
 
+# TASK-1689: only Bash tool cards get ~ display shortening.
+SHELL_TOOL_NAMES = frozenset({"Bash"})
+
 
 class ClaudeEventMixin:
     """Claude output persistence + tool/event emission (TASK-555).
@@ -312,12 +315,13 @@ class ClaudeEventMixin:
         attachments: list[dict] | None = None,
         extra_raw: dict | None = None,
     ) -> None:
-        text = self._shorten_paths(text)
-        tool_result = self._shorten_paths(tool_result)
-        # Approval arguments are executable replay payloads, not display text.
-        # Prettifying paths changes the exact invocation authorized by the grant.
-        if kind != AgentEventKind.APPROVAL_REQUIRED:
-            tool_arguments = self._shorten_paths_in_dict(tool_arguments)
+        # TASK-1689: ~ shortening is a Bash tool-card display nicety only.
+        # Prose and other tools' args/results must round-trip byte-identical.
+        # Approval arguments are executable replay payloads, never shortened.
+        if tool_name in SHELL_TOOL_NAMES:
+            tool_result = self._shorten_paths(tool_result)
+            if kind != AgentEventKind.APPROVAL_REQUIRED:
+                tool_arguments = self._shorten_paths_in_dict(tool_arguments)
         event_id = synthesize_event_id(
             session_key, kind.value,
             {"text": text, "tool": tool_name, "seq": seq},

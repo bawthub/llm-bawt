@@ -66,8 +66,8 @@ def test_codex_mcp_image_result_publishes_accounted_payload_without_base64():
     assert payload.media_blocks == 1
     assert BASE64_PNG[:64] not in payload.content
     assert payload.total_tokens < 3_000
-    # Path shortening still applies inside the structured value.
-    assert "/home/bridge/" not in payload.content and "~/dev/.playwright-mcp" in payload.content
+    # TASK-1689: non-shell results keep their exact paths.
+    assert "/home/bridge/dev/.playwright-mcp" in payload.content
 
 
 def test_codex_sdk_object_result_is_structured_too():
@@ -88,12 +88,12 @@ def test_codex_sdk_object_result_is_structured_too():
     assert payload.media_blocks == 1 and BASE64_PNG[:64] not in payload.content
 
 
-def test_codex_string_result_still_publishes_unchanged_with_paths_shortened():
+def test_codex_string_result_publishes_byte_identical():
     event = _tool_end(_bridge(), _mcp_item("saved /home/bridge/dev/out.txt"))
 
-    assert event.tool_result == "saved ~/dev/out.txt"
+    assert event.tool_result == "saved /home/bridge/dev/out.txt"
     payload = payload_from_event(event.to_dict()["tool_result_payload"], event.tool_result)
-    assert payload.content == "saved ~/dev/out.txt"
+    assert payload.content == "saved /home/bridge/dev/out.txt"
     assert payload.media_blocks == 0 and payload.accounting == TOOL_RESULT_ACCOUNTING_VERSION
 
 
