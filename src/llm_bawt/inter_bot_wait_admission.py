@@ -51,8 +51,18 @@ def _first(conn: Connection, sql: str, params: dict[str, Any]):
     return conn.execute(stmt, {**params, "statuses": list(IN_FLIGHT_STATUSES)}).mappings().first()
 
 
+def _lock_pair(conn: Connection, sender: str, target: str) -> None:
+    """Serialize A→B against B→A. They hold different target locks, so without
+    this neither sees the other's uncommitted row and both commit. Taken last,
+    after the caller's target lock, and nothing is locked after it, so it adds
+    no lock-order cycle. Two-key form: a separate space from ``lock_target``."""
+    pair = "|".join(sorted((sender, target)))
+    conn.execute(sa_text("SELECT pg_advisory_xact_lock(1253, hashtext(:pair))"), {"pair": pair})
+
+
 def refuse_waited_conflict(conn: Connection, *, sender: str, target: str, delivery_id: str) -> None:
     """Raise ``WaitAdmissionRefused`` if this waited send must not be admitted."""
+    _lock_pair(conn, sender, target)
     reverse = _first(conn, _ACTIVE_WAITED, {"target": sender, "sender": target, "exclude": delivery_id})
     if reverse is not None:
         raise WaitAdmissionRefused({

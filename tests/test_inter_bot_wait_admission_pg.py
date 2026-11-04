@@ -90,6 +90,23 @@ def test_two_cycle_wait_is_refused_as_deadlock(gated):
     assert _count(gated, a) == 0
 
 
+def test_concurrent_reciprocal_waits_admit_exactly_one(gated):
+    """A→B uncommitted while B→A arrives: distinct target locks, same pair lock."""
+    a, b = _name(gated, "a"), _name(gated, "b")
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with gated.store.engine.begin() as conn:
+            pid = conn.execute(sa_text("SELECT pg_backend_pid()")).scalar_one()
+            lock_target(conn, b)
+            first = _send(gated, a, b, connection=conn)
+            worker = pool.submit(_send, gated, b, a)
+            wait_blocked_by(gated.store.engine, pid, worker)
+        with pytest.raises(WaitAdmissionRefused) as refused:
+            worker.result(timeout=10)
+    assert refused.value.detail["error"] == WAIT_WOULD_DEADLOCK
+    assert refused.value.detail["waiting_delivery_id"] == first.id
+    assert _count(gated, a) == 0
+
+
 def test_async_send_during_a_wait_is_admitted(gated):
     a, b, target = _name(gated, "a"), _name(gated, "b"), _name(gated, "t")
     _send(gated, a, target)
