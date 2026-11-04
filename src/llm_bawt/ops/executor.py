@@ -213,7 +213,10 @@ def validate_image_spec(spec: dict) -> dict:
                "binding", "trigger_workflow_path", *_IMAGE_SPEC_PATTERNS}
     if set(spec) - allowed or set(_IMAGE_SPEC_PATTERNS) - set(spec):
         raise ValueError(f"image spec requires exactly {sorted(allowed)} "
-                         "(stop_grace_seconds, health_probe and binding optional, compose_config required for deploy)")
+                         "(stop_grace_seconds and binding optional, compose_config required for deploy)")
+    # TASK-1811: the row's probe is the only post-swap verification.
+    if "health_probe" not in spec:
+        raise ValueError("image spec requires health_probe")
     # TASK-1801: what a deploy binds to: a release-run row (default) or a CI
     # publish run whose receipt names the digest.
     if spec.get("binding", BINDING_RELEASE_RUN) not in IMAGE_BINDINGS:
@@ -226,8 +229,7 @@ def validate_image_spec(spec: dict) -> dict:
             isinstance(spec["trigger_workflow_path"], str)
             and re.fullmatch(_IMAGE_SPEC_PATTERNS["workflow_path"], spec["trigger_workflow_path"])):
         raise ValueError("image spec trigger_workflow_path is invalid")
-    if "health_probe" in spec:
-        validate_health_probe(spec["health_probe"])
+    validate_health_probe(spec["health_probe"])
     if spec["action"] == DEPLOY_ACTION and "compose_config" not in spec:
         raise ValueError("deploy image spec requires compose_config (TASK-1518 drift guard)")
     if "compose_config" in spec:

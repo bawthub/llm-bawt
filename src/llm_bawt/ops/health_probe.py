@@ -14,10 +14,10 @@ the probe is data on the catalog row instead:
   the container itself: it must run the approved image ID and that image's
   release labels must equal the bound release.
 
-The app accepts a row with or without a probe (staging: rows are patched
-before the worker is repinned); the worker built with this module refuses an
-image-family spec without one before it touches anything, and the app refuses
-to hand a probe-carrying spec to a worker that lacks :data:`WORKER_LABEL`.
+Every image-family row must declare a probe (TASK-1811): the app refuses a
+row or dispatch without one, the worker refuses such a spec before it touches
+anything, and the app refuses to hand a probe spec to a worker that lacks
+:data:`WORKER_LABEL`.
 """
 from __future__ import annotations
 

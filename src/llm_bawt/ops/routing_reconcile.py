@@ -37,12 +37,12 @@ def validate_routing_spec(spec: dict) -> dict:
         "route_service": r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}",
         "hostname": r"[a-zA-Z0-9][a-zA-Z0-9.-]{0,252}",
     }
-    required = {"action", "add_prefixes", "stop_grace_seconds", "health_timeout_seconds", *patterns}
-    # TASK-1801: the row's own post-swap probe (optional until the app requires it).
-    if not required <= set(spec) <= required | {"health_probe"}:
+    required = {"action", "add_prefixes", "stop_grace_seconds", "health_timeout_seconds", "health_probe",
+                *patterns}
+    # TASK-1801/1811: the row's own post-swap probe is required.
+    if set(spec) != required:
         raise ValueError("routing spec has missing or unsupported fields")
-    if "health_probe" in spec:
-        validate_health_probe(spec["health_probe"])
+    validate_health_probe(spec["health_probe"])
     if spec["action"] != ACTION or spec["add_prefixes"] != ["/api/system"]:
         raise ValueError("routing repair supports only the system-health prefix")
     for key, pattern in patterns.items():

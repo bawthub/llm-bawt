@@ -847,12 +847,12 @@ pocket-tts worker. They seed **disabled** with `require_approval` policies.
   (`com.bawthub.release.schema=1`, `org.opencontainers.image.version`
   `sha-<sha>`, `.revision`, `com.bawthub.release.workflow-run-id`) are checked
   before the swap, as for frontend releases.
-* **`health_probe`** (optional per spec):
+* **`health_probe`** (required on every image, config and routing spec, TASK-1811):
   * `{"type": "docker_health"}`: the container's own healthcheck, plus the
     running image ID and its release labels;
   * `{"type": "http_exec", "port", "path"}`: an in-container GET.
 
-  The worker built for this change requires a probe on every image-family spec.
+  The app refuses a row or dispatch without one, and so does the worker.
   The app refuses a probe spec on a worker without
   `llm-bawt.ops.health-probe="1"`.
 * **`compose_config.profile: "pinned-hardened"`** models `cpus`, `mem_limit`
@@ -874,6 +874,13 @@ Activation order:
 3. Seed-defaults inserts only missing rows. Review the pocket rows and their
    policies, enable them, and reload the policies.
 4. The first deploy's preflight pull checks GHCR access.
+
+The publish workflow builds each green CI push run's commit, so a commit that
+was never a push tip on its own gets no image. A `workflow_dispatch` publish
+can't satisfy the `ci_publish` binding (its trigger must be a successful
+`push` CI run). To publish a specific main commit, re-run that commit's CI
+push run (`gh run rerun <run-id>`); its completion triggers the publish for
+that commit (TASK-1811).
 
 A container still on the local `bawthub-pocket-tts:local` build carries no
 release labels, so the reconcile can't adopt it. If the first deploy reports

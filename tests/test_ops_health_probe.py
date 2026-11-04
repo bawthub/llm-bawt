@@ -554,3 +554,52 @@ def test_worker_dockerfile_ships_the_probe_module_and_both_labels():
     assert "src/llm_bawt/ops/health_probe.py" in text
     assert f'LABEL {HEALTH_PROBE_LABEL}="1"' in text and f'LABEL {HARDENED_PROFILE_LABEL}="1"' in text
 
+
+
+# ── TASK-1811: the app requires the probe ───────────────────────────────────
+
+FRONTEND_SLUGS = ("bawthub.deploy-prod-image", "bawthub.rollback-prod-image",
+                  "bawthub.reconcile-prod-config", "bawthub.reconcile-prod-routing")
+
+
+@pytest.mark.parametrize("slug", FRONTEND_SLUGS + tuple(POCKET))
+def test_row_validation_refuses_an_image_family_spec_without_a_probe(slug):
+    spec = json.loads(SEED[slug]["command_script"])
+    validate_spec(json.dumps(spec))
+    spec.pop("health_probe")
+    with pytest.raises(ValueError, match="health_probe|missing or unsupported"):
+        validate_spec(json.dumps(spec))
+
+
+def _store_with(tmp_path, slug):
+    from llm_bawt.ops.store import OpsStore
+    from tests.sqlite_support import fast_sqlite_engine
+    store = OpsStore(None, engine=fast_sqlite_engine(tmp_path / "ops.sqlite", check_same_thread=False, timeout=10))
+    seed = {k: v for k, v in SEED[slug].items() if k != "slug"}
+    store.create_operation({"slug": slug, **seed, "enabled": True}, actor="t")
+    return store
+
+
+def test_store_refuses_a_patch_that_drops_the_probe(tmp_path):
+    slug = "bawthub.reconcile-prod-routing"
+    store = _store_with(tmp_path, slug)
+    spec = json.loads(SEED[slug]["command_script"])
+    spec.pop("health_probe")
+    with pytest.raises(ValueError, match="missing or unsupported"):
+        store.update_operation(slug, {"command_script": json.dumps(spec)}, actor="t")
+
+
+def test_dispatch_refuses_a_legacy_row_without_a_probe(tmp_path):
+    from sqlalchemy import text
+
+    from llm_bawt.ops.service import OpsDispatchError, OpsService
+    slug = "bawthub.reconcile-prod-config"
+    store = _store_with(tmp_path, slug)
+    spec = json.loads(SEED[slug]["command_script"])
+    spec.pop("health_probe")
+    with store.engine.begin() as conn:  # a row written before the requirement
+        conn.execute(text("UPDATE ops_operations SET command_script = :s WHERE slug = :slug"),
+                     {"s": json.dumps(spec), "slug": slug})
+    with pytest.raises(OpsDispatchError) as caught:
+        OpsService(store).prepare_invocation(slug, {})
+    assert caught.value.code == "args_invalid" and "missing or unsupported" in str(caught.value)

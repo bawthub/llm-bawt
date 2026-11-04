@@ -80,17 +80,16 @@ def validate_renderer_image(value: dict) -> None:
 
 def validate_config_spec(spec: dict) -> dict:
     required = {"action", "compose_config", "display_values", "stat_paths", "stop_grace_seconds",
-                "health_timeout_seconds", *_PATTERNS}
-    # TASK-1801: optional row-declared probe; a slow-starting target (a model
-    # load) may wait up to 900s for health.
-    if not isinstance(spec, dict) or not required <= set(spec) <= required | {"health_probe"}:
+                "health_timeout_seconds", "health_probe", *_PATTERNS}
+    # TASK-1801/1811: the row-declared probe is required; a slow-starting
+    # target (a model load) may wait up to 900s for health.
+    if not isinstance(spec, dict) or set(spec) != required:
         raise ValueError("config reconcile spec has missing or unsupported fields")
     if spec["action"] != ACTION:
         raise ValueError("not a config reconcile spec")
     validate_target_fields(spec, _PATTERNS, health_max=900)
     validate_compose_config(spec["compose_config"])
-    if "health_probe" in spec:
-        validate_health_probe(spec["health_probe"])
+    validate_health_probe(spec["health_probe"])
     return spec
 
 
