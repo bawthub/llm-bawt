@@ -153,10 +153,14 @@ def build_payload(message: str, *, title: str | None, urgency: str, bot_id: str,
         data["push"] = {"interruption-level": "time-sensitive"}  # iOS
         data["priority"] = "high"                                 # Android
         data["ttl"] = 0                                           # Android: deliver now
+    return {"message": message, "title": push_title(bot_id, title, sender), "data": data}
+
+
+def push_title(bot_id: str, title: str | None, sender: str | None = None) -> str:
+    """The visible push title: the sender's name, then the bot's own title."""
     sender = (sender or bot_id).strip() or bot_id
     title = (title or "").strip()
-    return {"message": message, "title": f"{sender}: {title}" if title else sender,
-            "data": data}
+    return f"{sender}: {title}" if title else sender
 
 
 async def send_to_service(http: httpx.AsyncClient, credentials: HACredentials, service: str,

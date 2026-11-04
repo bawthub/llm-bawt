@@ -10,7 +10,7 @@ import pytest
 
 from llm_bawt.bot_access import BotAccessError
 from llm_bawt.bot_tags import BehaviorTag
-from llm_bawt.integrations import notify
+from llm_bawt.integrations import notify, notify_bell
 from llm_bawt.integrations.ha_credentials import HACredentials, HomeAssistantUnavailable
 from llm_bawt.integrations.notify import (
     Notifier, NotifyNotConfigured, NotifySettings, build_payload, resolve_link,
@@ -298,11 +298,21 @@ def tool(monkeypatch, rig, store):
     monkeypatch.setattr(notify_tools, "Config", lambda: CONFIG)
     monkeypatch.setattr(notify_tools, "_store", lambda config: store)
     monkeypatch.setattr(notify_tools, "_http", rig.http)
+    state.bell_requests, state.bell_status, state.bell_down = [], 200, False
+
+    def bell_handler(request: httpx.Request) -> httpx.Response:
+        state.bell_requests.append(request)
+        if state.bell_down:
+            raise httpx.ConnectError("down", request=request)
+        return httpx.Response(state.bell_status, json={"ok": True})
+
+    monkeypatch.setattr(notify_tools, "_bell_http", lambda: httpx.AsyncClient(
+        base_url="http://bell.example.test", transport=httpx.MockTransport(bell_handler)))
     return state
 
 
-def signed(bot):
-    return SimpleNamespace(bot_id=bot)
+def signed(bot, user="fixture-user"):
+    return SimpleNamespace(bot_id=bot, user_id=user)
 
 
 @pytest.mark.anyio
@@ -325,7 +335,7 @@ async def test_tool_refusals_are_audited_and_send_nothing(tool, rig, store, bot,
 
 @pytest.mark.anyio
 async def test_tool_sends_for_the_signed_caller(tool, rig, store):
-    tool.caller = SimpleNamespace(bot_id="fixture-bot")
+    tool.caller = signed("fixture-bot")
     receipt = await notify_tools.notify_user(bot_id="Fixture-Bot", message="Deploy failed",
                                              urgency="high", link="/tasks")
     assert receipt["result"] == "sent" and len(rig.requests) == 1
@@ -339,3 +349,90 @@ async def test_off_origin_link_is_an_audited_refusal(tool, rig, store):
                                              link="https://evil.example/x")
     assert receipt["result"] == "refused:invalid_link" and rig.requests == []
     assert store.get(receipt["id"])["result"] == "refused:invalid_link"
+
+
+# --- bell history (TASK-2002) ----------------------------------------------
+
+def bell_bodies(tool):
+    return [json.loads(request.content) for request in tool.bell_requests]
+
+
+@pytest.mark.anyio
+async def test_delivered_push_records_one_bell_entry(tool, rig, store):
+    tool.caller = signed("fixture-bot")
+    receipt = await notify_tools.notify_user(
+        bot_id="fixture-bot", message="Deploy failed on echo", title="Deploy",
+        urgency="high", link=f"{CONFIG.PUBLIC_ORIGIN}/tasks?x=1#top")
+    assert receipt["result"] == "sent"
+    [request] = tool.bell_requests
+    assert request.url.path == "/internal/notifications/push"
+    assert bell_bodies(tool) == [{
+        "pushId": receipt["id"], "botId": "fixture-bot", "userId": "fixture-user",
+        "title": "Name-fixture-bot: Deploy", "message": "Deploy failed on echo",
+        "urgency": "high", "link": "/tasks?x=1#top", "result": "sent"}]
+
+
+@pytest.mark.anyio
+async def test_partial_push_is_recorded_with_its_result(tool, rig, store):
+    rig.setting = {"ha_services": ["mobile_app_a", "mobile_app_b"]}
+    rig.statuses = {"mobile_app_b": 500}
+    tool.caller = signed("fixture-bot")
+    receipt = await notify_tools.notify_user(bot_id="fixture-bot", message="hi")
+    assert receipt["result"] == "partial:ha_error:500"
+    [body] = bell_bodies(tool)
+    assert body["result"] == "partial:ha_error:500" and body["link"] is None
+    assert body["title"] == "Name-fixture-bot" and body["urgency"] == "normal"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("setup,expected", [
+    (lambda rig, tool: setattr(tool, "caller", signed("private-bot")), "refused:caller_mismatch"),
+    (lambda rig, tool: setattr(rig, "statuses", {"mobile_app_fixture": 503}), "ha_error:503"),
+    (lambda rig, tool: setattr(rig, "unreachable", True), "ha_error:unreachable"),
+    (lambda rig, tool: setattr(rig, "setting", None), "not_configured"),
+])
+async def test_undelivered_pushes_never_reach_the_bell(tool, rig, store, setup, expected):
+    tool.caller = signed("fixture-bot")
+    setup(rig, tool)
+    receipt = await notify_tools.notify_user(bot_id="fixture-bot", message="hi")
+    assert receipt["result"] == expected and tool.bell_requests == []
+
+
+@pytest.mark.anyio
+async def test_quiet_hours_suppression_is_not_a_bell_entry(tool, rig, store, monkeypatch):
+    rig.setting = {"ha_services": ["mobile_app_fixture"],
+                   "quiet_hours": {"start": "11:00", "end": "13:00",
+                                   "timezone": "America/New_York"}}
+    monkeypatch.setattr(notify_tools, "Notifier",
+                        lambda *a, **k: Notifier(*a, now=lambda: NOON, **k))
+    tool.caller = signed("fixture-bot")
+    receipt = await notify_tools.notify_user(bot_id="fixture-bot", message="hi")
+    assert receipt["result"] == "suppressed:quiet_hours" and tool.bell_requests == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("status,down", [(500, False), (404, False), (200, True)])
+async def test_bell_failure_keeps_the_push_result_and_logs_no_text(tool, rig, store, caplog,
+                                                                   status, down):
+    tool.caller = signed("fixture-bot")
+    tool.bell_status, tool.bell_down = status, down
+    with caplog.at_level("WARNING"):
+        receipt = await notify_tools.notify_user(bot_id="fixture-bot",
+                                                 message="secret-ish push text")
+    assert receipt["result"] == "sent" and len(tool.bell_requests) == 1
+    assert store.get(receipt["id"])["result"] == "sent"
+    assert receipt["id"] in caplog.text and "secret-ish" not in caplog.text
+
+
+@pytest.mark.anyio
+async def test_caller_without_user_skips_the_bell(tool, rig, store):
+    tool.caller = SimpleNamespace(bot_id="fixture-bot", user_id=None)
+    receipt = await notify_tools.notify_user(bot_id="fixture-bot", message="hi")
+    assert receipt["result"] == "sent" and tool.bell_requests == []
+
+
+def test_bell_link_keeps_only_the_app_path():
+    assert notify_bell.bell_link(None) is None
+    assert notify_bell.bell_link("/chat/nova") == "/chat/nova"
+    assert notify_bell.bell_link("https://app.example.test/a/b?c=1") == "/a/b?c=1"
+    assert notify_bell.bell_link("https://app.example.test") == "/"
