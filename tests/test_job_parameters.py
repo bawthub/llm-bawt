@@ -258,6 +258,7 @@ def test_job_passes_snapshot_and_records_effective_parameters():
 
 @pytest.mark.parametrize("original_parameters", [None, IdleContextResetParameters(idle_minutes_gt=7)])
 def test_retry_after_settings_edit_reattaches_without_replacing_original_policy(monkeypatch, original_parameters):
+    from llm_bawt import config_resolver
     from llm_bawt.service.session_lifecycle import lifecycle as module
 
     stored = NewSessionLifecycle._encode(intent(original_parameters))
@@ -266,6 +267,11 @@ def test_retry_after_settings_edit_reattaches_without_replacing_original_policy(
     engine.begin.return_value.__enter__.return_value.execute.return_value.mappings.return_value.first.return_value = {"id": "existing"}
     store = SimpleNamespace(engine=engine, enqueue=Mock())
     service = SimpleNamespace(config=object(), _inter_bot_dispatcher=SimpleNamespace(store=store))
+    # This admission/idempotency fixture has no real DB-backed configuration.
+    # Preserve mode-capability admission without opening RuntimeSettingsStore.
+    monkeypatch.setattr(config_resolver, "ConfigResolver", lambda *args, **kwargs:
+                        SimpleNamespace(resolve_config_setting=lambda key:
+                                        SimpleNamespace(value="inline+summaries")))
     monkeypatch.setattr(module, "BotManager", lambda config: SimpleNamespace(get_bot=lambda bot: object()))
     monkeypatch.setattr(module, "durable_agent_backend", lambda bot: "claude-code")
     monkeypatch.setattr(module, "lock_target", lambda *args: None)
