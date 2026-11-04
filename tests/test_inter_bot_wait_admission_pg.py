@@ -17,7 +17,7 @@ from llm_bawt.service.turn_admission import lock_target
 from tests.pg_lock_wait import wait_blocked_by
 from tests.test_turn_gates_pg import gated  # noqa: F401
 
-pytestmark = pytest.mark.usefixtures("private_app_pg")
+pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("private_app_pg")]
 
 
 def _name(ctx, role):
