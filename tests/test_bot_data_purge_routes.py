@@ -1,6 +1,6 @@
 """Standalone purge reports transactional refusal, not partial/unknown success."""
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
 from fastapi import FastAPI
@@ -49,7 +49,9 @@ def test_purge_keeps_success_and_unavailable_contract_without_profile_lookup(mon
 @pytest.fixture
 def delete_env(monkeypatch):
     service = SimpleNamespace(config=object())
-    store = SimpleNamespace(engine=object(), get=Mock(return_value=object()), delete=Mock(return_value=True))
+    engine = MagicMock()  # delete route reads retired aliases through engine.connect()
+    store = SimpleNamespace(engine=engine, get=Mock(return_value=object()), delete=Mock(return_value=True))
+    monkeypatch.setattr("llm_bawt.bot_slug_aliases.aliases_for", lambda conn, slug: [])
     monkeypatch.setattr(settings, "get_service", lambda: service)
     monkeypatch.setattr(settings, "get_bot_profile_store", lambda config: store)
     effects = []
