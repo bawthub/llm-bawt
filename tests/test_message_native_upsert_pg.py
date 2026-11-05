@@ -425,12 +425,13 @@ def test_real_http_title_and_omitted_session_reads_are_not_hidden(http_runtime, 
     runtime = http_runtime
     with service_codec.bind_service_turn(proof_for(rig)), capture_sql(rig.engine) as title_sql:
         runtime.history.add_message("user", "A plain untitled message", session_id=rig.session_id)
-    assert len(title_sql) == 2, title_sql
-    assert title_sql.pool_ping_sql == ["SELECT 1"] * 2
-    assert len(title_sql.all_statements) == 4
+    # TASK-2061: a user message no longer writes a stored auto title.
+    assert len(title_sql) == 1, title_sql
+    assert title_sql.pool_ping_sql == ["SELECT 1"]
+    assert len(title_sql.all_statements) == 2
     assert sum(s.lstrip().startswith("SELECT") for s in title_sql) == 0, title_sql
     assert sum(s.lstrip().startswith("INSERT") for s in title_sql) == 1, title_sql
-    assert any(s.lstrip().startswith("UPDATE") and "sessions" in s for s in title_sql), title_sql
+    assert not any("sessions" in s for s in title_sql), title_sql
     assert not any("SELECT bot_id, user_id FROM sessions" in s for s in title_sql), title_sql
     with service_codec.bind_service_turn(proof_for(rig)), capture_sql(rig.engine) as omitted_sql:
         runtime.client.add_message("assistant", "omitted session")

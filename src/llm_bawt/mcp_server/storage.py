@@ -492,19 +492,6 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
             # or raw DB details in the MCP authorization error.
             raise BotAccessError("access_denied") from None
 
-        # TASK-256: cheap auto-title from the first user message on a thread
-        # still carrying the default title. Cosmetic + best-effort — the
-        # helper never raises, so it can't break the write path.
-        if role == "user" and session_id:
-            try:
-                from ..sessions.auto_title import maybe_auto_title
-
-                maybe_auto_title(
-                    self.get_short_term_manager(bot_id), session_id, content, user_id=user_id,
-                )
-            except Exception as e:  # manager acquisition is cosmetic too
-                logger.warning("auto-title failed for session %s: %s", session_id, e)
-
         return Message(
             id=message_id_final,
             role=role,

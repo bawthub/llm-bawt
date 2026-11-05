@@ -1,6 +1,6 @@
 """Bounded, owned timeline repository. All SQL for TASK-985 lives here.
 
-Normal 30d: grouped segments + at most one untitled-label query + monthly
+Normal 30d: grouped segments + one first-message query + monthly
 calendar overview (<=3 statements). Sparse recent ranges add a previous-active-
 day lookup and a second grouped read (<=5). SQL statement count does not grow
 with sessions or links; every message must join an owned session.
@@ -11,6 +11,7 @@ from __future__ import annotations
 from fastapi import HTTPException
 from sqlalchemy import text
 
+from ...sessions.first_message import fetch_first_messages, first_message_params, given_title_sql
 from .history_scope import MAX_TIMELINE_ANCHORS, owned_message_scope
 
 MAX_GROUPS = 2000
@@ -23,7 +24,7 @@ def timeline_rows(engine, table: str, bot_id: str, user_id: str, session_id: str
                   overview_only: bool = False, overview_before: float | None = None):
     """Return group/meta/prompts/overview plus actual lower bound (UTC epoch)."""
     base = {"bot_id": bot_id, "user_id": user_id, "session_id": session_id, "tz": tz,
-            "start": start, "end": end, "limit": MAX_GROUPS + 1}
+            "start": start, "end": end, "limit": MAX_GROUPS + 1, **first_message_params()}
     owner = owned_message_scope()
     session = " AND m.session_id = :session_id" if session_id else ""
     group_sql = text(f"""
@@ -34,7 +35,7 @@ def timeline_rows(engine, table: str, bot_id: str, user_id: str, session_id: str
                    min(m.timestamp) AS first_ts, max(m.timestamp) AS last_ts,
                    (array_agg(m.id ORDER BY m.timestamp, m.id))[1] AS first_id,
                    max(s.status) AS status,
-                   max(s.session_metadata->>'title') AS title
+                   max({given_title_sql('s')}) AS title
             FROM {table} m JOIN sessions s ON s.id = m.session_id
             WHERE {VISIBLE} AND {owner}{session}
               AND m.timestamp >= :start AND m.timestamp < :end
@@ -67,17 +68,10 @@ def timeline_rows(engine, table: str, bot_id: str, user_id: str, session_id: str
         if len(groups) > MAX_GROUPS:
             raise HTTPException(status_code=413, detail="Too many timeline segments; narrow the range")
         ids = sorted({str(g['session_id']) for g in groups})
-        missing = [str(g['session_id']) for g in groups if not (g.get('title') or '').strip()]
-        prompts = {}
-        if missing:
-            rows = conn.execute(text(f"""
-                SELECT DISTINCT ON (m.session_id) m.session_id, m.content
-                FROM {table} m WHERE m.session_id = ANY(:ids)
-                  AND m.role = 'user' AND ltrim(m.content) NOT LIKE '/%'
-                  AND {owner}
-                ORDER BY m.session_id, m.timestamp, m.id
-            """), {**base, 'ids': sorted(set(missing))}).mappings()
-            prompts = {str(row['session_id']): row['content'] for row in rows}
+        # TASK-2061: every grouped session already joined an owned session, so
+        # the shared first-message rule runs for exactly those (one statement).
+        prompts = fetch_first_messages(
+            conn, [{"id": sid, "bot_id": bot_id, "user_id": user_id} for sid in ids])
         months = [dict(row) for row in conn.execute(text(f"""
             SELECT date_trunc('month', to_timestamp(m.timestamp) AT TIME ZONE :tz)::date AS month,
                    count(*) AS messages

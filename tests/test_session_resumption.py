@@ -217,3 +217,42 @@ def test_shared_history_builder_keeps_receipt_on_exact_user_anchor(db, monkeypat
     assert result.messages[0].session_resumption.model_dump() == receipt
     assert result.messages[1].session_resumption is None
     assert result.has_older and result.has_newer and result.anchor_id == "prompt"
+
+
+def _set_old_metadata(db, metadata: str):
+    with db.begin() as conn:
+        conn.exec_driver_sql("UPDATE sessions SET session_metadata=? WHERE id='old'", (metadata,))
+
+
+def test_receipt_keeps_a_long_given_name_whole(db):
+    """TASK-2061: a rename longer than the old 300 cut is stored uncut."""
+    name = "Renamed " + "x" * 400
+    _set_old_metadata(db, '{"title": "%s", "title_source": "user"}' % name)
+    assert accept(db)["title"] == name
+    assert stored(db)[0]["title"] == name
+
+
+def test_receipt_never_copies_an_auto_title(db):
+    """TASK-2061: the stored auto copy of a first message is not a name."""
+    _set_old_metadata(db, '{"title": "first words of the chat…", "title_source": "auto"}')
+    assert accept(db)["title"] is None
+
+
+def test_schema_bootstrap_widens_a_legacy_varchar_title(monkeypatch):
+    """The ALTER runs only on PostgreSQL; elsewhere bootstrap stays create_all."""
+    calls = []
+
+    class Conn:
+        class dialect:
+            name = "postgresql"
+
+        def execute(self, statement, *_args):
+            sql = str(statement)
+            calls.append(sql)
+            result = Mock()
+            result.scalar_one_or_none.return_value = "character varying"
+            return result
+
+    monkeypatch.setattr(receipts._metadata, "create_all", lambda conn: None)
+    receipts._bootstrap(Conn())
+    assert any("ALTER COLUMN title TYPE text" in sql for sql in calls)

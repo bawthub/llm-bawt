@@ -35,9 +35,13 @@ class TimelineSession(BaseModel):
 
     id: str
     title: str | None
-    # "title" = session_metadata.title; "first_prompt" = first non-slash user
-    # prompt; "none" = neither exists (frontend picks its own placeholder).
+    # "title" = a given name (rename/schedule; never the stored auto copy);
+    # "first_prompt" = snippet of the first eligible user message; "none" =
+    # neither exists (frontend picks its own placeholder).
     label_source: Literal["title", "first_prompt", "none"]
+    # TASK-2061: the uncut first eligible user message and who sent it.
+    first_message_text: str | None = None
+    initiated_by: dict | None = None
     first_message_id: str
     first_ts: float
     last_ts: float

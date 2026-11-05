@@ -238,6 +238,7 @@ class PostgreSQLShortTermManager(ShortTermMessageReadsMixin, ShortTermMessageMut
         user_id: str | None = None,
         include_deleted: bool = False,
         allowed_bot_ids: frozenset[str] | None = None,
+        query: str | None = None,
     ) -> list[dict]:
         """List sessions, newest first.
 
@@ -255,6 +256,10 @@ class PostgreSQLShortTermManager(ShortTermMessageReadsMixin, ShortTermMessageMut
             include_deleted: TASK-250 — soft-deleted sessions are excluded by
                 default; pass True (or an explicit ``status='deleted'``
                 filter) to include them.
+            query: TASK-2061 — keep sessions whose given name or any
+                user/assistant/summary message contains this text
+                (case-insensitive), applied before ``limit``. The stored
+                auto-title copy is not a match source.
 
         Returns:
             List of session dicts in ``started_at DESC`` order.
@@ -289,9 +294,24 @@ class PostgreSQLShortTermManager(ShortTermMessageReadsMixin, ShortTermMessageMut
             else:
                 params["since"] = since
             clauses.append("started_at >= :since")
+        messages_table = self._backend._messages_table_name
+        needle = (query or "").strip().lower()
+        if needle:
+            from ..sessions.first_message import first_message_params, given_title_sql
+
+            escaped = needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            params.update({"query": needle, "query_like": f"%{escaped}%", **first_message_params()})
+            clauses.append(f"""(
+                strpos(LOWER({given_title_sql('s')}), :query) > 0
+                OR EXISTS (
+                    SELECT 1 FROM {messages_table if target_bot else 'messages'} mq
+                    WHERE mq.session_id = s.id
+                      AND mq.role IN ('user', 'assistant', 'summary')
+                      AND mq.content ILIKE :query_like ESCAPE '\\'
+                )
+            )""")
 
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        messages_table = self._backend._messages_table_name
         sql = f"""
             WITH message_stats AS (
                 SELECT
@@ -624,59 +644,6 @@ class PostgreSQLShortTermManager(ShortTermMessageReadsMixin, ShortTermMessageMut
                 return (res.rowcount or 0) > 0
         except Exception as e:
             logger.warning(f"update_session_metadata({session_id}) failed: {e}")
-            return False
-
-    def try_set_session_auto_title(
-        self, session_id: str, title: str, *, user_id: str | None,
-    ) -> bool:
-        """Return committed positive title evidence from one owner-pinned UPDATE.
-
-        CASE eligibility is rechecked under the row lock. An existing title takes
-        the value-preserving branch: it still gets one physical UPDATE, but
-        RETURNING authenticates settlement so later calls can skip title DML.
-        Missing/wrong-owner rows never settle the memo. No lifecycle restriction
-        is added; supplied users stay pinned and None keeps legacy bot-only
-        embedded behavior, not authority to bypass the existing MCP guards.
-        """
-        if not session_id or not title:
-            return False
-        from ..sessions.auto_title import PYTHON_STRIP_CHARS, session_title_is_settled
-
-        try:
-            with self._backend.engine.begin() as conn:
-                row = conn.execute(text("""
-                    UPDATE sessions AS s
-                    SET session_metadata = CASE WHEN
-                        COALESCE(s.session_metadata -> 'title_source', 'null'::jsonb)
-                            IN ('null'::jsonb, 'false'::jsonb, '0'::jsonb, '""'::jsonb,
-                                '[]'::jsonb, '{}'::jsonb, '"default"'::jsonb)
-                        AND (
-                            COALESCE(s.session_metadata -> 'title', 'null'::jsonb)
-                                IN ('null'::jsonb, 'false'::jsonb, '0'::jsonb, '""'::jsonb,
-                                    '[]'::jsonb, '{}'::jsonb)
-                            OR CASE WHEN jsonb_typeof(s.session_metadata -> 'title') = 'string'
-                                THEN btrim(s.session_metadata ->> 'title', :strip_chars) = ''
-                                ELSE FALSE END
-                        )
-                        THEN COALESCE(s.session_metadata, '{}'::jsonb) || CAST(:patch AS jsonb)
-                        ELSE s.session_metadata END
-                    WHERE s.id = :id AND s.bot_id = :owner_bot
-                      AND (:owner_user IS NULL OR s.user_id = :owner_user)
-                    RETURNING s.session_metadata
-                """), {
-                    "id": session_id, "owner_bot": self.bot_id, "owner_user": user_id,
-                    "patch": json.dumps({"title": title, "title_source": "auto"}),
-                    "strip_chars": PYTHON_STRIP_CHARS,
-                }).first()
-            if row is None:
-                return False
-            metadata = row[0]
-            # Non-object roots always take the eligible legacy || branch; their
-            # resulting arrays count as a successful title attempt, as before.
-            # Truthy malformed titles inside objects remain retryable, not settled.
-            return not isinstance(metadata, dict) or session_title_is_settled(metadata)
-        except Exception as e:
-            logger.warning("auto-title update failed for session %s: %s", session_id, e)
             return False
 
     @property

@@ -40,7 +40,53 @@ def _populate_private_repository(engine):
         ]
         for id_, bot, user, status, started, meta in rows:
             conn.execute(text("INSERT INTO sessions VALUES (:id,:bot,:user,:status,:started,NULL,CAST(:meta AS jsonb))"), {"id": id_, "bot": bot, "user": user, "status": status, "started": started, "meta": json.dumps(meta)})
+        _populate_first_messages(conn)
     yield SessionSearch(engine)
+
+
+LONG = ("Investigate the flaky upload path " + "with plenty of context " * 20
+        + "and finally the needle-past-300 word")
+assert LONG.index("needle-past-300") > 300
+
+
+def _populate_first_messages(conn):
+    """TASK-2061: user carol; messages keyed by the partition bot key, as in production."""
+    conn.execute(text("CREATE TABLE messages (bot_id text, id text, role text, content text, timestamp float8, session_id text, author_entity_type text, author_entity_id text)"))
+    conn.execute(text("CREATE TABLE inter_bot_deliveries (id text, user_message_id text, target_bot_id text, author_entity_type text, author_entity_id text)"))
+    conn.execute(text("CREATE TABLE prompt_occurrences (run_id text, job_id text, delivery_id text, session_id text)"))
+    conn.execute(text("CREATE TABLE prompt_schedules (job_id text, owner_user_id text, creator_bot_id text)"))
+    sessions = [
+        # id, bot, status, started, metadata
+        ("long", "sample-a", "archived", "2026-08-01", {"title": LONG[:59] + "…", "title_source": "auto"}),
+        ("named", "sample-a", "archived", "2026-08-02", {"title": "Renamed thread", "title_source": "user"}),
+        ("bot-start", "sample-b", "archived", "2026-08-03", {}),
+        ("sched", "sample-b", "archived", "2026-08-04", {"title": "Hourly watchdog", "title_source": "automation"}),
+        ("stale", "sample-a", "archived", "2026-08-05", {"title": "sup", "title_source": "auto"}),
+        ("empty", "sample-a", "archived", "2026-08-06", {}),
+    ]
+    for id_, bot, status, started, meta in sessions:
+        conn.execute(text("INSERT INTO sessions VALUES (:id,:bot,'carol',:status,:started,NULL,CAST(:meta AS jsonb))"),
+                     {"id": id_, "bot": bot, "status": status, "started": started, "meta": json.dumps(meta)})
+    messages = [
+        # bot key (hyphen dropped), id, role, content, ts, session, author type, author id
+        ("samplea", "l0", "user", "/new", 1.0, "long", "user", "carol"),
+        ("samplea", "l1", "user", "\t /new", 2.0, "long", "user", "carol"),
+        ("samplea", "l2", "user", "   ", 3.0, "long", "user", "carol"),
+        ("samplea", "l3", "user", "```\n# \n```", 4.0, "long", "user", "carol"),
+        ("samplea", "l4", "user", LONG + "\nsecond line keyword-after-newline", 5.0, "long", "user", "carol"),
+        ("samplea", "l5", "user", "later message mentions zebra", 6.0, "long", "user", "carol"),
+        ("samplea", "n1", "user", "first words of the renamed one", 1.0, "named", "user", "carol"),
+        ("sampleb", "b1", "user", "Message from bot 'snark': please review", 1.0, "bot-start", "bot", "snark"),
+        ("sampleb", "s1", "user", "Run the hourly watchdog", 1.0, "sched", "bot", "snark"),
+        ("samplea", "t0", "assistant", "sup", 1.0, "stale", "bot", "sample-a"),
+        ("samplea", "t1", "user", "Look into the outage", 2.0, "stale", None, None),
+    ]
+    for row in messages:
+        conn.execute(text("INSERT INTO messages VALUES (:b,:i,:r,:c,:t,:s,:at,:ai)"),
+                     dict(zip(("b", "i", "r", "c", "t", "s", "at", "ai"), row)))
+    conn.execute(text("INSERT INTO inter_bot_deliveries VALUES ('d1','s1','sample-b','bot','snark')"))
+    conn.execute(text("INSERT INTO prompt_occurrences VALUES ('o1','job-1','d1','sched')"))
+    conn.execute(text("INSERT INTO prompt_schedules VALUES ('job-1','carol','snark')"))
 
 
 def test_owned_ranked_search_and_metadata_projection(repository):
@@ -79,3 +125,97 @@ def test_literal_queries_and_malformed_metadata(repository):
     hit = repository.search(user_id="alice", query="another-model")["sessions"][0]
     assert hit["title"] == "" and hit["models"] == "another-model"
     assert repository.search(user_id="unknown")["total_count"] == 0
+
+
+def _by_id(page):
+    return {row["id"]: row for row in page["sessions"]}
+
+
+def test_full_first_message_is_searchable_past_old_cuts(repository):
+    for needle in ("needle-past-300", "keyword-after-newline", "investigate the flaky"):
+        page = repository.search(user_id="carol", query=needle)
+        assert list(_by_id(page)) == ["long"], needle
+    row = _by_id(repository.search(user_id="carol", query="needle-past-300"))["long"]
+    assert row["first_message_text"] == LONG + "\nsecond line keyword-after-newline"
+    assert row["initiated_by"] == {"kind": "user", "id": "carol"}
+    # The legacy stored copy is still returned for older clients, uncut by search.
+    assert row["title"] == LONG[:59] + "…" and row["title_source"] == "auto"
+
+
+def test_only_the_first_eligible_message_matches_not_later_ones(repository):
+    assert repository.search(user_id="carol", query="zebra")["total_count"] == 0
+
+
+def test_stored_auto_copy_is_not_a_match_source(repository):
+    # "sup" survives only in the stale auto copy and an assistant row.
+    assert "stale" not in _by_id(repository.search(user_id="carol", query="sup"))
+    stale = _by_id(repository.search(user_id="carol", query="outage"))["stale"]
+    assert stale["initiated_by"] == {"kind": "unknown", "id": None}
+
+
+def test_given_names_match_and_rank_as_labels(repository):
+    named = _by_id(repository.search(user_id="carol", query="renamed thread"))["named"]
+    assert named["rank"] == 4 and named["title_source"] == "user"
+    assert _by_id(repository.search(user_id="carol", query="hourly watchdog"))["sched"]["rank"] == 4
+
+
+def test_initiator_filter_and_schedule_provenance(repository):
+    sched = _by_id(repository.search(user_id="carol", initiated_by="schedule"))
+    assert list(sched) == ["sched"] and sched["sched"]["initiated_by"] == {"kind": "schedule", "id": "job-1"}
+    assert list(_by_id(repository.search(user_id="carol", initiated_by="bot"))) == ["bot-start"]
+    assert "empty" not in _by_id(repository.search(user_id="carol", initiated_by="unknown"))
+    with pytest.raises(ValueError):
+        repository.search(user_id="carol", initiated_by="robot")
+
+
+def test_page_only_lookup_matches_full_path(repository):
+    fast = _by_id(repository.search(user_id="carol", limit=200))
+    full = _by_id(repository.search(user_id="carol", limit=200, sort_by="title"))
+    assert fast.keys() == full.keys()
+    for key in fast:
+        assert fast[key]["first_message_text"] == full[key]["first_message_text"]
+        assert fast[key]["initiated_by"] == full[key]["initiated_by"]
+    assert fast["empty"]["first_message_text"] is None and fast["empty"]["initiated_by"] is None
+
+
+def test_batched_first_message_lookup_is_owner_keyed(repository):
+    from llm_bawt.sessions.first_message import fetch_first_messages
+
+    with repository.engine.connect() as conn:
+        found = fetch_first_messages(conn, [
+            {"id": "long", "bot_id": "sample-a", "user_id": "carol"},
+            {"id": "bot-start", "bot_id": "sample-b", "user_id": "carol"},
+            {"id": "empty", "bot_id": "sample-a", "user_id": "carol"},
+            {"id": "named", "bot_id": "sample-a", "user_id": "mallory"},  # wrong owner
+            {"id": "sched", "bot_id": "sample-a", "user_id": "carol"},  # wrong bot
+        ])
+    assert found["long"]["first_message_text"].startswith("Investigate the flaky")
+    assert found["bot-start"]["initiated_by"] == {"kind": "bot", "id": "snark"}
+    assert found["empty"] == {"first_message_text": None, "initiated_by": None}
+    assert "named" not in found and "sched" not in found
+
+
+def test_thread_list_query_searches_full_history_before_limit(repository):
+    from types import SimpleNamespace
+
+    from llm_bawt.memory.postgresql_short_term import PostgreSQLShortTermManager
+
+    with repository.engine.begin() as conn:  # the list query also reads archived_at
+        conn.execute(text("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS archived_at timestamp"))
+    manager = object.__new__(PostgreSQLShortTermManager)
+    manager.bot_id = "sample-a"
+    manager._backend = SimpleNamespace(engine=repository.engine, _messages_table_name="messages")
+
+    def ids(**kwargs):
+        return [row["id"] for row in manager.list_sessions(user_id="carol", **kwargs)]
+
+    # Past every old preview cut, after a newline, and in a later message.
+    assert ids(query="NEEDLE-past-300") == ["long"]
+    assert ids(query="keyword-after-newline") == ["long"]
+    assert ids(query="zebra") == ["long"]
+    assert ids(query="renamed thread") == ["named"]
+    # The stale auto copy "sup" is not a source; the assistant reply is.
+    assert ids(query="sup") == ["stale"]
+    assert ids(query="%_") == []
+    assert len(ids(query="", limit=200)) == 4
+    assert ids(query="zebra", limit=1) == ["long"]

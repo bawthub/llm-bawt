@@ -83,9 +83,15 @@ def is_slash_command(content: str | None) -> bool:
 def resolve_session_label(
     title: str | None, first_prompt: str | None
 ) -> tuple[str | None, str]:
-    """Label precedence: session title → first non-slash user prompt → none."""
+    """Label precedence: given name → first eligible user message → none.
+
+    ``title`` is a given name only (rename or schedule name), never the stored
+    auto copy. A given name is returned whole; the first-message label stays
+    a bounded snippet for older clients, which read ``title``. Current
+    clients label from the uncut ``first_message_text`` instead.
+    """
     if title and title.strip():
-        return snippet(title), "title"
+        return _WS.sub(" ", title).strip(), "title"
     if first_prompt and first_prompt.strip() and not is_slash_command(first_prompt):
         return snippet(first_prompt), "first_prompt"
     return None, "none"
@@ -98,7 +104,7 @@ def _earliest(a: tuple[float, str], b: tuple[float, str]) -> tuple[float, str]:
 def build_timeline(
     groups: list[dict],
     session_meta: dict[str, dict],
-    first_prompts: dict[str, str],
+    first_prompts: dict[str, dict],
 ) -> tuple[list[TimelineDay], list[TimelineSession], str]:
     """Fold ``(day, session_id)`` aggregate rows into days, sessions, version.
 
@@ -166,12 +172,15 @@ def build_timeline(
     session_models = []
     for sid, s in sorted(sessions.items(), key=lambda kv: kv[1]["first"]):
         meta = session_meta.get(sid) or {}
-        title, source = resolve_session_label(meta.get("title"), first_prompts.get(sid))
+        first = first_prompts.get(sid) or {}
+        title, source = resolve_session_label(meta.get("title"), first.get("first_message_text"))
         session_models.append(
             TimelineSession(
                 id=sid,
                 title=title,
                 label_source=source,
+                first_message_text=first.get("first_message_text"),
+                initiated_by=first.get("initiated_by"),
                 first_message_id=s["first"][1],
                 first_ts=s["first"][0],
                 last_ts=s["last_ts"],

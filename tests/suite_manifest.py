@@ -15,7 +15,6 @@ PG_ACCEPTANCE_SUITES = (
     "test_message_native_upsert_pg.py::",
     "test_native_selected_owner_pg.py::",
     "test_native_selected_write_guard_pg.py::",
-    "test_auto_title_pg.py::",
     "test_bot_tags_pg.py::",
     "test_embedding_repair_pg.py::",
     "test_memory_update_pg.py::",

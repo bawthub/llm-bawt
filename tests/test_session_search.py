@@ -24,7 +24,7 @@ def test_scope_and_paging_are_forwarded(client):
     http, search = client
     response = http.get("/v1/sessions/search", params={"user": "alice", "query": "Pocket", "bot_id": "sample", "status": "archived", "limit": 6, "offset": 12, "since": 100, "sort_by": "oldest"})
     assert response.status_code == 200
-    search.assert_called_once_with(user_id="alice", query="Pocket", bot_id="sample", status="archived", since=100.0, sort_by="oldest", limit=6, offset=12)
+    search.assert_called_once_with(user_id="alice", query="Pocket", bot_id="sample", status="archived", since=100.0, sort_by="oldest", limit=6, offset=12, initiated_by=None)
 
 
 @pytest.mark.parametrize("params", [

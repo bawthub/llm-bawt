@@ -51,13 +51,7 @@ class StorageSessionsMixin:
         """Read one session; guarded calls bind bot and applicable user in SQL."""
         owner = self._session_owner_scope(bot_id, "get_session")
         manager = self.get_short_term_manager(bot_id)
-        row = manager.get_session(session_id, **owner)
-        # SDK/binding consumers already need this row. Reuse its settled title
-        # without introducing a lookup on the later message-write hot path.
-        from ..sessions.auto_title import remember_session_title
-
-        remember_session_title(row)
-        return row
+        return manager.get_session(session_id, **owner)
 
     async def list_sessions(
         self,
@@ -67,6 +61,7 @@ class StorageSessionsMixin:
         limit: int = 50,
         user_id: str | None = None,
         include_deleted: bool = False,
+        query: str | None = None,
     ) -> list[dict]:
         """List sessions for a bot, newest first.
 
@@ -104,6 +99,7 @@ class StorageSessionsMixin:
             limit=limit,
             user_id=user_id,
             include_deleted=include_deleted,
+            query=query,
             **scoped,
         )
 

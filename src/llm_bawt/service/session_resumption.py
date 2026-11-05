@@ -11,7 +11,7 @@ import math
 import time
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, Float, MetaData, String, Table, bindparam, select, text
+from sqlalchemy import Column, Float, MetaData, String, Table, Text, bindparam, select, text
 
 from ..utils.schema import SchemaBootstrapGuard
 
@@ -26,14 +26,31 @@ RECEIPTS = Table(
     Column("previous_session_id", String(36), nullable=False),
     Column("accepted_at", Float, nullable=False),
     Column("session_started_at", Float, nullable=True),
-    Column("title", String(300), nullable=True),
+    # TASK-2061: a given session name (rename or schedule name), stored whole.
+    Column("title", Text, nullable=True),
 )
 _guard = SchemaBootstrapGuard()
 _FIELDS = ("turn_id", "session_id", "previous_session_id", "accepted_at", "session_started_at", "title")
 
 
+def _bootstrap(conn) -> None:
+    _metadata.create_all(conn)
+    if conn.dialect.name != "postgresql":
+        return
+    # TASK-2061: tables created before this change hold VARCHAR(300) titles;
+    # create_all never alters an existing column. Widen once so an uncut name
+    # cannot fail the receipt INSERT inside resume admission.
+    kind = conn.execute(text("""
+        SELECT data_type FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'session_resumption_receipts' AND column_name = 'title'
+    """)).scalar_one_or_none()
+    if kind == "character varying":
+        conn.execute(text("ALTER TABLE session_resumption_receipts ALTER COLUMN title TYPE text"))
+
+
 def ensure_schema(engine) -> None:
-    _guard.run(engine, "session-resumption-receipts", lambda conn: _metadata.create_all(conn))
+    _guard.run(engine, "session-resumption-receipts", _bootstrap)
 
 
 def _epoch(value) -> float | None:
@@ -88,8 +105,12 @@ def record(conn, *, bot_id: str, user_id: str, turn_id: str,
             metadata = json.loads(metadata)
         except (ValueError, TypeError):
             metadata = {}
-    title = metadata.get("title") if isinstance(metadata, dict) else None
-    title = title.strip()[:300] or None if isinstance(title, str) else None
+    # Only a name someone gave the session; the stored auto copy of its first
+    # message is not a name (TASK-2061). Kept whole; display truncates.
+    title = None
+    if isinstance(metadata, dict) and metadata.get("title_source") != "auto":
+        raw = metadata.get("title")
+        title = raw.strip() or None if isinstance(raw, str) else None
     row = {**key, "user_id": user_id, "turn_id": turn_id, "session_id": session_id,
            "previous_session_id": previous, "accepted_at": time.time(),
            "session_started_at": _epoch(target["started_at"]), "title": title}

@@ -13,11 +13,21 @@ router = APIRouter()
 log = get_service_logger(__name__)
 
 
+class SessionSearchInitiator(BaseModel):
+    kind: Literal["user", "bot", "schedule", "system", "unknown"]
+    id: str | None = None
+
+
 class SessionSearchItem(BaseModel):
     id: str
     bot_id: str
     user_id: str
+    # Stored value, kept for older clients. A given name only when
+    # title_source != 'auto'; otherwise label from first_message_text.
     title: str
+    title_source: str = ""
+    first_message_text: str | None = None
+    initiated_by: SessionSearchInitiator | None = None
     status: Literal["active", "archived"]
     started_at: datetime | None
     ended_at: datetime | None
@@ -49,8 +59,11 @@ def search_sessions(
     sort_by: Literal["relevance", "recent", "oldest", "title"] = Query("relevance"),
     limit: int = Query(20, ge=1, le=200),
     offset: int = Query(0, ge=0, le=100000),
+    initiated_by: Literal["user", "bot", "schedule", "system", "unknown"] | None = Query(None),
 ):
-    """Search titles, bot slugs and model/provider labels, never SDK IDs or message bodies.
+    """Search given names, full first messages, bot slugs and model/provider labels.
+
+    Never SDK IDs. A session's later messages are not match sources here.
 
     A user is mandatory (no default-user fallback on cross-bot discovery).
     Archived sessions are included; deleted and unowned legacy rows are not.
@@ -65,6 +78,7 @@ def search_sessions(
         return SessionSearch(engine).search(
             user_id=user.strip(), query=query, bot_id=bot_id, status=status,
             since=since, sort_by=sort_by, limit=limit, offset=offset,
+            initiated_by=initiated_by,
         )
     except Exception:
         log.exception("Session search unavailable")

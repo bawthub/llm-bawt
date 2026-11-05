@@ -195,7 +195,9 @@ def test_build_timeline_folds_groups():
          "first_ts": 30.0, "last_ts": 35.0, "first_id": "b"},
     ]
     meta = {"s1": {"title": "Rail work", "status": "archived"}, "s2": {"title": None, "status": "active"}}
-    days, sessions, version = build_timeline(groups, meta, {"s2": "why is it slow"})
+    first = {"s2": {"first_message_text": "why is it slow\nmore detail",
+                    "initiated_by": {"kind": "user", "id": "nick"}}}
+    days, sessions, version = build_timeline(groups, meta, first)
 
     assert [d.date for d in days] == ["2026-09-01", "2026-09-02"]
     d1, d2 = days
@@ -212,7 +214,10 @@ def test_build_timeline_folds_groups():
     s1, s2 = sessions
     assert (s1.first_message_id, s1.last_ts, s1.message_count) == ("a", 35.0, 7)
     assert (s1.title, s1.label_source, s1.status) == ("Rail work", "title", "archived")
-    assert (s2.title, s2.label_source) == ("why is it slow", "first_prompt")
+    assert (s2.title, s2.label_source) == ("why is it slow more detail", "first_prompt")
+    assert s2.first_message_text == "why is it slow\nmore detail"
+    assert s2.initiated_by == {"kind": "user", "id": "nick"}
+    assert s1.first_message_text is None and s1.initiated_by is None
     assert version == "10:45.0"
 
 
@@ -278,6 +283,8 @@ def test_timeline_repository_constant_sql_and_owner_predicates():
             self.values = values
         def mappings(self):
             return self
+        def all(self):
+            return list(self.values)
         def __iter__(self):
             return iter(self.values)
 
@@ -293,6 +300,8 @@ def test_timeline_repository_constant_sql_and_owner_predicates():
                     "status": "active", "continued": False}])
             if "AS month" in sql:
                 return Result([{"month": date(2026, 10, 1), "messages": 2}])
+            if "AS k(id, bot_id, user_id)" in sql:
+                return Result([])
             raise AssertionError("Unexpected query")
         def __enter__(self):
             return self
@@ -310,9 +319,16 @@ def test_timeline_repository_constant_sql_and_owner_predicates():
         result = timeline_rows(engine, "messages_p_snark", "snark", "nick", None,
                                "America/New_York", 1., 100.)
         assert len(result[0]) == 1
-        assert len(engine.conn.calls) == 2
-        assert all("owner.user_id = :user_id" in sql for sql, _ in engine.conn.calls)
-        assert all(params["user_id"] == "nick" for _, params in engine.conn.calls)
+        assert len(engine.conn.calls) == 3
+        owned = [(sql, p) for sql, p in engine.conn.calls if "AS k(id, bot_id, user_id)" not in sql]
+        assert len(owned) == 2
+        assert all("owner.user_id = :user_id" in sql for sql, _ in owned)
+        assert all(params["user_id"] == "nick" for _, params in owned)
+        # TASK-2061: the shared first-message read joins sessions on the owner key.
+        (first_sql, first_params), = [c for c in engine.conn.calls if c not in owned]
+        assert "s.user_id IS NOT DISTINCT FROM k.user_id" in first_sql
+        assert first_params["ids"] == ["own"] and first_params["users"] == ["nick"]
+        assert first_params["bots"] == ["snark"]
 
 
 def test_timeline_anchors_reject_oversize_without_sql():

@@ -16,10 +16,14 @@ The lifecycle primitives (rotate/activate/get_or_create) live in
 
 from __future__ import annotations
 
+import asyncio
+from typing import Literal
+
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from ...mcp_server.storage import get_storage
+from ...sessions.first_message import fetch_first_messages
 from ...working_memory.session_state import mode_from_flag
 from ..dependencies import get_effective_bot_id, get_service
 from ..logging import get_service_logger
@@ -36,6 +40,13 @@ log = get_service_logger(__name__)
 # ---------------------------------------------------------------------------
 # Schemas
 # ---------------------------------------------------------------------------
+class SessionInitiator(BaseModel):
+    """Who started a session: the author of its first eligible message."""
+
+    kind: Literal["user", "bot", "schedule", "system", "unknown"]
+    id: str | None = None
+
+
 class SessionInfo(BaseModel):
     id: str
     bot_id: str
@@ -54,6 +65,11 @@ class SessionInfo(BaseModel):
     summary: str | None = None
     status: str
     session_metadata: dict | None = None
+    # TASK-2061: the full first eligible user message, read from messages each
+    # time (never stored or cut), and who sent it. Labels use a given name
+    # (session_metadata.title when title_source != 'auto') before this.
+    first_message_text: str | None = None
+    initiated_by: SessionInitiator | None = None
 
 
 class SessionListResponse(BaseModel):
@@ -253,8 +269,26 @@ def _normalize_metadata(row: dict) -> dict:
     return meta
 
 
-def _to_info(row: dict) -> SessionInfo:
+def _first_messages_sync(rows: list[dict]) -> dict[str, dict]:
+    engine = getattr(get_storage(), "engine", None)
+    if engine is None or not rows:
+        return {}
+    with engine.connect() as conn:
+        return fetch_first_messages(conn, rows)
+
+
+async def _first_messages(rows: list[dict]) -> dict[str, dict]:
+    """Display enrichment for already-authorized rows; failure omits it only."""
+    try:
+        return await asyncio.to_thread(_first_messages_sync, rows)
+    except Exception as exc:
+        log.warning("first-message lookup failed for %d session(s): %s", len(rows), exc)
+        return {}
+
+
+def _to_info(row: dict, first: dict | None = None) -> SessionInfo:
     return SessionInfo(
+        **(first or {}),
         id=row["id"],
         bot_id=row.get("bot_id", ""),
         user_id=row.get("user_id"),
@@ -313,6 +347,11 @@ async def list_sessions(
         "pass true (admin) to include them.",
     ),
     limit: int = Query(50, ge=1, le=200),
+    query: str | None = Query(
+        None, max_length=300,
+        description="TASK-2061: keep threads whose given name or any message "
+        "text contains this (case-insensitive), before the limit.",
+    ),
 ):
     """List a user's threads for a bot, newest first (excludes deleted)."""
     effective_bot = get_effective_bot_id(bot_id)
@@ -323,11 +362,13 @@ async def list_sessions(
         status=status,
         limit=limit,
         include_deleted=include_deleted,
+        query=query,
     )
+    first = await _first_messages(rows)
     return SessionListResponse(
         bot_id=effective_bot,
         user_id=user_id,
-        sessions=[_to_info(r) for r in rows],
+        sessions=[_to_info(r, first.get(str(r.get("id")))) for r in rows],
         total_count=len(rows),
     )
 
@@ -343,7 +384,8 @@ async def get_active_session(
     row = await get_storage().get_active_session(bot_id=effective_bot, user_id=user_id)
     if not row:
         raise HTTPException(status_code=404, detail="No active session")
-    return _to_info(row)
+    first = await _first_messages([row])
+    return _to_info(row, first.get(str(row.get("id"))))
 
 
 @router.get("/v1/sessions/{session_id}", response_model=SessionInfo, tags=["Sessions"])
@@ -356,7 +398,8 @@ async def get_session(
     effective_bot = get_effective_bot_id(bot_id)
     user_id = _resolve_user(user)
     row = await _owned_session_or_404(session_id, effective_bot, user_id)
-    return _to_info(row)
+    first = await _first_messages([row])
+    return _to_info(row, first.get(str(row.get("id"))))
 
 
 @router.get(
@@ -528,7 +571,8 @@ async def update_session(
         )
 
     row = await storage.get_session(session_id, bot_id=effective_bot)
-    return _to_info(row)
+    first = await _first_messages([row])
+    return _to_info(row, first.get(str(row.get("id"))))
 
 
 @router.delete("/v1/sessions/{session_id}", tags=["Sessions"])
@@ -638,7 +682,7 @@ async def activate_session(
     user_id = _resolve_user(user)
     # Ownership check first so a cross-user id can't be activated (404, not 403,
     # to avoid confirming the session exists for another user).
-    row = await _owned_session_or_404(session_id, effective_bot, user_id)
+    await _owned_session_or_404(session_id, effective_bot, user_id)
     ok = await get_storage().activate_session(
         session_id, bot_id=effective_bot, user_id=user_id
     )
