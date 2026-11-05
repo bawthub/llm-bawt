@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
 from typing import Any
@@ -606,6 +607,8 @@ class OllamaDiscoveryProvider(ModelDiscoveryProvider):
     aliases = ("ollama",)
     empty_hint = "No models are installed on this Ollama server. Run `ollama pull <model>` on the server, then check again."
     _show_limit = 40
+    #: Overall time for the /api/show lookups; models past it use tags' context.
+    _show_budget_s = 15.0
 
     def __init__(self, config: Config | None = None):
         self._config = config
@@ -638,6 +641,7 @@ class OllamaDiscoveryProvider(ModelDiscoveryProvider):
 
         rows: list[dict[str, Any]] = []
         shows = 0
+        deadline = time.monotonic() + self._show_budget_s
         for item in models:
             if not isinstance(item, dict) or not item.get("name"):
                 continue
@@ -646,7 +650,7 @@ class OllamaDiscoveryProvider(ModelDiscoveryProvider):
                 continue
             details = item.get("details") if isinstance(item.get("details"), dict) else {}
             context = None
-            if shows < self._show_limit:
+            if shows < self._show_limit and time.monotonic() < deadline:
                 shows += 1
                 context = self._show_context(root, headers, str(item["name"]))
             if not isinstance(context, int):

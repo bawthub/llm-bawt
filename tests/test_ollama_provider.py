@@ -125,17 +125,38 @@ def test_non_ollama_server_is_rejected(monkeypatch, path_url):
     assert not result.ok and "not like an Ollama server" in result.detail
 
 
-def test_disconnect_falls_back_to_config(monkeypatch, path_url):
+def test_disconnect_keeps_the_server_url(monkeypatch, path_url):
     monkeypatch.setattr(ollama.httpx, "get", lambda *_a, **_k: _Response(payload={"version": "1"}))
     adapter = _adapter()
-    adapter.connect_endpoint("http://box:11434")
+    adapter.connect_endpoint("http://box:11434", "k-1")
     assert adapter.disconnect() is True
-    assert path_url["url"] is None
-    assert ollama.server_url(adapter.config) == "http://localhost:11434"
+    assert adapter.store.load("ollama") is None and adapter.api_key() is None
+    assert path_url["url"] == "http://box:11434/v1"
+    assert ollama.server_url(adapter.config) == "http://box:11434"
+
+
+def test_disconnect_without_a_record_changes_nothing(path_url):
+    path_url["url"] = "http://box:11434/v1"
+    adapter = _adapter()
+    assert adapter.disconnect() is False
+    assert path_url["url"] == "http://box:11434/v1"
+
+
+def test_health_checks_a_route_url_saved_without_a_record(monkeypatch, path_url):
+    path_url["url"] = "http://box:11434/v1"
+    monkeypatch.setattr(ollama.httpx, "get", lambda *_a, **_k: _Response(payload={"version": "0.40"}))
+    health = _adapter().health()
+    assert health["state"] == "ok" and health["detail"] == "Ollama 0.40 · http://box:11434"
+
+
+def test_health_is_unconfigured_with_only_the_config_default(path_url):
+    health = _adapter().health()
+    assert health["state"] == "unconfigured" and "http://localhost:11434" in health["detail"]
 
 
 def test_health_reports_unreachable_configured_server(monkeypatch, path_url):
     adapter = _adapter()
+    path_url["url"] = "http://box:1/v1"
     adapter.store.save(ConnectionRecord(provider="ollama", status=STATUS_CONNECTED, meta={"base_url": "http://box:1"}))
 
     def boom(*_a, **_k):

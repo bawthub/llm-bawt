@@ -343,8 +343,6 @@ async def openrouter_api_key(request: Request):
 async def disconnect(provider_id: str):
     adapter = _adapter_or_404(provider_id)
     result = await run_in_threadpool(adapter.disconnect)
-    if adapter.supports(AUTH_ENDPOINT):
-        await run_in_threadpool(_reload_catalog_after_endpoint_change)
     return result if isinstance(result, dict) else {"disconnected": result}
 
 

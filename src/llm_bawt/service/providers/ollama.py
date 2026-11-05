@@ -8,9 +8,9 @@ Where things live:
 
 - The server URL is the ``ollama`` access path's ``base_url`` (DB), the same
   value the chat and background clients already read through the model
-  catalog. Connecting writes it; disconnecting clears it, which falls back to
-  the ``OLLAMA_URL`` config value so installs that never configured anything
-  here keep working.
+  catalog. Connecting writes it. With no URL on the route, the ``OLLAMA_URL``
+  config value applies, so installs that never configured anything here keep
+  working. Disconnect forgets the record and key but keeps the URL.
 - The optional key is encrypted in the :class:`CredentialStore`.
 
 The adapter deliberately owns no access path for route eligibility: Ollama
@@ -192,12 +192,15 @@ class OllamaAdapter(ProviderAdapter):
         return ValidateResult(ok=True, account=account)
 
     def disconnect(self) -> bool:
-        removed = super().disconnect()
-        _write_path_url(self.config, None)
-        return removed
+        """Forget the saved connection and key; the server URL stays in place.
+
+        Clearing the URL would silently repoint every Ollama model at the
+        ``OLLAMA_URL`` default, which on many installs is not a server at all.
+        """
+        return super().disconnect()
 
     def validate(self, record: ConnectionRecord) -> ValidateResult:
-        root = str((record.meta or {}).get("base_url") or server_url(self.config))
+        root = server_url(self.config)
         version, detail = probe(root, (record.secret or {}).get(_SECRET_FIELD))
         if version is None:
             return ValidateResult(ok=False, detail=detail)
@@ -205,13 +208,17 @@ class OllamaAdapter(ProviderAdapter):
 
     def health(self) -> dict[str, Any]:
         record = self.store.load(self.id)
-        if not record or record.status != STATUS_CONNECTED:
-            return health_block(HEALTH_UNCONFIGURED, detail=f"not configured here; using {server_url(self.config)}")
-        root = str((record.meta or {}).get("base_url") or server_url(self.config))
-        version, detail = probe(root, (record.secret or {}).get(_SECRET_FIELD), timeout=_HEALTH_TIMEOUT)
+        connected = bool(record and record.status == STATUS_CONNECTED)
+        if not connected and not _stored_path_url(self.config):
+            return health_block(HEALTH_UNCONFIGURED, detail=f"not configured; using {server_url(self.config)}")
+        # A URL saved on the route (by an earlier setup or this form) is a real
+        # configuration even without a connection record, so check it.
+        root = server_url(self.config)
+        key = (record.secret or {}).get(_SECRET_FIELD) if connected else None
+        version, detail = probe(root, key, timeout=_HEALTH_TIMEOUT)
         if version is None:
             return health_block(HEALTH_BROKEN, detail=detail, fix="reconnect")
-        return health_block(HEALTH_OK, detail=f"Ollama {version}")
+        return health_block(HEALTH_OK, detail=f"Ollama {version} · {root}")
 
 
 def resolve_api_key(config: Any) -> str | None:
