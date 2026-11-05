@@ -179,6 +179,7 @@ def test_live_answer_allows_tool_with_native_answers(store, app):
         await asyncio.sleep(0)
         response = await chat.answer_question("t1", chat.QuestionAnswerRequest(
             bot_id="loopy",
+            user_id="nick",
             responses=[
                 chat.QuestionResponseItem(question_id="Ship", selected=["Yes"]),
                 chat.QuestionResponseItem(question_id="Envs", selected=["dev", "prod"], other="staging"),
@@ -223,13 +224,13 @@ def test_live_answer_is_same_tool_result(store, app):
         await asyncio.sleep(0)
         assert store.get("t1").status == "awaiting_live"
         assert bridge.events[0]["extra_raw"]["live_deadline"]
-        response = await chat.answer_question("t1", chat.QuestionAnswerRequest(bot_id="loopy", result="Yes"))
+        response = await chat.answer_question("t1", chat.QuestionAnswerRequest(bot_id="loopy", user_id="nick", result="Yes"))
         assert response.live is True
         assert response.continuation_prompt == ""
         assert (await pending).message == "Yes"
         assert app.sent == [("loopy:nick", "t1", "Yes")]
         assert store.get("t1").status == "answered"
-        duplicate = await chat.answer_question("t1", chat.QuestionAnswerRequest(bot_id="loopy", result="Yes"))
+        duplicate = await chat.answer_question("t1", chat.QuestionAnswerRequest(bot_id="loopy", user_id="nick", result="Yes"))
         assert duplicate.already_answered and not duplicate.continuation_prompt
         assert len(app.sent) == 1
         assert not bridge._pending_question_futures
@@ -257,10 +258,10 @@ def test_timeout_claim_wins_answer_race(store, app, monkeypatch):
         result = await cb("AskUserQuestion", {"questions": []}, SimpleNamespace(tool_use_id="t1"))
         assert result.message == "deferred"
         assert store.get("t1").status == "awaiting"
-        response = await chat.answer_question("t1", chat.QuestionAnswerRequest(bot_id="loopy", result="Too late"))
+        response = await chat.answer_question("t1", chat.QuestionAnswerRequest(bot_id="loopy", user_id="nick", result="Too late"))
         assert response.live is False
         assert response.continuation_prompt == "Too late"
-        duplicate = await chat.answer_question("t1", chat.QuestionAnswerRequest(bot_id="loopy", result="Too late"))
+        duplicate = await chat.answer_question("t1", chat.QuestionAnswerRequest(bot_id="loopy", user_id="nick", result="Too late"))
         assert duplicate.already_answered and not duplicate.continuation_prompt
         assert not app.sent
 
@@ -436,7 +437,7 @@ def test_expired_deadline_cannot_claim_live(store, app):
         session.add(row)
         session.commit()
     assert not store.claim_live_answer("t1", "late", None)
-    answer = asyncio.run(chat.answer_question("t1", chat.QuestionAnswerRequest(bot_id="loopy", result="late")))
+    answer = asyncio.run(chat.answer_question("t1", chat.QuestionAnswerRequest(bot_id="loopy", user_id="nick", result="late")))
     assert not answer.live
     assert answer.continuation_prompt == "late"
     assert not app.sent
@@ -454,7 +455,7 @@ def test_abort_cancels_future_and_preserves_deferred_answer(store, app):
         with pytest.raises(asyncio.CancelledError):
             await pending
         assert not bridge._pending_question_futures
-        answer = await chat.answer_question("t1", chat.QuestionAnswerRequest(bot_id="loopy", result="Later"))
+        answer = await chat.answer_question("t1", chat.QuestionAnswerRequest(bot_id="loopy", user_id="nick", result="Later"))
         assert not answer.live
         assert answer.continuation_prompt == "Later"
 
@@ -469,7 +470,7 @@ def test_dismiss_delivery_failure_is_recovered_by_timeout(store, app):
 
     app.send_tool_result = broken_delivery
     response = asyncio.run(chat.answer_question(
-        "t1", chat.QuestionAnswerRequest(bot_id="loopy", dismiss=True),
+        "t1", chat.QuestionAnswerRequest(bot_id="loopy", user_id="nick", dismiss=True),
     ))
     assert response.live
     timeout = asyncio.run(chat.timeout_question(
@@ -487,7 +488,7 @@ def test_live_dismiss_resolves_future(store, app):
         cb = bridge._make_can_use_tool(request_id="r", session_key="loopy:nick", seq_holder=[0], question_answer_wait_seconds=5)
         pending = asyncio.create_task(cb("AskUserQuestion", {"questions": []}, SimpleNamespace(tool_use_id="t1")))
         await asyncio.sleep(0)
-        response = await chat.answer_question("t1", chat.QuestionAnswerRequest(bot_id="loopy", dismiss=True))
+        response = await chat.answer_question("t1", chat.QuestionAnswerRequest(bot_id="loopy", user_id="nick", dismiss=True))
         assert response.live
         assert (await pending).message == "[Question dismissed by user.]"
         assert store.get("t1").status == "skipped"
