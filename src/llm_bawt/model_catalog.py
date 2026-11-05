@@ -111,6 +111,8 @@ class ProtocolCompatibility:
         # ``service.background_clients``; never a subscription OAuth path.
         "background": "chat-completions",
     }
+    # TASK-2046: harnesses that are internal clients, not a bot's runtime.
+    NON_BOT_RUNTIME_HARNESSES = frozenset({"background"})
     BACKGROUND_PROTOCOLS = frozenset(
         {"anthropic-messages", "chat-completions", "responses"}
     )

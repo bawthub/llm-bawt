@@ -91,6 +91,8 @@ def test_catalog_harnesses_are_driven_by_protocol_compatibility():
     assert rows["chat"]["protocol"] == "chat-completions"
     assert rows["codex"]["protocol"] == "responses"
     assert rows["claude-proxy"]["proxies"] is True
+    assert rows["background"]["bot_runtime"] is False
+    assert all(rows[key]["bot_runtime"] for key in ("chat", "codex", "claude-code"))
 
 
 def test_unknown_harness_is_rejected_before_querying_catalog():

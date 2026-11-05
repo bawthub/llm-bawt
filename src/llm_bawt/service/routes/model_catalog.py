@@ -223,7 +223,12 @@ def list_harnesses():
     """List harnesses and the protocol rule used by the cascade UI."""
     return {
         "harnesses": [
-            {"key": key, "protocol": protocol, "proxies": key == "claude-proxy"}
+            {
+                "key": key,
+                "protocol": protocol,
+                "proxies": key == "claude-proxy",
+                "bot_runtime": key not in ProtocolCompatibility.NON_BOT_RUNTIME_HARNESSES,
+            }
             for key, protocol in ProtocolCompatibility.HARNESS_PROTOCOLS.items()
         ]
     }
