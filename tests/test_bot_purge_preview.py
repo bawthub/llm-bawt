@@ -81,7 +81,8 @@ def test_current_purge_ownership_retention_and_operational_subsets(db):
                 'turn_changed_files', 'tool_approval_requests'):
         assert rows[key]['disposition'] == 'retained'
         assert rows[key]['count'] == 1
-    assert result['execution_enabled'] is False
+    assert result['execution_enabled'] is True
+    assert result['scope'] == 'purge_data'
     assert result['storage_ownership']['status'] == 'observed_unique'
     assert 'safe_to_execute' not in result
     assert 'private-prompt' not in json.dumps(result)
@@ -206,14 +207,20 @@ def client(monkeypatch):
         yield c
 
 
-def test_get_route_is_no_store_and_never_authorizes_execution(client, monkeypatch, db):
-    call = Mock(side_effect=lambda engine, slug: snapshot(db, slug))
+@pytest.mark.parametrize('query,delete_profile', [('', False), ('?delete_profile=true', True)])
+def test_get_route_is_no_store_and_read_only(client, monkeypatch, db, query, delete_profile):
+    def fake(engine, slug, *, delete_profile):
+        with db.connect() as conn:
+            return collect_preview(conn, slug, delete_profile=delete_profile)
+    call = Mock(side_effect=fake)
     monkeypatch.setattr(routes, 'preview_bot_purge', call)
-    response = client.get('/v1/bots/SOURCE/purge-preview')
+    response = client.get(f'/v1/bots/SOURCE/purge-preview{query}')
     assert response.status_code == 200
     assert response.headers['cache-control'] == 'no-store'
-    assert response.json()['execution_enabled'] is False
     assert call.call_args.args[1] == 'source'
+    assert call.call_args.kwargs == {'delete_profile': delete_profile}
+    rows = {r['key']: r for r in response.json()['inventory']}
+    assert rows['bot_profiles']['disposition'] == ('deleted' if delete_profile else 'retained')
     assert client.post('/v1/bots/source/purge-preview').status_code == 405
 
 

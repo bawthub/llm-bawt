@@ -1,118 +1,96 @@
-"""Standalone purge reports transactional refusal, not partial/unknown success."""
+"""Both destructive purge routes go through the guarded executor (TASK-2045)."""
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy.exc import IntegrityError
 
+from llm_bawt import bot_purge_execute as ex
 from llm_bawt.service.routes import settings
 
-
-@pytest.mark.parametrize("error,reason", [
-    (ValueError("Cannot purge source: prompt occurrences are active or unknown"), "active or unknown"),
-    (IntegrityError("private SQL", {"secret": "private parameter"}, Exception("private driver detail")), "dependent records"),
-])
-def test_purge_conflict_is_409_with_explicit_rollback_and_no_sql_leak(monkeypatch, error, reason):
-    monkeypatch.setattr(settings, "get_service", lambda: SimpleNamespace(config=object()))
-    purge = Mock(side_effect=error)
-    monkeypatch.setattr(settings, "purge_bot_data", purge)
-    app = FastAPI()
-    app.include_router(settings.router)
-    with TestClient(app) as client:
-        response = client.post("/v1/bots/SOURCE/purge-data")
-    assert response.status_code == 409
-    detail = response.json()["detail"]
-    assert reason in detail
-    assert "Nothing was deleted" in detail
-    assert "private" not in detail
-    assert purge.call_args.args[1] == "source"
-
-
-@pytest.mark.parametrize("result,status", [
-    ({"slug": "source", "deleted_rows": {"sessions": 0}}, 200),
-    ({"error": "No database credentials configured"}, 503),
-])
-def test_purge_keeps_success_and_unavailable_contract_without_profile_lookup(monkeypatch, result, status):
-    monkeypatch.setattr(settings, "get_service", lambda: SimpleNamespace(config=object()))
-    monkeypatch.setattr(settings, "get_bot_profile_store", Mock(side_effect=AssertionError("no profile lookup")))
-    monkeypatch.setattr(settings, "purge_bot_data", lambda *args: result)
-    app = FastAPI()
-    app.include_router(settings.router)
-    with TestClient(app) as client:
-        response = client.post("/v1/bots/source/purge-data")
-    assert response.status_code == status
-    assert response.json() == (result if status == 200 else {"detail": result["error"]})
+DIGEST = "a" * 64
 
 
 @pytest.fixture
-def delete_env(monkeypatch):
+def env(monkeypatch):
     service = SimpleNamespace(config=object())
-    engine = MagicMock()  # delete route reads retired aliases through engine.connect()
-    store = SimpleNamespace(engine=engine, get=Mock(return_value=object()), delete=Mock(return_value=True))
-    monkeypatch.setattr("llm_bawt.bot_slug_aliases.aliases_for", lambda conn, slug: [])
+    engine = object()
     monkeypatch.setattr(settings, "get_service", lambda: service)
+    monkeypatch.setattr("llm_bawt.utils.db.get_shared_engine", lambda config: engine)
+    store = SimpleNamespace(engine=MagicMock(), get=Mock(return_value=object()), delete=Mock(return_value=True))
     monkeypatch.setattr(settings, "get_bot_profile_store", lambda config: store)
-    effects = []
+    monkeypatch.setattr("llm_bawt.bot_slug_aliases.aliases_for", lambda conn, slug: [])
+    effects = {}
     for name in ("_reload_bot_registry", "_reload_service_model_catalog",
                  "_invalidate_bot_instance_cache", "_clear_session_model_overrides"):
-        effect = Mock()
-        monkeypatch.setattr(settings, name, effect)
-        effects.append(effect)
+        effects[name] = Mock()
+        monkeypatch.setattr(settings, name, effects[name])
     published = AsyncMock()
     monkeypatch.setattr(settings, "_publish_bot_profile_changed", published)
+    execute = Mock(return_value={"slug": "source", "deleted_rows": {"sessions": 3}, "profile_deleted": True})
+    monkeypatch.setattr(ex, "execute_bot_purge", execute)
     app = FastAPI()
     app.include_router(settings.router)
     with TestClient(app) as client:
-        yield client, store, effects, published
+        yield SimpleNamespace(client=client, store=store, effects=effects, published=published,
+                              execute=execute, engine=engine)
 
 
-@pytest.mark.parametrize("error,result,status", [
-    (ValueError("active or unknown"), None, 409),
-    (IntegrityError("private", {}, Exception("private")), None, 409),
-    (None, {"error": "DB unavailable"}, 503),
-])
-def test_combined_delete_keeps_profile_and_caches_on_purge_refusal(monkeypatch, delete_env, error, result, status):
-    client, store, effects, published = delete_env
-    monkeypatch.setattr(settings, "purge_bot_data", Mock(side_effect=error, return_value=result))
-    response = client.delete("/v1/bots/source/profile?purge=true")
-    assert response.status_code == status
-    store.delete.assert_not_called()
-    for effect in effects:
-        effect.assert_not_called()
-    published.assert_not_awaited()
-    if status == 409:
-        assert "Nothing was deleted" in response.json()["detail"]
-
-
-@pytest.mark.parametrize("purge", [False, True])
-def test_combined_delete_orders_successful_purge_before_profile_delete(monkeypatch, delete_env, purge):
-    client, store, effects, published = delete_env
-    order = []
-    result = {"deleted_rows": {"sessions": 3}}
-    purge_call = Mock(side_effect=lambda *args: (order.append("purge"), result)[1])
-    monkeypatch.setattr(settings, "purge_bot_data", purge_call)
-    store.delete.side_effect = lambda slug, **kw: (order.append("delete"), True)[1]
-    response = client.delete(f"/v1/bots/source/profile?purge={str(purge).lower()}")
+def test_combined_delete_runs_one_guarded_transaction_then_refreshes(env):
+    response = env.client.delete(f"/v1/bots/SOURCE/profile?purge=true&manifest_digest={DIGEST}")
     assert response.status_code == 200
-    assert order == (["purge", "delete"] if purge else ["delete"])
-    # TASK-2044: privacy tags are dropped only when the data was purged.
-    store.delete.assert_called_once_with("source", drop_privacy_tags=purge)
-    expected = {"success": True, "slug": "source"}
-    if purge:
-        expected["purge"] = result
-    assert response.json() == expected
-    for effect in effects:
+    assert response.json() == {"success": True, "slug": "source", "purge": env.execute.return_value}
+    env.execute.assert_called_once_with(env.engine, "source", manifest_digest=DIGEST, delete_profile=True)
+    env.store.delete.assert_not_called()  # the executor deletes the profile in its transaction
+    for effect in env.effects.values():
         effect.assert_called_once()
-    published.assert_awaited_once()
+    env.published.assert_awaited_once()
 
 
-def test_combined_delete_missing_profile_does_not_start_purge(monkeypatch, delete_env):
-    client, store, _, _ = delete_env
-    store.get.return_value = None
-    purge = Mock()
-    monkeypatch.setattr(settings, "purge_bot_data", purge)
-    assert client.delete("/v1/bots/source/profile?purge=true").status_code == 404
-    purge.assert_not_called()
-    store.delete.assert_not_called()
+def test_standalone_purge_requires_digest_and_keeps_profile(env):
+    response = env.client.post(f"/v1/bots/source/purge-data?manifest_digest={DIGEST}")
+    assert response.status_code == 200
+    env.execute.assert_called_once_with(env.engine, "source", manifest_digest=DIGEST, delete_profile=False)
+    env.store.delete.assert_not_called()
+
+
+@pytest.mark.parametrize("error,status,code", [
+    (ex.PurgeStale("A manifest_digest from a fresh purge preview is required", code="preview_required"), 409, "preview_required"),
+    (ex.PurgeStale("changed"), 409, "stale_preview"),
+    (ex.PurgeLocked("running", code="active"), 423, "active"),
+    (ex.PurgeLocked("reserved", code="protected"), 423, "protected"),
+    (ex.PurgeRefused("missing", code="not_found"), 404, "not_found"),
+    (ex.PurgeRefused("aliases", code="aliases"), 409, "aliases"),
+    (ex.PurgeUnavailable("PostgreSQL is unavailable"), 503, "unavailable"),
+])
+@pytest.mark.parametrize("path,method", [
+    ("/v1/bots/source/profile?purge=true", "delete"),
+    ("/v1/bots/source/purge-data", "post"),
+])
+def test_refusals_map_to_contract_and_leave_caches_alone(env, error, status, code, path, method):
+    env.execute.side_effect = error
+    response = getattr(env.client, method)(path)
+    assert response.status_code == status
+    detail = response.json()["detail"]
+    assert detail["code"] == code and "Nothing was deleted" in detail["message"]
+    env.store.delete.assert_not_called()
+    for effect in env.effects.values():
+        effect.assert_not_called()
+    env.published.assert_not_awaited()
+
+
+def test_legacy_purge_without_digest_reaches_the_guard(env):
+    env.execute.side_effect = ex.PurgeStale("required", code="preview_required")
+    assert env.client.delete("/v1/bots/source/profile?purge=true").status_code == 409
+    assert env.client.post("/v1/bots/source/purge-data").status_code == 409
+    assert all(call.kwargs["manifest_digest"] is None for call in env.execute.call_args_list)
+
+
+def test_profile_only_delete_is_unchanged(env):
+    response = env.client.delete("/v1/bots/source/profile")
+    assert response.status_code == 200
+    assert response.json() == {"success": True, "slug": "source"}
+    env.execute.assert_not_called()
+    # TASK-2044: without a purge the data is retained, so privacy tags stay.
+    env.store.delete.assert_called_once_with("source", drop_privacy_tags=False)

@@ -4,7 +4,6 @@ import json
 import logging
 
 from sqlalchemy import func
-from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from fastapi import APIRouter, HTTPException, Query
@@ -17,7 +16,7 @@ from ...bot_tags.errors import BotTagError, GrantLocked, TagSetChanged
 from ...bot_tags.store import BotTagStore
 from ...bot_tags.vocabulary import API_ASSIGNER
 from ...bot_types import normalize_bot_type
-from ...runtime_settings import BotAlreadyExists, BotProfileNotFound, RuntimeSetting, purge_bot_data, cleanup_orphaned_bot_data
+from ...runtime_settings import BotAlreadyExists, BotProfileNotFound, RuntimeSetting, cleanup_orphaned_bot_data
 from ...bot_create_transaction import BotCreateTransaction
 from ...orphan_partitions import PartitionExecutionHalted
 from ..providers.base import CREDENTIAL_SETTING_PREFIXES, is_credential_setting_key
@@ -819,47 +818,51 @@ def reload_bots():
     }
 
 
-def _purge_bot_data_or_raise(config, slug: str):
+def _guarded_purge_or_raise(config, slug: str, manifest_digest: str | None, *, delete_profile: bool):
+    """Run the TASK-2045 confirmed purge; map refusals to the 1897 contract."""
+    from ...bot_purge_execute import PurgeRefused, execute_bot_purge
+    from ...utils.db import get_shared_engine
+
     try:
-        result = purge_bot_data(config, slug)
-    except ValueError as exc:
-        raise HTTPException(status_code=409, detail=f"{exc}. Nothing was deleted.") from exc
-    except IntegrityError as exc:
-        # The purge connection rolls its transaction back before propagating.
-        # Do not leak SQL parameters or imply that a partial purge committed.
-        raise HTTPException(
-            status_code=409,
-            detail="Purge blocked by dependent records. Nothing was deleted.",
-        ) from exc
-    if "error" in result:
-        raise HTTPException(status_code=503, detail=result["error"])
-    return result
+        return execute_bot_purge(get_shared_engine(config), slug, manifest_digest=manifest_digest,
+                                 delete_profile=delete_profile)
+    except ValueError as exc:  # invalid slug
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except PurgeRefused as exc:
+        status = 404 if exc.code == "not_found" else exc.status
+        raise HTTPException(status_code=status, detail={
+            "code": exc.code, "message": f"{exc} Nothing was deleted."}) from exc
 
 
 @router.delete("/v1/bots/{slug}/profile", tags=["System"])
 async def delete_bot_profile(
     slug: str,
-    purge: bool = Query(False, description="Also purge all bot data (messages, memories, settings, etc.)"),
+    purge: bool = Query(False, description="Also purge all bot data; requires manifest_digest"),
+    manifest_digest: str | None = Query(None, description="Digest of GET purge-preview?delete_profile=true"),
 ):
-    """Delete a bot personality profile. Pass ?purge=true to also wipe all associated data."""
+    """Delete a bot profile. ``?purge=true`` deletes it with its data in one guarded transaction."""
     service = get_service()
+    normalized_slug = slug.strip().lower()
+    if purge:
+        # One transaction deletes data, tags and profile, or nothing at all.
+        purge_result = _guarded_purge_or_raise(service.config, normalized_slug, manifest_digest,
+                                               delete_profile=True)
+        _reload_bot_registry()
+        _reload_service_model_catalog(service)
+        _invalidate_bot_instance_cache(service, normalized_slug)
+        _clear_session_model_overrides(service, bot_id=normalized_slug)
+        await _publish_bot_profile_changed(service, normalized_slug)
+        return {"success": True, "slug": normalized_slug, "purge": purge_result}
+
     store = get_bot_profile_store(service.config)
     if store.engine is None:
         raise HTTPException(status_code=503, detail="Bot profiles DB unavailable")
-
-    normalized_slug = slug.strip().lower()
     from ...bot_slug_aliases import aliases_for
     with store.engine.connect() as conn:
         retired = aliases_for(conn, normalized_slug)
-    if retired:  # before any purge: a refused delete must not have wiped data
+    if retired:
         raise HTTPException(status_code=409, detail=(
             f"{normalized_slug} still has retired slug aliases ({', '.join(retired)}); remove them first"))
-    purge_result = None
-    if purge:
-        if store.get(normalized_slug) is None:
-            raise HTTPException(status_code=404, detail="Bot profile not found")
-        # A guard/FK refusal must leave the definition and caches intact too.
-        purge_result = _purge_bot_data_or_raise(service.config, normalized_slug)
 
     from ...bot_slug_aliases import BotHasAliases
     try:
@@ -875,21 +878,23 @@ async def delete_bot_profile(
     _invalidate_bot_instance_cache(service, normalized_slug)
     _clear_session_model_overrides(service, bot_id=normalized_slug)
 
-    response: dict = {"success": True, "slug": normalized_slug}
-    if purge:
-        response["purge"] = purge_result
     await _publish_bot_profile_changed(service, normalized_slug)
-    return response
+    return {"success": True, "slug": normalized_slug}
 
 
 @router.post("/v1/bots/{slug}/purge-data", tags=["System"])
-def purge_bot_data_endpoint(slug: str):
-    """Purge bot-owned conversation/configuration data without deleting its profile."""
+def purge_bot_data_endpoint(
+    slug: str,
+    manifest_digest: str | None = Query(None, description="Digest of GET purge-preview (no delete_profile)"),
+):
+    """Purge bot-owned data, keeping its profile and tags; requires a fresh preview digest."""
     service = get_service()
     normalized_slug = slug.strip().lower()
     if not normalized_slug:
         raise HTTPException(status_code=400, detail="Invalid slug")
-    return _purge_bot_data_or_raise(service.config, normalized_slug)
+    result = _guarded_purge_or_raise(service.config, normalized_slug, manifest_digest, delete_profile=False)
+    _invalidate_bot_instance_cache(service, normalized_slug)
+    return result
 
 
 @router.post("/v1/bots/cleanup-orphans", tags=["System"])

@@ -109,6 +109,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_purge_ops_pg.py::",
     "test_bot_data_purge_pg.py::",
     "test_bot_purge_preview_pg.py::",
+    "test_bot_purge_execute_pg.py::",
     "test_recovery_sweep_pg.py::",
     "test_session_reset_lineage_pg.py::",
     "test_session_summaries.py::TestSummarizeThreadLive::",

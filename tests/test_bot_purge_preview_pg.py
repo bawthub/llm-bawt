@@ -15,7 +15,7 @@ def preview_db(request):
     engine, _unused_executor = request.getfixturevalue('purge_db')
     seed(engine, keep_profile=True)
     with engine.begin() as conn:
-        conn.exec_driver_sql('CREATE TABLE bot_profile_tags (bot_slug TEXT)')
+        conn.exec_driver_sql('CREATE TABLE bot_profile_tags (bot_slug TEXT, tag_slug TEXT)')
     return engine
 
 
@@ -51,7 +51,7 @@ def test_real_postgresql_readonly_repeatable_snapshot_and_no_mutations(preview_d
     assert rows['job_runs']['count'] == 1
     assert rows['shared_job_runs']['count'] == 2
     assert rows['tool_call_result_payloads']['count'] == 1
-    assert result['execution_enabled'] is False
+    assert result['execution_enabled'] is True
     with preview_db.connect() as conn:
         assert conn.exec_driver_sql('SELECT count(*) FROM sessions').scalar_one() == 4
         assert conn.exec_driver_sql('SELECT count(*) FROM tool_call_records').scalar_one() == 2
@@ -80,7 +80,7 @@ def test_durable_profileless_alias_evidence_blocks_partition_attribution(preview
 
 
 def test_database_refuses_an_accidental_collector_write(preview_db, monkeypatch):
-    def accidental_write(conn, slug):
+    def accidental_write(conn, slug, **_):
         conn.exec_driver_sql("DELETE FROM sessions WHERE bot_id='source'")
     monkeypatch.setattr(preview, 'collect_preview', accidental_write)
     with pytest.raises(preview.PreviewUnavailable) as caught:
@@ -94,11 +94,11 @@ def test_snapshot_stays_coherent_when_independent_writer_commits(preview_db, mon
     original = preview.collect_preview
     saved = {}
 
-    def interleaved(conn, slug):
-        first = original(conn, slug)
+    def interleaved(conn, slug, **kw):
+        first = original(conn, slug, **kw)
         with preview_db.begin() as writer:
             writer.exec_driver_sql("INSERT INTO messages VALUES ('new-message','source','s-active')")
-        second = original(conn, slug)
+        second = original(conn, slug, **kw)
         assert second == first
         saved['first'] = first
         return second

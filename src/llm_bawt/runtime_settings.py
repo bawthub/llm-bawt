@@ -523,18 +523,17 @@ def purge_bot_data(config: Config, slug: str) -> dict[str, Any]:
     outbox history, profile-change audit and runs owned by shared/other jobs.
     A retained job-run status is historical metadata, not proof of cancellation.
     Shared content-addressed blobs are not exclusively owned by this bot.
-    """
-    import re as _re
 
-    from sqlalchemy import create_engine as _create_engine, text as _text
+    Unconfirmed internal primitive: HTTP routes use bot_purge_execute, which
+    requires a fresh preview digest and the protected/active guards.
+    """
+    from sqlalchemy import create_engine as _create_engine
 
     normalized = (slug or "").strip().lower()
     if not normalized:
         return {"error": "Invalid slug"}
     if not has_database_credentials(config):
         return {"error": "No database credentials configured"}
-
-    sanitized = _re.sub(r"[^a-z0-9_]", "", normalized) or "default"
 
     host = getattr(config, "POSTGRES_HOST", "localhost")
     port = int(getattr(config, "POSTGRES_PORT", 5432))
@@ -552,122 +551,14 @@ def purge_bot_data(config: Config, slug: str) -> dict[str, Any]:
             from .prompt_purge import PromptPurgeGuard
             prompt_purge = PromptPurgeGuard(conn)
             prompt_purge.guard({normalized})
-            # 1. Delete per-bot rows from the LIST-partitioned parents (TASK-571).
-            #    The old ``<bot>_messages`` shard tables no longer exist — dropping
-            #    them was a silent no-op that left every message/memory/forgotten
-            #    row alive while reporting success. The bot definition is preserved
-            #    here, so DELETE the rows rather than DROP the partition (a drop
-            #    would race the auto-provision on the bot's next write). ``bot_id``
-            #    in the parents is the sanitized partition value.
-            for parent in ("messages", "memories", "forgotten_messages"):
-                r = conn.execute(
-                    _text(f"DELETE FROM {parent} WHERE bot_id=:s"),
-                    {"s": sanitized},
-                )
-                result["deleted_rows"][parent] = r.rowcount
-
-            # Messages have a non-cascading session FK. Never delete another
-            # bot's messages to force removal: a foreign reference must roll
-            # back the whole purge. Profile pointers use ON DELETE SET NULL.
-            if "sessions" in prompt_purge.tables:
-                r = conn.execute(
-                    _text("DELETE FROM sessions WHERE bot_id=:s"),
-                    {"s": normalized},
-                )
-                result["deleted_rows"]["sessions"] = r.rowcount
-
-            # Accepted-prompt display receipts follow exact-bot history ownership.
-            if "session_resumption_receipts" in prompt_purge.tables:
-                r = conn.execute(_text(
-                    "DELETE FROM session_resumption_receipts WHERE bot_id=:s"
-                ), {"s": normalized})
-                result["deleted_rows"]["session_resumption_receipts"] = r.rowcount
-
-            # 2. runtime_settings
-            r = conn.execute(
-                _text("DELETE FROM runtime_settings WHERE scope_type='bot' AND scope_id=:s"),
-                {"s": normalized},
-            )
-            result["deleted_rows"]["runtime_settings"] = r.rowcount
-
-            # 3. entity_profile_attributes (before entity_profiles — no FK cascade)
-            r = conn.execute(
-                _text("DELETE FROM entity_profile_attributes WHERE entity_type::text IN ('BOT','bot') AND entity_id=:s"),
-                {"s": normalized},
-            )
-            result["deleted_rows"]["entity_profile_attributes"] = r.rowcount
-
-            # 4. entity_profiles
-            r = conn.execute(
-                _text("DELETE FROM entity_profiles WHERE entity_type::text IN ('BOT','bot') AND entity_id=:s"),
-                {"s": normalized},
-            )
-            result["deleted_rows"]["entity_profiles"] = r.rowcount
-
-            # 5–6. Prompt companions precede the job_runs/scheduled_jobs parents.
-            result["deleted_rows"].update(prompt_purge.delete_jobs(normalized))
-
-            # 7. prompt_template_versions
-            r = conn.execute(
-                _text("DELETE FROM prompt_template_versions WHERE scope_type='bot' AND scope_id=:s"),
-                {"s": normalized},
-            )
-            result["deleted_rows"]["prompt_template_versions"] = r.rowcount
-
-            # 8. prompt_templates
-            r = conn.execute(
-                _text("DELETE FROM prompt_templates WHERE scope_type='bot' AND scope_id=:s"),
-                {"s": normalized},
-            )
-            result["deleted_rows"]["prompt_templates"] = r.rowcount
-
-            # Legacy overflow payloads have no FK/cascade. Select ownership
-            # through the records before deleting them; shared blobs stay put.
-            if "tool_call_result_payloads" in prompt_purge.tables:
-                r = conn.execute(_text(
-                    "DELETE FROM tool_call_result_payloads WHERE tool_call_record_id IN "
-                    "(SELECT id FROM tool_call_records WHERE bot_id=:s)"
-                ), {"s": normalized})
-                result["deleted_rows"]["tool_call_result_payloads"] = r.rowcount
-
-            # 9. tool_call_records
-            r = conn.execute(
-                _text("DELETE FROM tool_call_records WHERE bot_id=:s"),
-                {"s": normalized},
-            )
-            result["deleted_rows"]["tool_call_records"] = r.rowcount
-
-            # 10. turn_logs
-            r = conn.execute(
-                _text("DELETE FROM turn_logs WHERE bot_id=:s"),
-                {"s": normalized},
-            )
-            result["deleted_rows"]["turn_logs"] = r.rowcount
-
+            from .bot_purge_execute import delete_scoped_rows
+            result["deleted_rows"].update(delete_scoped_rows(conn, normalized, prompt_purge))
             conn.commit()
     finally:
         engine.dispose()
 
-    # Evict cached SQLAlchemy table objects so they aren't revived on next access
-    try:
-        from .memory.postgresql import (
-            _memory_table_cache,
-            _message_table_cache,
-            _forgotten_table_cache,
-        )
-        # Cache keys are the partition table names (``messages_p_<bot>`` etc.,
-        # TASK-571), not the legacy ``<bot>_messages`` form.
-        _evict_keys = {
-            f"messages_p_{sanitized}",
-            f"memories_p_{sanitized}",
-            f"forgotten_messages_p_{sanitized}",
-        }
-        for cache in (_memory_table_cache, _message_table_cache, _forgotten_table_cache):
-            for key in list(cache.keys()):
-                if key in _evict_keys:
-                    del cache[key]
-    except Exception:
-        pass
+    from .bot_purge_execute import evict_partition_caches
+    evict_partition_caches(normalized)
 
     return result
 

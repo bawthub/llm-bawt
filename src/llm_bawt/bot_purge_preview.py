@@ -1,21 +1,21 @@
-"""Read-only, advisory impact snapshot for the current standalone bot purge.
+"""Read-only impact snapshot for a bot purge, with or without its profile.
 
 Never call the executor or a store constructor here: many stores bootstrap DDL.
-The digest describes observed scope/counts, NOT row preimages, a confirmation
-capability, writer admission, or a promise that a later purge can commit.
+The digest describes observed scope/counts, NOT row preimages. The guarded
+executor (bot_purge_execute) recomputes it under locks and refuses a mismatch.
 """
 from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import date, datetime
 from decimal import Decimal
 
 from sqlalchemy import inspect, text
 from sqlalchemy.exc import SQLAlchemyError
 
-from .bot_purge_inventory import DELETED, OWNER_SOURCES, RETAINED, SCOPE_VERSION, UNKNOWN
+from .bot_purge_inventory import DELETED, OWNER_SOURCES, PROFILE_DELETED, RETAINED, SCOPE_VERSION, UNKNOWN
 from .utils.bot_partition import sanitize_table_name
 
 
@@ -44,7 +44,7 @@ def fingerprint(value) -> str:
     return hashlib.sha256(serialized.encode()).hexdigest()
 
 
-def collect_preview(conn, slug: str) -> dict:
+def collect_preview(conn, slug: str, *, delete_profile: bool = False) -> dict:
     """Collect on a caller-owned snapshot; SELECT/reflection only, no commit.
 
     Production callers use preview_bot_purge() for enforced PostgreSQL RR/RO.
@@ -98,6 +98,8 @@ def collect_preview(conn, slug: str) -> dict:
     }
     entries = []
     for spec in (*DELETED, *RETAINED):
+        if delete_profile and spec.key in PROFILE_DELETED:
+            spec = replace(spec, disposition="deleted", reason=PROFILE_DELETED[spec.key])
         requirements = ((spec.table, spec.columns), *spec.dependencies)
         missing = sorted(t for t, cols in requirements if not available(t, cols))
         entry = {"key": spec.key, "store": "local_postgresql", "table": spec.table,
@@ -120,18 +122,19 @@ def collect_preview(conn, slug: str) -> dict:
                         "disposition": "unknown", "count": None, "coverage": "not_inspected", "reason": reason})
 
     payload = {
-        "schema_version": 1, "scope_version": SCOPE_VERSION,
-        "scope": "current_standalone_purge_data", "execution_enabled": False,
+        "schema_version": 2, "scope_version": SCOPE_VERSION,
+        "scope": "delete_profile_and_purge_data" if delete_profile else "purge_data",
+        "execution_enabled": True,
         "scope_fingerprint": fingerprint([asdict(s) for s in (*DELETED, *RETAINED)]),
         "slug": slug, "storage_id": storage, "profile_version": profile_version,
         "storage_ownership": ownership,
         "snapshot": "local_database_observation_only",
         "limitations": [
-            "Deleted means conditional selection by the existing executor, not completed deletion or approval to execute.",
+            "Deleted means selected if execution is confirmed and its guards pass; execution recomputes this preview under locks and refuses a changed digest.",
             "Retained counts can overlap; do not sum entries. Operational retained rows are not necessarily historical or inactive.",
             "Digest covers observed scope/counts/profile, not every row identity/value; equal-count changes can preserve it.",
-            "No future freshness, alias-reuse safety, active/protected-bot clearance, FK success, writer fence or cross-store atomicity is established.",
-            "Profile-only delete and legacy destructive endpoints are unchanged; this preview is not accepted by an execution endpoint.",
+            "Message/memory writers are not locked; a row written after execution's snapshot survives as orphan storage.",
+            "Stores outside local PostgreSQL are untouched; this is not a complete erasure claim.",
         ],
         "inventory": entries,
     }
@@ -139,7 +142,7 @@ def collect_preview(conn, slug: str) -> dict:
     return payload
 
 
-def preview_bot_purge(engine, slug: str) -> dict:
+def preview_bot_purge(engine, slug: str, *, delete_profile: bool = False) -> dict:
     """Enforce a coherent, read-only local transaction; never dispose shared pool."""
     slug = normalize_slug(slug)
     if engine is None or engine.dialect.name != "postgresql":
@@ -148,7 +151,7 @@ def preview_bot_purge(engine, slug: str) -> dict:
         with engine.connect() as conn:
             conn = conn.execution_options(isolation_level="REPEATABLE READ", postgresql_readonly=True)
             with conn.begin():
-                return collect_preview(conn, slug)
+                return collect_preview(conn, slug, delete_profile=delete_profile)
     except SQLAlchemyError as exc:
         # Driver errors/SQL parameters may contain private data; API is generic.
         raise PreviewUnavailable("PostgreSQL preview unavailable") from exc

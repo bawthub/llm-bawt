@@ -84,13 +84,16 @@ def test_delete_with_aliases_refuses_before_any_purge(rig, monkeypatch):  # noqa
     _create(rig, target)
     retired = _old(rig, "one")
     _alias(rig, retired, target)
-    purged = []
-    monkeypatch.setattr(settings, "_purge_bot_data_or_raise", lambda *_a: purged.append(True))
+    # The guarded purge checks aliases inside its transaction, before any write.
+    from llm_bawt import bot_purge_preview
+    import llm_bawt.utils.db as db_utils
+    monkeypatch.setattr(db_utils, "get_shared_engine", lambda _config: rig.engine)
+    digest = bot_purge_preview.preview_bot_purge(rig.engine, target, delete_profile=True)["manifest_digest"]
 
     with pytest.raises(HTTPException) as refused:
-        asyncio.run(settings.delete_bot_profile(target, purge=True))
+        asyncio.run(settings.delete_bot_profile(target, purge=True, manifest_digest=digest))
     assert refused.value.status_code == 409
-    assert purged == []
+    assert refused.value.detail["code"] == "aliases"
     assert rig.store.get(target) is not None
     with pytest.raises(bot_slug_aliases.BotHasAliases):
         rig.store.delete(target)

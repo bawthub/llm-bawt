@@ -1,16 +1,56 @@
-# Bot purge impact preview (read-only)
+# Bot purge: preview and confirmed execution
 
-`GET /v1/bots/{slug}/purge-preview` describes the **existing standalone
-`POST /v1/bots/{slug}/purge-data` selection**, not a new purge implementation.
-It does not describe profile-only deletion or authorize combined deletion.
-The GET is advisory and always returns `execution_enabled: false`; no execution
-endpoint accepts its digest. Existing destructive routes are unchanged.
+`GET /v1/bots/{slug}/purge-preview[?delete_profile=true]` is a read-only
+manifest of one action:
+
+- `scope: purge_data` (default) — the standalone `POST /v1/bots/{slug}/purge-data`
+  selection; the profile and its tags are kept.
+- `scope: delete_profile_and_purge_data` — `DELETE /v1/bots/{slug}/profile?purge=true`;
+  the same selection plus the `bot_profiles` row and every `bot_profile_tags` row.
+
+Both destructive routes require `manifest_digest` from a preview of the **same
+action** (`execution_enabled: true`). Profile-only `DELETE` (no `purge`) is
+unaffected and needs no digest.
+
+## Execution contract (`bot_purge_execute.execute_bot_purge`)
+
+One PostgreSQL REPEATABLE READ transaction, `lock_timeout` 3s:
+
+1. `LOCK bot_profiles, bot_profile_tags IN SHARE ROW EXCLUSIVE MODE`, then the
+   prompt-purge writer guard. Table discovery uses a separate connection so the
+   snapshot is taken **after** the locks.
+2. Recompute the manifest; a different digest refuses with 409 `stale_preview`.
+3. Refuse, deleting nothing:
+   - 423 `protected` — reserved identities (`system`, `*`), or message storage
+     not tied to this bot alone (ambiguous or profile-less storage, or a
+     storage id reserved by an alias);
+   - 409 `aliases` — retired slug aliases still point at the bot;
+   - 423 `active` — a non-terminal turn started in the last 6 hours, or an
+     undelivered inter-bot delivery to the bot;
+   - 423 `busy` — lock timeout, serialization failure or deadlock;
+   - 409 `dependent` — another bot's row references selected rows (FK);
+   - 404 `not_found` — combined delete of a missing profile;
+   - 503 `unavailable` — no PostgreSQL, a required store missing, or ownership
+     evidence incomplete.
+4. Delete the selected rows (and, for the combined action, tags then profile)
+   and commit. Partition caches are evicted afterwards.
+
+The receipt is `{slug, action, manifest_digest, profile_deleted, deleted_rows,
+retained[]}`; `retained` lists the manifest's retained and unknown entries so
+nothing outside the purge is presented as erased. Any refusal rolls back the
+whole transaction: there is never a partial profile delete.
+
+`runtime_settings.purge_bot_data` remains an unconfirmed internal primitive for
+tests and maintenance; no HTTP route reaches it without the guard.
+
+Orphan storage (no profile) is not purged here; System → Clean up orphans
+handles profile-less, non-private storage.
 
 ## Wire contract
 
 The response and its errors use `Cache-Control: no-store`.
 
-- `schema_version: 1`, `scope_version: standalone-purge-data/1` and
+- `schema_version: 2`, `scope_version: bot-purge/3`, `scope` and
   `scope_fingerprint` identify the inventory/predicate contract.
 - `slug` is trimmed/lowercased; `storage_id` uses the existing partition sanitizer.
   Legacy punctuation and one-character slugs are supported; blank/control/overlong
@@ -49,8 +89,8 @@ owned tool records and their legacy payloads, and jobs/companions through their
 **parent job's ownership**. Messages, memories and forgotten rows use the
 sanitized storage key; ambiguous attribution is explicitly unknown.
 
-`retained` does **not** mean historical, harmless or drained. Current standalone
-purge leaves profiles/tags, working memory, changed files, approvals, routing,
+`retained` does **not** mean historical, harmless or drained. Standalone
+purge leaves profiles/tags (the combined action deletes them), working memory, changed files, approvals, routing,
 ops jobs, delivery receipts and session outbox records. The preview separately
 counts nonterminal deliveries and pending session events as overlapping retained
 operational subsets. Shared/other-job runs, including `RUNNING` markers, remain;
@@ -63,19 +103,13 @@ ownership and physical bytes, Redis/bridge/provider state, backups, and indirect
 or unmapped references. Shared or user-owned blobs are not reclassified as
 exclusive bot data. This inventory is intentionally not a complete erasure claim.
 
-## Deliberate limits / later slices
+## Deliberate limits
 
-The digest is **not a row-level preimage or a fresh confirmation capability**.
-An equal-count row/value change outside the profile can preserve it. A writer can
-commit immediately after the snapshot; observed raw-owner sources are not an
-exhaustive historical registry. This GET establishes no writer fence, active or
-protected-bot clearance, alias-reuse safety, FK-catalog proof, drain, transport
-cancellation, stale-confirmation rejection or cross-store atomicity. Those
-requirements in TASK-1897's broader design remain later explicitly authorized
-slices, not claims made by this initial preview.
+The digest is **not a row-level preimage**: an equal-count change can preserve
+it, so it proves the confirmed counts and scope, not each row. Observed raw-owner
+sources are not an exhaustive historical registry. The active-turn check sees
+recorded turn logs and deliveries, not in-flight provider or bridge state, and
+stores outside local PostgreSQL (media, Redis, backups, external services) are
+reported unknown and left untouched — there is no cross-store atomicity.
 
-No frontend destructive enablement, schema migration, service activation or live
-bot query/purge is part of this implementation/test slice. Tests use disposable
-SQLite and test-owned PostgreSQL fixtures. The PostgreSQL regression checks actual
-RR/read-only mode, DB refusal of an accidental write, and consistency while a
-separate fixture writer commits.
+Tests use disposable SQLite and test-owned PostgreSQL fixtures only.

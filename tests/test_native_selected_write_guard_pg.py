@@ -1,8 +1,9 @@
 """TASK-1907 corrective owner READ inside native-selected DML on private PG.
 
-The HTTP purge cases reuse the real selected-native route/coordinator/history/MCP
+The purge cases reuse the real selected-native route/coordinator/history/MCP
 chain. Only URL construction for the purge's separate engine is redirected to the
-fixture-owned Unix socket; the settings route, purge SQL and commit are real.
+fixture-owned Unix socket; the purge SQL and commit are real. The HTTP purge
+routes refuse mid-turn (TASK-2045), so the race drives the physical primitive.
 No lock/fence or purge-after-write-snapshot serialization is claimed.
 """
 from __future__ import annotations
@@ -97,11 +98,12 @@ def supported_purge(native_runtime, rig, monkeypatch, record_property):
         # Production purge constructs a TCP URL; private PG is socket-only.
         # Redirect only engine construction, never the purge implementation.
         engine = real_create(rig.engine.url)
+        # The HTTP routes now refuse a purge while a turn runs (TASK-2045, 423),
+        # so this mid-turn race drives the unconfirmed physical primitive.
+        from llm_bawt.runtime_settings import purge_bot_data
         with monkeypatch.context() as patch, capture_sql(engine) as sql, transactions(engine) as tx:
             patch.setattr(sqlalchemy, "create_engine", lambda *_a, **_k: engine)
-            response = native_runtime.http.post(f"/v1/bots/{rig.bot}/purge-data")
-        assert response.status_code == 200, response.text
-        result = response.json()
+            result = json.loads(json.dumps(purge_bot_data(native_runtime.service.config, rig.bot)))
         assert result["slug"] == rig.bot
         assert result["deleted_rows"]["sessions"] == 1
         assert result["deleted_rows"]["messages"] >= 1

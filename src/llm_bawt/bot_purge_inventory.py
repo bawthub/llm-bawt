@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-SCOPE_VERSION = "standalone-purge-data/2"
+SCOPE_VERSION = "bot-purge/3"
 
 
 @dataclass(frozen=True)
@@ -91,6 +91,13 @@ RETAINED = (
                   "Retained tool records can have turn_id SET NULL by installed FKs.",
                   (("turn_logs", ("id", "bot_id")),)),
 )
+
+# The combined delete removes the definition and every tag assignment (privacy
+# tags included: the data they protected is deleted in the same transaction).
+PROFILE_DELETED = {
+    "bot_profiles": "The profile itself is deleted in the same transaction as its data.",
+    "bot_profile_tags": "All tag assignments, including private/no-global-search, are deleted with the data they protected.",
+}
 
 # These stores are untouched, but this connection cannot establish exhaustive
 # ownership/exclusive bytes or cross-store counts. Unknown never means zero.
