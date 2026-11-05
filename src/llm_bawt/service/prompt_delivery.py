@@ -17,6 +17,7 @@ from .prompt_delivery_state import gate_reason, receipt, schedule_author, transi
 from .prompt_schedule_models import NONTERMINAL, PromptOccurrence, PromptSchedule
 from .prompt_schedule_store import PromptScheduleStore
 from .scheduler import ScheduledJob, JobRun
+from .wakeup_staleness import wakeup_stale_reason
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +69,10 @@ class PromptDeliveryWorker:
             ).order_by(PromptOccurrence.updated_at, PromptOccurrence.run_id).limit(100)).all()
         for occurrence in pending:
             try:
-                prepared = self._prepare(occurrence.run_id, now)
+                # Task state is remote: read it before taking any outbox lock.
+                stale = (wakeup_stale_reason(occurrence.snapshot_json or {}, occurrence.kind)
+                         if occurrence.enqueue_attempts == 0 else None)
+                prepared = self._prepare(occurrence.run_id, now, stale=stale)
                 if prepared is None:
                     continue
                 record = self._enqueue(occurrence.run_id, prepared, dispatcher, now)
@@ -167,7 +171,7 @@ class PromptDeliveryWorker:
             ScheduledJob.id == job_id).with_for_update()).one()
         return job, session.get(PromptSchedule, job_id), session.get(PromptOccurrence, run_id), session.get(JobRun, run_id)
 
-    def _prepare(self, run_id, now):
+    def _prepare(self, run_id, now, stale=None):
         from ..memory.postgresql_short_term import PostgreSQLShortTermManager
 
         with Session(self.engine) as session, session.begin():
@@ -212,7 +216,7 @@ class PromptDeliveryWorker:
             # Once enqueue may have happened, recover by key before consulting
             # mutable capability/lifecycle. An accepted delivery must not be lost.
             if occurrence.enqueue_attempts == 0:
-                reason = gate_reason(*rows, now)
+                reason = gate_reason(*rows, now) or (("skipped", stale) if stale else None)
                 if reason:
                     transition(session, *rows, reason[0], now, error=reason[1])
                     return None

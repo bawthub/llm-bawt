@@ -14,6 +14,15 @@ def run(coro):
     return asyncio.run(coro)
 
 
+@pytest.fixture(autouse=True)
+def _no_owner_callback(monkeypatch):
+    """The owner callback has its own tests (test_review_owner_callback.py)."""
+    async def quiet(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(task_review_tools, "notify_review_owner", quiet)
+
+
 def test_reviews_list_forwards_bounded_pagination_and_returns_full_entries(monkeypatch):
     page = {
         "reviews": [{"id": "review-1", "body": "Keep this note", "authorActorId": "caid"}],

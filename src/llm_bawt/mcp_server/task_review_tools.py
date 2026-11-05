@@ -203,7 +203,68 @@ async def add_task_review(
     Returns:
         The review receipt as returned by BawtHub, or an error dict. This does
         not change the task's status, description, response, or assignee.
+        A recorded review is delivered to the task's owner (TASK-2056).
     """
+    result = await _record_review(
+        task_id, stage, verdict, body, bot_id, target_revision, idempotency_key,
+        findings, rechecks_review_id, resolutions,
+    )
+    if isinstance(result, dict) and not result.get("error"):
+        await notify_review_owner(task_id, bot_id, result)
+    return result
+
+
+def review_callback_message(task: dict, reviewer: str, review: dict) -> str:
+    """The compact owner notice: verdict, finding counts, reviewer, review id."""
+    counts: dict[str, int] = {}
+    for finding in review.get("findings") or []:
+        if isinstance(finding, dict):
+            severity = str(finding.get("severity") or "finding").upper()
+            counts[severity] = counts.get(severity, 0) + 1
+    tally = ", ".join(f"{count} {name}" for name, count in sorted(counts.items())) or "no findings"
+    ref = task.get("shortId") or task.get("id")
+    stage = review.get("stage")
+    return (f"Review recorded on {ref}: {review.get('verdict')}"
+            + (f" ({stage})" if stage else "")
+            + f" by {reviewer}; {tally}. Review id {review.get('id')}."
+            + " Open it with tasks_reviews_list.")
+
+
+async def notify_review_owner(task_id: str, reviewer: str, review: dict) -> dict | None:
+    """Durably tell the task's owner a review was recorded (TASK-2056).
+
+    One delivery per review id (its idempotency key), skipped when the
+    reviewer owns the task or the task has no owner. Never fails the review.
+    """
+    review_id = review.get("id")
+    if not review_id:
+        return None
+    try:
+        task = await _api_get(f"/tasks/{quote(task_id, safe='')}")
+        owner = str((task or {}).get("agentBotId") or "").strip().lower()
+        if not owner or owner == reviewer.strip().lower():
+            return None
+        from .inter_bot_tools import _enqueue_durable
+
+        return await _enqueue_durable(
+            prefer_steer=True, target_bot_id=owner,
+            message=review_callback_message(task, reviewer, review),
+            sender_bot_id=reviewer, max_tokens=None, temperature=0.7,
+            timeout_seconds=300, idempotency_key=f"review-callback:{review_id}",
+            project_id=None, task_id=task.get("shortId") or task_id,
+            message_kind=None, metadata={"review_callback": {"review_id": review_id}},
+            session_policy=None, reset_session_before_delivery=None,
+            retain_history=None, reset_reason=None,
+        )
+    except Exception:
+        logger.warning("Review callback failed for %s review %s", task_id, review_id, exc_info=True)
+        return None
+
+
+async def _record_review(
+    task_id, stage, verdict, body, bot_id, target_revision, idempotency_key,
+    findings, rechecks_review_id, resolutions,
+) -> dict:
     if not bot_id.strip():
         return {"error": "bot_id is required for review attribution"}
     recheck = rechecks_review_id is not None

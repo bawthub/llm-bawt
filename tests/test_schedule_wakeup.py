@@ -76,6 +76,8 @@ def rig(monkeypatch):
     monkeypatch.setattr(schedule_tools, "BotTags", lambda: SimpleNamespace(snapshot=lambda: state.tags))
     monkeypatch.setattr(schedule_tools, "_request", request)
     monkeypatch.setattr(schedule_tools, "_now", lambda: NOW)
+    state.turn_task = None
+    monkeypatch.setattr(schedule_tools, "current_turn_task", lambda: state.turn_task)
     return state
 
 
@@ -216,3 +218,26 @@ async def test_app_rejection_and_outage_are_reported(rig, monkeypatch):
     monkeypatch.setattr(schedule_tools, "_request", down)
     out = result(await schedule_tools.schedule_wakeup(message="a", in_minutes=5))
     assert out["error"] == "unavailable" and "unknown" in out["message"]
+
+
+@pytest.mark.anyio
+async def test_untagged_wakeup_inherits_the_current_turn_task(rig):
+    """TASK-2056: so a stale one can skip itself when it fires."""
+    rig.turn_task = "TASK-2056"
+    await schedule_tools.schedule_wakeup(message="check review", in_minutes=30)
+    body = [c for c in rig.calls if c[0] == "POST"][-1][3]
+    assert body["task_id"] == "TASK-2056"
+    assert body["prompt"].startswith("[Scheduled wake-up from byte, TASK-2056]")
+    # An explicit task wins over the turn's.
+    await schedule_tools.schedule_wakeup(message="other", in_minutes=31, task_id="TASK-1")
+    assert [c for c in rig.calls if c[0] == "POST"][-1][3]["task_id"] == "TASK-1"
+
+
+@pytest.mark.anyio
+async def test_no_current_turn_task_leaves_the_wakeup_untagged(rig):
+    await schedule_tools.schedule_wakeup(message="ping", in_minutes=5)
+    assert [c for c in rig.calls if c[0] == "POST"][-1][3]["task_id"] is None
+
+
+def test_current_turn_task_fails_closed_without_a_turn():
+    assert schedule_tools.current_turn_task() is None

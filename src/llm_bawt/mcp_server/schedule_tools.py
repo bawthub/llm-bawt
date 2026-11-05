@@ -15,6 +15,7 @@ created or that target the caller, never the user's own hand-made schedules.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -62,6 +63,31 @@ def _caller(arguments: dict):
     if caller is None or not caller.bot_id or not caller.user_id:
         return None
     return caller
+
+
+def current_turn_task() -> str | None:
+    """The ``TASK-N`` the trusted current turn is working on, if it resolves to one.
+
+    Untagged wake-ups inherit it so a stale one can skip itself when it
+    fires (TASK-2056). Any failure leaves the wake-up untagged, as before.
+    """
+    try:
+        from llm_bawt.turn_task import resolve_turn_tasks
+        from llm_bawt.utils.config import Config
+        from llm_bawt.utils.db import get_shared_engine
+
+        from .task_association import current_task_turn_context
+
+        turn_id = current_task_turn_context().turn_id
+        with get_shared_engine(Config()).connect() as conn:
+            found = resolve_turn_tasks(conn, turn_ids=[turn_id])
+    except Exception:
+        logger.debug("No current-turn task for schedule_wakeup", exc_info=True)
+        return None
+    for item in found:
+        if _TASK_RE.match(item.task_ref):
+            return item.task_ref
+    return None
 
 
 def _target_refusal(target: str, caller_bot: str) -> str | None:
@@ -205,6 +231,8 @@ async def schedule_wakeup(
     task = task_id.strip().upper() if task_id and task_id.strip() else None
     if task and not _TASK_RE.match(task):
         return _error("invalid_request", "task_id must look like TASK-123")
+    if task is None:
+        task = await asyncio.to_thread(current_turn_task)
     timing, problem = _timing(at, in_minutes, cron, timezone)
     if problem:
         return _error("invalid_request", problem)

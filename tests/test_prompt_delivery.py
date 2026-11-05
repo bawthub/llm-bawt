@@ -169,6 +169,30 @@ def test_scheduled_task_identity_survives_snapshot_and_enqueue(rig):
     assert rig.delivery.last_task_id == "TASK-2019"
 
 
+@pytest.mark.parametrize("reason", ["Skipped: TASK-9 is completed", None])
+def test_stale_wakeup_skips_at_fire_time_with_its_reason(rig, monkeypatch, reason):
+    """TASK-2056: the sweep reads task state outside the locks and skips stale wake-ups."""
+    from llm_bawt.service import prompt_delivery
+
+    seen = []
+
+    def fake_reason(snapshot, kind):
+        seen.append((snapshot["task_id"], kind))
+        return reason
+
+    monkeypatch.setattr(prompt_delivery, "wakeup_stale_reason", fake_reason)
+    job, run = reserve(rig, once=True, creator=BOT, task="TASK-9")
+    rig.worker._sweep(rig.dispatcher)
+    row = occurrence(rig, run)
+    assert seen == [("TASK-9", "scheduled")]
+    if reason:
+        assert (row.state, row.last_error, row.delivery_id) == ("skipped", reason, None)
+        with Session(rig.engine) as session:
+            assert session.get(JobRun, run).error_message == reason
+    else:
+        assert row.state == "queued" and row.delivery_id
+
+
 def occurrence(rig, run):
     with Session(rig.engine) as session:
         return session.get(PromptOccurrence, run)
