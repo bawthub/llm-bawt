@@ -41,7 +41,7 @@ from .service import OpsDispatchError, OpsService
 
 logger = logging.getLogger(__name__)
 
-# Nick's call (2026-10-21): an approval not admitted within 10 minutes expires
+# The user's call (2026-10-21): an approval not admitted within 10 minutes expires
 # rather than firing whenever the reconciler returns. A job that already exists
 # for the request's key is always reported, whatever its age.
 ADMISSION_WINDOW_SECONDS = 600

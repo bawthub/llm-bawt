@@ -273,7 +273,8 @@ async def test_catalog_token_budgets():
     # TASK-1778: two optional owner args (+42) and scoped descriptions (+13).
     # TASK-1151: ops_list_operations slug= (+23), so each catalog read drops
     # ~15k chars of descriptions/schemas to compact rows.
-    assert total <= 17251, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-1383: role wording ("the user", "a coordinator") replaces names (+35).
+    assert total <= 17286, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 
@@ -361,7 +362,7 @@ def test_task_update_closure_guidance_matches_visual_review_policy():
 
     for text in (TOOL_SUMMARIES["tasks_update"], update_task.__doc__):
         assert "REVIEW" in text and "COMPLETED" in text
-        assert "UI/UX" in text and ("Snark or Rook" in text or "Snark/Rook" in text)
+        assert "UI/UX" in text and "coordinator" in text
         assert "BUG" in text
         assert "Nick-requested" not in text
         assert "REVIEW by default" not in text
@@ -397,12 +398,12 @@ async def test_blocked_definition_reaches_task_write_tools():
     tools = {tool.name: tool for tool in await mcp.list_tools()}
     for name, function in (("tasks_create", create_task), ("tasks_update", update_task)):
         description = tools[name].description
-        assert "blocked_reason" in description and "what Nick must do/decide" in description
+        assert "blocked_reason" in description and "what the user must do/decide" in description
         assert ("Never nits" if name == "tasks_create" else "rules in tasks_create") in description
         assert BLOCKED_DEFINITION in function.__doc__
         assert "{blocked_definition}" not in function.__doc__
         assert "blocked_reason" in tools[name].inputSchema["properties"]
-    for clause in ("only Nick can make", "restart, deploy/ship, credentials", "against Nick's stated intent",
+    for clause in ("only the user can make", "restart, deploy/ship, credentials", "against the user's stated intent",
                    "bot-vs-bot disagreements (Gavel mediates)", "misusing BLOCKED is a process failure"):
         assert clause in BLOCKED_DEFINITION
 

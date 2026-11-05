@@ -48,7 +48,7 @@ def compact_project(project: dict | None) -> dict | None:
 def _state_fields(task: dict) -> dict:
     """The fields a row carries only in the state that makes them the point."""
     fields: dict[str, Any] = {}
-    # TASK-1368: a BLOCKED row is Nick's action item; its reason is the point.
+    # TASK-1368: a BLOCKED row is the user's action item; its reason is the point.
     if task.get("status") == "BLOCKED":
         fields["blockedReason"] = task.get("blockedReason")
     # TASK-1422: a REVIEW row's "Where to look" pages are what the reviewer opens.

@@ -449,7 +449,7 @@ class HistoryManager:
         want_summaries: bool = True,
         floor_current_turn: bool = False,
     ):
-        """Assemble LLM context under Nick's strict allocation ladder (TASK-612).
+        """Assemble LLM context under the user's strict allocation ladder (TASK-612).
 
         Fill order, highest priority first:
           1. **Plain system** prompt (persona) — always kept. If it alone exceeds

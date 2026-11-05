@@ -113,7 +113,7 @@ def parse_arguments(config_obj: Config) -> argparse.Namespace:
     parser.add_argument("--user", type=str, default=None, help="User profile to use (creates if not exists). Defaults to config.DEFAULT_USER")
     parser.add_argument("--list-users", action="store_true", help="List all user profiles")
     parser.add_argument("--user-profile", action="store_true", help="Show current user profile")
-    parser.add_argument("--user-profile-set", metavar="FIELD=VALUE", help="Set a user profile field (e.g., name=\"Nick\")")
+    parser.add_argument("--user-profile-set", metavar="FIELD=VALUE", help="Set a user profile field (e.g., name=\"Alex\")")
     parser.add_argument("--user-profile-setup", action="store_true", help="Run user profile setup wizard")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging output.")
     return parser.parse_args()

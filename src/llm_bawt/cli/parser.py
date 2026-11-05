@@ -202,7 +202,7 @@ def parse_arguments(config_obj: "Config") -> argparse.Namespace:
     parser.add_argument(
         "--user-profile-set",
         metavar="FIELD=VALUE",
-        help="Set a user profile field (e.g., name=\"Nick\")"
+        help="Set a user profile field (e.g., name=\"Alex\")"
     )
     parser.add_argument(
         "--user-profile-setup",

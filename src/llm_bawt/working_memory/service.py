@@ -1,4 +1,4 @@
-"""The two entry points onto the store: a bot's trusted turn and Nick's REST path.
+"""The two entry points onto the store: a bot's trusted turn and the user's REST path.
 
 Both run every operation through one :class:`WorkingMemoryPolicy` (design 7).
 A bot's identity comes only from its signed turn capability; the owner path
@@ -119,7 +119,7 @@ class WorkingMemoryService:
         )
 
     # -- owner, over REST (6.2) -----------------------------------------------
-    # Disabled bots stay readable and editable so Nick can clean up (7).
+    # Disabled bots stay readable and editable so the user can clean up (7).
 
     def owner_list(self, bot_id: str, user_id: str) -> dict[str, Any]:
         self.policy.require_owner_access(bot_id)

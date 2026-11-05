@@ -40,7 +40,7 @@ NON_HISTORY_TOOLS = frozenset({
 # ops_approvals_* (TASK-1609) read and decide approval cards, not history; the
 # route hides private requesters' and other users' cards itself.
 PARTICIPANT_TOOLS = frozenset({"bots_delivery_get", "bots_deliveries_list"})
-# Nick's 2026-10-23 ruling: do not add private-target delivery/reset mutation
+# The user's 2026-10-23 ruling: do not add private-target delivery/reset mutation
 # locks. Discovery filtering for availability/router candidates is a follow-up.
 UNSCOPED_MUTATION_TOOLS = frozenset({
     "bots_send_message", "bots_route_message", "agent_context_reset", "agent_context_compact",

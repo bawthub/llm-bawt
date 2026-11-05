@@ -2,7 +2,7 @@
 
 Provides /v1/botchat/{bot_id}/{user_id}/chat/completions and /models
 so clients that can't pass extra params can use a base URL like:
-    http://host:8642/v1/botchat/nova/nick
+    http://host:8642/v1/botchat/nova/alex
 and point their OpenAI-compatible client at it.
 """
 

@@ -409,7 +409,7 @@ async def update_task(
     - Visually confirmable UI/UX: status="REVIEW", check_links=[...],
       outcome="Plain-language change"
     - Other finished work: record review (Tier 0: self-check), attributable
-      pushed commit and test/live check in response; Snark or Rook closes
+      pushed commit and test/live check in response; a coordinator closes
       status="COMPLETED" after verifying those receipts.
     - Report failure: status="FAILED", response="What went wrong"
 
@@ -425,7 +425,7 @@ async def update_task(
 
     IMPORTANT: REVIEW is only for UI/UX the user can visually inspect, and
     needs check_links. For backend, infra, tooling
-    and skills, Snark or Rook verifies the review (Tier 0: self-check), pushed
+    and skills, a coordinator verifies the review (Tier 0: self-check), pushed
     attributable commit and test/live receipt before closing COMPLETED,
     including their own reviewed work. Leave incomplete work open with its
     blocker recorded. No agent may move a task out of BUG status.
@@ -476,7 +476,7 @@ async def update_task(
         associate_current_turn: Also link this trusted current chat turn to the
                 task. Use when claiming/starting ordinary-chat work. The server
                 supplies all correlation IDs; unsupported harnesses fail closed.
-        blocked_reason: What Nick must do or decide. Required with
+        blocked_reason: What the user must do or decide. Required with
                         status="BLOCKED"; rejected unless the task is or becomes
                         BLOCKED. Cleared automatically when the task leaves BLOCKED.
         check_links: {check_links_doc}
@@ -847,7 +847,7 @@ async def create_task(
         associate_current_turn: Link the newly created task to this trusted
                 current chat session and exact turn immediately after creation.
                 The server supplies all correlation IDs.
-        blocked_reason: What Nick must do or decide; required when
+        blocked_reason: What the user must do or decide; required when
                         status="BLOCKED" and rejected otherwise.
         image_urls: Images to attach: chat upload ids (ma_...) or upload URLs.
                     Unknown ids are refused.

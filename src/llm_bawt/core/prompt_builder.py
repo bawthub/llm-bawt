@@ -5,7 +5,7 @@ with clear sections that can be enabled/disabled and reordered per-bot.
 
 Usage:
     builder = PromptBuilder()
-    builder.add_section("user_context", "User's name is Nick", position=0)
+    builder.add_section("user_context", "User's name is Alex", position=0)
     builder.add_section("base_prompt", bot.system_prompt, position=2)
     builder.add_section("tools", tools_instructions, position=3)
     system_message = builder.build()

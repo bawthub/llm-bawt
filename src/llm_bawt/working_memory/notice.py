@@ -9,7 +9,7 @@ Ordering per 9.3 and 13: the caller runs this after the pin transaction has
 committed and before the turn's command is published, so the mark (with the
 ``compaction_gen`` it saw) commits before the harness can compact the notice
 away. The mark is best effort: a turn that dies after the mark loses that
-notice until the next external change or boundary (OI-R2, Nick's call).
+notice until the next external change or boundary (OI-R2, the user's call).
 """
 from __future__ import annotations
 

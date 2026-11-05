@@ -170,7 +170,7 @@ def extract_profile_attributes_from_fact(
         
         # If this is a name attribute, also set display_name on the profile
         if key.lower() == "name":
-            # Try to extract just the name from content like "User's name is Nick"
+            # Try to extract just the name from content like "User's name is Alex"
             # (re is already imported at module level)
             name_match = re.search(r"(?:name\s+is\s+|named\s+|I'?m\s+|call\s+me\s+)([A-Z][a-z]+)", content, re.IGNORECASE)
             if name_match:

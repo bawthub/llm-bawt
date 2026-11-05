@@ -397,7 +397,7 @@ def upgrade_message_tsv(
     attached leaf index that is not valid is rebuilt in place with
     ``REINDEX INDEX CONCURRENTLY``, which keeps its attachment.
 
-    Every leaf is covered, private bots' included (Nick, 2026-10-24: fine as
+    Every leaf is covered, private bots' included (the user, 2026-10-24: fine as
     long as the data never reaches a model; the column is only read inside
     SQL for matching and ranking).
     """

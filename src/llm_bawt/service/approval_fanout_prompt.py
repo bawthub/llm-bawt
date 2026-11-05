@@ -1,7 +1,7 @@
 """Prompt-registry seeds for approver notices (TASK-1661).
 
 Seed data only: registered in :mod:`llm_bawt.prompt_definitions` and resolved
-per approver bot at send time (``approval_fanout.notice_text``), so Nick can
+per approver bot at send time (``approval_fanout.notice_text``), so the user can
 edit them in BawtHub's Prompt Registry.
 """
 from __future__ import annotations

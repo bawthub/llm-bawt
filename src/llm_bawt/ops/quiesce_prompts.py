@@ -1,7 +1,7 @@
 """Prompt-registry text an agent reads about a quiesce job (TASK-1233).
 
 Each body here is seed data only: it is registered in
-:mod:`llm_bawt.prompt_definitions` and resolved per bot at call time, so Nick
+:mod:`llm_bawt.prompt_definitions` and resolved per bot at call time, so the user
 can see and edit it in BawtHub's Prompt Registry. A blank body or a registry
 failure falls back to the seed, so an instruction is never lost.
 """

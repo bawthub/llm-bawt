@@ -100,7 +100,7 @@ class ProfileMaintenanceService:
             if identity_text and not isinstance(identity_text, str):
                 identity_text = ", ".join(str(v) for v in identity_text) if isinstance(identity_text, list) else str(identity_text)
             if identity_text and isinstance(identity_text, str):
-                # Try to extract name from identity (e.g., "Nick is a software developer")
+                # Try to extract name from identity (e.g., "Alex is a software developer")
                 import re
                 name_match = re.match(r'^(\w+)\s+is\s+', identity_text)
                 if name_match:

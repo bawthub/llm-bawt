@@ -12,11 +12,11 @@ _STEP_STATUS_GUIDE = "|".join(STEP_STATUSES) + "; not IN_PROGRESS"
 # TASK-1368: compact form of task_step_types.BLOCKED_DEFINITION (full text in
 # the tool docstrings and the bawthub-mcp reference).
 _BLOCKED_GUIDE = (
-    "BLOCKED needs blocked_reason (what Nick must do/decide): only his decisions, "
-    "ship/restart/credentials/external deps, or his intent. Never nits or bot disputes."
+    "BLOCKED needs blocked_reason (what the user must do/decide): only their decisions, "
+    "ship/restart/credentials/external deps, or intent. Never nits or bot disputes."
 )
 # tasks_update is near the 100-token description cap; it points at the rules.
-_BLOCKED_POINTER = "BLOCKED (rare) needs blocked_reason: what Nick must do/decide; rules in tasks_create."
+_BLOCKED_POINTER = "BLOCKED (rare) needs blocked_reason: what the user must do/decide; rules in tasks_create."
 # TASK-1526: the attach policy, in full on tasks_create and pointed to from tasks_update.
 _IMAGES_GUIDE = (
     "Attach every relevant chat image (screenshots, errors) so bots needn't re-capture; "
@@ -81,7 +81,7 @@ TOOL_SUMMARIES: dict[str, str] = {
     "tasks_reviews_resolve_finding": "Settle one non-Blocker finding: FIXED (revision), DEFERRED (task) or WITHDRAWN.",
     "tasks_associate_current": "Link trusted turn when actually working a task, never from a mention. Supply cuid or TASK-N; unsupported context fails closed.",
     "tasks_create": f"Create task/steps. Own bot_id; associate_current_turn links new work via trusted turn. {_IMAGES_GUIDE} {_BLOCKED_GUIDE}",
-    "tasks_update": f"Patch; UI/UX Nick can see → REVIEW with dev URL/steps. Other work: Snark/Rook close COMPLETED after review (Tier 0: self-check), attributable push and test/live receipt. BUG is human-locked. {_BLOCKED_POINTER} Own bot_id fills missing owner; associate_current_turn links work and its images.",
+    "tasks_update": f"Patch; UI/UX the user can see → REVIEW with dev URL/steps. Other work: coordinators close COMPLETED after review (Tier 0: self-check), attributable push and test/live receipt. BUG is human-locked. {_BLOCKED_POINTER} Own bot_id fills missing owner; associate_current_turn links work and its images.",
     "browser_check_session": "1h non-admin BawtHub session for your UI checks: Playwright cookies; never echo them.",
     "initiative_state": "Read, acquire an expiring lease, or CAS-checkpoint recurring task state; trusted turn identity owns writes and stale owners conflict.",
     "tasks_delete": "Permanently delete task/steps; prefer tasks_update CANCELLED to retain history.",

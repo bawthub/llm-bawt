@@ -6,7 +6,7 @@ model-facing word of a steer here and sends the results on ``chat.steer``
 
 Each body is seed data: it is registered in :mod:`llm_bawt.prompt_definitions`
 (its loader returns the ``DEFAULT_*`` text below) and resolved per bot at call
-time, so Nick can edit it in BawtHub's Prompt Registry. Every read goes through
+time, so the user can edit it in BawtHub's Prompt Registry. Every read goes through
 the registry: a blank live body, a resolve failure, or a live body that no
 longer renders its slot falls back to the registered definition's default body,
 never to text held here. If that default can't render either, the steer fails

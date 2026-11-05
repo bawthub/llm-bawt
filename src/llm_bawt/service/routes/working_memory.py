@@ -1,7 +1,7 @@
 """Owner REST path for working memory (docs/WORKING_MEMORY.md 6.2; LAN trust boundary).
 
 Protected bots are refused. A bot that isn't opted in stays readable and
-editable here, so Nick can clean up after disabling it (7). There is no create.
+editable here, so the user can clean up after disabling it (7). There is no create.
 """
 from __future__ import annotations
 

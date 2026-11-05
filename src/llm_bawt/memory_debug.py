@@ -18,7 +18,7 @@ Usage:
 
     # === ENTITY PROFILES (user or bot) ===
     llm-memory --list-profiles                   # List all profiles (users and bots)
-    llm-memory --list-attrs nick                 # List attributes (auto-detects user/bot)
+    llm-memory --list-attrs alex                 # List attributes (auto-detects user/bot)
     llm-memory --list-attrs nova                 # List attributes for nova
     llm-memory --delete-attr 42                  # Delete a profile attribute
 
