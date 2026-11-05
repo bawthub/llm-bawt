@@ -54,6 +54,7 @@ async def speech_generate(text: Text, bot_id: Identifier, voice: str | None = No
     from llm_bawt.media import get_media_store
     if not text.strip():
         raise ValueError("Speech text must not be blank")
+    owner = resolve_user_id(user_id)  # before rendering, so no output is lost
     config = Config()
     resolved = await asyncio.to_thread(_voice, bot_id, voice)
     settings = await asyncio.to_thread(HomeAudioSettings.load, config)
@@ -62,7 +63,7 @@ async def speech_generate(text: Text, bot_id: Identifier, voice: str | None = No
         raw = await client.render(text, resolved)
         asset = await asyncio.to_thread(get_media_store().upload, raw_bytes=raw,
                                        original_mime="audio/wav", source="tool_generated",
-                                       owner_user_id=resolve_user_id(user_id), filename="speech.wav")
+                                       owner_user_id=owner, filename="speech.wav")
         return {"asset_id": asset.id, "voice": resolved, "duration_seconds": wav_duration(raw),
                 "playback_url": client.media_url(asset.id),
                 "download_path": f"/v1/uploads/{asset.id}"}

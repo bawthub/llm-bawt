@@ -103,6 +103,11 @@ async def generate_image(
         provider, model, prompt[:120], reference_asset_id, aspect_ratio, resolution,
     )
 
+    # Resolve the owner before generating, so a missing user never discards output.
+    try:
+        owner = resolve_user_id(user_id)
+    except ValueError as e:
+        return [{"error": str(e)}]
     store = get_media_store()
 
     # 1) Resolve the reference image (iteration) into a data URL, if asked.
@@ -148,7 +153,7 @@ async def generate_image(
             raw_bytes=raw,
             original_mime=f"image/{fmt}",
             source=_SOURCE,
-            owner_user_id=resolve_user_id(user_id),
+            owner_user_id=owner,
         )
     except Exception as e:
         logger.exception("generate_image: media store upload failed")

@@ -349,7 +349,7 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
         key="agents.mcp_tool_context_template",
         title="Agent MCP Tool Context Block",
         category="agent_execution",
-        required_vars=("bot_slug",),
+        required_vars=("bot_slug", "user_id"),
         loader=lambda: MCP_TOOL_CONTEXT_TEMPLATE,
         metadata={
             "notes": (

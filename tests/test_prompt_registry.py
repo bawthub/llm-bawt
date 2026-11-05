@@ -288,3 +288,12 @@ def test_preview_route_renders_literal_json_and_rejects_missing_required(monkeyp
             scope_id=None,
         )
         assert nested.valid is True and nested.rendered_preview == f"{literal}\nM"
+
+
+def test_mcp_tool_context_default_declares_and_validates_its_vars() -> None:
+    # TASK-1383: the body renders {user_id}; the definition must advertise it.
+    resolver = PromptResolver()
+    definition = resolver.definition_for("agents.mcp_tool_context_template")
+    assert definition is not None and definition.required_vars == ("bot_slug", "user_id")
+    result = resolver.validate(key=definition.key, body=definition.default_body())
+    assert result["valid"] is True and result["unknown_placeholders"] == []
