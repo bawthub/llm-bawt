@@ -87,12 +87,14 @@ async def test_real_git_clone_clean_and_visible(tmp_path, monkeypatch):
         assert args[-2] == "https://example.test/repo.git"
         assert kwargs["env"]["GIT_TERMINAL_PROMPT"] == "0"
         assert kwargs["start_new_session"] is True
+        assert (root / args[-1]).stat().st_mode & 0o777 == 0o700
         args = [args[0], "-c", "protocol.file.allow=always", *args[1:-2], str(source), args[-1]]
         return await original(*args, **kwargs)
     monkeypatch.setattr(asyncio, "create_subprocess_exec", local_transport)
     workspace = Workspace(root)
     result = await workspace.clone(clone_input({"url": "https://example.test/repo.git", "branch": "feature/test"}))
     assert result == {"name": "repo", "path": "repo", "branch": "feature/test"}
+    assert (root / "repo").stat().st_mode & 0o777 == 0o755
     assert (root / "repo" / "hello.txt").read_text() == "hello\n"
     assert git("status", "--porcelain", cwd=root / "repo") == b""
     assert git("branch", "--show-current", cwd=root / "repo").strip() == b"feature/test"

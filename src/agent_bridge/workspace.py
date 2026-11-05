@@ -146,6 +146,10 @@ class Workspace:
             current = target.lstat()
             if (current.st_dev, current.st_ino) != (claimed.st_dev, claimed.st_ino):
                 raise WorkspaceError(409, "Workspace folder changed during clone.", "folder_exists")
+            # mkdtemp keeps the in-flight checkout private (0700). Published
+            # repos must be readable by the frontend's different UID through
+            # its read-only workspace mount, without granting it write access.
+            staging.chmod(0o755)
             staging.rename(target)  # replaces only the empty directory we reserved
             staging = None
             claimed = None
