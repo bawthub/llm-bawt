@@ -200,10 +200,10 @@ services:
       # the share's NFS export uses root_squash (Unraid default), so the
       # container — which runs as root — gets mapped to nobody on the server
       # and can't write to a user-owned dir. Fix once on the host:
-      #     chmod 777 /mnt/user/home/echo/llmbawt-media
+      #     chmod 777 "$LLM_BAWT_MEDIA_HOST_PATH"
       # (chmod persists on disk; the dir contents stay 755, only the parent
       # is loosened so squashed-root can mkdir blobs/. Blob files end up owned
-      # by nobody:nogroup which is fine — readable by nick for backups.)
+      # by nobody:nogroup which is fine — readable by the host owner for backups.)
       #
       # rslave propagation: the source sits under an autofs NFS mount; if the
       # host ever unmounts/remounts it, the default (rprivate) leaves the
@@ -213,13 +213,14 @@ services:
       # drops propagation flags — the real guard on echo is the fstab change
       # that removed x-systemd.idle-timeout from /mnt/user/home, so the NFS
       # mount never idle-unmounts in the first place (2026-06-12).
-      - ${LLM_BAWT_MEDIA_HOST_PATH:-/mnt/user/home/echo/llmbawt-media}:/var/lib/llm-bawt/media:rslave
+      - ${LLM_BAWT_MEDIA_HOST_PATH:-./data/media}:/var/lib/llm-bawt/media:rslave
       # TASK-1309: skill content, read-only (see CLAUDE_CODE_SKILLS_PATH).
       - ${HOME}/dev/agent-skills:/home/bridge/dev/agent-skills:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
-      - "echo.lan.zenoran.com:${ECHO_LAN_HOST_IP:-10.0.0.101}"
-      - "echo:${ECHO_LAN_HOST_IP:-10.0.0.101}"
+      # The LAN host's names and address are deployment data (.env); see .env.docker.
+      - "${LAN_HOST_NAME:-lan-host}:${LAN_HOST_IP:-host-gateway}"
+      - "${LAN_HOST_FQDN:-lan-host.lan}:${LAN_HOST_IP:-host-gateway}"
     depends_on:
       redis:
         condition: service_healthy
@@ -302,8 +303,9 @@ services:
       - LLM_BAWT_XAI_API_KEY
     extra_hosts:
       - "host.docker.internal:host-gateway"
-      - "echo.lan.zenoran.com:${ECHO_LAN_HOST_IP:-10.0.0.101}"
-      - "echo:${ECHO_LAN_HOST_IP:-10.0.0.101}"
+      # The LAN host's names and address are deployment data (.env); see .env.docker.
+      - "${LAN_HOST_NAME:-lan-host}:${LAN_HOST_IP:-host-gateway}"
+      - "${LAN_HOST_FQDN:-lan-host.lan}:${LAN_HOST_IP:-host-gateway}"
     volumes:
       - ./.logs:/app/.logs
       - ${HOME}/dev:/home/bridge/dev
@@ -386,8 +388,9 @@ services:
       - REDIS_URL=redis://redis:6379/0
     extra_hosts:
       - "host.docker.internal:host-gateway"
-      - "echo.lan.zenoran.com:${ECHO_LAN_HOST_IP:-10.0.0.101}"
-      - "echo:${ECHO_LAN_HOST_IP:-10.0.0.101}"
+      # The LAN host's names and address are deployment data (.env); see .env.docker.
+      - "${LAN_HOST_NAME:-lan-host}:${LAN_HOST_IP:-host-gateway}"
+      - "${LAN_HOST_FQDN:-lan-host.lan}:${LAN_HOST_IP:-host-gateway}"
     volumes:
       - ./.logs:/app/.logs
       - ${HOME}/dev:/home/bridge/dev
@@ -525,8 +528,9 @@ services:
       - HF_TOKEN
     extra_hosts:
       - "host.docker.internal:host-gateway"
-      - "echo.lan.zenoran.com:${ECHO_LAN_HOST_IP:-10.0.0.101}"
-      - "echo:${ECHO_LAN_HOST_IP:-10.0.0.101}"
+      # The LAN host's names and address are deployment data (.env); see .env.docker.
+      - "${LAN_HOST_NAME:-lan-host}:${LAN_HOST_IP:-host-gateway}"
+      - "${LAN_HOST_FQDN:-lan-host.lan}:${LAN_HOST_IP:-host-gateway}"
     volumes:
       # Mirror the app service's model-related volumes so the bridge resolves
       # and downloads the same GGUF/HF artifacts.
@@ -581,8 +585,9 @@ services:
     command: ["--headless", "--no-sandbox", "--isolated", "--port", "8931", "--host", "0.0.0.0", "--allowed-hosts", "*", "--snapshot-mode", "none", "--viewport-size", "1280x720"]
     extra_hosts:
       - "host.docker.internal:host-gateway"
-      - "echo.lan.zenoran.com:${ECHO_LAN_HOST_IP:-10.0.0.101}"
-      - "echo:${ECHO_LAN_HOST_IP:-10.0.0.101}"
+      # The LAN host's names and address are deployment data (.env); see .env.docker.
+      - "${LAN_HOST_NAME:-lan-host}:${LAN_HOST_IP:-host-gateway}"
+      - "${LAN_HOST_FQDN:-lan-host.lan}:${LAN_HOST_IP:-host-gateway}"
     tmpfs:
       - /home/bridge:uid=1000,gid=1000
     restart: unless-stopped

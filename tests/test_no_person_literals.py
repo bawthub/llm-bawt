@@ -13,7 +13,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-SRC = Path(__file__).resolve().parents[1] / "src"
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
 
 # The DB holds the users; the names are listed here. Add a user's name when they are added.
 PERSON_NAMES = ("Nick",)
@@ -74,3 +75,11 @@ def test_src_has_no_person_or_deployment_infrastructure():
                 where.append(f"{file}:{line} {kind} {match!r}")
     assert where == [], "deployment-specific value in src/; read it from settings/data instead"
     assert list(unused) == [], "ALLOWED entries match nothing; delete them"
+
+
+def test_compose_files_hold_no_deployment_hosts():
+    # TASK-2030: shipped compose files take LAN names/addresses from .env.
+    where = [f"{p.name}:{line} {kind} {match!r}"
+             for p in sorted(ROOT.glob("docker-compose*.yml"))
+             for _, line, kind, match in _hits(p.name, p.read_text(encoding="utf-8"))]
+    assert where == [], "deployment-specific value in a compose file; interpolate it from .env"

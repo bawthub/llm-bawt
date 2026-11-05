@@ -105,7 +105,7 @@ services:
       # NOT GPU — no GPU needed for a functional tenant.
       - LOCAL_MODEL_EMBED_URL=${LOCAL_MODEL_EMBED_URL:-http://local-model-bridge:8684}
       # Storage stays LOCAL: fs backend on the app-storage named volume. Do NOT
-      # point LLM_BAWT_STORAGE_BACKEND=s3 at echo's Garage (10.0.2.38) — that is
+      # point LLM_BAWT_STORAGE_BACKEND=s3 at the operator's shared Garage — that is
       # a cross-tenant data leak. s3 is only valid against a tenant-OWNED store.
       - LLM_BAWT_STORAGE_BACKEND=${LLM_BAWT_STORAGE_BACKEND:-fs}
       # TASK-1472: the BawtHub service bearer is derived from the master key,

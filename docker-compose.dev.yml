@@ -10,7 +10,7 @@ services:
     # Use extra_hosts for local hostnames (DNS: Docker default handles external resolution)
     extra_hosts:
       - "host.docker.internal:host-gateway"
-      - "postgres.home:10.0.2.32"
+      - "postgres.home:${POSTGRES_HOST_IP:-host-gateway}"
     
     volumes:
       # Mount source code for live development
@@ -26,7 +26,7 @@ services:
       - ${LLM_BAWT_MODEL_CACHE_DIR:-${HOME}/.cache/llm-bawt/models}:/root/.cache/llm-bawt/models
       - ${HF_HOME:-${HOME}/.cache/huggingface}:/root/.cache/huggingface
       # MediaStore blobs (TASK-223) — mirrors base compose so dev mode has it too.
-      - ${LLM_BAWT_MEDIA_HOST_PATH:-/mnt/user/home/echo/llmbawt-media}:/var/lib/llm-bawt/media
+      - ${LLM_BAWT_MEDIA_HOST_PATH:-./data/media}:/var/lib/llm-bawt/media
 
     # Restart on reboot and on failure
     restart: unless-stopped
