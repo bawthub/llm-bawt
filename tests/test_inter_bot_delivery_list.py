@@ -69,6 +69,15 @@ def test_compact_row_names_a_user_author_only():
     assert user["author"] == "nick"
 
 
+def test_full_row_carries_text_only_for_a_users_queued_chat_message():
+    chat = {"author_entity_type": "user", "author_entity_id": "u",
+            "metadata_json": {"ordinary_chat": {"user": "u"}}, "message": "hi there"}
+    assert _record(**chat).to_api()["user_text"] == "hi there"
+    assert _record(**chat, status="DELIVERED").to_api()["user_text"] is None
+    assert _record(**{**chat, "metadata_json": {}}).to_api()["user_text"] is None
+    assert _record().to_api()["user_text"] is None  # bot-to-bot traffic
+
+
 # --- filter -------------------------------------------------------------------
 
 def test_parse_statuses_accepts_single_comma_and_iterable():

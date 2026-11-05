@@ -220,5 +220,13 @@ class DeliveryRecord:
             "steer_uncertain": _steer_uncertain(self),
             "revision": self.revision,
             "duplicate": duplicate,
+            # TASK-1822: a user's own held chat message isn't in history until it
+            # dispatches, so a reloaded client rebuilds its row from this text.
+            "user_text": self.message if self.is_user_chat_queued else None,
         }
+
+    @property
+    def is_user_chat_queued(self) -> bool:
+        return (self.status == "QUEUED" and self.author_entity_type == "user"
+                and bool(self.metadata.get("ordinary_chat")))
 
