@@ -330,7 +330,7 @@ def test_local_registered_with_keyless_default(monkeypatch):
     monkeypatch.delenv("LOCAL_ANTHROPIC_API_KEY", raising=False)
     adapter = lookup("local")
     assert isinstance(adapter, LocalAdapter)
-    assert LocalAdapter._base_url() == "http://10.0.0.246:11434"
+    assert LocalAdapter._base_url() == "http://localhost:11434"
     # A missing key must NOT raise — local servers don't validate it.
     assert adapter._api_key() == PLACEHOLDER_KEY
     monkeypatch.setenv("LOCAL_ANTHROPIC_API_KEY", "real")

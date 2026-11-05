@@ -6,7 +6,7 @@ Claude Agent SDK exactly like Z.AI or Moonshot do: nothing to translate, the
 shared passthrough in :class:`~.anthropic_passthrough.AnthropicPassthroughAdapter`
 does the work. This module only supplies the endpoint and (non-)credentials.
 
-Default upstream is Ollama on Taurus (RTX 5090); override with
+Default upstream is Ollama on localhost; override with
 ``LOCAL_ANTHROPIC_BASE_URL`` to point at a different host or at llama-server.
 
 Auth: local servers ignore the key, but the Anthropic wire contract still
@@ -35,7 +35,7 @@ class LocalAdapter(AnthropicPassthroughAdapter):
 
     name: ClassVar[str] = "local"
     LABEL: ClassVar[str] = "Local"
-    DEFAULT_BASE_URL: ClassVar[str] = "http://10.0.0.246:11434"
+    DEFAULT_BASE_URL: ClassVar[str] = "http://localhost:11434"
     BASE_URL_ENV: ClassVar[str] = "LOCAL_ANTHROPIC_BASE_URL"
     API_KEY_ENVS: ClassVar[tuple[str, ...]] = ("LOCAL_ANTHROPIC_API_KEY",)
     SUPPORTS_TOOL_DEFERRAL: ClassVar[bool] = False

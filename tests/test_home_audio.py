@@ -15,6 +15,17 @@ from llm_bawt.integrations.home_audio_store import HomeAudioStore
 from llm_bawt.integrations.home_audio_worker import HomeAudioWorker
 from tests.sqlite_support import fast_sqlite_engine
 
+_SETTINGS = HomeAudioSettings(
+    tts_url="http://10.0.0.101/api",
+    media_base_url="http://10.0.0.101:8642",
+    targets=(
+        "media_player.kitchen_display", "media_player.bedroom_display",
+        "media_player.sunroom_display", "media_player.office_speaker",
+        "media_player.bathroom_speaker", "media_player.chromecastaudio2533",
+        "media_player.all",
+    ),
+)
+
 
 @pytest.fixture(autouse=True)
 def no_ha_record(monkeypatch):
@@ -105,7 +116,7 @@ def test_wav_validation():
 
 def client(http):
     return HomeAudioClient(SimpleNamespace(HA_NATIVE_MCP_URL="http://ha/api/mcp", HA_NATIVE_MCP_TOKEN="test"),
-                           HomeAudioSettings(), http)
+                           _SETTINGS, http)
 
 
 @pytest.mark.anyio
@@ -228,7 +239,7 @@ async def test_complete_worker_path_stores_renders_and_plays_once(store, monkeyp
     claimed = store.claim("owner")
     fake_media = SimpleNamespace(upload=Mock(return_value=SimpleNamespace(id="asset")))
     monkeypatch.setattr(media, "get_media_store", lambda: fake_media)
-    monkeypatch.setattr(HomeAudioSettings, "load", lambda _: HomeAudioSettings())
+    monkeypatch.setattr(HomeAudioSettings, "load", lambda _: _SETTINGS)
     monkeypatch.setattr(HomeAudioClient, "wait_idle", AsyncMock())
     monkeypatch.setattr(HomeAudioClient, "render", AsyncMock(return_value=wav()))
     play = AsyncMock()
@@ -271,7 +282,7 @@ async def test_second_announcement_cannot_replace_while_first_is_playing(store, 
     second = store.enqueue(payload("second"), "second")
     fake_media = SimpleNamespace(upload=Mock(return_value=SimpleNamespace(id="shared-slot")))
     monkeypatch.setattr(media, "get_media_store", lambda: fake_media)
-    monkeypatch.setattr(HomeAudioSettings, "load", lambda _: HomeAudioSettings())
+    monkeypatch.setattr(HomeAudioSettings, "load", lambda _: _SETTINGS)
     monkeypatch.setattr(HomeAudioClient, "wait_idle", AsyncMock())
     monkeypatch.setattr(HomeAudioClient, "render", AsyncMock(return_value=wav()))
     monkeypatch.setattr(HomeAudioClient, "play", AsyncMock())
@@ -326,6 +337,6 @@ async def test_enqueue_requires_explicit_target_and_exactly_one_input(monkeypatc
         await tools.home_audio_enqueue("media_player.kitchen_display", "loopy", "key", text="hi", asset_id="x")
     with pytest.raises(ValueError, match="blank"):
         await tools.home_audio_enqueue("media_player.kitchen_display", "loopy", "key", text=" ")
-    monkeypatch.setattr(HomeAudioSettings, "load", lambda _: HomeAudioSettings())
+    monkeypatch.setattr(HomeAudioSettings, "load", lambda _: _SETTINGS)
     with pytest.raises(ValueError, match="not allowed"):
         await tools.home_audio_enqueue("media_player.unrelated", "loopy", "key", text="hi")

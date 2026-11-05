@@ -20,19 +20,17 @@ from llm_bawt.runtime_settings import RuntimeSettingsStore
 
 @dataclass(frozen=True)
 class HomeAudioSettings:
-    tts_url: str = "http://10.0.0.101/api"
-    media_base_url: str = "http://10.0.0.101:8642"
-    # Explicitly scoped Google devices, not every HA media player/receiver.
-    targets: tuple[str, ...] = (
-        "media_player.kitchen_display", "media_player.bedroom_display",
-        "media_player.sunroom_display", "media_player.office_speaker",
-        "media_player.bathroom_speaker", "media_player.chromecastaudio2533",
-        "media_player.all",
-    )
+    # Deployment data: the global ``home_audio`` runtime setting supplies all
+    # three. Targets are an explicit allowlist, not every HA media player.
+    tts_url: str = ""
+    media_base_url: str = ""
+    targets: tuple[str, ...] = ()
 
     @classmethod
     def load(cls, config):
-        raw = RuntimeSettingsStore(config).get_scope_settings("global", "*").get("home_audio", {})
+        raw = RuntimeSettingsStore(config).get_scope_settings("global", "*").get("home_audio")
+        if raw is None:
+            raise ValueError("home audio is not configured: set the global home_audio runtime setting")
         if not isinstance(raw, dict):
             raise ValueError("home_audio runtime setting must be an object")
         result = cls(**raw)

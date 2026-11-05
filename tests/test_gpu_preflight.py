@@ -27,7 +27,8 @@ def test_voice_status_reuses_db_speech_address_without_auth(monkeypatch):
 
         def get_scope_settings(self, scope, scope_id):
             assert (scope, scope_id) == ("global", "*")
-            return {"home_audio": {"tts_url": "http://voice.example/custom/api/"}}
+            return {"home_audio": {"tts_url": "http://voice.example/custom/api/",
+                                   "media_base_url": "http://media.example", "targets": ["media_player.test"]}}
 
     monkeypatch.setattr("llm_bawt.integrations.home_audio.RuntimeSettingsStore", SettingsStore)
 

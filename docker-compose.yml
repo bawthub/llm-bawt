@@ -281,7 +281,7 @@ services:
       # Local inference (Ollama / llama-server on the LAN) — native Anthropic
       # Messages passthrough. Powers bots whose model_id is namespaced
       # "local/<ollama-model>" (e.g. local/qwen3.8:27b). Key is optional.
-      - LOCAL_ANTHROPIC_BASE_URL=${LOCAL_ANTHROPIC_BASE_URL:-http://10.0.0.246:11434}
+      - LOCAL_ANTHROPIC_BASE_URL=${LOCAL_ANTHROPIC_BASE_URL:-http://localhost:11434}
       - LOCAL_ANTHROPIC_API_KEY=${LOCAL_ANTHROPIC_API_KEY:-}
       - ENABLE_TOOL_SEARCH=true
       - CLAUDE_CODE_SKILLS_PATH=/home/bridge/dev/agent-skills
