@@ -7,6 +7,7 @@ from llm_bawt.service import wakeup_staleness as ws
 
 def snap(**overrides):
     base = {"creator_bot_id": "caid", "task_id": "TASK-9", "bot_id": "caid",
+            "task_owner_bot_id": "caid",
             "timing": {"kind": "once", "once_at": "2026-11-05T22:00:00+00:00"}}
     return {**base, **overrides}
 
@@ -39,7 +40,7 @@ def test_stale_task_records_its_reason(monkeypatch, task, expected):
 @pytest.mark.parametrize("task", [
     {"shortId": "TASK-9", "status": "IN_PROGRESS", "agentBotId": "caid"},
     {"shortId": "TASK-9", "status": "QUEUED", "agentBotId": "caid"},
-    {"shortId": "TASK-9", "status": "BLOCKED", "agentBotId": None},
+    {"shortId": "TASK-9", "status": "BLOCKED", "agentBotId": "caid"},
     None,  # BawtHub unreachable: fail open
 ])
 def test_live_or_unknown_task_fires(monkeypatch, task):
@@ -54,3 +55,23 @@ def test_fetch_failure_fails_open(monkeypatch):
 
     monkeypatch.setattr(ws.httpx, "Client", Broken)
     assert ws.fetch_task("TASK-9") is None
+
+
+def test_contributor_wakeup_on_someone_elses_task_fires(monkeypatch):
+    """An integrator's 'check the gate' on caid's task is not a hand-off."""
+    monkeypatch.setattr(ws, "fetch_task", lambda ref: {
+        "shortId": "TASK-9", "status": "IN_PROGRESS", "agentBotId": "caid"})
+    gavel = snap(creator_bot_id="gavel", bot_id="gavel", task_owner_bot_id="caid")
+    assert ws.wakeup_stale_reason(gavel, "scheduled") is None
+
+
+def test_reowned_owner_wakeup_skips(monkeypatch):
+    monkeypatch.setattr(ws, "fetch_task", lambda ref: {
+        "shortId": "TASK-9", "status": "IN_PROGRESS", "agentBotId": None})
+    assert ws.wakeup_stale_reason(snap(), "scheduled") == "Skipped: TASK-9 is now owned by nobody, not caid"
+
+
+def test_wakeup_without_a_recorded_owner_never_skips_on_ownership(monkeypatch):
+    monkeypatch.setattr(ws, "fetch_task", lambda ref: {
+        "shortId": "TASK-9", "status": "IN_PROGRESS", "agentBotId": "nova"})
+    assert ws.wakeup_stale_reason(snap(task_owner_bot_id=None), "scheduled") is None

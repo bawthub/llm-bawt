@@ -1,9 +1,10 @@
 """Skip one-time task-tagged bot wake-ups whose task has moved on (TASK-2056).
 
 A bot's wake-up ("check on TASK-N later") is stale when, by the time it fires,
-the task is finished, in REVIEW, archived, or owned by a bot other than the
-wake-up's target. Recurring schedules and user-created schedules are exempt:
-only one-time wake-ups with a proven creator bot and a task are checked.
+the task is finished, in REVIEW, archived, or was handed off: the target
+owned it when the wake-up was made and no longer does. Recurring and
+user-created schedules are exempt: only one-time wake-ups with a proven
+creator bot and a task are checked.
 
 Task state lives in BawtHub, so it is read outside the outbox locks. Any
 lookup failure fails open: the wake-up fires as before.
@@ -43,10 +44,14 @@ def stale_reason(snapshot: dict, task: dict | None) -> str | None:
         return f"Skipped: {ref} is archived"
     if status in _DONE:
         return f"Skipped: {ref} is {_DONE[status]}"
+    # Only a hand-off skips: the target owned the task when the wake-up was
+    # made and no longer does. A contributor's wake-up (reviewer, integrator)
+    # on someone else's task keeps firing.
+    then = str(snapshot.get("task_owner_bot_id") or "").strip().lower()
     owner = str(task.get("agentBotId") or "").strip().lower()
     target = str(snapshot.get("bot_id") or "").strip().lower()
-    if owner and target and owner != target:
-        return f"Skipped: {ref} is now owned by {owner}, not {target}"
+    if then and then == target and owner != target:
+        return f"Skipped: {ref} is now owned by {owner or 'nobody'}, not {target}"
     return None
 
 

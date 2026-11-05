@@ -42,6 +42,8 @@ class ScheduleInput(BaseModel):
     description: str = Field(default="", max_length=2000)
     prompt: str = Field(min_length=1, max_length=100000)
     task_id: str | None = Field(default=None, max_length=128, pattern=r"^TASK-\d+$")
+    # The task's owner when the wake-up was made (TASK-2056 stale check).
+    task_owner_bot_id: str | None = Field(default=None, max_length=128)
     bot_id: str | None = Field(default=None, max_length=128)
     target_mode: Literal["specific", "auto"] = "specific"
     candidate_bot_ids: list[str] | None = None

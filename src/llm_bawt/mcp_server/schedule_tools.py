@@ -90,6 +90,19 @@ def current_turn_task() -> str | None:
     return None
 
 
+async def task_owner(task: str) -> str | None:
+    """The task's current owner bot, recorded on the wake-up (TASK-2056)."""
+    try:
+        from .task_api import api_get
+
+        found = await api_get(f"/tasks/{quote(task, safe='')}")
+    except Exception:
+        logger.debug("No owner lookup for %s", task, exc_info=True)
+        return None
+    owner = str((found or {}).get("agentBotId") or "").strip().lower() if isinstance(found, dict) else ""
+    return owner or None
+
+
 def _target_refusal(target: str, caller_bot: str) -> str | None:
     if target == caller_bot:
         return None
@@ -250,7 +263,7 @@ async def schedule_wakeup(
     name = f"{WAKEUP_PREFIX}{bot}:{nonce}:{(label or task or 'wake-up').strip()}"[:120]
     body = {
         "name": name, "description": f"task_id={task}" if task else "",
-        "task_id": task,
+        "task_id": task, "task_owner_bot_id": await task_owner(task) if task else None,
         "prompt": f"{header}\n\n{message.strip()}", "bot_id": target, "target_mode": "specific",
         "timing": timing, "clear_context": True, "augment_memory": False, "extract_memory": False,
         # A late wake-up beats none: missed runs fire on recovery for up to

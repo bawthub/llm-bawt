@@ -78,6 +78,12 @@ def rig(monkeypatch):
     monkeypatch.setattr(schedule_tools, "_now", lambda: NOW)
     state.turn_task = None
     monkeypatch.setattr(schedule_tools, "current_turn_task", lambda: state.turn_task)
+    state.owners = {}
+
+    async def owner(task):
+        return state.owners.get(task)
+
+    monkeypatch.setattr(schedule_tools, "task_owner", owner)
     return state
 
 
@@ -241,3 +247,13 @@ async def test_no_current_turn_task_leaves_the_wakeup_untagged(rig):
 
 def test_current_turn_task_fails_closed_without_a_turn():
     assert schedule_tools.current_turn_task() is None
+
+
+@pytest.mark.anyio
+async def test_wakeup_records_the_task_owner_at_creation(rig):
+    rig.owners = {"TASK-5": "caid"}
+    await schedule_tools.schedule_wakeup(message="check gate", in_minutes=10, task_id="TASK-5")
+    body = [c for c in rig.calls if c[0] == "POST"][-1][3]
+    assert body["task_owner_bot_id"] == "caid"
+    await schedule_tools.schedule_wakeup(message="ping", in_minutes=11)
+    assert [c for c in rig.calls if c[0] == "POST"][-1][3]["task_owner_bot_id"] is None
