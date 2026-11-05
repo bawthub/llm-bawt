@@ -1,7 +1,7 @@
 """TASK-284 step 13: backfill summary provenance (``source_session_ids``).
 
-New summaries stamp provenance at insert time (``summarize_session`` /
-``save_self_recap`` via ``resolve_source_session_ids``), but ~3.2k historical
+New summaries stamp provenance at insert time (``summarize_session``
+via ``resolve_source_session_ids``), but ~3.2k historical
 ``role='summary'`` rows predate that. Worse, the step-17 NULL-session backfill
 had no role filter, so it blanket-stamped summary rows onto ``legacy-<bot>``
 threads regardless of where their SOURCE messages actually live.

@@ -41,7 +41,7 @@ uv run python -m llm_bawt.mcp_server --transport http --host 0.0.0.0 --port 8001
 | `steps_*` | `steps_add`, `steps_update`, `steps_delete` |
 | `projects_*` | `projects_list`, `projects_get`, `projects_create`, `projects_update`, `projects_delete`, `projects_get_context` |
 | `activity_*` | `activity_get` |
-| `self_*` | `self_recap`, `self_tail`, `self_fwd`, `self_system_prompt` |
+| `self_*` | `self_tail`, `self_fwd`, `self_system_prompt`, `self_model` |
 | `profile` | unified user/bot profile tool |
 
 ## Notes on inter-bot tools

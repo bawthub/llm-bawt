@@ -20,7 +20,7 @@ DEFAULT_RECALL_SYSTEM_PROMPT = """Select evidence relevant to the research quest
 def resolve_recall_system_prompt(bot_id: str) -> str:
     """Return the live recall instructions for ``bot_id``.
 
-    Mirrors the registry's own contract (and ``self_recap.system``): a bot-scoped
+    Mirrors the registry's own contract: a bot-scoped
     override wins, then the global row, then the seed. A blank body or a
     registry error falls back to the seed, so a store hiccup never sends an
     empty system prompt, which would drop the untrusted-data guard.

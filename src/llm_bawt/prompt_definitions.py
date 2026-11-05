@@ -82,7 +82,6 @@ from .prompt_default_loaders import (
     load_refine_default_instruction,
     load_refine_system_guard,
     load_refine_user_frame,
-    load_self_recap_system,
     load_setup_first_agent_prompt,
     load_working_memory_notice,
     load_working_memory_scheduled_note,
@@ -533,23 +532,6 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
         category="agent_execution",
         required_vars=("origin", "task_section"),
         loader=load_agents_docs,
-    ),
-    "self_recap.system": PromptDefinition(
-        key="self_recap.system",
-        title="Self-Recap Handoff Analyst",
-        category="agent_execution",
-        required_vars=(),
-        loader=load_self_recap_system,
-        metadata={
-            "notes": (
-                "System prompt for the self_recap MCP tool's HANDOFF ANALYST. "
-                "Sent to Grok with the raw conversation transcript to produce a "
-                "cold-start continuation briefing (itemized TOPIC LOG + pending "
-                "work). No placeholders — the transcript is passed as a separate "
-                "user message, so the body is used verbatim (never .format()-ed). "
-                "Bot-scoped overrides supported via scope_type=bot."
-            ),
-        },
     ),
     "recall.synthesis.system": PromptDefinition(
         key="recall.synthesis.system",

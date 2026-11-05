@@ -114,7 +114,6 @@ TOOL_SUMMARIES: dict[str, str] = {
     "agent_context_health": "Read context headroom, estimates, and supported reset/compaction capabilities for a bot.",
     "agent_context_reset": "Reset an idle provider session, preserving durable history. session_policy: reset_retain_history|reset_without_history; inspect capabilities first.",
     "agent_context_compact": "Queue one Claude /compact turn for idle execution; use a stable idempotency_key and your sender_bot_id.",
-    "self_recap": "Generate a continuation briefing from your bot_id's history using inference. Window is hours+days*24; store=true writes a summary.",
     "self_tail": "Read your bot_id's last count raw conversation bubbles for context restoration. Absorb them; do not reprint the transcript unless asked.",
     "self_fwd": "Forward YOUR recent bubbles to target_bot_id; sender_bot_id must be your explicit slug. Async by default; force never authorizes concurrency.",
     "self_system_prompt": "Read your own durable persona (action=view) or fully replace it (edit, new_prompt). Use your bot_id; lands next turn, pinned sessions at next boundary; not harness wrapper.",

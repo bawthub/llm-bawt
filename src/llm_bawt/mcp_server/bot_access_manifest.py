@@ -11,7 +11,7 @@ BOT_TARGET_TOOLS = frozenset({
     "messages_clear", "messages_remove_last_partial", "facts_extract", "context_get_recent",
     "system_stats", "system_run_maintenance", "sessions_get", "sessions_close",
     "sessions_get_active", "sessions_get_or_create_active", "sessions_rotate",
-    "self_tail", "self_recap", "self_system_prompt", "self_model", "agent_context_health",
+    "self_tail", "self_system_prompt", "self_model", "agent_context_health",
 })
 AGGREGATE_TOOLS = frozenset({
     "memory_list_sources", "memory_search_all", "messages_search_all", "sessions_list",

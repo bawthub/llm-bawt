@@ -121,12 +121,6 @@ def load_agents_docs() -> str:
     return AGENTS_DOCS_PROMPT
 
 
-def load_self_recap_system() -> str:
-    from .mcp_server.recap_prompt import RECAP_SYSTEM_PROMPT
-
-    return RECAP_SYSTEM_PROMPT
-
-
 def load_recall_synthesis_system() -> str:
     from .recall.prompt import DEFAULT_RECALL_SYSTEM_PROMPT
 

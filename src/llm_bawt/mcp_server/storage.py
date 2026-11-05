@@ -609,7 +609,7 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
         When ``raw=True`` the summary-aware path is bypassed and the messages
         table is queried directly: every real bubble is returned regardless of
         its ``summarized`` flag, and ``role='summary'`` husks are excluded.
-        Callers like self_recap / self_tail want the actual transcript the user
+        Callers like self_tail / self_fwd want the actual transcript the user
         sees in the app, not a summary of a summary.
 
         TASK-284: when ``session_id`` is given, the read is scoped to that one
@@ -697,9 +697,9 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
         """Direct-table read of real message bubbles.
 
         Bypasses the summary-aware manager entirely. Returns every row whose
-        role is NOT ``summary`` (so prior recaps/session summaries are excluded)
+        role is NOT ``summary`` (so session summaries are excluded)
         and — by default — ignores the ``summarized`` flag (so bubbles already
-        rolled into a summary are still returned; self_recap/self_tail want the
+        rolled into a summary are still returned; self_tail/self_fwd want the
         literal transcript). Ordered oldest-first; ``limit`` keeps the most
         recent N.
 
@@ -837,77 +837,6 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
             raise ValueError("History mutation requires user_id")
         manager = self.get_short_term_manager(bot_id, provision_schema=True)
         return manager.remove_last_message_if_partial(role, user_id=user_id)
-
-    async def store_recap_summary(
-        self,
-        bot_id: str,
-        content: str,
-        window_start: float,
-        window_end: float,
-        message_ids: list[str],
-        model: str,
-    ) -> str | None:
-        """Persist a self-recap as a ``role='summary'`` row.
-
-        Unlike the compaction summarizer (``HistorySummarizer.summarize_session``)
-        this deliberately does NOT mark the source messages ``summarized=TRUE``.
-        A recap is a handoff artifact layered on top of history, not a
-        compaction that should evict raw messages from the live context window.
-        Mirrors the proven INSERT in ``summarization.py`` (json.dumps into the
-        ``summary_metadata`` JSON column, no ``::jsonb`` cast needed).
-        """
-        import json
-
-        from sqlalchemy import text
-
-        from llm_bawt.memory.summarization import resolve_source_session_ids
-
-        backend = self._get_backend(bot_id, provision_schema=True)
-        summary_id = str(uuid.uuid4())
-        metadata = {
-            "summary_type": "self_recap",
-            "summarization_method": "self-recap",
-            "model": model,
-            "session_start": window_start,
-            "session_end": window_end,
-            "message_ids": message_ids,
-            "message_count": len(message_ids),
-            "created_at": time.time(),
-        }
-        try:
-            with backend.engine.connect() as conn:
-                # TASK-284 step 13: stamp summary provenance (source threads).
-                source_session_ids = resolve_source_session_ids(
-                    conn, backend._messages_table_name, message_ids
-                )
-                metadata["source_session_ids"] = source_session_ids
-                conn.execute(
-                    text(
-                        f"""
-                        INSERT INTO {backend._messages_table_name}
-                        (id, role, content, timestamp, summary_metadata, session_id, created_at)
-                        VALUES (:id, 'summary', :content, :ts, :meta, :session_id, CURRENT_TIMESTAMP)
-                        """
-                    ),
-                    {
-                        "id": summary_id,
-                        "session_id": source_session_ids[0] if len(source_session_ids) == 1 else None,
-                        "content": content,
-                        "ts": window_end,
-                        "meta": json.dumps(metadata),
-                    },
-                )
-                conn.commit()
-            logger.info(
-                "Stored self-recap summary %s for bot=%s (%d source messages)",
-                summary_id[:8], bot_id, len(message_ids),
-            )
-            return summary_id
-        except Exception as e:
-            logger.error("Failed to store recap summary: %s", e)
-            return None
-
-
 
 # Singleton instance
 _storage: MemoryStorage | None = None
