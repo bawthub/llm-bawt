@@ -120,10 +120,14 @@ def list_upstream_models(
     provider_key = (provider or "").strip().lower()
     if not provider_key:
         raise HTTPException(status_code=400, detail="provider is required")
-    return {
-        "provider": provider_key,
-        "models": _upstream_lookup(provider_key, get_service().config),
-    }
+    from ..model_discovery import empty_hint
+
+    models = _upstream_lookup(provider_key, get_service().config)
+    body: dict = {"provider": provider_key, "models": models}
+    hint = empty_hint(provider_key) if not models else None
+    if hint:
+        body["empty_hint"] = hint
+    return body
 
 
 @router.get("/v1/models/current", tags=["Models"])

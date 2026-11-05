@@ -25,6 +25,7 @@ from ...task_turn_context import (
 from .. import bridge_gate
 from ..dependencies import get_service
 from ..providers.base import AUTH_API_KEY, AUTH_CLI_OAUTH, AUTH_DEVICE_OAUTH
+from ..providers.ollama import AUTH_ENDPOINT
 from ..providers.github import GitHubAdapter, GitHubConfigError, GitHubNotConnectedError, parse_repository
 from ..providers.registry import all_adapters, get_adapter
 
@@ -267,6 +268,57 @@ async def connect_api_key(provider_id: str, request: Request, response: Response
     }
 
 
+# --- Server-URL connect (Ollama, any future AUTH_ENDPOINT adapter) ----------
+class EndpointRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    url: str
+    api_key: SecretStr | None = None
+
+
+@router.post("/v1/providers/{provider_id}/connect/endpoint")
+async def connect_endpoint(provider_id: str, request: Request, response: Response):
+    """Probe and save a self-hosted server URL (plus an optional key).
+
+    Nothing is saved unless the server answers. The model catalog is reloaded
+    so cached clients pick up the new URL on their next request.
+    """
+    adapter = _adapter_or_404(provider_id)
+    if not adapter.supports(AUTH_ENDPOINT):
+        raise HTTPException(status_code=400, detail=f"{provider_id} is not configured by server URL")
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        body = EndpointRequest.model_validate(await request.json())
+    except (ValueError, TypeError):
+        raise HTTPException(
+            status_code=400, detail="Invalid server settings", headers={"Cache-Control": "no-store"},
+        ) from None
+    key = body.api_key.get_secret_value() if body.api_key else None
+    try:
+        result = await run_in_threadpool(adapter.connect_endpoint, body.url, key)
+    except Exception:  # noqa: BLE001 — storage errors may echo the key
+        logger.warning("endpoint connect failed for %s", provider_id)
+        raise HTTPException(status_code=502, detail="Could not save the server settings")
+    if not result.ok:
+        raise HTTPException(status_code=400, detail=result.detail or "server unreachable")
+    await run_in_threadpool(_reload_catalog_after_endpoint_change)
+    record = adapter.store.load(provider_id)
+    return {
+        "status": "connected",
+        "account": result.account,
+        "connection": record.public() if record else None,
+    }
+
+
+def _reload_catalog_after_endpoint_change() -> None:
+    from .models import reload_models_catalog  # noqa: PLC0415 — route-module cycle
+
+    try:
+        reload_models_catalog()
+    except Exception as exc:  # noqa: BLE001 — the URL is saved; a later reload picks it up
+        logger.warning("model catalog reload after endpoint change failed: %s", exc)
+
+
 # --- OpenRouter key broker (TASK-822) ----------------------------------------
 @router.get("/v1/providers/openrouter/token")
 async def openrouter_api_key(request: Request):
@@ -291,6 +343,8 @@ async def openrouter_api_key(request: Request):
 async def disconnect(provider_id: str):
     adapter = _adapter_or_404(provider_id)
     result = await run_in_threadpool(adapter.disconnect)
+    if adapter.supports(AUTH_ENDPOINT):
+        await run_in_threadpool(_reload_catalog_after_endpoint_change)
     return result if isinstance(result, dict) else {"disconnected": result}
 
 

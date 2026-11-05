@@ -594,6 +594,91 @@ class OpenRouterDiscoveryProvider(ModelDiscoveryProvider):
         return _normalize(rows)
 
 
+class OllamaDiscoveryProvider(ModelDiscoveryProvider):
+    """Models installed on the configured Ollama server (TASK-2047).
+
+    ``/api/tags`` reports each model's context length and capabilities on
+    current servers; ``/api/show`` fills the context length only where tags
+    lacks it. Embedding-only models are left out because they cannot chat.
+    """
+
+    aliases = ("ollama",)
+    empty_hint = "No models are installed on this Ollama server. Run `ollama pull <model>` on the server, then check again."
+    _show_limit = 40
+
+    def __init__(self, config: Config | None = None):
+        self._config = config
+
+    def fetch(self) -> list[dict[str, Any]]:
+        from .providers.ollama import resolve_api_key, server_url
+
+        if self._config is None:
+            raise ModelDiscoveryError("Ollama discovery needs the service config", status_code=500)
+        root = server_url(self._config)
+        key = resolve_api_key(self._config)
+        headers = {"Authorization": f"Bearer {key}"} if key else {}
+        try:
+            response = httpx.get(f"{root}/api/tags", headers=headers, timeout=10.0)
+            response.raise_for_status()
+            payload = response.json()
+        except httpx.HTTPStatusError as exc:
+            raise ModelDiscoveryError(
+                f"Ollama at {root} returned HTTP {exc.response.status_code} listing models"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise ModelDiscoveryError(
+                f"Couldn't reach Ollama at {root} ({type(exc).__name__}). Check the server URL in Provider accounts."
+            ) from exc
+        except ValueError as exc:
+            raise ModelDiscoveryError(f"Ollama at {root} returned non-JSON data") from exc
+        models = payload.get("models") if isinstance(payload, dict) else None
+        if not isinstance(models, list):
+            raise ModelDiscoveryError(f"Ollama at {root} returned an invalid model list")
+
+        rows: list[dict[str, Any]] = []
+        shows = 0
+        for item in models:
+            if not isinstance(item, dict) or not item.get("name"):
+                continue
+            capabilities = item.get("capabilities")
+            if isinstance(capabilities, list) and capabilities and "completion" not in capabilities:
+                continue
+            details = item.get("details") if isinstance(item.get("details"), dict) else {}
+            context = details.get("context_length")
+            if not isinstance(context, int) and shows < self._show_limit:
+                shows += 1
+                context = self._show_context(root, headers, str(item["name"]))
+            facts = [str(v) for v in (details.get("parameter_size"), details.get("quantization_level")) if v]
+            rows.append({
+                "id": item["name"],
+                "description": " · ".join(facts),
+                "context_length": context if isinstance(context, int) else None,
+            })
+        return _normalize(rows)
+
+    @staticmethod
+    def _show_context(root: str, headers: dict[str, str], name: str) -> int | None:
+        try:
+            response = httpx.post(f"{root}/api/show", json={"model": name}, headers=headers, timeout=5.0)
+            response.raise_for_status()
+            info = response.json().get("model_info") or {}
+        except (httpx.HTTPError, ValueError, AttributeError):
+            return None
+        for key, value in info.items():
+            if key.endswith(".context_length") and isinstance(value, int):
+                return value
+        return None
+
+
+def empty_hint(provider: str) -> str | None:
+    """Provider-specific guidance for an empty catalog, if it has any."""
+    provider_key = provider.strip().lower()
+    for adapter in _providers():
+        if provider_key in adapter.aliases:
+            return getattr(adapter, "empty_hint", None)
+    return None
+
+
 def _providers(config: Config | None = None) -> tuple[ModelDiscoveryProvider, ...]:
     # Imports stay lazy so the model-manager's optional provider SDKs remain off
     # the service import path until discovery is actually requested.
@@ -643,6 +728,7 @@ def _providers(config: Config | None = None) -> tuple[ModelDiscoveryProvider, ..
         ),
         KimiCodingDiscoveryProvider(config),
         OpenRouterDiscoveryProvider(),
+        OllamaDiscoveryProvider(config),
     )
 
 

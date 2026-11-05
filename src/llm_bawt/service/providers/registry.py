@@ -31,6 +31,7 @@ from .github_deploy import (
     GitHubReleaseDispatchAdapter,
 )
 from .openai_key import OpenAIKeyAdapter
+from .ollama import OllamaAdapter
 from .openrouter import OpenRouterAdapter
 from .xai import XaiAdapter
 from .xai_management import XaiManagementAdapter
@@ -52,6 +53,8 @@ _ADAPTER_CLASSES: dict[str, type[ProviderAdapter]] = {
     CodexAdapter.id: CodexAdapter,
     ChatGPTAppAdapter.id: ChatGPTAppAdapter,
     OpenRouterAdapter.id: OpenRouterAdapter,
+    # TASK-2047: self-hosted Ollama server URL (+ optional proxy key).
+    OllamaAdapter.id: OllamaAdapter,
     XaiAdapter.id: XaiAdapter,
     XaiManagementAdapter.id: XaiManagementAdapter,
     OpenAIKeyAdapter.id: OpenAIKeyAdapter,

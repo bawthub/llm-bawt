@@ -467,11 +467,13 @@ class ServiceLLMBawt(BaseLLMBawt):
             base_url = self.model_definition.get("base_url") or (
                 f"{self.config.OLLAMA_URL.rstrip('/')}/v1"
             )
+            from .providers.ollama import resolve_api_key as resolve_ollama_key
+
             client = OpenAIClient(
                 model_id,
                 config=self.config,
                 base_url=base_url,
-                api_key=self.model_definition.get("api_key") or "ollama",
+                api_key=self.model_definition.get("api_key") or resolve_ollama_key(self.config) or "ollama",
                 model_definition=self.model_definition,
             )
             load_time_ms = (time.perf_counter() - start_time) * 1000

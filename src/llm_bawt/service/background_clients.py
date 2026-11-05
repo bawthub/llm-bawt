@@ -203,10 +203,11 @@ class OllamaFactory(BackgroundClientFactory):
 
     def build(self, config: Any, model_def: dict, alias: str) -> Any:
         from ..clients.openai_client import OpenAIClient
+        from .providers.ollama import resolve_api_key
 
         base_url = model_def.get("base_url") or f"{config.OLLAMA_URL.rstrip('/')}/v1"
         return OpenAIClient(self.model_id(model_def, alias), config=config, base_url=base_url,
-                            api_key=model_def.get("api_key") or "ollama",
+                            api_key=model_def.get("api_key") or resolve_api_key(config) or "ollama",
                             model_definition=model_def)
 
 
