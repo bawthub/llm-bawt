@@ -272,6 +272,51 @@ def test_resume_after_gap_is_lossless_and_marks_catchup_as_replayed():
     assert not any(ev["_replayed"] for ev in live)
 
 
+def test_frozen_page_resume_rewinds_to_the_clients_last_received_id():
+    """TASK-2029: iOS froze the page; its open socket kept taking events."""
+
+    async def scenario():
+        redis = FakeRedis()
+        frozen = UiStreamReader(redis, "window-1", [STREAM])
+        await frozen.claim()
+        await redis.publish(5)
+        gen = frozen.events(timeout_s=60)
+        seen = await _take(gen, 5)  # the page processed these
+        await redis.publish(10)
+        unread = await _take(gen, 10)  # written to buffers the page never read
+        assert await gen.__anext__() is None
+        await gen.aclose()
+
+        client_last = seen[-1]["_cursor"]
+        live = UiStreamReader(redis, "window-1", [STREAM])
+        await live.claim({client_last[0]: client_last[1], "other": "garbage"})
+        got = await _take(live.events(timeout_s=60), 10)
+        return seen, unread, got
+
+    seen, unread, got = virtual_clock.run(scenario())
+    assert seen[-1]["_cursor"][0] == STREAM
+    assert _seqs(got) == _seqs(unread) == list(range(6, 16))
+    assert all(ev["_replayed"] for ev in got)
+
+
+def test_client_resume_never_moves_the_cursor_forward():
+    async def scenario():
+        redis = FakeRedis()
+        first = UiStreamReader(redis, "window-1", [STREAM])
+        await first.claim()
+        ids = await redis.publish(3)
+        gen = first.events(timeout_s=60)
+        await _take(gen, 1)  # cursor stored at #1 only after the next pull
+        await gen.aclose()
+
+        second = UiStreamReader(redis, "window-1", [STREAM])
+        await second.claim({STREAM: ids[-1]})  # claims more than it may skip
+        return await _take(second.events(timeout_s=60), 3)
+
+    got = virtual_clock.run(scenario())
+    assert _seqs(got)[-1] == 3 and 2 in _seqs(got)
+
+
 def test_reconnect_before_first_event_still_covers_the_gap():
     async def scenario():
         redis = FakeRedis()

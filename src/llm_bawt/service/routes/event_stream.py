@@ -33,6 +33,7 @@ async def event_stream(
     user_id: str = Query(None, description="User ID to stream"),
     consumer_id: str = Query(None, description="Consumer ID for the window's durable cursor"),
     config_only: bool = Query(False, description="Subscribe only to global configuration changes"),
+    resume: str = Query(None, description="JSON {stream: last received id} from the client (TASK-2029)"),
 ):
     """Expose agent events as SSE via the Redis subscriber.
 
@@ -65,7 +66,7 @@ async def event_stream(
         )
 
     return StreamingResponse(
-        _unified_event_stream(redis_url, bot_id, user_id, consumer_id),
+        _unified_event_stream(redis_url, bot_id, user_id, consumer_id, _parse_resume(resume)),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -75,7 +76,23 @@ async def event_stream(
     )
 
 
-async def _unified_event_stream(redis_url: str, bot_ids: list[str], user_id: str, consumer_id: str):
+def _parse_resume(raw: str | None) -> dict[str, str]:
+    """The client's last received id per stream; malformed input is ignored."""
+    if not raw or len(raw) > 16384:
+        return {}
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    return {k: v for k, v in value.items() if isinstance(k, str) and isinstance(v, str)}
+
+
+async def _unified_event_stream(
+    redis_url: str, bot_ids: list[str], user_id: str, consumer_id: str,
+    resume: dict[str, str] | None = None,
+):
     """Resumable event stream for one UI window, over one or more bots.
 
     Reads by the window's server-held cursor (``agent_bridge.ui_stream``): the
@@ -109,7 +126,7 @@ async def _unified_event_stream(redis_url: str, bot_ids: list[str], user_id: str
         # the next claim retries the migration.
         reader = sub.ui_stream(bot_ids, user_id, consumer_id, include_global=True,
                                include_system=bool(user_id))
-        await reader.claim()
+        await reader.claim(resume)
         yield _sse(
             "hello",
             {
@@ -130,6 +147,7 @@ async def _unified_event_stream(redis_url: str, bot_ids: list[str], user_id: str
         async for event_data in reader.events(timeout_s=86400):
             if event_data is not None:
                 replayed = event_data.pop("_replayed", False)
+                cursor = event_data.pop("_cursor", None)
                 if event_data.get("_type") == "system_event":
                     # Redis can replay an event after its bot became private.
                     # Re-read the committed projection off-loop and fail closed.
@@ -144,7 +162,7 @@ async def _unified_event_stream(redis_url: str, bot_ids: list[str], user_id: str
                     if receipt is None:
                         continue
                     event_data = receipt
-                yield _sse("event", {**event_data, "replayed": replayed})
+                yield _sse("event", {**event_data, "replayed": replayed, **({"cursor": cursor} if cursor else {})})
 
             now = asyncio.get_running_loop().time()
             if now - last_ping >= HEARTBEAT_INTERVAL_S:

@@ -136,7 +136,7 @@ class UiStreamReader:
         self._catchup_until: dict[str, tuple[int, int]] = {}
         self.superseded = False
 
-    async def claim(self) -> None:
+    async def claim(self, resume: dict[str, str] | None = None) -> None:
         """Take the cursor from any older connection and load the resume point.
 
         A stream with no stored cursor resumes from the window's retired
@@ -144,7 +144,14 @@ class UiStreamReader:
         last-delivered id), and otherwise starts at the current tail. The start
         point is persisted at once, so every event published after ``claim``
         returns is delivered, even across a reconnect before the first event.
+
+        ``resume`` is the client's own last *received* id per stream (TASK-2029).
+        The stored cursor advances when an event is handed to the socket, so a
+        frozen mobile page whose old connection stayed open loses everything the
+        server wrote into buffers it never read. A client resume id earlier than
+        the stored cursor rewinds this connection to it; it never moves forward.
         """
+        resume = {sk: v for sk, v in (resume or {}).items() if _valid_stream_id(v)}
         raw = await self._redis.eval(CLAIM_SCRIPT, 1, self.cursor_key, self.token, self._ttl_s)
         stored = dict(zip(raw[::2], raw[1::2])) if raw else {}
         stored.pop(_OWNER_FIELD, None)
@@ -154,7 +161,11 @@ class UiStreamReader:
             tail = await self._tail(sk)
             self._catchup_until[sk] = stream_id_key(tail)
             if sk in stored:
-                self._cursors[sk] = stored[sk]
+                cursor = stored[sk]
+                client = resume.get(sk)
+                if client is not None and stream_id_key(client) < stream_id_key(cursor):
+                    cursor = client
+                self._cursors[sk] = cursor
                 continue
             legacy = await self._legacy_resume_point(sk)
             if legacy is not None:
@@ -262,6 +273,7 @@ class UiStreamReader:
                     data = {"raw": payload_str}
                 catchup = self._catchup_until.get(stream_name)
                 data["_replayed"] = catchup is not None and stream_id_key(msg_id) <= catchup
+                data["_cursor"] = [stream_name, msg_id]
                 yield data
                 # Persist only after the event was handed off, like the old XACK.
                 self._cursors[stream_name] = msg_id
@@ -285,6 +297,14 @@ class UiStreamReader:
         if not self.superseded:
             logger.info("UI stream %s superseded by a newer connection", self.cursor_key)
         self.superseded = True
+
+
+def _valid_stream_id(value: object) -> bool:
+    """A Redis stream id ``<ms>-<seq>`` (client input; anything else is ignored)."""
+    if not isinstance(value, str) or len(value) > 48:
+        return False
+    ms, sep, seq = value.partition("-")
+    return bool(sep) and ms.isdigit() and seq.isdigit()
 
 
 def _is_absent(exc: ResponseError) -> bool:

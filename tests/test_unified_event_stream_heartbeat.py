@@ -37,7 +37,7 @@ class _FakeSubscriber:
         bot_ids = args[0]
 
         class _Reader:
-            async def claim(self) -> None:
+            async def claim(self, resume=None) -> None:
                 cls.subscription_scope = cls.groups_scope
                 cls.subscription_include_global = cls.groups_include_global
 
