@@ -329,6 +329,49 @@ def test_a_re_created_profileless_private_slug_comes_back_private(rig):
     assert rig.tags("fixture-private") == LEGACY and private_everywhere(rig, "fixture-private")
 
 
+def changes_for(rig, slug: str) -> list:
+    with rig.engine.connect() as conn:
+        return list(conn.execute(text(
+            "SELECT changed_by, change_note, changes FROM bot_profile_changes "
+            "WHERE bot_slug=:s ORDER BY id"), {"s": slug}).all())
+
+
+def test_a_profile_delete_drops_its_tags_but_keeps_privacy_for_retained_data(rig):
+    """TASK-2044: no "no profile" leftovers, except load-bearing privacy tags."""
+    store = rig.store()
+    upsert(store, "fixture-public")
+    upsert(store, "fixture-private", include_in_global_search=False)
+    with rig.engine.begin() as conn:
+        tag(conn, "fixture-public", BehaviorTag.INACTIVE)
+        tag(conn, "fixture-private", BehaviorTag.INACTIVE)
+
+    assert store.delete("fixture-public") and store.delete("fixture-private")
+
+    assert rig.tags("fixture-public") == []
+    assert rig.tags("fixture-private") == LEGACY
+    with rig.engine.connect() as conn:
+        assert "fixture-private" in read_protected_slugs(conn)
+    by, note, changes = changes_for(rig, "fixture-public")[-1]
+    assert (by, note) == ("profile-delete", "profile deleted")
+    assert changes["tags"] == {"before": ["inactive"], "after": []}
+    # A fresh create of the untagged slug is no longer refused.
+    store.upsert({"slug": "fixture-public", "name": "x", "system_prompt": "fixture"}, create_only=True)
+    assert rig.tags("fixture-public") == []
+
+
+def test_a_purged_profile_delete_drops_every_tag(rig):
+    store = rig.store()
+    upsert(store, "fixture-private", include_in_global_search=False)
+    with rig.engine.begin() as conn:
+        tag(conn, "fixture-private", BehaviorTag.INACTIVE)
+
+    assert store.delete("fixture-private", drop_privacy_tags=True)
+
+    assert rig.tags("fixture-private") == []
+    with rig.engine.connect() as conn:
+        assert "fixture-private" not in read_protected_slugs(conn)
+
+
 # --- §10.11 the real sql_allowed query --------------------------------------
 
 

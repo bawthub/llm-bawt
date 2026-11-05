@@ -863,7 +863,8 @@ async def delete_bot_profile(
 
     from ...bot_slug_aliases import BotHasAliases
     try:
-        deleted = store.delete(slug)
+        # Without a purge the bot's data is retained, so its privacy tags stay.
+        deleted = store.delete(slug, drop_privacy_tags=purge)
     except BotHasAliases as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     if not deleted:

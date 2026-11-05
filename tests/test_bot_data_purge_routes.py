@@ -93,10 +93,12 @@ def test_combined_delete_orders_successful_purge_before_profile_delete(monkeypat
     result = {"deleted_rows": {"sessions": 3}}
     purge_call = Mock(side_effect=lambda *args: (order.append("purge"), result)[1])
     monkeypatch.setattr(settings, "purge_bot_data", purge_call)
-    store.delete.side_effect = lambda slug: (order.append("delete"), True)[1]
+    store.delete.side_effect = lambda slug, **kw: (order.append("delete"), True)[1]
     response = client.delete(f"/v1/bots/source/profile?purge={str(purge).lower()}")
     assert response.status_code == 200
     assert order == (["purge", "delete"] if purge else ["delete"])
+    # TASK-2044: privacy tags are dropped only when the data was purged.
+    store.delete.assert_called_once_with("source", drop_privacy_tags=purge)
     expected = {"success": True, "slug": "source"}
     if purge:
         expected["purge"] = result

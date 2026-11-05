@@ -424,13 +424,25 @@ class BotProfileStore:
                 session.refresh(row)
             return row
 
-    def delete(self, slug: str) -> bool:
+    def delete(self, slug: str, *, drop_privacy_tags: bool = False) -> bool:
+        """Delete the profile and its tag assignments (TASK-2044).
+
+        ``private``/``no_global_search`` stay unless ``drop_privacy_tags``: the
+        bot's retained messages and partitions are protected by them once the
+        profile is gone (orphan cleanup reads ``private``; a re-created slug
+        comes back private). Pass it only after the bot's data was purged.
+        """
         if self.engine is None:
             raise RuntimeError("Bot profiles DB unavailable")
         normalized_slug = (slug or "").strip().lower()
         if not normalized_slug:
             return False
+        from . import bot_profile_changes as profile_changes
+        from .bot_tags.catalog import lock_bot
+        from .bot_tags.vocabulary import LEGACY_PRIVATE_TAGS
         with Session(self.engine) as session:
+            conn = session.connection()
+            lock_bot(conn, normalized_slug)  # same order as upsert: tag lock, then row
             row = session.exec(
                 select(BotProfile).where(BotProfile.slug == normalized_slug)
             ).first()
@@ -440,6 +452,18 @@ class BotProfileStore:
             retired = bot_slug_aliases.aliases_for(session.connection(), row.slug)
             if retired:
                 raise bot_slug_aliases.BotHasAliases(row.slug, retired)
+            keep = [] if drop_privacy_tags else [str(t) for t in LEGACY_PRIVATE_TAGS]
+            tags_before = sorted(conn.execute(text(
+                "SELECT tag_slug FROM bot_profile_tags WHERE bot_slug = :bot"
+            ), {"bot": row.slug}).scalars())
+            conn.execute(text("""
+                DELETE FROM bot_profile_tags
+                WHERE bot_slug = :bot AND NOT (tag_slug = ANY(CAST(:keep AS text[])))
+            """), {"bot": row.slug, "keep": keep})
+            profile_changes.record_change(
+                conn, row.slug, {profile_changes.TAGS: tags_before},
+                {profile_changes.TAGS: [t for t in tags_before if t in keep]},
+                {profile_changes.CHANGE_NOTE: "profile deleted"}, "profile-delete")
             session.delete(row)
             from .bot_policy_events import policy_changed
             policy_changed(session.connection())
