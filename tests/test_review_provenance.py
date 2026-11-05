@@ -18,6 +18,16 @@ TASK = {"id": "cfixturetask0001", "shortId": "TASK-7"}
 AUTHOR_NOTE = "author_unresolved:no_commit_turn_record"
 
 
+@pytest.fixture(autouse=True)
+def _no_owner_callback(monkeypatch):
+    """These tests pin provenance reads; the owner notice (TASK-2056) reads the
+    task separately and has its own tests (test_review_owner_callback.py)."""
+    async def quiet(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(task_review_tools, "notify_review_owner", quiet)
+
+
 @pytest.fixture
 def fernet(monkeypatch):
     instance = Fernet(Fernet.generate_key())
