@@ -61,5 +61,6 @@ class ChangedFileDecisionsStore(ChangedFilesStore):
                 if version != descriptor["snapshot_version"]:
                     raise ChangedFileDecisionConflict("Changes updated; refresh and try again")
                 row.ignored_version = version if ignored else None
+                row.restored_version = None if ignored else version
                 session.add(row)
         return resolved, len(selected)

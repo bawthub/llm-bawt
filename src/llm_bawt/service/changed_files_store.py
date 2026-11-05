@@ -148,6 +148,8 @@ class TurnChangedFile(SQLModel, table=True):
     source_tool_call_ids: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
     # User dismissal binds to this snapshot version, not the path forever.
     ignored_version: str | None = Field(default=None, sa_column=Column(String(64), nullable=True))
+    # Explicit Restore overrides a generated-cache default for this snapshot.
+    restored_version: str | None = Field(default=None, sa_column=Column(String(64), nullable=True))
     # A request records intent, never proof that Git committed the change.
     commit_requested_at: datetime | None = Field(
         default=None,
@@ -299,6 +301,7 @@ def serialize_changed_file(row: TurnChangedFile) -> dict[str, Any]:
     """Metadata-only shape for one changed file. No bytes; the client fetches
     content lazily by (turn_id, repo_key, path)."""
     from .changed_file_decisions import snapshot_version
+    from .changed_file_defaults import default_ignored
 
     version = snapshot_version(row)
     has_before = bool(row.before_blob_key or row.before_sha256)
@@ -328,7 +331,11 @@ def serialize_changed_file(row: TurnChangedFile) -> dict[str, Any]:
         "before_sha256": row.before_sha256,
         "after_sha256": row.after_sha256,
         "snapshot_version": version,
-        "ignored": row.ignored_version == version,
+        "ignored": row.ignored_version == version or (
+            row.restored_version != version and default_ignored(
+                provenance=row.provenance, path=row.repo_relative_path or row.path,
+            )
+        ),
         "commit_requested": row.commit_requested_at is not None,
         "commit_state": "not_applicable" if row.in_repo is False else "unknown",
         **{key: getattr(row, key, None) for key in IDENTITY_FIELDS},
@@ -342,12 +349,13 @@ def build_turn_summary(turn_id: str, rows: list[TurnChangedFile]) -> dict[str, A
     Used verbatim as ``turn_complete.changed_files`` AND the read-API body.
     """
     files = [serialize_changed_file(r) for r in rows]
-    total_add = sum(f["additions"] or 0 for f in files)
-    total_del = sum(f["deletions"] or 0 for f in files)
+    counted = [f for f in files if not f["ignored"]]
+    total_add = sum(f["additions"] or 0 for f in counted)
+    total_del = sum(f["deletions"] or 0 for f in counted)
     summary = {
         "turn_id": turn_id,
         "files": files,
-        "total_files": len(files),
+        "total_files": len(counted),
         "total_additions": total_add,
         "total_deletions": total_del,
     }
@@ -374,13 +382,14 @@ def build_uncommitted_summary(rows: list[TurnChangedFile]) -> dict[str, Any]:
                 current["change_kind"] = "added"
         merged[key] = current
     files = list(merged.values())
+    counted = [file for file in files if not file["ignored"]]
     return {
         "turn_id": turn_ids[-1] if turn_ids else "",
         "turn_ids": turn_ids,
         "files": files,
-        "total_files": len(files),
-        "total_additions": sum(file.get("additions") or 0 for file in files),
-        "total_deletions": sum(file.get("deletions") or 0 for file in files),
+        "total_files": len(counted),
+        "total_additions": sum(file.get("additions") or 0 for file in counted),
+        "total_deletions": sum(file.get("deletions") or 0 for file in counted),
     }
 
 
@@ -437,6 +446,10 @@ class ChangedFilesStore:
             if "ignored_version" not in legacy_columns:
                 conn.execute(sa_text(
                     "ALTER TABLE turn_changed_files ADD COLUMN ignored_version VARCHAR(64)"
+                ))
+            if "restored_version" not in legacy_columns:
+                conn.execute(sa_text(
+                    "ALTER TABLE turn_changed_files ADD COLUMN restored_version VARCHAR(64)"
                 ))
             if "in_repo" not in legacy_columns:
                 conn.execute(sa_text(
@@ -585,10 +598,13 @@ class ChangedFilesStore:
                     row.source_tool_call_ids = (
                         json.dumps(combined_sources) if combined_sources else None
                     )
-                    if row.ignored_version:
+                    if row.ignored_version or row.restored_version:
                         from .changed_file_decisions import snapshot_version
-                        if snapshot_version(row) != row.ignored_version:
+                        version = snapshot_version(row)
+                        if version != row.ignored_version:
                             row.ignored_version = None
+                        if version != row.restored_version:
+                            row.restored_version = None
                     session.add(row)
                     saved += 1
                 session.commit()

@@ -114,6 +114,7 @@ def test_ensure_schema_removes_legacy_overlap_columns():
     columns = {column["name"] for column in inspect(engine).get_columns("turn_changed_files")}
     assert "overlapping" not in columns
     assert "manifest_truncated" not in columns
+    assert "restored_version" in columns
     assert legacy.save_turn_files(
         turn_id="turn-legacy", bot_id="b", user_id="u", trigger_message_id="m",
         files=[_mod("a.py", "old", "new")],
