@@ -9,6 +9,7 @@ from pydantic import Field
 
 from llm_bawt.integrations.home_audio import HomeAudioClient, HomeAudioSettings, wav_duration
 from llm_bawt.integrations.home_audio_store import HomeAudioStore
+from llm_bawt.default_user import resolve_user_id
 from llm_bawt.utils.config import Config
 from .registry import mcp
 
@@ -48,7 +49,7 @@ async def home_audio_devices() -> dict:
 
 @mcp.tool()
 async def speech_generate(text: Text, bot_id: Identifier, voice: str | None = None,
-                          user_id: str = "nick") -> dict:
+                          user_id: str | None = None) -> dict:
     """Generate a stored WAV using an explicit or bot-default voice. No playback."""
     from llm_bawt.media import get_media_store
     if not text.strip():
@@ -61,7 +62,7 @@ async def speech_generate(text: Text, bot_id: Identifier, voice: str | None = No
         raw = await client.render(text, resolved)
         asset = await asyncio.to_thread(get_media_store().upload, raw_bytes=raw,
                                        original_mime="audio/wav", source="tool_generated",
-                                       owner_user_id=user_id, filename="speech.wav")
+                                       owner_user_id=resolve_user_id(user_id), filename="speech.wav")
         return {"asset_id": asset.id, "voice": resolved, "duration_seconds": wav_duration(raw),
                 "playback_url": client.media_url(asset.id),
                 "download_path": f"/v1/uploads/{asset.id}"}
@@ -70,7 +71,7 @@ async def speech_generate(text: Text, bot_id: Identifier, voice: str | None = No
 @mcp.tool()
 async def home_audio_enqueue(target: Identifier, bot_id: Identifier, idempotency_key: Identifier,
                              text: Text | None = None, asset_id: str | None = None,
-                             voice: str | None = None, user_id: str = "nick") -> dict:
+                             voice: str | None = None, user_id: str | None = None) -> dict:
     """Queue exactly one of text or a generated WAV asset. Audible, asynchronous."""
     if bool(text) == bool(asset_id):
         raise ValueError("Supply exactly one of text or asset_id")
@@ -84,7 +85,7 @@ async def home_audio_enqueue(target: Identifier, bot_id: Identifier, idempotency
         raise ValueError("Target is not allowed; use home_audio_devices")
     resolved = await asyncio.to_thread(_voice, bot_id, voice) if text else None
     payload = {"target": target, "bot_id": bot_id, "text": text, "asset_id": asset_id,
-               "voice": resolved, "user_id": user_id}
+               "voice": resolved, "user_id": resolve_user_id(user_id)}
     store = await asyncio.to_thread(_store, config)
     return await asyncio.to_thread(store.enqueue, payload, idempotency_key)
 

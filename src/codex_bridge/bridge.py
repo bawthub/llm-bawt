@@ -22,6 +22,7 @@ from typing import Any
 
 import httpx
 from agent_bridge.changed_file_lifecycle import ChangedFileLifecycleMixin
+from agent_bridge.user_scope import session_user
 from agent_bridge.events import AgentEvent, AgentEventKind, synthesize_event_id
 from agent_bridge.publisher import COMMANDS_STREAM, RedisPublisher
 from agent_bridge.session_queue import SessionQueue
@@ -358,7 +359,7 @@ class CodexBridge(
         session_key: str,
         *,
         had_session: bool = False,
-        user_id: str = "nick",
+        user_id: str | None = None,
     ) -> None:
         """Publish SESSION_RESET on the unified SSE stream.
 
@@ -367,6 +368,10 @@ class CodexBridge(
         See TASK-249.
         """
         if not bot_id:
+            return
+        user_id = session_user(session_key, user_id)
+        if not user_id:
+            logger.warning("session_reset for %s has no user; not published", bot_id)
             return
         try:
             self._publisher.publish_unified_event(bot_id, user_id, {

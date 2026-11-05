@@ -1,6 +1,6 @@
 """Request-scoped abort orchestration; the turn audit owns terminal truth.
 
-TASK-1232 P4, Nick: "stop should stop. no questions." A user Stop always ends
+TASK-1232 P4, the user: "stop should stop. no questions." A user Stop always ends
 the turn through the shared settle (``turn_termination.settle_open_turn``).
 The bridge's answer decides only what the ``user_stop`` audit records
 (``bridge_state``, ``confirmed``), never whether the row closes. This replaces,
@@ -15,6 +15,7 @@ import uuid
 
 from sqlalchemy import text
 
+from ..default_user import default_user_id
 from .logging import get_service_logger
 from .turn_termination import TurnAbortCoordinator
 
@@ -224,7 +225,7 @@ async def _publish_abort_snapshot(service, turn_id: str) -> None:
         changed_files = None
     from .usage.balance import balance_update_for_turn
     balance_update = balance_update_for_turn(store.engine, row.token_usage_json)
-    await subscriber.publish_tool_event(row.bot_id, row.user_id or "nick", {
+    await subscriber.publish_tool_event(row.bot_id, row.user_id or default_user_id(), {
         "_type": "turn_complete", "turn_id": row.id,
         "trigger_message_id": row.trigger_message_id,
         "assistant_message_id": row.assistant_message_id,

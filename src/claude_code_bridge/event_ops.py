@@ -31,6 +31,7 @@ from claude_agent_sdk.types import (
     UserMessage,
 )
 
+from agent_bridge.user_scope import session_user
 from agent_bridge.approval import (
     ApprovalDecision,
     PolicyAction,
@@ -176,7 +177,7 @@ class ClaudeEventMixin:
         artifacts: list[dict] = []
         if not self._app_api_url:
             return artifacts
-        user_id = session_key.split(":", 1)[1] if ":" in session_key else "nick"
+        user_id = session_user(session_key)
         for block in content:
             img = self._extract_image_block(block)
             if img is None:
@@ -394,7 +395,7 @@ class ClaudeEventMixin:
         session_key: str,
         *,
         had_session: bool = False,
-        user_id: str = "nick",
+        user_id: str | None = None,
     ) -> None:
         """Publish a SESSION_RESET event on the unified SSE stream.
 
@@ -404,6 +405,10 @@ class ClaudeEventMixin:
         racing the HTTP run stream's ASSISTANT_DONE.  See TASK-249.
         """
         if not bot_id:
+            return
+        user_id = session_user(session_key, user_id)
+        if not user_id:
+            logger.warning("session_reset for %s has no user; not published", bot_id)
             return
         try:
             self._publisher.publish_unified_event(bot_id, user_id, {

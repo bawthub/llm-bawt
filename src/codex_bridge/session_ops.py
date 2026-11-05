@@ -40,7 +40,7 @@ class CodexSessionMixin:
     methods on sibling mixins all resolve on the assembled instance.
     """
 
-    async def _get_mcp_tool_context(self, bot_slug: str) -> str:
+    async def _get_mcp_tool_context(self, bot_slug: str, user_id: str = "") -> str:
         """Return the MCP tool context block for a bot (TASK-490).
 
         Fetches the (bot-overridable) template body from the app registry via
@@ -52,8 +52,9 @@ class CodexSessionMixin:
         if cache is None:
             cache = {}
             self._mcp_ctx_cache = cache
-        if bot_slug in cache:
-            return cache[bot_slug]
+        cache_key = f"{bot_slug}\0{user_id}"
+        if cache_key in cache:
+            return cache[cache_key]
 
         body = _MCP_TOOL_CONTEXT_FALLBACK
         if self._app_api_url:
@@ -72,8 +73,8 @@ class CodexSessionMixin:
                     "MCP tool context fetch failed for %s (%s); using local fallback",
                     bot_slug, e,
                 )
-        rendered = body.replace("{bot_slug}", bot_slug)
-        cache[bot_slug] = rendered
+        rendered = body.replace("{bot_slug}", bot_slug).replace("{user_id}", user_id or "the user")
+        cache[cache_key] = rendered
         return rendered
 
     async def _set_thread_session(

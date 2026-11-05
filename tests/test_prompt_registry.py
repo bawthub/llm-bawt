@@ -145,9 +145,9 @@ def test_inter_bot_docs_do_not_restore_queue_only_contract() -> None:
 
 
 def test_agents_docs_seed_keeps_visual_review_distinct_from_coordinator_closure() -> None:
-    assert "Visual UI/UX Nick can see stays in `REVIEW` for Nick" in AGENTS_DOCS_PROMPT
-    assert "put the dev URL and\n  exact steps to check in `response`" in AGENTS_DOCS_PROMPT
-    assert "a coordinator (Snark/Rook)\n  closes it to `COMPLETED`" in AGENTS_DOCS_PROMPT
+    assert "Visual UI/UX the user can see stays in `REVIEW` for the user" in AGENTS_DOCS_PROMPT
+    assert "put the dev URL\n  and exact steps to check in `response`" in AGENTS_DOCS_PROMPT
+    assert "a coordinator\n  closes it to `COMPLETED`" in AGENTS_DOCS_PROMPT
     assert "a recorded review, a pushed commit,\n  and verification evidence" in AGENTS_DOCS_PROMPT
     assert "Only humans transition tasks to `COMPLETED`" not in AGENTS_DOCS_PROMPT
 

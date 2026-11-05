@@ -32,6 +32,7 @@ import logging
 from mcp.server.fastmcp import Image
 
 from llm_bawt.media import get_media_store
+from llm_bawt.default_user import resolve_user_id
 from llm_bawt.media.generation_service import MediaGenerationService
 
 from .server import mcp
@@ -70,7 +71,7 @@ async def generate_image(
     reference_asset_id: str | None = None,
     aspect_ratio: str | None = None,
     resolution: str | None = None,
-    user_id: str = "nick",
+    user_id: str | None = None,
 ) -> list:
     """Generate an image with the requested provider (``grok`` or ``openai``).
 
@@ -89,7 +90,7 @@ async def generate_image(
         reference_asset_id: Optional prior generated asset used as image input.
         aspect_ratio: Provider-supported aspect ratio; provider default if omitted.
         resolution: Provider-supported resolution; provider default if omitted.
-        user_id: Owner scope for the stored asset.
+        user_id: Owner scope for the stored asset; defaults to the configured default user.
 
     Returns:
         A list of ``[<image>, <info>]`` where ``<info>`` is a dict containing
@@ -147,7 +148,7 @@ async def generate_image(
             raw_bytes=raw,
             original_mime=f"image/{fmt}",
             source=_SOURCE,
-            owner_user_id=user_id,
+            owner_user_id=resolve_user_id(user_id),
         )
     except Exception as e:
         logger.exception("generate_image: media store upload failed")

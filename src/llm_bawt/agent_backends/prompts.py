@@ -21,7 +21,7 @@ Conventions
   Python kwargs (``tasks_update(task_id=..., status="...")``).
 - Tasks: ``QUEUED → PLANNING → REFINED → IN_PROGRESS → REVIEW → COMPLETED``
   with ``FAILED`` / ``CANCELLED`` as terminal failure states and ``BLOCKED``
-  as an open state waiting on Nick (needs ``blockedReason``). Agents NEVER
+  as an open state waiting on the user (needs ``blockedReason``). Agents NEVER
   set ``COMPLETED``; only humans do.
 - Steps: ``PENDING → RUNNING → COMPLETED | FAILED | SKIPPED``. Agents own
   the full step lifecycle.
@@ -397,14 +397,14 @@ Base URL: {origin}
 
 Tasks: `QUEUED → PLANNING → REFINED → IN_PROGRESS → REVIEW → COMPLETED`
        (with `FAILED` and `CANCELLED` as terminal failure states;
-       `BLOCKED` is an open state waiting on Nick and needs `blockedReason`)
+       `BLOCKED` is an open state waiting on the user and needs `blockedReason`)
 Steps: `PENDING → RUNNING → COMPLETED | FAILED | SKIPPED`
 
 CRITICAL: The agent doing the work sets the task to `REVIEW` when done —
 never `COMPLETED` on its own work. Closure:
-- Visual UI/UX Nick can see stays in `REVIEW` for Nick; put the dev URL and
-  exact steps to check in `response`.
-- Everything else (backend, infra, tooling): a coordinator (Snark/Rook)
+- Visual UI/UX the user can see stays in `REVIEW` for the user; put the dev URL
+  and exact steps to check in `response`.
+- Everything else (backend, infra, tooling): a coordinator
   closes it to `COMPLETED` once there is a recorded review, a pushed commit,
   and verification evidence in `outcome`.
 Steps are owned by agents — set them to `COMPLETED` / `FAILED` / `SKIPPED`

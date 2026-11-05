@@ -135,7 +135,7 @@ def test_codex_cancel_during_setup_also_publishes_terminal():
         redis = SimpleNamespace(xack=AsyncMock())
         started = asyncio.Event()
 
-        async def context(bot):
+        async def context(bot, user_id=""):
             started.set()
             await asyncio.Event().wait()
 

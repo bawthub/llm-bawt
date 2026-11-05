@@ -76,7 +76,7 @@ MCP_TOOL_CONTEXT_TEMPLATE = (
     "## MCP Tool Context\n"
     "Your bot_id is \"{bot_slug}\". When using bawthub MCP tools:\n"
     "- Memory/message tools: always pass bot_id=\"{bot_slug}\"\n"
-    "- Profile tool with entity_type=\"user\": use entity_id=\"nick\" (the user)\n"
+    "- Profile tool with entity_type=\"user\": use entity_id=\"{user_id}\" (the user)\n"
     "- Profile tool with entity_type=\"bot\": use entity_id=\"{bot_slug}\" (yourself)\n"
     "- When you actually begin/resume an existing task in ordinary chat, call "
     "tasks_associate_current(task_id=...). Do not link from TASK-N text alone.\n"
@@ -211,4 +211,23 @@ SCOPED_COMMIT_PROMPT = (
     "or stash changes outside this scope. Do not amend or push. If the scoped "
     "changes cannot be isolated safely, do not commit them; explain what blocks "
     "the commit instead. Report the commit hash or hashes and the files committed."
+)
+
+
+# Review and closure policy appended to a task copied for an agent. BawtHub
+# supplies {task_id}; the tool-call reference lines stay in BawtHub code.
+TASK_COPY_POLICY = (
+    "- Happy path: commit locally → one independent review of that SHA by another "
+    "agent bot. APPROVE_WITH_CHANGES: record the fix SHA without re-review; "
+    "REQUEST_CHANGES: one Blocker-only recheck, never r3.\n"
+    "- The arbiter resolves repo conflicts and gives a neutral process check "
+    "(reviews, Blockers, attribution, conflicts, secrets) before SHIP; it does not "
+    "review code. Push promptly after SHIP; the user controls deploys, restarts "
+    "and explicit holds.\n"
+    "- Visually confirmable UI/UX only: `tasks_update(task_id=\"{task_id}\", "
+    "status=\"REVIEW\", response=<technical receipts plus dev URL and exact look "
+    "steps or screenshot>, bot_id=<your bot_id>)` for the user to check.\n"
+    "- Other work: a coordinator verifies the receipts and closes it COMPLETED, "
+    "including their own reviewed work. Leave incomplete work open; agents cannot "
+    "clear BUG."
 )

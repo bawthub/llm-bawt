@@ -21,6 +21,7 @@ from .chat_prompt_defaults import (
     RESPONSE_STYLE_TLDR,
     RUNTIME_CONTEXT_TEMPLATE,
     SCOPED_COMMIT_PROMPT,
+    TASK_COPY_POLICY,
     SESSION_SEED_ACK,
     SESSION_SEED_BRIEFING,
     SYSTEM_PROMPT_REFINE_INSTRUCTION,
@@ -234,6 +235,19 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
                 "Sent when the Commit action is used on a completed changed-files "
                 "summary. BawtHub supplies {scope} from that turn's repository and "
                 "file summary; llm-bawt validates and renders the final request."
+            ),
+        },
+    ),
+    "agents.task_copy_policy": PromptDefinition(
+        key="agents.task_copy_policy",
+        title="Task Copy — Review and Closure Policy",
+        category="agents",
+        required_vars=("task_id",),
+        loader=lambda: TASK_COPY_POLICY,
+        metadata={
+            "notes": (
+                "Appended to the 'Updating this task' section when a task is copied "
+                "for an agent in BawtHub. {task_id} is the task's short ID."
             ),
         },
     ),

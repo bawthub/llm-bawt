@@ -15,6 +15,7 @@ from agent_bridge.steer_contract import (
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from ...default_user import default_user_id
 from ...message_authorship import AuthorReference
 from ...request_identity import AdmissionUnavailable, IdentityConflict, InvalidIdentity
 from ..dependencies import get_service
@@ -97,7 +98,7 @@ class ChatSteerRequest(BaseModel):
     message_id: str = Field(..., description="Frontend-generated user message UUID")
     content_offset: int | None = Field(None, ge=0, description="Assistant characters visible when steering")
     bot_id: str = Field(..., description="Bot slug owning the active turn")
-    user_id: str = Field("nick", description="User namespace owning the turn")
+    user_id: str = Field(default_factory=default_user_id, description="User namespace owning the turn")
     session_id: str | None = Field(None, description="Explicit durable conversation; must match the target turn")
     allow_queue: bool = Field(True, description="Allow maintenance to queue a separate turn; false for same-turn recovery")
     priority: Literal["now", "next"] = Field(
@@ -269,7 +270,7 @@ async def steer_active_turn(
     if turn is None:
         raise HTTPException(status_code=404, detail="Turn not found")
     bot_id = request.bot_id.strip().lower()
-    user_id = request.user_id.strip().lower() or "nick"
+    user_id = request.user_id.strip().lower() or default_user_id()
     if turn.bot_id != bot_id or (turn.user_id or "").lower() != user_id:
         raise HTTPException(status_code=409, detail="Turn ownership mismatch")
     # Inter-bot steers pass their sender; a composer steer is the turn owner's.
@@ -473,7 +474,7 @@ class ChatSteerEscalateRequest(BaseModel):
     turn_id: str
     message_id: str
     bot_id: str
-    user_id: str = "nick"
+    user_id: str = Field(default_factory=default_user_id)
 
 
 @router.post("/v1/chat/steer/escalate", tags=["Agent Backends"])
@@ -576,7 +577,7 @@ class ToolResultRequest(BaseModel):
     continuation; the originating SSE connection (or its resume path) does.
     """
     bot_id: str = Field(..., description="Bot slug whose paused turn this answers")
-    user_id: str = Field("nick", description="User id (scopes the routing key)")
+    user_id: str = Field(default_factory=default_user_id, description="User id (scopes the routing key)")
     tool_use_id: str = Field(..., description="SDK tool_use id from the AWAIT_TOOL_RESULT event")
     result: str = Field(..., description="User's answer (label, free text, or JSON-encoded multi-pick)")
 
@@ -654,7 +655,7 @@ class QuestionResponseItem(BaseModel):
 class QuestionAnswerRequest(BaseModel):
     """Answer to a deferred AskUserQuestion (TASK-269)."""
     bot_id: str = Field(..., description="Bot the continuation turn should run on")
-    user_id: str = Field("nick", description="User id (scopes routing + events)")
+    user_id: str = Field(default_factory=default_user_id, description="User id (scopes routing + events)")
     responses: list[QuestionResponseItem] | None = Field(
         default=None, description="Canonical structured answer, one entry per sub-question",
     )

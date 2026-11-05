@@ -203,7 +203,7 @@ class ClaudeSendMixin(
                 # Body comes from the registry (TASK-490) with a byte-identical
                 # local fallback; separator added here.
                 if system_prompt and self._mcp_servers and bot_slug:
-                    mcp_ctx = await self._get_mcp_tool_context(bot_slug)
+                    mcp_ctx = await self._get_mcp_tool_context(bot_slug, session_key.partition(":")[2])
                     system_prompt += f"\n\n{mcp_ctx}"
 
                 # Session resolution: the app resolved the thread's stored

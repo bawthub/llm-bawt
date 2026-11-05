@@ -96,7 +96,10 @@ class BridgeSessionResetMixin:
 
             uid = (user_id or "").strip() or (
                 getattr(self.config, "DEFAULT_USER", "") or ""
-            ).strip() or "nick"
+            ).strip()
+            if not uid:
+                log.warning("thread_switched for %s has no user; not published", bot_id)
+                return
             threading.Thread(
                 target=self._publish_thread_switched_blocking,
                 args=(bot_id, uid, new_session_id, source),

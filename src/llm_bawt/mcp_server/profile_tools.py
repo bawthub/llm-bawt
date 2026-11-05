@@ -20,7 +20,7 @@ def _get_profile_manager():
 async def profile(
     action: str,
     entity_type: str = "user",
-    entity_id: str = "nick",
+    entity_id: str | None = None,
     category: str | None = None,
     key: str | None = None,
     value: str | None = None,
@@ -28,11 +28,17 @@ async def profile(
     """Read or mutate structured user/bot profile attributes.
 
     Actions: ``summary``, ``list``, ``get``, ``set``, ``delete``. This is not
-    semantic memory; use memory tools for free-text facts.
+    semantic memory; use memory tools for free-text facts. A user
+    ``entity_id`` defaults to the configured default user.
     """
     from llm_bawt.bots import BotManager
+    from llm_bawt.default_user import default_user_id
     from llm_bawt.profiles import AttributeCategory, EntityType
     from llm_bawt.utils.config import Config
+
+    entity_id = (entity_id or "").strip() or (default_user_id() if entity_type == "user" else "")
+    if not entity_id:
+        return f"Error: entity_id is required for entity_type '{entity_type}'."
 
     if action in ("set", "delete", "list", "get"):
         manager = _get_profile_manager()

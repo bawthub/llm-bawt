@@ -32,6 +32,7 @@ from claude_agent_sdk.types import (
 )
 
 from agent_bridge.abort_contract import ABORT_TEARDOWN_BOUND_S, AbortState
+from agent_bridge.user_scope import session_user
 from agent_bridge.abort_rpc import answer_abort
 from agent_bridge.ping import PING_METHOD, answer_ping
 from agent_bridge.run_status import RUN_STATUS_METHOD, answer_run_status, queue_run_state
@@ -343,7 +344,7 @@ class ClaudeCommandMixin:
                 # the SESSION_RESET event so the frontend clears its buffer.
                 # The scalar agent_backend_config.session_key is retired
                 # (TASK-638); no _clear_session call needed.
-                reset_user = (params.get("userId") or "").strip() or "nick"
+                reset_user = session_user(session_key, params.get("userId"))
                 target = _bot_slug_from_session_key(session_key) or session_key
                 if target:
                     logger.info("Session reset: %s", target)

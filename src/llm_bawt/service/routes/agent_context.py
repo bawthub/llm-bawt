@@ -38,7 +38,9 @@ def _resolve(bot_id: str, user: str | None):
     bot = BotManager(service.config).get_bot(slug)
     if bot is None:
         raise HTTPException(status_code=404, detail="Bot not found")
-    user_id = (user or getattr(service.config, "DEFAULT_USER", "nick") or "nick").strip()
+    user_id = (user or getattr(service.config, "DEFAULT_USER", None) or "").strip()
+    if not user_id:
+        raise HTTPException(status_code=422, detail="user is required")
     backend = bot.agent_backend or bot.harness
     model_ref = bot_model_ref(service.config, bot)
     ceiling = service.config.get_model_context_window(model_ref) if model_ref else None
