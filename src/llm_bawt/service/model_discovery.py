@@ -597,9 +597,10 @@ class OpenRouterDiscoveryProvider(ModelDiscoveryProvider):
 class OllamaDiscoveryProvider(ModelDiscoveryProvider):
     """Models installed on the configured Ollama server (TASK-2047).
 
-    ``/api/tags`` reports each model's context length and capabilities on
-    current servers; ``/api/show`` fills the context length only where tags
-    lacks it. Embedding-only models are left out because they cannot chat.
+    ``/api/tags`` gives the list and capabilities. ``/api/show`` supplies the
+    context window: a configured ``num_ctx`` wins, because the server truncates
+    past it, then the model's maximum; tags' maximum is the last fallback.
+    Embedding-only models are left out because they cannot chat.
     """
 
     aliases = ("ollama",)
@@ -644,10 +645,12 @@ class OllamaDiscoveryProvider(ModelDiscoveryProvider):
             if isinstance(capabilities, list) and capabilities and "completion" not in capabilities:
                 continue
             details = item.get("details") if isinstance(item.get("details"), dict) else {}
-            context = details.get("context_length")
-            if not isinstance(context, int) and shows < self._show_limit:
+            context = None
+            if shows < self._show_limit:
                 shows += 1
                 context = self._show_context(root, headers, str(item["name"]))
+            if not isinstance(context, int):
+                context = details.get("context_length")
             facts = [str(v) for v in (details.get("parameter_size"), details.get("quantization_level")) if v]
             rows.append({
                 "id": item["name"],
@@ -658,12 +661,19 @@ class OllamaDiscoveryProvider(ModelDiscoveryProvider):
 
     @staticmethod
     def _show_context(root: str, headers: dict[str, str], name: str) -> int | None:
+        """The window the server will actually use: the model's ``num_ctx``, else its maximum."""
         try:
             response = httpx.post(f"{root}/api/show", json={"model": name}, headers=headers, timeout=5.0)
             response.raise_for_status()
-            info = response.json().get("model_info") or {}
+            payload = response.json()
+            info = payload.get("model_info") or {}
+            parameters = str(payload.get("parameters") or "")
         except (httpx.HTTPError, ValueError, AttributeError):
             return None
+        for line in parameters.splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[0] == "num_ctx" and parts[1].isdigit():
+                return int(parts[1])
         for key, value in info.items():
             if key.endswith(".context_length") and isinstance(value, int):
                 return value

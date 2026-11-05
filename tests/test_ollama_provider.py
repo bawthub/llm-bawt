@@ -157,16 +157,30 @@ def test_discovery_lists_chat_models_with_context(monkeypatch, path_url):
     ]}
     seen = []
     monkeypatch.setattr(model_discovery.httpx, "get", lambda url, **_k: seen.append(url) or _Response(payload=tags))
+    shows = {
+        "qwen:27b": {"parameters": "temperature 1\nnum_ctx                        65536", "model_info": {"q.context_length": 262144}},
+        "old:7b": {"model_info": {"llama.context_length": 8192}},
+    }
     monkeypatch.setattr(
         model_discovery.httpx, "post",
-        lambda url, json=None, **_k: _Response(payload={"model_info": {"llama.context_length": 8192}}),
+        lambda url, json=None, **_k: _Response(payload=shows[json["model"]]),
     )
     rows = OllamaDiscoveryProvider(SimpleNamespace(OLLAMA_URL="x")).fetch()
     assert seen == ["http://box:11434/api/tags"]
     assert rows == [
-        {"id": "qwen:27b", "description": "27B · Q4_K_M", "context_length": 262144},
+        {"id": "qwen:27b", "description": "27B · Q4_K_M", "context_length": 65536},
         {"id": "old:7b", "description": "7B", "context_length": 8192},
     ]
+
+
+def test_discovery_falls_back_to_tags_context_when_show_fails(monkeypatch, path_url):
+    path_url["url"] = "http://box:11434/v1"
+    monkeypatch.setattr(ollama, "resolve_api_key", lambda _config: None)
+    tags = {"models": [{"name": "m", "details": {"context_length": 4096}, "capabilities": ["completion"]}]}
+    monkeypatch.setattr(model_discovery.httpx, "get", lambda *_a, **_k: _Response(payload=tags))
+    monkeypatch.setattr(model_discovery.httpx, "post", lambda *_a, **_k: _Response(status=500))
+    rows = OllamaDiscoveryProvider(SimpleNamespace(OLLAMA_URL="x")).fetch()
+    assert rows == [{"id": "m", "description": "", "context_length": 4096}]
 
 
 def test_discovery_error_names_the_server(monkeypatch, path_url):
