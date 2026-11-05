@@ -4,7 +4,9 @@ A grant tag (``GRANT_TAGS``) is written only by :func:`write_grant`, which
 records who changed it and why. Every other tag writer refuses to add or remove
 one: the profile tag write (:func:`check_grant_membership`) and the
 single-assignment delete (:func:`refuse_grant_tag`), so a bot can't ordain
-itself or a peer through ``bots_profile_patch``.
+itself or a peer through ``bots_profile_patch``. The one exception is identity
+teardown: deleting the bot's profile (``BotProfileStore.delete``, TASK-2044)
+drops its grants in that audited transaction, since a deleted bot holds nothing.
 
 Who may write a grant is decided here too (:class:`GrantActor`):
 
