@@ -134,7 +134,7 @@ def test_old_open_turn_still_blocks(db, status):
 
 
 def advisory_locks(engine):
-    return count(engine, "SELECT count(*) FROM pg_locks WHERE locktype='advisory'")
+    return count(engine, "SELECT count(*) FROM pg_locks WHERE locktype='advisory'")  # timing-ok: post-hoc leaked-lock count after the purge settled, not a wait or poll
 
 
 def test_turn_admitted_while_purge_waits_is_seen_and_refused(db):
