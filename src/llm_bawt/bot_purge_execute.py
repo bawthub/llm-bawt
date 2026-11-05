@@ -8,7 +8,9 @@ recomputed preview selected (plus the profile and its tag rows for the combined
 action) and commits once. Any refusal or database error rolls everything back:
 there is never a partial profile delete.
 
-Limits, stated rather than hidden: message/memory writers are not table-locked
+Turn and delivery admission for the bot is fenced for the whole purge by its
+admission lock, taken before the snapshot. Limits, stated rather than hidden:
+other message/memory writers are not table-locked
 (that would stall every bot). A row a writer commits after the snapshot is not
 seen by the DELETE and survives; for a deleted profile it becomes orphan
 storage that System → Clean up orphans covers. Stores outside local PostgreSQL
@@ -17,6 +19,7 @@ are reported ``unknown`` and are untouched.
 from __future__ import annotations
 
 import re
+import time
 from typing import Any
 
 from sqlalchemy import inspect, text
@@ -26,10 +29,9 @@ from .bot_identities import RESERVED_JOB_BOT_IDS
 from .bot_purge_preview import collect_preview, normalize_slug
 
 _DIGEST = re.compile(r"^[a-f0-9]{64}$")
-# A turn that never stamped ended_at (crash before recovery) must not block a
-# delete forever; anything this recent is treated as possibly running.
-ACTIVE_TURN_WINDOW = "6 hours"
 LOCK_TIMEOUT = "3s"
+ADMISSION_WAIT_SECONDS = 3.0
+_ADMISSION_POLL_SECONDS = 0.05
 
 
 class PurgeRefused(RuntimeError):
@@ -146,18 +148,51 @@ _REQUIRED_DELETED_TABLES = frozenset({
 })
 
 
+def _acquire_admission_fence(raw, slug: str) -> None:
+    """Hold the bot's turn-admission lock for the whole purge.
+
+    Same key as ``turn_admission.lock_target`` and the delivery claim, so no
+    turn or delivery can be admitted for this bot until the purge ends. It is
+    taken at session level *before* the REPEATABLE READ transaction begins: a
+    lock acquired by a statement inside that transaction would fix the snapshot
+    before the wait, hiding a turn admitted while we waited. Non-blocking polls
+    keep the session's lock_timeout untouched.
+    """
+    raw.execution_options(isolation_level="AUTOCOMMIT")
+    deadline = time.monotonic() + ADMISSION_WAIT_SECONDS
+    while True:
+        with raw.begin():
+            got = raw.execute(text("SELECT pg_try_advisory_lock(hashtext(:target))"), {"target": slug}).scalar_one()
+        if got:
+            return
+        if time.monotonic() >= deadline:
+            raise PurgeLocked(f"{slug} is starting or finishing a turn; try again in a moment", code="busy")
+        time.sleep(_ADMISSION_POLL_SECONDS)
+
+
+def _release_admission_fence(raw, slug: str) -> None:
+    """Release the session lock; a connection that can't is discarded, which also frees it."""
+    try:
+        raw.execution_options(isolation_level="AUTOCOMMIT")
+        with raw.begin():
+            released = raw.execute(text("SELECT pg_advisory_unlock(hashtext(:target))"), {"target": slug}).scalar_one()
+        if not released:
+            raw.invalidate()
+    except Exception:  # noqa: BLE001 — never return a pooled connection that may still hold it
+        raw.invalidate()
+
+
 def _check_active(conn, slug: str, tables: set[str]) -> None:
-    from .service.turn_log_schema import TERMINAL_TURN_STATUSES
+    from .service.turn_admission import classify_target
 
     if {"turn_logs"} <= tables:
-        statuses = ",".join(f"'{s}'" for s in sorted(TERMINAL_TURN_STATUSES))
-        running = conn.execute(text(
-            f"SELECT count(*) FROM turn_logs WHERE bot_id=:s AND ended_at IS NULL AND end_reason IS NULL "
-            f"AND (status IS NULL OR status NOT IN ({statuses})) "
-            f"AND created_at > now() - interval '{ACTIVE_TURN_WINDOW}'"), {"s": slug}).scalar_one()
-        if running:
-            raise PurgeLocked(f"{slug} has {running} running turn(s); stop them or wait, then preview again",
-                              code="active")
+        # The admission authority's own view, under its lock: any open turn row
+        # (running, reserved or unrecovered) blocks. Age is not proof of
+        # termination; an abandoned turn must be recovered first.
+        state = classify_target(conn, slug, exclude_turn_id=None)
+        if not state.idle:
+            raise PurgeLocked(f"{slug} has an open turn ({state.describe()}); stop it or wait for it to finish, "
+                              "then preview again", code="active")
     if "inter_bot_deliveries" in tables:
         pending = conn.execute(text(
             "SELECT count(*) FROM inter_bot_deliveries WHERE target_bot_id=:s "
@@ -167,10 +202,48 @@ def _check_active(conn, slug: str, tables: set[str]) -> None:
                               "then preview again", code="active")
 
 
-def execute_bot_purge(engine, slug: str, *, manifest_digest: str | None, delete_profile: bool) -> dict[str, Any]:
-    """Run one confirmed purge; raise ``PurgeRefused`` (nothing deleted) otherwise."""
+def _purge_in_snapshot(raw, slug: str, manifest_digest: str, delete_profile: bool,
+                       tables: set[str]) -> tuple[dict[str, Any], dict[str, int]]:
+    """The confirmed purge in one REPEATABLE READ transaction (admission already fenced)."""
     from .prompt_purge import PromptPurgeGuard
 
+    conn = raw.execution_options(isolation_level="REPEATABLE READ")
+    with conn.begin():
+        conn.execute(text(f"SET LOCAL lock_timeout = '{LOCK_TIMEOUT}'"))
+        conn.execute(text("LOCK TABLE bot_profiles, bot_profile_tags IN SHARE ROW EXCLUSIVE MODE"))
+        prompt_purge = PromptPurgeGuard(conn, tables)
+        try:
+            prompt_purge.guard({slug})
+        except ValueError as exc:
+            raise PurgeLocked(str(exc), code="active") from exc
+        current = collect_preview(conn, slug, delete_profile=delete_profile)
+        if current["manifest_digest"] != manifest_digest:
+            raise PurgeStale("The bot's data changed since the preview; preview again")
+        if delete_profile and current["profile_version"]["state"] != "present":
+            raise PurgeRefused(f"Bot profile {slug} not found", code="not_found")
+        owned = _check_protected(conn, slug, current)
+        _check_active(conn, slug, prompt_purge.tables)
+
+        if not owned:
+            # Unattributable message storage cannot be purged, and its rows
+            # still reference this bot's sessions, so a partial purge would
+            # either fail on the FK or misreport sessions.
+            raise PurgeLocked(f"Message storage for {slug} can't be tied to this bot alone, so its data "
+                              "can't be purged. Delete the profile only, or resolve the shared storage "
+                              "first.", code="protected")
+        deleted = delete_scoped_rows(conn, slug, prompt_purge)
+        if delete_profile:
+            deleted["bot_profile_tags"] = conn.execute(
+                text("DELETE FROM bot_profile_tags WHERE bot_slug=:s"), {"s": slug}).rowcount
+            deleted["bot_profiles"] = conn.execute(
+                text("DELETE FROM bot_profiles WHERE slug=:s"), {"s": slug}).rowcount
+            from .bot_policy_events import policy_changed
+            policy_changed(conn)
+    return current, deleted
+
+
+def execute_bot_purge(engine, slug: str, *, manifest_digest: str | None, delete_profile: bool) -> dict[str, Any]:
+    """Run one confirmed purge; raise ``PurgeRefused`` (nothing deleted) otherwise."""
     slug = normalize_slug(slug)
     if not manifest_digest or not _DIGEST.match(manifest_digest):
         raise PurgeStale("A manifest_digest from a fresh purge preview is required", code="preview_required")
@@ -182,38 +255,11 @@ def execute_bot_purge(engine, slug: str, *, manifest_digest: str | None, delete_
         with engine.connect() as probe:
             tables = set(inspect(probe).get_table_names())
         with engine.connect() as raw:
-            conn = raw.execution_options(isolation_level="REPEATABLE READ")
-            with conn.begin():
-                conn.execute(text(f"SET LOCAL lock_timeout = '{LOCK_TIMEOUT}'"))
-                conn.execute(text("LOCK TABLE bot_profiles, bot_profile_tags IN SHARE ROW EXCLUSIVE MODE"))
-                prompt_purge = PromptPurgeGuard(conn, tables)
-                try:
-                    prompt_purge.guard({slug})
-                except ValueError as exc:
-                    raise PurgeLocked(str(exc), code="active") from exc
-                current = collect_preview(conn, slug, delete_profile=delete_profile)
-                if current["manifest_digest"] != manifest_digest:
-                    raise PurgeStale("The bot's data changed since the preview; preview again")
-                if delete_profile and current["profile_version"]["state"] != "present":
-                    raise PurgeRefused(f"Bot profile {slug} not found", code="not_found")
-                owned = _check_protected(conn, slug, current)
-                _check_active(conn, slug, prompt_purge.tables)
-
-                if not owned:
-                    # Unattributable message storage cannot be purged, and its
-                    # rows still reference this bot's sessions, so a partial
-                    # purge would either fail on the FK or misreport sessions.
-                    raise PurgeLocked(f"Message storage for {slug} can't be tied to this bot alone, so its data "
-                                      "can't be purged. Delete the profile only, or resolve the shared storage "
-                                      "first.", code="protected")
-                deleted = delete_scoped_rows(conn, slug, prompt_purge)
-                if delete_profile:
-                    deleted["bot_profile_tags"] = conn.execute(
-                        text("DELETE FROM bot_profile_tags WHERE bot_slug=:s"), {"s": slug}).rowcount
-                    deleted["bot_profiles"] = conn.execute(
-                        text("DELETE FROM bot_profiles WHERE slug=:s"), {"s": slug}).rowcount
-                    from .bot_policy_events import policy_changed
-                    policy_changed(conn)
+            _acquire_admission_fence(raw, slug)
+            try:
+                current, deleted = _purge_in_snapshot(raw, slug, manifest_digest, delete_profile, tables)
+            finally:
+                _release_admission_fence(raw, slug)
     except PurgeRefused:
         raise
     except IntegrityError as exc:

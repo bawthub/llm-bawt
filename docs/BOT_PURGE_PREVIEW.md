@@ -14,7 +14,12 @@ unaffected and needs no digest.
 
 ## Execution contract (`bot_purge_execute.execute_bot_purge`)
 
-One PostgreSQL REPEATABLE READ transaction, `lock_timeout` 3s:
+First the bot's turn-admission lock (the `hashtext(slug)` advisory key that
+`turn_admission.lock_target` and the delivery claim use) is taken at session
+level, waiting up to 3s, then held until the purge ends. It is acquired before
+the transaction begins so the snapshot sees every turn admitted while the
+purge waited, and no turn or delivery for the bot can be admitted mid-purge.
+Then one PostgreSQL REPEATABLE READ transaction, `lock_timeout` 3s:
 
 1. `LOCK bot_profiles, bot_profile_tags IN SHARE ROW EXCLUSIVE MODE`, then the
    prompt-purge writer guard. Table discovery uses a separate connection so the
@@ -25,9 +30,11 @@ One PostgreSQL REPEATABLE READ transaction, `lock_timeout` 3s:
      not tied to this bot alone (ambiguous or profile-less storage, or a
      storage id reserved by an alias);
    - 409 `aliases` — retired slug aliases still point at the bot;
-   - 423 `active` — a non-terminal turn started in the last 6 hours, or an
-     undelivered inter-bot delivery to the bot;
-   - 423 `busy` — lock timeout, serialization failure or deadlock;
+   - 423 `active` — any open turn row (running, reserved or never recovered;
+     age is not treated as termination), or an undelivered inter-bot delivery
+     to the bot;
+   - 423 `busy` — admission lock not free within 3s, lock timeout,
+     serialization failure or deadlock;
    - 409 `dependent` — another bot's row references selected rows (FK);
    - 404 `not_found` — combined delete of a missing profile;
    - 503 `unavailable` — no PostgreSQL, a required store missing, or ownership
@@ -108,8 +115,9 @@ exclusive bot data. This inventory is intentionally not a complete erasure claim
 The digest is **not a row-level preimage**: an equal-count change can preserve
 it, so it proves the confirmed counts and scope, not each row. Observed raw-owner
 sources are not an exhaustive historical registry. The active-turn check sees
-recorded turn logs and deliveries, not in-flight provider or bridge state, and
-stores outside local PostgreSQL (media, Redis, backups, external services) are
+recorded turn logs and deliveries, not in-flight provider or bridge state. The
+route's post-commit refresh can fail after the delete committed; the UI then
+reports an unknown outcome rather than "nothing was deleted". Stores outside local PostgreSQL (media, Redis, backups, external services) are
 reported unknown and left untouched — there is no cross-store atomicity.
 
 Tests use disposable SQLite and test-owned PostgreSQL fixtures only.

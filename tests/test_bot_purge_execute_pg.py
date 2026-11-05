@@ -23,7 +23,11 @@ def db(request):
             ('source','private'),('source','coder'),('dash','private')""")
         for ddl in ("ADD COLUMN status TEXT DEFAULT 'ok'", "ADD COLUMN end_reason TEXT",
                     "ADD COLUMN ended_at TIMESTAMP DEFAULT now()",
-                    "ADD COLUMN created_at TIMESTAMP DEFAULT now()"):
+                    "ADD COLUMN created_at TIMESTAMP DEFAULT now()",
+                    # Columns turn_admission.classify_target reads.
+                    "ADD COLUMN agent_session_key TEXT", "ADD COLUMN agent_request_id TEXT",
+                    "ADD COLUMN agent_backend TEXT", "ADD COLUMN agent_steer_caps TEXT",
+                    "ADD COLUMN user_id TEXT"):
             conn.exec_driver_sql(f"ALTER TABLE turn_logs {ddl}")
     return engine
 
@@ -117,11 +121,94 @@ def test_running_turn_is_423(db):
     assert_untouched(db)
 
 
-def test_stale_unfinished_turn_outside_window_does_not_block(db):
+@pytest.mark.parametrize("status", ["streaming", "reserved"])
+def test_old_open_turn_still_blocks(db, status):
+    # Age is not termination evidence: an abandoned open row must be recovered first.
     with db.begin() as conn:
-        conn.exec_driver_sql("""INSERT INTO turn_logs(id,bot_id,status,ended_at,created_at)
-            VALUES ('t-old','source','streaming',NULL, now() - interval '2 days')""")
-    assert run(db)["deleted_rows"]["turn_logs"] == 2
+        conn.exec_driver_sql(f"""INSERT INTO turn_logs(id,bot_id,status,ended_at,created_at)
+            VALUES ('t-old','source','{status}',NULL, now() - interval '7 hours')""")
+    with pytest.raises(ex.PurgeLocked) as refused:
+        run(db)
+    assert refused.value.code == "active"
+    assert_untouched(db)
+
+
+def advisory_locks(engine):
+    return count(engine, "SELECT count(*) FROM pg_locks WHERE locktype='advisory'")
+
+
+def test_turn_admitted_while_purge_waits_is_seen_and_refused(db):
+    """Admission holds the bot's lock and commits an open turn while purge waits for it."""
+    digest = preview.preview_bot_purge(db, "source", delete_profile=True)["manifest_digest"]
+    admitter = db.connect()
+    tx = admitter.begin()
+    admitter.execute(text("SELECT pg_advisory_xact_lock(hashtext('source'))"))  # turn_admission.lock_target
+    admitter.execute(text("INSERT INTO turn_logs(id,bot_id,status,ended_at) VALUES ('t-new','source','streaming',NULL)"))
+    errors = []
+
+    def purge():
+        try:
+            run(db, digest=digest)
+        except Exception as exc:  # noqa: BLE001 - asserted below
+            errors.append(exc)
+
+    worker = threading.Thread(target=purge)
+    worker.start()
+    worker.join(0.5)
+    assert worker.is_alive()  # waiting on the admission fence, nothing deleted yet
+    tx.commit()
+    admitter.close()
+    worker.join(10)
+    # The new turn is visible to the snapshot: it changes the counted turn rows
+    # (stale) and is an open turn (active). Either way nothing is deleted.
+    assert len(errors) == 1 and isinstance(errors[0], ex.PurgeRefused)
+    assert errors[0].code in {"stale_preview", "active"}
+    assert_untouched(db)
+    assert count(db, "SELECT count(*) FROM turn_logs WHERE id='t-new'") == 1
+    assert advisory_locks(db) == 0
+
+
+def test_admission_cannot_start_while_purge_runs(db, monkeypatch):
+    """While the purge holds the fence, the admission lock is unavailable to others."""
+    seen = []
+    original = ex._check_active
+
+    def probe(conn, slug, tables):
+        with db.connect() as other:
+            seen.append(other.execute(text("SELECT pg_try_advisory_xact_lock(hashtext('source'))")).scalar_one())
+            other.rollback()
+        return original(conn, slug, tables)
+
+    monkeypatch.setattr(ex, "_check_active", probe)
+    assert run(db)["profile_deleted"] is True
+    assert seen == [False]
+    assert advisory_locks(db) == 0
+
+
+def test_admission_held_past_the_wait_is_busy_and_releases_nothing(db, monkeypatch):
+    monkeypatch.setattr(ex, "ADMISSION_WAIT_SECONDS", 0.2)
+    digest = preview.preview_bot_purge(db, "source", delete_profile=True)["manifest_digest"]
+    admitter = db.connect()
+    tx = admitter.begin()
+    admitter.execute(text("SELECT pg_advisory_xact_lock(hashtext('source'))"))
+    try:
+        with pytest.raises(ex.PurgeLocked) as refused:
+            run(db, digest=digest)
+        assert refused.value.code == "busy"
+    finally:
+        tx.rollback()
+        admitter.close()
+    assert_untouched(db)
+    assert advisory_locks(db) == 0
+    assert run(db, digest=digest)["profile_deleted"] is True
+
+
+def test_refusal_inside_the_snapshot_still_releases_the_fence(db):
+    with db.begin() as conn:
+        conn.exec_driver_sql("INSERT INTO turn_logs(id,bot_id,status,ended_at) VALUES ('t-live','source','streaming',NULL)")
+    with pytest.raises(ex.PurgeLocked):
+        run(db)
+    assert advisory_locks(db) == 0
 
 
 def test_undelivered_message_to_bot_is_423(db):
