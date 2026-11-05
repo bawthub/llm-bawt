@@ -112,6 +112,21 @@ def client(database, monkeypatch):
         yield client
 
 
+def test_details_carry_first_message_fields(client, monkeypatch):
+    """TASK-2061: the viewer labels from the full first message, not a stored copy."""
+    seen = []
+
+    async def first_messages(rows):
+        seen.append([(r["id"], r["bot_id"], r["user_id"]) for r in rows])
+        return {"dest": {"first_message_text": "x" * 500, "initiated_by": {"kind": "user", "id": "owner"}}}
+
+    monkeypatch.setattr(routes, "_first_messages", first_messages)
+    session = client.get("/v1/sessions/dest/details?bot_id=test-bot&user=owner").json()["session"]
+    assert session["first_message_text"] == "x" * 500
+    assert session["initiated_by"] == {"kind": "user", "id": "owner"}
+    assert seen == [[("dest", "test-bot", "owner")]]
+
+
 def test_details_legacy_by_message_and_scoping(client):
     result = client.get("/v1/sessions/dest/details?bot_id=test-bot&user=owner")
     assert result.status_code == 200

@@ -7,14 +7,14 @@ from sqlalchemy import text
 from ...mcp_server.storage import get_storage
 from ...memory.session_continuity import SessionContinuity
 from ..dependencies import get_effective_bot_id
-from .sessions import _owned_session_or_404, _resolve_user, _to_info
+from .sessions import _first_messages, _owned_session_or_404, _resolve_user, _to_info
 
 router = APIRouter()
 
 
 async def session_details(session_id: str, bot_id: str, user_id: str, offset: int, limit: int):
     row = await _owned_session_or_404(session_id, bot_id, user_id)
-    info = _to_info(row)
+    info = _to_info(row, (await _first_messages([row])).get(row["id"]))
     # Registry timestamps are naive UTC; never let browsers interpret them as local time.
     for field in ("started_at", "ended_at", "archived_at"):
         value = getattr(info, field)
