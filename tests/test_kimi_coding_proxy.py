@@ -384,3 +384,12 @@ def test_kimi_subscription_cost_is_zero_not_unknown_model_fallback():
 
     usage = {"input_tokens": 100_000, "output_tokens": 10_000}
     assert _estimate_proxy_cost_usd("kimi_coding/k3", usage) == 0.0
+
+
+def test_local_engine_cost_is_zero_not_unknown_model_fallback():
+    """TASK-2053: a local Ollama turn must not carry the CLI's Opus-tier guess."""
+    from claude_code_bridge._bridge_helpers import _estimate_proxy_cost_usd
+
+    usage = {"input_tokens": 160_000, "cache_read_input_tokens": 150_000, "output_tokens": 2_000}
+    assert _estimate_proxy_cost_usd("local/qwen3.8:27b-256k", usage) == 0.0
+    assert _estimate_proxy_cost_usd("claude-opus-5-5", usage) is None

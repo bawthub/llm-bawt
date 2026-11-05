@@ -98,7 +98,9 @@ def _estimate_proxy_cost_usd(model: str | None, usage: dict | None) -> float | N
     # Kimi For Coding is a flat subscription surface. The Claude CLI does not
     # know that model and otherwise prices it as Opus-tier pay-as-you-go, which
     # is pure fiction. There is no marginal per-token charge to estimate.
-    if m.startswith("kimi_coding/"):
+    # Local engines (Ollama, llama.cpp, vLLM) run on our own hardware; the
+    # CLI's Opus-tier guess for them is equally fictional.
+    if m.startswith(("kimi_coding/", "local/")):
         return 0.0
     if not m.startswith("xai/"):
         return None
