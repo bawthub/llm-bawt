@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 import json
-from threading import Lock
+from threading import Condition, Lock
 import time
 
 STALE_SECONDS = 30.0
@@ -142,6 +142,12 @@ class OpsHealthState:
     def __init__(self, *, clock=time.monotonic, utcnow=lambda: datetime.now(UTC)):
         self.clock, self.utcnow = clock, utcnow
         self._lock = Lock()
+        # TASK-2105 S2: bumped on any content change (not a re-stamp), so
+        # consumers wait for changes instead of polling the snapshots.
+        self._changed = Condition(self._lock)
+        # Seeded from the wall clock so a restart never reuses a version a
+        # consumer already saw.
+        self._version = time.time_ns() // 1_000_000
         initial = HealthSample(self.sample_time(), "down", "not yet collected")
         self._samples = dict.fromkeys(("database", "docker", "ops.executor", "reconciler.loop"), initial)
         # A dormant mode may be unconfigured while the other mode can run.
@@ -158,19 +164,38 @@ class OpsHealthState:
             if name not in self._samples:
                 raise ValueError("unknown health capability")
             if not self._stopping:
-                self._samples[name] = sample
+                self._swap(self._samples, name, sample)
 
     def publish_mode(self, mode: str, sample: ExecutorModeSample):
         if mode not in ("process", "isolated"):
             raise ValueError("unknown executor mode")
         with self._lock:
             if not self._stopping:
-                self._modes[mode] = sample
+                self._swap(self._modes, mode, sample)
 
     def publish_catalog(self, sample: CatalogSample):
         with self._lock:
             if not self._stopping:
+                if replace(sample, sampled=self._catalog.sampled) != self._catalog:
+                    self._bump()
                 self._catalog = sample
+
+    def _swap(self, table, key, sample):
+        """Caller holds the lock. Notify only when more than ``sampled`` changed."""
+        old = table[key]
+        if type(old) is not type(sample) or replace(sample, sampled=old.sampled) != old:
+            self._bump()
+        table[key] = sample
+
+    def _bump(self):
+        self._version += 1
+        self._changed.notify_all()
+
+    def wait_for_change(self, seen: int, timeout: float) -> int:
+        """Block until the version differs from ``seen``, stop, or timeout; return the version."""
+        with self._changed:
+            self._changed.wait_for(lambda: self._version != seen or self._stopping, timeout)
+            return self._version
 
     def confirm_docker(self, changed_after: SampleTime, now: SampleTime):
         """Re-stamp Docker-derived samples the live event stream proves current.
@@ -200,6 +225,7 @@ class OpsHealthState:
     def stop(self):
         with self._lock:
             self._stopping = True
+            self._bump()
 
     def _read(self):
         with self._lock:

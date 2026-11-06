@@ -137,3 +137,49 @@ def test_run_exits_when_stop_lands_before_wake_clear():
 
     OpsHealthCollector.run(lambda: calls.append(1), LateStop(), interval=60, wake=wake)
     assert calls == []
+
+
+def test_change_version_bumps_on_content_not_restamp():
+    state = OpsHealthState(clock=Clock())
+    v0 = state.wait_for_change(-1, 0)
+    state.publish("docker", HealthSample(state.sample_time(), "ok"))
+    v1 = state.wait_for_change(v0, 0)
+    assert v1 != v0
+    # Same content, new timestamp: a re-stamp, not a change.
+    state.publish("docker", HealthSample(state.sample_time(), "ok"))
+    assert state.wait_for_change(v1, 0) == v1
+    state.publish("docker", HealthSample(state.sample_time(), "down", "gone"))
+    assert state.wait_for_change(v1, 0) != v1
+
+
+def test_change_wait_wakes_on_publish_and_stop():
+    from threading import Thread
+    state = OpsHealthState(clock=Clock())
+    seen = state.wait_for_change(-1, 0)
+    got = []
+    waiter = Thread(target=lambda: got.append(state.wait_for_change(seen, 5)))
+    waiter.start()
+    state.publish("database", HealthSample(state.sample_time(), "ok"))
+    waiter.join(2)
+    assert got and got[0] != seen
+    seen = got[0]
+    waiter = Thread(target=lambda: got.append(state.wait_for_change(seen, 5)))
+    waiter.start()
+    state.stop()
+    waiter.join(2)
+    assert not waiter.is_alive()
+
+
+def test_changes_endpoint_long_polls_and_rejects_bad_versions():
+    from fastapi.testclient import TestClient
+    from llm_bawt.ops import health_http
+    state = OpsHealthState(clock=Clock())
+    client = TestClient(health_http.create_health_app(state))
+    version = client.get("/v1/health/changes/0").json()["version"]
+    health_http.CHANGES_HOLD_SECONDS = 0.05
+    try:
+        assert client.get(f"/v1/health/changes/{version}").json() == {"schemaVersion": 1, "version": version}
+    finally:
+        health_http.CHANGES_HOLD_SECONDS = 25.0
+    assert client.get("/v1/health/changes/x1").status_code == 404
+    assert client.get("/v1/health/changes/1?a=b").status_code == 404

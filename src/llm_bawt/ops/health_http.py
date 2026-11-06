@@ -7,12 +7,14 @@ from threading import Event, Thread
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException
 import uvicorn
 from uvicorn.protocols.http.h11_impl import H11Protocol
 
 from .service_identity import PROJECT_PATTERN, SERVICE_PATTERN
 
+CHANGES_HOLD_SECONDS = 25.0
 SERVICE_ID = re.compile(rf"{PROJECT_PATTERN}\.{SERVICE_PATTERN}")
 
 
@@ -57,6 +59,15 @@ def create_health_app(state, *, lifespan=None):
     @app.get("/v1/health/services")
     async def services():
         return reply(state.services())
+
+    @app.get("/v1/health/changes/{seen}")
+    async def changes(seen: str):
+        # TASK-2105 S2: long-poll. Returns at once when the version differs
+        # from ``seen`` (use 0 to read it), else after a change or the hold.
+        if not seen.isdigit() or len(seen) > 18:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        version = await run_in_threadpool(state.wait_for_change, int(seen), CHANGES_HOLD_SECONDS)
+        return {"schemaVersion": 1, "version": version}
 
     @app.get("/v1/health/services/{service_id}")
     async def service(service_id: str):
