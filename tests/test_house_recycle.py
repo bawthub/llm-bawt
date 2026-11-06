@@ -27,6 +27,8 @@ class FakeRedis:
         self.streams: dict[str, list[dict]] = {}
         self.acks: list[tuple[str, str, str]] = []
         self.lag = 0
+        self.pending: list[str] = []  # read by the group, not yet acked
+        self.on_xinfo = None
 
     async def get(self, key):
         return self.kv.get(key)
@@ -69,7 +71,20 @@ class FakeRedis:
         self.acks.append((stream, group, msg_id))
 
     async def xinfo_groups(self, stream):
+        if self.on_xinfo:
+            # Runs while the recycle task awaits: the listener's interleaving.
+            self.on_xinfo(self)
         return [{"name": GROUP, "lag": self.lag}]
+
+    async def xpending_range(self, stream, group, *, min, max, count):
+        assert min.startswith("(") and max == "+"
+        after = _seq(min[1:])
+        return [{"message_id": m} for m in self.pending if _seq(m) > after][:count]
+
+
+def _seq(msg_id: str) -> tuple[int, int]:
+    ms, seq = msg_id.split("-")
+    return int(ms), int(seq)
 
 
 class Queue:
@@ -168,7 +183,8 @@ def test_in_flight_turn_is_never_evicted():
             _control(slot), "2-0", redis, group=GROUP, exit_process=lambda: exits.append(1)))
         for _ in range(20):
             await asyncio.sleep(0.002)
-        assert not exits and not task.done() and redis.acks == []
+        # The control is acked up front; the exit waits for the turn.
+        assert not exits and not task.done() and redis.acks == [(H1, GROUP, "2-0")]
         queue.live.clear()
         assert await asyncio.wait_for(task, 1)
         assert exits == [1]
@@ -180,6 +196,67 @@ def test_unread_send_on_the_stream_holds_the_exit():
         redis = FakeRedis()
         slot = await _house(redis)
         redis.lag = 1
+        exits = []
+        task = asyncio.create_task(slot.recycle(
+            _control(slot), "2-0", redis, group=GROUP, exit_process=lambda: exits.append(1)))
+        for _ in range(10):
+            await asyncio.sleep(0.002)
+        assert not exits
+        redis.lag = 0
+        assert await asyncio.wait_for(task, 1)
+    asyncio.run(go())
+
+
+def test_send_read_during_the_drain_check_is_never_dropped():
+    """Codex F1: the listener reads, then admits, a send while recycle awaits."""
+    async def go():
+        redis, queue = FakeRedis(), Queue()
+        slot = await _house(redis, queue)
+        slot.GRACE_S = 0
+        send = {"request_id": "r2", "session_key": "s", EPOCH_FIELD: slot.epoch}
+        steps = iter([
+            # 1st check: the send is delivered to the listener mid-await (lag 0
+            # by the time XINFO answers), but not admitted yet: still pending.
+            lambda r: r.pending.append("3-0"),
+            # 2nd check: the listener admits and starts it; the run acks it.
+            lambda r: (gate_ok.append(slot.admit(send)), slot.track(send),
+                       queue.live.add(("s", "r2")), r.pending.remove("3-0")),
+        ])
+        gate_ok: list[bool] = []
+        redis.on_xinfo = lambda r: next(steps, lambda _: None)(r)
+        exits = []
+        task = asyncio.create_task(slot.recycle(
+            _control(slot), "2-0", redis, group=GROUP, exit_process=lambda: exits.append(1)))
+        for _ in range(20):
+            await asyncio.sleep(0.002)
+        assert gate_ok == [True] and not exits and not task.done()
+        queue.live.clear()
+        assert await asyncio.wait_for(task, 1) and exits == [1]
+        # Anything the listener reads after the decision is refused, never run.
+        publisher = Publisher()
+        late = {"request_id": "r3", "session_key": "s", EPOCH_FIELD: slot.epoch}
+        assert not await gate_send(slot, late, "4-0", redis, group=GROUP, publisher=publisher)
+        assert publisher.done == ["r3"] and (H1, GROUP, "4-0") in redis.acks
+    asyncio.run(go())
+
+
+def test_pending_before_the_control_does_not_hold_the_exit():
+    async def go():
+        redis = FakeRedis()
+        redis.pending = ["1-0"]  # a predecessor's unacked leftover
+        slot = await _house(redis)
+        exits = []
+        assert await slot.recycle(_control(slot), "2-0", redis, group=GROUP,
+                                  exit_process=lambda: exits.append(1))
+        assert exits == [1]
+    asyncio.run(go())
+
+
+def test_unknown_lag_holds_the_exit():
+    async def go():
+        redis = FakeRedis()
+        redis.lag = None
+        slot = await _house(redis)
         exits = []
         task = asyncio.create_task(slot.recycle(
             _control(slot), "2-0", redis, group=GROUP, exit_process=lambda: exits.append(1)))

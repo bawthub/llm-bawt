@@ -165,7 +165,7 @@ def test_new_session_vacates_the_house_and_recycles_it(monkeypatch):
     assert house_lease.evict_for_reset(service, llm, "B", delivery_id="d") == "h1"
     (payload, kwargs), = store.writes
     assert payload["house"] is None and payload["house_pinned"] is False
-    assert payload["expected_fields"] == {"house": "h1"}
+    assert payload["expected_fields"] == {"house": "h1", "house_pinned": False}
     assert payload["_changed_by"] == house_lease.SYSTEM_ACTOR and kwargs == {"require_existing": True}
     assert "house" not in llm.client._bot_config  # the reset turn runs in the mansion
     assert calls.invalidated == ["b"] and len(calls.published) == 1
@@ -189,6 +189,24 @@ def test_kept_pinned_or_mansion_bots_are_untouched(monkeypatch, store, intent, c
     service, llm, calls = _rig(monkeypatch, store=store, intent=intent, cached=cached)
     assert house_lease.evict_for_reset(service, llm, "b", delivery_id="d") is None
     assert store.writes == [] and calls.recycled == [] and calls.invalidated == []
+
+
+def test_pin_landing_after_the_read_keeps_the_tenancy(monkeypatch):
+    """A pin PATCH between the read and the bot lock refuses the eviction."""
+    from llm_bawt.bot_profile_changes import ProfileFieldsChanged
+
+    store = Store()
+
+    def upsert(payload, **kwargs):
+        store.writes.append(payload)
+        raise ProfileFieldsChanged("b", {"house": "h1", "house_pinned": True}, "pinned")
+
+    store.upsert = upsert
+    service, llm, calls = _rig(monkeypatch, store=store)
+    assert house_lease.evict_for_reset(service, llm, "b", delivery_id=None) is None
+    assert store.writes[0]["expected_fields"]["house_pinned"] is False
+    assert llm.client._bot_config["house"] == "h1"
+    assert calls.recycled == [] and calls.invalidated == [] and calls.published == []
 
 
 def test_failed_eviction_never_fails_the_reset(monkeypatch):

@@ -23,10 +23,10 @@ HOSTNAME = re.compile(
 MEMORY = re.compile(r"[1-9][0-9]*(?:[kKmMgG](?:[bB])?)?\Z")
 HARNESSES = {"claude-code": "claude_code_bridge", "codex": "codex_bridge"}
 _BRIDGE_OWNED = "uid=1001,gid=1001"
-# Tenant scratch that would otherwise persist in the container layer across a
-# restart. Shared state (~/.claude, Codex config/sessions, dev, skills) is bind
-# mounted and unaffected; ~/.local holds image tools and stays. Pages count
-# against the house memory limit; the caps total 1.3 GiB.
+# The only container-local writable paths of a house (its root is read-only),
+# emptied by every restart. Shared state (~/.claude, Codex config/sessions,
+# dev, skills) is bind mounted and unaffected; ~/.local holds image tools and
+# is read-only. Pages count against the house memory limit; caps total 1.3 GiB.
 HOUSE_TMPFS = (
     "/tmp:size=512m,mode=1777",
     f"/home/bridge/.cache:size=512m,{_BRIDGE_OWNED},mode=0755",
@@ -165,9 +165,11 @@ def render_compose(config: object, base_compose: Path) -> dict:
                 "${HOME}/.codex/sessions:/home/bridge/.codex/sessions",
                 "house-service-token:/run/bawthub-service-token:ro",
             ],
-            # TASK-2080: every writable path a tenant touches outside the shared
-            # mounts is size-capped tmpfs, so a restarted house is a fresh
-            # container (nested binds above still mount on top).
+            # TASK-2080: a restart keeps the container layer, so the root is
+            # read-only. A tenant writes only to the shared mounts or to the
+            # size-capped tmpfs below, which a restart empties (nested binds
+            # still mount on top). Any other write fails instead of persisting.
+            "read_only": True,
             "tmpfs": list(HOUSE_TMPFS),
             "networks": ["default", "house-previews"],
         }

@@ -207,6 +207,8 @@ class HouseSlot:
         self._task: asyncio.Task | None = None
         self.superseded = False
         self.recycling = False
+        # Set once a recycle decided to exit: nothing is admitted after it.
+        self.closed = False
         self._recycle_tasks: set[asyncio.Task] = set()
 
     @property
@@ -227,7 +229,7 @@ class HouseSlot:
         """False for a send routed under an older epoch (fenced, never run)."""
         if not self.is_house:
             return True
-        if self.superseded:
+        if self.superseded or self.closed:
             return False
         return (fields.get(EPOCH_FIELD) or "") == (self.epoch or "-")
 
@@ -304,11 +306,19 @@ class HouseSlot:
         """Restart this house for a fresh container, never under a running turn.
 
         Run as its own task so the listener keeps serving the in-flight turn's
-        steers and aborts. Only the current lease holder acts: the lease is
-        released first (new work for this house now falls back to the mansion),
-        then the bridge waits until no admitted turn is live and nothing is
-        unread on its stream, acks, and exits. Docker's restart policy brings it
-        back; its tmpfs paths start empty. Returns True when it exited.
+        steers and aborts. Only the current lease holder acts: the control is
+        acked and the lease released first (new work for this house now falls
+        back to the mansion), then the bridge drains and exits. Docker's
+        restart policy brings it back; its tmpfs paths start empty. Returns
+        True when it exited.
+
+        Drain: every entry after the control is either unread (group lag),
+        read but not yet admitted (still pending), or admitted (tracked, so
+        ``busy``). The lag is read before the pending range, so an entry
+        delivered between the two reads is caught by the second. The final
+        ``busy`` check, closing admission and the exit run with no await in
+        between, so the listener cannot admit a send after the decision; one
+        it reads later is refused at receipt (nothing runs).
         """
         stale = (not self.is_house or self.superseded or self.recycling
                  or (fields.get("backend") or "") != self.backend
@@ -319,14 +329,21 @@ class HouseSlot:
             await redis.xack(self.stream, group, msg_id)
             return False
         self.recycling = True
+        await redis.xack(self.stream, group, msg_id)
         await redis.eval(_RELEASE_LEASE_LUA, 1, lease_key(self.house, self.backend), self.epoch)
         logger.info("house %s/%s recycling: lease released, draining", self.house, self.backend)
-        while self.busy() or await self._unread(redis, group):
+        while True:
+            unread = await self._unread(redis, group)
+            pending = await self._pending_after(redis, group, msg_id)
+            # No await from here to exit_process: the decision is atomic with
+            # respect to the listener on this event loop.
+            if not unread and not pending and not self.busy():
+                self.closed = True
+                logger.info("house %s/%s idle; exiting for a fresh container",
+                            self.house, self.backend)
+                exit_process()
+                return True
             await asyncio.sleep(RECYCLE_POLL_S)
-        await redis.xack(self.stream, group, msg_id)
-        logger.info("house %s/%s idle; exiting for a fresh container", self.house, self.backend)
-        exit_process()
-        return True
 
     async def _unread(self, redis: Any, group: str) -> int:
         """Entries on this house's stream not yet read by its group."""
@@ -334,12 +351,31 @@ class HouseSlot:
             for info in await redis.xinfo_groups(self.stream):
                 if info.get("name") == group:
                     lag = info.get("lag")
-                    return int(lag) if lag is not None else 0
+                    if lag is None:
+                        # Redis can't compute lag (e.g. after deletions):
+                        # never treat unknown as drained.
+                        return 1
+                    return int(lag)
         except Exception:
             logger.warning("house %s stream lag unreadable; treating as busy", self.house,
                            exc_info=True)
             return 1
         return 0
+
+    async def _pending_after(self, redis: Any, group: str, msg_id: str) -> int:
+        """Entries after ``msg_id`` read by the group but not yet acked.
+
+        Sends ahead of the control were read (count=1, in order) before it and
+        are tracked; only later ones can be read but not yet admitted. Older
+        pending entries (a predecessor process's leftovers) never block.
+        """
+        try:
+            return len(await redis.xpending_range(
+                self.stream, group, min=f"({msg_id}", max="+", count=1))
+        except Exception:
+            logger.warning("house %s pending entries unreadable; treating as busy",
+                           self.house, exc_info=True)
+            return 1
 
     async def _heartbeat(self) -> None:
         while True:

@@ -21,6 +21,8 @@ from typing import Any
 
 from sqlalchemy import text
 
+from .bot_profile_changes import ProfileWriteConflict
+
 logger = logging.getLogger(__name__)
 
 SYSTEM_ACTOR = "system:house-lease"
@@ -69,9 +71,14 @@ def evict_for_reset(service: Any, llm_bawt: Any, bot_id: str, *,
             return None
         store.upsert({
             "slug": slug, "house": None, "house_pinned": False,
-            "expected_fields": {"house": house},
+            # Rechecked under the bot lock: a pin or house change that landed
+            # after the read above refuses the eviction (ProfileFieldsChanged).
+            "expected_fields": {"house": house, "house_pinned": False},
             "_changed_by": SYSTEM_ACTOR, "change_note": "new session vacated the house",
         }, require_existing=True)
+    except ProfileWriteConflict as conflict:
+        logger.info("bot %s tenancy changed during eviction (%s); kept", slug, conflict)
+        return None
     except Exception:
         logger.exception("house eviction failed for %s; tenancy unchanged", slug)
         return None

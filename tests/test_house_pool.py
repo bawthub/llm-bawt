@@ -116,6 +116,9 @@ def test_tenant_scratch_is_capped_tmpfs_under_the_house_limit(config):
             for entry in service["tmpfs"]}
         assert set(mounts) == {"/tmp", "/home/bridge/.cache", "/home/bridge/.config",
                                "/home/bridge/.codex", "/home/bridge/.npm"}
+        # The restart-surviving container layer is read-only: a tenant write
+        # anywhere else (~/tenant-marker, ~/.local/...) fails, never persists.
+        assert service["read_only"] is True
         # Image tools under ~/.local and every shared mount stay as they are.
         assert "/home/bridge/.local" not in mounts and not shared & set(mounts)
         assert sum(_mib(m["size"]) for m in mounts.values()) < _mib("4g") // 2
