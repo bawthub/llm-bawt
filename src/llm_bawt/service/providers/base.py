@@ -225,6 +225,10 @@ class CredentialStore:
     def _payload(record: ConnectionRecord) -> dict[str, Any]:
         """Stamp ``record`` and build the stored row JSON (secret encrypted)."""
         record.updated_at = _now()
+        # Every credential write builds its row here (TASK-2105 S3).
+        from ..health_changes import publish
+
+        publish(f"credential write: {record.provider}")
         if record.status == STATUS_CONNECTED and not record.connected_at:
             record.connected_at = record.updated_at
         payload: dict[str, Any] = {
@@ -334,7 +338,12 @@ class CredentialStore:
     def delete(self, provider: str) -> bool:
         if not self.available:
             return False
-        return self._store.delete_value("global", "*", self._key(provider))
+        removed = self._store.delete_value("global", "*", self._key(provider))
+        if removed:
+            from ..health_changes import publish
+
+            publish(f"credential delete: {provider}")
+        return removed
 
 
 BillingMode = Literal["subscription", "metered", "unknown"]

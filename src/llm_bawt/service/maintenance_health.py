@@ -112,6 +112,13 @@ class JobState:
     last_at: str | None = None
 
 
+def _publish(reason: str) -> None:
+    """A job's row appeared or flipped: wake BawtHub's health (TASK-2105 S3)."""
+    from .health_changes import publish
+
+    publish(reason)
+
+
 class MaintenanceHealth:
     """Thread-safe per-job outcome registry (background jobs run in a pool)."""
 
@@ -127,6 +134,8 @@ class MaintenanceHealth:
                 log.info("Maintenance job %s recovered after %d failure(s)", job, previous.failures)
             self._jobs[job] = JobState(job=job, ok=True, model=model, provider=provider,
                                        credential=credential, last_at=_now())
+        if previous is None or not previous.ok:
+            _publish(f"maintenance {job} ok")
 
     def record_failure(self, job: str, error_class: str, detail: str, *, model: str | None,
                        provider: str | None, credential: str | None) -> None:
@@ -140,6 +149,8 @@ class MaintenanceHealth:
                 failures=(previous.failures if failing else 0) + 1,
                 since=previous.since if failing else now, last_at=now,
             )
+        if not failing:
+            _publish(f"maintenance {job} failing")
         log.error("Maintenance job %s failed (%s) on %s/%s: %s",
                   job, error_class, provider or "?", model or "?", detail[:200])
 

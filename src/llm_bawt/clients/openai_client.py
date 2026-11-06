@@ -20,6 +20,35 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+class _ConnectReportingTransport(httpx.HTTPTransport):
+    """Reports a failed connect to the Ollama health tracker (TASK-2105 S3), so
+    a chat that can't reach the server marks it offline without waiting for
+    the next probe. The error still propagates unchanged."""
+
+    def __init__(self, base_url: str, **kwargs):
+        super().__init__(**kwargs)
+        self._base_url = base_url
+
+    def handle_request(self, request):
+        try:
+            return super().handle_request(request)
+        except httpx.ConnectError as error:
+            from ..service.providers.ollama import report_unreachable
+
+            try:
+                report_unreachable(self._base_url, error)
+            except Exception:  # noqa: BLE001 — never mask the request error
+                logger.debug("ollama unreachable report failed", exc_info=True)
+            raise
+
+
+def _reporting_http_client(base_url: str) -> httpx.Client:
+    from openai import DefaultHttpxClient
+
+    return DefaultHttpxClient(transport=_ConnectReportingTransport(
+        base_url, limits=httpx.Limits(max_connections=1000, max_keepalive_connections=100)))
+
+
 class OpenAIClient(LLMClient):
     """Client for OpenAI API and OpenAI-compatible endpoints.
     
@@ -56,7 +85,8 @@ class OpenAIClient(LLMClient):
         effective_key = self.api_key or "not-needed"
         
         if base_url:
-            self.client = OpenAI(api_key=effective_key, base_url=base_url)
+            self.client = OpenAI(api_key=effective_key, base_url=base_url,
+                                 http_client=_reporting_http_client(base_url))
             logger.debug(f"OpenAI client using custom endpoint: {base_url}")
         else:
             self.client = OpenAI(api_key=effective_key)

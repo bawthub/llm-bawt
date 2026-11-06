@@ -24,6 +24,7 @@ from ...task_turn_context import (
 )
 from .. import bridge_gate
 from ..dependencies import get_service
+from ..health_changes import health_changes, publish
 from ..providers.base import AUTH_API_KEY, AUTH_CLI_OAUTH, AUTH_DEVICE_OAUTH
 from ..providers.ollama import AUTH_ENDPOINT
 from ..providers.github import GitHubAdapter, GitHubConfigError, GitHubNotConnectedError, parse_repository
@@ -103,7 +104,10 @@ async def providers_health():
             })
         return out
 
-    return {"providers": await run_in_threadpool(_collect)}
+    providers = await run_in_threadpool(_collect)
+    # TASK-2105 S3: wake BawtHub when the next reported credential expires.
+    health_changes().arm_expiry([p.get("expires_at") for p in providers])
+    return {"providers": providers}
 
 
 @router.get("/v1/providers/{provider_id}")
@@ -349,6 +353,8 @@ async def openrouter_api_key(request: Request):
 async def disconnect(provider_id: str):
     adapter = _adapter_or_404(provider_id)
     result = await run_in_threadpool(adapter.disconnect)
+    # File-backed credentials (Claude) can clear without a DB row (TASK-2105 S3).
+    publish(f"disconnect: {provider_id}")
     return result if isinstance(result, dict) else {"disconnected": result}
 
 

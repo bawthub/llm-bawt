@@ -56,6 +56,29 @@ _health_cache: dict[tuple[str, str | None], tuple[float, tuple[str | None, str |
 _health_cache_lock = threading.Lock()
 
 
+#: Background reachability probe cadence while Ollama is configured (TASK-2105
+#: S3). A switched-off server has no event to push, so this is the one probe
+#: kept on a timer; it publishes a health change only when the state flips.
+REACHABILITY_INTERVAL_SECONDS = 60.0
+
+
+def _state_of(result: tuple[str | None, str | None, bool]) -> str:
+    version, _detail, unreachable = result
+    return HEALTH_OK if version else (HEALTH_OFFLINE if unreachable else HEALTH_BROKEN)
+
+
+def _store_probe(root: str, key: str | None, result: tuple[str | None, str | None, bool]) -> None:
+    """Cache ``result``; publish a health change when the server's state flips."""
+    with _health_cache_lock:
+        previous = next((hit[1] for (r, _k), hit in _health_cache.items() if r == root), None)
+        _health_cache.clear()  # one server URL at a time; drop stale entries
+        _health_cache[(root, key)] = (time.monotonic(), result)
+    if previous is not None and _state_of(previous) != _state_of(result):
+        from ..health_changes import publish  # noqa: PLC0415
+
+        publish(f"ollama {_state_of(previous)} -> {_state_of(result)}")
+
+
 def _cached_health_probe(root: str, key: str | None) -> tuple[str | None, str | None, bool]:
     now = time.monotonic()
     with _health_cache_lock:
@@ -63,10 +86,43 @@ def _cached_health_probe(root: str, key: str | None) -> tuple[str | None, str | 
         if hit and now - hit[0] < _HEALTH_CACHE_SECONDS:
             return hit[1]
     result = _probe(root, key, timeout=_HEALTH_TIMEOUT)
-    with _health_cache_lock:
-        _health_cache.clear()  # one server URL at a time; drop stale entries
-        _health_cache[(root, key)] = (time.monotonic(), result)
+    _store_probe(root, key, result)
     return result
+
+
+def report_unreachable(base_url: str, error: BaseException) -> None:
+    """A request to ``base_url`` could not connect: if that is the probed Ollama
+    server, mark it offline now instead of at the next probe (TASK-2105 S3).
+    Other OpenAI-compatible servers are not tracked and are ignored."""
+    try:
+        root = normalize_server_url(base_url)
+    except OllamaUrlError:
+        return
+    with _health_cache_lock:
+        keys = [k for (r, k) in _health_cache if r == root]
+    if not keys:
+        return
+    detail = f"Couldn't reach Ollama at {root} ({type(error).__name__})"
+    _store_probe(root, keys[0], (None, detail, True))
+
+
+def recheck_reachability(config: Any) -> bool:
+    """Probe the configured server now (bypassing the cache); False when unconfigured."""
+    target = OllamaAdapter(config).probe_target()
+    if target is None:
+        return False
+    root, key = target
+    _store_probe(root, key, _probe(root, key, timeout=_HEALTH_TIMEOUT))
+    return True
+
+
+def reachability_loop(config: Any, stop: threading.Event) -> None:
+    """Daemon-thread body: :func:`recheck_reachability` every interval until ``stop``."""
+    while not stop.wait(REACHABILITY_INTERVAL_SECONDS):
+        try:
+            recheck_reachability(config)
+        except Exception as exc:  # noqa: BLE001 — a failed tick must not end the loop
+            logger.debug("ollama reachability probe failed: %s", exc)
 
 
 def clear_health_cache() -> None:
@@ -247,15 +303,21 @@ class OllamaAdapter(ProviderAdapter):
             return ValidateResult(ok=False, detail=detail)
         return ValidateResult(ok=True, account=f"Ollama {version} · {root}")
 
-    def health(self) -> dict[str, Any]:
+    def probe_target(self) -> tuple[str, str | None] | None:
+        """(server root, key) to check, or None when Ollama isn't configured."""
         record = self.store.load(self.id)
         connected = bool(record and record.status == STATUS_CONNECTED)
-        if not connected and not _stored_path_url(self.config):
-            return health_block(HEALTH_UNCONFIGURED, detail=f"not configured; using {server_url(self.config)}")
         # A URL saved on the route (by an earlier setup or this form) is a real
         # configuration even without a connection record, so check it.
-        root = server_url(self.config)
-        key = (record.secret or {}).get(_SECRET_FIELD) if connected else None
+        if not connected and not _stored_path_url(self.config):
+            return None
+        return server_url(self.config), (record.secret or {}).get(_SECRET_FIELD) if connected else None
+
+    def health(self) -> dict[str, Any]:
+        target = self.probe_target()
+        if target is None:
+            return health_block(HEALTH_UNCONFIGURED, detail=f"not configured; using {server_url(self.config)}")
+        root, key = target
         version, detail, unreachable = _cached_health_probe(root, key)
         if version is None:
             # A server that's switched off isn't a credential problem (TASK-2104).

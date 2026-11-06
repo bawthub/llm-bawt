@@ -388,6 +388,17 @@ async def lifespan(app):
     from .usage.codex_oauth import proactive_refresh_loop as _codex_loop
     service._codex_refresh_task = asyncio.create_task(_codex_loop())
 
+    # TASK-2105 S3: the one provider probe kept on a timer (a switched-off
+    # Ollama server has no event); it publishes only when reachability flips.
+    import threading
+
+    from .providers.ollama import reachability_loop
+    service._ollama_reachability_stop = threading.Event()
+    threading.Thread(
+        target=reachability_loop, args=(config, service._ollama_reachability_stop),
+        name="ollama-reachability", daemon=True,
+    ).start()
+
     # GPU transition intent is durable. An app restart cannot replay an
     # unconfirmed stop/start or assume that the old owner still holds the GPU.
     from ..media.gpu_handoff_store import GpuHandoffStore
@@ -449,6 +460,8 @@ def shutdown_phases(service, *, scheduler, redis_subscriber, home_audio_worker) 
     shutdown is never counted as a delivery failure.
     """
     phases: list = [("home audio worker", home_audio_worker.stop)]
+    if hasattr(service, "_ollama_reachability_stop"):
+        phases.append(("ollama reachability stop", service._ollama_reachability_stop.set))
     if hasattr(service, "_embedding_repair_stop"):
         phases.append(("embedding repair stop", service._embedding_repair_stop.set))
     if scheduler:

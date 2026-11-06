@@ -37,6 +37,38 @@ def get_health_checks():
     return collect(config, get_ops_store(config), get_ops_service(config), service=service)
 
 
+CHANGES_HOLD_SECONDS = 25.0
+# Each waiter holds a threadpool thread (shared with every sync route) for the
+# hold; beyond the cap, 503 so the client backs off rather than spins.
+MAX_CHANGE_WAITERS = 8
+_change_waiters = {"n": 0}  # event-loop only, so no lock
+
+
+@router.get("/v1/health/changes/{seen}", tags=["System"])
+async def get_health_changes(seen: str):
+    """Long-poll the app health change version (TASK-2105 S3).
+
+    Returns at once when the version differs from ``seen`` (use 0 to read
+    it), else after a change or the hold. BawtHub reruns its llm-bawt and
+    provider checks when it moves.
+    """
+    from fastapi.concurrency import run_in_threadpool
+    from fastapi.responses import JSONResponse
+
+    from ..health_changes import health_changes
+
+    if not seen.isdigit() or len(seen) > 18:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if _change_waiters["n"] >= MAX_CHANGE_WAITERS:
+        return JSONResponse({"error": "busy"}, status_code=503)
+    _change_waiters["n"] += 1
+    try:
+        version = await run_in_threadpool(health_changes().wait_for_change, int(seen), CHANGES_HOLD_SECONDS)
+    finally:
+        _change_waiters["n"] -= 1
+    return {"schemaVersion": 1, "version": version}
+
+
 @router.get("/v1/health/maintenance", tags=["System"])
 def get_maintenance_health():
     """Per-job outcome of botless maintenance/utility calls (TASK-1704).
