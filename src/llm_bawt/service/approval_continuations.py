@@ -18,6 +18,7 @@ from ..ops.approved_admission import ops_receipt_is_error
 from ..mcp_result_envelope import (
     MCP_RESULT_ENVELOPE_PREFIX, append_reset_guidance, format_mcp_result_envelope,
 )
+from collections.abc import Collection
 from typing import Any
 
 from .dependencies import get_ops_service, get_service
@@ -389,17 +390,26 @@ async def recover_approval_requests(store):
         await asyncio.to_thread(store.prepare_harness_continuation, row.id)
 
 
-async def dispatch_due_continuations_once(service, store, *, limit: int = 20) -> set[str]:
+async def dispatch_due_continuations_once(
+    service, store, *, limit: int = 20, exclude_ids: Collection[str] = (),
+) -> set[str]:
     """Run one recover/dispatch pass for the durable continuation outbox.
 
-    Returns the ids left waiting on something that wakes the loop itself (an
-    ops job still active, or a failed status lookup), so the loop schedules
-    every other due row for an immediate pass and does not spin on these.
+    Returns every id it inspected. Rows still due afterwards wait on
+    something that wakes the loop itself (an ops job still active, a failed
+    status lookup); the loop schedules only other due rows for an immediate
+    pass and does not spin on these.
+    ``exclude_ids`` skips rows parked earlier in the same drain, so a full
+    batch of parked rows cannot hide a runnable row behind it.
     """
     await recover_approval_requests(store)
-    due = await asyncio.to_thread(store.find_pending_continuations, limit=limit)
+    due = await asyncio.to_thread(store.find_pending_continuations, limit=limit,
+                                  exclude_ids=exclude_ids)
     parked: set[str] = set()
     for pending in due:
+        # Every inspected row counts: one that stays due (a failed dispatch
+        # that wrote no backoff) must not spin the drain either.
+        parked.add(pending.id)
         # An approved restart starts before its continuation. Claiming the
         # continuation while the job is active creates an in-flight agent turn
         # that the restart can kill. Wait for the durable terminal job receipt,
@@ -455,19 +465,24 @@ async def run_mcp_continuation_outbox(service, store, *, idle_seconds: float = 2
     from .commit_wake import backstop, subscribe, wait_for_wake
 
     wake = subscribe(service)
+    held: set[str] = set()  # parked during the current drain; rechecked once it ends
     while True:
         delay = idle_seconds
+        draining = False
         try:
-            parked = await dispatch_due_continuations_once(service, store)
+            held |= await dispatch_due_continuations_once(service, store, exclude_ids=held)
             if wake is not None:
                 delay = backstop(service, idle_seconds)
-                due = await asyncio.to_thread(store.seconds_until_next_continuation, exclude_ids=parked or ())
+                due = await asyncio.to_thread(store.seconds_until_next_continuation, exclude_ids=held)
                 if due is not None:
+                    draining = due <= 0
                     delay = min(delay, max(due, 0.05))
         except asyncio.CancelledError:
             raise
         except Exception:
             log.exception("Approval recovery/outbox pass failed; retrying")
+        if not draining:
+            held = set()  # the next pass (wake, retry due or backstop) rechecks parked rows
         await wait_for_wake(wake, delay)
 
 

@@ -836,6 +836,7 @@ class McpApprovalStoreMixin:
         *,
         limit: int = 50,
         include_dispatching_older_than_s: int = 120,
+        exclude_ids: Collection[str] = (),
     ) -> list[ToolApprovalRequest]:
         """Outbox worker query: continuations ready for dispatch.
 
@@ -870,6 +871,8 @@ class McpApprovalStoreMixin:
                 .order_by(ToolApprovalRequest.continuation_next_attempt_at)
                 .limit(limit)
             )
+            if exclude_ids:  # TASK-2108: rows parked earlier in this drain
+                stmt = stmt.where(ToolApprovalRequest.id.not_in(list(exclude_ids)))
             return list(session.exec(stmt).all())
 
     def seconds_until_next_continuation(
@@ -878,32 +881,39 @@ class McpApprovalStoreMixin:
         """Seconds until the earliest continuation retry or lease expiry (TASK-2108).
 
         Already-due rows count as 0 (run another pass now), except
-        ``exclude_ids``: rows the last pass left waiting on something that
-        wakes the loop itself (an ops job's terminal commit), so they never
-        spin it. None when nothing is scheduled.
+        ``exclude_ids``: rows the drain already inspected that are still due,
+        i.e. waiting on something that wakes the loop itself (an ops job's
+        terminal commit), so they never spin it. An excluded row with a future
+        retry still counts at that time. None when nothing is scheduled.
         """
         if self.engine is None:
             raise ApprovalStoreUnavailable("Approval database unavailable")
         now = _utcnow()
         lease = timedelta(seconds=include_dispatching_older_than_s)
+        excluded = set(exclude_ids)
         stmt = (
-            select(ToolApprovalRequest.continuation_state, ToolApprovalRequest.continuation_next_attempt_at)
+            select(ToolApprovalRequest.id, ToolApprovalRequest.continuation_state,
+                   ToolApprovalRequest.continuation_next_attempt_at)
             .where(
                 (ToolApprovalRequest.continuation_state == CONT_PENDING)
                 | ((ToolApprovalRequest.continuation_state == CONT_DISPATCHING)
                    & (ToolApprovalRequest.continuation_delivered_at.is_(None)))
             )
         )
-        if exclude_ids:
-            stmt = stmt.where(ToolApprovalRequest.id.not_in(list(exclude_ids)))
         with Session(self.engine) as session:
             rows = session.exec(stmt).all()
-        # A DISPATCHING row without a stamp is never reclaimed by the outbox query; skip it.
+
         def aware(at):  # stored naive on some backends; stamps are UTC
             return at.replace(tzinfo=now.tzinfo) if at is not None and at.tzinfo is None and now.tzinfo else at
 
-        dues = [aware(at) + lease if state == CONT_DISPATCHING else (aware(at) or now)
-                for state, at in rows if at is not None or state == CONT_PENDING]
+        dues = []
+        for row_id, state, at in rows:
+            if at is None and state == CONT_DISPATCHING:
+                continue  # never reclaimed by the outbox query
+            due = aware(at) + lease if state == CONT_DISPATCHING else (aware(at) or now)
+            if row_id in excluded and due <= now:
+                continue
+            dues.append(due)
         if not dues:
             return None
         return max(0.0, (min(dues) - now).total_seconds())

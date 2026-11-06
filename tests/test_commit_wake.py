@@ -106,8 +106,9 @@ def test_continuation_loop_sleeps_until_the_next_retry_is_due(monkeypatch):
 
     passes = []
 
-    async def once(service, store):
+    async def once(service, store, **_):
         passes.append(time.monotonic())
+        return set()
 
     monkeypatch.setattr(approval_continuations, "dispatch_due_continuations_once", once)
     store = SimpleNamespace(seconds_until_next_continuation=lambda **_: 0.1)
@@ -251,3 +252,64 @@ def test_follow_up_after_a_failed_pass_sleeps_the_interval(last):
         await runner._wait_for_next_pass(last)
         assert time.monotonic() - started >= 0.05
     run(main())
+
+
+class _ContinuationStore:
+    """Rows ``r00..r20`` all due; ``parked`` ids wait on an active ops job."""
+
+    def __init__(self, n, parked):
+        self.rows = {f"r{i:02d}": "pending" for i in range(n)}
+        self.parked = set(parked)
+        self.finds = 0
+        self.dispatched = []
+
+    def find_pending_continuations(self, *, limit, exclude_ids=()):
+        self.finds += 1
+        due = [rid for rid, state in sorted(self.rows.items()) if state == "pending" and rid not in exclude_ids]
+        return [SimpleNamespace(id=rid) for rid in due[:limit]]
+
+    def claim_continuation(self, rid, lease_seconds):
+        self.rows[rid] = "dispatching"
+        return SimpleNamespace(id=rid)
+
+    def seconds_until_next_continuation(self, *, exclude_ids=()):
+        due = [rid for rid, state in self.rows.items() if state == "pending" and rid not in exclude_ids]
+        return 0.0 if due else None
+
+
+def _continuation_loop(monkeypatch, store, seconds):
+    from llm_bawt.service import approval_continuations as mod
+
+    async def no_recovery(_store):
+        return None
+
+    async def dispatch(service, store_, claimed, result_override=None):
+        store_.dispatched.append(claimed.id)
+        store_.rows[claimed.id] = "delivered"
+
+    monkeypatch.setattr(mod, "recover_approval_requests", no_recovery)
+    monkeypatch.setattr(mod, "_terminal_ops_result",
+                        lambda service, pending: None if pending.id in store.parked else {})
+    monkeypatch.setattr(mod, "_admission_card_result", lambda pending: None)
+    monkeypatch.setattr(mod, "dispatch_mcp_result_continuation", dispatch)
+
+    async def main():
+        service = SimpleNamespace(_commit_wake_hub=WakeHub())
+        task = asyncio.create_task(mod.run_mcp_continuation_outbox(service, store))
+        await asyncio.sleep(seconds)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    run(main())
+
+
+def test_a_full_parked_batch_does_not_hide_a_runnable_row(monkeypatch):
+    store = _ContinuationStore(21, parked=[f"r{i:02d}" for i in range(20)])
+    _continuation_loop(monkeypatch, store, 0.5)
+    assert store.dispatched == ["r20"]
+    assert store.finds <= 4  # head batch, the tail, then idle on the backstop
+
+
+def test_all_parked_rows_do_not_spin_the_loop(monkeypatch):
+    store = _ContinuationStore(5, parked=[f"r{i:02d}" for i in range(5)])
+    _continuation_loop(monkeypatch, store, 0.5)
+    assert store.dispatched == [] and store.finds == 1
