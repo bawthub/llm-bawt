@@ -163,9 +163,10 @@ HARDENED_PROFILE = ServiceProfile("pinned-hardened", SERVICE_KEYS | HARDENING_KE
 INIT_MEMORY_PROFILE_LABEL = "llm-bawt.ops.init-memory-profile"
 
 
-def needs_init_memory_worker(desired: dict, profile: ServiceProfile) -> bool:
-    """Would a worker built before TASK-2088 refuse this desired configuration?"""
-    if "init" in desired:
+def needs_init_memory_worker(desired: dict, profile: ServiceProfile, drift_names=()) -> bool:
+    """Would a worker built before TASK-2088 refuse this desired configuration,
+    or disagree with this drift (it never computes ``init:~``)?"""
+    if "init" in desired or "init:~" in drift_names:
         return True
     memory = desired.get("memory")
     if memory is None:

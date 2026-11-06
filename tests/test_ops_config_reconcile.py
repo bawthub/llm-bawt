@@ -322,6 +322,28 @@ def test_legacy_worker_without_the_capability_fails_before_render_or_dispatch():
     assert not api.render_bodies
 
 
+def test_image_deploy_check_of_a_lone_mem_limit_needs_the_init_memory_worker():
+    # TASK-2088 r1: an older worker's own config check refuses a lone mem_limit
+    # mid-job, so the admission check refuses first.
+    from llm_bawt.ops.compose_config import HARDENED_PROFILE_LABEL, INIT_MEMORY_PROFILE_LABEL
+    gib4 = 1 << 32
+    api = ConfigDocker(compose=compose_project(mem_limit=str(gib4)))
+    api.by_name(NAME)["HostConfig"].update(Memory=gib4, MemorySwap=2 * gib4)
+    spec = copy.deepcopy(DEPLOY_SPEC)
+    spec["compose_config"]["profile"] = "pinned-hardened"
+    old = {WORKER_CAPABILITY_LABEL: "1", HEALTH_PROBE_LABEL: "1", HARDENED_PROFILE_LABEL: "1"}
+    executor, _pulls = _executor(api, worker_labels=old)
+    with pytest.raises(ConfigCheckError) as caught:
+        executor.config_check(spec, f"{REPO}@{DIGEST}")
+    assert caught.value.code == "config_reconcile_unavailable" and INIT_MEMORY_PROFILE_LABEL in str(caught.value)
+    executor, _pulls = _executor(api, worker_labels={**old, INIT_MEMORY_PROFILE_LABEL: "1"})
+    assert executor.config_check(spec, f"{REPO}@{DIGEST}") is None
+    # A declared pair is what the older worker already modelled (TASK-1801).
+    api.compose = compose_project(mem_limit=str(gib4), memswap_limit=str(2 * gib4))
+    executor, _pulls = _executor(api, worker_labels=old)
+    assert executor.config_check(spec, f"{REPO}@{DIGEST}") is None
+
+
 def test_preflight_checks_prerequisites_without_rendering():
     api = ConfigDocker(compose=DRIFTED)
     executor, pulls = _executor(api, renderer_present=False)

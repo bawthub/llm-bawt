@@ -456,6 +456,15 @@ def test_app_needs_the_init_memory_worker_only_once_it_declares_init_or_a_cap():
         approved = _executor(api, worker_labels={**APP_V2_WORKER, INIT_MEMORY_PROFILE_LABEL: "1"}).config_approval(
             APP_SPEC)
         assert approved["drift"] in (["init:~"], ["memory:~"])
+    # r1: removing an undeclared Init is drift only the new worker computes.
+    api = AppDocker()
+    api.by_name(APP_NAME)["HostConfig"]["Init"] = True
+    with pytest.raises(ConfigCheckError) as caught:
+        _executor(api, worker_labels=APP_V2_WORKER).config_approval(APP_SPEC)
+    assert caught.value.code == "config_reconcile_unavailable" and INIT_MEMORY_PROFILE_LABEL in str(caught.value)
+    approved = _executor(api, worker_labels={**APP_V2_WORKER, INIT_MEMORY_PROFILE_LABEL: "1"}).config_approval(
+        APP_SPEC)
+    assert approved["drift"] == ["init:~"]
     dockerfile = (Path(__file__).resolve().parents[1] / "docker" / "Dockerfile.ops-worker").read_text()
     assert f'LABEL {INIT_MEMORY_PROFILE_LABEL}="1"' in dockerfile
 

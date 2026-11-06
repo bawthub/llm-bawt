@@ -558,7 +558,7 @@ class DockerExecutor(Executor):
             else:
                 binding, desired = config_binding(spec, container, image, renderer)
                 profile = selected_profile(spec["compose_config"])
-            if needs_init_memory_worker(desired, profile):
+            if needs_init_memory_worker(desired, profile, binding.get("drift") or ()):
                 # TASK-2088: likewise for init and the memory cap.
                 self._check_config_worker(self.execution_settings(spec), spec["action"],
                                           extra=(INIT_MEMORY_PROFILE_LABEL,))
@@ -584,13 +584,18 @@ class DockerExecutor(Executor):
             raise ConfigCheckError("config_check_unconfigured",
                                    "deploy spec declares no compose_config; the drift guard cannot run")
         renderer, container, image = self._config_inputs(spec)
+        profile = selected_profile(spec["compose_config"])
         try:
             result = evaluate(spec, container, image, renderer, image_ref or container["Config"].get("Image", ""),
-                              selected_profile(spec["compose_config"]))
+                              profile)
         except ComposeError as exc:
             raise ConfigCheckError(exc.code, f"compose config check failed: {exc}") from exc
         except (ValueError, KeyError) as exc:
             raise ExecutorError(f"compose config check failed: {exc}") from exc
+        if needs_init_memory_worker(result["desired"], profile, result["drift"]):
+            # TASK-2088: the image deploy's worker re-checks with its own parser.
+            self._check_config_worker(self.execution_settings(spec), spec["action"],
+                                      extra=(INIT_MEMORY_PROFILE_LABEL,))
         if result["drift"]:
             raise ConfigCheckError("config_drift", (
                 "config_drift: the running target differs from its Compose service ("
