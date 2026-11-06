@@ -425,7 +425,7 @@ def test_unconfigured_observed_house_is_flagged():
 def test_pool_file_exposes_only_id_harness_and_origin(tmp_path, monkeypatch):
     import json
 
-    from llm_bawt.service.routes.campus import POOL_FILE_ENV, configured_pool
+    from llm_bawt.house_pool_config import POOL_FILE_ENV, configured_pool
 
     monkeypatch.delenv(POOL_FILE_ENV, raising=False)
     assert configured_pool() is None
