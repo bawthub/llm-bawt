@@ -219,10 +219,11 @@ def test_actual_http_selected_native_history_sql(native_runtime, real_storage, r
         if role == "assistant":
             assert len(sql.all_statements) == 2  # actual UPSERT + delegated ping
         else:
-            # Admission's actual session read primes an already-settled title.
-            assert len(sql.all_statements) == (2 if title else 4), sql.all_statements
-            assert any("UPDATE sessions" in s for s in sql) is (title is None), sql
-    assert len(whole.all_statements) == (24 if title else 26), whole.all_statements
+            # TASK-2061 retired the auto-title writer: a title-less session no
+            # longer adds a session read + UPDATE to the user append.
+            assert len(sql.all_statements) == 2, sql.all_statements
+            assert not any("UPDATE sessions" in s for s in sql), sql
+    assert len(whole.all_statements) == 24, whole.all_statements
     assert _receipt(whole)["read_bearing_owner_dml"] == 2
     # Admission and context SELECTs remain in the WHOLE HTTP receipt; do not
     # sell the append optimization as a zero-SELECT whole request.
