@@ -45,3 +45,33 @@ def test_schedule_runs_once_per_session(monkeypatch):
     for _ in range(3):
         gt.schedule_session_title(None, session_id="once", bot_id="b", user_id="u", message_id="m", content="hi")
     assert len(started) == 1
+
+
+def test_chat_write_path_schedules_title_for_user_messages(monkeypatch):
+    """Chat turns write through the short-term manager, not MCP storage."""
+    from llm_bawt.memory.postgresql_short_term import PostgreSQLShortTermManager
+
+    calls, rows = [], []
+    monkeypatch.setattr(gt, "schedule_session_title", lambda engine, **kw: calls.append((engine, kw)))
+    manager = object.__new__(PostgreSQLShortTermManager)
+    manager.bot_id, manager.user_id = "bot-a", "nick"
+    manager._backend = type("B", (), {"engine": "ENG", "add_message": lambda self, **kw: rows.append(kw)})()
+
+    mid = manager.add_message("user", "How do I rebase?", session_id="s1")
+    manager.add_message("assistant", "Like this", session_id="s1")
+
+    assert len(rows) == 2
+    assert calls == [("ENG", {"session_id": "s1", "bot_id": "bot-a", "user_id": "nick",
+                              "message_id": mid, "content": "How do I rebase?"})]
+
+
+def test_chat_write_survives_title_hook_failure(monkeypatch):
+    from llm_bawt.memory.postgresql_short_term import PostgreSQLShortTermManager
+
+    def boom(engine, **kw):
+        raise RuntimeError("x")
+    monkeypatch.setattr(gt, "schedule_session_title", boom)
+    manager = object.__new__(PostgreSQLShortTermManager)
+    manager.bot_id, manager.user_id = "bot-a", "nick"
+    manager._backend = type("B", (), {"engine": None, "add_message": lambda self, **kw: None})()
+    assert manager.add_message("user", "hi", session_id="s1")

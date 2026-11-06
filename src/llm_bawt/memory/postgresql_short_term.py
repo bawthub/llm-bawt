@@ -711,17 +711,33 @@ class PostgreSQLShortTermManager(ShortTermMessageReadsMixin, ShortTermMessageMut
         # ONLY when the row actually committed. Previously this returned `mid`
         # unconditionally, handing the caller a valid-looking id for a row that
         # never persisted (the silent-swallow / orphan-turn_logs bug).
+        target_session = session_id or self._current_session_id
         self._backend.add_message(
             message_id=mid,
             role=role,
             content=content,
             timestamp=ts,
-            session_id=session_id or self._current_session_id,
+            session_id=target_session,
             attachments=attachments,
             reasoning=reasoning,
             author=author,
             **({"extract_memory": False} if not extract_memory else {}),
         )
+
+        # TASK-2064: chat turns write here, not through the MCP storage path,
+        # so the generated-title hook must run here too. Cosmetic: never
+        # raises or slows the write.
+        if role == "user" and target_session:
+            try:
+                from ..sessions.generated_title import schedule_session_title
+
+                schedule_session_title(
+                    self._backend.engine, session_id=target_session,
+                    bot_id=self.bot_id, user_id=self.user_id,
+                    message_id=mid, content=content,
+                )
+            except Exception as e:
+                logger.warning("session title hook failed (%s)", type(e).__name__)
 
         return mid
     
