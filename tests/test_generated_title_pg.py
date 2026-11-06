@@ -130,6 +130,8 @@ def scheduler(monkeypatch):
     monkeypatch.setattr(deps, "_service", object())
     monkeypatch.setattr(gt, "_attempted", set())
     monkeypatch.setattr(gt, "_pending", set())
+    monkeypatch.setattr(gt, "_triggers", {})
+    monkeypatch.setattr(gt, "_running", set())
     real = gt.generate_session_title
     monkeypatch.setattr(gt, "generate_session_title",
                         lambda *a, **kw: real(*a, **{**kw, "complete": Model("Git rebase question")}))
@@ -188,3 +190,22 @@ def test_sequential_marker_then_question(engine, scheduler):
     scheduler("s12", "q1", "How do I rebase?")
     Deferred.drain()
     assert _meta(engine, "s12")["title"] == "Git rebase question"
+
+
+def test_new_message_in_old_unnamed_chat_is_not_backfilled(engine, scheduler):
+    """Codex r3: a later message must not title an old chat from its history."""
+    engine_holder[0] = engine
+    _session(engine, "s13", {}, [("old", "user", "Old question from last month")])
+    _add(engine, "s13", "new", "today's follow-up", 9)
+    scheduler("s13", "new", "today's follow-up")
+    Deferred.drain()
+    assert _meta(engine, "s13") == {}
+    assert gt._triggers == {} and gt._running == set()
+
+
+def test_unrelated_first_message_is_skipped_by_generator(engine):
+    _session(engine, "s14", {}, [("old", "user", "Old question")])
+    model = Model("Unused")
+    assert generate_session_title(engine, "s14", "bot-a", "nick", model,
+                                  trigger_ids={"other"}) is gt.NOT_TRIGGERED
+    assert model.calls == []

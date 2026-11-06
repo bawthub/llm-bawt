@@ -50,6 +50,9 @@ _WS = re.compile(r"\s+")
 _attempted: set[str] = set()
 # Sessions that got another user message while their worker was running.
 _pending: set[str] = set()
+# Message ids each running worker answers for.
+_triggers: dict[str, set[str]] = {}
+_running: set[str] = set()
 _attempted_lock = threading.Lock()
 
 
@@ -128,14 +131,20 @@ def store_generated_title(conn, session_id: str, bot_id: str, user_id: str | Non
 
 
 NO_ELIGIBLE = object()
+NOT_TRIGGERED = object()
 
 
 def generate_session_title(engine, session_id: str, bot_id: str, user_id: str | None,
-                           complete=None):
+                           complete=None, trigger_ids=None):
     """Title the session from its first eligible message, read from the DB.
 
-    Returns the stored title, ``None`` (named, refused or not stored) or
-    ``NO_ELIGIBLE`` when the session has no eligible message yet.
+    ``trigger_ids`` are the message writes this worker answers for; when
+    given, the first eligible message must be one of them, so a new message
+    in an old unnamed chat never titles it from history (no backfill).
+
+    Returns the stored title, ``None`` (named, refused or not stored),
+    ``NO_ELIGIBLE`` when the session has no eligible message yet, or
+    ``NOT_TRIGGERED`` when its first eligible message is not a trigger.
     """
     with engine.connect() as conn:
         row = _first_message(conn, session_id, bot_id, user_id)
@@ -143,6 +152,8 @@ def generate_session_title(engine, session_id: str, bot_id: str, user_id: str | 
         return None
     if row["fm_id"] is None:
         return NO_ELIGIBLE
+    if trigger_ids is not None and row["fm_id"] not in trigger_ids:
+        return NOT_TRIGGERED
     content = row["fm_text"] or ""
 
     from ..prompt_registry import get_prompt_resolver
@@ -168,23 +179,36 @@ def generate_session_title(engine, session_id: str, bot_id: str, user_id: str | 
 
 
 def _worker(engine, session_id: str, bot_id: str, user_id: str | None) -> None:
-    """One worker per session. A user message that arrives while it runs sets
-    ``_pending``; if the worker found no eligible message it re-reads instead of
-    giving up, so the first eligible message is never skipped."""
+    """One worker per session, answering only for the writes that scheduled it.
+
+    A write arriving while it runs adds its id and marks the session pending;
+    a worker that found no eligible message, or a first message not yet among
+    its trigger ids, re-reads when pending instead of stopping.
+    """
+    def finish(release: bool) -> None:  # caller holds _attempted_lock
+        _triggers.pop(session_id, None)
+        _running.discard(session_id)
+        _pending.discard(session_id)
+        if release:
+            _attempted.discard(session_id)
+
     while True:
         with _attempted_lock:
             _pending.discard(session_id)
+            ids = set(_triggers.get(session_id, ()))
         try:
-            outcome = generate_session_title(engine, session_id, bot_id, user_id)
+            outcome = generate_session_title(engine, session_id, bot_id, user_id,
+                                             trigger_ids=ids)
         except Exception as error:  # cosmetic; type only, never message text
-            logger.warning("session title failed for %s (%s)", session_id, type(error).__name__)
-            return
-        if outcome is not NO_ELIGIBLE:
-            return
+            logger.warning("session title failed for %s (%s)", session_id,
+                           type(error).__name__)
+            outcome = None
         with _attempted_lock:
-            if session_id not in _pending:
-                _attempted.discard(session_id)
-                return
+            if outcome is NO_ELIGIBLE or outcome is NOT_TRIGGERED:
+                if session_id in _pending:
+                    continue
+            finish(release=outcome is NO_ELIGIBLE)
+            return
 
 
 def schedule_session_title(engine, *, session_id: str | None, bot_id: str,
@@ -199,9 +223,13 @@ def schedule_session_title(engine, *, session_id: str | None, bot_id: str,
             return
         with _attempted_lock:
             if session_id in _attempted:
-                _pending.add(session_id)
+                if session_id in _running:  # hand the write to the live worker
+                    _triggers.setdefault(session_id, set()).add(message_id)
+                    _pending.add(session_id)
                 return
             _attempted.add(session_id)
+            _running.add(session_id)
+            _triggers[session_id] = {message_id}
         threading.Thread(target=_worker, args=(engine, session_id, bot_id, user_id),
                          daemon=True, name="session-title").start()
     except Exception as error:
