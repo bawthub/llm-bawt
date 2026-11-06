@@ -1,7 +1,7 @@
 """Immutable, bounded health snapshots. Readers never touch Docker or the DB."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 import json
 from threading import Lock
@@ -171,6 +171,23 @@ class OpsHealthState:
         with self._lock:
             if not self._stopping:
                 self._catalog = sample
+
+    def confirm_docker(self, changed_after: SampleTime, now: SampleTime):
+        """Re-stamp Docker-derived samples the live event stream proves current.
+
+        Only samples collected at or after the last observed change (or the
+        stream's connect) are re-stamped, so a pre-change snapshot is never
+        kept fresh; anything older ages out to stale as before."""
+        def fresh(sample):
+            return sample.sampled.monotonic >= changed_after.monotonic
+        with self._lock:
+            if self._stopping:
+                return
+            for name in ("docker", "ops.executor"):
+                if fresh(self._samples[name]):
+                    self._samples[name] = replace(self._samples[name], sampled=now)
+            if fresh(self._modes["isolated"]):
+                self._modes["isolated"] = replace(self._modes["isolated"], sampled=now)
 
     def stop(self):
         with self._lock:

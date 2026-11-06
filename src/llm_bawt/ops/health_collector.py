@@ -37,6 +37,10 @@ from .worker import QUIESCE_FENCE_LABEL
 
 COLLECTION_BUDGET_SECONDS = 15.0
 DOCKER_TIMEOUT_SECONDS = 2
+# Docker events are read in windows of this many seconds (TASK-2105).
+EVENT_WINDOW_SECONDS = 5
+# Full Docker snapshot cadence while events drive updates: reconciliation only.
+DOCKER_RECONCILE_SECONDS = 60.0
 # Fixed first-party names and availability only; never expose the raw image
 # label map. Missing optional labels block only operations that require them.
 ISOLATED_CAPABILITIES = (
@@ -206,11 +210,36 @@ def docker_client():
     return docker.from_env(timeout=DOCKER_TIMEOUT_SECONDS)
 
 
+def docker_events_client():
+    import docker
+    # Event windows block until ``until``; the read timeout must outlast one.
+    return docker.from_env(timeout=EVENT_WINDOW_SECONDS + 5)
+
+
+# Changes that can alter inventory, health or the isolated worker image.
+EVENT_FILTERS = {"type": ["container", "image"]}
+IGNORED_EVENT_PREFIXES = ("exec_", "attach", "top", "resize", "export", "commit", "copy", "archive-path")
+
+
+def relevant_event(event) -> bool:
+    if not isinstance(event, dict):
+        return False
+    action = event.get("Action") or event.get("status") or ""
+    return isinstance(action, str) and not action.startswith(IGNORED_EVENT_PREFIXES)
+
+
 class OpsHealthCollector:
-    def __init__(self, state, engine_factory, *, client_factory=docker_client):
+    def __init__(self, state, engine_factory, *, client_factory=docker_client,
+                 events_client_factory=docker_events_client):
         self.state = state
         self.engine_factory = engine_factory
         self.client_factory = client_factory
+        self.events_client_factory = events_client_factory
+        self.docker_events_live = False
+
+    def docker_interval(self):
+        """Reconcile slowly only while the event stream is proven live."""
+        return DOCKER_RECONCILE_SECONDS if self.docker_events_live else 5.0
 
     def collect_database(self):
         sampled = self.state.sample_time()
@@ -317,8 +346,52 @@ class OpsHealthCollector:
         if self.state.clock() - sampled.monotonic > COLLECTION_BUDGET_SECONDS:
             raise TimeoutError("health collection budget exceeded")
 
-    @staticmethod
-    def run(collect, stop, *, interval=5.0):
+    def watch_docker(self, stop, wake, *, window=EVENT_WINDOW_SECONDS, backoff=5.0):
+        """Push Docker changes into the snapshot instead of waiting for a poll.
+
+        Reads the event stream in contiguous bounded windows (``since``/``until``),
+        so no read blocks indefinitely and each cleanly closed window proves no
+        change happened. A relevant event wakes the Docker collector; a clean
+        window re-stamps samples taken since the last change. Connecting or
+        reconnecting always forces a full resync."""
         while not stop.is_set():
+            client = None
+            try:
+                client = self.events_client_factory()
+                last_change = self.state.sample_time()
+                wake.set()  # (re)connect: resync, events may have been missed
+                since = int(last_change.wall.timestamp())
+                while not stop.is_set():
+                    until = since + window
+                    changed = False
+                    for event in client.events(since=since, until=until,
+                                               filters=EVENT_FILTERS, decode=True):
+                        if relevant_event(event):
+                            changed = True
+                            last_change = self.state.sample_time()
+                            wake.set()
+                    self.docker_events_live = True
+                    if not changed:
+                        self.state.confirm_docker(last_change, self.state.sample_time())
+                    since = until
+            except Exception:
+                self.docker_events_live = False  # snapshots fall back to polling
+                wake.set()  # stream lost: resync, then reconnect after backoff
+                stop.wait(backoff)
+            finally:
+                if client is not None:
+                    try:
+                        client.close()
+                    except Exception:
+                        pass
+
+    @staticmethod
+    def run(collect, stop, *, interval=5.0, wake=None):
+        """Collect, then wait for ``interval`` or an early ``wake``.
+
+        Whoever sets ``stop`` must also set ``wake`` to end the wait promptly."""
+        while not stop.is_set():
+            if wake is not None:
+                wake.clear()
             collect()
-            stop.wait(interval)
+            (wake or stop).wait(interval() if callable(interval) else interval)

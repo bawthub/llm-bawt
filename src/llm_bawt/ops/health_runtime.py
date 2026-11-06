@@ -84,6 +84,7 @@ class OpsHealthRuntime:
                  wedge_seconds=None, exit=None):
         self.state = state or OpsHealthState()
         self.stop = Event()
+        self.docker_wake = Event()
         self.collector = collector or OpsHealthCollector(self.state, database_engine)
         self.reconciler_factory = reconciler_factory
         self.interval = interval
@@ -145,7 +146,11 @@ class OpsHealthRuntime:
             self.control.start()
         for name, target in (
             ("ops-health-database", lambda: self.collector.run(self.collector.collect_storage, self.stop)),
-            ("ops-health-docker", lambda: self.collector.run(self.collector.collect_docker, self.stop)),
+            # Docker events push changes; the full snapshot is reconciliation.
+            ("ops-health-docker", lambda: self.collector.run(
+                self.collector.collect_docker, self.stop,
+                interval=self.collector.docker_interval, wake=self.docker_wake)),
+            ("ops-health-docker-events", lambda: self.collector.watch_docker(self.stop, self.docker_wake)),
             ("ops-reconciler", self._reconcile),
         ) + ((("ops-watchdog", self._watchdog),) if self.wedge_seconds > 0 else ()):
             worker = Thread(name=name, target=target, daemon=True)
@@ -158,6 +163,7 @@ class OpsHealthRuntime:
         self._closed = True
         self.state.stop()
         self.stop.set()
+        self.docker_wake.set()
         if self.control is not None:
             self.control.close()
         # A stuck RPC cannot hold SIGTERM indefinitely. One fixed daemon per
