@@ -193,3 +193,31 @@ def test_changes_endpoint_refuses_beyond_the_waiter_cap(monkeypatch):
     client = TestClient(health_http.create_health_app(state))
     # At the cap it refuses at once, so the client backs off instead of spinning.
     assert client.get("/v1/health/changes/1", timeout=5).status_code == 503
+
+
+def test_catalog_rereads_on_notify_and_closes_listener():
+    stop = Event()
+    reads, waits = [], []
+
+    class Waiter:
+        closed = False
+
+        def wait(self, stop_, timeout):
+            waits.append(timeout)
+            if len(waits) == 2:
+                stop_.set()
+            return True
+
+        def close(self):
+            Waiter.closed = True
+
+    collector = OpsHealthCollector(OpsHealthState(clock=Clock()), lambda: None)
+    collector.collect_catalog = lambda: reads.append(1)
+    collector.watch_catalog(stop, Waiter())
+    assert reads == [1, 1] and waits == [60.0, 60.0] and Waiter.closed
+
+
+def test_operation_writes_notify_the_catalog_channel():
+    from llm_bawt.ops import store as store_mod
+    src = open(store_mod.__file__).read()
+    assert src.count("self._notify_catalog(session, row.slug)") == 2

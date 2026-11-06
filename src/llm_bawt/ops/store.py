@@ -45,6 +45,8 @@ PREFLIGHT_FAILED = "preflight_failed"
 # without waiting out its interval (TASK-1169 S3b). A wake-up only: the
 # reconciler still scans the ledger, so a lost notify costs one interval.
 JOB_CREATED_CHANNEL = "ops_job_created"
+#: TASK-2105: operation-catalog writes wake the ops health catalog reader.
+CATALOG_CHANGED_CHANNEL = "ops_catalog_changed"
 
 
 def _utcnow():
@@ -298,6 +300,12 @@ class OpsStore:
                 raise ValueError(f"{field} must be a string")
         validate_quiesce_settings(op, schema)
 
+    def _notify_catalog(self, session, slug):
+        if self.engine.dialect.name == "postgresql":
+            # Delivered only if this transaction commits.
+            session.execute(text("SELECT pg_notify(:channel, :slug)"),
+                            {"channel": CATALOG_CHANGED_CHANNEL, "slug": slug})
+
     @staticmethod
     def _record_revision(session, row):
         session.add(OpsOperationRevision(operation_id=row.id, operation_slug=row.slug,
@@ -314,6 +322,7 @@ class OpsStore:
         with Session(self.engine) as session:
             session.add(row)
             self._record_revision(session, row)
+            self._notify_catalog(session, row.slug)
             try:
                 session.commit()
             except IntegrityError as exc:
@@ -354,6 +363,7 @@ class OpsStore:
             row.updated_by = actor
             session.add(row)
             self._record_revision(session, row)
+            self._notify_catalog(session, row.slug)
             session.commit()
             session.refresh(row)
             return row

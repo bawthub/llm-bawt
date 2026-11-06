@@ -36,6 +36,7 @@ from .service_identity import PROJECT_LABEL, SERVICE_LABEL, ComposeServiceRef
 from .worker import QUIESCE_FENCE_LABEL
 
 COLLECTION_BUDGET_SECONDS = 15.0
+CATALOG_RECONCILE_SECONDS = 60.0
 DOCKER_TIMEOUT_SECONDS = 2
 # Docker events are read in windows of this many seconds (TASK-2105).
 EVENT_WINDOW_SECONDS = 5
@@ -285,9 +286,21 @@ class OpsHealthCollector:
         self.state.publish_catalog(sample)
 
     def collect_storage(self):
-        """The database worker's tick: liveness probe, then catalog snapshot."""
+        """Liveness probe, then catalog snapshot (tests and one-shot callers)."""
         self.collect_database()
         self.collect_catalog()
+
+    def watch_catalog(self, stop, waiter, *, reconcile=CATALOG_RECONCILE_SECONDS):
+        """Re-read the catalog when an operation write notifies
+        ``ops_catalog_changed``. The ``reconcile`` wait is only a backstop for
+        a missed notify (listener down, or writes outside OpsStore such as a
+        manual SQL edit); it is not the update path."""
+        try:
+            while not stop.is_set():
+                self.collect_catalog()
+                waiter.wait(stop, reconcile)
+        finally:
+            waiter.close()
 
     def collect_docker(self):
         sampled = self.state.sample_time()

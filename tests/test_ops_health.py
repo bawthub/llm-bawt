@@ -340,8 +340,9 @@ def test_http_survives_blocked_reconciler_and_collectors_and_shutdown_is_bounded
     def block(*_args):
         _stall(entered, release)
 
-    collectors = SimpleNamespace(run=OpsHealthCollector.run, collect_storage=block, collect_docker=block,
-                                 docker_interval=5.0, watch_docker=lambda *_: block())
+    collectors = SimpleNamespace(run=OpsHealthCollector.run, collect_database=block, collect_docker=block,
+                                 docker_interval=5.0, watch_docker=lambda *_: block(),
+                                 watch_catalog=lambda *_: block())
     runtime = OpsHealthRuntime(state=state, collector=collectors,
                               reconciler_factory=lambda _: SimpleNamespace(run=block))
     server = OpsHealthServer(state, ("127.0.0.1", 0), lifespan=runtime.lifespan)
@@ -362,7 +363,7 @@ def test_http_survives_blocked_reconciler_and_collectors_and_shutdown_is_bounded
         # timing-ok: real thread joins: close's 2s worker deadline vs collectors stalled for 10s
         assert time.monotonic() - before < 3.5
         assert not server.thread.is_alive()
-        assert len(runtime.workers) == 5  # three producers, Docker events, watchdog
+        assert len(runtime.workers) == 6  # DB, catalog, Docker, Docker events, reconciler, watchdog
     finally:
         release.set()
         server.close()
@@ -448,8 +449,9 @@ def test_bootstrap_failure_recovers_without_restarting_http():
         _until_stopped(stop)
 
     collectors = SimpleNamespace(run=lambda _collect, stop, **_: _until_stopped(stop),
-                                 collect_storage=None, collect_docker=None, docker_interval=5.0,
-                                 watch_docker=lambda stop, _wake: _until_stopped(stop))
+                                 collect_database=None, collect_docker=None, docker_interval=5.0,
+                                 watch_docker=lambda stop, _wake: _until_stopped(stop),
+                                 watch_catalog=lambda stop, _waiter: _until_stopped(stop))
     runtime = OpsHealthRuntime(state=state, collector=collectors, interval=0.01,
                               reconciler_factory=build)
     server = OpsHealthServer(state, ("127.0.0.1", 0), lifespan=runtime.lifespan)
@@ -625,8 +627,9 @@ def test_fastapi_lifespan_owns_one_fixed_runtime_and_control_listener():
         _until_stopped(stop)
 
     collectors = SimpleNamespace(run=lambda _collect, stop, **_: _until_stopped(stop),
-                                 collect_storage=None, collect_docker=None, docker_interval=5.0,
-                                 watch_docker=lambda stop, _wake: _until_stopped(stop))
+                                 collect_database=None, collect_docker=None, docker_interval=5.0,
+                                 watch_docker=lambda stop, _wake: _until_stopped(stop),
+                                 watch_catalog=lambda stop, _waiter: _until_stopped(stop))
     runtime = OpsHealthRuntime(state=state, collector=collectors,
                               reconciler_factory=lambda _: SimpleNamespace(run=run))
     runtime.control = Mock()
@@ -636,14 +639,14 @@ def test_fastapi_lifespan_owns_one_fixed_runtime_and_control_listener():
     runtime.control.start.assert_not_called()
     with TestClient(app) as client:
         assert entered.wait(HANG_GUARD_S)
-        assert len(runtime.workers) == 5  # three producers, Docker events, watchdog
+        assert len(runtime.workers) == 6  # DB, catalog, Docker, Docker events, reconciler, watchdog
         assert not runtime.stop.is_set()
         runtime.control.start.assert_called_once()
         for _ in range(3):
             response = client.get("/health/live")
             assert response.status_code == 200
             assert response.headers["cache-control"] == "no-store"
-        assert len(runtime.workers) == 5  # HTTP requests never spawn producers
+        assert len(runtime.workers) == 6  # HTTP requests never spawn producers
     assert runtime.stop.is_set()
     assert all(not worker.is_alive() for worker in runtime.workers)
     runtime.control.close.assert_called_once()

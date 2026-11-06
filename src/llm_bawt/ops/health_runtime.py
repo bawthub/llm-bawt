@@ -77,6 +77,17 @@ def _wedge_seconds() -> float:
     return value
 
 
+class _IntervalWaiter:
+    """No LISTEN available (no database / not PostgreSQL): plain interval."""
+
+    def wait(self, stop, timeout):
+        stop.wait(timeout)
+        return False
+
+    def close(self):
+        pass
+
+
 class OpsHealthRuntime:
     def __init__(self, *, interval=5.0, state=None, collector=None,
                  reconciler_factory=build_reconciler,
@@ -145,7 +156,10 @@ class OpsHealthRuntime:
         if self.control is not None:
             self.control.start()
         for name, target in (
-            ("ops-health-database", lambda: self.collector.run(self.collector.collect_storage, self.stop)),
+            # Timer: DB liveness (5s); a dead database emits no event.
+            ("ops-health-database", lambda: self.collector.run(self.collector.collect_database, self.stop)),
+            # Catalog writes notify; the 60s wait is reconciliation only.
+            ("ops-health-catalog", lambda: self.collector.watch_catalog(self.stop, self._catalog_waiter())),
             # Docker events push changes; the full snapshot is reconciliation.
             ("ops-health-docker", lambda: self.collector.run(
                 self.collector.collect_docker, self.stop,
@@ -156,6 +170,18 @@ class OpsHealthRuntime:
             worker = Thread(name=name, target=target, daemon=True)
             worker.start()
             self.workers.append(worker)
+
+    @staticmethod
+    def _catalog_waiter():
+        from .reconciler import JobCreatedWaiter
+        from .store import CATALOG_CHANGED_CHANNEL
+        try:
+            engine = database_engine()
+        except Exception:  # noqa: BLE001 - the reconcile interval still runs
+            engine = None
+        if engine is None or engine.dialect.name != "postgresql":
+            return _IntervalWaiter()
+        return JobCreatedWaiter(engine, channel=CATALOG_CHANGED_CHANNEL)
 
     def close(self):
         if self._closed:
