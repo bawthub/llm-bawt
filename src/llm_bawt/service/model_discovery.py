@@ -23,7 +23,7 @@ from agent_bridge.chatgpt_models import (
 )
 
 from ..utils.config import Config
-from .curated_models import CURATED_KEY, curated_claude_rows
+from .curated_models import CURATED_CLAUDE_MODELS, CURATED_KEY, curated_claude_rows
 
 logger = logging.getLogger(__name__)
 
@@ -153,11 +153,11 @@ class OpenAIDiscoveryProvider(ExistingFetcherProvider):
         ]
 
 
-#: Window the Claude Code CLI assumes for a plain ``claude-*`` model name, and
-#: the window it switches to when the name carries the ``[1m]`` suffix. The CLI
-#: ignores ``CLAUDE_CODE_MAX_CONTEXT_TOKENS`` for canonical Claude names, so the
-#: suffix is the only way to get the large window (verified in CLI 2.1.283).
-CLAUDE_CODE_STANDARD_WINDOW = 200_000
+#: Verified bare-model windows come from the curated CLI table, not the compact
+#: policy or API metadata. Keep the historical 200K bare / [1m] shaping only for
+#: models whose CLI default has not been verified.
+CLAUDE_CODE_DEFAULT_WINDOWS = {model.id: model.context_length for model in CURATED_CLAUDE_MODELS}
+CLAUDE_CODE_FALLBACK_WINDOW = 200_000
 CLAUDE_CODE_1M_WINDOW = 1_000_000
 CLAUDE_CODE_1M_SUFFIX = "[1m]"
 
@@ -167,11 +167,10 @@ class AnthropicDiscoveryProvider(ExistingFetcherProvider):
 
     Every Anthropic catalog endpoint runs through the Claude Code harness
     (``model_catalog`` maps vendor ``anthropic`` to ``claude-code``), so the
-    upstream id must be the CLI's slug, not the bare API id. A model whose API
-    window exceeds the CLI's standard window is offered twice: the bare id at
-    the standard window and the ``[1m]`` id at the large window. Each choice
-    carries the window the CLI will actually enforce, so the catalog can't
-    claim a window the session never gets.
+    upstream id must be the CLI's slug, not the bare API id. Verified defaults
+    are per model: recent bare Opus/Sonnet and Fable already use 1M. Explicit
+    ``[1m]`` choices remain available for compatibility, not as a requirement
+    to unlock that window. Unknown models retain the historical API shaping.
     """
 
     def _postprocess(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -186,21 +185,27 @@ def claude_code_slugs(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
     out: list[dict[str, Any]] = []
     for row in rows:
-        api_window = row.get("context_length")
-        if not isinstance(api_window, int) or api_window <= CLAUDE_CODE_STANDARD_WINDOW:
+        if row["id"].endswith(CLAUDE_CODE_1M_SUFFIX):
             out.append(row)
             continue
+        cli_window = CLAUDE_CODE_DEFAULT_WINDOWS.get(row["id"])
+        window = cli_window if cli_window is not None else row.get("context_length")
+        if not isinstance(window, int) or window <= CLAUDE_CODE_FALLBACK_WINDOW:
+            out.append({**row, "context_length": window} if cli_window is not None else row)
+            continue
         label = row.get("description") or row["id"]
+        bare_window = cli_window or CLAUDE_CODE_FALLBACK_WINDOW
+        bare_label = "1M" if bare_window == CLAUDE_CODE_1M_WINDOW else "200K"
         out.append({
             **row,
-            "description": f"{label} · 200K context",
-            "context_length": CLAUDE_CODE_STANDARD_WINDOW,
+            "description": f"{label} · {bare_label} context",
+            "context_length": bare_window,
         })
         out.append({
             **row,
             "id": f"{row['id']}{CLAUDE_CODE_1M_SUFFIX}",
             "description": f"{label} · 1M context",
-            "context_length": min(api_window, CLAUDE_CODE_1M_WINDOW),
+            "context_length": min(window, CLAUDE_CODE_1M_WINDOW),
         })
     return out
 

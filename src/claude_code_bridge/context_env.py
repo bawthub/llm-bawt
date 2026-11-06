@@ -1,8 +1,10 @@
 """Context-window env hints for proxy-routed Claude Code turns.
 
-Claude Code sizes its auto-compaction from the model's context window. For a
-model name it doesn't recognise (every proxy-routed upstream: ``local/…``,
-``openai_chatgpt/…``, ``xai/…``) it assumes the Anthropic default of 200k and
+Claude Code sizes its auto-compaction from the model's context window. Native
+Claude defaults are model-specific (CLI 2.1.317: bare Opus/Sonnet 5/5.5 and
+Fable 5.1 use 1M, Haiku 4.5 uses 200k), independently of our compact policy.
+For a model name it doesn't recognise (every proxy-routed upstream:
+``local/…``, ``openai_chatgpt/…``, ``xai/…``) it falls back to 200k and
 reserves 32k of that for output. When the real window is smaller — a local
 Ollama/llama-server model at 64k, say — the CLI never compacts: the upstream
 silently drops the oldest messages instead (Ollama ``chatPrompt`` truncation,
@@ -23,6 +25,7 @@ bundled CLI source):
 CLI floors it at 100k. It is used separately (``compact_window_env``) for the
 configurable compact threshold, where the CLI takes ``min(model window,
 max(100k, value))`` as its auto-compact window on every path, native or proxy.
+Thus a capped ``/context`` denominator is not evidence of the model's limit.
 
 The app resolves the true window from the model catalog and sends it down with
 every command (TASK-609); this module turns that scalar into env hints. The hint

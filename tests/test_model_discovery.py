@@ -312,7 +312,7 @@ def test_anthropic_discovery_offers_claude_code_slugs_with_real_windows(monkeypa
     models = discover_models("anthropic", object())
 
     assert models == [
-        {"id": "claude-opus-5-5", "description": "Claude Opus 5.5 · 200K context", "context_length": 200_000},
+        {"id": "claude-opus-5-5", "description": "Claude Opus 5.5 · 1M context", "context_length": 1_000_000},
         {"id": "claude-opus-5-5[1m]", "description": "Claude Opus 5.5 · 1M context", "context_length": 1_000_000},
         {"id": "claude-opus-4-5-20251101", "description": "Claude Opus 4.5", "context_length": 200_000},
         {"id": "claude-mystery", "description": "Claude Mystery"},
@@ -328,6 +328,56 @@ def test_claude_code_alias_uses_same_anthropic_shaping(monkeypatch):
     ids = [row["id"] for row in discover_models("claude-code", object())]
 
     assert ids == ["claude-sonnet-5-5", "claude-sonnet-5-5[1m]"]
+
+
+@pytest.mark.parametrize(
+    ("model_id", "expected_window"),
+    [
+        ("claude-opus-5-5", 1_000_000),
+        ("claude-opus-5", 1_000_000),
+        ("claude-sonnet-5-5", 1_000_000),
+        ("claude-sonnet-5", 1_000_000),
+        ("claude-fable-5-1", 1_000_000),
+        ("claude-haiku-4-5", 200_000),
+    ],
+)
+@pytest.mark.parametrize("api_window", [None, 200_000, 1_000_000])
+def test_verified_cli_windows_override_missing_or_stale_api_metadata(model_id, expected_window, api_window):
+    from llm_bawt.service.model_discovery import claude_code_slugs
+
+    row = {"id": model_id, "description": model_id, "context_length": api_window, "curated": True}
+    models = claude_code_slugs([row])
+
+    assert models[0]["id"] == model_id
+    assert models[0]["context_length"] == expected_window
+    assert all(model["curated"] is True for model in models)
+    if expected_window == 1_000_000:
+        assert [model["id"] for model in models] == [model_id, f"{model_id}[1m]"]
+        assert all(model["context_length"] == 1_000_000 for model in models)
+        assert all(model["description"].endswith(" · 1M context") for model in models)
+    else:
+        assert len(models) == 1
+
+
+def test_unverified_models_keep_historical_windows_and_explicit_aliases_are_not_resuffixed():
+    from llm_bawt.service.model_discovery import claude_code_slugs
+
+    unknown_small = {"id": "claude-unknown-small", "context_length": 128_000}
+    explicit = {"id": "claude-opus-5-5[1m]", "context_length": 1_000_000}
+    models = claude_code_slugs([
+        {"id": "claude-unknown-large", "context_length": 2_000_000},
+        unknown_small,
+        explicit,
+    ])
+
+    assert [(model["id"], model["context_length"]) for model in models] == [
+        ("claude-unknown-large", 200_000),
+        ("claude-unknown-large[1m]", 1_000_000),
+        ("claude-unknown-small", 128_000),
+        ("claude-opus-5-5[1m]", 1_000_000),
+    ]
+    assert models[2] == unknown_small
+    assert models[3] == explicit
 
 
 def test_anthropic_fetcher_keeps_api_max_input_tokens(monkeypatch):
@@ -434,9 +484,10 @@ def test_claude_subscription_discovery_lists_live_models_with_oauth_headers(monk
         "Accept": "application/json",
     }
     assert rows == [
-        {"id": "claude-opus-5-5", "description": "Claude Opus 5.5 · 200K context", "context_length": 200_000},
+        {"id": "claude-opus-5-5", "description": "Claude Opus 5.5 · 1M context", "context_length": 1_000_000},
         {"id": "claude-opus-5-5[1m]", "description": "Claude Opus 5.5 · 1M context", "context_length": 1_000_000},
-        {"id": "claude-fable-5-1", "description": "Claude Fable 5.1", "context_length": 200_000},
+        {"id": "claude-fable-5-1", "description": "Claude Fable 5.1 · 1M context", "context_length": 1_000_000},
+        {"id": "claude-fable-5-1[1m]", "description": "Claude Fable 5.1 · 1M context", "context_length": 1_000_000},
     ]
     assert not any(row.get("curated") for row in rows)
 
@@ -452,7 +503,17 @@ def test_claude_subscription_discovery_falls_back_to_curated_on_refusal(monkeypa
     assert "claude-opus-5-5" in ids and "claude-opus-5-5[1m]" in ids
     assert "claude-fable-5-1" in ids
     assert all(row["curated"] is True for row in rows)
-    assert all(row["context_length"] in (200_000, 1_000_000) for row in rows)
+    assert {row["id"]: row["context_length"] for row in rows} == {
+        **{model: 1_000_000 for model in (
+            "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5",
+            "claude-sonnet-5", "claude-fable-5-1",
+        )},
+        **{f"{model}[1m]": 1_000_000 for model in (
+            "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5",
+            "claude-sonnet-5", "claude-fable-5-1",
+        )},
+        "claude-haiku-4-5": 200_000,
+    }
 
 
 @pytest.mark.parametrize("status", [500, 502, 503, 429, 408])
