@@ -140,6 +140,19 @@ _OPS_DEFAULT_POLICIES: list[dict[str, Any]] = [
         "order": 14,
     },
     {
+        # TASK-2100: also enforced by the ops service (card-only).
+        "id": "seed-ops-run-house-restart",
+        "backend_scope": "*",
+        "tool_name": "ops_run",
+        "matcher_type": "prefix",
+        "pattern": "operation=llm-bawt.restart-house ",
+        "action": "require_approval",
+        "severity": "high",
+        "category": "restart",
+        "approval_prompt": "Restart this agent house? It refuses while occupied unless override_occupied is set.",
+        "order": 15,
+    },
+    {
         "id": "seed-ops-run-require-approval",
         "backend_scope": "*",
         "tool_name": "ops_run",

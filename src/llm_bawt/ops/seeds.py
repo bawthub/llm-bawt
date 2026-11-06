@@ -187,6 +187,45 @@ _LLM_BAWT_SEEDS: list[dict[str, Any]] = [
         }, sort_keys=True),
     },
     {
+        # TASK-2100: the operator's restart of one pool house (e.g. a stuck
+        # one). Routine recycling needs no ops: a vacated house restarts
+        # itself (TASK-2080). Recreate/image repin stays a deployment step.
+        "slug": "llm-bawt.restart-house",
+        "title": "Restart a house",
+        "description": (
+            "Restart one agent house (Compose service house-<id>); never a mansion bridge, volume or "
+            "worktree. Runs only from an approval card. Refuses while the house has a tenant, a running "
+            "turn or an unread send, checked when the card is prepared and again before dispatch, unless "
+            "override_occupied is set (that kills the house's running turns). The house comes back on "
+            "its own container with empty scratch, and the job fails unless its bridge answers healthy."
+        ),
+        "enabled": False,
+        "executor_kind": EXECUTOR_DOCKER,
+        "target_host": "",
+        "working_directory": None,
+        "command_script": _spec(
+            action="restart",
+            compose_project=_LLM_BAWT_PROJECT,
+            compose_service_from_arg="house",
+            health_url="http://127.0.0.1:8681/health", health_field="redis", health_value=True,
+            health_timeout_seconds=120,
+        ),
+        "args_schema_json": _schema(
+            {
+                "house": {"type": "string", "pattern": r"^house-[a-z0-9][a-z0-9-]{0,30}$"},
+                "override_occupied": {"type": "boolean"},
+            },
+            required=["house"],
+        ),
+        "args_defaults_json": _defaults({"override_occupied": False}),
+        "timeout_seconds": 240,
+        "start_delay_seconds": 0,
+        "max_concurrent": 1,
+        "risk_level": RISK_HIGH,
+        "category": "restart",
+        "approval_prompt_prefix": "Restart house",
+    },
+    {
         "slug": "llm-bawt.restart-redis",
         "title": "Restart Redis",
         "description": (

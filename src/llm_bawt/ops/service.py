@@ -20,6 +20,7 @@ from .executor import (ConfigCheckError, DockerExecutor, Executor, ExecutorError
                        validate_spec)
 from .execution_mode import snapshot_execution_mode
 from .gpu_guard import GPU_VOICE_SERVICES, GpuGuardUnverifiable, gpu_voice_target
+from .house_guard import HouseOccupancyUnverifiable, house_target, occupancy_reader, override_requested
 from .self_target import SelfTargetError
 from .image_deploy import DEPLOY_ACTION, IMAGE_ACTIONS
 from .release_spec import is_release_spec
@@ -134,7 +135,7 @@ class OpsService:
     def __init__(self, store: OpsStore, *, executor: Executor | None = None,
                  release_verifier: ReleaseVerifier | None = None,
                  release_store: ReleaseStore | None = None, quiesce_driver=None,
-                 admission_only: bool = False, preparer=None):
+                 admission_only: bool = False, preparer=None, house_occupancy=None):
         """``admission_only`` (the app, TASK-1169 S3): this service admits and
         reads jobs and never reaches an executor. ``preparer.prepare(slug,
         args)`` builds snapshots in the ops process, and the ops reconciler
@@ -148,6 +149,8 @@ class OpsService:
         self.releases = release_store or ReleaseStore(None, engine=store.engine)
         self._release_verifier = release_verifier or GitHubReleaseVerifier()
         self.admission_only = admission_only
+        # TASK-2100: ``house -> occupancy reasons``; tests inject one.
+        self._house_occupancy = house_occupancy
         if admission_only:
             if executor is not None or preparer is None:
                 raise ValueError("an admission-only OpsService takes a preparer and no executor")
@@ -369,6 +372,13 @@ class OpsService:
                                                       plan_targets=_plan_target_specs(snapshot))
         except GpuGuardUnverifiable as exc:
             raise OpsDispatchError("gpu_guard_unverifiable", str(exc)) from exc
+        # TASK-2100: never put an occupied house before an approver unless the
+        # card itself asks to override; re-checked right before dispatch.
+        house = house_target(spec, merged)
+        if house is not None and not override_requested(merged):
+            reasons = self._house_reasons(house, OpsDispatchError)
+            if reasons:
+                raise OpsDispatchError("house_occupied", self._occupied_text(house, reasons))
         # TASK-1169 S4c: inspected here and again by every dispatch preflight.
         try:
             target = executor.self_target(snapshot)
@@ -493,7 +503,10 @@ class OpsService:
             # source check for a caller that can never run it.
             raise OpsDispatchError("approval_required", APPROVAL_REQUIRED)
         snapshot = snapshot or self.prepare_invocation(operation_slug, supplied)
-        if snapshot["spec"].get("action") in APPROVAL_ONLY_ACTIONS and (
+        # TASK-2100: a house container action is card-only too, so its
+        # occupancy override is always an approver's explicit choice.
+        house_only = house_target(snapshot["spec"], snapshot["resolved_args"]) is not None
+        if (snapshot["spec"].get("action") in APPROVAL_ONLY_ACTIONS or house_only) and (
                 approved_snapshot is None or create_fence is None or not approval_request_id):
             # Keyed on what would EXECUTE, so a catalog edit between the check
             # above and the snapshot cannot slip past it (TASK-1474 C-b).
@@ -653,6 +666,7 @@ class OpsService:
             try:
                 executor.preflight(snapshot)
                 self._check_gpu_handoff(job, snapshot)
+                occupied = self._house_occupied_now(snapshot)
             except ExecutorError as exc:
                 # No target action can have been submitted before the claim. Keep
                 # QUEUED for an operator fixing prerequisites, with a visible reason,
@@ -661,9 +675,40 @@ class OpsService:
                 delay = int(snapshot["execution"].get("start_delay_seconds") or 0)
                 self.store.fail_stale_queued(job.id, deadline_seconds=preflight_deadline_seconds() + delay)
                 return
+            if occupied:
+                # A tenant moved in after approval: fail now rather than wait
+                # for a turn boundary the approver never saw.
+                self.store.mark_terminal(job.id, state=JOB_FAILED,
+                    error_text=f"house_occupied: {occupied}; no action submitted")
+                return
             if not self.store.claim_job(job.id, max_concurrent=snapshot["execution"].get("max_concurrent")):
                 return
         self._submit(job, snapshot, executor)
+
+    @staticmethod
+    def _occupied_text(house: str, reasons: list[str]) -> str:
+        return (f"house {house!r} is occupied ({'; '.join(reasons)}); wait until it is vacated, "
+                "or set override_occupied on the approval card")
+
+    def _house_reasons(self, house: str, error) -> list[str]:
+        """Occupancy reasons; unreadable occupancy raises ``error`` (fail closed)."""
+        reader = self._house_occupancy or occupancy_reader(getattr(self.store, "config", None),
+                                                           self.store.engine)
+        try:
+            return reader(house)
+        except HouseOccupancyUnverifiable as exc:
+            if error is OpsDispatchError:
+                raise OpsDispatchError("house_occupancy_unverifiable", str(exc)) from exc
+            raise error(f"house_occupancy_unverifiable: {exc}") from exc
+
+    def _house_occupied_now(self, snapshot) -> str | None:
+        """Dispatch point of the house guard: the occupancy text, else None.
+        Unreadable occupancy raises ExecutorError and keeps the job queued."""
+        house = house_target(snapshot.get("spec") or {}, snapshot.get("resolved_args") or {})
+        if house is None or override_requested(snapshot.get("resolved_args") or {}):
+            return None
+        reasons = self._house_reasons(house, ExecutorError)
+        return self._occupied_text(house, reasons) if reasons else None
 
     def _submit(self, job, snapshot, executor, fence=None):
         """Submit a job already moved to DISPATCHING (claim or quiesce CAS)."""

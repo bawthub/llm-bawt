@@ -335,6 +335,9 @@ DISPATCH_ERROR_STATUS = {
     # TASK-1171: only the GPU handoff may start or recreate a Moshi container.
     "gpu_handoff_required": 409,
     "gpu_guard_unverifiable": 409,
+    # TASK-2100: a house action refuses while the house is occupied.
+    "house_occupied": 409,
+    "house_occupancy_unverifiable": 409,
     "executor_unavailable": 503,
     "dispatch_failed": 502,
     "executor_kind_unknown": 500,
