@@ -12,6 +12,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import pytest
+from tests.publish_eval_args import split_publish_eval
 
 
 # ---------------------------------------------------------------------------
@@ -54,8 +55,8 @@ class TestSubagentModelSetting:
 
 def fake_publish_eval(captured_fields: dict):
     """Model the dedupe Lua success return and capture XADD's field pairs."""
-    async def evaluate(_script, numkeys, _dedupe_key, _stream, _maxlen, _request_id, *pairs):
-        assert numkeys == 2
+    async def evaluate(_script, numkeys, *args):
+        _keys, _request_id, pairs = split_publish_eval(numkeys, args)
         captured_fields.update(zip(pairs[::2], pairs[1::2], strict=True))
         return [1, b"1"]
 

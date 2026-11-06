@@ -20,6 +20,7 @@ from llm_bawt.agent_backends import agent_bridge
 from llm_bawt.agent_backends.codex import CodexBackend
 from llm_bawt.service.routes import bot_profile_validation
 from llm_bawt.steer_capabilities import IMAGES, NEXT, NO_STEER_CAPS, bot_steer_caps
+from tests.publish_eval_args import split_publish_eval
 
 
 @pytest.mark.parametrize(("config", "caps"), [
@@ -64,7 +65,8 @@ def _published(**kwargs):
     fake = MagicMock()
     commands = []
 
-    async def eval_script(_script, _numkeys, _dedupe, _stream, _maxlen, _request, *flat):
+    async def eval_script(_script, numkeys, *args):
+        _keys, _request, flat = split_publish_eval(numkeys, args)
         commands.append(dict(zip(flat[::2], flat[1::2])))
         return [1, "1-0"]
 

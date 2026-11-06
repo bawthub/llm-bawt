@@ -31,6 +31,7 @@ from claude_code_bridge.send_errors import CLAUDE_CREDENTIAL_ERROR_MARKER
 from claude_code_bridge.send_request import SendRequest
 from claude_code_bridge.send_stream import ClaudeStreamMixin
 from tests.test_claude_code_send_boundaries import SESSION, _SendHarness
+from tests.publish_eval_args import split_publish_eval
 
 PROXY_BASE = "http://127.0.0.1:12345"
 GATEWAY = f"{PROXY_BASE}/claude-oauth"
@@ -222,7 +223,8 @@ class _CapturingPublisher(CommandPublisherMixin):
     def __init__(self):
         self.fields: dict[str, str] = {}
 
-        async def evaluate(_script, _numkeys, _dedupe, _stream, _maxlen, _request_id, *pairs):
+        async def evaluate(_script, numkeys, *args):
+            _keys, _request_id, pairs = split_publish_eval(numkeys, args)
             self.fields.update(zip(pairs[::2], pairs[1::2], strict=True))
             return [1, "1-0"]
 

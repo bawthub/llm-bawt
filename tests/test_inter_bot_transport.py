@@ -23,6 +23,7 @@ from llm_bawt.mcp_server.server import _get_profile_manager
 from llm_bawt.model_catalog import AccessPath, ModelCatalog, ModelEndpoint, ModelIdentity
 from llm_bawt.service.routes.inter_bot_deliveries import _target_context_window
 from llm_bawt.utils.config import Config
+from tests.publish_eval_args import split_publish_eval
 
 
 def test_profile_manager_compatibility_alias_remains_importable():
@@ -78,9 +79,8 @@ def test_stable_bridge_request_id_publishes_one_command():
     published: dict[str, str] = {}
     commands: list[dict] = []
 
-    async def eval_script(
-        _script, _numkeys, dedupe_key, stream, _maxlen, request_id, *flat
-    ):
+    async def eval_script(_script, numkeys, *args):
+        (dedupe_key, stream, *_), request_id, flat = split_publish_eval(numkeys, args)
         if dedupe_key in published:
             return [0, published[dedupe_key]]
         fields = dict(zip(flat[::2], flat[1::2]))
@@ -211,7 +211,8 @@ def test_empty_seed_is_serialized_as_explicit_decision():
     fake = MagicMock()
     commands = []
 
-    async def eval_script(_script, _numkeys, _dedupe, _stream, _maxlen, _request, *flat):
+    async def eval_script(_script, numkeys, *args):
+        _keys, _request, flat = split_publish_eval(numkeys, args)
         commands.append(dict(zip(flat[::2], flat[1::2])))
         return [1, "1-0"]
 
@@ -235,7 +236,8 @@ def test_responses_transport_is_serialized_into_bridge_command():
     fake = MagicMock()
     commands = []
 
-    async def eval_script(_script, _numkeys, _dedupe, _stream, _maxlen, _request, *flat):
+    async def eval_script(_script, numkeys, *args):
+        _keys, _request, flat = split_publish_eval(numkeys, args)
         commands.append(dict(zip(flat[::2], flat[1::2])))
         return [1, "1-0"]
 
