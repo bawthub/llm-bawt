@@ -12,7 +12,7 @@ from sqlmodel import Session, select
 
 from .approval_events import append_approval_transition
 from .approval_mcp_store import McpApprovalStoreMixin
-from .service.commit_wake import notify_in_transaction
+from .service.commit_wake import OPS_WAKE_CHANNEL, notify_in_transaction
 from .approval_orchestration_store import OrchestrationApprovalStoreMixin
 from .approval_models import (
     ApprovalPersistError,
@@ -32,6 +32,7 @@ from .approval_models import (
     RESOLVED_VIA_USER,
     ToolApprovalRequest,
     _utcnow,
+    is_approved_ops_run,
 )
 
 
@@ -195,8 +196,12 @@ class ApprovalRequestStoreMixin(OrchestrationApprovalStoreMixin, McpApprovalStor
                 .values(**values)
             )
             if changed.rowcount == 1:
-                append_approval_transition(getattr(self, "events", None), session.connection(),
-                                           session.get(ToolApprovalRequest, request_id))
+                row = session.get(ToolApprovalRequest, request_id)
+                append_approval_transition(getattr(self, "events", None), session.connection(), row)
+                if is_approved_ops_run(row):
+                    # The ops reconciler admits approved ops_run rows: wake it on commit.
+                    notify_in_transaction(session.connection(), f"approval:{request_id}",
+                                          channel=OPS_WAKE_CHANNEL)
             session.commit()
             return session.get(ToolApprovalRequest, request_id)
 

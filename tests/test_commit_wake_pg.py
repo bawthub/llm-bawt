@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import threading
 from types import SimpleNamespace
 
@@ -67,3 +68,28 @@ def test_listener_wakes_subscribers_and_recovers_a_dropped_connection(private_ap
             _stage_noop(conn)
 
     asyncio.run(main())
+
+
+def _ops_waiter(engine):
+    waiter = JobCreatedWaiter(engine)  # the reconciler's own channel
+    assert waiter.wait(threading.Event(), 0.05) is False  # connects and LISTENs
+    return waiter
+
+
+def test_approving_an_ops_run_wakes_the_reconciler(private_app_pg):
+    from llm_bawt.approval_policies import REQ_APPROVED, REQ_DENIED, ToolApprovalPolicyStore
+    from tests.test_approval_mcp_state import _mcp_req
+
+    store = ToolApprovalPolicyStore(None, engine=OpsStore(private_app_pg).engine)
+    waiter = _ops_waiter(store.engine)
+    try:
+        for rid, status, woke in (("t2108-deny", REQ_DENIED, False), ("t2108-ok", REQ_APPROVED, True)):
+            store.record_mcp_request(**_mcp_req(request_id=rid, tool_use_id=f"toolu_{rid}",
+                                                invocation_hash=hashlib.sha256(rid.encode()).hexdigest()))
+            waiter.received.clear()
+            store.resolve_request(rid, status=status, resolved_by="nick")
+            assert waiter.wait(threading.Event(), 1 if woke else 0.3) is woke
+            if woke:
+                assert f"approval:{rid}" in waiter.received
+    finally:
+        waiter.close()

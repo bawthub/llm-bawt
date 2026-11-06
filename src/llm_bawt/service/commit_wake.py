@@ -32,7 +32,12 @@ IDLE_WAIT_SECONDS = 600.0
 RECONNECT_SECONDS = 5.0
 
 
-def notify_in_transaction(conn: Any, payload: str = "") -> None:
+#: The ops reconciler's existing channel (``ops.store.JOB_CREATED_CHANNEL``);
+#: literal here so this module stays free of the ops import closure.
+OPS_WAKE_CHANNEL = "ops_job_created"
+
+
+def notify_in_transaction(conn: Any, payload: str = "", *, channel: str = WAKE_CHANNEL) -> None:
     """Queue a wake on ``conn``'s transaction; Postgres sends it only on commit.
 
     No-op on other dialects. Never raises: a wake never blocks its write.
@@ -41,7 +46,7 @@ def notify_in_transaction(conn: Any, payload: str = "") -> None:
         if conn.dialect.name != "postgresql":
             return
         conn.execute(sa_text("SELECT pg_notify(:channel, :payload)"),
-                     {"channel": WAKE_CHANNEL, "payload": payload})
+                     {"channel": channel, "payload": payload})
     except Exception:  # noqa: BLE001 - the backstop timer still finds the work
         log.warning("commit wake notify failed; loops fall back to their backstop", exc_info=True)
 

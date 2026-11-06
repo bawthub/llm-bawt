@@ -34,6 +34,9 @@ from sqlalchemy import text as sa_text
 from ..bot_types import normalize_bot_type
 from ..utils.schema import SchemaBootstrapGuard, drop_columns, ensure_columns, ensure_relations
 
+#: The ops reconciler's wake channel (``ops.store.JOB_CREATED_CHANNEL``).
+OPS_WAKE_CHANNEL = "ops_job_created"
+
 logger = logging.getLogger(__name__)
 
 HOLD = "hold"
@@ -588,6 +591,10 @@ def stamp_turn_exit(conn, turn_id: str, record: Mapping[str, Any]) -> bool:
     payload[EXECUTION_EXIT_KEY] = dict(record)
     conn.execute(sa_text("UPDATE turn_logs SET request_json=:json WHERE id=:id"),
                  {"json": dump_payload(payload), "id": turn_id})
+    # A gate member's exit may drain its gate: wake the ops reconciler on commit.
+    conn.execute(sa_text(
+        "SELECT pg_notify(:channel, 'drain:' || m.gate_id) FROM gate_members m WHERE m.turn_id=:id LIMIT 1"
+    ), {"channel": OPS_WAKE_CHANNEL, "id": turn_id})
     return True
 
 
@@ -713,6 +720,8 @@ def stamp_member_exit(conn, member_id: int, record: Mapping[str, Any]) -> bool:
         return False
     conn.execute(sa_text("UPDATE gate_members SET execution_exit=CAST(:record AS jsonb) WHERE id=:id"),
                  {"id": member_id, "record": json.dumps(dict(record), default=str)})
+    conn.execute(sa_text("SELECT pg_notify(:channel, 'drain:' || gate_id) FROM gate_members WHERE id=:id"),
+                 {"channel": OPS_WAKE_CHANNEL, "id": member_id})
     return True
 
 

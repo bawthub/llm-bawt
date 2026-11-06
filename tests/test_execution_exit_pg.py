@@ -111,3 +111,18 @@ def test_the_member_stamp_never_undoes_a_proof_either(gated):  # noqa: F811 (pyt
         assert stamp_member_exit(conn, member, record(False)) is False
         assert stamp_member_exit(conn, member, record(True)) is False
     assert _drain(store, gate.id)[turn] == (True, "execution_exit:b")
+
+
+@pytest.mark.integration
+def test_a_gate_member_exit_stamp_wakes_the_ops_reconciler(gated):  # noqa: F811 (pytest injects the imported fixture)
+    from llm_bawt.ops.reconciler import JobCreatedWaiter
+
+    store, turn, gate, execution = _held_bound_turn(gated)
+    waiter = JobCreatedWaiter(store.engine)
+    try:
+        assert waiter.wait(Event(), 0.05) is False  # connects and LISTENs
+        assert execution.record_exit(_terminal(True)) is True
+        assert waiter.wait(Event(), 1) is True  # promptness: the wait's own timeout result
+        assert f"drain:{gate.id}" in waiter.received
+    finally:
+        waiter.close()
