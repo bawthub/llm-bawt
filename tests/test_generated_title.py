@@ -41,7 +41,7 @@ def test_schedule_runs_once_per_session(monkeypatch):
     monkeypatch.setattr(gt.threading, "Thread", lambda **kw: started.append(kw) or type("T", (), {"start": lambda self: None})())
     import llm_bawt.service.dependencies as deps
     monkeypatch.setattr(deps, "_service", object())
-    monkeypatch.setattr(gt, "_attempted", set())
+    monkeypatch.setattr(gt, "_attempted", set()); monkeypatch.setattr(gt, "_pending", set())
     for _ in range(3):
         gt.schedule_session_title(None, session_id="once", bot_id="b", user_id="u", message_id="m", content="hi")
     assert len(started) == 1

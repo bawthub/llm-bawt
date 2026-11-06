@@ -48,6 +48,8 @@ _WS = re.compile(r"\s+")
 
 # Sessions this process has already tried; one attempt per session per process.
 _attempted: set[str] = set()
+# Sessions that got another user message while their worker was running.
+_pending: set[str] = set()
 _attempted_lock = threading.Lock()
 
 
@@ -82,11 +84,12 @@ def _first_message(conn, session_id: str, bot_id: str, user_id: str | None):
 
     row = conn.execute(text(f"""
         SELECT {given_title_sql('s')} AS given,
-               (SELECT m1.id FROM messages m1
+               fm.id AS fm_id, fm.content AS fm_text
+        FROM sessions s
+        LEFT JOIN LATERAL (SELECT m1.id, m1.content FROM messages m1
                 WHERE m1.session_id = s.id AND m1.bot_id = {storage_bot_sql('s.bot_id')}
                   AND {eligible_sql('m1')}
-                ORDER BY m1.timestamp ASC, m1.id ASC LIMIT 1) AS fm_id
-        FROM sessions s
+                ORDER BY m1.timestamp ASC, m1.id ASC LIMIT 1) fm ON TRUE
         WHERE s.id = :id AND s.bot_id = :bot
           AND (CAST(:user AS TEXT) IS NULL OR s.user_id = :user)
           AND s.status <> 'deleted'
@@ -124,21 +127,23 @@ def store_generated_title(conn, session_id: str, bot_id: str, user_id: str | Non
     return row is not None
 
 
-def generate_session_title(engine, session_id: str, bot_id: str, user_id: str | None,
-                           message_id: str, content: str, complete=None,
-                           on_no_eligible=None) -> str | None:
-    """Generate and store a title if ``message_id`` is the session's first message.
+NO_ELIGIBLE = object()
 
-    ``on_no_eligible`` runs when the session has no eligible message yet (this
-    one was marker-only, e.g. ``###``), so a later first eligible message
-    still gets its attempt.
+
+def generate_session_title(engine, session_id: str, bot_id: str, user_id: str | None,
+                           complete=None):
+    """Title the session from its first eligible message, read from the DB.
+
+    Returns the stored title, ``None`` (named, refused or not stored) or
+    ``NO_ELIGIBLE`` when the session has no eligible message yet.
     """
     with engine.connect() as conn:
         row = _first_message(conn, session_id, bot_id, user_id)
-    if row is not None and row["fm_id"] is None and not row["given"] and on_no_eligible:
-        on_no_eligible()
-    if row is None or row["given"] or row["fm_id"] != message_id:
+    if row is None or row["given"]:
         return None
+    if row["fm_id"] is None:
+        return NO_ELIGIBLE
+    content = row["fm_text"] or ""
 
     from ..prompt_registry import get_prompt_resolver
     from ..service.schemas import RawCompletionRequest
@@ -162,6 +167,26 @@ def generate_session_title(engine, session_id: str, bot_id: str, user_id: str | 
     return title if stored else None
 
 
+def _worker(engine, session_id: str, bot_id: str, user_id: str | None) -> None:
+    """One worker per session. A user message that arrives while it runs sets
+    ``_pending``; if the worker found no eligible message it re-reads instead of
+    giving up, so the first eligible message is never skipped."""
+    while True:
+        with _attempted_lock:
+            _pending.discard(session_id)
+        try:
+            outcome = generate_session_title(engine, session_id, bot_id, user_id)
+        except Exception as error:  # cosmetic; type only, never message text
+            logger.warning("session title failed for %s (%s)", session_id, type(error).__name__)
+            return
+        if outcome is not NO_ELIGIBLE:
+            return
+        with _attempted_lock:
+            if session_id not in _pending:
+                _attempted.discard(session_id)
+                return
+
+
 def schedule_session_title(engine, *, session_id: str | None, bot_id: str,
                            user_id: str | None, message_id: str, content: str) -> None:
     """Start title generation in the background. Never raises, never blocks."""
@@ -174,21 +199,10 @@ def schedule_session_title(engine, *, session_id: str | None, bot_id: str,
             return
         with _attempted_lock:
             if session_id in _attempted:
+                _pending.add(session_id)
                 return
             _attempted.add(session_id)
-
-        def _release():
-            with _attempted_lock:
-                _attempted.discard(session_id)
-
-        def _run():
-            try:
-                generate_session_title(engine, session_id, bot_id, user_id, message_id, content,
-                                       on_no_eligible=_release)
-            except Exception as error:  # cosmetic; type only, never message text
-                logger.warning("session title failed for %s (%s)", session_id,
-                               type(error).__name__)
-
-        threading.Thread(target=_run, daemon=True, name="session-title").start()
+        threading.Thread(target=_worker, args=(engine, session_id, bot_id, user_id),
+                         daemon=True, name="session-title").start()
     except Exception as error:
         logger.warning("session title scheduling failed (%s)", type(error).__name__)
