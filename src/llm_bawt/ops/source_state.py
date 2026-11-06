@@ -81,6 +81,8 @@ _TOKEN = re.compile(r"[A-Za-z0-9._+-]{0,128}")
 _LANG = re.compile(r"[A-Za-z0-9_.@-]{1,64}")
 _TZ = re.compile(r"[A-Za-z0-9_+-]{1,64}(?:/[A-Za-z0-9_+-]{1,64}){0,3}")
 _HOSTNAME = re.compile(r"[A-Za-z0-9.-]{0,253}")
+BRIDGE_NODE_PRELOAD = "/usr/local/libexec/bridge-node-check-preload.cjs"
+BRIDGE_NODE_OPTIONS = f"--require={BRIDGE_NODE_PRELOAD}"
 RESERVED_ENV = frozenset({
     "ENV", "BASH_ENV", "SHELLOPTS", "BASHOPTS", "IFS", "CDPATH", "GLOBIGNORE", "PS1", "PS2", "PS3", "PS4",
     "PROMPT_COMMAND", "HOME", "PATH", "SHELL", "TMPDIR", "TERMINFO", "TERMINFO_DIRS", "HOSTALIASES",
@@ -139,6 +141,11 @@ PRODUCT_ENV = {
     # TASK-1476: the codex bridge EXECUTES this binary, so it is a runtime
     # variable (never opaque data): the image's own file, outside every mount.
     "CODEX_BIN": _outside,
+    # TASK-2097: the agent bridge image marks itself and preloads its fixed
+    # node-check script. Exactly these values: any other NODE_OPTIONS (or
+    # NODE_* name) can load arbitrary code and stays refused.
+    "BAWT_AGENT_BRIDGE": lambda v, _m: v == "1",
+    "NODE_OPTIONS": lambda v, m: v == BRIDGE_NODE_OPTIONS and _outside(BRIDGE_NODE_PRELOAD, m),
     "PYTHONUNBUFFERED": lambda v, _m: bool(_FLAG.fullmatch(v)),
     "PYTHONDONTWRITEBYTECODE": lambda v, _m: bool(_FLAG.fullmatch(v)),
     "UV_HTTP_TIMEOUT": lambda v, _m: bool(_DIGITS.fullmatch(v)),
