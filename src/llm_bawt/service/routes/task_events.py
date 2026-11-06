@@ -105,3 +105,25 @@ async def publish_project_changed(event: ProjectChangedEvent):
     since task rows show their project's name and color.
     """
     return await _publish(event.to_event(), "project")
+
+
+class HealthChangedEvent(BaseModel):
+    """``{"_type": "health_changed", "status": "ok"|"degraded"|"down"}`` (TASK-2105 S4).
+
+    BawtHub sends it when a health run's verdict differs from the last one;
+    open UIs refetch the cached verdict instead of polling it. Status only.
+    """
+
+    model_config = _CLOSED
+
+    type: Literal["health_changed"] = Field(alias="_type")
+    status: Literal["ok", "degraded", "down"]
+
+    def to_event(self) -> dict:
+        return {"_type": "health_changed", "status": self.status}
+
+
+@router.post("/v1/events/health-changed", status_code=status.HTTP_202_ACCEPTED, tags=["Events"])
+async def publish_health_changed(event: HealthChangedEvent):
+    """Tell open UIs the system health verdict changed. Best-effort, like task-changed."""
+    return await _publish(event.to_event(), "health")
