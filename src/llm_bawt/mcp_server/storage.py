@@ -492,6 +492,19 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
             # or raw DB details in the MCP authorization error.
             raise BotAccessError("access_denied") from None
 
+        # TASK-2064: a generated title from the first user message, in the
+        # background. Cosmetic: it never raises or slows this write.
+        if role == "user" and session_id:
+            try:
+                from ..sessions.generated_title import schedule_session_title
+
+                schedule_session_title(
+                    backend.engine, session_id=session_id, bot_id=bot_id,
+                    user_id=user_id, message_id=message_id_final, content=content,
+                )
+            except Exception as e:
+                logger.warning("session title hook failed (%s)", type(e).__name__)
+
         return Message(
             id=message_id_final,
             role=role,

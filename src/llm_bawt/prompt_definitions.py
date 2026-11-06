@@ -60,6 +60,7 @@ from .prompt_default_loaders import (
     load_injected_skills_entry,
     load_injected_skills_preamble,
     load_media_prompt_expansion_video,
+    load_sessions_title_generate,
     load_memory_extraction_fact,
     load_memory_extraction_fact_sourced,
     load_memory_extraction_fact_system,
@@ -973,6 +974,21 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
                 "maintenance_model to turn a short idea into a detailed "
                 "text-to-video prompt. {prompt} is the user's text, {duration} "
                 "the clip seconds, {aspect_ratio} e.g. 16:9."
+            ),
+        },
+    ),
+    "sessions.title.generate": PromptDefinition(
+        key="sessions.title.generate",
+        title="Generated Chat Title",
+        category="sessions",
+        required_vars=("message",),
+        loader=load_sessions_title_generate,
+        metadata={
+            "notes": (
+                "TASK-2064: sent to the global maintenance_model after a chat's "
+                "first user message to name the chat (about 8 words). {message} "
+                "is that message, cut to 2000 characters. Stored only when the "
+                "chat has no user-given or schedule name."
             ),
         },
     ),

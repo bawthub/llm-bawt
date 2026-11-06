@@ -271,6 +271,12 @@ def load_chat_steer_interrupt_replacement() -> str:
     return DEFAULT_INTERRUPT_REPLACEMENT
 
 
+def load_sessions_title_generate() -> str:
+    from .sessions.generated_title import TITLE_PROMPT_TEMPLATE
+
+    return TITLE_PROMPT_TEMPLATE
+
+
 def load_media_prompt_expansion_video() -> str:
     from .media.prompt_expansion import VIDEO_PROMPT_EXPANSION_TEMPLATE
 

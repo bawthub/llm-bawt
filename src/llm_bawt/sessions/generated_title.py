@@ -1,0 +1,181 @@
+"""TASK-2064: a short generated title for each session.
+
+After the first eligible user message lands, a background thread asks the
+global maintenance model (bounded utility completion) for a title of about
+eight words, using only that message, and stores it as
+``title`` with ``title_source='generated'``. It never blocks the turn.
+
+A name someone gave the session (a user rename or a schedule name) always
+wins: the write is one conditional UPDATE that only fills a missing or
+``auto`` title, so a rename that lands first is kept and a rename that lands
+later replaces the generated title. Failure, refusal or timeout stores
+nothing and the display falls back to the first message (TASK-2061).
+
+The prompt lives in the prompt registry (``sessions.title.generate``).
+Message text is never logged.
+"""
+from __future__ import annotations
+
+import logging
+import re
+import threading
+
+logger = logging.getLogger(__name__)
+
+TITLE_PROMPT_KEY = "sessions.title.generate"
+TITLE_SOURCE = "generated"
+MAX_INPUT_CHARS = 2000
+MAX_TITLE_CHARS = 80
+MAX_TITLE_WORDS = 10
+TIMEOUT_SECONDS = 30.0
+
+TITLE_PROMPT_TEMPLATE = """\
+Write a short title for a chat conversation that starts with the message below.
+
+Rules:
+- At most 8 words, in the language of the message.
+- Summarize the topic, e.g. "Git rebase question", "Fix flaky login test", \
+"Weekend trip packing list".
+- No quotes, no ending punctuation, no emoji, no preamble.
+- Output only the title.
+
+Message:
+{message}"""
+
+_REFUSAL = re.compile(
+    r"^(i\s*(can'?t|cannot|am unable|'m unable|won'?t)|sorry|as an ai|i'm sorry)\b", re.I)
+_WS = re.compile(r"\s+")
+
+# Sessions this process has already tried; one attempt per session per process.
+_attempted: set[str] = set()
+_attempted_lock = threading.Lock()
+
+
+def clean_title(raw: str | None) -> str | None:
+    """Normalize a model reply to a title, or None for empty/refusal output."""
+    if not isinstance(raw, str):
+        return None
+    line = next((part.strip() for part in raw.strip().splitlines() if part.strip()), "")
+    line = re.sub(r"^(title\s*:\s*)", "", line, flags=re.I)
+    line = line.strip().strip("*#").strip()
+    while len(line) >= 2 and line[0] in "\"'“‘`" and line[-1] in "\"'”’`":
+        line = line[1:-1].strip()
+    line = _WS.sub(" ", line).rstrip(" .,;:!")
+    if not line or _REFUSAL.match(line):
+        return None
+    words = line.split(" ")
+    if len(words) > MAX_TITLE_WORDS:
+        line = " ".join(words[:MAX_TITLE_WORDS])
+    if len(line) > MAX_TITLE_CHARS:
+        cut = line[:MAX_TITLE_CHARS]
+        line = cut[: cut.rfind(" ")] if " " in cut else cut
+    return line.strip() or None
+
+
+def _first_message(conn, session_id: str, bot_id: str, user_id: str | None):
+    """The session's first eligible message id/text and whether it has a given name."""
+    from sqlalchemy import text
+
+    from .first_message import (
+        eligible_sql, first_message_params, given_title_sql, storage_bot_sql,
+    )
+
+    row = conn.execute(text(f"""
+        SELECT {given_title_sql('s')} AS given,
+               (SELECT m1.id FROM messages m1
+                WHERE m1.session_id = s.id AND m1.bot_id = {storage_bot_sql('s.bot_id')}
+                  AND {eligible_sql('m1')}
+                ORDER BY m1.timestamp ASC, m1.id ASC LIMIT 1) AS fm_id
+        FROM sessions s
+        WHERE s.id = :id AND s.bot_id = :bot
+          AND (CAST(:user AS TEXT) IS NULL OR s.user_id = :user)
+          AND s.status <> 'deleted'
+    """), {"id": session_id, "bot": bot_id, "user": user_id,
+           **first_message_params()}).mappings().first()
+    return row
+
+
+def store_generated_title(conn, session_id: str, bot_id: str, user_id: str | None,
+                          title: str) -> bool:
+    """Fill the title only when nobody has named the session. True if stored."""
+    import json
+
+    from sqlalchemy import text
+
+    from .first_message import first_message_params
+
+    row = conn.execute(text("""
+        UPDATE sessions AS s
+        SET session_metadata = COALESCE(s.session_metadata, '{}'::jsonb) || CAST(:patch AS jsonb)
+        WHERE s.id = :id AND s.bot_id = :bot
+          AND (CAST(:user AS TEXT) IS NULL OR s.user_id = :user)
+          AND jsonb_typeof(COALESCE(s.session_metadata, '{}'::jsonb)) = 'object'
+          AND (
+            COALESCE(s.session_metadata->>'title_source', '') = 'auto'
+            OR jsonb_typeof(s.session_metadata->'title') IS DISTINCT FROM 'string'
+            OR btrim(s.session_metadata->>'title', :fm_strip) = ''
+          )
+          AND COALESCE(s.session_metadata->>'title_source', '')
+              IN ('', 'auto', 'default', 'generated')
+        RETURNING s.id
+    """), {"id": session_id, "bot": bot_id, "user": user_id,
+           "patch": json.dumps({"title": title, "title_source": TITLE_SOURCE}),
+           **first_message_params()}).first()
+    return row is not None
+
+
+def generate_session_title(engine, session_id: str, bot_id: str, user_id: str | None,
+                           message_id: str, content: str, complete=None) -> str | None:
+    """Generate and store a title if ``message_id`` is the session's first message."""
+    with engine.connect() as conn:
+        row = _first_message(conn, session_id, bot_id, user_id)
+    if row is None or row["given"] or row["fm_id"] != message_id:
+        return None
+
+    from ..prompt_registry import get_prompt_resolver
+    from ..service.schemas import RawCompletionRequest
+
+    prompt = get_prompt_resolver().render(
+        key=TITLE_PROMPT_KEY, variables={"message": content.strip()[:MAX_INPUT_CHARS]})
+    if complete is None:
+        from ..service.utility_completion import complete_utility
+
+        def complete(request):
+            return complete_utility(request, timeout_seconds=TIMEOUT_SECONDS)
+
+    result = complete(RawCompletionRequest(prompt=prompt, max_tokens=64, temperature=0.2))
+    title = clean_title(result.content)
+    if title is None:
+        logger.info("session title: no usable title for %s", session_id)
+        return None
+    with engine.begin() as conn:
+        stored = store_generated_title(conn, session_id, bot_id, user_id, title)
+    logger.info("session title %s for %s", "stored" if stored else "skipped (named)", session_id)
+    return title if stored else None
+
+
+def schedule_session_title(engine, *, session_id: str | None, bot_id: str,
+                           user_id: str | None, message_id: str, content: str) -> None:
+    """Start title generation in the background. Never raises, never blocks."""
+    try:
+        text_ = (content or "").strip()
+        if not session_id or not text_ or text_.startswith("/"):
+            return
+        from ..service.dependencies import _service
+        if _service is None:  # no app service in this process (CLI, tests)
+            return
+        with _attempted_lock:
+            if session_id in _attempted:
+                return
+            _attempted.add(session_id)
+
+        def _run():
+            try:
+                generate_session_title(engine, session_id, bot_id, user_id, message_id, content)
+            except Exception as error:  # cosmetic; type only, never message text
+                logger.warning("session title failed for %s (%s)", session_id,
+                               type(error).__name__)
+
+        threading.Thread(target=_run, daemon=True, name="session-title").start()
+    except Exception as error:
+        logger.warning("session title scheduling failed (%s)", type(error).__name__)
