@@ -32,8 +32,10 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    and_,
     bindparam,
     inspect,
+    or_,
     text as sa_text,
 )
 from sqlmodel import Field, SQLModel, Session, select
@@ -391,6 +393,32 @@ def build_uncommitted_summary(rows: list[TurnChangedFile]) -> dict[str, Any]:
         "total_additions": sum(file.get("additions") or 0 for file in counted),
         "total_deletions": sum(file.get("deletions") or 0 for file in counted),
     }
+
+
+def _net_zero_chain(files: list[dict[str, Any]]) -> bool:
+    """Require a complete, same-workspace chain, not just equal endpoints."""
+    def side(file: dict[str, Any], name: str) -> str | None:
+        digest = file.get(f"{name}_sha256")
+        if digest:
+            return digest
+        # Missing capture bytes are NOT proof of an absent file. Only explicit
+        # create/delete semantics let two absent endpoints compare equal.
+        absent_kind = "added" if name == "before" else "deleted"
+        return "" if file["change_kind"] == absent_kind else None
+
+    workspace = files[0].get("workspace_id") or files[0]["repo_key"]
+    previous_after = None
+    for index, file in enumerate(files):
+        if (file.get("binary") or file.get("truncated") or file.get("old_path")
+                or file["change_kind"] == "renamed"
+                or file.get("commit_state") == "committed"
+                or (file.get("workspace_id") or file["repo_key"]) != workspace):
+            return False
+        before, after = side(file, "before"), side(file, "after")
+        if before is None or after is None or (index and before != previous_after):
+            return False
+        previous_after = after
+    return side(files[0], "before") == previous_after
 
 
 # ---------------------------------------------------------------------------
@@ -844,6 +872,35 @@ class ChangedFilesStore:
         reconcile_files(history)
         evidence = {(f["turn_id"], f["repo_key"], f["path"]): f for f in history}
 
+        def canonical_key(file: dict[str, Any]) -> tuple[str, str]:
+            proof = file.get("commit_evidence") or {}
+            return (proof.get("repo_id") or file["repo_key"],
+                    proof.get("repo_path") or file["path"])
+
+        def foreign_change_since(chain: list[TurnChangedFile]) -> bool:
+            # Attribution is never inferred from equal content. Include unknown
+            # owners and other users, and match captured identities only.
+            identities = []
+            for row in chain:
+                identities.append(and_(TurnChangedFile.repo_key == row.repo_key,
+                                       TurnChangedFile.path == row.path))
+                if row.workspace_repo_id and row.repo_relative_path:
+                    identities.append(and_(
+                        TurnChangedFile.workspace_repo_id == row.workspace_repo_id,
+                        TurnChangedFile.repo_relative_path == row.repo_relative_path,
+                    ))
+            statement = select(TurnChangedFile.id).where(
+                TurnChangedFile.created_at >= chain[0].created_at,
+                or_(TurnChangedFile.bot_id.is_(None), TurnChangedFile.bot_id != bot_id,
+                    TurnChangedFile.user_id.is_(None), TurnChangedFile.user_id != user_id),
+                or_(*identities),
+            ).limit(1)
+            # created_at records first capture, not the last upsert. A foreign
+            # edit after the last row's timestamp may still intervene; keep it
+            # visible conservatively rather than guessing an upper time bound.
+            with Session(self.engine) as session:
+                return session.exec(statement).first() is not None
+
         def aggregate(selected: list[TurnChangedFile]) -> dict[str, Any]:
             summary = build_uncommitted_summary(selected)
             for file in summary["files"]:
@@ -855,12 +912,18 @@ class ChangedFilesStore:
             # tracked repo ID + exact relative path is the canonical identity.
             canonical: dict[tuple[str, str], dict[str, Any]] = {}
             for file in summary["files"]:
-                proof = file.get("commit_evidence") or {}
-                key = (proof.get("repo_id") or file["repo_key"],
-                       proof.get("repo_path") or file["path"])
+                key = canonical_key(file)
                 previous = canonical.get(key)
                 if previous is None or file["created_at"] >= previous["created_at"]:
                     canonical[key] = file
+            chains: dict[tuple[str, str], list[TurnChangedFile]] = {}
+            for row in selected:
+                proof = evidence[(row.turn_id, row.repo_key, row.path)]
+                chains.setdefault(canonical_key(proof), []).append(row)
+            for key, chain in chains.items():
+                snapshots = [evidence[(row.turn_id, row.repo_key, row.path)] for row in chain]
+                if _net_zero_chain(snapshots) and not foreign_change_since(chain):
+                    canonical.pop(key, None)
             summary["files"] = list(canonical.values())
             return pending_summary(summary)
 
