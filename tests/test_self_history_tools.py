@@ -11,7 +11,7 @@ from llm_bawt.mcp_server import server
 def test_self_tool_catalog_matches_supported_tools():
     tools = asyncio.run(server.mcp.list_tools())
     assert {tool.name for tool in tools if tool.name.startswith("self_")} == {
-        "self_tail", "self_fwd", "self_system_prompt", "self_model",
+        "self_tail", "self_fwd", "self_system_prompt", "self_model", "self_house",
     }
 
 

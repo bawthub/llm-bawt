@@ -1,19 +1,19 @@
 """Self-move house tenancy on the real profile store (TASK-2118).
 
-Two bots racing for one house: both wait on the house assignment lock, then
+Two bots racing for one house: held behind the house assignment lock, then
 exactly one moves in and the other is refused ``occupied``. A manual profile
 write of ``house`` waits on the same lock, so a self-move sees it. The write
 is audited as the bot itself and never pins. Fixture bots only, isolated PostgreSQL.
 """
 from __future__ import annotations
 
-import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from sqlalchemy import text
 
 from llm_bawt.house_tenancy import HouseMoveRefused, HouseState, move_in, move_out
+from tests.pg_lock_wait import wait_blocked_by
 from tests.test_bot_tags_pg import rig, upsert  # noqa: F401
 
 pytestmark = pytest.mark.integration
@@ -24,26 +24,8 @@ def LIVE():  # noqa: N802
                       pool={"h1": "claude-code", "h2": "claude-code"})
 
 
-_WAITERS = text("""
-    SELECT count(*) FROM pg_stat_activity
-    WHERE datname = current_database() AND wait_event_type = 'Lock'
-      AND :holder = ANY(pg_blocking_pids(pid))
-""")
-
-
 def agent(store, slug, **fields):
     upsert(store, slug, bot_type="agent", agent_backend="claude-code", **fields)
-
-
-def _wait_for_waiters(engine, holder: int, count: int, futures) -> None:
-    deadline = time.monotonic() + 10
-    while True:
-        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
-            if conn.execute(_WAITERS, {"holder": holder}).scalar_one() >= count:
-                return
-        assert not any(f.done() for f in futures), [f.exception() for f in futures if f.done()]
-        assert time.monotonic() < deadline, "the racers never waited on the self-move lock"
-        time.sleep(0.02)
 
 
 def outcome(future):
@@ -62,9 +44,10 @@ def test_two_bots_racing_for_one_house_get_one_winner_and_one_refusal(rig):  # n
         holder.execute(text("SELECT pg_advisory_xact_lock(2118, 1)"))
         pid = holder.execute(text("SELECT pg_backend_pid()")).scalar_one()
         with ThreadPoolExecutor(2) as pool:
-            racers = [pool.submit(move_in, store, slug, "h1", LIVE)
-                      for slug in ("fixture-a", "fixture-b")]
-            _wait_for_waiters(rig.engine, pid, 2, racers)
+            racers = []
+            for slug in ("fixture-a", "fixture-b"):
+                racers.append(pool.submit(move_in, store, slug, "h1", LIVE))
+                wait_blocked_by(rig.engine, pid, racers[-1])
             holder.execute(text("ROLLBACK"))
             outcomes = sorted(outcome(f) for f in racers)
     assert outcomes == ["h1", "occupied"]
@@ -106,7 +89,7 @@ def test_a_manual_house_write_takes_the_same_lock_and_a_self_move_then_sees_it(r
         with ThreadPoolExecutor(1) as pool:
             manual = pool.submit(store.upsert, {"slug": "fixture-a", "house": "h1"},
                                  require_existing=True)
-            _wait_for_waiters(rig.engine, pid, 1, [manual])
+            wait_blocked_by(rig.engine, pid, manual)
             holder.execute(text("ROLLBACK"))
             manual.result(timeout=10)
     # A write that doesn't touch house never takes it.
