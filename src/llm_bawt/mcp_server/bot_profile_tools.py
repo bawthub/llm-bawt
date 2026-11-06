@@ -59,7 +59,7 @@ MODEL_FIELDS = frozenset({MODEL, ENDPOINT})
 #: harness is derived from the endpoint, never set; backend, bot_type and the
 #: legacy privacy flag are not editable here.
 ALLOWED_FIELDS = frozenset({
-    TAGS, "name", "description", "color", "avatar", "default_voice", "system_prompt",
+    TAGS, "name", "description", "color", "cli_color", "avatar", "default_voice", "system_prompt",
     "prompt_override_id", "requires_memory", "voice_optimized", "tts_mode", "uses_tools",
     "uses_search", "uses_home_assistant", *MODEL_FIELDS,
 })

@@ -39,6 +39,7 @@ class BotInfo(BaseModel):
     uses_home_assistant: bool = False
     default_model: str | None = None
     color: str | None = None
+    cli_color: str | None = None
     avatar: str | None = None
     avatar_render: str | None = None
     bot_type: BotKind = "chat"
@@ -90,6 +91,7 @@ class BotProfileResponse(BaseModel):
     uses_home_assistant: bool = False
     default_model: str | None = None
     color: str | None = None
+    cli_color: str | None = None
     avatar: str | None = None
     # Server-derived, self-hosted render of ``avatar`` as a data: URL
     # (Twemoji SVG for emoji, small WebP for images). Read-only for clients.
@@ -124,6 +126,7 @@ class BotProfileUpsertRequest(BaseModel):
     uses_home_assistant: bool = False
     default_model: str | None = None
     color: str | None = None
+    cli_color: str | None = None
     avatar: str | None = None
     default_voice: str | None = None
     nextcloud_config: dict[str, Any] | None = None
@@ -153,6 +156,7 @@ class BotProfilePatchRequest(BaseModel):
     uses_home_assistant: bool | None = None
     default_model: str | None = None
     color: str | None = None
+    cli_color: str | None = None
     avatar: str | None = None
     default_voice: str | None = None
     nextcloud_config: dict[str, Any] | None = None

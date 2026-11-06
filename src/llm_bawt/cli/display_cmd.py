@@ -16,6 +16,7 @@ from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
+from llm_bawt.bot_colors import cli_color_for
 from llm_bawt.bot_types import format_bot_type
 from llm_bawt.bots import BotManager
 from llm_bawt.core import LLMBawt
@@ -43,7 +44,6 @@ def query_via_service(
     """
     from rich.markdown import Markdown
     from rich.align import Align
-    from rich.style import Style
 
     if config is None:
         config = Config()
@@ -59,12 +59,7 @@ def query_via_service(
     bot_name = bot.name if bot else (bot_id or "Assistant")
 
     # Determine panel style from bot config color with safe fallback.
-    configured_color = (getattr(bot, "color", None) if bot else None) or "green"
-    try:
-        Style.parse(configured_color)
-        panel_color = configured_color
-    except Exception:
-        panel_color = "green"
+    panel_color = cli_color_for(bot)
 
     title_style, border_style = panel_color, panel_color
 
@@ -659,7 +654,8 @@ def _show_bots_from_local(config: Config):
             f"{bot.slug}{is_default}",
             bot.name,
             format_bot_type(bot.bot_type, bot.agent_backend),
-            f"[{bot.color}]{bot.color}[/]" if bot.color else "[dim]default[/dim]",
+            f"[{cli_color_for(bot)}]{escape(bot.cli_color or bot.color)}[/]"
+            if (bot.cli_color or bot.color) else "[dim]default[/dim]",
             bot.description,
             default_model,
             memory_icon

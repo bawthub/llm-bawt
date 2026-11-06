@@ -43,6 +43,7 @@ def _request_to_profile_payload(
         "prompt_override_id",
         "default_model",
         "color",
+        "cli_color",
         "avatar",
         "default_voice",
         "nextcloud_config",
@@ -76,6 +77,12 @@ CODEX_TRANSPORTS = ("exec", "app_server")
 
 
 def _validate_profile_payload(payload: dict[str, object]) -> None:
+    if "cli_color" in payload:
+        from ...bot_colors import normalize_cli_color
+        try:
+            payload["cli_color"] = normalize_cli_color(payload["cli_color"])
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     resolved_type = normalize_bot_type(
         str(payload.get("bot_type")) if payload.get("bot_type") is not None else None,
         str(payload.get("agent_backend")) if payload.get("agent_backend") is not None else None,

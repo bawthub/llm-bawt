@@ -37,7 +37,7 @@ AUDITED_FIELDS: tuple[str, ...] = (
     "name", "description", "system_prompt", "prompt_override_id", "requires_memory",
     "voice_optimized", "tts_mode", "include_summaries", "include_in_global_search",
     "uses_tools", "uses_search", "uses_home_assistant", "default_model", "harness",
-    "endpoint_id", "color", "avatar", "default_voice", "nextcloud_config", "bot_type",
+    "endpoint_id", "color", "cli_color", "avatar", "default_voice", "nextcloud_config", "bot_type",
     "agent_backend", "agent_backend_config", "house", "house_pinned",
 )
 TAGS = "tags"

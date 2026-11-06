@@ -162,3 +162,17 @@ def test_a_row_that_keeps_changing_gives_up_after_three_merges(api, monkeypatch)
     assert response.status_code == 409, response.text
     assert response.json()["detail"]["code"] == "row_changed"
     assert len(attempts) == settings._PATCH_ATTEMPTS == 3
+
+
+def test_cli_color_is_validated_normalized_and_clearable(api):  # noqa: F811
+    assert api.patch(BOT, cli_color="not-a-color").status_code == 400
+    assert api.store.get(BOT).cli_color is None
+
+    response = api.patch(BOT, cli_color=" Bright_Cyan ")
+    assert response.status_code == 200, response.text
+    assert response.json()["cli_color"] == "bright_cyan"
+    assert api.store.get(BOT).cli_color == "bright_cyan"
+    assert _changes(api)[-1]["changes"] == {"cli_color": {"before": None, "after": "bright_cyan"}}
+
+    assert api.patch(BOT, cli_color="").status_code == 200
+    assert api.store.get(BOT).cli_color is None

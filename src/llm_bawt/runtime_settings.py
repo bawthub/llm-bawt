@@ -91,6 +91,8 @@ class BotProfile(SQLModel, table=True):
     # FK is installed after both independently bootstrapped tables exist.
     last_session_id: str | None = Field(default=None, sa_column=Column(String(36), nullable=True))
     color: str | None = Field(default=None, sa_column=Column(String(64), nullable=True))
+    # Optional Rich color name for the CLI; null = derive from ``color``.
+    cli_color: str | None = Field(default=None, sa_column=Column(String(64), nullable=True))
     avatar: str | None = Field(default=None, sa_column=Column(String(512), nullable=True))
     # Self-hosted, ready-to-embed render of ``avatar`` as a ``data:`` URL
     # (Twemoji SVG for emoji, normalized small WebP for images). Resolved
@@ -223,6 +225,7 @@ class BotProfileStore:
         """Add columns introduced after initial schema creation."""
         migrations = [
             "ALTER TABLE bot_profiles ADD COLUMN IF NOT EXISTS color VARCHAR(64)",
+            "ALTER TABLE bot_profiles ADD COLUMN IF NOT EXISTS cli_color VARCHAR(64)",
             "ALTER TABLE bot_profiles ADD COLUMN IF NOT EXISTS bot_type VARCHAR(32)",
             "ALTER TABLE bot_profiles ADD COLUMN IF NOT EXISTS agent_backend VARCHAR(128)",
             "ALTER TABLE bot_profiles ADD COLUMN IF NOT EXISTS agent_backend_config JSONB",
@@ -331,6 +334,7 @@ class BotProfileStore:
                     harness=payload.get("harness"),
                     endpoint_id=payload.get("endpoint_id"),
                     color=payload.get("color"),
+                    cli_color=payload.get("cli_color"),
                     avatar=payload.get("avatar"),
                     avatar_render=payload.get("avatar_render"),
                     default_voice=payload.get("default_voice"),
@@ -372,6 +376,8 @@ class BotProfileStore:
                 # color" (TASK-1521); callers that leave color out keep it.
                 if "color" in payload:
                     row.color = payload.get("color")
+                if "cli_color" in payload:
+                    row.cli_color = payload.get("cli_color")
                 if "avatar" in payload:
                     row.avatar = payload.get("avatar")
                 if "avatar_render" in payload:

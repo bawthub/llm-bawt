@@ -39,7 +39,8 @@ class Bot:
     uses_tools: bool = False  # Whether this bot can use tools (memory search, etc.)
     uses_search: bool = False  # Whether this bot can search the web
     uses_home_assistant: bool = False  # Whether this bot can control Home Assistant via MCP
-    color: str | None = None  # Optional Rich color name for CLI panel styling
+    color: str | None = None  # UI color, normally a #rrggbb hex
+    cli_color: str | None = None  # Optional Rich color name for the CLI
     avatar: str | None = None  # Optional emoji or image URL for bot avatar
     avatar_render: str | None = None  # Self-hosted data: URL render of avatar (no CDN at runtime)
     nextcloud: dict | None = None  # Nextcloud integration config (bot_id, secret, etc.)
@@ -225,6 +226,8 @@ def _load_db_bot_profiles() -> dict[str, dict[str, Any]]:
                 entry["house_pinned"] = True
             if row.color is not None:
                 entry["color"] = row.color
+            if getattr(row, "cli_color", None):
+                entry["cli_color"] = row.cli_color
             if row.avatar is not None:
                 entry["avatar"] = row.avatar
             if getattr(row, "avatar_render", None):
@@ -322,6 +325,7 @@ def _load_bots_config() -> None:
             uses_search=data.get("uses_search", False),
             uses_home_assistant=data.get("uses_home_assistant", False),
             color=data.get("color"),
+            cli_color=data.get("cli_color"),
             avatar=data.get("avatar"),
             avatar_render=data.get("avatar_render"),
             nextcloud=data.get("nextcloud"),

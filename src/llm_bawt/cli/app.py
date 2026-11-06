@@ -522,7 +522,6 @@ def _query_agent_backend(prompt: str, bot, plaintext_output: bool):
     """
     import asyncio
     from llm_bawt.agent_backends import get_backend
-    from rich.style import Style
 
     backend = get_backend(bot.agent_backend)
     if not backend:
@@ -568,11 +567,9 @@ def _query_agent_backend(prompt: str, bot, plaintext_output: bool):
         from rich.markdown import Markdown
         from rich.panel import Panel
 
-        bot_color = getattr(bot, "color", None) or "green"
-        try:
-            Style.parse(bot_color)
-        except Exception:
-            bot_color = "green"
+        from ..bot_colors import cli_color_for
+
+        bot_color = cli_color_for(bot)
 
         title = f"[bold {bot_color}]{bot.name}[/bold {bot_color}] [dim][{bot.agent_backend}][/dim]"
         render_complete_response(

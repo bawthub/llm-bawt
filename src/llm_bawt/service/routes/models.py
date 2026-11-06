@@ -226,6 +226,7 @@ def list_bots():
             uses_home_assistant=bot.uses_home_assistant,
             default_model=bot.default_model,
             color=bot.color,
+            cli_color=getattr(bot, "cli_color", None),
             avatar=bot.avatar,
             avatar_render=getattr(bot, "avatar_render", None),
             bot_type=bot.bot_type,
