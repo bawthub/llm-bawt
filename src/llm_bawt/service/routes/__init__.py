@@ -4,6 +4,7 @@ from .admin_gates import router as admin_gates_router
 from .bawthub_auth_secrets import router as bawthub_auth_secrets_router
 from .internal_connections import router as internal_connections_router
 from .bot_grants import router as bot_grants_router
+from .houses import router as houses_router
 from .bot_tags import router as bot_tags_router
 from .botchat import router as botchat_router
 from .chat import router as chat_router
@@ -90,6 +91,7 @@ all_routers = [
     task_retros_router,
     bot_tags_router,
     bot_grants_router,
+    houses_router,
     skills_router,
     setup_router,
     sessions_router,

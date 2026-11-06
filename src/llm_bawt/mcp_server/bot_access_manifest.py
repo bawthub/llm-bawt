@@ -20,6 +20,7 @@ SPECIAL_TOOLS = frozenset({"memory_search_source", "self_fwd", "profile"})
 # Existing self-namespace capabilities/backend/protected gates remain authoritative.
 SELF_NAMESPACE_TOOLS = frozenset({
     "working_memory_list", "working_memory_create", "working_memory_update", "context_recall",
+    "self_house",  # TASK-2118: signed caller only, no bot argument
 })
 # These are explicitly outside this history boundary (not inferred by a prefix).
 NON_HISTORY_TOOLS = frozenset({

@@ -6,6 +6,24 @@ not copied checkouts or container layers, hold persistent code and sessions.
 This file owns image/pool/startup instructions; routing and lease behavior is
 owned by the `agent_bridge` house router.
 
+## Moving in and out
+
+A bot moves itself with the `self_house` MCP tool (`/v1/houses/self`, signed
+turn only, no bot argument; rules in `llm_bawt/house_tenancy.py`):
+
+- `list`: houses with a live lease or a tenant, their tenants, and which are
+  free for the caller.
+- `move_in`: a named house, or any free one. The house must hold a live lease
+  for the bot's harness and have no tenant; an occupied house is always
+  refused. Self-moves serialize on one advisory lock, so a race has one winner.
+  Never pins. Applies from the bot's next turn.
+- `move_out`: leaves the caller's own house; an emptied house recycles. A
+  pinned tenancy is the pinner's to end.
+
+Only `claude-code` bots are eligible for now; others get `unsupported_harness`.
+Bots never patch another bot's `house` field. Pinning, and assigning a bot by
+profile, stay with a coordinator or the user.
+
 ## Local configuration
 
 Copy `docker/houses.example.json` outside source control. All images, resource
