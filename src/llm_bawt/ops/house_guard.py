@@ -31,7 +31,9 @@ GUARDED_ACTIONS = frozenset({"start", "restart", "stop"})
 OVERRIDE_ARG = "override_occupied"
 _HOUSE_ID = r"[a-z0-9][a-z0-9-]{0,30}"
 HOUSE_SERVICE_RE = re.compile(rf"house-({_HOUSE_ID})")
-HOUSE_CONTAINER_RE = re.compile(rf"[a-z0-9][a-z0-9_.-]{{0,63}}-house-({_HOUSE_ID})")
+_HOUSE_ID_RE = re.compile(_HOUSE_ID)
+_PROJECT_RE = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}")
+_CONTAINER_SEP = "-house-"
 _TENANTS_SQL = text("SELECT slug FROM bot_profiles WHERE house = :house ORDER BY slug")
 _TURN_RECORDS = "agent:turn:req:*"
 
@@ -40,20 +42,41 @@ class HouseOccupancyUnverifiable(Exception):
     """Occupancy could not be read; the guard fails closed."""
 
 
-def house_target(spec: dict, args: dict) -> str | None:
-    """The house id a container spec acts on, else None."""
+def _container_houses(name: str) -> tuple[str, ...]:
+    """Every house id a ``<project>-house-<id>`` container name can denote.
+
+    Both the project and the id may contain ``-house-`` themselves (e.g.
+    ``llm-bawt-house-dev-house-h1`` is house ``dev-house-h1`` *or* ``h1`` in
+    project ``llm-bawt-house-dev``), so a name is not split greedily: every
+    legal reading counts and the guard checks all of them (fail closed).
+    """
+    found: list[str] = []
+    start = name.find(_CONTAINER_SEP)
+    while start != -1:
+        project, house = name[:start], name[start + len(_CONTAINER_SEP):]
+        if _PROJECT_RE.fullmatch(project) and _HOUSE_ID_RE.fullmatch(house):
+            found.append(house)
+        start = name.find(_CONTAINER_SEP, start + 1)
+    return tuple(found)
+
+
+def house_targets(spec: dict, args: dict) -> tuple[str, ...]:
+    """The house id(s) a container spec may act on; empty when not a house.
+
+    A Compose service is unambiguous (``house-<id>``); a literal container
+    name may have more than one legal reading, and every one is returned.
+    """
     if not isinstance(spec, dict) or spec.get("action") not in GUARDED_ACTIONS:
-        return None
+        return ()
     try:
         name, _filters = target_selector(spec, args)
         if name is not None:
-            match = HOUSE_CONTAINER_RE.fullmatch(name)
-        else:
-            match = HOUSE_SERVICE_RE.fullmatch(
-                str(spec.get("compose_service") or args[spec["compose_service_from_arg"]]))
+            return _container_houses(name)
+        match = HOUSE_SERVICE_RE.fullmatch(
+            str(spec.get("compose_service") or args[spec["compose_service_from_arg"]]))
     except (KeyError, TypeError):
-        return None
-    return match.group(1) if match else None
+        return ()
+    return (match.group(1),) if match else ()
 
 
 def override_requested(resolved_args: dict) -> bool:
@@ -108,5 +131,5 @@ def occupancy_reader(config: Any, engine: Any) -> Callable[[str], list[str]]:
     return read
 
 
-__all__ = ["GUARDED_ACTIONS", "OVERRIDE_ARG", "HouseOccupancyUnverifiable", "house_target",
+__all__ = ["GUARDED_ACTIONS", "OVERRIDE_ARG", "HouseOccupancyUnverifiable", "house_targets",
            "occupancy_reader", "override_requested", "read_occupancy"]

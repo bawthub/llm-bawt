@@ -11,7 +11,7 @@ from sqlmodel import create_engine
 from llm_bawt.approval_defaults import _OPS_DEFAULT_POLICIES
 from llm_bawt.ops import JOB_FAILED, OpsDispatchError, OpsService
 from llm_bawt.ops.executor import validate_spec
-from llm_bawt.ops.house_guard import HouseOccupancyUnverifiable, house_target, read_occupancy
+from llm_bawt.ops.house_guard import HouseOccupancyUnverifiable, house_targets, read_occupancy
 from llm_bawt.ops.seeds import SEEDS
 from llm_bawt.ops.validation import validate_args
 from llm_bawt.service.routes.ops import DISPATCH_ERROR_STATUS
@@ -30,7 +30,8 @@ def _args(**over):
 
 
 def test_the_row_targets_only_house_services():
-    assert house_target(SPEC, _args(house="house-h1")) == "h1"
+    assert house_targets(SPEC, _args(house="house-h1")) == ("h1",)
+    assert house_targets(SPEC, _args(house="house-dev-house-h1")) == ("dev-house-h1",)
     for bad in ("claude-code-bridge", "codex-bridge", "app", "house-", "house-H1", "xhouse-h1",
                 "house-h1 ", "house-../x"):
         with pytest.raises(Exception):
@@ -39,12 +40,19 @@ def test_the_row_targets_only_house_services():
 
 def test_house_containers_and_services_are_recognized_everywhere():
     named = {"action": "restart", "container_name_from_arg": "c"}
-    assert house_target(named, {"c": "llm-bawt-house-h2"}) == "h2"
-    assert house_target(named, {"c": "llm-bawt-claude-code-bridge"}) is None
-    assert house_target({"action": "stop", "container_name": "llm-bawt-house-h1"}, {}) == "h1"
-    assert house_target({"action": "pull", "container_name": "llm-bawt-house-h1"}, {}) is None
-    assert house_target({"action": "start", "compose_project": "llm-bawt",
-                         "compose_service": "house-dev3"}, {}) == "dev3"
+    assert house_targets(named, {"c": "llm-bawt-house-h2"}) == ("h2",)
+    assert house_targets(named, {"c": "llm-bawt-claude-code-bridge"}) == ()
+    assert house_targets({"action": "stop", "container_name": "llm-bawt-house-h1"}, {}) == ("h1",)
+    assert house_targets({"action": "pull", "container_name": "llm-bawt-house-h1"}, {}) == ()
+    assert house_targets({"action": "start", "compose_project": "llm-bawt",
+                          "compose_service": "house-dev3"}, {}) == ("dev3",)
+
+
+def test_an_ambiguous_container_name_yields_every_reading():
+    # Rendered for house dev-house-h1, but also legal as house h1 of project
+    # llm-bawt-house-dev: never split greedily, check both.
+    named = {"action": "restart", "container_name": "llm-bawt-house-dev-house-h1"}
+    assert house_targets(named, {}) == ("dev-house-h1", "h1")
 
 
 def test_seed_shape_and_approval_policy():
@@ -133,14 +141,14 @@ class Occupancy:
         return list(self.reasons)
 
 
-def _service():
+def _service(occupancy=None, **row_over):
     store = _store()
     row = {k: v for k, v in SEED.items() if k in {
         "slug", "title", "description", "executor_kind", "target_host", "working_directory",
         "command_script", "args_schema_json", "args_defaults_json", "timeout_seconds",
         "start_delay_seconds", "max_concurrent", "risk_level", "category", "approval_prompt_prefix"}}
-    store.create_operation({**row, "enabled": True})
-    occupancy, executor = Occupancy(), FakeExecutor()
+    store.create_operation({**row, **row_over, "enabled": True})
+    occupancy, executor = occupancy or Occupancy(), FakeExecutor()
     return OpsService(store, executor=executor, house_occupancy=occupancy), store, executor, occupancy
 
 
@@ -201,6 +209,33 @@ def test_unreadable_occupancy_at_dispatch_keeps_the_job_queued():
     row = store.get_job(job["id"])
     assert row.state == "queued" and "house_occupancy_unverifiable" in (row.error_text or "")
     assert not executor.dispatch_calls
+
+
+class PerHouse(Occupancy):
+    def __init__(self, occupied):
+        super().__init__()
+        self.occupied, self.asked = occupied, []
+
+    def __call__(self, house):
+        self.calls += 1
+        self.asked.append(house)
+        return list(self.occupied.get(house, []))
+
+
+def test_an_ambiguous_literal_container_checks_the_actual_house_too():
+    spec = json.loads(SEED["command_script"])
+    spec.pop("compose_project"), spec.pop("compose_service_from_arg")
+    spec["container_name"] = "llm-bawt-house-dev-house-h1"
+    occupancy = PerHouse({"dev-house-h1": ["assigned to probe"]})
+    service, _store_, executor, _ = _service(occupancy, command_script=json.dumps(spec))
+    args = {"house": "house-zz"}  # required by the row's schema; the literal name ignores it
+    with pytest.raises(OpsDispatchError) as exc:
+        service.prepare_invocation(SEED["slug"], args)
+    assert exc.value.code == "house_occupied" and "'dev-house-h1'" in str(exc.value)
+    assert set(occupancy.asked) == {"dev-house-h1", "h1"} and not executor.dispatch_calls
+    with pytest.raises(OpsDispatchError) as exc:  # still card-only
+        service.dispatch_job(operation_slug=SEED["slug"], args=args, idempotency_key="amb")
+    assert exc.value.code in {"approval_required", "house_occupied"} and not executor.dispatch_calls
 
 
 def test_the_approver_override_skips_the_occupancy_check():
