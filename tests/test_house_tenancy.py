@@ -116,6 +116,13 @@ def test_codex_and_chat_bots_are_refused(fields, backend):
         move_in(store, "bot", "h1", LIVE)
     assert refused.value.code == "unsupported_harness" and refused.value.status_code == 403
     assert backend in str(refused.value)
+    # A manually assigned tenancy can't be self-released either.
+    with store.engine.begin() as conn:
+        conn.execute(text("UPDATE bot_profiles SET house='h1' WHERE slug='bot'"))
+    with pytest.raises(HouseMoveRefused) as out:
+        move_out(store, "bot")
+    assert out.value.code == "unsupported_harness" and store.house("bot") == "h1"
+    assert store.writes == []
     listed = list_houses(store, "bot", LIVE)
     assert listed["you"]["eligible"] is False
 

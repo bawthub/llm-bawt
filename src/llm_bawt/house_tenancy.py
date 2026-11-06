@@ -210,6 +210,7 @@ def move_out(store: Any, slug: str) -> MoveResult:
         conn = session.connection()
         _lock(conn)
         row = _caller_row(store, slug)
+        _backend(row)  # same eligibility as move-in; others' tenancy is a coordinator's
         current = (row.house or "").strip() or None
         if not current:
             return MoveResult(slug, None, changed=False)
