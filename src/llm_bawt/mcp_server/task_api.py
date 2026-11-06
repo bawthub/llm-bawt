@@ -51,6 +51,11 @@ def _state_fields(task: dict) -> dict:
     # TASK-1368: a BLOCKED row is the user's action item; its reason is the point.
     if task.get("status") == "BLOCKED":
         fields["blockedReason"] = task.get("blockedReason")
+    # TASK-2115: a WAITING row's point is the event it waits on and since when.
+    if task.get("status") == "WAITING":
+        fields["waitingOn"] = task.get("waitingOn")
+        fields["waitingReason"] = task.get("waitingReason")
+        fields["waitingSince"] = task.get("waitingSince")
     # TASK-1422: a REVIEW row's "Where to look" pages are what the reviewer opens.
     if task.get("status") == "REVIEW" and task.get("checkLinks"):
         fields["checkLinks"] = task.get("checkLinks")

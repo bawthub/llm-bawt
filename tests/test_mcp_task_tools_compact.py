@@ -497,6 +497,26 @@ def test_update_forwards_blocked_reason_and_compact_shows_it(monkeypatch: pytest
     assert "blockedReason" not in task_tools._compact_task({**_full_task(), "blockedReason": None})
 
 
+def test_update_forwards_waiting_and_compact_shows_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    # TASK-2115: waiting_on/waiting_reason pass through; BawtHub validates.
+    calls = _capture_patch(monkeypatch)
+    waiting = {**_full_task(), "status": "WAITING", "waitingOn": "RESTART",
+               "waitingReason": "App restart.", "waitingSince": "2026-11-06T22:30:00.000Z"}
+
+    async def fake_patch(path: str, json: dict[str, Any], headers: dict[str, str] | None = None) -> dict[str, Any]:
+        calls.append({"path": path, "json": json, "headers": headers})
+        return waiting
+
+    monkeypatch.setattr(task_tools, "_api_patch", fake_patch)
+    result = _run(task_tools.update_task(
+        "TASK-1", status="WAITING", waiting_on="RESTART", waiting_reason="App restart."))
+
+    assert calls[0]["json"] == {"status": "WAITING", "waitingOn": "RESTART", "waitingReason": "App restart."}
+    assert result["task"]["waitingOn"] == "RESTART"
+    assert result["task"]["waitingSince"] == "2026-11-06T22:30:00.000Z"
+    assert "waitingOn" not in task_tools._compact_task({**_full_task(), "waitingOn": None})
+
+
 def test_create_forwards_blocked_reason(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[dict[str, Any]] = []
 

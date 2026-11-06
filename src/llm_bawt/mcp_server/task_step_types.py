@@ -32,7 +32,19 @@ _STEP_TYPE_SET = frozenset(STEP_TYPES)
 # Mirrors Prisma TaskStatus; task tools accept str so HTTP can normalize case.
 TASK_STATUSES = (
     "QUEUED", "PLANNING", "REFINED", "IN_PROGRESS", "REVIEW",
-    "COMPLETED", "FAILED", "BUG", "CANCELLED", "DELETED", "BLOCKED",
+    "COMPLETED", "FAILED", "BUG", "CANCELLED", "DELETED", "BLOCKED", "WAITING",
+)
+
+# TASK-2115: mirrors Prisma TaskWaitingOn.
+WaitingOn = Literal["RESTART", "RELEASE", "DECISION", "EXTERNAL"]
+
+# TASK-2115: what WAITING means, next to BLOCKED in the tool descriptions.
+WAITING_DEFINITION = (
+    "WAITING is built work parked on one external event (a restart, a release, "
+    "a decision or something external); it stays in In Progress on the board and "
+    "does not count toward a bot's one active task. QUEUED is work not started. "
+    "Entering WAITING requires waiting_on (RESTART, RELEASE, DECISION or EXTERNAL) "
+    "and waiting_reason: the event that releases it. Leaving WAITING clears both."
 )
 
 # TASK-1368: the user's definition of BLOCKED, the only gate before COMPLETED.

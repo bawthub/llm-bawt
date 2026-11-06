@@ -111,6 +111,19 @@ def test_an_arg_the_board_did_not_apply_is_an_error(
         f"the board did not apply {key}={asked!r} (it used {used!r}); that board is not returned.")}
 
 
+def test_waiting_filter_is_forwarded_and_must_be_applied(monkeypatch: pytest.MonkeyPatch) -> None:
+    # TASK-2115: waiting= keeps one WAITING kind; a board that ignored it
+    # (a build before WAITING) would return every task, so that is an error.
+    applied = {**BOARD, "filters": {**BOARD["filters"], "waiting": "RESTART"}}
+    requests = _stub(monkeypatch, body=applied)
+    assert _run(task_tools.tasks_board(waiting="RESTART")) == applied
+    assert requests[0].url.params["waiting"] == "RESTART"
+
+    _stub(monkeypatch)
+    assert _run(task_tools.tasks_board(waiting="RESTART")) == {
+        "error": "the board did not apply waiting='RESTART'; that board is not returned."}
+
+
 def test_a_board_without_the_rows_filter_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
     old = {key: value for key, value in BOARD.items() if key != "rows"}
     _stub(monkeypatch, body=old)

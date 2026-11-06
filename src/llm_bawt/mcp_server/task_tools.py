@@ -34,8 +34,10 @@ from .task_step_types import (
     BLOCKED_DEFINITION,
     CHECK_LINKS_DOC,
     TASK_STATUSES,
+    WAITING_DEFINITION,
     CheckLinkInput,
     TaskStepInput,
+    WaitingOn,
     validate_step_inputs,
 )
 from .task_api import (
@@ -97,6 +99,7 @@ def _task_status_docs(function):
         (function.__doc__ or "")
         .replace("{task_statuses}", ", ".join(TASK_STATUSES))
         .replace("{blocked_definition}", BLOCKED_DEFINITION)
+        .replace("{waiting_definition}", WAITING_DEFINITION)
         .replace("{check_links_doc}", CHECK_LINKS_DOC)
     )
     return function
@@ -208,6 +211,7 @@ async def tasks_board(
     priority: str | None = None,
     limit: int = 5,
     rows: BoardRows | None = None,
+    waiting: WaitingOn | None = None,
 ) -> dict:
     """The task board as data: the lanes BawtHub's /tasks/board lays out.
 
@@ -233,6 +237,9 @@ async def tasks_board(
               Done, Archived) keep their counts with rowsOmitted. "all"
               sends every lane's cards, including completed/history matches.
               Default: "active", even when q is supplied.
+        waiting: Keep only WAITING tasks on this event (RESTART, RELEASE,
+                 DECISION or EXTERNAL). WAITING tasks sit in Doing (kanban)
+                 or their own Waiting lane (status view).
 
     Returns:
         Dict with view, updated, q, filters, rows, now and lanes: every
@@ -240,7 +247,8 @@ async def tasks_board(
         the column). Each lane has id, label, windowed, active, shown, older
         (left out by the time filter) and compact rows (shortId, title,
         status, priority, agentBotId, focusRank, archivedAt, updatedAt,
-        blockedReason).
+        blockedReason; WAITING rows add waitingOn, waitingReason and
+        waitingSince).
         Use tasks_get_context for one task's description and steps.
     """
     rows_scope = rows or "active"
@@ -249,6 +257,7 @@ async def tasks_board(
         for key, value in (
             ("view", view), ("updated", updated), ("bot", bot),
             ("q", q), ("project", project), ("priority", priority),
+            ("waiting", waiting),
         )
         if value
     }
@@ -265,6 +274,8 @@ async def tasks_board(
     mismatch = _board_mismatch(reply, {"view": view, "updated": updated})
     if mismatch:
         return {"error": mismatch}
+    if waiting and (reply.get("filters") or {}).get("waiting") != waiting:
+        return {"error": f"the board did not apply waiting={waiting!r}; that board is not returned."}
     if rows_scope == "active" and reply.get("rows") != rows_scope:
         # A BawtHub build before TASK-1555 ignores rows and sends every card.
         reply["note"] = f"this BawtHub build ignores rows={rows_scope}; every lane's cards are included."
@@ -402,6 +413,8 @@ async def update_task(
     bot_id: str | None = None,
     associate_current_turn: bool = False,
     blocked_reason: str | None = None,
+    waiting_on: WaitingOn | None = None,
+    waiting_reason: str | None = None,
     check_links: list[CheckLinkInput] | None = None,
     focus: Annotated[
         FocusAction | None,
@@ -459,6 +472,10 @@ async def update_task(
     the shared-DB migration, then ship." While BLOCKED, blocked_reason alone
     updates the reason.
 
+    {waiting_definition} Example: status="WAITING", waiting_on="RESTART",
+    waiting_reason="App restart that loads the new title worker." While
+    WAITING, either field alone updates it; waitingSince is kept.
+
     Focus is the user's ordered list of work they chose to get done. When
     they say "focus X", "put Y first" or "drop Z", set it here in one call:
     any bot or user may, and BawtHub records who did. Examples: focus="on" (append at the
@@ -500,6 +517,11 @@ async def update_task(
         blocked_reason: What the user must do or decide. Required with
                         status="BLOCKED"; rejected unless the task is or becomes
                         BLOCKED. Cleared automatically when the task leaves BLOCKED.
+        waiting_on: RESTART, RELEASE, DECISION or EXTERNAL. Required with
+                    status="WAITING"; rejected unless the task is or becomes
+                    WAITING. Cleared when the task leaves WAITING.
+        waiting_reason: The event that releases a WAITING task. Same rules
+                        as waiting_on.
         check_links: {check_links_doc}
         focus: "on" or "off". "on" without a position puts an unfocused task
                at the bottom and leaves a focused task where it is.
@@ -546,6 +568,10 @@ async def update_task(
         body["agentBotId"] = agent_bot_id
     if blocked_reason is not None:
         body["blockedReason"] = blocked_reason
+    if waiting_on is not None:
+        body["waitingOn"] = waiting_on
+    if waiting_reason is not None:
+        body["waitingReason"] = waiting_reason
     if check_links is not None:
         body["checkLinks"] = check_links
     focus_body, focus_error = _focus_patch(focus, focus_position, focus_anchor)
@@ -839,6 +865,8 @@ async def create_task(
     agent_bot_id: str | None = None,
     associate_current_turn: bool = False,
     blocked_reason: str | None = None,
+    waiting_on: WaitingOn | None = None,
+    waiting_reason: str | None = None,
     image_urls: list[str] | None = None,
     attach_turn_images: bool = True,
 ) -> dict:
@@ -852,6 +880,8 @@ async def create_task(
     attaches that message's own images automatically.
 
     {blocked_definition}
+
+    {waiting_definition}
 
     Args:
         title: Task title (required).
@@ -872,6 +902,10 @@ async def create_task(
                 The server supplies all correlation IDs.
         blocked_reason: What the user must do or decide; required when
                         status="BLOCKED" and rejected otherwise.
+        waiting_on: RESTART, RELEASE, DECISION or EXTERNAL; required when
+                    status="WAITING" and rejected otherwise.
+        waiting_reason: The event that releases it; required when
+                        status="WAITING" and rejected otherwise.
         image_urls: Images to attach: chat upload ids (ma_...) or upload URLs.
                     Unknown ids are refused.
         attach_turn_images: With associate_current_turn, also attach the
@@ -897,6 +931,10 @@ async def create_task(
         body["projectId"] = project_id
     if blocked_reason is not None:
         body["blockedReason"] = blocked_reason
+    if waiting_on is not None:
+        body["waitingOn"] = waiting_on
+    if waiting_reason is not None:
+        body["waitingReason"] = waiting_reason
     if agent_bot_id:
         body["agentBotId"] = agent_bot_id
     if steps is not None:

@@ -195,7 +195,8 @@ async def test_catalog_token_budgets():
     # own; the occupied/no-pin rules in-band): 4,606 (+44).
     # TASK-2121: ops_quiesce_ack carries Nick's verbatim "finished"/"stopping"
     # definition (he required it in the description): 4,878 (+272).
-    assert sum(descriptions) <= 4878, f"Descriptions grew to {sum(descriptions)} tokens"
+    # TASK-2115: WAITING joins the status enum on tasks_list (+1).
+    assert sum(descriptions) <= 4879, f"Descriptions grew to {sum(descriptions)} tokens"
     definitions = [{"name": f"mcp__bawthub__{t.name}", "description": t.description or "", "input_schema": t.inputSchema} for t in tools]
     total = len(encoder.encode(json.dumps(definitions, ensure_ascii=False, separators=(",", ":"))))
     # TASK-900: explicit X search adds ~160 tokens; measured catalog 11,239.
@@ -301,7 +302,9 @@ async def test_catalog_token_budgets():
     # TASK-2121: ops_quiesce_ack "finished" status with Nick's verbatim
     # definition in its description: 17,898 (+330). Claude bots load the
     # schema only when a quiesce asks them to ack.
-    assert total <= 17898, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-2115: waiting_on/waiting_reason on create/update and tasks_board
+    # waiting= (typed WAITING kind enum): 18,043 (+145).
+    assert total <= 18043, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 
@@ -402,7 +405,7 @@ async def test_task_and_step_status_guidance_uses_canonical_values():
 
     assert TASK_STATUSES == (
         "QUEUED", "PLANNING", "REFINED", "IN_PROGRESS", "REVIEW",
-        "COMPLETED", "FAILED", "BUG", "CANCELLED", "DELETED", "BLOCKED",
+        "COMPLETED", "FAILED", "BUG", "CANCELLED", "DELETED", "BLOCKED", "WAITING",
     )
     tools = {tool.name: tool for tool in await mcp.list_tools()}
     for status in TASK_STATUSES:
