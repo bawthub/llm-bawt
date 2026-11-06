@@ -582,8 +582,8 @@ def test_continuation_ready_commits_notify(monkeypatch):
     import llm_bawt.approval_request_store as request_store
 
     sent = []
-    monkeypatch.setattr(mcp_store, "notify_in_transaction", lambda conn, payload="": sent.append(payload))
-    monkeypatch.setattr(request_store, "notify_in_transaction", lambda conn, payload="": sent.append(payload))
+    monkeypatch.setattr(mcp_store, "notify_in_transaction", lambda conn, payload="", **_: sent.append(payload))
+    monkeypatch.setattr(request_store, "notify_in_transaction", lambda conn, payload="", **_: sent.append(payload))
     store = _store()
     _ready_row(store)  # complete_mcp_execution + enqueue_continuation
     assert sent.count("continuation") >= 2
