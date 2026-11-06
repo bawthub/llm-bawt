@@ -55,7 +55,7 @@ def docker_args(job):
         "--env", "BAWT_AGENT_BRIDGE=0", "--env", "BAWT_HEAVY_QUEUE=1",
         "--env", "BRIDGE_BROKER_TOKEN_FILE=", "--env", "HOME=/tmp/heavy-home",
         "--env", "LLM_BAWT_TEST_WORKERS=4",
-        "--entrypoint", "/bin/sh",
+        "--entrypoint", "/usr/bin/timeout",
     ]
     for directory in [job["cwd"], *job["binds"]]:
         command += ["--mount", f"type=bind,source={directory},target={directory}"]
@@ -65,7 +65,9 @@ def docker_args(job):
         f'printf "\\nheavy-queue-peak:{job["id"]}:%s\\n" '
         '"$(cat /sys/fs/cgroup/memory.peak 2>/dev/null || printf unavailable)"; exit "$code"'
     )
-    return [*command, job["image"], "-c", wrapper, "heavy-queue", *job["command"]]
+    # The container-owned deadline survives SIGKILL/OOM of this host worker.
+    return [*command, job["image"], "--signal=KILL", str(WALL_SECONDS),
+            "/bin/sh", "-c", wrapper, "heavy-queue", *job["command"]]
 
 
 def notify(job, receipt, *, opener=urllib.request.urlopen):
@@ -104,6 +106,18 @@ def remove_container(name):
         return False
 
 
+def read_peak(log_path, identifier):
+    # The shell emits the measurement at EOF. Bound host-side memory even when
+    # a generic command produced gigabytes or one enormous unterminated line.
+    with log_path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        size = handle.tell()
+        handle.seek(max(0, size - 65536))
+        tail = handle.read(65536)
+    match = re.search(rb"heavy-queue-peak:" + identifier.encode() + rb":(\d+)", tail)
+    return int(match[1]) if match else None
+
+
 def run_job(directory, ticket_fd):
     job = json.loads((directory / "job.json").read_text())
     receipt_path = directory / "receipt.json"
@@ -130,7 +144,12 @@ def run_job(directory, ticket_fd):
         with heavy_slot(kind="queue", wait_seconds=86400,
                         ticket=os.fdopen(ticket_fd, "r+"), ticket_path=job["ticket_path"],
                         ready=lambda: available_memory() >= MEMORY + HEADROOM):
+            active = default_lock().with_name(default_lock().name + ".tickets") / "active.json"
             try:
+                # Write before create, not merely in finally: SIGKILL cannot
+                # run Python cleanup, but the next participant sees uncertainty.
+                save(active, {"job": job["id"], "container": job["container"],
+                              "receipt_path": str(receipt_path)})
                 receipt.update(status="RUNNING", started_at=stamp())
                 save(receipt_path, receipt)
                 deadline = time.monotonic() + WALL_SECONDS
@@ -161,9 +180,7 @@ def run_job(directory, ticket_fd):
                 receipt["exit_code"] = state["State"]["ExitCode"]
                 receipt["oom_killed"] = state["State"].get("OOMKilled", False)
                 receipt["container_memory_bytes"] = state["HostConfig"]["Memory"]
-                peak = re.search(rf"heavy-queue-peak:{job['id']}:(\d+)", (directory / "run.log").read_text(errors="replace"))
-                if peak:
-                    receipt["memory_peak_bytes"] = int(peak[1])
+                receipt["memory_peak_bytes"] = read_peak(directory / "run.log", job["id"])
                 if receipt["status"] != "TIMED_OUT":
                     receipt["status"] = "PASSED" if receipt["exit_code"] == 0 else "FAILED"
             finally:
@@ -179,6 +196,7 @@ def run_job(directory, ticket_fd):
                     receipt["cleanup_hold"] = str(hold)
                     save(receipt_path, receipt)
                     raise RuntimeError("container cleanup uncertain")
+                active.unlink(missing_ok=True)
                 cleaning = False
     except KeyboardInterrupt:
         if receipt["status"] != "CLEANUP_UNCERTAIN":

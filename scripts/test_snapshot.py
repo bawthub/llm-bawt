@@ -44,7 +44,7 @@ from typing import Any, Iterator
 
 REPO = Path(__file__).resolve().parents[1]
 DEFAULT_ROOT = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "llm-bawt-test-snapshot"
-DEFAULT_LOCK_WAIT_S = 1800
+DEFAULT_LOCK_WAIT_S = 2700  # queue wall cap (1800s) plus bounded cleanup/headroom
 STOP_GRACE_S = (30.0, 10.0)  # SIGINT → SIGTERM → SIGKILL
 RUN_RETENTION_S = 14 * 24 * 3600
 # A patch touching these changes the runner that judges it; the receipt says so.

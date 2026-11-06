@@ -13,6 +13,7 @@ absolute path. Use the host-visible task checkout path, not a bridge-only alias.
 Supply a locally prepared toolchain image with the dependencies for the check:
 the queue neither installs dependencies nor borrows another task's mutable
 environment. All paths, images, origins and requester IDs are deployment input.
+The prepared image must include `/bin/sh` and GNU `/usr/bin/timeout`.
 
 ```sh
 heavy-queue submit --cwd /work/task/frontend --image prepared-checks:revision \
@@ -48,7 +49,9 @@ to retry notification. Never replay a job automatically after an uncertain exit.
   pids-limit 4096**, no restart policy, a separate cgroup, and no network.
 - A **30-minute wall deadline** includes create/start/command execution.
   Deadline/interruption kills the actual named container, not just its attach
-  process. Bounded Docker cleanup follows before the host slot is released.
+  process. A second, container-owned timeout survives the host worker dying.
+  Bounded Docker cleanup follows before the host slot is released. Gate wait
+  defaults to 2700 seconds, covering a maximum-length queue job plus cleanup.
 - Only explicitly named task directories are mounted, at identical host/container
   paths. No implicit home, Docker socket, provider credentials, DB environment
   or application settings enter the job.
@@ -79,11 +82,16 @@ gate is running. Review the two-repository contract first and coordinate the
 initial cutover with the integrator.
 
 Container removal requires a **successful empty Docker inventory**. A daemon
-failure is not absence. Uncertain cleanup writes `.tickets/hold`, fails the
+failure is not absence. Before Docker create, `.tickets/active.json` durably names
+the workload; only positive exact-container removal clears it. SIGKILL/OOM of the
+Python worker releases its flock but leaves this marker, so both gate adapters
+refuse admission rather than overlapping a surviving daemon workload.
+Uncertain cleanup also writes `.tickets/hold`, fails the
 receipt and stops subsequent queue **and gate** admission. The callback identifies
-the job; its receipt identifies the container and hold path. An operator must
+the job; admission refusals identify the marker, container and recovery step. An operator must
 reconcile that exact container, confirm its absence, then remove that hold file.
-Do not clear a hold merely to get tests moving.
+For an orphan, remove its active marker too after confirming absence. Do not
+clear a marker merely to get tests moving.
 
 ## Bridge enforcement
 

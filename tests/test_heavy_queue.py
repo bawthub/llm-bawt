@@ -4,6 +4,8 @@ import io
 import json
 import os
 from pathlib import Path
+import select
+import signal
 import subprocess
 import sys
 
@@ -218,3 +220,54 @@ def test_job_terminal_receipt_timeout_cleanup_and_wakeup(monkeypatch, tmp_path, 
     assert result == (0 if not timeout and cleanup else 1)
     if not cleanup:
         assert Path(receipt["cleanup_hold"]).is_file()
+    active = tmp_path / "llm-bawt-test-suite.lock.tickets" / "active.json"
+    assert active.exists() is (not cleanup)
+
+
+def test_peak_reader_uses_bounded_tail_not_whole_log(tmp_path):
+    log = tmp_path / "run.log"
+    log.write_bytes(b"x" * 1_000_000 + b"\nheavy-queue-peak:abc:7654321\n")
+    assert heavy_queue.read_peak(log, "abc") == 7654321
+    assert heavy_queue.read_peak(log, "other") is None
+
+
+def test_default_gate_wait_covers_wall_cap_and_cleanup():
+    from scripts.test_snapshot import parse_args
+    assert parse_args([]).lock_wait >= heavy_queue.WALL_SECONDS + 60
+
+
+@pytest.mark.real_process
+def test_killed_owner_cannot_expose_a_surviving_workload_to_next_admission(tmp_path):
+    lock = tmp_path / "slot"
+    script = """
+import json, subprocess, sys, time
+from pathlib import Path
+from scripts.heavy_slot import heavy_slot
+lock = Path(sys.argv[1])
+with heavy_slot(kind="queue", lock_path=lock, wait_seconds=0):
+    marker = lock.with_name(lock.name + ".tickets") / "active.json"
+    marker.write_text(json.dumps({"container":"fixture-survivor"}))
+    work = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                            start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    print(work.pid, flush=True)
+    time.sleep(60)
+"""
+    owner = subprocess.Popen([sys.executable, "-c", script, str(lock)],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    workload_pid = None
+    try:
+        assert select.select([owner.stdout], [], [], 5)[0], "fixture owner failed to become ready"
+        workload_pid = int(owner.stdout.readline())
+        owner.kill()
+        owner.wait(timeout=5)
+        os.kill(workload_pid, 0)  # Independent daemon-like workload survived owner.
+        for kind in ("gate", "queue"):
+            with pytest.raises(RuntimeError, match=r"active\.json; container=fixture-survivor"):
+                with heavy_slot.heavy_slot(kind=kind, lock_path=lock, wait_seconds=0):
+                    pytest.fail("admitted work after owner SIGKILL")
+    finally:
+        if owner.poll() is None:
+            owner.kill()
+            owner.wait(timeout=5)
+        if workload_pid:
+            os.kill(workload_pid, signal.SIGKILL)

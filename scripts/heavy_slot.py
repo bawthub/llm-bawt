@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import fcntl
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -36,8 +37,18 @@ def reserve_ticket(kind, lock_path=None):
         return handle, path
 
 
+def cleanup_refusal(path):
+    try:
+        container = json.loads(path.read_text()).get("container", "unknown")
+    except (OSError, ValueError):
+        container = "unknown"
+    return (f"heavy-work cleanup hold: {path}; container={container}. "
+            "Reconcile/remove that exact container, confirm absence with a successful "
+            "Docker container inventory, then remove this marker; never clear it blindly.")
+
+
 @contextmanager
-def heavy_slot(*, kind="gate", wait_seconds=1800, poll_seconds=1.0,
+def heavy_slot(*, kind="gate", wait_seconds=2700, poll_seconds=1.0,
                lock_path=None, ready=lambda: True, clock=time.monotonic, sleep=time.sleep,
                ticket=None, ticket_path=None):
     if kind not in {"gate", "queue"}:
@@ -77,12 +88,20 @@ def heavy_slot(*, kind="gate", wait_seconds=1800, poll_seconds=1.0,
                             pass
                     # Gate tickets sort before queue tickets; sequence orders
                     # each class. Running work keeps its ticket until release.
-                    if min(live) == ticket_path.name and not (tickets / "hold").exists() and ready():
+                    if (tickets / "hold").exists():
+                        raise RuntimeError(cleanup_refusal(tickets / "hold"))
+                    if min(live) == ticket_path.name and ready():
                         try:
                             fcntl.flock(slot, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                            admitted = True
                         except BlockingIOError:
                             pass
+                        else:
+                            # Persisted before Docker create. A dead Python owner
+                            # cannot release a still-running daemon workload into
+                            # an apparently free slot. Only positive removal clears it.
+                            if (tickets / "active.json").exists():
+                                raise RuntimeError(cleanup_refusal(tickets / "active.json"))
+                            admitted = True
                 finally:
                     fcntl.flock(registry, fcntl.LOCK_UN)
                 if admitted:
