@@ -70,9 +70,9 @@ def create_health_app(state, *, lifespan=None):
             return JSONResponse({"error": "not found"}, status_code=404)
         # The waiting thread can't see a client disconnect, so an abandoned poll
         # holds its slot until the hold ends. Cap waiters well under the shared
-        # uvicorn limit; beyond it, answer at once (the client just asks again).
+        # uvicorn limit; beyond it, 503 so the client backs off rather than spins.
         if waiters["n"] >= MAX_CHANGE_WAITERS:
-            return {"schemaVersion": 1, "version": state.wait_for_change(int(seen), 0)}
+            return JSONResponse({"error": "busy"}, status_code=503)
         waiters["n"] += 1
         try:
             version = await run_in_threadpool(state.wait_for_change, int(seen), CHANGES_HOLD_SECONDS)

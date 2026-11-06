@@ -185,12 +185,11 @@ def test_changes_endpoint_long_polls_and_rejects_bad_versions():
     assert client.get("/v1/health/changes/1?a=b").status_code == 404
 
 
-def test_changes_endpoint_answers_at_once_beyond_the_waiter_cap(monkeypatch):
+def test_changes_endpoint_refuses_beyond_the_waiter_cap(monkeypatch):
     from fastapi.testclient import TestClient
     from llm_bawt.ops import health_http
     state = OpsHealthState(clock=Clock())
     monkeypatch.setattr(health_http, "MAX_CHANGE_WAITERS", 0)
     client = TestClient(health_http.create_health_app(state))
-    version = client.get("/v1/health/changes/0").json()["version"]
-    # Same version would normally hold 25s; at the cap it returns immediately.
-    assert client.get(f"/v1/health/changes/{version}", timeout=5).json()["version"] == version
+    # At the cap it refuses at once, so the client backs off instead of spinning.
+    assert client.get("/v1/health/changes/1", timeout=5).status_code == 503
