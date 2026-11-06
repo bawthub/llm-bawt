@@ -445,6 +445,21 @@ def test_app_needs_the_v3_worker_only_once_it_declares_a_v3_key():
         assert approved["drift"]
 
 
+def test_app_needs_the_init_memory_worker_only_once_it_declares_init_or_a_cap():
+    # TASK-2088: an app worker without the label still binds a service declaring neither.
+    from llm_bawt.ops.compose_config import INIT_MEMORY_PROFILE_LABEL
+    for service in ({"init": True}, {"mem_limit": str(1 << 32)}):
+        api = AppDocker(compose=app_compose(**service))
+        with pytest.raises(ConfigCheckError) as caught:
+            _executor(api, worker_labels=APP_V2_WORKER).config_approval(APP_SPEC)
+        assert caught.value.code == "config_reconcile_unavailable" and INIT_MEMORY_PROFILE_LABEL in str(caught.value)
+        approved = _executor(api, worker_labels={**APP_V2_WORKER, INIT_MEMORY_PROFILE_LABEL: "1"}).config_approval(
+            APP_SPEC)
+        assert approved["drift"] in (["init:~"], ["memory:~"])
+    dockerfile = (Path(__file__).resolve().parents[1] / "docker" / "Dockerfile.ops-worker").read_text()
+    assert f'LABEL {INIT_MEMORY_PROFILE_LABEL}="1"' in dockerfile
+
+
 def test_worker_runs_the_tagged_kind_from_a_receipt(tmp_path):
     api = CrawlDocker(compose=crawl_compose(environment={"CRAWL4AI_API_TOKEN": "", "NEW": "1"}))
     root = tmp_path / "receipts"

@@ -19,7 +19,9 @@ from ..utils.config import Config
 from .app_config_reconcile import (ACTION as APP_CONFIG_ACTION, BUILT_PROFILE_LABEL, PROCESS_PROFILE_LABEL,
                                    SOURCE_GUARD_LABEL, WORKER_CAPABILITY_LABEL as APP_CONFIG_WORKER_LABEL,
                                    app_config_binding, uses_process_profile, validate_app_spec)
-from .compose_config import HARDENED_PROFILE, HARDENED_PROFILE_LABEL, evaluate, selected_profile
+from .compose_config import (BUILT_PROFILE, DEV_PROFILE, HARDENED_PROFILE, HARDENED_PROFILE_LABEL,
+                             INIT_MEMORY_PROFILE_LABEL, PINNED_PROCESS_PROFILE, evaluate,
+                             needs_init_memory_worker, selected_profile)
 # TASK-1169 S4: the error/result types live in executor_types; re-exported here.
 from .executor_types import (ConfigCheckError, DispatchResult, ExecutorError,  # noqa: F401
                              QuiesceFenceUnsupported, ReconcileResult)
@@ -542,16 +544,25 @@ class DockerExecutor(Executor):
                     # TASK-1476: an older worker would refuse it mid-job; refuse first.
                     self._check_config_worker(self.execution_settings(spec), spec["action"],
                                               extra=(PROCESS_PROFILE_LABEL,))
-                return binding, desired, container
-            if spec["action"] == TAGGED_CONFIG_ACTION:
+                profile = BUILT_PROFILE
+            elif spec["action"] == TAGGED_CONFIG_ACTION:
                 checker = (SourceChecker(self._render_api_factory(), spec["compose_config"]["renderer_image"],
                                          tag="src" + os.urandom(4).hex()) if source_guarded(spec) else None)
-                return (*tagged_config_binding(spec, container, image, renderer, source_checker=checker,
-                                               tag_moved=lambda tag: self._image_tag_moved(tag, image)), container)
-            if spec["action"] == DEV_CONFIG_ACTION:
-                return (*dev_config_binding(spec, container, image, renderer,
-                                            tag_moved=lambda tag: self._image_tag_moved(tag, image)), container)
-            return (*config_binding(spec, container, image, renderer), container)
+                binding, desired = tagged_config_binding(spec, container, image, renderer, source_checker=checker,
+                                                         tag_moved=lambda tag: self._image_tag_moved(tag, image))
+                profile = PINNED_PROCESS_PROFILE
+            elif spec["action"] == DEV_CONFIG_ACTION:
+                binding, desired = dev_config_binding(spec, container, image, renderer,
+                                                      tag_moved=lambda tag: self._image_tag_moved(tag, image))
+                profile = DEV_PROFILE
+            else:
+                binding, desired = config_binding(spec, container, image, renderer)
+                profile = selected_profile(spec["compose_config"])
+            if needs_init_memory_worker(desired, profile):
+                # TASK-2088: likewise for init and the memory cap.
+                self._check_config_worker(self.execution_settings(spec), spec["action"],
+                                          extra=(INIT_MEMORY_PROFILE_LABEL,))
+            return binding, desired, container
         except ComposeError as exc:  # fixed code and names only
             raise ConfigCheckError(exc.code, f"config target cannot be bound: {exc}") from exc
         except (ValueError, KeyError) as exc:

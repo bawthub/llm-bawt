@@ -83,7 +83,9 @@ def memory_text(memory: dict) -> str:
     """The cap as the card shows it; 0 is no limit, a swap of -1 unlimited swap."""
     if not memory["Memory"]:
         return "unlimited"
-    swap = "unlimited" if memory["MemorySwap"] == -1 else f"{memory['MemorySwap']} bytes"
+    swap = ("unlimited" if memory["MemorySwap"] == -1
+            else "Docker default" if memory["MemorySwap"] == 0  # TASK-2088: a lone mem_limit
+            else f"{memory['MemorySwap']} bytes")
     return f"{memory['Memory']} bytes, swap {swap}"
 
 

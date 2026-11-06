@@ -109,19 +109,27 @@ class ServiceProfile:
     built: bool
     models_process: bool
     pull_policies: frozenset
+    # ``memory`` is always in the desired configuration (undeclared =
+    # unlimited) rather than only when the service declares a cap.
+    owns_memory: bool = False
 
 
+# TASK-2088: ``init`` and the memory cap on the built and mutable-tag kinds
+# (the agent bridges and playwright-mcp, TASK-2072). Both are stored in the
+# desired configuration only when declared, so a service declaring neither
+# keeps the desired configuration, and its hash, it had before.
+MEMORY_KEYS = ("mem_limit", "memswap_limit")
 PINNED_PROFILE = ServiceProfile("pinned", SERVICE_KEYS, built=False, models_process=False,
                                 pull_policies=PULL_POLICIES)
 BUILT_PROFILE = ServiceProfile("built", frozenset({
     "build", "command", "container_name", "depends_on", "entrypoint", "environment", "extra_hosts", "healthcheck",
-    "image", "labels", "networks", "ports", "pull_policy", "restart", "security_opt", "stdin_open", "tmpfs", "tty",
-    "volumes"}), built=True, models_process=True, pull_policies=BUILT_PULL_POLICIES)
+    "image", "init", "labels", "networks", "ports", "pull_policy", "restart", "security_opt", "stdin_open", "tmpfs",
+    "tty", "volumes", *MEMORY_KEYS}), built=True, models_process=True, pull_policies=BUILT_PULL_POLICIES)
 # TASK-1476: a third-party image run by a mutable tag (crawl4ai). The rendered
 # ``image`` must equal the declared tag; the reconcile swaps to the RUNNING
 # image ID, so the tag is never re-resolved. Its healthcheck is the image's.
 PINNED_PROCESS_PROFILE = ServiceProfile("pinned-process", SERVICE_KEYS | {
-    "container_name", "depends_on", "ports", "tmpfs"}, built=False, models_process=True,
+    "container_name", "depends_on", "init", "ports", "tmpfs", *MEMORY_KEYS}, built=False, models_process=True,
     pull_policies=PULL_POLICIES)
 # TASK-1169: the ops reconciler is a pinned-image Compose service, not a
 # build or a mutable tag. Its internal exposed ports and stop grace period
@@ -135,9 +143,8 @@ OPS_PROFILE = ServiceProfile("pinned-ops", frozenset({
 # built keys plus its memory cap, which this profile owns: the desired
 # configuration always carries ``memory`` (0 = unlimited) and the recreate
 # sets it.
-MEMORY_KEYS = ("mem_limit", "memswap_limit")
-DEV_PROFILE = ServiceProfile("dev", BUILT_PROFILE.keys | set(MEMORY_KEYS), built=True, models_process=True,
-                             pull_policies=BUILT_PULL_POLICIES)
+DEV_PROFILE = ServiceProfile("dev", BUILT_PROFILE.keys, built=True, models_process=True,
+                             pull_policies=BUILT_PULL_POLICIES, owns_memory=True)
 _MAX_MEMORY = 1 << 50
 # TASK-1801: a digest-pinned image whose Compose service declares its own
 # confinement. The profile OWNS it: the desired configuration always carries
@@ -150,7 +157,22 @@ HARDENING_KEYS = frozenset({"cap_drop", "cpus", "pids_limit", "read_only"})
 HARDENED_PROFILE_LABEL = "llm-bawt.ops.hardened-profile"
 HARDENED_PROFILE = ServiceProfile("pinned-hardened", SERVICE_KEYS | HARDENING_KEYS | set(MEMORY_KEYS) | {
     "container_name", "healthcheck", "profiles", "security_opt", "tmpfs"}, built=False, models_process=True,
-    pull_policies=PULL_POLICIES)
+    pull_policies=PULL_POLICIES, owns_memory=True)
+# TASK-2088: worker image label proving it models ``init`` and the memory cap
+# on the built and mutable-tag kinds, and a lone ``mem_limit``.
+INIT_MEMORY_PROFILE_LABEL = "llm-bawt.ops.init-memory-profile"
+
+
+def needs_init_memory_worker(desired: dict, profile: ServiceProfile) -> bool:
+    """Would a worker built before TASK-2088 refuse this desired configuration?"""
+    if "init" in desired:
+        return True
+    memory = desired.get("memory")
+    if memory is None:
+        return False
+    return not profile.owns_memory or (memory["Memory"] > 0 and memory["MemorySwap"] == 0)
+
+
 # Profiles a catalog row may select by name (``compose_config.profile``); the
 # other kinds' profiles are fixed by their action.
 SELECTABLE_PROFILES = {p.name: p for p in (PINNED_PROFILE, HARDENED_PROFILE)}
@@ -362,21 +384,32 @@ def _bytes(value, key: str) -> int:
 
 
 def _memory(service: dict) -> dict:
-    """``HostConfig.Memory``/``MemorySwap`` (TASK-1649). Both or neither: a
-    lone ``mem_limit`` leaves the swap to Docker's default, which this module
-    does not model. ``memswap_limit`` is ``-1`` (unlimited) or at least the
-    limit."""
-    declared = [key for key in MEMORY_KEYS if service.get(key) is not None]
-    if not declared:
+    """``HostConfig.Memory``/``MemorySwap`` (TASK-1649). ``memswap_limit`` is
+    ``-1`` (unlimited) or at least the limit, and needs a ``mem_limit``. A lone
+    ``mem_limit`` (TASK-2088) is ``MemorySwap`` 0, Docker's default, exactly
+    what Compose sends: the daemon then sets twice the limit (see
+    :func:`_memory_matches`)."""
+    if service.get("mem_limit") is None:
+        if service.get("memswap_limit") is not None:
+            raise ComposeError("unsupported_compose_key", ["mem_limit"])
         return {"Memory": 0, "MemorySwap": 0}
-    if len(declared) != len(MEMORY_KEYS):
-        raise ComposeError("unsupported_compose_key", [key for key in MEMORY_KEYS if key not in declared])
-    memory, swap = _bytes(service["mem_limit"], "mem_limit"), _bytes(service["memswap_limit"], "memswap_limit")
+    memory = _bytes(service["mem_limit"], "mem_limit")
     if not 0 < memory <= _MAX_MEMORY:
         raise ComposeError("unsupported_compose_key", ["mem_limit"])
+    if service.get("memswap_limit") is None:
+        return {"Memory": memory, "MemorySwap": 0}
+    swap = _bytes(service["memswap_limit"], "memswap_limit")
     if swap != -1 and not memory <= swap <= _MAX_MEMORY:
         raise ComposeError("unsupported_compose_key", ["memswap_limit"])
     return {"Memory": memory, "MemorySwap": swap}
+
+
+def _memory_matches(want: dict, have: dict) -> bool:
+    """A default swap (0) under a limit is what the daemon makes it: 2x the limit."""
+    if want == have:
+        return True
+    return (want["MemorySwap"] == 0 and want["Memory"] > 0 and have["Memory"] == want["Memory"]
+            and have["MemorySwap"] == 2 * want["Memory"])
 
 
 def _capabilities(value, key: str) -> list[str]:
@@ -466,6 +499,8 @@ def _process(service: dict, spec: dict, mounts: dict) -> dict:
     tmpfs = _tmpfs(service.get("tmpfs"), mounts)
     if tmpfs:
         process["tmpfs"] = tmpfs
+    if service.get("init") is not None:  # TASK-2088
+        process["init"] = _flag(service["init"], "init")
     if "expose" in service:
         process["expose"] = _exposed(service["expose"])
     if "stop_grace_period" in service:
@@ -555,7 +590,8 @@ def translate(rendered: dict, spec: dict, image_ref: str, profile: ServiceProfil
                "restart": [restart.group(1), int(restart.group(2) or 0)]}
     if profile.models_process:
         desired.update(_process(service, spec, mounts))
-    if "mem_limit" in profile.keys:
+    if "mem_limit" in profile.keys and (profile.owns_memory
+                                        or any(service.get(key) is not None for key in MEMORY_KEYS)):
         desired["memory"] = _memory(service)
     if HARDENING_KEYS <= profile.keys:
         desired["hardening"] = _hardening(service)
@@ -603,7 +639,7 @@ def running(container: dict) -> dict:
             "healthcheck": _health_state(config.get("Healthcheck")),
             "tmpfs": dict(sorted((host.get("Tmpfs") or {}).items())),
             "expose": sorted((config.get("ExposedPorts") or {}).keys()),
-            "stop_timeout": config.get("StopTimeout"),
+            "stop_timeout": config.get("StopTimeout"), "init": bool(host.get("Init")),
             "memory": {"Memory": int(host.get("Memory") or 0), "MemorySwap": int(host.get("MemorySwap") or 0)},
             "hardening": _running_hardening(host)}
 
@@ -667,8 +703,11 @@ def drift(desired: dict, actual: dict) -> list[str]:
         names += [f"tmpfs:+{k}" for k in want if k not in have]
         names += [f"tmpfs:-{k}" for k in have if k not in want]
         names += [f"tmpfs:~{k}" for k in want if k in have and want[k] != have[k]]
+        # TASK-2088: an init the service does not declare is removed too.
+        if desired.get("init", False) != actual.get("init", False):
+            names.append("init:~")
     # TASK-1649: only a profile that owns the memory cap compares it.
-    if "memory" in desired and desired["memory"] != actual["memory"]:
+    if "memory" in desired and not _memory_matches(desired["memory"], actual["memory"]):
         names.append("memory:~")
     # TASK-1801: only a profile that owns confinement compares it.
     if "hardening" in desired:
@@ -774,6 +813,7 @@ def apply_desired(body: dict, old: dict, desired: dict, *, container_name: str, 
         host["PortBindings"] = json.loads(json.dumps(desired["ports"]))
         host["SecurityOpt"] = list(desired.get("security_opt", [])) or None
         host["Tmpfs"] = dict(desired.get("tmpfs", {})) or None
+        host["Init"] = desired.get("init")  # undeclared: the daemon's default
     if "memory" in desired:
         host["Memory"], host["MemorySwap"] = desired["memory"]["Memory"], desired["memory"]["MemorySwap"]
     if "hardening" in desired:

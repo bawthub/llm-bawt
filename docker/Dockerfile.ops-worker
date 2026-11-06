@@ -52,4 +52,7 @@ LABEL llm-bawt.ops.hardened-profile="1"
 # TASK-1831: ...and reconciles a tagged image verified by its own Docker
 # healthcheck and behind the Compose source guard (redis).
 LABEL llm-bawt.ops.tagged-guard="1"
+# TASK-2088: ...and models init and the memory cap on the built and
+# mutable-tag kinds (the agent bridges, playwright-mcp), plus a lone mem_limit.
+LABEL llm-bawt.ops.init-memory-profile="1"
 ENTRYPOINT ["python3", "-I", "/ops/worker.py"]

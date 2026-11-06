@@ -147,11 +147,13 @@ def _memory(**service):
     return translate(dev_compose(**service), SPEC, TAG, DEV_PROFILE)["memory"]
 
 
-def test_memory_is_both_or_neither_and_bounded():
+def test_memory_is_bounded_and_swap_needs_a_limit():
     assert _memory() == {"Memory": GIB4, "MemorySwap": GIB4}
     assert _memory(memswap_limit=-1) == {"Memory": GIB4, "MemorySwap": -1}
     assert _memory(mem_limit=None, memswap_limit=None) == {"Memory": 0, "MemorySwap": 0}
-    for service, names in (({"memswap_limit": None}, ["memswap_limit"]), ({"mem_limit": None}, ["mem_limit"]),
+    # TASK-2088: a lone mem_limit is Docker's default swap, as Compose sends it.
+    assert _memory(memswap_limit=None) == {"Memory": GIB4, "MemorySwap": 0}
+    for service, names in (({"mem_limit": None}, ["mem_limit"]),
                            ({"mem_limit": "4g"}, ["mem_limit"]), ({"mem_limit": 0}, ["mem_limit"]),
                            ({"mem_limit": True}, ["mem_limit"]), ({"mem_limit": str(1 << 51)}, ["mem_limit"]),
                            ({"memswap_limit": str(GIB4 - 1)}, ["memswap_limit"]),
@@ -161,18 +163,20 @@ def test_memory_is_both_or_neither_and_bounded():
         assert caught.value.code == "unsupported_compose_key" and caught.value.names == names
 
 
-def test_only_the_dev_profile_models_memory():
-    with pytest.raises(ComposeError) as caught:
-        translate(dev_compose(), SPEC, TAG, BUILT_PROFILE)
-    assert caught.value.code == "unsupported_compose_key" and set(caught.value.names) == {"mem_limit",
-                                                                                          "memswap_limit"}
+def test_the_built_profile_models_memory_only_when_declared():
+    # TASK-2088: the built kind admits a declared cap; undeclared, its desired
+    # configuration (and hash) is what it was before memory was modelled.
+    assert translate(dev_compose(), SPEC, TAG, BUILT_PROFILE)["memory"] == {"Memory": GIB4, "MemorySwap": GIB4}
     assert "memory" not in translate(dev_compose(mem_limit=None, memswap_limit=None), SPEC, TAG, BUILT_PROFILE)
+    assert translate(dev_compose(mem_limit=None, memswap_limit=None), SPEC, TAG, DEV_PROFILE)["memory"] == {
+        "Memory": 0, "MemorySwap": 0}
 
 
 def test_memory_text():
     assert memory_text({"Memory": 0, "MemorySwap": 0}) == "unlimited"
     assert memory_text({"Memory": GIB4, "MemorySwap": -1}) == f"{GIB4} bytes, swap unlimited"
     assert memory_text({"Memory": GIB4, "MemorySwap": GIB4}) == f"{GIB4} bytes, swap {GIB4} bytes"
+    assert memory_text({"Memory": GIB4, "MemorySwap": 0}) == f"{GIB4} bytes, swap Docker default"
 
 
 # ── binding ─────────────────────────────────────────────────────────────────
