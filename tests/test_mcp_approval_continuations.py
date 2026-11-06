@@ -616,5 +616,31 @@ def test_pass_parks_continuations_waiting_on_an_active_ops_job(monkeypatch):
     monkeypatch.setattr("llm_bawt.service.approval_continuations.recover_approval_requests",
                         lambda _store: asyncio.sleep(0))
     parked = asyncio.run(dispatch_due_continuations_once(service, store))
-    assert parked == {row.id}
+    assert set(parked) == {row.id}
     assert store.seconds_until_next_continuation(exclude_ids=parked) is None  # no spin
+
+
+def test_retry_rescheduled_during_the_drain_is_not_held(monkeypatch):
+    """Codex r3: a row inspected earlier gets a persisted 30s backoff, then a
+    later callback runs past it; the matured retry must schedule a pass now."""
+    import llm_bawt.approval_mcp_store as mcp_store
+    from datetime import timedelta
+
+    store = _store()
+    row = _ready_row(store)
+    store.mark_continuation_failed(row.id, error="fixture reset", backoff_seconds=0,
+                                   claim_token=row.continuation_claim_token)
+    inspected = store.get_request(row.id).continuation_next_attempt_at
+    claimed = store.claim_continuation(row.id)
+    store.mark_continuation_failed(row.id, error="target busy", backoff_seconds=30,
+                                   claim_token=claimed.continuation_claim_token)
+    held = {row.id: inspected}
+    retry_at = store.get_request(row.id).continuation_next_attempt_at
+    assert retry_at > inspected  # the persisted backoff rewrote the stamp
+    later = retry_at.replace(tzinfo=mcp_store._utcnow().tzinfo) + timedelta(seconds=10)
+    monkeypatch.setattr(mcp_store, "_utcnow", lambda: later)  # a later callback ran past it
+    assert store.seconds_until_next_continuation(exclude_ids=held) == 0.0
+    assert [r.id for r in store.find_pending_continuations(limit=20, exclude_ids=held)] == [row.id]
+    # Unchanged since inspection: still held, so it can't spin the drain.
+    held = {row.id: store.get_request(row.id).continuation_next_attempt_at}
+    assert store.seconds_until_next_continuation(exclude_ids=held) is None

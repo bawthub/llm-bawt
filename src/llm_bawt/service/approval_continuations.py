@@ -392,10 +392,11 @@ async def recover_approval_requests(store):
 
 async def dispatch_due_continuations_once(
     service, store, *, limit: int = 20, exclude_ids: Collection[str] = (),
-) -> set[str]:
+) -> dict[str, Any]:
     """Run one recover/dispatch pass for the durable continuation outbox.
 
-    Returns every id it inspected. Rows still due afterwards wait on
+    Returns every inspected id with the retry stamp it had. Rows still due
+    afterwards with that stamp unchanged wait on
     something that wakes the loop itself (an ops job still active, a failed
     status lookup); the loop schedules only other due rows for an immediate
     pass and does not spin on these.
@@ -405,11 +406,11 @@ async def dispatch_due_continuations_once(
     await recover_approval_requests(store)
     due = await asyncio.to_thread(store.find_pending_continuations, limit=limit,
                                   exclude_ids=exclude_ids)
-    parked: set[str] = set()
+    parked: dict[str, Any] = {}
     for pending in due:
         # Every inspected row counts: one that stays due (a failed dispatch
         # that wrote no backoff) must not spin the drain either.
-        parked.add(pending.id)
+        parked[pending.id] = pending.continuation_next_attempt_at
         # An approved restart starts before its continuation. Claiming the
         # continuation while the job is active creates an in-flight agent turn
         # that the restart can kill. Wait for the durable terminal job receipt,
@@ -423,10 +424,8 @@ async def dispatch_due_continuations_once(
             # Keep this receipt pending for retry; one failed warning/status
             # lookup must not starve unrelated terminal continuations.
             log.exception("Ops continuation status/notification failed id=%s", pending.id)
-            parked.add(pending.id)
             continue
         if terminal_ops_result is None:
-            parked.add(pending.id)
             continue
         card_result = terminal_ops_result or _admission_card_result(pending)
         if card_result:
@@ -465,12 +464,12 @@ async def run_mcp_continuation_outbox(service, store, *, idle_seconds: float = 2
     from .commit_wake import backstop, subscribe, wait_for_wake
 
     wake = subscribe(service)
-    held: set[str] = set()  # parked during the current drain; rechecked once it ends
+    held: dict[str, Any] = {}  # id -> stamp inspected this drain; rechecked once it ends
     while True:
         delay = idle_seconds
         draining = False
         try:
-            held |= await dispatch_due_continuations_once(service, store, exclude_ids=held)
+            held.update(await dispatch_due_continuations_once(service, store, exclude_ids=held))
             if wake is not None:
                 delay = backstop(service, idle_seconds)
                 due = await asyncio.to_thread(store.seconds_until_next_continuation, exclude_ids=held)
@@ -482,7 +481,7 @@ async def run_mcp_continuation_outbox(service, store, *, idle_seconds: float = 2
         except Exception:
             log.exception("Approval recovery/outbox pass failed; retrying")
         if not draining:
-            held = set()  # the next pass (wake, retry due or backstop) rechecks parked rows
+            held = {}  # the next pass (wake, retry due or backstop) rechecks parked rows
         await wait_for_wake(wake, delay)
 
 

@@ -266,7 +266,7 @@ class _ContinuationStore:
     def find_pending_continuations(self, *, limit, exclude_ids=()):
         self.finds += 1
         due = [rid for rid, state in sorted(self.rows.items()) if state == "pending" and rid not in exclude_ids]
-        return [SimpleNamespace(id=rid) for rid in due[:limit]]
+        return [SimpleNamespace(id=rid, continuation_next_attempt_at=None) for rid in due[:limit]]
 
     def claim_continuation(self, rid, lease_seconds):
         self.rows[rid] = "dispatching"

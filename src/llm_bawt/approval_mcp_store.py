@@ -7,7 +7,7 @@ import logging
 import re
 from datetime import timedelta
 from hashlib import sha256
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from typing import Any
 
 from sqlalchemy import and_, case, func, not_, or_, update
@@ -253,6 +253,17 @@ def _pending_duplicate_id(
         .order_by(ToolApprovalRequest.created_at)
         .limit(1)
     ).first()
+
+
+def _still_held(exclude: Any, row_id: str, stamp: Any) -> bool:
+    """Whether a drain's exclusion still covers this row (TASK-2108).
+
+    A mapping holds a row only while its retry stamp is the one inspected; a
+    plain collection holds it unconditionally.
+    """
+    if isinstance(exclude, Mapping):
+        return row_id in exclude and exclude[row_id] == stamp
+    return row_id in exclude
 
 
 class McpApprovalStoreMixin:
@@ -871,9 +882,12 @@ class McpApprovalStoreMixin:
                 .order_by(ToolApprovalRequest.continuation_next_attempt_at)
                 .limit(limit)
             )
-            if exclude_ids:  # TASK-2108: rows parked earlier in this drain
-                stmt = stmt.where(ToolApprovalRequest.id.not_in(list(exclude_ids)))
-            return list(session.exec(stmt).all())
+            if not exclude_ids:
+                return list(session.exec(stmt).all())
+            # TASK-2108: skip rows inspected earlier in this drain whose stamp is unchanged.
+            rows = session.exec(stmt.limit(limit + len(exclude_ids))).all()
+            return [row for row in rows
+                    if not _still_held(exclude_ids, row.id, row.continuation_next_attempt_at)][:limit]
 
     def seconds_until_next_continuation(
         self, *, exclude_ids: Collection[str] = (), include_dispatching_older_than_s: int = 120,
@@ -881,16 +895,15 @@ class McpApprovalStoreMixin:
         """Seconds until the earliest continuation retry or lease expiry (TASK-2108).
 
         Already-due rows count as 0 (run another pass now), except
-        ``exclude_ids``: rows the drain already inspected that are still due,
-        i.e. waiting on something that wakes the loop itself (an ops job's
-        terminal commit), so they never spin it. An excluded row with a future
-        retry still counts at that time. None when nothing is scheduled.
+        ``exclude_ids``: rows the drain already inspected and left unchanged
+        (an id -> stamp mapping; a stamp rewritten since, e.g. a retry backoff,
+        is not held), i.e. waiting on something that wakes the loop itself (an
+        ops job's terminal commit), so they never spin it. None when nothing is scheduled.
         """
         if self.engine is None:
             raise ApprovalStoreUnavailable("Approval database unavailable")
         now = _utcnow()
         lease = timedelta(seconds=include_dispatching_older_than_s)
-        excluded = set(exclude_ids)
         stmt = (
             select(ToolApprovalRequest.id, ToolApprovalRequest.continuation_state,
                    ToolApprovalRequest.continuation_next_attempt_at)
@@ -911,7 +924,7 @@ class McpApprovalStoreMixin:
             if at is None and state == CONT_DISPATCHING:
                 continue  # never reclaimed by the outbox query
             due = aware(at) + lease if state == CONT_DISPATCHING else (aware(at) or now)
-            if row_id in excluded and due <= now:
+            if due <= now and _still_held(exclude_ids, row_id, at):
                 continue
             dues.append(due)
         if not dues:
