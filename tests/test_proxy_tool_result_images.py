@@ -32,7 +32,7 @@ def _body(first: list[dict], second: list[dict]) -> dict:
 @pytest.mark.parametrize("source", ["url", "base64"])
 def test_mixed_image_and_text_results_keep_the_image_owner(source: str) -> None:
     """Moving one image to another result must change the upstream request."""
-    before = [{"type": "text", "text": "Before evidence"}, _image(source)]
+    before = [{"type": "text", "text": "Before evidence\nAdditional details"}, _image(source)]
     after = [{"type": "text", "text": "After evidence"}]
     body = _body(before, after)
     alternate = deepcopy(body)
@@ -45,8 +45,14 @@ def test_mixed_image_and_text_results_keep_the_image_owner(source: str) -> None:
     assert original != moved
     assert original["input"][:4] == moved["input"][:4]
     image_message = original["input"][4]
-    assert image_message["content"][0]["text"] == "Image(s) returned by tool_call_id=before:"
-    assert moved["input"][4]["content"][0]["text"] == "Image(s) returned by tool_call_id=after:"
+    assert image_message["content"][0]["text"] == (
+        "Image(s) returned by tool result 1 of 2 (tool_call_id=before):\n"
+        "Result text: Before evidence"
+    )
+    assert moved["input"][4]["content"][0]["text"] == (
+        "Image(s) returned by tool result 2 of 2 (tool_call_id=after):\n"
+        "Result text: After evidence"
+    )
     expected_url = "https://example.invalid/A.png" if source == "url" else "data:image/png;base64,A"
     assert image_message["content"][1] == {
         "type": "input_image", "image_url": expected_url, "detail": "auto",
@@ -69,8 +75,9 @@ def test_each_image_result_gets_its_own_labeled_message_after_all_outputs() -> N
     assert items[2]["output"] == "Before"
     assert items[3]["output"] == "[image returned by tool — shown in the following message]"
     assert [item["content"][0]["text"] for item in items[4:6]] == [
-        "Image(s) returned by tool_call_id=before:",
-        "Image(s) returned by tool_call_id=after:",
+        "Image(s) returned by tool result 1 of 2 (tool_call_id=before):\nResult text: Before",
+        "Image(s) returned by tool result 2 of 2 (tool_call_id=after):\n"
+        "Result text: [image returned by tool — shown in the following message]",
     ]
     assert [item["content"][1]["image_url"] for item in items[4:6]] == [
         "https://example.invalid/A.png", "https://example.invalid/B.png",
@@ -93,7 +100,9 @@ def test_two_images_in_one_result_do_not_collide_with_split_ownership() -> None:
     assert original != moved
     assert len(original["input"][4]["content"]) == 3
     assert len(moved["input"][4]["content"]) == 2
-    assert moved["input"][5]["content"][0]["text"] == "Image(s) returned by tool_call_id=after:"
+    assert moved["input"][5]["content"][0]["text"] == (
+        "Image(s) returned by tool result 2 of 2 (tool_call_id=after):\nResult text: After"
+    )
 
 
 def test_text_only_results_do_not_gain_image_messages() -> None:

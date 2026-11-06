@@ -274,8 +274,8 @@ def _user_content_to_responses(
     A ``function_call_output.output`` MUST be a plain string, so an image
     returned *inside* a tool_result (e.g. the ``generate_image`` tool) cannot
     ride in it. The third return value contains one user image message per
-    image-bearing tool result, labeled with its call ID so ownership survives
-    when a batch mixes results with and without images.
+    image-bearing tool result, labeled with its batch position, text and call
+    ID so ownership survives when a batch mixes results with and without images.
     """
     parts: list[dict] = []
     tool_results: list[dict] = []
@@ -289,6 +289,10 @@ def _user_content_to_responses(
     if not isinstance(content, list):
         return parts, tool_results, image_messages
 
+    result_count = sum(
+        isinstance(block, dict) and block.get("type") == "tool_result"
+        for block in content
+    )
     for block in content:
         if not isinstance(block, dict):
             continue
@@ -330,10 +334,15 @@ def _user_content_to_responses(
                 if block_imgs and not output.strip():
                     output = "[image returned by tool — shown in the following message]"
                 if block_imgs:
+                    label = (
+                        f"Image(s) returned by tool result {len(tool_results) + 1} "
+                        f"of {result_count} (tool_call_id={call_id}):\n"
+                        f"Result text: {output.splitlines()[0]}"
+                    )
                     image_messages.append({
                         "role": "user",
                         "content": [
-                            {"type": "input_text", "text": f"Image(s) returned by tool_call_id={call_id}:"},
+                            {"type": "input_text", "text": label},
                             *block_imgs,
                         ],
                     })
