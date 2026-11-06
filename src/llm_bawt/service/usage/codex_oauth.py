@@ -66,6 +66,7 @@ _migrated = False
 
 def _record_refresh_outcome(error: str | None) -> None:
     global _last_refresh_ok_at, _last_refresh_error, _last_refresh_error_at
+    was_failing = _last_refresh_error is not None
     now_ms = int(time.time() * 1000)
     if error is None:
         _last_refresh_ok_at = now_ms
@@ -74,6 +75,10 @@ def _record_refresh_outcome(error: str | None) -> None:
     else:
         _last_refresh_error = error
         _last_refresh_error_at = now_ms
+    if was_failing != (error is not None):
+        # Provider health reads this without a credential write: publish the flip.
+        from llm_bawt.service.health_changes import publish
+        publish("refresh-outcome")
 
 
 def refresh_health() -> dict:

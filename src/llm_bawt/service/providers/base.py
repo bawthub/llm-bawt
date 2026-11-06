@@ -288,7 +288,11 @@ class CredentialStore:
         return conn.execute(statement).rowcount == 1
 
     def save_in(self, conn: Any, record: ConnectionRecord) -> None:
-        """Atomically replace a credential using the caller's locked transaction."""
+        """Atomically replace a credential using the caller's locked transaction.
+
+        Publishes a health change before the caller commits; work after this in
+        the same transaction must finish within the 0.5s debounce, or the rerun
+        reads pre-commit state until the 60s reconciliation."""
         from sqlalchemy.dialects import postgresql, sqlite
 
         from ...runtime_settings import RuntimeSetting
