@@ -56,9 +56,16 @@ class Store:
 
 
 class FakeRedis:
-    def __init__(self, **values):
+    def __init__(self, groups=None, **values):
         self.values = {k.replace("__", ":"): v for k, v in values.items()}
+        self.groups = groups or {}
         self.sets = []
+
+    def exists(self, key):
+        return key in self.groups
+
+    def xinfo_groups(self, stream):
+        return self.groups[stream]
 
     def scan_iter(self, match):
         import fnmatch
@@ -73,9 +80,13 @@ class FakeRedis:
         self.values[key] = value
 
 
+POOL = {"h1": "claude-code", "h2": "claude-code", "h3": "claude-code", "c1": "codex"}
+
+
 def state(**overrides):
     base = HouseState(leases={"h1": {"claude-code": "5"}, "h2": {"claude-code": "7"},
-                              "c1": {"codex": "1"}})
+                              "c1": {"codex": "1"}, "h9": {"claude-code": "1"}},
+                      pool=POOL)
     return lambda: HouseState(**{**base.__dict__, **overrides})
 
 
@@ -88,16 +99,33 @@ def test_read_house_state_reads_leases_recycle_markers_and_running_turns():
         "agent:house:h2:recycle:claude-code": "7", "agent:house:BAD!:lease:x": "1",
         "agent:turn:req:r1": "agent:commands:house:h2", "agent:turn:req:r2": "agent:commands",
     })
-    got = read_house_state(client)
+    got = read_house_state(client, [{"id": "h1", "harness": "claude-code"}])
     assert got.leases == {"h1": {"claude-code": "5"}}
     assert got.recycling == {("h2", "claude-code"): "7"}
     assert got.busy_streams == {"agent:commands:house:h2", "agent:commands"}
+    assert got.pool == {"h1": "claude-code"}
+    assert read_house_state(client).pool is None
+
+
+@pytest.mark.parametrize("group,busy", [
+    ({"lag": 0, "pending": 0}, False),
+    ({"lag": 1, "pending": 0}, True),  # routed, nobody has read it yet
+    ({"lag": 0, "pending": 1}, True),  # read, no turn record yet
+    ({"lag": None, "pending": 0}, True),  # unknown lag is never drained
+])
+def test_an_unread_or_unacked_send_holds_the_house(group, busy):
+    stream = "agent:commands:house:h1"
+    client = FakeRedis(groups={stream: [group]}, **{"agent:house:h1:lease:claude-code": "5"})
+    got = read_house_state(client, [{"id": "h1", "harness": "claude-code"}])
+    assert got.status("h1", "claude-code", []) == ("draining" if busy else "free")
 
 
 @pytest.mark.parametrize("overrides,house,status", [
     ({}, "h1", "free"),
-    ({}, "c1", "down"),  # a codex bridge only
-    ({}, "h9", "down"),
+    ({}, "c1", "incompatible"),  # configured for codex
+    ({}, "h3", "down"),  # configured, no bridge
+    ({}, "h9", "unconfigured"),  # a live bridge outside the pool
+    ({"pool": None}, "h1", "unconfigured"),
     ({"recycling": {("h1", "claude-code"): "5"}}, "h1", "recycling"),
     ({"recycling": {("h1", "claude-code"): "4"}}, "h1", "free"),  # restarted since
     ({"busy_streams": frozenset({"agent:commands:house:h1"})}, "h1", "draining"),
@@ -129,15 +157,30 @@ def test_occupied_house_is_refused_and_any_free_skips_it():
 @pytest.mark.parametrize("overrides,code", [
     ({"recycling": {("h1", "claude-code"): "5"}}, "recycling"),
     ({"busy_streams": frozenset({"agent:commands:house:h1"})}, "draining"),
-    ({"leases": {}}, "house_unavailable"),
+    ({"leases": {"h2": {"claude-code": "7"}}}, "house_unavailable"),
 ])
 def test_a_house_that_is_not_free_is_refused_and_skipped(overrides, code):
     store = Store(alpha={})
     with pytest.raises(HouseMoveRefused) as refused:
         move_in(store, "alpha", "h1", state(**overrides))
     assert refused.value.code == code and store.writes == []
-    if code != "house_unavailable":
-        assert move_in(store, "alpha", None, state(**overrides)).house == "h2"
+    assert move_in(store, "alpha", None, state(**overrides)).house == "h2"
+
+
+def test_only_configured_compatible_houses_are_claimable():
+    store = Store(alpha={})
+    for house, code in (("h9", "unconfigured"), ("c1", "incompatible"), ("h3", "house_unavailable")):
+        with pytest.raises(HouseMoveRefused) as refused:
+            move_in(store, "alpha", house, LIVE)
+        assert refused.value.code == code
+    with pytest.raises(HouseMoveRefused) as none:
+        move_in(store, "alpha", None, state(pool=None))
+    assert none.value.code == "no_pool" and store.writes == []
+    # Any-free never picks the live but unconfigured h9.
+    only_h9 = state(leases={"h9": {"claude-code": "1"}})
+    with pytest.raises(HouseMoveRefused) as refused:
+        move_in(store, "alpha", None, only_h9)
+    assert refused.value.code == "no_free_house"
 
 
 def test_no_free_house_keeps_the_caller_where_it_is():
@@ -216,26 +259,68 @@ def test_list_shows_status_tenants_and_masks_private_bots():
     listed = list_houses(store, "beta", LIVE, frozenset({"shy"}))
     assert listed["you"] == {"bot": "beta", "house": None, "eligible": True}
     by_id = {h["house"]: h for h in listed["houses"]}
-    assert by_id["h1"] == {"house": "h1", "live": ["claude-code"],
+    assert listed["pool_configured"] is True
+    assert by_id["h1"] == {"house": "h1", "configured": True, "harness": "claude-code",
+                           "live": ["claude-code"],
                            "tenants": [{"bot": "alpha", "pinned": True}], "status": "occupied"}
     assert by_id["h2"]["tenants"] == [{"bot": house_tenancy.PRIVATE_TENANT}]
-    assert by_id["c1"]["status"] == "down"  # codex bridge only
-    assert by_id["h7"] == {"house": "h7", "live": [], "tenants": [{"bot": "gone"}],
-                           "status": "occupied"}
+    assert by_id["c1"]["status"] == "incompatible"  # a codex house
+    assert by_id["h3"]["status"] == "down"  # configured, listed though not live
+    assert (by_id["h9"]["configured"], by_id["h9"]["status"]) == (False, "unconfigured")
+    assert by_id["h7"] == {"house": "h7", "configured": False, "harness": None, "live": [],
+                           "tenants": [{"bot": "gone"}], "status": "occupied"}
     # A private caller sees itself.
     mine = {h["house"]: h for h in list_houses(store, "shy", LIVE, frozenset({"shy"}))["houses"]}
     assert mine["h2"]["tenants"] == [{"bot": "shy"}]
 
 
-def test_recycle_request_marks_the_epoch_before_asking(monkeypatch):
+@pytest.fixture
+def recycler(monkeypatch):
+    """request_recycle against a Store's engine and a fake Redis."""
+    from llm_bawt.utils import db
+
     client = FakeRedis(**{"agent:house:h1:lease:claude-code": "5"})
     client.xadd = lambda stream, fields: client.sets.append(("xadd", stream, None))
     monkeypatch.setattr(house_lease, "_publish", lambda config, action: action(client))
+    holder = SimpleNamespace(store=None)
+    monkeypatch.setattr(db, "get_shared_engine", lambda config: holder.store.engine)
+    def reader():
+        return read_house_state(client, [{"id": "h1", "harness": "claude-code"}])
+
+    return SimpleNamespace(client=client, holder=holder, read=reader)
+
+
+def test_recycle_request_marks_the_epoch_before_asking(recycler):
+    recycler.holder.store = Store(alpha={})
     assert house_lease.request_recycle(None, "h1") == ["claude-code"]
-    assert client.sets[0] == ("agent:house:h1:recycle:claude-code", "5",
-                              house_tenancy.RECYCLE_MARKER_TTL_S)
-    assert client.sets[1][0] == "xadd"
-    assert read_house_state(client).status("h1", "claude-code", []) == "recycling"
+    assert recycler.client.sets[0] == ("agent:house:h1:recycle:claude-code", "5",
+                                       house_tenancy.RECYCLE_MARKER_TTL_S)
+    assert recycler.client.sets[1][0] == "xadd"
+    assert recycler.read().status("h1", "claude-code", []) == "recycling"
+    with pytest.raises(HouseMoveRefused) as refused:
+        move_in(recycler.holder.store, "alpha", "h1", recycler.read)
+    assert refused.value.code == "recycling"
+
+
+def test_a_claim_between_release_and_recycle_cancels_the_recycle(recycler):
+    # Release, a claim lands, then the releaser's recycle runs: it must not
+    # restart the new tenant's house.
+    store = recycler.holder.store = Store(alpha={"house": "h1"}, beta={})
+    assert move_out(store, "alpha").vacated_empty is True
+    assert move_in(store, "beta", "h1", recycler.read).house == "h1"
+    assert house_lease.request_recycle(None, "h1") == []
+    assert recycler.client.sets == []
+
+
+def test_unverifiable_tenancy_skips_the_recycle(recycler, monkeypatch):
+    from llm_bawt.utils import db
+
+    def broken(config):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(db, "get_shared_engine", broken)
+    assert house_lease.request_recycle(None, "h1") == []
+    assert recycler.client.sets == []
 
 
 def test_tools_take_no_bot_argument():

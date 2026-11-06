@@ -8,10 +8,14 @@ may take which house:
   argument, so a bot can never set or clear another bot's house here.
 * Eligibility is the bot's runtime (an agent on a backend in
   :data:`SELF_MOVE_BACKENDS`), never its name, model or provider.
-* Move-in takes only a ``free`` house: one holding a live lease for the bot's
-  backend, not asked to recycle at that lease's epoch, with no tenant and no
-  admitted turn still running there (a released bot's turn finishes where it
-  was admitted). Anything else is refused; there is no force path.
+* Move-in takes only a ``free`` house: one in the deployment's configured pool
+  for the bot's harness, holding a live lease for it, not asked to recycle at
+  that lease's epoch, with no tenant, no admitted turn still running there and
+  no send on its stream unread or unacked (a released bot's work finishes where
+  it was sent). Anything else is refused; there is no force path.
+* Recycling an emptied house rechecks for tenants and sets its marker under the
+  same lock (:func:`llm_bawt.house_lease.request_recycle`), so a claim either
+  lands first and the recycle is skipped, or sees ``recycling`` and is refused.
 * A bot already housed elsewhere is refused (``already_housed``) and keeps its
   house: it moves out first, so a failed move never strands it.
 * Self-move-in never pins. Setting a pin stays a coordinator decision, so
@@ -67,19 +71,26 @@ def lock_house_assignments(conn: Any) -> None:
 
 @dataclass(frozen=True)
 class HouseState:
-    """One read of the routing state in Redis."""
+    """One read of the configured pool and the routing state in Redis."""
 
     #: ``{house: {backend: epoch}}`` for every live lease.
     leases: dict[str, dict[str, str]] = field(default_factory=dict)
     #: ``{(house, backend): epoch}`` a recycle was requested at.
     recycling: dict[tuple[str, str], str] = field(default_factory=dict)
-    #: Command streams with an admitted turn still running.
+    #: Command streams with a turn running, or a send unread or unacked.
     busy_streams: frozenset[str] = frozenset()
+    #: ``{house: harness}`` from the deployment's pool; None when none is configured.
+    pool: dict[str, str] | None = None
 
     def status(self, house: str, backend: str, tenants: list) -> str:
-        """``free`` | ``occupied`` | ``down`` | ``recycling`` | ``draining``."""
+        """``free`` | ``occupied`` | ``unconfigured`` | ``incompatible`` | ``down``
+        | ``recycling`` | ``draining``."""
         if tenants:
             return "occupied"
+        if self.pool is None or house not in self.pool:
+            return "unconfigured"
+        if self.pool[house] != backend:
+            return "incompatible"
         epoch = self.leases.get(house, {}).get(backend)
         if not epoch:
             return "down"
@@ -101,8 +112,22 @@ def _house_part(key: str, kind: str) -> tuple[str, str] | None:
     return (house, parts[4]) if house else None
 
 
-def read_house_state(client: Any) -> HouseState:
-    """Leases, recycle markers and running turns from a sync Redis client; raises if unreadable."""
+def _stream_busy(client: Any, stream: str) -> bool:
+    """A send nobody has read, or read but not acked (no turn record yet), holds the house.
+
+    Same rule as the ops house guard: lag Redis can't compute is never drained.
+    """
+    if not client.exists(stream):
+        return False
+    for group in client.xinfo_groups(stream):
+        lag = group.get("lag")
+        if lag is None or int(lag) > 0 or int(group.get("pending") or 0) > 0:
+            return True
+    return False
+
+
+def read_house_state(client: Any, pool: list[dict] | None = None) -> HouseState:
+    """Pool, leases, recycle markers and stream occupancy; raises if Redis is unreadable."""
     leases: dict[str, dict[str, str]] = {}
     recycling: dict[tuple[str, str], str] = {}
     for key in client.scan_iter(match="agent:house:*:lease:*"):
@@ -120,7 +145,12 @@ def read_house_state(client: Any) -> HouseState:
         stream = client.get(key)
         if stream:
             busy.add(str(stream))
-    return HouseState(leases, recycling, frozenset(busy))
+    for house in leases:
+        stream = commands_stream(house)
+        if stream not in busy and _stream_busy(client, stream):
+            busy.add(stream)
+    configured = None if pool is None else {h["id"]: h["harness"] for h in pool}
+    return HouseState(leases, recycling, frozenset(busy), configured)
 
 
 StateReader = Callable[[], HouseState]
@@ -197,10 +227,12 @@ def list_houses(store: Any, slug: str, read_state: StateReader,
         tenants = _tenants(conn)
     hidden = _private_bots(store) if private_bots is None else private_bots
     houses = []
-    for house in sorted(set(state.leases) | set(tenants)):
+    for house in sorted(set(state.pool or ()) | set(state.leases) | set(tenants)):
         held = tenants.get(house, [])
         houses.append({
             "house": house,
+            "configured": state.pool is not None and house in state.pool,
+            "harness": (state.pool or {}).get(house),
             "live": sorted(state.leases.get(house, {})),
             "tenants": [{"bot": s if s == slug or s not in hidden else PRIVATE_TENANT,
                          **({"pinned": True} if p else {})} for s, p in held],
@@ -213,11 +245,14 @@ def list_houses(store: Any, slug: str, read_state: StateReader,
         eligible = {"eligible": False, "reason": str(refused)}
     return {"you": {"bot": row.slug, "house": row.house or None,
                     **({"pinned": True} if row.house_pinned else {}), **eligible},
+            "pool_configured": state.pool is not None,
             "houses": houses}
 
 
 _REFUSALS = {
     "occupied": "{house} is occupied; houses are never taken from a tenant",
+    "unconfigured": "{house} is not in the configured house pool",
+    "incompatible": "{house} is configured for another harness than {backend}",
     "down": "{house} has no live {backend} bridge; pick a free house from the list",
     "recycling": "{house} is restarting for a fresh container; try again shortly or pick another",
     "draining": "{house} is still finishing a turn; try again shortly or pick another",
@@ -246,6 +281,9 @@ def move_in(store: Any, slug: str, house: str | None, read_state: StateReader) -
                 "already_housed", f"you live in {current}; move out first", house=current)
         tenants = _tenants(conn)
         state = read_state()
+        if state.pool is None:
+            raise HouseMoveRefused("no_pool", "no house pool is configured; nothing to move into",
+                                   status_code=503)
         if wanted:
             status = state.status(wanted, backend, tenants.get(wanted, []))
             if status != "free":
@@ -254,7 +292,7 @@ def move_in(store: Any, slug: str, house: str | None, read_state: StateReader) -
                     _REFUSALS[status].format(house=wanted, backend=backend), house=wanted)
             target = wanted
         else:
-            free = sorted(h for h in state.leases
+            free = sorted(h for h in state.pool
                           if state.status(h, backend, tenants.get(h, [])) == "free")
             if not free:
                 raise HouseMoveRefused("no_free_house", f"no {backend} house is free right now")

@@ -20,7 +20,8 @@ pytestmark = pytest.mark.integration
 
 
 def LIVE():  # noqa: N802
-    return HouseState(leases={"h1": {"claude-code": "1"}, "h2": {"claude-code": "1"}})
+    return HouseState(leases={"h1": {"claude-code": "1"}, "h2": {"claude-code": "1"}},
+                      pool={"h1": "claude-code", "h2": "claude-code"})
 
 
 _WAITERS = text("""

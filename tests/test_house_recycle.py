@@ -143,6 +143,8 @@ def test_app_asks_each_live_backend_with_its_epoch(monkeypatch):
 
     client = SyncRedis({lease_key("h1", "codex"): "7", lease_key("h10", "codex"): "3"})
     monkeypatch.setattr(house_lease, "_publish", lambda config, action: action(client))
+    # Vacancy under the assignment lock is test_house_tenancy's (TASK-2118).
+    monkeypatch.setattr(house_lease, "_while_vacant", lambda config, house, action: action())
     assert house_lease.request_recycle(object(), "h1") == ["codex"]
     assert client.streams == {H1: [{"action": RECYCLE_ACTION, "backend": "codex",
                                     "house": "h1", EPOCH_FIELD: "7"}]}

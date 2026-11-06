@@ -46,8 +46,10 @@ def _state() -> house_tenancy.HouseState:
 
     client = redis.Redis.from_url(get_service().config.REDIS_URL, decode_responses=True,
                                   socket_timeout=2.0, socket_connect_timeout=2.0)
+    from ...house_pool_config import configured_pool
+
     try:
-        return house_tenancy.read_house_state(client)
+        return house_tenancy.read_house_state(client, configured_pool())
     finally:
         client.close()
 

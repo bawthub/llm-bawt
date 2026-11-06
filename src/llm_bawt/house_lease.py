@@ -152,9 +152,31 @@ def request_recycle(config: Any, house: str) -> list[str]:
                 asked.append(backend)
         return asked
 
-    asked = _publish(config, send) or []
+    asked = _while_vacant(config, house, lambda: _publish(config, send)) or []
     logger.info("house %s recycle requested (backends=%s)", house, ",".join(asked) or "none live")
     return asked
+
+
+def _while_vacant(config: Any, house: str, action):
+    """Run ``action`` holding the house assignment lock, only if ``house`` has no tenant.
+
+    A self-move claim takes the same lock (TASK-2118): it either lands first and
+    the recycle is skipped, or it sees the marker ``action`` set and refuses.
+    Unverifiable tenancy skips the recycle; the house just keeps its container.
+    """
+    from .house_tenancy import lock_house_assignments
+    from .utils.db import get_shared_engine
+
+    try:
+        with get_shared_engine(config).begin() as conn:
+            lock_house_assignments(conn)
+            if list(conn.execute(_TENANTS_SQL, {"house": house}).scalars()):
+                logger.info("house %s has a tenant again; not recycling", house)
+                return None
+            return action()
+    except Exception:
+        logger.exception("house %s recycle skipped: tenancy unverifiable", house)
+        return None
 
 
 def _publish(config: Any, action):
