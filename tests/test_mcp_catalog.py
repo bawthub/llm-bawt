@@ -287,7 +287,8 @@ async def test_catalog_token_budgets():
     # TASK-1383: role wording ("the user", "a coordinator") replaces names (+35).
     # TASK-2066: notifications_list, read-only bell history for bots (+28).
     # TASK-2083: outcome Field guidance on create/update (+92), measured17,406.
-    assert total <= 17406, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-2116: bots_list_available location filter (+46), measured 17,452.
+    assert total <= 17452, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 

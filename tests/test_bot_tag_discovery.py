@@ -107,7 +107,8 @@ def test_discovery_lists_only_public_and_quiet_bots_with_their_tags(policy):
     assert listed[1]["capabilities"] == []
     assert policy["order"] == ["policy", "capabilities", "profiles", "routes"]
     assert policy["state_reads"] == []
-    assert policy["caller_args"] == {"tag": None, "capability": None, "include_state": False}
+    assert policy["caller_args"] == {"tag": None, "capability": None, "include_state": False,
+                                     "location": None}
 
 
 def test_state_is_read_once_for_the_visible_bots_only(policy):

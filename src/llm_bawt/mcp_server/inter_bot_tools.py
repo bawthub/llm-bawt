@@ -913,6 +913,9 @@ async def list_available_bots(
     include_state: Annotated[bool, Field(
         description="Add state.turn.kind (idle/reserved/executing/ambiguous) and the other live fields."
     )] = True,
+    location: Annotated[str | None, Field(
+        description="Only bots running on: claude-code-bridge, codex-bridge, house, hN or app."
+    )] = None,
 ) -> list[dict]:
     """List bots available as inter-bot message targets, each with its tags.
 
@@ -939,9 +942,15 @@ async def list_available_bots(
     ``state.turn.task``/``state.last_turn.task`` (TASK-1754): the task that turn
     works on, ``{task_ref, title, source}``; source is association, delivery or
     mutation; null when none resolves.
+    ``state.location`` (TASK-2116): where the bot's new turns run, resolved like
+    the dispatcher (house lease, then the backend's bridge), never from the
+    model; see ``llm_bawt.bot_location``. ``location`` filters on it.
     """
+    from llm_bawt.bot_location import location_runtimes, read_locations
+
     caller, turn_id = _discovery_caller(
-        {"tag": tag, "capability": capability, "include_state": include_state})
+        {"tag": tag, "capability": capability, "include_state": include_state,
+         "location": location})
     # Policy first: a profile created after the snapshot is unknown, so hidden.
     access = await _policy_resolver().resolve()
     wanted = None
@@ -967,6 +976,11 @@ async def list_available_bots(
         and (wanted is None or wanted in access.tags.tags.get(row.slug, ()))
         and (wanted_capability is None or wanted_capability in capabilities_of(row.slug))
     ]
+    locations = await read_locations(profiles) if include_state or location else {}
+    if location is not None:
+        wanted_location = location.strip().lower()
+        profiles = [row for row in profiles
+                    if wanted_location in location_runtimes(locations[row.slug])]
     # The caller's own row may be hidden from the list but still names its route.
     routed = profiles + [row for row in every if row.slug == caller]
     facts, caller_provider = await asyncio.to_thread(_route_facts, routed, caller, turn_id)
@@ -990,6 +1004,6 @@ async def list_available_bots(
             "same_provider_as_caller": same,
         }
         if include_state:
-            entry["state"] = states[row.slug]
+            entry["state"] = {**states[row.slug], "location": locations[row.slug]}
         listed.append(entry)
     return listed
