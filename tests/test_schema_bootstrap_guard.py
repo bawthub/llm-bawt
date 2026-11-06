@@ -155,6 +155,7 @@ def test_memory_schema_has_shared_and_per_sanitized_bot_scopes(monkeypatch) -> N
 def test_turn_log_orchestration_does_not_repeat_nested_schema(monkeypatch) -> None:
     from llm_bawt.service import (
         changed_files_store,
+        llm_response_store,
         session_resumption,
         tool_call_store,
         turn_log_schema,
@@ -189,6 +190,7 @@ def test_turn_log_orchestration_does_not_repeat_nested_schema(monkeypatch) -> No
     for store_type in (
         turn_logs.TurnLogStore,
         tool_call_store.ToolCallStore,
+        llm_response_store.LlmResponseStore,
         changed_files_store.ChangedFilesStore,
     ):
         store_type._schema_guard.reset_for_tests()
@@ -200,6 +202,7 @@ def test_turn_log_orchestration_does_not_repeat_nested_schema(monkeypatch) -> No
 
     assert create_calls == [
         ("tool_call_records", "tool_call_result_payloads"),
+        ("llm_response_records",),
         ("turn_changed_files", "turn_diff_payloads"),
         ("turn_logs",),
         ("session_resumption_receipts",),
