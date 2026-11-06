@@ -24,7 +24,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
-from types import SimpleNamespace
 from typing import Any
 
 from fastapi import APIRouter
@@ -72,9 +71,9 @@ async def _active(client: Any, rows: list[Any], turns: dict[str, Any] | None
     ``turns`` maps a bot to its admission state (``kind``, ``request_id`` of
     the one executing turn). That exact request's route record
     (``agent:turn:req:<id>``, written with its publication) names the stream
-    it went to. Only housed bots' turns are recorded, so with no record the
-    turn is on its backend's bridge only when the bot was unhoused when the
-    turn was admitted (no profile write since); otherwise ``unknown``.
+    it went to; with no record (a mansion turn's lapses after ``TURN_TTL_S``)
+    the location is ``unknown``: the profile says where new turns go, not where
+    this one went.
     """
     from agent_bridge.houses import HOUSE_STREAM_PREFIX, turn_request_key
 
@@ -102,20 +101,11 @@ async def _active(client: Any, rows: list[Any], turns: dict[str, Any] | None
             continue
         if stream and stream.startswith(HOUSE_STREAM_PREFIX):
             out[row.slug] = {"runtime": "house", "house": stream[len(HOUSE_STREAM_PREFIX):]}
-        elif stream or (not row.house and _unhoused_since_admission(row, turn)):
+        elif stream:
             out[row.slug] = {"runtime": _bridge(routed[0])}
         else:
             out[row.slug] = "unknown"
     return out
-
-
-def _unhoused_since_admission(row: Any, turn: dict) -> bool:
-    """No profile write since the turn was admitted, so its route saw this (empty) house."""
-    from ...campus_events import version_of
-
-    version = version_of(row)
-    admitted = version_of(SimpleNamespace(updated_at=turn.get("created_at")))
-    return version is not None and admitted is not None and version < admitted
 
 
 def _turns(engine: Any, slugs: list[str]) -> dict[str, dict] | None:
@@ -127,8 +117,7 @@ def _turns(engine: Any, slugs: list[str]) -> dict[str, dict] | None:
         for slug, state in peek_targets(engine, slugs).items():
             executing = state.executing
             out[slug] = {"kind": state.kind,
-                         "request_id": executing.get("agent_request_id") if executing else None,
-                         "created_at": executing.get("created_at") if executing else None}
+                         "request_id": executing.get("agent_request_id") if executing else None}
         return out
     except Exception:
         log.warning("campus: turn state unavailable", exc_info=True)

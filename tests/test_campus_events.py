@@ -318,8 +318,8 @@ def test_active_uses_the_executing_request_record_only():
              "f": {"kind": "ambiguous"}}
     out = asyncio.run(_active(_TurnRedis(records), rows, turns))
     assert out["a"] == {"runtime": "house", "house": "h2"}
-    assert out["b"] == {"runtime": "claude-code-bridge"}  # unhoused since before admission
-    assert out["g"] == "unknown"  # assignment changed after admission: no proof
+    assert out["b"] == "unknown"  # no record: the profile doesn't prove where it went
+    assert out["g"] == "unknown"
     assert out["c"] == {"runtime": "claude-code-bridge"}  # recorded fallback
     assert out["d"] == "unknown"  # housed but no record: not trustworthy
     assert out["e"] is None and out["f"] == "unknown"

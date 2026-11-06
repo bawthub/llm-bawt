@@ -145,6 +145,9 @@ def test_zero_houses_is_byte_identical():
     assert list(plain.streams) == [MANSION]
     assert EPOCH_FIELD not in plain.streams[MANSION][0]
     assert housed.reads == 0  # no lease or turn lookups for a mansion bot
+    # TASK-2120: the request's actual stream is recorded; no session record.
+    assert housed.kv == {houses.turn_request_key("req_1"): MANSION,
+                         **{k: v for k, v in housed.kv.items() if k.startswith("agent:command:")}}
 
 
 def test_zero_houses_follow_ups_stay_in_the_mansion():
