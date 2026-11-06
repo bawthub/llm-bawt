@@ -61,6 +61,8 @@ class FakeRedis:
     async def expire(self, key, ttl):
         if key in self.kv:
             self.ttl[key] = ttl
+            return True
+        return False
 
     async def xadd(self, stream, fields, **_):
         self.streams.setdefault(stream, []).append(dict(fields))
@@ -78,6 +80,8 @@ class FakeRedis:
         fields = dict(zip(flat[::2], flat[1::2]))
         stream_id = await self.xadd(keys[1], fields)
         self.kv[keys[0]] = stream_id
+        for key in keys[2:]:  # turn location, written with the publication
+            self.kv[key] = keys[1]
         return [1, stream_id]
 
     async def xread(self, streams, count=None, block=None):
@@ -299,4 +303,78 @@ def test_heartbeat_renews_live_turns_and_drops_finished_ones():
         assert houses.turn_request_key("r1") not in redis.kv
         assert houses.turn_session_key("codex", "s") not in redis.kv
         assert redis.ttl[lease_key("h1", "codex")] == houses.LEASE_TTL_S
+    run(go())
+
+
+# ------------------------------------------------- Codex r1 regressions
+
+
+def test_retry_keeps_the_first_route():
+    """F1: a deduplicated retry after the house comes up must not move r1."""
+    redis = FakeRedis()
+    pub = Publisher(redis)
+    run(pub.send_command("al:nick", "hi", "r1", backend="claude-code", house="h1"))
+    assert redis.kv[houses.turn_request_key("r1")] == MANSION
+    redis.kv[lease_key("h1", "claude-code")] = "1"
+    run(pub.send_command("al:nick", "hi", "r1", backend="claude-code", house="h1"))
+    assert list(redis.streams) == [MANSION]
+    assert run(follow_up_stream(redis, request_id="r1")) == MANSION
+
+
+def test_fallback_turn_does_not_inherit_a_stale_session_record():
+    """F2: r_new fell back to the mansion while r_old's house record lingers."""
+    redis = FakeRedis()
+    pub = Publisher(redis)
+    redis.kv[lease_key("h1", "claude-code")] = "1"
+    run(pub.send_command("al:nick", "a", "r_old", backend="claude-code", house="h1"))
+    run(redis.delete(lease_key("h1", "claude-code")))
+    run(pub.send_command("al:nick", "b", "r_new", backend="claude-code", house="h1"))
+    assert run(follow_up_stream(redis, request_id="r_new", backend="claude-code",
+                                session_key="al:nick")) == MANSION
+    # A request record is authoritative even when a session record disagrees.
+    redis.kv[houses.turn_session_key("claude-code", "al:nick")] = H1
+    assert run(follow_up_stream(redis, request_id="r_new", backend="claude-code",
+                                session_key="al:nick")) == MANSION
+    sub = subscriber(redis)
+    run(sub.send_rpc("chat.abort", {"sessionKey": "al:nick", "requestId": "r_new"}, "abort_1",
+                     backend="claude-code"))
+    assert redis.streams[MANSION][-1]["action"] == "rpc.call"
+
+
+def test_heartbeat_restores_expired_records_of_a_live_turn():
+    """F3: records that expired during an outage come back; a newer session owner is kept."""
+    async def go():
+        redis, queue = FakeRedis(), Queue()
+        slot = HouseSlot("h1", "claude-code", queue)
+        await slot.start(redis)
+        slot._task.cancel()
+        slot.track({"request_id": "r1", "session_key": "s"})
+        await asyncio.sleep(0)
+        queue.live.add(("s", "r1"))
+        await redis.delete(houses.turn_request_key("r1"), houses.turn_session_key("claude-code", "s"))
+        await slot.refresh()
+        assert redis.kv[houses.turn_request_key("r1")] == H1
+        assert redis.kv[houses.turn_session_key("claude-code", "s")] == H1
+        # A newer turn's session record is never overwritten by the restore.
+        await redis.delete(houses.turn_session_key("claude-code", "s"))
+        await redis.set(houses.turn_session_key("claude-code", "s"), MANSION, nx=True, ex=90)
+        redis.ttl.pop(houses.turn_session_key("claude-code", "s"))
+        await slot.refresh()
+        assert redis.kv[houses.turn_session_key("claude-code", "s")] == MANSION
+    run(go())
+
+
+def test_superseded_slot_stops_renewing_and_admitting():
+    """F4: an older slot cannot overwrite a replacement's lease."""
+    async def go():
+        redis = FakeRedis()
+        old, new = HouseSlot("h1", "codex", Queue()), HouseSlot("h1", "codex", Queue())
+        await old.start(redis)
+        await new.start(redis)
+        old._task.cancel()
+        new._task.cancel()
+        await old.refresh()
+        assert redis.kv[lease_key("h1", "codex")] == "2"
+        assert not old.admit({EPOCH_FIELD: "1"})
+        assert new.admit({EPOCH_FIELD: "2"})
     run(go())

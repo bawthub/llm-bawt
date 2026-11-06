@@ -9,7 +9,7 @@ from collections.abc import Mapping, Sequence
 
 from .continuity import RESET_SKILLS_FIELD, SEED_FRAMING_FIELD, SeedFraming, reset_skills_field
 from .publisher import COMMANDS_STREAM
-from .houses import EPOCH_FIELD, record_turn, route_new_command
+from .houses import EPOCH_FIELD, TURN_TTL_S, route_new_command, turn_request_key, turn_session_key
 
 logger = logging.getLogger(__name__)
 
@@ -200,10 +200,6 @@ class CommandPublisherMixin:
             )
             if epoch is not None:
                 fields[EPOCH_FIELD] = epoch
-                # Record the turn's slot before publishing, so a follow-up
-                # sent right after (dispatch-time abort) cannot miss it.
-                await record_turn(self._pub_redis, stream=stream, request_id=request_id,
-                                  backend=backend, session_key=session_key)
 
         dedupe_key = f"agent:command:request:{request_id}"
         flat_fields: list[str] = []
@@ -220,15 +216,25 @@ class CommandPublisherMixin:
             local ttl = {COMMAND_DEDUPE_TTL_S}
             if string.sub(ARGV[2], 1, {len(DELIVERY_REQUEST_PREFIX)}) == '{DELIVERY_REQUEST_PREFIX}' then ttl = {DELIVERY_COMMAND_DEDUPE_TTL_S} end
             redis.call('SET', KEYS[1], stream_id, 'EX', ttl)
+            for i = 3, #KEYS do redis.call('SET', KEYS[i], KEYS[2], 'EX', {TURN_TTL_S}) end
             return {{1, stream_id}}
         """
+        # TASK-2077: a housed bot's turn location (house OR mansion fallback)
+        # is written in the same atomic step as the first publication, before
+        # any follow-up can be sent; a deduplicated retry writes nothing.
+        location_keys: list[str] = []
+        if house:
+            location_keys.append(turn_request_key(request_id))
+            if backend and session_key:
+                location_keys.append(turn_session_key(backend, session_key))
         eval_fn = getattr(self._pub_redis, "eval", None)
         if callable(eval_fn):
             eval_result = eval_fn(
                 script,
-                2,
+                2 + len(location_keys),
                 dedupe_key,
                 stream,
+                *location_keys,
                 "1000",
                 request_id,
                 *flat_fields,

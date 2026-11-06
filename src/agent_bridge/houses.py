@@ -146,13 +146,15 @@ async def follow_up_stream(
 ) -> str:
     """Where a follow-up (steer/answer/approval/abort) for a turn must go.
 
-    House bridges record their admitted turns; a missing record means the
-    turn runs in the mansion (always true with zero houses).
+    Every housed bot's turn has a record (house or mansion fallback); a
+    missing record means the mansion (always true with zero houses). A
+    follow-up naming its request uses only that request's record, never a
+    session record that may belong to an older turn.
     """
     keys: list[str] = []
     if request_id:
         keys.append(turn_request_key(request_id))
-    if backend and session_key:
+    elif backend and session_key:
         keys.append(turn_session_key(backend, session_key))
     try:
         for key in keys:
@@ -164,14 +166,6 @@ async def follow_up_stream(
         # reached through their record, so the mansion is the safe default.
         logger.warning("turn location lookup failed; using the mansion", exc_info=True)
     return MANSION_COMMANDS_STREAM
-
-
-async def record_turn(redis: Any, *, stream: str, request_id: str,
-                      backend: str | None, session_key: str | None) -> None:
-    """Pin a house-routed turn's follow-ups to *stream* (TTL; bridge renews)."""
-    await redis.set(turn_request_key(request_id), stream, ex=TURN_TTL_S)
-    if backend and session_key:
-        await redis.set(turn_session_key(backend, session_key), stream, ex=TURN_TTL_S)
 
 
 # ------------------------------------------------------------- bridge side
@@ -194,6 +188,7 @@ class HouseSlot:
         self.epoch: str | None = None
         self._turns: dict[tuple[str, str], float] = {}
         self._task: asyncio.Task | None = None
+        self.superseded = False
 
     @property
     def is_house(self) -> bool:
@@ -213,6 +208,8 @@ class HouseSlot:
         """False for a send routed under an older epoch (fenced, never run)."""
         if not self.is_house:
             return True
+        if self.superseded:
+            return False
         return (fields.get(EPOCH_FIELD) or "") == (self.epoch or "-")
 
     def track(self, fields: dict) -> None:
@@ -234,14 +231,32 @@ class HouseSlot:
             logger.exception("turn record write failed: request=%s", request_id)
 
     async def refresh(self) -> None:
-        """One heartbeat: renew the lease and live turns, drop finished ones."""
-        await self._redis.set(lease_key(self.house, self.backend), self.epoch, ex=LEASE_TTL_S)
+        """One heartbeat: renew the lease and live turns, drop finished ones.
+
+        Only the current owner renews: a lease holding a newer epoch means a
+        replacement started, so this slot stops admitting and renewing.
+        """
+        key = lease_key(self.house, self.backend)
+        current = await self._redis.get(key)
+        if current and int(current) > int(self.epoch or 0):
+            if not self.superseded:
+                logger.warning("house %s/%s superseded by epoch %s (ours %s)",
+                               self.house, self.backend, current, self.epoch)
+            self.superseded = True
+            return
+        await self._redis.set(key, self.epoch, ex=LEASE_TTL_S)
         now = time.monotonic()
         for (session_key, request_id), seen in list(self._turns.items()):
             live = self._queue.request_phase(session_key, request_id) is not None
             if live or now - seen < self.GRACE_S:
-                await self._redis.expire(turn_request_key(request_id), TURN_TTL_S)
-                await self._redis.expire(turn_session_key(self.backend, session_key), TURN_TTL_S)
+                # Restore a record that expired while we couldn't heartbeat:
+                # the request is ours outright; the session only if no newer
+                # turn has claimed it meanwhile.
+                if not await self._redis.expire(turn_request_key(request_id), TURN_TTL_S):
+                    await self._redis.set(turn_request_key(request_id), self.stream, ex=TURN_TTL_S)
+                sess = turn_session_key(self.backend, session_key)
+                if not await self._redis.expire(sess, TURN_TTL_S):
+                    await self._redis.set(sess, self.stream, nx=True, ex=TURN_TTL_S)
                 continue
             self._turns.pop((session_key, request_id), None)
             await self._redis.delete(turn_request_key(request_id))
