@@ -133,6 +133,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_db_session_policy_pg.py::",
     "test_tool_execution_tracking_pg.py::",
     "test_scheduled_run_notice_pg.py::",
+    "test_commit_wake_pg.py::",
 )
 
 PG_SELECTORS = tuple("tests/" + suite.removesuffix("::") for suite in PG_ACCEPTANCE_SUITES)
