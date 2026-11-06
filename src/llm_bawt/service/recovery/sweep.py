@@ -187,6 +187,26 @@ class StartupRecoveryCheck:
                                 entry["turn_id"], entry["bot_id"], entry["why"])
         return result
 
+    async def wait_for_runs(self, result: dict[str, Any], timeout: float) -> None:
+        """Wait until a run this pass left open ends, or ``timeout`` (TASK-2108).
+
+        Blocks on the runs' ``agent:run:<id>`` streams, so a turn settles when
+        its run finishes rather than at the next interval. A busy or failed
+        pass, or no Redis transport, waits the full interval.
+        """
+        request_ids = [] if self._full_pass_owed or result.get("busy") else [
+            entry.get("agent_request_id")
+            for step in result.get("steps", ()) if step.get("step") == "orphan_turns" and not step.get("error")
+            for entry in step.get("ambiguous", ()) if _awaits_its_run(entry)
+        ]
+        from ...agent_backends.agent_bridge import get_agent_subscriber
+
+        subscriber = get_agent_subscriber() if request_ids else None
+        if subscriber is None or not hasattr(subscriber, "wait_any_run_done"):
+            await asyncio.sleep(timeout)
+            return
+        await subscriber.wait_any_run_done([r for r in request_ids if r], timeout)
+
     def follow_up_due(self, result: dict[str, Any]) -> bool:
         """Whether a pass left a turn a later probe can settle (TASK-1846).
 

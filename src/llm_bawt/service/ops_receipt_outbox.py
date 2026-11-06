@@ -63,8 +63,16 @@ def build_resume_sender(service, receipts: QuiesceReceiptSender) -> QuiesceResum
 
 
 async def run_ops_receipt_outbox(service, *, idle_seconds: float = 2.0) -> None:
-    """Lifespan loop; a DB outage logs and retries, it never kills the loop."""
+    """Lifespan loop; a DB outage logs and retries, it never kills the loop.
+
+    TASK-2108: woken when an ops job's terminal row commits; the timer is a
+    backstop that only repairs a missed notification.
+    """
+    from .commit_wake import backstop, subscribe, wait_for_wake
+
     sender = resumes = None
+    wake = subscribe(service)
+    interval = backstop(service, idle_seconds)
     while True:
         try:
             sender = sender or build_receipt_sender(service)
@@ -78,7 +86,7 @@ async def run_ops_receipt_outbox(service, *, idle_seconds: float = 2.0) -> None:
             raise
         except Exception:
             log.exception("ops receipt outbox pass failed; retrying")
-        await asyncio.sleep(idle_seconds)
+        await wait_for_wake(wake, interval)
 
 
 __all__ = ["announce", "build_receipt_sender", "build_resume_sender", "run_ops_receipt_outbox"]

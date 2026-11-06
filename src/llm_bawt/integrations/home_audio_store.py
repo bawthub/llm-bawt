@@ -9,6 +9,7 @@ import uuid
 from sqlalchemy import Column, Float, Integer, MetaData, String, Table, Text, select, update
 from sqlalchemy.exc import IntegrityError
 
+from llm_bawt.service.commit_wake import notify_in_transaction
 from llm_bawt.utils.schema import SchemaBootstrapGuard
 
 _metadata = MetaData()
@@ -67,6 +68,7 @@ class HomeAudioStore:
         try:
             with self.engine.begin() as conn:
                 conn.execute(_jobs.insert().values(**values))
+                notify_in_transaction(conn, "home_audio")  # wakes the app worker at commit (TASK-2108)
         except IntegrityError:
             with self.engine.connect() as conn:
                 row = conn.execute(select(_jobs).where(_jobs.c.request_key == request_key)).mappings().one()

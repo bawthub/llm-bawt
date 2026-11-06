@@ -59,6 +59,8 @@ class StartupRecoveryRunner:
     # follow-up whose turns never answer; deliveries.queue health flags those.
     FOLLOW_UP_SECONDS = 60.0
     FOLLOW_UP_LIMIT_SECONDS = 6 * 3600.0
+    # TASK-2108: the follow-up wakes when an awaited run ends; this bounds re-probes.
+    FOLLOW_UP_MIN_GAP_SECONDS = 2.0
 
     def __init__(
         self, check: StartupCheck, *, on_done: Callable[[], None] | None = None,
@@ -169,8 +171,9 @@ class StartupRecoveryRunner:
     async def _follow_up_loop(self, origin: asyncio.Task) -> None:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.FOLLOW_UP_LIMIT_SECONDS
+        last = origin.result()
         while True:
-            await asyncio.sleep(self.FOLLOW_UP_SECONDS)
+            await self._wait_for_next_pass(last)
             if self._task is not origin and self._task is not None and self._task.done():
                 origin = self._task  # a later pass (new term) ended: follow it instead
             elif self._task is not origin:
@@ -185,11 +188,37 @@ class StartupRecoveryRunner:
                 result = await self.check.follow_up()
             except Exception:
                 logger.exception("startup recovery follow-up pass failed; retrying next interval")
+                last = None
                 continue
+            last = result
             if self._on_done is not None:
                 self._on_done()
             if not self.check.follow_up_due(result):
                 return
+
+    async def _wait_for_next_pass(self, last: Any) -> None:
+        """Until a run the last pass left open ends (TASK-2108), at most
+        ``FOLLOW_UP_SECONDS`` and at least ``FOLLOW_UP_MIN_GAP_SECONDS``.
+
+        A check without ``wait_for_runs``, or after a failed pass, sleeps the
+        whole interval, which then only backstops a missed run end.
+        """
+        wait = getattr(self.check, "wait_for_runs", None)
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        if wait is None or last is None:
+            await asyncio.sleep(self.FOLLOW_UP_SECONDS)
+            return
+        try:
+            await wait(last, self.FOLLOW_UP_SECONDS)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("recovery follow-up run wait failed; sleeping the interval", exc_info=True)
+            await asyncio.sleep(max(0.0, self.FOLLOW_UP_SECONDS - (loop.time() - started)))
+            return
+        # A run already ended but its bridge still can't answer: don't spin.
+        await asyncio.sleep(max(0.0, self.FOLLOW_UP_MIN_GAP_SECONDS - (loop.time() - started)))
 
     def _check_done(self, task: asyncio.Task) -> None:
         if task.cancelled():

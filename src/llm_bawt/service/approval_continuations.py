@@ -437,15 +437,29 @@ async def dispatch_due_continuations_once(service, store, *, limit: int = 20) ->
 
 
 async def run_mcp_continuation_outbox(service, store, *, idle_seconds: float = 2.0) -> None:
-    """Lifespan recovery and outbox loop; DB outages do not kill the worker."""
+    """Lifespan recovery and outbox loop; DB outages do not kill the worker.
+
+    TASK-2108: woken by each commit (an approval resolving, an ops job ending);
+    otherwise it sleeps until the next retry/lease expiry is due, at most the
+    backstop, which only repairs a missed notification.
+    """
+    from .commit_wake import backstop, subscribe, wait_for_wake
+
+    wake = subscribe(service)
     while True:
+        delay = idle_seconds
         try:
             await dispatch_due_continuations_once(service, store)
+            if wake is not None:
+                delay = backstop(service, idle_seconds)
+                due = await asyncio.to_thread(store.seconds_until_next_continuation)
+                if due is not None:
+                    delay = min(delay, max(due, 0.05))
         except asyncio.CancelledError:
             raise
         except Exception:
             log.exception("Approval recovery/outbox pass failed; retrying")
-        await asyncio.sleep(idle_seconds)
+        await wait_for_wake(wake, delay)
 
 
 log = logging.getLogger(__name__)

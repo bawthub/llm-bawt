@@ -123,6 +123,9 @@ async def lifespan(app):
     service = BackgroundService(config)
     set_service(service)
     service.start_worker()
+    # TASK-2108: committed work wakes the outbox loops via LISTEN; their timers are backstops.
+    from .commit_wake import WakeHub, run_commit_wake_listener
+    service._commit_wake_hub = WakeHub()
     # One committed ledger feeds both the bounded read API and Redis outbox.
     # Bootstrap off-loop; a schema outage keeps history visibly unavailable.
     from ..system_events import SystemEventEmitter
@@ -290,7 +293,8 @@ async def lifespan(app):
         # at startup; committed rows must not wait for another app restart.
         from .system_event_outbox import run_system_event_outbox
         service._system_event_outbox_task = asyncio.create_task(
-            run_system_event_outbox(service._system_events, config.REDIS_URL),
+            run_system_event_outbox(service._system_events, config.REDIS_URL,
+                                    hub=service._commit_wake_hub),
             name="system-event-outbox",
         )
 
@@ -311,7 +315,10 @@ async def lifespan(app):
         service, startup_recovery=startup_recovery,
     )
     service._inter_bot_dispatcher.start()
+    service._commit_wake_task = asyncio.create_task(
+        run_commit_wake_listener(service, model_engine), name="commit-wake-listener")
     if scheduler is not None:
+        scheduler.wake_hub = service._commit_wake_hub
         await scheduler.start()
         log.info("Scheduler started (maintenance interval=%ss; prompt sweep=5s)",
                  config.SCHEDULER_CHECK_INTERVAL_SECONDS)
@@ -392,7 +399,7 @@ async def lifespan(app):
     # Durable speech playback belongs to the app, not a short-lived MCP call.
     from ..integrations.home_audio_store import HomeAudioStore
     from ..integrations.home_audio_worker import HomeAudioWorker
-    home_audio_worker = HomeAudioWorker(config, HomeAudioStore(model_engine))
+    home_audio_worker = HomeAudioWorker(config, HomeAudioStore(model_engine), hub=service._commit_wake_hub)
     home_audio_worker.start()
 
     from ..bot_access.refresh import policy_refresh_async_lifecycle
@@ -425,6 +432,7 @@ BACKGROUND_TASK_ATTRIBUTES = (
     "_ops_receipt_task",
     "_quiesce_exit_task",
     "_gate_change_task",
+    "_commit_wake_task",
     "_claude_refresh_task",
     "_codex_refresh_task",
 )

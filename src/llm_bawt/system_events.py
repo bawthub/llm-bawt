@@ -159,6 +159,10 @@ class CommitStagedAppends:
             except Exception:  # noqa: BLE001 - appends are savepoint-isolated
                 SystemEventEmitter.failed_appends += 1
                 logger.exception("system event not recorded; the transaction still commits")
+        if staged:
+            # Delivered by Postgres only if this transaction commits (TASK-2108).
+            from .service.commit_wake import notify_in_transaction
+            notify_in_transaction(conn)
 
 
 class SystemEventEmitter:

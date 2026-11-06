@@ -149,6 +149,7 @@ class JobScheduler:
         # Do not consume billable occurrences into an unconsumed outbox on upgrade.
         self._prompt_sweep = prompt_sweep
         self._prompt_task: Optional[asyncio.Task] = None
+        self.wake_hub = None  # TASK-2108: set by the app before start()
         from .runtime_health import LoopHealth
         self.maintenance_health = LoopHealth()
         self.prompt_health = LoopHealth()
@@ -175,7 +176,15 @@ class JobScheduler:
         logger.debug("Scheduler stopped")
 
     async def _run_prompt_loop(self) -> None:
-        """Independent cadence: maintenance/model processing cannot delay prompts."""
+        """Independent cadence: maintenance/model processing cannot delay prompts.
+
+        The 5s timer stays: ``reserve_due`` fires scheduled prompts, so time is
+        the trigger. TASK-2108: a committed delivery transition or gate change
+        also wakes it, so an occurrence's terminal state reconciles at once.
+        """
+        from .commit_wake import wait_for_wake
+
+        wake = self.wake_hub.subscribe() if self.wake_hub is not None else None
         while self._running:
             try:
                 await self._prompt_sweep()
@@ -183,7 +192,7 @@ class JobScheduler:
             except Exception as exc:
                 self.prompt_health.failed(exc)
                 logger.exception("Prompt scheduler sweep failed; will retry")
-            await asyncio.sleep(5)
+            await wait_for_wake(wake, 5)
     
     async def _run_loop(self) -> None:
         """Main scheduler loop."""

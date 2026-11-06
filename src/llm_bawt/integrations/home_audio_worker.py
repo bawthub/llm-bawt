@@ -14,9 +14,10 @@ logger = logging.getLogger(__name__)
 
 
 class HomeAudioWorker:
-    def __init__(self, config, store: HomeAudioStore):
+    def __init__(self, config, store: HomeAudioStore, *, hub=None):
         self.config = config
         self.store = store
+        self.hub = hub
         self.task: asyncio.Task | None = None
 
     def start(self):
@@ -31,7 +32,14 @@ class HomeAudioWorker:
                 pass
 
     async def run(self):
+        from ..service.commit_wake import BACKSTOP_SECONDS, wait_for_wake
+
+        # TASK-2108: an enqueue's commit wakes this loop; the timer is a
+        # backstop for a missed notification or a quarantined lane lapsing.
+        wake = self.hub.subscribe() if self.hub is not None else None
+        interval = BACKSTOP_SECONDS if wake is not None else 1
         while True:
+            job = None
             try:
                 owner = uuid.uuid4().hex
                 job = await asyncio.to_thread(self.store.claim, owner)
@@ -41,7 +49,10 @@ class HomeAudioWorker:
                 raise
             except Exception:
                 logger.exception("Home audio worker iteration failed")
-            await asyncio.sleep(1)
+                await asyncio.sleep(1)
+            if job and wake is not None:
+                continue  # the next queued clip plays now
+            await wait_for_wake(wake, interval)
 
     async def _run_claim(self, owner: str, job: dict):
         work = asyncio.create_task(self._perform(owner, job))

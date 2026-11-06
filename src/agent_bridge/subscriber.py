@@ -307,6 +307,38 @@ class RedisSubscriber(CommandPublisherMixin):
             session_key, grant_key[:12], backend or "?", ttl_seconds,
         )
 
+    async def wait_any_run_done(self, request_ids: list[str], timeout_s: float) -> bool:
+        """Block until any of these runs publishes its ``done`` sentinel (TASK-2108).
+
+        True at once if one already has a terminal record. Reads start from
+        each stream's current tail, read after the terminal check, so a run
+        ending in between is still seen. False on timeout (the caller's backstop).
+        """
+        ids = [rid for rid in dict.fromkeys(request_ids) if rid]
+        if not ids:
+            await asyncio.sleep(timeout_s)
+            return False
+        for rid in ids:
+            if await self._pub_redis.exists(run_terminal_key(rid)):
+                return True
+        cursors: dict[str, str] = {}
+        for rid in ids:
+            key = f"{RUN_STREAM_PREFIX}{rid}"
+            tail = await self._pub_redis.xrevrange(key, count=1)
+            cursors[key] = tail[0][0] if tail else "0-0"
+        for rid in ids:  # a run that ended before the tails were read
+            if await self._pub_redis.exists(run_terminal_key(rid)):
+                return True
+        deadline = asyncio.get_running_loop().time() + timeout_s
+        while (remaining := deadline - asyncio.get_running_loop().time()) > 0:
+            results = await self._redis.xread(cursors, count=50, block=max(1, int(min(remaining, 5.0) * 1000)))
+            for stream, messages in results or ():
+                for msg_id, fields in messages:
+                    cursors[stream] = msg_id
+                    if fields.get(DONE_FIELD) == "1":
+                        return True
+        return False
+
     async def publish_approval_reload(self) -> int:
         """Broadcast a policy-bundle reload to every bridge (TASK-291, TASK-293).
 
