@@ -238,8 +238,11 @@ class OpsHealthCollector:
         self.docker_events_live = False
 
     def docker_interval(self):
-        """Reconcile slowly only while the event stream is proven live."""
-        return DOCKER_RECONCILE_SECONDS if self.docker_events_live else 5.0
+        """Reconcile slowly only while the event stream is proven live and the
+        last collection succeeded; a failed collection retries at 5s."""
+        if self.docker_events_live and self.state.docker_ok():
+            return DOCKER_RECONCILE_SECONDS
+        return 5.0
 
     def collect_database(self):
         sampled = self.state.sample_time()
@@ -373,7 +376,10 @@ class OpsHealthCollector:
                     self.docker_events_live = True
                     if not changed:
                         self.state.confirm_docker(last_change, self.state.sample_time())
-                    since = until
+                    # Overlap one second: an event stamped just before ``until``
+                    # but published after the window closed is replayed (a
+                    # duplicate only costs an extra resync).
+                    since = until - 1
             except Exception:
                 self.docker_events_live = False  # snapshots fall back to polling
                 wake.set()  # stream lost: resync, then reconnect after backoff
@@ -393,5 +399,7 @@ class OpsHealthCollector:
         while not stop.is_set():
             if wake is not None:
                 wake.clear()
+                if stop.is_set():  # stop landed before clear(): its wake is lost
+                    break
             collect()
             (wake or stop).wait(interval() if callable(interval) else interval)

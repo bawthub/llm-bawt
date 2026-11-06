@@ -179,7 +179,8 @@ class OpsHealthState:
         stream's connect) are re-stamped, so a pre-change snapshot is never
         kept fresh; anything older ages out to stale as before."""
         def fresh(sample):
-            return sample.sampled.monotonic >= changed_after.monotonic
+            # Only ok samples: a failed collection must be retried, not kept current.
+            return sample.status == "ok" and sample.sampled.monotonic >= changed_after.monotonic
         with self._lock:
             if self._stopping:
                 return
@@ -188,6 +189,13 @@ class OpsHealthState:
                     self._samples[name] = replace(self._samples[name], sampled=now)
             if fresh(self._modes["isolated"]):
                 self._modes["isolated"] = replace(self._modes["isolated"], sampled=now)
+
+    def docker_ok(self):
+        """True when the last docker, ops.executor and isolated publishes were ok."""
+        with self._lock:
+            return (self._samples["docker"].status == "ok"
+                    and self._samples["ops.executor"].status == "ok"
+                    and self._modes["isolated"].status == "ok")
 
     def stop(self):
         with self._lock:

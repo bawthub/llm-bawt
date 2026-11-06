@@ -62,7 +62,7 @@ def test_clean_window_confirms_post_change_sample_and_windows_are_contiguous():
     assert wake.is_set()  # connect forces a resync
     assert collector.docker_events_live
     assert state._samples["docker"].sampled.monotonic > resynced.sampled.monotonic
-    assert client.calls[0]["until"] == client.calls[1]["since"]
+    assert client.calls[0]["until"] - 1 == client.calls[1]["since"]  # 1s overlap
 
 
 def test_event_wakes_collector_and_does_not_refresh_pre_change_sample():
@@ -106,3 +106,34 @@ def test_run_wakes_early_on_event():
             stop.set()
     OpsHealthCollector.run(collect, stop, interval=60, wake=wake)
     assert len(calls) == 2
+
+
+def test_failed_collection_is_retried_fast_and_never_restamped():
+    state = OpsHealthState(clock=Clock())
+    stop, wake = Event(), Event()
+    down = None
+
+    def fail():
+        nonlocal down
+        down = HealthSample(state.sample_time(), "down", "container observation unavailable")
+        state.publish("docker", down)
+        return []
+    collector = _collector(state, FakeEventsClient([fail, []], stop))
+    collector.watch_docker(stop, wake, window=5)
+    assert collector.docker_events_live
+    assert state._samples["docker"] is down  # not kept looking current
+    assert collector.docker_interval() == 5.0  # stream live, but retry the failure
+
+
+def test_run_exits_when_stop_lands_before_wake_clear():
+    wake, calls = Event(), []
+
+    class LateStop:  # stop flips after the loop's check, before clear()
+        n = 0
+
+        def is_set(self):
+            self.n += 1
+            return self.n > 1
+
+    OpsHealthCollector.run(lambda: calls.append(1), LateStop(), interval=60, wake=wake)
+    assert calls == []
