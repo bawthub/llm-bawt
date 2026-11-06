@@ -131,6 +131,9 @@ class SyncRedis:
     def get(self, key):
         return self.kv.get(key)
 
+    def set(self, key, value, ex=None):  # TASK-2118 recycle marker
+        self.kv[key] = value
+
     def xadd(self, stream, fields, **_):
         self.streams.setdefault(stream, []).append(dict(fields))
 

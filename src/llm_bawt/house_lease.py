@@ -131,6 +131,8 @@ def request_recycle(config: Any, house: str) -> list[str]:
     """Ask a vacated house to restart itself; best-effort, returns backends asked."""
     from agent_bridge.houses import commands_stream, lease_key, normalize_house, recycle_command
 
+    from .house_tenancy import RECYCLE_MARKER_TTL_S, recycle_marker_key
+
     house = normalize_house(house)
     if not house:
         return []
@@ -142,6 +144,10 @@ def request_recycle(config: Any, house: str) -> list[str]:
             backend = str(key)[len(prefix):]
             epoch = client.get(key)
             if backend and epoch:
+                # Before the request: no self-move claims a house about to
+                # restart at this epoch (TASK-2118). Its next epoch is free.
+                client.set(recycle_marker_key(house, backend), str(epoch),
+                           ex=RECYCLE_MARKER_TTL_S)
                 client.xadd(commands_stream(house), recycle_command(house, backend, str(epoch)))
                 asked.append(backend)
         return asked

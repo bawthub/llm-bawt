@@ -6,17 +6,23 @@ may take which house:
 
 * The caller is always the bot named by its signed turn; there is no target
   argument, so a bot can never set or clear another bot's house here.
-* Move-in takes a house that holds a live lease for the bot's backend and has
-  no tenant. An occupied house is refused, always: there is no force path.
-* Self-move-in never pins. A pin stays a coordinator decision, so the idle
-  janitor and ``/new`` still vacate a self-claimed house.
-* A pinned bot cannot move itself out; the pin's owner unpins it first.
+* Eligibility is the bot's runtime (an agent on a backend in
+  :data:`SELF_MOVE_BACKENDS`), never its name, model or provider.
+* Move-in takes only a ``free`` house: one holding a live lease for the bot's
+  backend, not asked to recycle at that lease's epoch, with no tenant and no
+  admitted turn still running there (a released bot's turn finishes where it
+  was admitted). Anything else is refused; there is no force path.
+* A bot already housed elsewhere is refused (``already_housed``) and keeps its
+  house: it moves out first, so a failed move never strands it.
+* Self-move-in never pins. Setting a pin stays a coordinator decision, so
+  ``/new`` and the idle janitor still vacate a self-claimed house. A pinned
+  bot may still leave voluntarily; that ends its tenancy and the pin with it.
 
-Every self-move runs under one transaction-scoped advisory lock and rechecks
-the tenants inside it, so two bots racing for one house get one winner and one
-``occupied`` refusal. The profile write itself goes through
-:meth:`BotProfileStore.upsert` with ``expected_fields``, which audits it and
-refuses a concurrent edit of the same bot.
+Every write of ``bot_profiles.house`` (self-moves here, a profile PATCH, the
+``/new`` eviction, the janitor) takes :data:`HOUSE_LOCK_SQL` inside
+:meth:`BotProfileStore.upsert`, and a self-move takes it before reading, so
+two bots racing for one house get one winner and one ``occupied`` refusal. The
+write goes through ``upsert`` with ``expected_fields``, which audits it.
 
 A move takes effect at the bot's next turn; the current turn finishes where it
 was admitted.
@@ -24,13 +30,13 @@ was admitted.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Any
 
 from sqlalchemy import text
 
-from agent_bridge.houses import normalize_house
+from agent_bridge.houses import commands_stream, normalize_house
 
 logger = logging.getLogger(__name__)
 
@@ -40,14 +46,84 @@ SELF_MOVE_BACKENDS = frozenset({"claude-code"})
 UNSUPPORTED_MESSAGE = ("houses support claude-code bots only for now; "
                        "this bot's harness ({backend}) stays in the mansion")
 
-_LOCK_SQL = text("SELECT pg_advisory_xact_lock(2118, 1)")
+#: One lock for every house assignment write; reentrant within a transaction.
+HOUSE_LOCK_SQL = text("SELECT pg_advisory_xact_lock(2118, 1)")
+RECYCLE_MARKER_TTL_S = 300
 _HOUSED_SQL = text(
     "SELECT slug, house, house_pinned FROM bot_profiles "
     "WHERE house IS NOT NULL AND house <> '' ORDER BY slug")
-_LEASE_PATTERN = "agent:house:*:lease:*"
+PRIVATE_TENANT = "(private)"
 
-#: ``scan(pattern) -> keys``. Raises when Redis can't be read.
-LeaseScanner = Callable[[str], Iterable[str]]
+
+def recycle_marker_key(house: str, backend: str) -> str:
+    """Set to the lease epoch when the app asks that house to recycle."""
+    return f"agent:house:{house}:recycle:{backend}"
+
+
+def lock_house_assignments(conn: Any) -> None:
+    if conn.dialect.name == "postgresql":
+        conn.execute(HOUSE_LOCK_SQL)
+
+
+@dataclass(frozen=True)
+class HouseState:
+    """One read of the routing state in Redis."""
+
+    #: ``{house: {backend: epoch}}`` for every live lease.
+    leases: dict[str, dict[str, str]] = field(default_factory=dict)
+    #: ``{(house, backend): epoch}`` a recycle was requested at.
+    recycling: dict[tuple[str, str], str] = field(default_factory=dict)
+    #: Command streams with an admitted turn still running.
+    busy_streams: frozenset[str] = frozenset()
+
+    def status(self, house: str, backend: str, tenants: list) -> str:
+        """``free`` | ``occupied`` | ``down`` | ``recycling`` | ``draining``."""
+        if tenants:
+            return "occupied"
+        epoch = self.leases.get(house, {}).get(backend)
+        if not epoch:
+            return "down"
+        if self.recycling.get((house, backend)) == epoch:
+            return "recycling"
+        if commands_stream(house) in self.busy_streams:
+            return "draining"
+        return "free"
+
+
+def _house_part(key: str, kind: str) -> tuple[str, str] | None:
+    parts = str(key).split(":")  # agent:house:<id>:<kind>:<backend>
+    if len(parts) != 5 or parts[3] != kind or not parts[4]:
+        return None
+    try:
+        house = normalize_house(parts[2])
+    except ValueError:
+        return None
+    return (house, parts[4]) if house else None
+
+
+def read_house_state(client: Any) -> HouseState:
+    """Leases, recycle markers and running turns from a sync Redis client; raises if unreadable."""
+    leases: dict[str, dict[str, str]] = {}
+    recycling: dict[tuple[str, str], str] = {}
+    for key in client.scan_iter(match="agent:house:*:lease:*"):
+        part = _house_part(key, "lease")
+        epoch = client.get(key) if part else None
+        if part and epoch:
+            leases.setdefault(part[0], {})[part[1]] = str(epoch)
+    for key in client.scan_iter(match="agent:house:*:recycle:*"):
+        part = _house_part(key, "recycle")
+        epoch = client.get(key) if part else None
+        if part and epoch:
+            recycling[part] = str(epoch)
+    busy = set()
+    for key in client.scan_iter(match="agent:turn:req:*"):
+        stream = client.get(key)
+        if stream:
+            busy.add(str(stream))
+    return HouseState(leases, recycling, frozenset(busy))
+
+
+StateReader = Callable[[], HouseState]
 
 
 class HouseMoveRefused(Exception):
@@ -81,33 +157,11 @@ class MoveResult:
         return out
 
 
-def live_leases(scan: LeaseScanner) -> dict[str, set[str]]:
-    """``{house: {backend, ...}}`` for every house holding a lease now."""
-    out: dict[str, set[str]] = {}
-    for key in scan(_LEASE_PATTERN):
-        parts = str(key).split(":")
-        # agent:house:<id>:lease:<backend>
-        if len(parts) != 5 or parts[3] != "lease" or not parts[4]:
-            continue
-        try:
-            house = normalize_house(parts[2])
-        except ValueError:
-            continue
-        if house:
-            out.setdefault(house, set()).add(parts[4])
-    return out
-
-
 def _tenants(conn: Any) -> dict[str, list[tuple[str, bool]]]:
     out: dict[str, list[tuple[str, bool]]] = {}
     for slug, house, pinned in conn.execute(_HOUSED_SQL):
         out.setdefault(str(house), []).append((str(slug), bool(pinned)))
     return out
-
-
-def _lock(conn: Any) -> None:
-    if conn.dialect.name == "postgresql":
-        conn.execute(_LOCK_SQL)
 
 
 def _caller_row(store: Any, slug: str) -> Any:
@@ -127,22 +181,30 @@ def _backend(row: Any) -> str:
     return backend
 
 
-def list_houses(store: Any, slug: str, scan: LeaseScanner) -> dict[str, Any]:
-    """Every known house with its live harnesses, tenants and whether it is free for ``slug``."""
+def _private_bots(store: Any) -> frozenset[str]:
+    from .bot_tags import BotTags
+
+    return BotTags(store.engine).snapshot().private_bots  # unavailable: everyone private
+
+
+def list_houses(store: Any, slug: str, read_state: StateReader,
+                private_bots: frozenset[str] | None = None) -> dict[str, Any]:
+    """Every known house: live harnesses, tenants, and its status for ``slug``'s harness."""
     row = _caller_row(store, slug)
     backend = (getattr(row, "agent_backend", None) or "").strip().lower()
-    leases = live_leases(scan)
+    state = read_state()
     with store.engine.connect() as conn:
         tenants = _tenants(conn)
+    hidden = _private_bots(store) if private_bots is None else private_bots
     houses = []
-    for house in sorted(set(leases) | set(tenants)):
-        live = sorted(leases.get(house, ()))
+    for house in sorted(set(state.leases) | set(tenants)):
         held = tenants.get(house, [])
         houses.append({
             "house": house,
-            "live": live,
-            "tenants": [{"bot": s, **({"pinned": True} if p else {})} for s, p in held],
-            "free": not held and backend in live,
+            "live": sorted(state.leases.get(house, {})),
+            "tenants": [{"bot": s if s == slug or s not in hidden else PRIVATE_TENANT,
+                         **({"pinned": True} if p else {})} for s, p in held],
+            "status": state.status(house, backend, held),
         })
     try:
         _backend(row)
@@ -154,8 +216,16 @@ def list_houses(store: Any, slug: str, scan: LeaseScanner) -> dict[str, Any]:
             "houses": houses}
 
 
-def move_in(store: Any, slug: str, house: str | None, scan: LeaseScanner) -> MoveResult:
-    """Claim ``house`` (or any free one) for ``slug``; refuse an occupied one."""
+_REFUSALS = {
+    "occupied": "{house} is occupied; houses are never taken from a tenant",
+    "down": "{house} has no live {backend} bridge; pick a free house from the list",
+    "recycling": "{house} is restarting for a fresh container; try again shortly or pick another",
+    "draining": "{house} is still finishing a turn; try again shortly or pick another",
+}
+
+
+def move_in(store: Any, slug: str, house: str | None, read_state: StateReader) -> MoveResult:
+    """Claim ``house`` (or any free one) for ``slug``; refuse anything not free."""
     from sqlmodel import Session
 
     try:
@@ -165,7 +235,7 @@ def move_in(store: Any, slug: str, house: str | None, scan: LeaseScanner) -> Mov
     _backend(_caller_row(store, slug))  # refuse early, before taking the lock
     with Session(store.engine) as session:
         conn = session.connection()
-        _lock(conn)
+        lock_house_assignments(conn)
         row = _caller_row(store, slug)  # reread under the lock
         backend = _backend(row)
         current = (row.house or "").strip() or None
@@ -175,22 +245,19 @@ def move_in(store: Any, slug: str, house: str | None, scan: LeaseScanner) -> Mov
             raise HouseMoveRefused(
                 "already_housed", f"you live in {current}; move out first", house=current)
         tenants = _tenants(conn)
-        live = {h for h, backends in live_leases(scan).items() if backend in backends}
+        state = read_state()
         if wanted:
-            if tenants.get(wanted):
+            status = state.status(wanted, backend, tenants.get(wanted, []))
+            if status != "free":
                 raise HouseMoveRefused(
-                    "occupied", f"{wanted} is occupied; houses are never taken from a tenant",
-                    house=wanted, tenants=[s for s, _ in tenants[wanted]])
-            if wanted not in live:
-                raise HouseMoveRefused(
-                    "house_unavailable",
-                    f"{wanted} has no live {backend} bridge; pick a free house from the list",
-                    house=wanted)
+                    "house_unavailable" if status == "down" else status,
+                    _REFUSALS[status].format(house=wanted, backend=backend), house=wanted)
             target = wanted
         else:
-            free = sorted(live - set(tenants))
+            free = sorted(h for h in state.leases
+                          if state.status(h, backend, tenants.get(h, [])) == "free")
             if not free:
-                raise HouseMoveRefused("no_free_house", "every live house is occupied")
+                raise HouseMoveRefused("no_free_house", f"no {backend} house is free right now")
             target = free[0]
         store.upsert({
             "slug": slug, "house": target, "house_pinned": False,
@@ -203,24 +270,22 @@ def move_in(store: Any, slug: str, house: str | None, scan: LeaseScanner) -> Mov
 
 
 def move_out(store: Any, slug: str) -> MoveResult:
-    """Vacate ``slug``'s own house. A pinned tenancy is the coordinator's to end."""
+    """Vacate ``slug``'s own house (and the pin bound to it); idempotent in the mansion."""
     from sqlmodel import Session
 
     with Session(store.engine) as session:
         conn = session.connection()
-        _lock(conn)
+        lock_house_assignments(conn)
         row = _caller_row(store, slug)
         _backend(row)  # same eligibility as move-in; others' tenancy is a coordinator's
         current = (row.house or "").strip() or None
         if not current:
             return MoveResult(slug, None, changed=False)
-        if row.house_pinned:
-            raise HouseMoveRefused(
-                "pinned", f"your tenancy of {current} is pinned; ask a coordinator to unpin it",
-                house=current)
+        # Leaving voluntarily ends the tenancy and the pin bound to it, as any
+        # move out of a house already does; nobody else's pin is touched.
         store.upsert({
             "slug": slug, "house": None, "house_pinned": False,
-            "expected_fields": {"house": current, "house_pinned": False},
+            "expected_fields": {"house": current, "house_pinned": bool(row.house_pinned)},
             "_changed_by": f"bot:{slug}", "change_note": "moved itself out of its house",
         }, session=session, require_existing=True)
         remaining = [s for s, _ in _tenants(conn).get(current, []) if s != slug]

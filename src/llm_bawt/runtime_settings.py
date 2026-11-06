@@ -288,6 +288,11 @@ class BotProfileStore:
         now = datetime.now(timezone.utc)
         borrowed = session is not None
         with (nullcontext(session) if borrowed else Session(self.engine)) as session:
+            if "house" in payload:
+                # Every house assignment writer serializes here first (TASK-2118),
+                # so a manual PATCH can't interleave with a self-move's check.
+                from .house_tenancy import lock_house_assignments
+                lock_house_assignments(session.connection())
             if guard is not None:
                 guard.lock(session.connection(), slug)
             # Every profile write reads the row under the bot's tag lock (the one

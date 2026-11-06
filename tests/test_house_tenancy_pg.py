@@ -1,8 +1,9 @@
 """Self-move house tenancy on the real profile store (TASK-2118).
 
-Two bots racing for one house: both wait on the self-move lock, then exactly
-one moves in and the other is refused ``occupied``. The write is audited as the
-bot itself and never pins. Fixture bots only, isolated PostgreSQL.
+Two bots racing for one house: both wait on the house assignment lock, then
+exactly one moves in and the other is refused ``occupied``. A manual profile
+write of ``house`` waits on the same lock, so a self-move sees it. The write
+is audited as the bot itself and never pins. Fixture bots only, isolated PostgreSQL.
 """
 from __future__ import annotations
 
@@ -12,12 +13,16 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 from sqlalchemy import text
 
-from llm_bawt.house_tenancy import HouseMoveRefused, move_in, move_out
+from llm_bawt.house_tenancy import HouseMoveRefused, HouseState, move_in, move_out
 from tests.test_bot_tags_pg import rig, upsert  # noqa: F401
 
 pytestmark = pytest.mark.integration
 
-LIVE = lambda pattern: ["agent:house:h1:lease:claude-code", "agent:house:h2:lease:claude-code"]  # noqa: E731
+
+def LIVE():  # noqa: N802
+    return HouseState(leases={"h1": {"claude-code": "1"}, "h2": {"claude-code": "1"}})
+
+
 _WAITERS = text("""
     SELECT count(*) FROM pg_stat_activity
     WHERE datname = current_database() AND wait_event_type = 'Lock'
@@ -87,3 +92,36 @@ def test_any_free_skips_the_occupied_house_and_move_out_frees_it(rig):  # noqa: 
     assert (out.vacated, out.vacated_empty) == ("h1", True)
     assert store.get("fixture-a").house is None
     assert store.get("fixture-b").house == "h2"
+
+
+def test_a_manual_house_write_takes_the_same_lock_and_a_self_move_then_sees_it(rig):  # noqa: F811
+    store = rig.store()
+    agent(store, "fixture-a")
+    agent(store, "fixture-b")
+    with rig.engine.connect() as holder:
+        holder.execute(text("BEGIN"))
+        holder.execute(text("SELECT pg_advisory_xact_lock(2118, 1)"))
+        pid = holder.execute(text("SELECT pg_backend_pid()")).scalar_one()
+        with ThreadPoolExecutor(1) as pool:
+            manual = pool.submit(store.upsert, {"slug": "fixture-a", "house": "h1"},
+                                 require_existing=True)
+            _wait_for_waiters(rig.engine, pid, 1, [manual])
+            holder.execute(text("ROLLBACK"))
+            manual.result(timeout=10)
+    # A write that doesn't touch house never takes it.
+    with rig.engine.connect() as holder:
+        holder.execute(text("BEGIN"))
+        holder.execute(text("SELECT pg_advisory_xact_lock(2118, 1)"))
+        store.upsert({"slug": "fixture-b", "description": "unrelated"}, require_existing=True)
+        holder.execute(text("ROLLBACK"))
+    with pytest.raises(HouseMoveRefused) as refused:
+        move_in(store, "fixture-b", "h1", LIVE)
+    assert refused.value.code == "occupied"
+
+
+def test_a_pinned_bot_leaves_and_its_pin_goes_with_it(rig):  # noqa: F811
+    store = rig.store()
+    agent(store, "fixture-a", house="h1", house_pinned=True)
+    out = move_out(store, "fixture-a")
+    row = store.get("fixture-a")
+    assert out.vacated == "h1" and row.house is None and row.house_pinned is False

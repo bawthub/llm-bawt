@@ -40,13 +40,14 @@ def _caller(request: Request) -> str:
                             headers=NO_STORE) from exc
 
 
-def _scan(pattern: str) -> list[str]:
+def _state() -> house_tenancy.HouseState:
+    """Read live routing state; an unreadable Redis refuses (503), never guesses."""
     import redis
 
     client = redis.Redis.from_url(get_service().config.REDIS_URL, decode_responses=True,
                                   socket_timeout=2.0, socket_connect_timeout=2.0)
     try:
-        return list(client.scan_iter(match=pattern))
+        return house_tenancy.read_house_state(client)
     finally:
         client.close()
 
@@ -88,14 +89,14 @@ def _after_move(slug: str, result: house_tenancy.MoveResult) -> None:
 @router.get("/v1/houses/self")
 async def list_houses(request: Request):
     slug = _caller(request)
-    return await _run(house_tenancy.list_houses, _store(), slug, _scan)
+    return await _run(house_tenancy.list_houses, _store(), slug, _state)
 
 
 @router.post("/v1/houses/self/move-in")
 async def move_in(request: Request):
     slug = _caller(request)
     body = await read_body(request, MoveIn)
-    result = await _run(house_tenancy.move_in, _store(), slug, body.house, _scan)
+    result = await _run(house_tenancy.move_in, _store(), slug, body.house, _state)
     if result.changed:
         await asyncio.to_thread(_after_move, slug, result)
     return result.as_dict()
