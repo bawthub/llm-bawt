@@ -911,15 +911,20 @@ class ChangedFilesStore:
             # Capture paths may use ~/dev or the absolute mount spelling. Git's
             # tracked repo ID + exact relative path is the canonical identity.
             canonical: dict[tuple[str, str], dict[str, Any]] = {}
+            path_keys: dict[tuple[str, str], tuple[str, str]] = {}
             for file in summary["files"]:
                 key = canonical_key(file)
+                path_keys[(file["repo_key"], file["path"])] = key
                 previous = canonical.get(key)
                 if previous is None or file["created_at"] >= previous["created_at"]:
                     canonical[key] = file
             chains: dict[tuple[str, str], list[TurnChangedFile]] = {}
             for row in selected:
-                proof = evidence[(row.turn_id, row.repo_key, row.path)]
-                chains.setdefault(canonical_key(proof), []).append(row)
+                # Evidence may be absent on older/budget-exceeded rows. Every
+                # row feeding a merged path must follow that path's final key,
+                # never split into a partial chain based on its own evidence.
+                key = path_keys[(row.repo_key, row.path)]
+                chains.setdefault(key, []).append(row)
             for key, chain in chains.items():
                 snapshots = [evidence[(row.turn_id, row.repo_key, row.path)] for row in chain]
                 if _net_zero_chain(snapshots) and not foreign_change_since(chain):

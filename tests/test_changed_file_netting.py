@@ -188,3 +188,43 @@ def test_committed_intermediate_snapshot_is_not_cancelled_by_later_revert(store,
         files[0]["commit_state"] = "committed"
     monkeypatch.setattr(changed_file_commits, "reconcile_files", proof)
     assert summary(store)[0]["total_files"] == 1
+
+
+@pytest.mark.parametrize("evidence_index", [0, 1])
+def test_partial_commit_evidence_cannot_split_a_paths_real_change(store, monkeypatch, evidence_index):
+    """Descriptor caps/budgets may resolve only one row of the same raw path."""
+    from llm_bawt.service import changed_file_commits
+
+    _conversation(store, session_id="s")
+    save(store, "first", "A", "B")
+    save(store, "second", "B", "C")
+    store.save_turn_files(turn_id="second", bot_id="b", user_id="u", trigger_message_id="second",
+                          files=[_mod("same.py", "C", "B")])
+
+    def proof(files):
+        for index, file in enumerate(files):
+            file["commit_evidence"] = (
+                {"repo_id": "registered", "repo_path": "same.py"}
+                if index == evidence_index else {"state": "unknown", "reason": "verification_budget_exceeded"}
+            )
+    monkeypatch.setattr(changed_file_commits, "reconcile_files", proof)
+    pending, _ = summary(store)
+    assert pending["total_files"] == 1  # session A→B, not the last turn's B→B
+    assert pending["files"][0]["turn_id"] == "second"
+    assert len(pending["history_files"]) == 2
+
+
+@pytest.mark.parametrize("evidence_index", [0, 1])
+def test_partial_commit_evidence_still_nets_complete_revert(store, monkeypatch, evidence_index):
+    from llm_bawt.service import changed_file_commits
+
+    _conversation(store, session_id="s")
+    save(store, "first", "A", "B")
+    save(store, "last", "B", "A")
+
+    def proof(files):
+        files[evidence_index]["commit_evidence"] = {"repo_id": "registered", "repo_path": "same.py"}
+    monkeypatch.setattr(changed_file_commits, "reconcile_files", proof)
+    pending, _ = summary(store)
+    assert pending["total_files"] == 0
+    assert len(pending["history_files"]) == 2
