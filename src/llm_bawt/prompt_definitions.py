@@ -790,7 +790,7 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
             "each running turn a quiesce ops job holds, at the next tool boundary "
             "(priority next: running tools are never killed). It must ask the bot to "
             "reach a safe stopping point and end its turn, not start new work or poll, "
-            "and may invite an ops_quiesce_ack. TASK-2121: it carries Nick's verbatim "
+            "and may invite an ops_quiesce_ack. TASK-2121: it carries the user's verbatim "
             "definition of a \"finished\" ack (no resume; note required), identical to the "
             "ops_quiesce_ack status description. Sent once per held run, from system. "
             "Used verbatim; a blank body falls back to the seed. Target-bot overrides supported."

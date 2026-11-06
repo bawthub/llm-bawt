@@ -39,7 +39,7 @@ DEFAULT_END_TURN_NO_RECEIPT = (
     "later turn."
 )
 
-# TASK-2121: Nick's definition of the "finished" ack, verbatim. It appears in
+# TASK-2121: the user's definition of the "finished" ack, verbatim. It appears in
 # the quiesce request below, the ops_quiesce_ack status description and
 # bawthub-ops/SKILL.md; keep the three identical.
 FINISHED_DEFINITION = (

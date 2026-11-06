@@ -281,7 +281,7 @@ async def ops_quiesce_ack(status: QuiesceAckStatus, note: QuiesceAckNote = None)
     """Answer a quiesce request for your current turn.
 
     An operation is waiting for your turn to end before it runs. ``"finished"``:
-    nothing is left to resume (TASK-2121; Nick's definition is in the catalog description), so you are
+    nothing is left to resume (TASK-2121; the user's definition is in the catalog description), so you are
     not woken when the operation ends; it needs a ``note`` naming what wakes
     you next. ``"stopping"``: you pause mid-work and are resumed with your note.
     ``"cannot_stop"``: you cannot stop safely; the note says why.
