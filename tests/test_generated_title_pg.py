@@ -96,3 +96,49 @@ def test_wrong_user_is_not_touched(engine):
     _session(engine, "s8", {}, [("m1", "user", "hello")])
     assert generate_session_title(engine, "s8", "bot-a", "someone-else", "m1", "hello", Model("Hello")) is None
     assert _meta(engine, "s8") == {}
+
+
+def test_marker_only_first_message_releases_the_attempt(engine):
+    """Codex r1: ``###`` first must not consume the session's one attempt."""
+    import llm_bawt.service.dependencies as deps
+    from llm_bawt.sessions import generated_title as gt
+
+    _session(engine, "s9", {}, [("m0", "user", "###")])
+    released = []
+    model = Model("Unused")
+    assert generate_session_title(engine, "s9", "bot-a", "nick", "m0", "###", model,
+                                  on_no_eligible=lambda: released.append(True)) is None
+    assert released == [True] and model.calls == []
+
+    # Real scheduler, threads run inline: ### then the first real question.
+    class Inline:
+        def __init__(self, target, **_):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    calls = []
+    orig = gt.generate_session_title
+
+    def spy(*a, **kw):
+        calls.append(a[4])
+        return orig(*a, **{**kw, "complete": Model("Git rebase question")})
+
+    mp = pytest.MonkeyPatch()
+    try:
+        mp.setattr(gt.threading, "Thread", Inline)
+        mp.setattr(gt, "generate_session_title", spy)
+        mp.setattr(deps, "_service", object())
+        mp.setattr(gt, "_attempted", set())
+        _session(engine, "s10", {}, [("q0", "user", "###")])
+        gt.schedule_session_title(engine, session_id="s10", bot_id="bot-a", user_id="nick",
+                                  message_id="q0", content="###")
+        with engine.begin() as conn:
+            conn.execute(text("INSERT INTO messages VALUES ('bota','q1','user','How do I rebase?',5,'s10')"))
+        gt.schedule_session_title(engine, session_id="s10", bot_id="bot-a", user_id="nick",
+                                  message_id="q1", content="How do I rebase?")
+    finally:
+        mp.undo()
+    assert calls == ["q0", "q1"]
+    assert _meta(engine, "s10")["title"] == "Git rebase question"

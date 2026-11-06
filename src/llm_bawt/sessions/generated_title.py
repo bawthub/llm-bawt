@@ -125,10 +125,18 @@ def store_generated_title(conn, session_id: str, bot_id: str, user_id: str | Non
 
 
 def generate_session_title(engine, session_id: str, bot_id: str, user_id: str | None,
-                           message_id: str, content: str, complete=None) -> str | None:
-    """Generate and store a title if ``message_id`` is the session's first message."""
+                           message_id: str, content: str, complete=None,
+                           on_no_eligible=None) -> str | None:
+    """Generate and store a title if ``message_id`` is the session's first message.
+
+    ``on_no_eligible`` runs when the session has no eligible message yet (this
+    one was marker-only, e.g. ``###``), so a later first eligible message
+    still gets its attempt.
+    """
     with engine.connect() as conn:
         row = _first_message(conn, session_id, bot_id, user_id)
+    if row is not None and row["fm_id"] is None and not row["given"] and on_no_eligible:
+        on_no_eligible()
     if row is None or row["given"] or row["fm_id"] != message_id:
         return None
 
@@ -169,9 +177,14 @@ def schedule_session_title(engine, *, session_id: str | None, bot_id: str,
                 return
             _attempted.add(session_id)
 
+        def _release():
+            with _attempted_lock:
+                _attempted.discard(session_id)
+
         def _run():
             try:
-                generate_session_title(engine, session_id, bot_id, user_id, message_id, content)
+                generate_session_title(engine, session_id, bot_id, user_id, message_id, content,
+                                       on_no_eligible=_release)
             except Exception as error:  # cosmetic; type only, never message text
                 logger.warning("session title failed for %s (%s)", session_id,
                                type(error).__name__)
