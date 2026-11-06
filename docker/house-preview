@@ -1,0 +1,21 @@
+#!/bin/sh
+# Run the existing frontend pair in a task-local checkout, not another llm app.
+set -eu
+if [ "$#" -ne 1 ] || [ ! -f "$1/package.json" ]; then
+    printf '%s\n' 'usage: house-preview /absolute/task/worktree/frontend' >&2
+    exit 2
+fi
+case "$1" in /*) ;; *) printf '%s\n' 'frontend path must be absolute' >&2; exit 2 ;; esac
+: "${BAWT_HOUSE:?house-preview requires a house slot}"
+: "${BAWTHUB_AUTH_URL:?configure the house public origin}"
+: "${DATABASE_URL:?configure the shared frontend database}"
+if [ "${BAWTHUB_AUTH_SESSIONS:-}" != on ]; then
+    printf '%s\n' 'house previews require BAWTHUB_AUTH_SESSIONS=on' >&2
+    exit 2
+fi
+cd "$1"
+# No install, migration, db push, generated schema change or backend app startup.
+# A second preview fails instead of silently moving to another port.
+exec pnpm exec concurrently --kill-others \
+    'vite --host 0.0.0.0 --port 5173 --strictPort' \
+    'tsx watch server/index.ts'

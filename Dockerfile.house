@@ -1,0 +1,20 @@
+# A house adds test dependencies to the SAME harness image used by the mansion.
+# Pin AGENT_BRIDGE_IMAGE to the deployed bridge image for a deployment build.
+ARG AGENT_BRIDGE_IMAGE=llm-bawt-agent-bridge
+FROM ${AGENT_BRIDGE_IMAGE}
+
+USER root
+# Do not change the lean harness environment or its pinned SDKs. pytest and the
+# full CPU-only application/test dependencies live in a separate environment.
+COPY pyproject.toml README.md LICENSE /app/
+RUN uv venv /opt/house-tests \
+    && uv pip install --python /opt/house-tests/bin/python -e "/app[dev,service,mcp,search]" \
+    && ln -s /opt/house-tests/bin/pytest /usr/local/bin/pytest \
+    && chown -R bridge:bridge /opt/house-tests
+COPY docker/house-preview /usr/local/bin/house-preview
+RUN chmod 0755 /usr/local/bin/house-preview
+USER bridge
+RUN pytest --version && node --version && pnpm --version \
+    && python -c "import claude_code_bridge, codex_bridge"
+# Pool configuration chooses the harness command, never a model.
+CMD ["python", "-m", "claude_code_bridge"]

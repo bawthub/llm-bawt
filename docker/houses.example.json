@@ -1,0 +1,10 @@
+{
+  "image": "llm-bawt-house:local",
+  "base_image": "llm-bawt-agent-bridge",
+  "memory": "4g",
+  "cgroup_parent": "",
+  "preview_network": "bawthub_default",
+  "service_token_volume": "llm-bawt-bawthub-service-token",
+  "frontend_env_file": "/absolute/deployment/private/house-frontend.env",
+  "houses": []
+}
