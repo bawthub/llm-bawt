@@ -148,6 +148,8 @@ services:
     # TASK-2072: init reaps orphaned test children; 0 or unset = no memory cap.
     init: true
     mem_limit: ${CLAUDE_CODE_BRIDGE_MEM_LIMIT:-0}
+    # TASK-2076: optional host parent cgroup/slice; empty = Docker default.
+    cgroup_parent: ${AGENTS_CGROUP_PARENT:-}
     env_file:
       - ./.env
     environment:

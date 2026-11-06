@@ -251,6 +251,10 @@ services:
     # The memory cap is deployment data (.env); 0 or unset means unlimited.
     init: true
     mem_limit: ${CLAUDE_CODE_BRIDGE_MEM_LIMIT:-0}
+    # TASK-2076: optional parent cgroup (e.g. a host systemd slice with an
+    # aggregate MemoryMax). Empty/unset = Docker's default; the slice must
+    # exist on the host before you set it.
+    cgroup_parent: ${AGENTS_CGROUP_PARENT:-}
     # TASK-1476: no env_file (see the app). z.ai and Kimi keys come from the
     # app broker (records); their env names are no longer passed.
     environment:
@@ -359,6 +363,7 @@ services:
     # TASK-2072: see claude-code-bridge (init + .env memory cap).
     init: true
     mem_limit: ${CODEX_BRIDGE_MEM_LIMIT:-0}
+    cgroup_parent: ${AGENTS_CGROUP_PARENT:-}  # TASK-2076: see claude-code-bridge
     # TASK-1476: no env_file. Codex reads nothing else from .env (it scrubs
     # OPENAI_API_KEY anyway: codex_bridge/transport.py).
     environment:
@@ -584,6 +589,7 @@ services:
     # TASK-2072: init reaps orphaned Chrome children; .env memory cap, 0 = unlimited.
     init: true
     mem_limit: ${PLAYWRIGHT_MCP_MEM_LIMIT:-0}
+    cgroup_parent: ${AGENTS_CGROUP_PARENT:-}  # TASK-2076: see claude-code-bridge
     ports:
       - "${PLAYWRIGHT_MCP_PORT:-8931}:8931"
     # Token-cost guard:
