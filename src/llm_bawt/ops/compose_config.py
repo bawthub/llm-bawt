@@ -124,13 +124,13 @@ PINNED_PROFILE = ServiceProfile("pinned", SERVICE_KEYS, built=False, models_proc
 BUILT_PROFILE = ServiceProfile("built", frozenset({
     "build", "command", "container_name", "depends_on", "entrypoint", "environment", "extra_hosts", "healthcheck",
     "image", "init", "labels", "networks", "ports", "pull_policy", "restart", "security_opt", "stdin_open", "tmpfs",
-    "tty", "volumes", *MEMORY_KEYS}), built=True, models_process=True, pull_policies=BUILT_PULL_POLICIES)
+    "tty", "volumes", "cgroup_parent", *MEMORY_KEYS}), built=True, models_process=True, pull_policies=BUILT_PULL_POLICIES)
 # TASK-1476: a third-party image run by a mutable tag (crawl4ai). The rendered
 # ``image`` must equal the declared tag; the reconcile swaps to the RUNNING
 # image ID, so the tag is never re-resolved. Its healthcheck is the image's.
 PINNED_PROCESS_PROFILE = ServiceProfile("pinned-process", SERVICE_KEYS | {
-    "container_name", "depends_on", "init", "ports", "tmpfs", *MEMORY_KEYS}, built=False, models_process=True,
-    pull_policies=PULL_POLICIES)
+    "container_name", "depends_on", "init", "ports", "tmpfs", "cgroup_parent", *MEMORY_KEYS}, built=False,
+    models_process=True, pull_policies=PULL_POLICIES)
 # TASK-1169: the ops reconciler is a pinned-image Compose service, not a
 # build or a mutable tag. Its internal exposed ports and stop grace period
 # must be owned by this profile rather than silently inherited from the old
@@ -161,6 +161,15 @@ HARDENED_PROFILE = ServiceProfile("pinned-hardened", SERVICE_KEYS | HARDENING_KE
 # TASK-2088: worker image label proving it models ``init`` and the memory cap
 # on the built and mutable-tag kinds, and a lone ``mem_limit``.
 INIT_MEMORY_PROFILE_LABEL = "llm-bawt.ops.init-memory-profile"
+# TASK-2076: worker image label proving it models ``cgroup_parent`` (an
+# optional host slice, e.g. agents.slice) on the built and mutable-tag kinds.
+CGROUP_PARENT_PROFILE_LABEL = "llm-bawt.ops.cgroup-parent-profile"
+
+
+def needs_cgroup_parent_worker(desired: dict, drift_names=()) -> bool:
+    """Would a worker built before TASK-2076 refuse this desired configuration
+    or miss this drift (it never computes ``cgroup_parent:~``)?"""
+    return "cgroup_parent" in desired or "cgroup_parent:~" in drift_names
 
 
 def needs_init_memory_worker(desired: dict, profile: ServiceProfile, drift_names=()) -> bool:
@@ -502,6 +511,10 @@ def _process(service: dict, spec: dict, mounts: dict) -> dict:
         process["tmpfs"] = tmpfs
     if service.get("init") is not None:  # TASK-2088
         process["init"] = _flag(service["init"], "init")
+    if service.get("cgroup_parent"):  # TASK-2076: empty/unset is Docker's default
+        if not isinstance(service["cgroup_parent"], str):
+            raise ComposeError("unsupported_compose_key", ["cgroup_parent"])
+        process["cgroup_parent"] = service["cgroup_parent"]
     if "expose" in service:
         process["expose"] = _exposed(service["expose"])
     if "stop_grace_period" in service:
@@ -641,6 +654,7 @@ def running(container: dict) -> dict:
             "tmpfs": dict(sorted((host.get("Tmpfs") or {}).items())),
             "expose": sorted((config.get("ExposedPorts") or {}).keys()),
             "stop_timeout": config.get("StopTimeout"), "init": bool(host.get("Init")),
+            "cgroup_parent": host.get("CgroupParent") or "",
             "memory": {"Memory": int(host.get("Memory") or 0), "MemorySwap": int(host.get("MemorySwap") or 0)},
             "hardening": _running_hardening(host)}
 
@@ -707,6 +721,9 @@ def drift(desired: dict, actual: dict) -> list[str]:
         # TASK-2088: an init the service does not declare is removed too.
         if desired.get("init", False) != actual.get("init", False):
             names.append("init:~")
+        # TASK-2076: likewise an undeclared parent cgroup.
+        if desired.get("cgroup_parent", "") != actual.get("cgroup_parent", ""):
+            names.append("cgroup_parent:~")
     # TASK-1649: only a profile that owns the memory cap compares it.
     if "memory" in desired and not _memory_matches(desired["memory"], actual["memory"]):
         names.append("memory:~")
@@ -815,6 +832,7 @@ def apply_desired(body: dict, old: dict, desired: dict, *, container_name: str, 
         host["SecurityOpt"] = list(desired.get("security_opt", [])) or None
         host["Tmpfs"] = dict(desired.get("tmpfs", {})) or None
         host["Init"] = desired.get("init")  # undeclared: the daemon's default
+        host["CgroupParent"] = desired.get("cgroup_parent", "")  # TASK-2076: "" = Docker's default
     if "memory" in desired:
         host["Memory"], host["MemorySwap"] = desired["memory"]["Memory"], desired["memory"]["MemorySwap"]
     if "hardening" in desired:

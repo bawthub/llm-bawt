@@ -55,4 +55,6 @@ LABEL llm-bawt.ops.tagged-guard="1"
 # TASK-2088: ...and models init and the memory cap on the built and
 # mutable-tag kinds (the agent bridges, playwright-mcp), plus a lone mem_limit.
 LABEL llm-bawt.ops.init-memory-profile="1"
+# TASK-2076: ...and models cgroup_parent (an optional host slice) on those kinds.
+LABEL llm-bawt.ops.cgroup-parent-profile="1"
 ENTRYPOINT ["python3", "-I", "/ops/worker.py"]

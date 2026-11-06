@@ -20,8 +20,9 @@ from .app_config_reconcile import (ACTION as APP_CONFIG_ACTION, BUILT_PROFILE_LA
                                    SOURCE_GUARD_LABEL, WORKER_CAPABILITY_LABEL as APP_CONFIG_WORKER_LABEL,
                                    app_config_binding, uses_process_profile, validate_app_spec)
 from .compose_config import (BUILT_PROFILE, DEV_PROFILE, HARDENED_PROFILE, HARDENED_PROFILE_LABEL,
-                             INIT_MEMORY_PROFILE_LABEL, PINNED_PROCESS_PROFILE, evaluate,
-                             needs_init_memory_worker, selected_profile)
+                             CGROUP_PARENT_PROFILE_LABEL, INIT_MEMORY_PROFILE_LABEL, PINNED_PROCESS_PROFILE,
+                             evaluate, needs_cgroup_parent_worker, needs_init_memory_worker,
+                             selected_profile)
 # TASK-1169 S4: the error/result types live in executor_types; re-exported here.
 from .executor_types import (ConfigCheckError, DispatchResult, ExecutorError,  # noqa: F401
                              QuiesceFenceUnsupported, ReconcileResult)
@@ -562,6 +563,9 @@ class DockerExecutor(Executor):
                 # TASK-2088: likewise for init and the memory cap.
                 self._check_config_worker(self.execution_settings(spec), spec["action"],
                                           extra=(INIT_MEMORY_PROFILE_LABEL,))
+            if needs_cgroup_parent_worker(desired, binding.get("drift") or ()):  # TASK-2076
+                self._check_config_worker(self.execution_settings(spec), spec["action"],
+                                          extra=(CGROUP_PARENT_PROFILE_LABEL,))
             return binding, desired, container
         except ComposeError as exc:  # fixed code and names only
             raise ConfigCheckError(exc.code, f"config target cannot be bound: {exc}") from exc
@@ -596,6 +600,9 @@ class DockerExecutor(Executor):
             # TASK-2088: the image deploy's worker re-checks with its own parser.
             self._check_config_worker(self.execution_settings(spec), spec["action"],
                                       extra=(INIT_MEMORY_PROFILE_LABEL,))
+        if needs_cgroup_parent_worker(result["desired"], result["drift"]):  # TASK-2076
+            self._check_config_worker(self.execution_settings(spec), spec["action"],
+                                      extra=(CGROUP_PARENT_PROFILE_LABEL,))
         if result["drift"]:
             raise ConfigCheckError("config_drift", (
                 "config_drift: the running target differs from its Compose service ("
