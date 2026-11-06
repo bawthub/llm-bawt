@@ -10,8 +10,11 @@ a client drops events with ``seq <= snapshot.seq`` and refetches once on a gap:
   house/pin write) or ``route`` (the house's lease came or went; no write).
   Neither moves a turn already running: that stays where it was admitted.
   ``version`` is the bot's committed location version (see :func:`version_of`):
-  frames can arrive out of commit order, so a client applies a frame only when
-  its ``version`` is at least the one it holds for that bot (snapshot included).
+  frames can arrive out of commit order. A client holds one version per bot
+  (from the snapshot or the last frame applied) and applies an ``assignment``
+  frame only when its version is greater, a ``route`` frame when it is at least
+  equal: a route frame is the newer lease news for that committed assignment,
+  while an assignment frame's route was read once, possibly before it.
 * ``house_state_changed {event_id, seq, ts, house_id, from, to, tenants}``;
   states are ``up`` / ``down`` / ``recreating``.
 
@@ -135,6 +138,26 @@ def visibility(config: Any = None):
         log.warning("campus visibility: no engine", exc_info=True)
     snapshot = BotTags(engine).snapshot()
     return lambda slug: snapshot.excluded_reason(slug) is None
+
+
+CAMPUS_FRAME_TYPES = frozenset({BOT_LOCATION_CHANGED, HOUSE_STATE_CHANGED})
+
+
+def redact_for_delivery(frame: dict, shown) -> dict | None:
+    """A stored Campus frame as it may be delivered now (None: drop it).
+
+    Replays can outlive a bot's visibility, so delivery re-applies the policy;
+    ``shown`` None (policy unreadable) drops location frames and every tenant name.
+    """
+    if frame.get("_type") == BOT_LOCATION_CHANGED:
+        return frame if shown is not None and shown(frame.get("bot_id")) else None
+    if frame.get("_type") == HOUSE_STATE_CHANGED:
+        tenants = list(frame.get("tenants") or [])
+        visible = [t for t in tenants if shown is not None and shown(t)]
+        return {**frame, "tenants": visible,
+                "hidden_tenants": int(frame.get("hidden_tenants") or 0)
+                + len(tenants) - len(visible)}
+    return frame
 
 
 def location_frame(bot_id: str, before: dict, after: dict, reason: str,

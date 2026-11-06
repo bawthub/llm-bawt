@@ -194,6 +194,47 @@ def test_route_frames_carry_the_row_version():
     assert frame["version"] == ce.version_of(row) == int(stamp.timestamp() * 1_000_000)
 
 
+def apply_frames(held: dict, frames: list[dict]) -> dict:
+    """The documented client rule: assignment needs a greater version, route an equal one."""
+    for frame in frames:
+        version = held.get("version", 0)
+        if frame["version"] > version or (frame["kind"] == ce.ROUTE and frame["version"] == version):
+            held = frame
+    return held
+
+
+def test_stale_assignment_route_cannot_undo_a_newer_lease_route():
+    """Assignment at V read h1 live, then paused; h1 expired and its route frame at V went first."""
+    from datetime import datetime, timezone
+    stamp = datetime(2026, 11, 6, tzinfo=timezone.utc)
+    row = SimpleNamespace(slug="b", house="h1", house_pinned=False, updated_at=stamp, **AGENT)
+    v = ce.version_of(row)
+    snapshot = {"kind": ce.ASSIGNMENT, "version": v - 1, "to": {"runtime": "claude-code-bridge"}}
+    route = frames_for([("h1", UP, DOWN)], lambda house: [row])[1]
+    late = ce.location_frame("b", fields(), fields("h1"), "", {LEASE_H1: True}, v)
+    held = apply_frames(snapshot, [route, late])
+    assert held["to"]["runtime"] == "claude-code-bridge" and held["to"]["house_live"] is False
+    # In order, the later lease news still applies at the same version.
+    assert apply_frames(snapshot, [late, route]) == route
+    back = frames_for([("h1", DOWN, UP)], lambda house: [row])[1]
+    assert apply_frames(snapshot, [late, route, back])["to"]["runtime"] == "house"
+
+
+def test_delivery_redacts_frames_of_bots_hidden_since_publication():
+    shown = lambda slug: slug != "gone"  # noqa: E731
+    frame = {"_type": "bot_location_changed", "bot_id": "gone", "seq": 3}
+    assert ce.redact_for_delivery(frame, shown) is None
+    assert ce.redact_for_delivery({**frame, "bot_id": "ok"}, shown)["bot_id"] == "ok"
+    house = {"_type": "house_state_changed", "tenants": ["gone", "ok"], "hidden_tenants": 1}
+    assert ce.redact_for_delivery(house, shown) == {
+        "_type": "house_state_changed", "tenants": ["ok"], "hidden_tenants": 2}
+    # Unreadable policy: fail closed.
+    assert ce.redact_for_delivery({**frame, "bot_id": "ok"}, None) is None
+    assert ce.redact_for_delivery(house, None)["tenants"] == []
+    other = {"_type": "bot_profile_changed", "bot_id": "gone"}
+    assert ce.redact_for_delivery(other, None) == other
+
+
 # --- publication: visibility and committed versions ----------------------------
 
 class _Redis:
@@ -231,10 +272,7 @@ def test_late_publication_is_older_by_version(monkeypatch):
     monkeypatch.setattr(ce, "visibility", lambda config=None: lambda slug: True)
     ce.emit_tenancy_changes([("b", fields("h1"), fields("h2"), "", 2)])
     ce.emit_tenancy_changes([("b", fields(), fields("h1"), "", 1)])
-    held: dict = {}
-    for frame in client.added:  # the documented client rule
-        if frame["version"] >= held.get("version", 0):
-            held = frame
+    held = apply_frames({}, client.added)
     assert held["to"]["house"] == "h2"
     assert [f["seq"] for f in client.added] == [1, 2]
 
@@ -264,16 +302,24 @@ def test_active_uses_the_executing_request_record_only():
         "agent:turn:req:r2": "agent:commands:house:h2",
         "agent:turn:req:r3": "agent:commands",
     }
-    rows = [_bot("a", "h2"), _bot("b"), _bot("c", "h1"), _bot("d", "h1"), _bot("e"), _bot("f")]
+    from datetime import datetime, timedelta, timezone
+    t0 = datetime(2026, 11, 6, tzinfo=timezone.utc)
+    rows = [_bot("a", "h2"), _bot("b"), _bot("c", "h1"), _bot("d", "h1"), _bot("e"), _bot("f"),
+            _bot("g")]
+    for row in rows:
+        row.updated_at = t0
+    rows[-1].updated_at = t0 + timedelta(seconds=5)  # g released its house mid-turn
     turns = {"a": {"kind": "executing", "request_id": "r2"},
-             "b": {"kind": "executing", "request_id": "new"},
+             "b": {"kind": "executing", "request_id": "new", "created_at": t0 + timedelta(1)},
+             "g": {"kind": "executing", "request_id": "housed", "created_at": t0 + timedelta(seconds=1)},
              "c": {"kind": "executing", "request_id": "r3"},
              "d": {"kind": "executing", "request_id": "gone"},
              "e": {"kind": "idle"},
              "f": {"kind": "ambiguous"}}
     out = asyncio.run(_active(_TurnRedis(records), rows, turns))
     assert out["a"] == {"runtime": "house", "house": "h2"}
-    assert out["b"] == {"runtime": "claude-code-bridge"}  # unhoused, unrecorded: mansion
+    assert out["b"] == {"runtime": "claude-code-bridge"}  # unhoused since before admission
+    assert out["g"] == "unknown"  # assignment changed after admission: no proof
     assert out["c"] == {"runtime": "claude-code-bridge"}  # recorded fallback
     assert out["d"] == "unknown"  # housed but no record: not trustworthy
     assert out["e"] is None and out["f"] == "unknown"

@@ -12,6 +12,8 @@ from typing import List
 
 from agent_bridge.subscriber import RedisSubscriber
 
+from ...campus_events import CAMPUS_FRAME_TYPES, redact_for_delivery
+from ...campus_events import visibility as campus_visibility
 from ..dependencies import get_service
 from ..logging import get_service_logger
 
@@ -162,6 +164,16 @@ async def _unified_event_stream(
                     if receipt is None:
                         continue
                     event_data = receipt
+                elif event_data.get("_type") in CAMPUS_FRAME_TYPES:
+                    # TASK-2120: same rule for Campus frames, re-read at delivery.
+                    try:
+                        shown = await asyncio.to_thread(campus_visibility, get_service().config)
+                    except Exception:
+                        log.exception("Campus visibility check failed")
+                        shown = None
+                    event_data = redact_for_delivery(event_data, shown)
+                    if event_data is None:
+                        continue
                 yield _sse("event", {**event_data, "replayed": replayed, **({"cursor": cursor} if cursor else {})})
 
             now = asyncio.get_running_loop().time()
