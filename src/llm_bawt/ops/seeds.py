@@ -149,7 +149,7 @@ _LLM_BAWT_SEEDS: list[dict[str, Any]] = [
         "slug": "llm-bawt.restart-bridge",
         "title": "Restart an agent bridge",
         "description": (
-            "Restart claude-code-bridge or codex-bridge. HIGH "
+            "Restart claude-code-bridge. HIGH "
             "risk: kills active agent sessions hosted by that bridge. Requires "
             "explicit operator approval each time."
         ),
@@ -166,7 +166,7 @@ _LLM_BAWT_SEEDS: list[dict[str, Any]] = [
             {
                 "bridge": {
                     "type": "string",
-                    "enum": ["claude-code-bridge", "codex-bridge"],
+                    "enum": ["claude-code-bridge"],
                 }
             },
             required=["bridge"],
@@ -183,7 +183,7 @@ _LLM_BAWT_SEEDS: list[dict[str, Any]] = [
         "quiesce_timeout_seconds": 600,
         "quiesce_scope_json": json.dumps({
             "backend_from_arg": "bridge",
-            "map": {"claude-code-bridge": "claude-code", "codex-bridge": "codex"},
+            "map": {"claude-code-bridge": "claude-code"},
         }, sort_keys=True),
     },
     {
@@ -770,14 +770,6 @@ _CONFIG_SEEDS: list[dict[str, Any]] = [{
         "approval_prompt_prefix": f"Reconcile {bridge} configuration with the same image (KILLS ACTIVE AGENTS)",
     }
     for bridge, port, data_mounts, env_names in (
-        ("codex-bridge", 8682,
-         ["/app/.logs", "/home/bridge/dev", "/home/bridge/.codex/config.toml", "/home/bridge/.codex/sessions",
-          "/home/bridge/.ssh", "/opt/agent-skills/bin", "/run/llm-bawt-bridge-tokens"],
-         ["BAWT_WT_DEV_ROOT", "BRIDGE_BROKER_TOKEN_FILE", "BRIDGE_GIT_CREDENTIAL_TOKEN_FILE", "CODEX_BACKEND_NAME",
-          "CODEX_BAWTHUB_MCP_URL", "CODEX_BRIDGE_CWD", "CODEX_BRIDGE_HEALTH_PORT", "CODEX_BRIDGE_LOG_LEVEL",
-          "CODEX_BRIDGE_REQUEST_TIMEOUT", "CODEX_CRAWL4AI_MCP_URL", "CODEX_DEV_ROOT", "CODEX_HOME",
-          "CODEX_LOCAL_PLUGINS_ENABLED", "CODEX_LOCAL_PLUGINS_SRC", "CODEX_MODEL", "CRAWL4AI_API_TOKEN_FILE",
-          "LLM_BAWT_API_URL", "LLM_BAWT_SERVICE_HOST", "REDIS_URL"]),
         ("claude-code-bridge", 8681,
          ["/app/.logs", "/home/bridge/dev", "/home/bridge/.claude", "/home/bridge/.claude.json",
           "/home/bridge/.ssh", "/etc/ssh/ssh_config", "/opt/agent-skills/bin", "/run/llm-bawt-bridge-tokens"],
@@ -929,7 +921,7 @@ _PLAN_SEEDS: list[dict[str, Any]] = [{
     "slug": "llm-bawt.cutover-plan",
     "title": "Cut over llm-bawt services to their declared configuration",
     "description": (
-        "Recreate the app, Crawl4AI, the codex bridge and the claude-code bridge in that order, each at "
+        "Recreate the app, Crawl4AI and the claude-code bridge in that order, each at "
         "its SAME image and each only after the previous one is verified. Approval shows every target's "
         "own card plus how each stored credential is carried over (migrated, kept in env, unconfigured or "
         "an accepted loss); a credential the app would lose without a stored record refuses unless named "
@@ -943,7 +935,7 @@ _PLAN_SEEDS: list[dict[str, Any]] = [{
     "command_script": _spec(
         action="reconcile_service_plan",
         targets=["llm-bawt.reconcile-app-config", "llm-bawt.reconcile-crawl4ai-config",
-                 "llm-bawt.reconcile-codex-bridge-config", "llm-bawt.reconcile-claude-code-bridge-config"],
+                 "llm-bawt.reconcile-claude-code-bridge-config"],
         records_target="llm-bawt.reconcile-app-config",
         probes=[{"id": "crawl4ai_bearer", "target": "llm-bawt.reconcile-app-config"},
                 {"id": "web_fetch", "target": "llm-bawt.reconcile-app-config"},

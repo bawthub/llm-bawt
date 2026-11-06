@@ -20,7 +20,7 @@ def _compose_names(service: str) -> set[str]:
     return {item.split("=", 1)[0] for item in env}
 
 
-@pytest.mark.parametrize("bridge", ["codex-bridge", "claude-code-bridge"])
+@pytest.mark.parametrize("bridge", ["claude-code-bridge"])
 def test_bridge_seed_classifies_every_compose_env_name(bridge):
     seed = next(s for s in SEEDS if s["slug"] == f"llm-bawt.reconcile-{bridge}-config")
     spec = seed["command_script"]

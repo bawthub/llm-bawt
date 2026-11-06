@@ -89,7 +89,6 @@ def test_effective_dev_account_mount_preserved(config):
     dev = yaml.safe_load((ROOT / "docker-compose.dev.yml").read_text())
     account = "${BRIDGE_GIT_CONFIG_DIR:-${HOME}/.config/bawthub-git/bridge}:/home/bridge/.config/bawthub-git:ro"
     assert account in dev["services"]["claude-code-bridge"]["volumes"]
-    assert account in dev["services"]["codex-bridge"]["volumes"]
     for service in render_compose(config, ROOT / "docker-compose.yml")["services"].values():
         assert account in service["volumes"]
 

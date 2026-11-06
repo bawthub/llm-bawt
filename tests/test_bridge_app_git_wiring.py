@@ -81,7 +81,7 @@ def test_missing_app_helper_refuses_without_native_fallback(dispatch, monkeypatc
     assert capsys.readouterr().err == "gh: configured GitHub command is unavailable\n"
 
 
-@pytest.mark.parametrize("name", ["codex-bridge", "claude-code-bridge"])
+@pytest.mark.parametrize("name", ["claude-code-bridge"])
 def test_bridge_overlay_keeps_image_path_and_no_git_env(name):
     service = yaml.safe_load((ROOT / "docker-compose.dev.yml").read_text())["services"][name]
     env = service.get("environment", {})

@@ -175,7 +175,7 @@ def test_every_source_mounted_service_keeps_bytecode_out_of_the_checkout():
         name for name, service in _services(overlay).items()
         if any(str(v).split(":")[0] == "./src" for v in service.get("volumes") or [])
     }
-    assert {"app", "claude-code-bridge", "codex-bridge"} <= mounted
+    assert {"app", "claude-code-bridge"} <= mounted
     services = _services(ROOT / "docker-compose.yml")
     missing = sorted(
         name for name in mounted

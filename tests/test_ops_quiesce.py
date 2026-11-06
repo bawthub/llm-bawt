@@ -100,8 +100,13 @@ def test_restart_bridge_seed_scopes_the_named_bridge_and_starts_disabled():
     assert seed["quiesce_enabled"] is False
     schema = json.loads(seed["args_schema_json"])
     validate_quiesce_settings(_op(quiesce_scope_json=seed["quiesce_scope_json"]), schema)
-    for bridge, backend in BRIDGE_MAP.items():
-        assert resolve_scope(seed["quiesce_scope_json"], {"bridge": bridge}) == GateScope.on_backends(backend)
+    assert schema["properties"]["bridge"]["enum"] == ["claude-code-bridge"]
+    assert json.loads(seed["quiesce_scope_json"])["map"] == {"claude-code-bridge": "claude-code"}
+    assert resolve_scope(
+        seed["quiesce_scope_json"], {"bridge": "claude-code-bridge"},
+    ) == GateScope.on_backends("claude-code")
+    with pytest.raises(ValueError, match="no backend"):
+        resolve_scope(seed["quiesce_scope_json"], {"bridge": "codex-bridge"})
 
 
 def test_store_rejects_bad_settings_and_round_trips_good_ones():

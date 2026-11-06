@@ -24,7 +24,10 @@ Every house always has its own positive `mem_limit` and `init: true`.
 Use the *same base Compose files, project name and .env as the mansion*. The
 renderer extends its Claude service to inherit identical `/home/bridge/dev`,
 host-identical dev root, `.claude`, SSH, scripts and broker-token mounts, then
-adds the mansion's Codex config/sessions mounts at `/home/bridge/.codex`.
+adds explicit host Codex config/sessions binds at `/home/bridge/.codex`.
+Neither harness needs a separate `codex-bridge` mansion service. A GPT bot can
+use `claude-code` with the proxy; `codex` selects the legacy native harness,
+not the GPT model family.
 The dev source and optional signed Git/GitHub account-config mount are included
 explicitly: extending the base file does not inherit later dev overlays.
 Do not use a new Compose project: the house must join the existing app/Redis

@@ -146,9 +146,11 @@ serves.
 - **App kind** (`reconcile_app_config`, `ops/app_config_reconcile.py`): a
   Compose-built service with a bind-mounted source checkout. The checkout must be
   exactly the published branch head (source guard). The image is bound by ID,
-  never by tag. Rows: `llm-bawt.reconcile-app-config`,
-  `llm-bawt.reconcile-codex-bridge-config` and
-  `llm-bawt.reconcile-claude-code-bridge-config`. For a bridge, the source guard
+  never by tag. Current rows: `llm-bawt.reconcile-app-config` and
+  `llm-bawt.reconcile-claude-code-bridge-config`. The native
+  `reconcile-codex-bridge-config` row and cutover target were retired with that
+  mansion service (TASK-2117); historical cutovers may still name it.
+  For a bridge, the source guard
   binds only the bridge's own source. The agents it hosts run code from the
   mounted workspace by design, so that workspace is not guarded.
 - **Tagged kind** (`reconcile_tagged_config`, `ops/tagged_config_reconcile.py`):

@@ -639,6 +639,12 @@ def test_the_cutover_seed_orders_disabled_argument_free_config_rows():
     assert spec["action"] == PLAN_ACTION and PLAN_SEED["enabled"] is False
     assert PLAN_SEED["risk_level"] == "critical" and "KILLS ACTIVE AGENTS" in PLAN_SEED["approval_prompt_prefix"]
     by_slug = {s["slug"]: s for s in SEEDS}
+    retired = "llm-bawt.reconcile-codex-bridge-config"
+    assert retired not in by_slug
+    assert spec["targets"] == [
+        "llm-bawt.reconcile-app-config", "llm-bawt.reconcile-crawl4ai-config",
+        "llm-bawt.reconcile-claude-code-bridge-config",
+    ]
     kinds = []
     for slug in spec["targets"]:
         row = by_slug[slug]

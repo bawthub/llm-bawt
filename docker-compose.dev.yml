@@ -40,11 +40,6 @@ services:
       - ./src:/app/src
       - ${BRIDGE_GIT_CONFIG_DIR:-${HOME}/.config/bawthub-git/bridge}:/home/bridge/.config/bawthub-git:ro
 
-  codex-bridge:
-    volumes:
-      - ./src:/app/src
-      - ${BRIDGE_GIT_CONFIG_DIR:-${HOME}/.config/bawthub-git/bridge}:/home/bridge/.config/bawthub-git:ro
-
   # Dev: mount src so the embed server / bridge code (TASK-277) deploys on a
   # restart without rebuilding the heavy CUDA image.
   local-model-bridge:

@@ -1,4 +1,40 @@
-# Codex Bridge
+# Native Codex Bridge (legacy)
+
+## Service retirement and rollback
+
+The separate `codex-bridge` mansion service is retired from base/dev Compose
+and the restart/configuration ops catalog (TASK-2117). GPT bots, including the
+Codex personality, run on `claude-code` / `claude-proxy` without changing their
+OpenAI model or endpoint. Provider and harness are independent choices.
+The Python native backend and optional Codex-capable houses remain supported
+compatibility code; the implementation notes below do not imply a deployed
+mansion service.
+
+Before the approved, named-container stop, retain the running container and
+record its immutable image ID, mounts and pre-retirement Compose revision.
+Do not remove images, session/config binds, shared bridge tokens or volumes.
+A stopped container preserves its writable layer as the simplest rollback;
+`unless-stopped` keeps an intentionally stopped container down.
+
+Rollback is an operator-controlled maintenance action:
+
+1. Keep the Codex bot on its working proxy route until the native bridge is
+   healthy. Preserve any in-flight turn; migrate only between turns.
+2. Restore the `codex-bridge` service and dev overlay from the recorded
+   pre-retirement revision, leaving unrelated service changes intact. Reuse the
+   retained image ID; do not pull or rebuild. For the retained container, start
+   only that container through an approved, fixed-target `start` operation. If
+   it was removed, recreate only the restored service with `--no-deps`,
+   `--no-build` and `--pull never`, pinned to that image.
+3. Verify its own `/health` on port 8682 and Redis connectivity. The app-owned
+   provider broker remains the credential source; do not copy host auth files.
+4. Through the bot profile API restore `agent_backend="codex"`,
+   `harness="codex"` and `agent_backend_config={"codex_transport":"app_server"}`,
+   retaining the bot's exact model/endpoint, identity, memory and tags. Use a
+   deliberate new session boundary, then verify a real review.
+5. Restore catalog restart schema/quiesce map and reconciliation/cutover
+   targets only if native service management is intentionally being restored.
+   Seeds do not overwrite live rows; use the catalog API and normal approvals.
 
 The Codex bridge runs bots through the OpenAI Codex SDK. The service entrypoint
 is [src/codex_bridge/__main__.py](../src/codex_bridge/__main__.py)

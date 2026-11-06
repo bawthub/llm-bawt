@@ -33,7 +33,6 @@ CRAWL4AI = (_CRAWL4AI_FOR_BRIDGES.path_env, crawl4ai_token.FILE_ENV)
 #: (bridge_token / crawl4ai_token callers under src/<bridge package>/).
 READERS = {
     "claude-code-bridge": (BROKER, GIT_CREDENTIAL, CRAWL4AI),
-    "codex-bridge": (BROKER, GIT_CREDENTIAL, CRAWL4AI),
 }
 
 

@@ -36,8 +36,7 @@ BawtHub surfaces
               `- task/self-recap tools
 
         -> optional bridges
-              |- claude-code-bridge
-              `- codex-bridge
+              `- claude-code-bridge (Anthropic and proxy-routed providers)
 
         -> backing services
               |- PostgreSQL + pgvector
@@ -58,8 +57,8 @@ The MCP server on port `8001` exposes memory/history/profile/task tools to agent
 
 ### Bridges
 
-- `claude-code-bridge` runs Claude Agent SDK bots and now also supports provider-routed models through its Anthropic-compatible proxy path.
-- `codex-bridge` is still available for Codex SDK based bots.
+- `claude-code-bridge` runs Claude Agent SDK bots, including GPT bots through its Anthropic-compatible proxy. The harness does not determine the model provider.
+- The separate `codex-bridge` mansion service is retired. The legacy native backend remains in source for compatibility and rollback; it is not required for GPT bots. See [retirement and rollback](docs/CODEX_BRIDGE.md#service-retirement-and-rollback).
 
 ### Storage
 
@@ -103,7 +102,6 @@ Important compose services:
 - `app` — FastAPI service + MCP server
 - `redis` — bridge transport
 - `claude-code-bridge`
-- `codex-bridge`
 - `local-model-bridge`
 - `crawl4ai`
 - `playwright-mcp`
@@ -189,7 +187,7 @@ src/llm_bawt/
 
 src/agent_bridge/          shared bridge transport/runtime pieces
 src/claude_code_bridge/    Claude Code bridge + proxy path
-src/codex_bridge/          Codex bridge
+src/codex_bridge/          legacy native Codex backend (no mansion service)
 src/local_model_bridge/    embeddings + local inference service
 ```
 
@@ -207,7 +205,7 @@ The important design choice is that the thread does not live in the client. Bawt
 - [docs/README.md](docs/README.md)
 - [docs/MCP_SERVER.md](docs/MCP_SERVER.md)
 - [docs/CLAUDE_CODE_BRIDGE.md](docs/CLAUDE_CODE_BRIDGE.md)
-- [docs/CODEX_BRIDGE.md](docs/CODEX_BRIDGE.md)
+- [docs/CODEX_BRIDGE.md](docs/CODEX_BRIDGE.md) — legacy implementation and rollback
 - [docs/INTER_BOT_COMMUNICATION.md](docs/INTER_BOT_COMMUNICATION.md)
 - [docs/BACKGROUND_SCHEDULER.md](docs/BACKGROUND_SCHEDULER.md)
 - [docs/approval-policies.md](docs/approval-policies.md)
