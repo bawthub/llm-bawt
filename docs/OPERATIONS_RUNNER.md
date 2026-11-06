@@ -833,19 +833,25 @@ approval, not an automatic test of the enabled action.
 pocket-tts worker. They seed **disabled** with `require_approval` policies.
 
 * **Binding `ci_publish`.** A deploy spec with `binding: "ci_publish"` binds to
-  the CI publish run, not a release row. Its args are exactly `workflow_run_id`,
-  `source_sha` and `digest`. `GitHubReleaseVerifier.verify_publish` requires:
-  * the run is a completed, successful `workflow_run` of `workflow_path` on the
-    canonical branch;
+  the image publish run, not a release row. Its args are exactly
+  `workflow_run_id`, `source_sha` and `digest`. `GitHubReleaseVerifier.verify_publish`
+  requires:
+  * the run is a completed, successful run of `workflow_path` on the canonical
+    branch;
   * its attempt-specific `<image>-publish-receipt-<attempt>` artifact
     (`bawthub.image-publish-receipt/v1`) equals the args;
-  * the receipt's `trigger_run_id` is a completed, successful `push` run of the
-    spec's `trigger_workflow_path` on the canonical branch, in the same
-    repository and head repository, whose `head_sha` is `source_sha`.
+  * for a `workflow_dispatch` run (on-demand publishing, TASK-2075): the receipt
+    names no `trigger_run_id`, and GitHub's compare shows the canonical branch
+    contains `source_sha`;
+  * for a legacy `workflow_run` run: the receipt's `trigger_run_id` is a
+    completed, successful `push` run of the spec's `trigger_workflow_path` on the
+    canonical branch, in the same repository and head repository, whose
+    `head_sha` is `source_sha`.
 
-  A `workflow_run` run's own `head_sha` is the branch head when it was queued,
-  not the commit it built, so it is never compared. `trigger_workflow_path` is
-  required for `ci_publish` and refused on any other spec. The image's labels
+  A publish run's own `head_sha` is the branch head when it started, not the
+  commit it built, so it is never compared. `trigger_workflow_path` is
+  required for `ci_publish` and refused on any other spec; only legacy runs use
+  it. The image's labels
   (`com.bawthub.release.schema=1`, `org.opencontainers.image.version`
   `sha-<sha>`, `.revision`, `com.bawthub.release.workflow-run-id`) are checked
   before the swap, as for frontend releases.
@@ -877,15 +883,19 @@ Activation order:
    policies, enable them, and reload the policies.
 4. The first deploy's preflight pull checks GHCR access.
 
-The publish workflow builds each green CI push run's commit, so a commit that
-was never a push tip on its own gets no image. A `workflow_dispatch` publish
-can't satisfy the `ci_publish` binding (its trigger must be a successful
-`push` CI run). If the commit already has its own CI push run on main (it was
-a push tip whose publish failed or was skipped), re-run that run
-(`gh run rerun <run-id>`); its completion publishes that commit. Re-running a
-later commit's run never selects an earlier SHA, and a commit that was never a
-push tip has no such run: it needs an approved publication path (for example,
-making it the tip of a main push) rather than this recipe (TASK-1811).
+Images are published on demand (TASK-2075); main pushes build none. To deploy
+a commit, dispatch the publisher for it, wait for the run, then file the deploy
+with that run's ID and the digest its receipt reports:
+
+```sh
+gh workflow run publish-tenant-voice.yml -R bawthub/bawthub -f sha=<SHA on main>
+gh run list -R bawthub/bawthub -w publish-tenant-voice.yml -e workflow_dispatch -L 1
+gh run watch <run-id> -R bawthub/bawthub --exit-status
+gh run download <run-id> -R bawthub/bawthub -n pocket-tts-publish-receipt-<attempt>
+```
+
+The workflow refuses a SHA its canonical branch doesn't contain. Any commit on
+main can be published, including one that was never a push tip.
 
 A container still on the local `bawthub-pocket-tts:local` build carries no
 release labels, so the reconcile can't adopt it. If the first deploy reports

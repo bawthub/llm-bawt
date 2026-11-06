@@ -354,7 +354,7 @@ QUEUED_HEAD = "4" * 40
 
 class PublishGitHub:
     def __init__(self, *, run=None, receipt=None, trigger=None, artifact="pocket-tts-publish-receipt-1",
-                 filename="publish-receipt.json"):
+                 filename="publish-receipt.json", compare=None):
         api = "https://api.github.com/repos/bawthub/bawthub"
         run = {"status": "completed", "conclusion": "success",
                "path": POCKET_DEPLOY["workflow_path"] + "@refs/heads/main", "head_branch": "main",
@@ -369,6 +369,7 @@ class PublishGitHub:
                    "workflow_run_id": RUN_ID, "workflow_run_attempt": "1", "source_sha": SOURCE,
                    "trigger_run_id": TRIGGER_ID,
                    "image_repository": POCKET_REPO, "digest": DIGEST, "status": "complete", **(receipt or {})}
+        receipt = {key: value for key, value in receipt.items() if value is not DROP}
         archive = io.BytesIO()
         with zipfile.ZipFile(archive, "w") as zf:
             zf.writestr(filename, json.dumps(receipt))
@@ -380,6 +381,8 @@ class PublishGitHub:
                 {"name": artifact, "expired": False, "archive_download_url": f"{api}/zip"}]}).encode()),
             f"{api}/zip": _Resp(302, location="https://blob.example/signed"),
             "https://blob.example/signed": _Resp(body=archive.getvalue()),
+            f"{api}/compare/main...{SOURCE}?per_page=1": _Resp(body=json.dumps(
+                {"status": "behind", "merge_base_commit": {"sha": SOURCE}, **(compare or {})}).encode()),
         }
 
     def open(self, request, timeout):
@@ -405,6 +408,35 @@ def test_verify_publish_binds_run_sha_and_digest():
     assert "release_run_id" not in release
 
 
+DROP = object()  # receipt key a run doesn't write
+DISPATCH = {"run": {"event": "workflow_dispatch"}, "receipt": {"trigger_run_id": DROP}}
+
+
+def _dispatched(**gh):
+    opener = PublishGitHub(**{**DISPATCH, **gh})
+    return GitHubReleaseVerifier("tok", opener=opener).verify_publish(POCKET_DEPLOY, PUBLISH_ARGS), opener
+
+
+def test_verify_publish_binds_a_dispatched_run_to_a_sha_on_main():
+    """TASK-2075: images publish on demand; the source SHA is proven on main."""
+    release, opener = _dispatched()
+    assert release["binding"] == BINDING_CI_PUBLISH and release["image_ref"] == POCKET_REF
+    assert release["publish_event"] == "workflow_dispatch" and release["trigger_run_id"] is None
+    assert release["source_sha"] == release["trigger_sha"] == SOURCE
+    assert any("/compare/main..." in url for url, _ in opener.seen)
+    assert not any(f"/runs/{TRIGGER_ID}" in url for url, _ in opener.seen)
+    release, _ = _dispatched(compare={"status": "identical"})
+    assert release["source_sha"] == SOURCE
+
+
+@pytest.mark.parametrize("compare", [
+    {"status": "ahead"}, {"status": "diverged"}, {"merge_base_commit": {"sha": "3" * 40}}, {"status": None},
+])
+def test_verify_publish_refuses_a_dispatched_sha_main_does_not_contain(compare):
+    with pytest.raises(ReleaseVerificationError, match="is not on main"):
+        _dispatched(compare=compare)
+
+
 def test_verify_publish_reads_the_latest_attempt_artifact_only():
     release = _verify(run={"run_attempt": 2}, artifact="pocket-tts-publish-receipt-2",
                       receipt={"workflow_run_attempt": "2"})
@@ -414,7 +446,7 @@ def test_verify_publish_reads_the_latest_attempt_artifact_only():
 
 
 @pytest.mark.parametrize("gh, message", [
-    ({"run": {"event": "workflow_dispatch"}}, "event"),
+    ({"run": {"event": "workflow_dispatch"}}, "names no trigger_run_id"),
     ({"run": {"event": "push"}}, "event"),
     ({"trigger": {"head_sha": "3" * 40}}, "trigger run .* head_sha"),
     ({"trigger": {"event": "pull_request"}}, "event"),

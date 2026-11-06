@@ -1,8 +1,10 @@
 name: Tenant app image
 
-# Test both native architectures on PRs. Only a successful master push's
-# completed test workflow may publish a digest-addressable manifest; never
-# deploy or move latest.
+# Test both native architectures on PRs. Publishing is on demand (TASK-2075):
+# a workflow_dispatch for one exact SHA on master builds both architectures and
+# combines them into a digest-addressable manifest. It never deploys or moves
+# latest. Master pushes build nothing; a tenant install or upgrade dispatches
+# this for the SHA it needs and pins the digests the run reports.
 #
 # Two tenant images come from this repo: the CPU app and the agent bridge
 # every tenant runs for its first agent (TASK-1293). The bridge image is built
@@ -10,9 +12,12 @@ name: Tenant app image
 # defaults to the operator's own vault, which a tenant must never point at.
 on:
   pull_request:
-  workflow_run:
-    workflows: [llm-bawt tests]
-    types: [completed]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Full 40-character commit SHA on master to build and publish
+        required: true
+        type: string
 
 permissions: {}
 
@@ -20,9 +25,7 @@ jobs:
   build:
     if: >-
       github.event_name == 'pull_request' ||
-      (github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.event == 'push' &&
-       github.event.workflow_run.head_branch == 'master')
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master')
     runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     permissions:
       contents: read
@@ -42,10 +45,22 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha }}
+          ref: ${{ inputs.sha || github.event.pull_request.head.sha }}
+          # '0' (full history, for the ancestry check) is a non-empty string, so truthy.
+          fetch-depth: ${{ github.event_name == 'workflow_dispatch' && '0' || '1' }}
           persist-credentials: false
+      # A dispatch publishes only a commit master already contains.
+      - if: github.event_name == 'workflow_dispatch'
+        name: The SHA is a commit on master
+        env:
+          SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::sha must be a full 40-character commit SHA"; exit 1; }
+          [ "$(git rev-parse HEAD)" = "$SHA" ] || { echo "::error::checked out $(git rev-parse HEAD), not $SHA"; exit 1; }
+          git merge-base --is-ancestor "$SHA" origin/master || { echo "::error::$SHA is not on master"; exit 1; }
       - uses: docker/setup-buildx-action@v4
-      - if: github.event_name == 'workflow_run'
+      - if: github.event_name == 'workflow_dispatch'
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
@@ -57,22 +72,18 @@ jobs:
           context: .
           file: ${{ matrix.dockerfile }}
           platforms: linux/${{ matrix.arch }}
-          push: ${{ github.event_name == 'workflow_run' }}
-          tags: ghcr.io/bawthub/${{ matrix.image }}:sha-${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha }}-${{ matrix.arch }}
+          push: ${{ github.event_name == 'workflow_dispatch' }}
+          tags: ghcr.io/bawthub/${{ matrix.image }}:sha-${{ inputs.sha || github.event.pull_request.head.sha }}-${{ matrix.arch }}
           provenance: mode=max
           sbom: false
           build-args: |
-            SOURCE_SHA=${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha }}
+            SOURCE_SHA=${{ inputs.sha || github.event.pull_request.head.sha }}
             ${{ matrix.build-args }}
           cache-from: type=gha,scope=tenant-${{ matrix.image }}-${{ matrix.arch }}
           cache-to: type=gha,scope=tenant-${{ matrix.image }}-${{ matrix.arch }},mode=max
 
   publish:
-    if: >-
-      github.event_name == 'workflow_run' &&
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'push' &&
-      github.event.workflow_run.head_branch == 'master'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master'
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -91,7 +102,7 @@ jobs:
       - name: Combine and verify native ${{ matrix.image }} images
         env:
           IMAGE: ghcr.io/bawthub/${{ matrix.image }}
-          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+          SOURCE_SHA: ${{ inputs.sha }}
         run: |
           set -euo pipefail
           tag="$IMAGE:sha-$SOURCE_SHA"

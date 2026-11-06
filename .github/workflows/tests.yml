@@ -5,7 +5,40 @@ on:
   pull_request:
 
 jobs:
+  # TASK-2075: `make gate` runs `make test-all` at exactly a commit. The
+  # integrator pushes a SHA whose unpatched gate run PASSED together with a
+  # `bawthub-gate PASSED <gate id>` note on refs/notes/bawthub-gate, in one
+  # atomic push (agent-skills `gate-push`). A master push with that note skips
+  # the suite; anything else (another branch, a pull request, an ungated or
+  # patched SHA, a failed note check) runs it.
+  gate-note:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      covered: ${{ steps.note.outputs.covered }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: note
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          set -uo pipefail
+          covered=false
+          if git fetch -q --no-tags --depth=1 origin +refs/notes/bawthub-gate:refs/notes/bawthub-gate 2>/dev/null \
+             && note=$(git notes --ref=bawthub-gate show "$SHA" 2>/dev/null) \
+             && [[ "$note" == "bawthub-gate PASSED "* ]]; then
+            covered=true
+            echo "::notice::$SHA: $note; the offline suite already passed at this exact SHA, skipping it"
+          else
+            echo "$SHA has no PASSED gate note; running the offline suite"
+          fi
+          echo "covered=$covered" >> "$GITHUB_OUTPUT"
+
   offline:
+    needs: gate-note
+    if: ${{ !cancelled() && needs.gate-note.outputs.covered != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
