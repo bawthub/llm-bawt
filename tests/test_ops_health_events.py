@@ -2,7 +2,7 @@
 from threading import Event
 
 from llm_bawt.ops.health_collector import OpsHealthCollector, relevant_event
-from llm_bawt.ops.health_state import HealthSample, OpsHealthState
+from llm_bawt.ops.health_state import CatalogSample, HealthSample, OpsHealthState
 
 
 class Clock:
@@ -195,26 +195,63 @@ def test_changes_endpoint_refuses_beyond_the_waiter_cap(monkeypatch):
     assert client.get("/v1/health/changes/1", timeout=5).status_code == 503
 
 
-def test_catalog_rereads_on_notify_and_closes_listener():
+class ScriptedWaiter:
+    """wait() results in order; ``_conn`` mimics JobCreatedWaiter's live LISTEN."""
+
+    def __init__(self, results, stop, clock=None):
+        self.results, self.stop, self.clock, self.closed = list(results), stop, clock, False
+        self._conn = None
+
+    def wait(self, stop, timeout):
+        if not self.results:
+            stop.set()
+            return False
+        woke, listening = self.results.pop(0)
+        self._conn = object() if listening else None
+        if self.clock is not None:
+            self.clock.t += timeout
+        return woke
+
+    def close(self):
+        self.closed = True
+
+
+def test_quiet_catalog_stays_fresh_past_30s_while_listening():
+    clock = Clock()
+    state = OpsHealthState(clock=clock)
     stop = Event()
-    reads, waits = [], []
+    reads = []
 
-    class Waiter:
-        closed = False
+    collector = OpsHealthCollector(state, lambda: None)
 
-        def wait(self, stop_, timeout):
-            waits.append(timeout)
-            if len(waits) == 2:
-                stop_.set()
-            return True
+    def read():
+        reads.append(1)
+        state.publish_catalog(CatalogSample(state.sample_time(), "ok", services=()))
+    collector.collect_catalog = read
+    # connect (forces a re-read), then 4 quiet 10s waits = 40s with no write
+    waiter = ScriptedWaiter([(False, True)] + [(False, True)] * 4, stop, clock)
+    collector.watch_catalog(stop, waiter, reconcile=1000)
+    assert reads == [1, 1]  # initial + after connect; quiet waits only confirm
+    assert clock.t - state._catalog.sampled.monotonic < 30
+    assert waiter.closed
 
-        def close(self):
-            Waiter.closed = True
 
-    collector = OpsHealthCollector(OpsHealthState(clock=Clock()), lambda: None)
-    collector.collect_catalog = lambda: reads.append(1)
-    collector.watch_catalog(stop, Waiter())
-    assert reads == [1, 1] and waits == [60.0, 60.0] and Waiter.closed
+def test_catalog_rereads_on_notify_on_listener_loss_and_never_confirms_failure():
+    state = OpsHealthState(clock=Clock())
+    stop = Event()
+    reads = []
+    collector = OpsHealthCollector(state, lambda: None)
+
+    def read():
+        reads.append(1)
+        state.publish_catalog(CatalogSample(state.sample_time(), "down", "operation catalog unavailable"))
+    collector.collect_catalog = read
+    waiter = ScriptedWaiter([(False, True), (True, True), (False, False)], stop)
+    collector.watch_catalog(stop, waiter, reconcile=1000)
+    assert reads == [1, 1, 1, 1]  # initial, connect, notify, listener lost
+    failed = state._catalog
+    state.confirm_catalog(state.sample_time())
+    assert state._catalog is failed  # a down read is retried, never re-stamped
 
 
 def test_operation_writes_notify_the_catalog_channel():

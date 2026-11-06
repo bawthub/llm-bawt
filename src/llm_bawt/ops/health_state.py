@@ -180,6 +180,16 @@ class OpsHealthState:
                     self._bump()
                 self._catalog = sample
 
+    def confirm_catalog(self, now: SampleTime):
+        """Re-stamp an ok catalog read that a live LISTEN proves current.
+
+        The caller guarantees the read was taken while listening and no
+        ``ops_catalog_changed`` notify arrived since; a failed read is never
+        kept current, so it is retried instead."""
+        with self._lock:
+            if not self._stopping and self._catalog.status == "ok":
+                self._catalog = replace(self._catalog, sampled=now)
+
     def _swap(self, table, key, sample):
         """Caller holds the lock. Notify only when more than ``sampled`` changed."""
         old = table[key]

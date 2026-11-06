@@ -37,6 +37,8 @@ from .worker import QUIESCE_FENCE_LABEL
 
 COLLECTION_BUDGET_SECONDS = 15.0
 CATALOG_RECONCILE_SECONDS = 60.0
+#: Under the 30s catalog freshness contract (state and BawtHub client).
+CATALOG_CONFIRM_SECONDS = 10.0
 DOCKER_TIMEOUT_SECONDS = 2
 # Docker events are read in windows of this many seconds (TASK-2105).
 EVENT_WINDOW_SECONDS = 5
@@ -229,6 +231,11 @@ def relevant_event(event) -> bool:
     return isinstance(action, str) and not action.startswith(IGNORED_EVENT_PREFIXES)
 
 
+def _listening(waiter):
+    """True while the waiter holds a live LISTEN connection."""
+    return getattr(waiter, "_conn", None) is not None
+
+
 class OpsHealthCollector:
     def __init__(self, state, engine_factory, *, client_factory=docker_client,
                  events_client_factory=docker_events_client):
@@ -290,15 +297,32 @@ class OpsHealthCollector:
         self.collect_database()
         self.collect_catalog()
 
-    def watch_catalog(self, stop, waiter, *, reconcile=CATALOG_RECONCILE_SECONDS):
+    def watch_catalog(self, stop, waiter, *, reconcile=CATALOG_RECONCILE_SECONDS,
+                      confirm_every=CATALOG_CONFIRM_SECONDS):
         """Re-read the catalog when an operation write notifies
-        ``ops_catalog_changed``. The ``reconcile`` wait is only a backstop for
-        a missed notify (listener down, or writes outside OpsStore such as a
-        manual SQL edit); it is not the update path."""
+        ``ops_catalog_changed``. While the LISTEN connection is live, each
+        quiet ``confirm_every`` wait proves no write committed, so the last ok
+        read is re-stamped (like confirm_docker) and stays within the 30s
+        freshness contract. A full re-read every ``reconcile`` seconds is only
+        a backstop for missed notifies (writes outside OpsStore, such as
+        seeding or manual SQL). Without a live listener it re-reads each
+        ``confirm_every`` instead."""
         try:
+            self.collect_catalog()
+            last_read = self.state.clock()
             while not stop.is_set():
-                self.collect_catalog()
-                waiter.wait(stop, reconcile)
+                listening_before = _listening(waiter)
+                woke = waiter.wait(stop, confirm_every)
+                if stop.is_set():
+                    break
+                listening = _listening(waiter)
+                # A fresh (re)connect may have missed writes before LISTEN.
+                if (woke or not listening or not listening_before
+                        or self.state.clock() - last_read >= reconcile):
+                    self.collect_catalog()
+                    last_read = self.state.clock()
+                else:
+                    self.state.confirm_catalog(self.state.sample_time())
         finally:
             waiter.close()
 
