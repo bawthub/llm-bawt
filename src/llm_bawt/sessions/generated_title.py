@@ -213,24 +213,58 @@ def _worker(engine, session_id: str, bot_id: str, user_id: str | None) -> None:
 
 def schedule_session_title(engine, *, session_id: str | None, bot_id: str,
                            user_id: str | None, message_id: str, content: str) -> None:
-    """Start title generation in the background. Never raises, never blocks."""
+    """Start title generation in the background. Never raises, never blocks.
+
+    Only the app service process generates titles (it owns the maintenance
+    model). Its chat writes go through the MCP client, which does not know the
+    server-resolved thread, so ``session_id`` may be None: the session is then
+    read from the written message's row off the write path.
+    """
     try:
         text_ = (content or "").strip()
-        if not session_id or not text_ or text_.startswith("/"):
+        if not message_id or not text_ or text_.startswith("/"):
             return
         from ..service.dependencies import _service
-        if _service is None:  # no app service in this process (CLI, tests)
+        if _service is None:  # no app service in this process (MCP, CLI, tests)
             return
-        with _attempted_lock:
-            if session_id in _attempted:
-                if session_id in _running:  # hand the write to the live worker
-                    _triggers.setdefault(session_id, set()).add(message_id)
-                    _pending.add(session_id)
+        if engine is None:
+            from ..utils.db import get_shared_engine
+            engine = get_shared_engine(_service.config)
+            if engine is None:
                 return
-            _attempted.add(session_id)
-            _running.add(session_id)
-            _triggers[session_id] = {message_id}
-        threading.Thread(target=_worker, args=(engine, session_id, bot_id, user_id),
+        if session_id:
+            _claim(engine, session_id, bot_id, user_id, message_id)
+            return
+        threading.Thread(target=_resolve_and_claim,
+                         args=(engine, bot_id, user_id, message_id),
                          daemon=True, name="session-title").start()
     except Exception as error:
         logger.warning("session title scheduling failed (%s)", type(error).__name__)
+
+
+def _resolve_and_claim(engine, bot_id: str, user_id: str | None, message_id: str) -> None:
+    try:
+        from sqlalchemy import text
+        with engine.connect() as conn:
+            session_id = conn.execute(
+                text("SELECT session_id FROM messages WHERE id = :id"),
+                {"id": message_id}).scalar()
+        if session_id:
+            _claim(engine, str(session_id), bot_id, user_id, message_id)
+    except Exception as error:
+        logger.warning("session title scheduling failed (%s)", type(error).__name__)
+
+
+def _claim(engine, session_id: str, bot_id: str, user_id: str | None,
+           message_id: str) -> None:
+    with _attempted_lock:
+        if session_id in _attempted:
+            if session_id in _running:  # hand the write to the live worker
+                _triggers.setdefault(session_id, set()).add(message_id)
+                _pending.add(session_id)
+            return
+        _attempted.add(session_id)
+        _running.add(session_id)
+        _triggers[session_id] = {message_id}
+    threading.Thread(target=_worker, args=(engine, session_id, bot_id, user_id),
+                     daemon=True, name="session-title").start()

@@ -43,7 +43,7 @@ def test_schedule_runs_once_per_session(monkeypatch):
     monkeypatch.setattr(deps, "_service", object())
     monkeypatch.setattr(gt, "_attempted", set()); monkeypatch.setattr(gt, "_pending", set()); monkeypatch.setattr(gt, "_triggers", {}); monkeypatch.setattr(gt, "_running", set())
     for _ in range(3):
-        gt.schedule_session_title(None, session_id="once", bot_id="b", user_id="u", message_id="m", content="hi")
+        gt.schedule_session_title("E", session_id="once", bot_id="b", user_id="u", message_id="m", content="hi")
     assert len(started) == 1
 
 
@@ -75,3 +75,50 @@ def test_chat_write_survives_title_hook_failure(monkeypatch):
     manager.bot_id, manager.user_id = "bot-a", "nick"
     manager._backend = type("B", (), {"engine": None, "add_message": lambda self, **kw: None})()
     assert manager.add_message("user", "hi", session_id="s1")
+
+
+def test_schedule_resolves_session_from_message_when_unknown(monkeypatch):
+    """App chat writes go via MCP and don't know the resolved thread."""
+    import llm_bawt.service.dependencies as deps
+    monkeypatch.setattr(deps, "_service", object())
+    monkeypatch.setattr(gt, "_attempted", set()); monkeypatch.setattr(gt, "_pending", set()); monkeypatch.setattr(gt, "_triggers", {}); monkeypatch.setattr(gt, "_running", set())
+    workers = []
+
+    class T:
+        def __init__(self, target, args, **kw):
+            self.target, self.args = target, args
+        def start(self):
+            if self.target is gt._worker:
+                workers.append(self.args)
+            else:
+                self.target(*self.args)
+    monkeypatch.setattr(gt.threading, "Thread", T)
+
+    class Conn:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def execute(self, stmt, params):
+            assert params == {"id": "m1"}
+            return type("R", (), {"scalar": lambda self: "sess-9"})()
+    engine = type("E", (), {"connect": lambda self: Conn()})()
+
+    gt.schedule_session_title(engine, session_id=None, bot_id="b", user_id="u", message_id="m1", content="hi")
+    assert workers == [(engine, "sess-9", "b", "u")]
+    assert gt._triggers == {"sess-9": {"m1"}}
+
+
+def test_mcp_client_write_schedules_title_for_user_messages(monkeypatch):
+    from llm_bawt.mcp_server.client_short_term import _MCPShortTermManager
+
+    calls = []
+    monkeypatch.setattr(gt, "schedule_session_title", lambda engine, **kw: calls.append((engine, kw)))
+    principal = type("P", (), {"bot_id": "codex", "user_id": "nick"})()
+    msgs = iter(["m-user", "m-bot"])
+    client = type("C", (), {"_service_principal": principal,
+                            "add_message": lambda self, **kw: type("M", (), {"id": next(msgs), "session_id": None})()})()
+    manager = _MCPShortTermManager(client)
+
+    assert manager.add_message("user", "How do I rebase?") == "m-user"
+    manager.add_message("assistant", "Like this")
+    assert calls == [(None, {"session_id": None, "bot_id": "codex", "user_id": "nick",
+                             "message_id": "m-user", "content": "How do I rebase?"})]

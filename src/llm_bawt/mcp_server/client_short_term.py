@@ -55,6 +55,22 @@ class _MCPShortTermManager:
             author_entity_id=(author.entity_id if author and not system else None),
             **({"trusted_author": author} if system else {}),
         )
+        # TASK-2064: the app's chat writes land here; the MCP server process
+        # cannot generate titles, so schedule from this side. Cosmetic: never
+        # raises or slows the write.
+        if role == "user" and msg.id:
+            try:
+                from ..sessions.generated_title import schedule_session_title
+
+                schedule_session_title(
+                    None, session_id=getattr(msg, "session_id", None) or session_id,
+                    bot_id=self.bot_id, user_id=self.user_id,
+                    message_id=msg.id, content=content,
+                )
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "session title hook failed (%s)", type(e).__name__)
         return msg.id
 
     def get_messages(
