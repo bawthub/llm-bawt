@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import threading
-import time
 from types import SimpleNamespace
 
 import pytest
@@ -53,9 +52,7 @@ def test_listener_wakes_subscribers_and_recovers_a_dropped_connection(private_ap
         task = asyncio.create_task(run_commit_wake_listener(service, engine))
         assert await wait_for_wake(wake, 5)  # the connect wake
         await asyncio.to_thread(_commit)
-        started = time.monotonic()
-        assert await wait_for_wake(wake, 5)
-        assert time.monotonic() - started < 1
+        assert await wait_for_wake(wake, 1)  # prompt: the wait's own timeout result
         # Drop the listener's connection: it reconnects and wakes everyone once.
         service._commit_wake_waiter._conn.close()
         assert await wait_for_wake(wake, 15)
