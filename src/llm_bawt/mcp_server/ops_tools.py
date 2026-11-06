@@ -21,8 +21,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from typing import Any
+from typing import Annotated, Any
 
+from pydantic import Field
+
+from ..ops.quiesce_prompts import FINISHED_DEFINITION, FINISHED_NOTE_RULE
 from ..ops.approved_admission import dispatch_error_text, ops_run_receipt
 from ..ops.service import OpsDispatchError
 from ..task_turn_context import open_task_turn_context
@@ -266,25 +269,32 @@ def _record_quiesce_ack(bot_id: str, turn_id: str, status: str, note: str | None
                       status=status, note=note)
 
 
+QuiesceAckStatus = Annotated[str, Field(description=(
+    "finished|stopping|cannot_stop.\n" + FINISHED_DEFINITION + "\n" + FINISHED_NOTE_RULE))]
+QuiesceAckNote = Annotated[str | None, Field(description=(
+    "Required for finished: what wakes you next. stopping: where you stopped, what's next. "
+    "cannot_stop: what you are waiting on."))]
+
+
 @mcp.tool(name="ops_quiesce_ack")
-async def ops_quiesce_ack(status: str, note: str | None = None) -> dict:
+async def ops_quiesce_ack(status: QuiesceAckStatus, note: QuiesceAckNote = None) -> dict:
     """Answer a quiesce request for your current turn.
 
-    An operation is waiting for your turn to finish before it runs. Say
-    whether you are wrapping up (``"stopping"``) or cannot stop safely
-    (``"cannot_stop"``, with a short ``note`` saying why).
-
-    Args:
-        status: ``"stopping"`` or ``"cannot_stop"``.
-        note: Optional short explanation shown to the operator.
+    An operation is waiting for your turn to end before it runs. ``"finished"``:
+    nothing is left to resume (TASK-2121; definition on ``status``), so you are
+    not woken when the operation ends; it needs a ``note`` naming what wakes
+    you next. ``"stopping"``: you pause mid-work and are resumed with your note.
+    ``"cannot_stop"``: you cannot stop safely; the note says why.
 
     Returns:
         ``{"recorded": true, "gate_id": ...}``.
     """
-    from ..ops.quiesce import ACK_STATUSES
+    from ..ops.quiesce import ACK_FINISHED, ACK_STATUSES, AckNoteRequired
 
     if status not in ACK_STATUSES:
         raise ValueError(f"status must be one of {list(ACK_STATUSES)}")
+    if status == ACK_FINISHED and not (note or "").strip():
+        raise AckNoteRequired(FINISHED_NOTE_RULE)
     # Identity comes only from the signed per-turn capability, never from args.
     turn = await asyncio.to_thread(current_task_turn_context)
     gate_id = await asyncio.to_thread(_record_quiesce_ack, turn.bot_id, turn.turn_id, status, note)

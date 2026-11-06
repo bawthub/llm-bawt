@@ -39,6 +39,30 @@ DEFAULT_END_TURN_NO_RECEIPT = (
     "later turn."
 )
 
+# TASK-2121: Nick's definition of the "finished" ack, verbatim. It appears in
+# the quiesce request below, the ops_quiesce_ack status description and
+# bawthub-ops/SKILL.md; keep the three identical.
+FINISHED_DEFINITION = (
+    "- \"finished\" = if this bot were never woken again, nothing would be lost, "
+    "half-applied or forgotten. ALL of these hold: no edit unsaved or uncommitted "
+    "that this turn meant to commit; no tool call, command, build, gate or background "
+    "job this turn started and still owes a result to act on; no step of the current "
+    "plan that was going to run in THIS turn; no reply, handoff or card update owed "
+    "that hasn't been sent/written. Remaining task work is fine ONLY if something "
+    "durable already wakes the bot for it (a delivery, ops receipt, gate callback, "
+    "scheduled wake-up), and the note names it.\n"
+    "- \"stopping\" = anything else. You are pausing mid-work; the note says exactly "
+    "where you stopped and what's next. You will be resumed.\n"
+    "- When in doubt: \"stopping\". A wasted resume turn is cheap; silently dropped "
+    "work is not.\n"
+    "- Never ack \"finished\" to avoid being resumed, and never stop the turn earlier "
+    "than needed to make a \"finished\" ack true."
+)
+FINISHED_NOTE_RULE = (
+    "\"finished\" requires a non-empty note naming what wakes you next for your task "
+    "(e.g. \"gate receipt\", \"Caid's reply\", \"none: task closed\")."
+)
+
 # The control steer (B3) the app's quiesce control pump sends into each held
 # running turn, at the next tool boundary.
 QUIESCE_REQUEST_KEY = "ops.quiesce_request"
@@ -48,8 +72,10 @@ DEFAULT_QUIESCE_REQUEST = (
     "runs. New work is held until it finishes. Bring the step you are on to a safe "
     "stopping point, save or note anything that would be lost, and end your turn "
     "now. Do not start new work and do not poll. If you can, first call "
-    "ops_quiesce_ack with status \"stopping\", or \"cannot_stop\" with a short note "
-    "saying what you are waiting on. You can pick the work up again in a later turn.]"
+    "ops_quiesce_ack with status \"finished\" or \"stopping\" and a note, or "
+    "\"cannot_stop\" with a short note saying what you are waiting on. A \"stopping\" "
+    "bot is woken with its note when the operation ends; a \"finished\" bot is not.\n"
+    + FINISHED_DEFINITION + "\n" + FINISHED_NOTE_RULE + "]"
 )
 
 # TASK-1748: the replacement query when the quiesce request was escalated
@@ -135,7 +161,7 @@ def render_quiesce_interrupt_frame(bot_id: str | None) -> str:
 
 __all__ = [
     "DEFAULT_END_TURN_NEW_TURN", "DEFAULT_END_TURN_NO_RECEIPT", "DEFAULT_QUIESCE_INTERRUPT_FRAME",
-    "DEFAULT_QUIESCE_REQUEST", "DEFAULT_RECEIPT", "DEFAULT_RESUME", "DEFAULT_RESUME_BLOCKED", "END_TURN_NEW_TURN_KEY", "END_TURN_NO_RECEIPT_KEY",
+    "DEFAULT_QUIESCE_REQUEST", "DEFAULT_RECEIPT", "FINISHED_DEFINITION", "FINISHED_NOTE_RULE", "DEFAULT_RESUME", "DEFAULT_RESUME_BLOCKED", "END_TURN_NEW_TURN_KEY", "END_TURN_NO_RECEIPT_KEY",
     "QUIESCE_INTERRUPT_FRAME_KEY", "QUIESCE_INTERRUPT_SLOT", "QUIESCE_REQUEST_KEY", "RECEIPT_KEY", "RESUME_BLOCKED_KEY", "RESUME_KEY", "SEEDS",
     "render_quiesce_interrupt_frame", "resolve",
 ]

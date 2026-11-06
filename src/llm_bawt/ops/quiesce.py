@@ -68,7 +68,14 @@ logger = logging.getLogger(__name__)
 LEASE_SECONDS = 30
 GATE_TTL_SECONDS = 60
 MARGIN_SECONDS = 30
-ACK_STATUSES = ("stopping", "cannot_stop")
+# TASK-2121: "finished" = nothing left to resume (definition in
+# quiesce_prompts.FINISHED_DEFINITION); it must carry a note and gets no resume.
+ACK_FINISHED = "finished"
+ACK_STATUSES = ("stopping", "cannot_stop", ACK_FINISHED)
+
+
+class AckNoteRequired(ValueError):
+    """A "finished" ack without a note naming what wakes the bot next."""
 
 
 class QuiesceUnavailable(RuntimeError):
@@ -155,6 +162,10 @@ def record_ack(engine, *, bot_id: str, turn_id: str, status: str, note: str | No
     later answer has nothing to inform and is refused, not silently stored."""
     if status not in ACK_STATUSES:
         raise ValueError(f"ack status must be one of {list(ACK_STATUSES)}")
+    note = (note or "").strip() or None
+    if status == ACK_FINISHED and note is None:
+        raise AckNoteRequired('"finished" needs a note naming what wakes you next for your task '
+                              '(e.g. "gate receipt", "none: task closed")')
     if engine is None or engine.dialect.name != "postgresql":
         raise QuiesceUnavailable("quiesce requires PostgreSQL")
     with engine.begin() as conn:
@@ -581,7 +592,7 @@ def build_quiesce_driver(engine, *, factory: Callable[..., QuiesceDriver] = Quie
 
 
 __all__ = [
-    "ACK_STATUSES", "GATE_TTL_SECONDS", "LEASE_SECONDS", "MARGIN_SECONDS", "QuiesceDriver",
+    "ACK_FINISHED", "ACK_STATUSES", "AckNoteRequired", "GATE_TTL_SECONDS", "LEASE_SECONDS", "MARGIN_SECONDS", "QuiesceDriver",
     "QuiesceUnavailable", "StepResult", "TurnGates", "build_quiesce_driver",
     "caller_instruction", "cancel_pending_controls", "cancel_quiesce_job", "record_ack",
     "release_job_gates", "scope_covers_bot", "set_phase",

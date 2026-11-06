@@ -189,7 +189,9 @@ async def test_catalog_token_budgets():
     # TASK-1151: ops_list_operations slug= detail (compact list rows) (+3).
     # TASK-2118: self_house (a bot moves itself into a free house or out of its
     # own; the occupied/no-pin rules in-band): 4,606 (+44).
-    assert sum(descriptions) <= 4606, f"Descriptions grew to {sum(descriptions)} tokens"
+    # TASK-2121: ops_quiesce_ack names "finished" (no resume, note required)
+    # and "in doubt: stopping": 4,620 (+14).
+    assert sum(descriptions) <= 4620, f"Descriptions grew to {sum(descriptions)} tokens"
     definitions = [{"name": f"mcp__bawthub__{t.name}", "description": t.description or "", "input_schema": t.inputSchema} for t in tools]
     total = len(encoder.encode(json.dumps(definitions, ensure_ascii=False, separators=(",", ":"))))
     # TASK-900: explicit X search adds ~160 tokens; measured catalog 11,239.
@@ -292,7 +294,11 @@ async def test_catalog_token_budgets():
     # TASK-2116: bots_list_available location filter (+46), measured 17,452.
     # TASK-2118: self_house (action enum, optional house): 17,568 (+116). One
     # self-only tool replaces a coordinator PATCHing the bot's house field.
-    assert total <= 17568, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-2121: ops_quiesce_ack "finished" status with Nick's verbatim
+    # definition on the status field (he required it in the tool description;
+    # the 100-token description cap can't hold it): 17,883 (+315). Claude
+    # bots load the schema only when a quiesce asks them to ack.
+    assert total <= 17883, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 

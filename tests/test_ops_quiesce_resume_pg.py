@@ -13,7 +13,7 @@ import pytest
 
 from llm_bawt.ops import JOB_ACCEPTED, JOB_FAILED, JOB_SUCCEEDED
 from llm_bawt.ops.executor import ReconcileResult
-from llm_bawt.ops.quiesce import record_ack
+from llm_bawt.ops.quiesce import AckNoteRequired, record_ack
 from llm_bawt.ops.quiesce_prompts import DEFAULT_RESUME, DEFAULT_RESUME_BLOCKED
 from llm_bawt.ops.resume_sender import EPOCH, QuiesceResumeSender
 from tests.test_ops_quiesce_pg import _agent_bot, _receipt_deliveries, rig  # noqa: F401
@@ -214,3 +214,75 @@ def test_jobs_finished_before_the_sender_first_ran_are_skipped(rig, resume):  # 
     rig.sql("UPDATE ops_resume_notices SET created_at = now() WHERE job_id=:e AND bot_id=:e", e=EPOCH)
     assert resume.deliver_due() == []
     assert _resumes(rig) == []
+
+
+# TASK-2121: a "finished" ack (nothing left to resume, note names what wakes
+# the bot next) gets no resume; "stopping" and no-ack bots still do.
+
+def _held_and_finished(rig, note="none: task closed"):  # noqa: F811
+    turn_id = rig.turn()
+    job_id = rig.job()
+    assert rig.driver.step(job_id).outcome == "opened"
+    _member(rig, turn_id, control_state="cancelled")  # the steer stopped it
+    assert record_ack(rig.engine, bot_id=rig.bot, turn_id=turn_id, status="finished", note=note)
+    return turn_id, job_id
+
+
+def test_a_finished_bot_is_not_resumed(rig, resume):  # noqa: F811
+    turn_id, job_id = _held_and_finished(rig)
+    rig.end(turn_id)
+    _dispatch(rig, job_id)
+    _finish(rig, job_id)
+    assert resume.deliver_due() == [job_id]
+    assert _resumes(rig) == []
+    assert resume.deliver_due() == []  # done marker written: no later resume either
+
+
+def test_a_finished_ack_needs_a_note(rig, resume):  # noqa: F811
+    turn_id = rig.turn()
+    job_id = rig.job()
+    assert rig.driver.step(job_id).outcome == "opened"
+    for blank in (None, "", "   "):
+        with pytest.raises(AckNoteRequired):
+            record_ack(rig.engine, bot_id=rig.bot, turn_id=turn_id, status="finished", note=blank)
+    assert rig.sql("SELECT ack_status FROM gate_members WHERE turn_id=:t", t=turn_id).scalar() is None
+
+
+def test_a_later_stopping_ack_overrides_finished(rig, resume):  # noqa: F811
+    """The latest ack wins: a bot that found more work and re-acked is resumed."""
+    turn_id, job_id = _held_and_finished(rig)
+    assert record_ack(rig.engine, bot_id=rig.bot, turn_id=turn_id, status="stopping",
+                      note="found one more step")
+    rig.end(turn_id)
+    _dispatch(rig, job_id)
+    _finish(rig, job_id)
+    assert resume.deliver_due() == [job_id]
+    [delivery] = _resumes(rig)
+    assert _facts(delivery)["ack_note"] == "found one more step"
+
+
+def test_a_failed_job_still_names_a_finished_bot_to_the_coordinator(rig, resume):  # noqa: F811
+    """The OPS_RESUME_BLOCKED path is unchanged: coordinators see every held bot."""
+    tag = uuid.uuid4().hex[:10]
+    role, capability = f"test_coord_{tag}", f"test_coordinate_{tag}"
+    coordinator = f"{rig.bot}-coord"
+    _agent_bot(rig, coordinator)
+    rig.sql("INSERT INTO bot_tag_catalog (slug, name, kind, capabilities)"
+            " VALUES (:s, :s, 'role', CAST(:c AS jsonb))", s=role, c=json.dumps([capability]))
+    rig.sql("INSERT INTO bot_profile_tags (bot_slug, tag_slug) VALUES (:b, :t)", b=coordinator, t=role)
+    try:
+        turn_id, job_id = _held_and_finished(rig, note="gate receipt")
+        rig.end(turn_id)
+        _dispatch(rig, job_id)
+        _finish(rig, job_id, JOB_FAILED)
+        resume.capability["value"] = capability
+        assert resume.deliver_due() == [job_id]
+        assert _resumes(rig) == []
+        [notice] = _receipt_deliveries(rig, coordinator)
+        [held] = _facts(notice)["held_bots"]
+        assert (held["bot_id"], held["ack_status"], held["ack_note"]) == (
+            rig.bot, "finished", "gate receipt")
+    finally:
+        rig.sql("DELETE FROM bot_profile_tags WHERE tag_slug=:t", t=role)
+        rig.sql("DELETE FROM bot_tag_catalog WHERE slug=:t", t=role)
+        rig.sql("DELETE FROM bot_profiles WHERE slug=:s", s=coordinator)

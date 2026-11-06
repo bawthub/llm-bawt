@@ -9,7 +9,9 @@ process beside :class:`.receipt_callback.QuiesceReceiptSender`:
   ``OPS_RESUME`` new turn, carrying its own ``ops_quiesce_ack`` note, once the
   job is terminal and its target is up: the job succeeded, or it never ran
   (``dispatched_at`` unset: a quiesce timeout or a cancel left the service
-  untouched). Bots that were idle have no member row and get nothing.
+  untouched). Bots that were idle have no member row and get nothing, and a
+  bot whose latest ack is ``finished`` (TASK-2121: nothing left to resume, its
+  note names what wakes it next) is not resumed either.
 * A job that ran and did not succeed may have left its target down, so its
   held bots are not resumed. Each coordinator bot (a non-private bot holding a
   role with the ``ops_resume_coordinator_capability`` setting's capability)
@@ -37,6 +39,7 @@ from sqlalchemy import text
 from ..bot_identities import SYSTEM_BOT_ID
 from ..bot_tags.vocabulary import BehaviorTag
 from .models import JOB_SUCCEEDED, JOB_TERMINAL_STATES
+from .quiesce import ACK_FINISHED
 from .quiesce_prompts import RESUME_BLOCKED_KEY, RESUME_KEY, resolve
 
 logger = logging.getLogger(__name__)
@@ -131,7 +134,14 @@ class QuiesceResumeSender:
         skip = self._receipt_bot(job)
         held = [member for member in held if member["bot_id"] != skip]
         if resumable(job):
-            sent = [self._resume(job, member) for member in held]
+            # TASK-2121: a bot whose latest ack is "finished" said nothing is
+            # left to resume and named what wakes it next; don't wake it.
+            # A failed job still names it to coordinators below.
+            sent = [self._resume(job, member) for member in held
+                    if member["ack_status"] != ACK_FINISHED]
+            skipped = [m["bot_id"] for m in held if m["ack_status"] == ACK_FINISHED]
+            if skipped:
+                logger.info("ops job %s: no resume for finished bots %s", job_id, skipped)
         else:
             sent = self._escalate(job, held) if held else []
         self._mark(job_id, DONE_BOT, "done", None)
