@@ -70,6 +70,8 @@ models/
 # Documentation
 *.md
 docs/
+# Package metadata required by the house's editable test environment.
+!README.md
 
 # CI/CD
 .github/

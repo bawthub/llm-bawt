@@ -202,3 +202,10 @@ def test_image_keeps_tests_separate_from_harness_environment():
     assert '--python /opt/house-tests/bin/python -e "/app[dev,service,mcp,search]"' in dockerfile
     assert "gpt-" not in dockerfile
     assert "USER bridge" in dockerfile
+
+
+def test_house_build_context_includes_required_package_readme():
+    ignored = (ROOT / ".dockerignore").read_text().splitlines()
+    assert ignored.index("!README.md") > ignored.index("*.md")
+    for path in ("pyproject.toml", "README.md", "LICENSE", "docker/house-preview"):
+        assert (ROOT / path).is_file()
