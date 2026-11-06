@@ -92,35 +92,6 @@ def is_credential_setting_key(key: str) -> bool:
     return key.strip().lower().startswith(CREDENTIAL_SETTING_PREFIXES)
 
 
-# Per-provider "Alert on problems" switch (TASK-2104), global runtime_settings
-# rows ``provider_alerts:<id>`` holding a bool. No row = default on.
-ALERTS_SETTING_PREFIX = "provider_alerts:"
-
-
-def load_alert_prefs(config: Config) -> dict[str, bool]:
-    """``{provider_id: enabled}`` for every provider with a stored switch."""
-    store = RuntimeSettingsStore(config)
-    if store.engine is None:
-        return {}
-    out: dict[str, bool] = {}
-    for key, value in store.get_scope_settings("global", "*").items():
-        if key.startswith(ALERTS_SETTING_PREFIX) and isinstance(value, bool):
-            out[key[len(ALERTS_SETTING_PREFIX):]] = value
-    return out
-
-
-def set_alerts_enabled(config: Config, provider_id: str, enabled: bool) -> None:
-    """Persist the switch; turning it back on removes the row (the default)."""
-    store = RuntimeSettingsStore(config)
-    if store.engine is None:
-        raise RuntimeError("Runtime settings DB unavailable")
-    key = f"{ALERTS_SETTING_PREFIX}{provider_id}"
-    if enabled:
-        store.delete_value("global", "*", key)
-    else:
-        store.set_value("global", "*", key, False)
-
-
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -404,7 +375,6 @@ class ProviderAdapter:
             "auth_methods": list(self.auth_methods),
             "connection": (rec or ConnectionRecord(provider=self.id)).public(),
             "health": self.health(),
-            "alerts": load_alert_prefs(self.config).get(self.id, True),
         }
 
     def health(self) -> dict[str, Any]:
