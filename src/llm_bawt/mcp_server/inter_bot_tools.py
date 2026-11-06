@@ -976,9 +976,9 @@ async def list_available_bots(
         and (wanted is None or wanted in access.tags.tags.get(row.slug, ()))
         and (wanted_capability is None or wanted_capability in capabilities_of(row.slug))
     ]
-    locations = await read_locations(profiles) if include_state or location else {}
-    if location is not None:
-        wanted_location = location.strip().lower()
+    wanted_location = (location or "").strip().lower() or None  # blank = no filter
+    locations = await read_locations(profiles) if include_state or wanted_location else {}
+    if wanted_location is not None:
         profiles = [row for row in profiles
                     if wanted_location in location_runtimes(locations[row.slug])]
     # The caller's own row may be hidden from the list but still names its route.

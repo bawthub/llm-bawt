@@ -32,6 +32,11 @@ def test_backend_decides_the_bridge_not_the_model():
     assert calls == []  # no house, no Redis read
 
 
+def test_local_backend_names_its_real_service():
+    out, _ = resolve([bot("gpu", "local")])
+    assert out["gpu"] == {"runtime": "local-model-bridge"}
+
+
 def test_live_house_lease_runs_in_the_house():
     out, calls = resolve([bot("probe", house="H1", pinned=True)],
                          {"agent:house:h1:lease:claude-code": "7"})

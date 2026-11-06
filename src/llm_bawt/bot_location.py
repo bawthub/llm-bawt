@@ -30,13 +30,15 @@ from .bot_types import normalize_bot_type
 
 log = logging.getLogger(__name__)
 
-BRIDGES = {"claude-code": "claude-code-bridge", "codex": "codex-bridge"}
+BRIDGES = {"claude-code": "claude-code-bridge", "codex": "codex-bridge",
+           "local": "local-model-bridge"}
 
 LeaseReader = Callable[[str], Awaitable[Any]]
 
 
 def _bridge(backend: str) -> str:
-    return BRIDGES.get(backend, f"{backend}-bridge")
+    """The service running this backend; an unmapped backend reports its own name."""
+    return BRIDGES.get(backend, backend)
 
 
 def location_runtimes(location: dict) -> set[str]:
