@@ -264,7 +264,7 @@ def _user_content_to_responses(
     content: Any, patch_call_ids: set[str] | frozenset[str] = frozenset(),
     patch_mode: str | None = None,
 ) -> tuple[list[dict], list[dict], list[dict]]:
-    """Split a user-role content payload into (parts, tool_result items, followup images).
+    """Split user content into parts, tool results, and labeled image messages.
 
     Anthropic packs tool_result blocks inside a user message; Responses API
     breaks them out as separate ``function_call_output`` input items. So a
@@ -273,21 +273,21 @@ def _user_content_to_responses(
 
     A ``function_call_output.output`` MUST be a plain string, so an image
     returned *inside* a tool_result (e.g. the ``generate_image`` tool) cannot
-    ride in it. Such images are collected into the third return value so the
-    caller can re-surface them as a trailing user ``input_image`` message — the
-    only way a Responses-API model actually SEES a tool-generated image.
+    ride in it. The third return value contains one user image message per
+    image-bearing tool result, labeled with its call ID so ownership survives
+    when a batch mixes results with and without images.
     """
     parts: list[dict] = []
     tool_results: list[dict] = []
-    followup_images: list[dict] = []
+    image_messages: list[dict] = []
 
     if isinstance(content, str):
         if content:
             parts.append({"type": "input_text", "text": content})
-        return parts, tool_results, followup_images
+        return parts, tool_results, image_messages
 
     if not isinstance(content, list):
-        return parts, tool_results, followup_images
+        return parts, tool_results, image_messages
 
     for block in content:
         if not isinstance(block, dict):
@@ -306,8 +306,8 @@ def _user_content_to_responses(
             # tool_result.content can be a string OR a list of content blocks
             # (text/image). A Responses ``function_call_output.output`` must be
             # a STRING, so we flatten the text here and pull any image blocks
-            # OUT into ``followup_images`` — the caller re-surfaces them as a
-            # trailing user input_image message so the model can see them.
+            # OUT into a call-labeled user image message. Do not pool images
+            # across results: that erases which call produced each image.
             raw = block.get("content")
             if isinstance(raw, str):
                 output = raw
@@ -329,7 +329,14 @@ def _user_content_to_responses(
                 # so the model knows an image accompanies this tool result.
                 if block_imgs and not output.strip():
                     output = "[image returned by tool — shown in the following message]"
-                followup_images.extend(block_imgs)
+                if block_imgs:
+                    image_messages.append({
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": f"Image(s) returned by tool_call_id={call_id}:"},
+                            *block_imgs,
+                        ],
+                    })
             else:
                 output = ""
             tool_results.append({
@@ -343,7 +350,7 @@ def _user_content_to_responses(
                 "output": output,
             })
 
-    return parts, tool_results, followup_images
+    return parts, tool_results, image_messages
 
 
 def _assistant_content_to_responses(
@@ -532,7 +539,7 @@ def anthropic_to_responses(
         content = msg.get("content")
 
         if role == "user":
-            parts, tool_results, followup_images = _user_content_to_responses(
+            parts, tool_results, image_messages = _user_content_to_responses(
                 content, patch_call_ids, apply_patch,
             )
             if temporal_prefix and not temporal_prefix_attached:
@@ -546,19 +553,9 @@ def anthropic_to_responses(
             # is NOT a sibling block — it is appended inside the tool_result
             # string; hoisting that safely is TASK-937.)
             input_items.extend(tool_results)
-            # Images returned inside a tool_result can't ride in a
-            # function_call_output (its output must be a string), so surface
-            # them as a trailing user image message right after the tool
-            # outputs. This is what lets the model actually SEE a tool-generated
-            # image (e.g. generate_image) and iterate on it.
-            if followup_images:
-                input_items.append({
-                    "role": "user",
-                    "content": [
-                        {"type": "input_text", "text": "Image(s) returned by the tool call above:"},
-                        *followup_images,
-                    ],
-                })
+            # Keep every function output adjacent to the preceding calls,
+            # then emit the call-labeled image messages before sibling text.
+            input_items.extend(image_messages)
             if parts:
                 # All parts are input_text/input_image; user content items
                 # take the list directly.
