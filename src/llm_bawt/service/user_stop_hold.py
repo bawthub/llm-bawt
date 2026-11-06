@@ -39,6 +39,7 @@ from .turn_gates import (
     GateScope,
     GateSpec,
     extend_gate,
+    live_condition,
     live_gate_for_owner,
     release_gates,
 )
@@ -157,6 +158,27 @@ def snapshot(engine, bot_id: str) -> QueueHold | None:
     queued = tuple({**row, "created_at": row["created_at"].isoformat() if row["created_at"] else None}
                    for row in rows)
     return QueueHold(gate_id=gate.id, expires_at=gate.expires_at, queued=queued)
+
+
+def live_hold_counts(conn) -> tuple[tuple[str, int, str, int], ...]:
+    """Every live user-Stop hold as (bot, gate id, expiry, held rows); PostgreSQL only.
+
+    The state watcher's queue-hold fingerprint (TASK-2109): it moves when a
+    hold opens, extends, is released or lapses, and when its held count changes.
+    """
+    if not is_postgresql(conn):
+        return ()
+    gates = conn.execute(sa_text(
+        f"SELECT id, owner_id, expires_at FROM system_gates"
+        f" WHERE left(owner_id, {len(hold_owner(''))}) = :prefix AND {live_condition(fresh=True)}"
+        " ORDER BY owner_id, id"
+    ), {"prefix": hold_owner("")}).mappings().all()
+    out = []
+    for gate in gates:
+        bot_id = gate["owner_id"][len(hold_owner("")):]
+        held = conn.execute(sa_text(f"SELECT count(*) {_HELD_ROWS}"), {"bot": bot_id}).scalar_one()
+        out.append((bot_id, int(gate["id"]), gate["expires_at"].isoformat(), int(held)))
+    return tuple(out)
 
 
 def resume(engine, bot_id: str) -> list[int]:

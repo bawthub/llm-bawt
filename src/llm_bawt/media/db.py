@@ -13,6 +13,7 @@ from urllib.parse import quote_plus
 
 from sqlalchemy import text
 
+from ..service.commit_wake import notify_in_transaction
 from ..utils.config import Config
 from ..utils.schema import SchemaBootstrapGuard
 
@@ -112,6 +113,7 @@ class MediaGenerationStore:
 
         with self.engine.connect() as conn:
             conn.execute(sql, row)
+            notify_in_transaction(conn)
             conn.commit()
 
     # ------------------------------------------------------------------
@@ -132,6 +134,7 @@ class MediaGenerationStore:
 
         with self.engine.connect() as conn:
             result = conn.execute(sql, params)
+            notify_in_transaction(conn)
             conn.commit()
             return result.rowcount > 0
 
@@ -201,5 +204,6 @@ class MediaGenerationStore:
         sql = text(f"DELETE FROM {TABLE_NAME} WHERE id = :id")
         with self.engine.connect() as conn:
             result = conn.execute(sql, {"id": gen_id})
+            notify_in_transaction(conn)
             conn.commit()
             return result.rowcount > 0

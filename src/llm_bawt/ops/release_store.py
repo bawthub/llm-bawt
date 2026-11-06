@@ -11,6 +11,7 @@ from sqlalchemy import func, inspect, or_, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, SQLModel, select
 
+from ..service.commit_wake import notify_in_transaction
 from ..utils.config import Config, has_database_credentials
 from ..utils.schema import SchemaBootstrapGuard
 from .release_models import (ReleaseEvent, ReleaseRun, RELEASE_AWAITING_DEPLOY_APPROVAL,
@@ -125,6 +126,9 @@ class ReleaseStore:
             detail_json=canonical_json(detail or {}),
         )
         session.add(event)
+        # Releases run in the ops-reconciler and write no system_events row, so
+        # this commit notify is how the app's state watcher hears them (TASK-2109).
+        notify_in_transaction(session.connection())
         return event
 
     def create(

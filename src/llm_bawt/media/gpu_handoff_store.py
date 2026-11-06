@@ -16,7 +16,18 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
 
+from llm_bawt.service.commit_wake import notify_in_transaction
 from llm_bawt.utils.schema import SchemaBootstrapGuard
+
+
+def _changed(conn) -> None:
+    """Wake the app's state watcher when this transaction commits (TASK-2109).
+
+    The video server writes this ledger from its own process, so a commit
+    notify is the only way open UIs hear about those phase changes.
+    """
+    notify_in_transaction(conn)
+
 
 _metadata = MetaData()
 # These actions require a durable ops receipt before the cursor can advance.
@@ -177,6 +188,7 @@ class GpuHandoffFence:
             raise HandoffConflict("TTS restarts only while voice owns an idle GPU", code="gpu_not_voice")
         if conn.execute(select(_video_jobs.c.id).limit(1)).first() is not None:
             raise HandoffConflict("Video render claims are still open", code="active_video_claims")
+        _changed(conn)
         conn.execute(_state.update().where(_state.c.id == 1).values(
             phase="tts_restarting", generation=row["generation"] + 1, tts_restart_key=self.key))
 
@@ -226,6 +238,7 @@ class GpuHandoffStore:
             row = _lock_state(conn)
             if row["phase"] != "tts_restarting" or row["tts_restart_key"] != key:
                 raise HandoffConflict("TTS restart fence is no longer this request's", code="fence_changed")
+            _changed(conn)
             conn.execute(_state.update().where(_state.c.id == 1).values(
                 phase="idle", generation=row["generation"] + 1, tts_restart_key=None))
             return self._view(_lock_state(conn))
@@ -261,6 +274,7 @@ class GpuHandoffStore:
             if (lost_owner or (has_claims and row["owner"] in ("video", "video_calibration"))) and row["phase"] != "recovery_required":
                 reason = ("Video worker restarted with unresolved render claims; verify GPU and jobs"
                           if has_claims else "Video worker restarted; verify model residency and GPU owner")
+                _changed(conn)
                 conn.execute(_state.update().where(_state.c.id == 1).values(
                     owner="unknown", phase="recovery_required",
                     generation=row["generation"] + 1, last_error=reason,
@@ -292,6 +306,7 @@ class GpuHandoffStore:
                 raise HandoffConflict("GPU does not belong to video; request a handoff")
             # Claims cover queued requests too: no handoff may begin until the
             # entire queue drains, even when the worker is between renders.
+            _changed(conn)
             conn.execute(_video_jobs.insert().values(id=job_id, generation=row["generation"]))
             return row["generation"]
 
@@ -331,6 +346,7 @@ class GpuHandoffStore:
                 select(_calibrations.c.generation).where(_calibrations.c.generation == generation)
             ).first():
                 raise HandoffConflict("Calibration was already submitted; inspect its existing job")
+            _changed(conn)
             conn.execute(_calibrations.insert().values(generation=generation, job_id=job_id))
             conn.execute(_video_jobs.insert().values(id=job_id, generation=generation))
 
@@ -373,6 +389,7 @@ class GpuHandoffStore:
             if (measurement["gpu_uuid"] != original_gpu.get("uuid")
                     or measurement["device_total_mib"] != original_gpu.get("total_mib")):
                 raise HandoffConflict("Calibration ran on a different GPU than the consented reservation")
+            _changed(conn)
             conn.execute(_calibrations.update().where(_calibrations.c.job_id == job_id).values(measurement_json=json.dumps(evidence)))
             conn.execute(_video_jobs.delete().where(_video_jobs.c.id == job_id))
             draining = row["phase"] == "draining"
@@ -429,6 +446,7 @@ class GpuHandoffStore:
         """The render finished but its evidence was rejected: release, then fence."""
         with self.engine.begin() as conn:
             row = self._locked(conn)
+            _changed(conn)
             conn.execute(_video_jobs.delete().where(_video_jobs.c.id == job_id))
             conn.execute(_state.update().where(_state.c.id == 1).values(
                 owner="unknown", phase="recovery_required", generation=row["generation"] + 1,
@@ -438,6 +456,7 @@ class GpuHandoffStore:
 
     def release_video(self, job_id: str) -> None:
         with self.engine.begin() as conn:
+            _changed(conn)
             conn.execute(_video_jobs.delete().where(_video_jobs.c.id == job_id))
 
     def resolve_video_claim(self, *, job_id: str, user: str, expected_generation: int,
@@ -464,6 +483,7 @@ class GpuHandoffStore:
                           observations_json=json.dumps(observations, allow_nan=False),
                           resolved_at=time.time())
             conn.execute(_resolved_jobs.insert().values(**record))
+            _changed(conn)
             conn.execute(_video_jobs.delete().where(_video_jobs.c.id == job_id))
             return {"job_id": job_id, "outcome": outcome, "reviewed_by": user,
                     "owner_generation": row["generation"], "resolved_at": record["resolved_at"]}
@@ -495,6 +515,7 @@ class GpuHandoffStore:
             if (not restore and conn.execute(select(_video_jobs.c.id).limit(1)).first() is not None):
                 raise HandoffConflict("Active video work must finish before offering a switch")
             # Replacing an offer invalidates its old token and bumps the generation.
+            _changed(conn)
             conn.execute(_state.update().where(_state.c.id == 1).values(
                 phase="offered", generation=row["generation"] + 1,
                 offer_hash=hashlib.sha256(token.encode()).hexdigest(), offer_user=user,
@@ -543,6 +564,7 @@ class GpuHandoffStore:
                     or not secrets.compare_digest(row["offer_hash"] or "", hashlib.sha256(token.encode()).hexdigest())):
                 raise HandoffConflict("Consent is expired, used, or does not match this transition")
             draining = row["offer_target"] == "voice" and row["owner"] in ("video", "video_calibration")
+            _changed(conn)
             conn.execute(_state.update().where(_state.c.id == 1).values(
                 phase="draining" if draining else "transitioning", generation=row["generation"] + 1,
                 offer_hash=None, offer_user=None, offer_expires=None,
@@ -558,6 +580,7 @@ class GpuHandoffStore:
                 raise HandoffConflict("Video drain is no longer current")
             if conn.execute(select(_video_jobs.c.id).limit(1)).first() is not None:
                 raise HandoffConflict("Accepted video renders are still draining")
+            _changed(conn)
             conn.execute(_state.update().where(_state.c.id == 1).values(phase="transitioning"))
             return self._view(self._locked(conn))
 
@@ -570,6 +593,7 @@ class GpuHandoffStore:
                     or row["pending_action"] or row["next_action"] >= len(actions)
                     or actions[row["next_action"]] != action):
                 raise HandoffConflict("Transition action is not next or requires reconciliation")
+            _changed(conn)
             conn.execute(_state.update().where(_state.c.id == 1).values(pending_action=action, last_job_id=None))
             return self._view(self._locked(conn))
 
@@ -581,6 +605,7 @@ class GpuHandoffStore:
             if (row["phase"] != "transitioning" or row["generation"] != generation
                     or row["pending_action"] != action or row["last_job_id"]):
                 raise HandoffConflict("Transition has changed or operation needs reconciliation")
+            _changed(conn)
             conn.execute(_state.update().where(_state.c.id == 1).values(last_job_id=job_id))
             return self._view(self._locked(conn))
 
@@ -592,6 +617,7 @@ class GpuHandoffStore:
                     or row["pending_action"] != action
                     or (action in OPS_ACTIONS and not row["last_job_id"])):
                 raise HandoffConflict("Action is not pending or needs an operation receipt")
+            _changed(conn)
             conn.execute(_state.update().where(_state.c.id == 1).values(
                 pending_action=None, next_action=row["next_action"] + 1,
             ))
@@ -606,6 +632,7 @@ class GpuHandoffStore:
                     or row["offer_target"] != target or row["pending_action"]
                     or row["next_action"] != len(actions)):
                 raise HandoffConflict("Transition has unfinished actions or mismatched target")
+            _changed(conn)
             conn.execute(_state.update().where(_state.c.id == 1).values(
                 owner=target, phase="idle", generation=generation + 1,
                 offer_target=None, actions=None, next_action=0, last_job_id=None,
@@ -617,6 +644,7 @@ class GpuHandoffStore:
             row = self._locked(conn)
             if row["phase"] not in ("transitioning", "draining") or row["generation"] != generation:
                 raise HandoffConflict("Transition has changed")
+            _changed(conn)
             conn.execute(_state.update().where(_state.c.id == 1).values(
                 owner="unknown", phase="recovery_required", generation=generation + 1,
                 pending_action="await_video_drain" if row["phase"] == "draining" else row["pending_action"],
@@ -633,6 +661,7 @@ class GpuHandoffStore:
                 raise HandoffConflict("GPU state changed; refresh and try again")
             if conn.execute(select(_video_jobs.c.id).limit(1)).first() is not None:
                 raise HandoffConflict("A render's outcome is unknown; restore voice to reset the video worker")
+            _changed(conn)
             conn.execute(_state.update().where(_state.c.id == 1).values(
                 owner="video", phase="idle", generation=row["generation"] + 1, last_error=None,
                 offer_hash=None, offer_user=None, offer_target=None, offer_expires=None,
@@ -645,6 +674,7 @@ class GpuHandoffStore:
         with self.engine.begin() as conn:
             row = self._locked(conn)
             if row["phase"] in ("transitioning", "draining"):
+                _changed(conn)
                 conn.execute(_state.update().where(_state.c.id == 1).values(
                     owner="unknown", phase="recovery_required", generation=row["generation"] + 1,
                     pending_action="await_video_drain" if row["phase"] == "draining" else row["pending_action"],

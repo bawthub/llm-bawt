@@ -25,6 +25,7 @@ from .approval_models import (
     _new_id,
     _utcnow,
 )
+from .service.commit_wake import notify_in_transaction
 from .system_events import SystemEventEmitter
 from .utils.config import Config, has_database_credentials
 from .utils.schema import SchemaBootstrapGuard
@@ -443,6 +444,9 @@ class ToolApprovalPolicyStore(ApprovalRequestStoreMixin):
         return seeded
 
     def _revision(self, session, row, change, actor):
+        # Every policy create/update/delete records a revision here; the commit
+        # notify lets open approval pages refresh (TASK-2109 state watcher).
+        notify_in_transaction(session.connection())
         key = f"{row.id}:{row.version}"
         if session.get(ToolApprovalPolicyRevision, key) is None:
             session.add(

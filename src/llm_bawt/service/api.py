@@ -318,8 +318,14 @@ async def lifespan(app):
     service._inter_bot_dispatcher.start()
     service._commit_wake_task = asyncio.create_task(
         run_commit_wake_listener(service, model_engine), name="commit-wake-listener")
+    # TASK-2109: one loop turns commit wakes into browser `state_changed` events.
+    from .state_events import MAINTENANCE_JOBS, mark as mark_state, nudge as nudge_state, run_state_watcher
+    service._state_watcher_task = asyncio.create_task(
+        run_state_watcher(service, model_engine), name="state-watcher")
     if scheduler is not None:
         scheduler.wake_hub = service._commit_wake_hub
+        scheduler.on_runs_changed = lambda: mark_state(service, MAINTENANCE_JOBS)
+        scheduler.state_nudge = lambda: nudge_state(service)
         await scheduler.start()
         log.info("Scheduler started (maintenance interval=%ss; prompt sweep=5s)",
                  config.SCHEDULER_CHECK_INTERVAL_SECONDS)
@@ -445,6 +451,7 @@ BACKGROUND_TASK_ATTRIBUTES = (
     "_quiesce_exit_task",
     "_gate_change_task",
     "_commit_wake_task",
+    "_state_watcher_task",
     "_claude_refresh_task",
     "_codex_refresh_task",
 )

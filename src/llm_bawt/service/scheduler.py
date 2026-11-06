@@ -150,6 +150,10 @@ class JobScheduler:
         self._prompt_sweep = prompt_sweep
         self._prompt_task: Optional[asyncio.Task] = None
         self.wake_hub = None  # TASK-2108: set by the app before start()
+        # TASK-2109: called after a maintenance run starts or finishes, so open
+        # automation pages refresh (the app marks the `maintenance_jobs` topic).
+        self.on_runs_changed = None
+        self.state_nudge = None
         from .runtime_health import LoopHealth
         self.maintenance_health = LoopHealth()
         self.prompt_health = LoopHealth()
@@ -189,6 +193,10 @@ class JobScheduler:
             try:
                 await self._prompt_sweep()
                 self.prompt_health.succeeded()
+                # TASK-2109: a sweep may move occurrences without a commit
+                # notify; the state watcher re-reads their fingerprint.
+                if self.state_nudge is not None:
+                    self.state_nudge()
             except Exception as exc:
                 self.prompt_health.failed(exc)
                 logger.exception("Prompt scheduler sweep failed; will retry")
@@ -333,6 +341,7 @@ class JobScheduler:
         claimed = await loop.run_in_executor(None, create_run)
         if claimed is None:
             return
+        self._runs_changed()
         run_id, result_json = claimed
         start_time = datetime.now(timezone.utc)
         status = JobStatus.RUNNING
@@ -430,7 +439,16 @@ class JobScheduler:
                 session.commit()
         
         await loop.run_in_executor(None, update_run)
+        self._runs_changed()
         logger.debug(f"Job {job.job_type} completed with status {status}")
+
+    def _runs_changed(self) -> None:
+        if self.on_runs_changed is None:
+            return
+        try:
+            self.on_runs_changed()
+        except Exception:  # noqa: BLE001 - a missed refresh never fails the job
+            logger.debug("maintenance run change notice failed", exc_info=True)
 
     @staticmethod
     def _sanitize_identifier(identifier: str) -> str:

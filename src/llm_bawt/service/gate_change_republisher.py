@@ -155,6 +155,11 @@ async def run_gate_change_republisher(service: Any, *, waiter_factory=GateChange
 
 
 async def _republish(dispatcher: Any) -> None:
+    # TASK-2109: a gate opened, released or lapsed (queue holds are gates), so
+    # the state watcher re-reads the queue-hold fingerprint.
+    from .state_events import nudge
+
+    nudge(getattr(dispatcher, "service", None))
     try:
         await asyncio.to_thread(republish_waiting, dispatcher)
     except Exception:  # noqa: BLE001 - the next change retries

@@ -10,6 +10,7 @@ from ...utils.config import has_database_credentials
 from ..dependencies import get_profile_manager, get_service
 from ..job_parameters import JobConfigurationPatch, JobParameterRegistry
 from ..schemas import JobRunInfo, JobRunsResponse, ScheduledJobInfo, ScheduledJobsResponse
+from ..state_events import MAINTENANCE_JOBS, mark
 from ..scheduler import JobRun, JobStatus, JobType, ScheduledJob, create_scheduler_tables
 
 router = APIRouter()
@@ -59,6 +60,7 @@ def trigger_job(job_type: str):
         session.add(job)
         session.commit()
 
+    mark(get_service(), MAINTENANCE_JOBS)
     return {"success": True, "job_type": normalized_job_type}
 
 
@@ -99,6 +101,7 @@ def update_job_configuration(job_id: str, patch: JobConfigurationPatch):
             job.next_run_at = datetime.now(timezone.utc) + timedelta(minutes=job.interval_minutes)
         session.add(job)
         session.commit()
+    mark(get_service(), MAINTENANCE_JOBS)
     return {"success": True, "job_id": job_id}
 
 

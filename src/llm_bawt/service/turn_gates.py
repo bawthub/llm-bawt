@@ -340,6 +340,11 @@ def _live(*, fresh: bool = False) -> str:
 
 _LIVE = _live()
 
+
+def live_condition(*, fresh: bool = False) -> str:
+    """The SQL predicate for a live ``system_gates`` row (unreleased, unexpired)."""
+    return _live(fresh=fresh)
+
 _GATE_COLUMNS = "id, mode, owner_kind, owner_id, reason, expires_at"
 
 
