@@ -28,7 +28,8 @@ def test_move_in_and_out_report_routes_and_reasons():
     move_in = ce.location_frame("b", fields(), fields("h1"), "", live)
     assert move_in == {"_type": "bot_location_changed", "kind": "assignment", "bot_id": "b",
                        "from": {"runtime": "claude-code-bridge"},
-                       "to": {"runtime": "house", "house": "h1"}, "reason": "move_in"}
+                       "to": {"runtime": "house", "house": "h1"}, "reason": "move_in",
+                       "version": None}
     move_out = ce.location_frame("b", fields("h1"), fields(), "", live)
     assert move_out["reason"] == "move_out" and move_out["to"] == {"runtime": "claude-code-bridge"}
 
@@ -158,7 +159,7 @@ def test_house_frames_move_tenant_routes_without_profile_write():
     tenant = SimpleNamespace(slug="b", house="h1", house_pinned=True, **AGENT)
     frames = frames_for([("h1", UP, DOWN)], lambda house: [tenant])
     assert frames[0] == {"_type": "house_state_changed", "house_id": "h1", "from": UP,
-                         "to": DOWN, "tenants": ["b"]}
+                         "to": DOWN, "tenants": ["b"], "hidden_tenants": 0}
     assert frames[1]["kind"] == "route" and frames[1]["reason"] == "house_down_fallback"
     assert frames[1]["to"] == {"runtime": "claude-code-bridge", "house": "h1",
                                "house_live": False, "pinned": True}
@@ -168,10 +169,169 @@ def test_house_frames_move_tenant_routes_without_profile_write():
     assert len(frames_for([("h1", RECREATING, DOWN)], lambda house: [tenant])) == 1
 
 
-def test_first_sighting_announces_house_only():
-    calls = []
-    frames = frames_for([("h1", None, UP)], lambda house: calls.append(house) or [])
-    assert [f["_type"] for f in frames] == ["house_state_changed"] and calls == []
+def test_first_sighting_up_is_from_down_and_routes_tenants():
+    tenant = SimpleNamespace(slug="b", house="h1", house_pinned=False, **AGENT)
+    frames = frames_for([("h1", None, UP)], lambda house: [tenant])
+    assert frames[0]["from"] == DOWN and frames[0]["tenants"] == ["b"]
+    assert frames[1]["reason"] == "house_up" and frames[1]["to"]["runtime"] == "house"
+    # First seen down: nothing changed from what a snapshot showed.
+    assert frames_for([("h2", None, DOWN)], lambda house: [tenant]) == []
+
+
+def test_hidden_tenants_are_counted_never_named():
+    rows = [SimpleNamespace(slug=s, house="h1", house_pinned=False, **AGENT) for s in ("a", "secretbot")]
+    frames = frames_for([("h1", UP, DOWN)], lambda house: rows, lambda slug: slug != "secretbot")
+    assert frames[0]["tenants"] == ["a"] and frames[0]["hidden_tenants"] == 1
+    assert [f.get("bot_id") for f in frames[1:]] == ["a"]
+    assert "secretbot" not in str(frames)
+
+
+def test_route_frames_carry_the_row_version():
+    from datetime import datetime, timezone
+    stamp = datetime(2026, 11, 6, tzinfo=timezone.utc)
+    row = SimpleNamespace(slug="b", house="h1", house_pinned=False, updated_at=stamp, **AGENT)
+    frame = frames_for([("h1", UP, DOWN)], lambda house: [row])[1]
+    assert frame["version"] == ce.version_of(row) == int(stamp.timestamp() * 1_000_000)
+
+
+# --- publication: visibility and committed versions ----------------------------
+
+class _Redis:
+    def __init__(self, live=()):
+        self.live, self.added, self.n = set(live), [], 0
+
+    def get(self, key):
+        return "1" if key in self.live else None
+
+    def incr(self, key):
+        self.n += 1
+        return self.n
+
+    def xadd(self, stream, data, **_):
+        import json
+        self.added.append(json.loads(data["payload"]))
+
+    def close(self):
+        pass
+
+
+def test_hidden_bots_are_not_published(monkeypatch):
+    client = _Redis({LEASE_H1})
+    monkeypatch.setattr(ce, "_redis", lambda config=None: client)
+    monkeypatch.setattr(ce, "visibility", lambda config=None: lambda slug: slug != "secret")
+    ce.emit_tenancy_changes([("secret", fields(), fields("h1"), "", 5),
+                             ("open", fields(), fields("h1"), "", 6)])
+    assert [(f["bot_id"], f["version"]) for f in client.added] == [("open", 6)]
+
+
+def test_late_publication_is_older_by_version(monkeypatch):
+    """Commit order h1 (v1) then h2 (v2), published h2 first: versions still order them."""
+    client = _Redis({LEASE_H1, "agent:house:h2:lease:claude-code"})
+    monkeypatch.setattr(ce, "_redis", lambda config=None: client)
+    monkeypatch.setattr(ce, "visibility", lambda config=None: lambda slug: True)
+    ce.emit_tenancy_changes([("b", fields("h1"), fields("h2"), "", 2)])
+    ce.emit_tenancy_changes([("b", fields(), fields("h1"), "", 1)])
+    held: dict = {}
+    for frame in client.added:  # the documented client rule
+        if frame["version"] >= held.get("version", 0):
+            held = frame
+    assert held["to"]["house"] == "h2"
+    assert [f["seq"] for f in client.added] == [1, 2]
+
+
+# --- active location ------------------------------------------------------------
+
+class _TurnRedis:
+    def __init__(self, records):
+        self.records = records
+
+    async def get(self, key):
+        return self.records.get(key)
+
+
+def _bot(slug, house=None):
+    return SimpleNamespace(slug=slug, house=house, house_pinned=False, **AGENT)
+
+
+def test_active_uses_the_executing_request_record_only():
+    import asyncio
+
+    from llm_bawt.service.routes.campus import _active
+    records = {
+        # An older housed thread's records must not decide a new mansion turn.
+        "agent:turn:sess:claude-code:b:nick": "agent:commands:house:h1",
+        "agent:turn:req:old": "agent:commands:house:h1",
+        "agent:turn:req:r2": "agent:commands:house:h2",
+        "agent:turn:req:r3": "agent:commands",
+    }
+    rows = [_bot("a", "h2"), _bot("b"), _bot("c", "h1"), _bot("d", "h1"), _bot("e"), _bot("f")]
+    turns = {"a": {"kind": "executing", "request_id": "r2"},
+             "b": {"kind": "executing", "request_id": "new"},
+             "c": {"kind": "executing", "request_id": "r3"},
+             "d": {"kind": "executing", "request_id": "gone"},
+             "e": {"kind": "idle"},
+             "f": {"kind": "ambiguous"}}
+    out = asyncio.run(_active(_TurnRedis(records), rows, turns))
+    assert out["a"] == {"runtime": "house", "house": "h2"}
+    assert out["b"] == {"runtime": "claude-code-bridge"}  # unhoused, unrecorded: mansion
+    assert out["c"] == {"runtime": "claude-code-bridge"}  # recorded fallback
+    assert out["d"] == "unknown"  # housed but no record: not trustworthy
+    assert out["e"] is None and out["f"] == "unknown"
+
+
+# --- watcher subscriptions -------------------------------------------------------
+
+def test_every_subscription_ack_rereads_leases(monkeypatch):
+    """redis-py resubscribes inside listen(); each ack must re-read, no timer."""
+    import asyncio
+
+    from llm_bawt import house_watcher as hw
+
+    reads = iter([{("h1", "claude-code"): "1"}, {}])
+    emitted: list = []
+
+    class PubSub:
+        async def psubscribe(self, pattern):
+            pass
+
+        async def listen(self):
+            yield {"type": "psubscribe"}
+            yield {"type": "psubscribe"}  # automatic reconnect
+            raise asyncio.CancelledError
+
+        async def aclose(self):
+            pass
+
+    class Client:
+        connection_pool = SimpleNamespace(connection_kwargs={})
+        flag_reads = 0
+
+        def pubsub(self):
+            return PubSub()
+
+        async def config_get(self, name):
+            Client.flag_reads += 1
+            return {name: "K$gx"}
+
+        async def aclose(self):
+            pass
+
+    import redis.asyncio as aioredis
+    monkeypatch.setattr(aioredis, "from_url", lambda *a, **k: Client())
+    watcher = hw.HouseWatcher(SimpleNamespace(REDIS_URL="redis://x"))
+
+    async def read(client):
+        return next(reads)
+
+    async def emit(transitions):
+        emitted.append(transitions)
+
+    monkeypatch.setattr(watcher, "_read_leases", read)
+    monkeypatch.setattr(watcher, "_emit", emit)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(watcher.run())
+    assert emitted == [[("h1", UP, DOWN)]] and Client.flag_reads == 2
+    assert watcher.states.state["h1"] == DOWN
 
 
 def test_merge_flags_keeps_existing():
@@ -184,6 +344,12 @@ def test_merge_flags_keeps_existing():
 
 POOL = [{"id": "h1", "harness": "claude-code", "preview_host": "https://dev1.example.test"},
         {"id": "h2", "harness": "claude-code", "preview_host": "https://dev2.example.test"}]
+
+
+def test_hidden_tenants_keep_occupancy_without_identity():
+    rows = house_rows(POOL, {}, {}, {}, {"h2": 1})
+    assert [(r["id"], r["tenants"], r["hidden_tenants"]) for r in rows] == [
+        ("h1", [], 0), ("h2", [], 1)]
 
 
 def test_configured_empty_and_down_houses_are_listed():

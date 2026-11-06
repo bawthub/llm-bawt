@@ -96,29 +96,37 @@ def _tenants(config: Any, house: str) -> list[Any]:
 
     with get_shared_engine(config).connect() as conn:
         return list(conn.execute(text(
-            "SELECT slug, bot_type, agent_backend, house, house_pinned "
+            "SELECT slug, bot_type, agent_backend, house, house_pinned, updated_at "
             "FROM bot_profiles WHERE house = :house ORDER BY slug"), {"house": house}))
 
 
-def frames_for(transitions: list, tenants_of) -> list[dict]:
-    """Frames for house transitions; ``tenants_of(house)`` lists profile rows."""
+def frames_for(transitions: list, tenants_of, shown=lambda slug: True) -> list[dict]:
+    """Frames for house transitions; ``tenants_of(house)`` lists profile rows.
+
+    A house seen for the first time (``old`` None) is reported as coming from
+    ``down``: a client's snapshot without its lease showed it, and routed its
+    tenants, that way. Hidden (private/inactive) tenants are only counted.
+    """
     from .bot_location import location_of
-    from .campus_events import BOT_LOCATION_CHANGED, HOUSE_STATE_CHANGED, ROUTE
+    from .campus_events import BOT_LOCATION_CHANGED, HOUSE_STATE_CHANGED, ROUTE, version_of
 
     frames: list[dict] = []
     for house, old, new in transitions:
-        rows = tenants_of(house) if old is not None else []
+        old = DOWN if old is None else old
+        if old == new:
+            continue
+        rows = tenants_of(house)
+        visible = [r for r in rows if shown(r.slug)]
         frames.append({"_type": HOUSE_STATE_CHANGED, "house_id": house, "from": old,
-                       "to": new, "tenants": [r.slug for r in rows]})
-        if old is None:
-            continue  # first sighting: nothing a client could have shown moved
-        for row in rows:
+                       "to": new, "tenants": [r.slug for r in visible],
+                       "hidden_tenants": len(rows) - len(visible)})
+        for row in visible:
             args = (row.bot_type, row.agent_backend, row.house, row.house_pinned)
             before = location_of(*args, old == UP)
             after = location_of(*args, new == UP)
             if before != after:
                 frames.append({"_type": BOT_LOCATION_CHANGED, "kind": ROUTE, "bot_id": row.slug,
-                               "from": before, "to": after,
+                               "from": before, "to": after, "version": version_of(row),
                                "reason": "house_up" if new == UP else "house_down_fallback"})
     return frames
 
@@ -131,16 +139,23 @@ class HouseWatcher:
     async def _emit(self, transitions: list) -> None:
         if not transitions:
             return
-        from .campus_events import publish_frames
+        from .campus_events import publish_frames, visibility
 
         def run() -> None:
-            publish_frames(frames_for(transitions, lambda h: _tenants(self.config, h)),
+            shown = visibility(self.config)
+            publish_frames(frames_for(transitions, lambda h: _tenants(self.config, h), shown),
                            self.config)
 
         try:
             await asyncio.to_thread(run)
         except Exception:
             log.warning("house watcher emit failed", exc_info=True)
+
+    async def _ensure_flags(self, client: Any) -> None:
+        flags = (await client.config_get("notify-keyspace-events")).get(
+            "notify-keyspace-events", "")
+        if merge_flags(flags) != "".join(sorted(flags)):
+            await client.config_set("notify-keyspace-events", merge_flags(flags))
 
     async def _read_leases(self, client: Any) -> dict[tuple[str, str], str]:
         leases: dict[tuple[str, str], str] = {}
@@ -179,19 +194,21 @@ class HouseWatcher:
             client = aioredis.from_url(url, decode_responses=True)
             pubsub = client.pubsub()
             try:
-                flags = (await client.config_get("notify-keyspace-events")).get(
-                    "notify-keyspace-events", "")
-                if merge_flags(flags) != "".join(sorted(flags)):
-                    await client.config_set("notify-keyspace-events", merge_flags(flags))
                 db = client.connection_pool.connection_kwargs.get("db", 0)
                 await pubsub.psubscribe(f"__keyspace@{db}__:agent:house:*:lease:*")
-                transitions = self.states.reseed(await self._read_leases(client))
-                # The first read only learns the pool; later ones report what changed.
-                if not first:
-                    await self._emit(transitions)
-                first = False
                 async for message in pubsub.listen():
-                    if message.get("type") == "pmessage":
+                    kind = message.get("type")
+                    if kind == "psubscribe":
+                        # Every established subscription, including redis-py's
+                        # own resubscribe after a reconnect: re-apply the flags
+                        # (a restarted Redis loses them) and re-read the leases.
+                        await self._ensure_flags(client)
+                        transitions = self.states.reseed(await self._read_leases(client))
+                        # The first read only learns the pool; later ones report changes.
+                        if not first:
+                            await self._emit(transitions)
+                        first = False
+                    elif kind == "pmessage":
                         await self.handle(client, message["channel"], message["data"])
             except asyncio.CancelledError:
                 raise

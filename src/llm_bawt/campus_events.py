@@ -9,6 +9,9 @@ a client drops events with ``seq <= snapshot.seq`` and refetches once on a gap:
   profile created or deleted). ``kind`` is ``assignment`` (a committed
   house/pin write) or ``route`` (the house's lease came or went; no write).
   Neither moves a turn already running: that stays where it was admitted.
+  ``version`` is the bot's committed location version (see :func:`version_of`):
+  frames can arrive out of commit order, so a client applies a frame only when
+  its ``version`` is at least the one it holds for that bot (snapshot included).
 * ``house_state_changed {event_id, seq, ts, house_id, from, to, tenants}``;
   states are ``up`` / ``down`` / ``recreating``.
 
@@ -17,7 +20,9 @@ Tenancy changes are captured at the one place a bot's ``house`` is written,
 from the session's ``after_commit``, so it fires for borrowed sessions too
 (whoever commits) and a rollback sends nothing. House state transitions come
 from :mod:`house_watcher`. Publishing is best effort: a lost frame shows up as
-a ``seq`` gap and the client refetches the snapshot.
+a ``seq`` gap and the client refetches the snapshot. Private and inactive bots
+are never named (same policy as ``bots_list_available``); a visibility change
+arrives as ``bot_profile_changed``, on which the client refetches.
 """
 
 from __future__ import annotations
@@ -97,8 +102,43 @@ def infer_reason(before: dict, after: dict) -> str:
     return "pinned_change"
 
 
+def version_of(row: Any) -> int | None:
+    """A bot's committed location version: its ``updated_at`` in microseconds.
+
+    Writes to one bot serialize under its tag lock, so a later commit carries a
+    larger version; a client keeps the frame with the highest version per bot.
+    """
+    stamp = getattr(row, "updated_at", None)
+    if stamp is None:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return int(stamp.timestamp() * 1_000_000)
+
+
+def visibility(config: Any = None):
+    """``slug -> bool``: the bot may be shown (not private or inactive).
+
+    The same policy as ``bots_list_available``; an unreadable policy hides all.
+    """
+    from .bot_tags.facade import BotTags
+
+    engine = None
+    try:
+        from .utils.db import get_shared_engine
+
+        if config is None:
+            from .utils.config import Config
+            config = Config()
+        engine = get_shared_engine(config)
+    except Exception:
+        log.warning("campus visibility: no engine", exc_info=True)
+    snapshot = BotTags(engine).snapshot()
+    return lambda slug: snapshot.excluded_reason(slug) is None
+
+
 def location_frame(bot_id: str, before: dict, after: dict, reason: str,
-                   live: dict[str, bool | None]) -> dict | None:
+                   live: dict[str, bool | None], version: int | None = None) -> dict | None:
     """The frame for one profile write; None when the location didn't change.
 
     ``before``/``after`` hold ``bot_type, agent_backend, house, house_pinned``;
@@ -116,7 +156,7 @@ def location_frame(bot_id: str, before: dict, after: dict, reason: str,
 
     def frame(old: dict | None, new: dict | None, why: str) -> dict:
         return {"_type": BOT_LOCATION_CHANGED, "kind": ASSIGNMENT, "bot_id": bot_id,
-                "from": old, "to": new, "reason": why}
+                "from": old, "to": new, "reason": why, "version": version}
 
     # A profile created into, or deleted from, a house; mansion bots appear and
     # disappear through the ordinary bot_profile_changed frame.
@@ -140,7 +180,7 @@ def tenancy_fields(row: Any) -> dict:
 
 
 def note_tenancy_change(session: Any, bot_id: str, before: dict, after: dict,
-                        reason: str | None) -> None:
+                        reason: str | None, version: int | None = None) -> None:
     """Queue a location frame for this write; it is sent after ``session`` commits."""
     if {k: before.get(k) for k in TENANCY_FIELDS} == {k: after.get(k) for k in TENANCY_FIELDS}:
         return
@@ -150,7 +190,7 @@ def note_tenancy_change(session: Any, bot_id: str, before: dict, after: dict,
         event.listen(session, "after_commit", _flush)
         event.listen(session, "after_rollback", _drop)
     session.info.setdefault(_PENDING, []).append(
-        (bot_id, dict(before), dict(after), reason or ""))
+        (bot_id, dict(before), dict(after), reason or "", version))
 
 
 def _drop(session: Any) -> None:
@@ -163,7 +203,7 @@ def _flush(session: Any) -> None:
         emit_tenancy_changes(pending)
 
 
-def emit_tenancy_changes(pending: list[tuple[str, dict, dict, str]], config: Any = None) -> None:
+def emit_tenancy_changes(pending: list[tuple], config: Any = None) -> None:
     from agent_bridge.houses import lease_key
 
     from .bot_location import tenancy
@@ -174,7 +214,7 @@ def emit_tenancy_changes(pending: list[tuple[str, dict, dict, str]], config: Any
             return
         try:
             live: dict[str, bool | None] = {}
-            for _, before, after, _ in pending:
+            for _, before, after, *_ in pending:
                 for fields in (before, after):
                     routed = tenancy(fields.get("bot_type"), fields.get("agent_backend"),
                                      fields.get("house"))
@@ -182,8 +222,10 @@ def emit_tenancy_changes(pending: list[tuple[str, dict, dict, str]], config: Any
                         key = lease_key(routed[1], routed[0])
                         if key not in live:
                             live[key] = bool(client.get(key))
-            frames = [f for bot_id, before, after, reason in pending
-                      if (f := location_frame(bot_id, before, after, reason, live))]
+            shown = visibility(config)
+            frames = [f for bot_id, before, after, reason, version in pending
+                      if shown(bot_id)
+                      and (f := location_frame(bot_id, before, after, reason, live, version))]
             publish(client, frames)
         finally:
             client.close()

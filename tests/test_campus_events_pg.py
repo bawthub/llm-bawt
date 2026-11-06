@@ -53,3 +53,14 @@ def test_deleting_a_housed_bot_moves_it_out(api, sent):  # noqa: F811
     sent.clear()
     assert api.store.delete(BOT)
     assert [(s[0], s[1]["house"], s[2], s[3]) for s in sent] == [(BOT, "h1", {}, "move_out")]
+
+
+def test_versions_increase_with_each_committed_write(api, sent):  # noqa: F811
+    api.store.upsert(AGENT, require_existing=True)
+    sent.clear()
+    api.store.upsert({"slug": BOT, "house": "h1"}, require_existing=True)
+    api.store.upsert({"slug": BOT, "house": "h2"}, require_existing=True)
+    api.store.upsert({"slug": BOT, "house": None}, require_existing=True)
+    versions = [s[4] for s in sent]
+    assert len(versions) == 3 and versions == sorted(set(versions))
+    assert versions[-1] == campus_events.version_of(api.store.get(BOT))

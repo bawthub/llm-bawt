@@ -10,7 +10,7 @@ import json
 import logging
 import time
 from contextlib import nullcontext
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from typing import Any, Protocol
@@ -311,8 +311,15 @@ class BotProfileStore:
                 ), {"slug": slug}).scalar_one()
                 if existing_tags:
                     raise BotAlreadyExists(f"Bot '{slug}' has retained tags; choose a different slug")
-            from .campus_events import REASON_KEY, note_tenancy_change, tenancy_fields
+            from .campus_events import REASON_KEY, note_tenancy_change, tenancy_fields, version_of
             tenancy_before = tenancy_fields(row)
+            # TASK-2120: stamp under the lock and past the stored one, so a
+            # later commit for this bot always carries a larger location version.
+            now = datetime.now(timezone.utc)
+            if row is not None and row.updated_at is not None:
+                stored = (row.updated_at if row.updated_at.tzinfo
+                          else row.updated_at.replace(tzinfo=timezone.utc))
+                now = max(now, stored + timedelta(microseconds=1))
             previous = ProfileRuntime.of(row) if row is not None else None
             previous_searchable = row.include_in_global_search if row is not None else None
             # Under the lock, before any write: a stale read refuses here (TASK-1521).
@@ -452,7 +459,7 @@ class BotProfileStore:
                 policy_changed(session.connection())
             # TASK-2120: the Campus location event is sent when this commits.
             note_tenancy_change(session, slug, tenancy_before, tenancy_fields(row),
-                                payload.get(REASON_KEY))
+                                payload.get(REASON_KEY), version_of(row))
             if not borrowed:
                 session.commit()
                 session.refresh(row)
@@ -498,8 +505,10 @@ class BotProfileStore:
                 conn, row.slug, {profile_changes.TAGS: tags_before},
                 {profile_changes.TAGS: [t for t in tags_before if t in keep]},
                 {profile_changes.CHANGE_NOTE: "profile deleted"}, "profile-delete")
-            from .campus_events import note_tenancy_change, tenancy_fields
-            note_tenancy_change(session, row.slug, tenancy_fields(row), {}, "move_out")
+            from .campus_events import note_tenancy_change, tenancy_fields, version_of
+            version = version_of(row)
+            note_tenancy_change(session, row.slug, tenancy_fields(row), {}, "move_out",
+                                version + 1 if version is not None else None)
             session.delete(row)
             from .bot_policy_events import policy_changed
             policy_changed(session.connection())

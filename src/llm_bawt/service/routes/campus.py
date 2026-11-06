@@ -14,7 +14,9 @@ the list is only what was observed. A Redis failure makes lease-derived fields
 
 Per bot: ``assigned``/``pinned`` (the profile), ``route`` (where its next turn
 would run, TASK-2116) and ``active`` (where its running turn executes: null
-idle, ``unknown`` when that can't be established).
+idle, ``unknown`` when that can't be established) and ``version`` (see
+:func:`llm_bawt.campus_events.version_of`). Private and inactive bots are left
+out; a house counts them in ``hidden_tenants``.
 """
 
 from __future__ import annotations
@@ -55,12 +57,14 @@ def configured_pool() -> list[dict] | None:
 
 
 def house_rows(pool: list[dict] | None, leases: dict[str, set[str]] | None,
-               watched: dict[str, str], tenants: dict[str, list[str]]) -> list[dict]:
+               watched: dict[str, str], tenants: dict[str, list[str]],
+               hidden: dict[str, int] | None = None) -> list[dict]:
     """The house list; ``leases`` None means Redis couldn't be read."""
     from ...house_watcher import DOWN, UNKNOWN, UP
 
     configured = {h["id"]: h for h in pool or []}
-    observed = set(tenants) | set(leases or ()) | set(watched)
+    hidden = hidden or {}
+    observed = set(tenants) | set(hidden) | set(leases or ()) | set(watched)
     rows = []
     for house in sorted(set(configured) | observed):
         conf = configured.get(house)
@@ -77,20 +81,23 @@ def house_rows(pool: list[dict] | None, leases: dict[str, set[str]] | None,
             "id": house, "harness": harness, "state": state,
             "configured": conf is not None,
             "tenants": sorted(tenants.get(house, [])),
+            "hidden_tenants": hidden.get(house, 0),
             "preview_host": conf["preview_host"] if conf else None,
         })
     return rows
 
 
-async def _active(client: Any, rows: list[Any], kinds: dict[str, str] | None
+async def _active(client: Any, rows: list[Any], turns: dict[str, Any] | None
                   ) -> dict[str, Any]:
     """Where each bot's running turn executes.
 
-    House bridges record every admitted turn (``agent:turn:sess:<backend>:
-    <bot>:*`` -> house stream); mansion turns are not recorded, so an executing
-    bot with no house record runs on its backend's bridge.
+    ``turns`` maps a bot to its admission state (``kind``, ``request_id`` of
+    the one executing turn). That exact request's route record
+    (``agent:turn:req:<id>``, written with its publication) names the stream
+    it went to. Only housed bots' turns are recorded, so with no record an
+    unhoused bot runs on its backend's bridge and a housed one is ``unknown``.
     """
-    from agent_bridge.houses import HOUSE_STREAM_PREFIX
+    from agent_bridge.houses import HOUSE_STREAM_PREFIX, turn_request_key
 
     from ...bot_location import _bridge, tenancy
 
@@ -100,36 +107,40 @@ async def _active(client: Any, rows: list[Any], kinds: dict[str, str] | None
         if routed is None:
             out[row.slug] = None
             continue
-        kind = (kinds or {}).get(row.slug)
+        turn = (turns or {}).get(row.slug) or {}
+        kind = turn.get("kind")
         if kind in ("idle", "reserved"):  # reserved: admitted, not yet running
             out[row.slug] = None
             continue
-        if kind != "executing" or client is None:
+        request_id = turn.get("request_id")
+        if kind != "executing" or client is None or not request_id:
             out[row.slug] = "unknown"
             continue
-        backend = routed[0]
         try:
-            house = None
-            async for key in client.scan_iter(match=f"agent:turn:sess:{backend}:{row.slug}:*",
-                                              count=100):
-                stream = await client.get(key) or ""
-                if stream.startswith(HOUSE_STREAM_PREFIX):
-                    house = stream[len(HOUSE_STREAM_PREFIX):]
-                    break
+            stream = await client.get(turn_request_key(str(request_id)))
         except Exception:
             out[row.slug] = "unknown"
             continue
-        out[row.slug] = ({"runtime": "house", "house": house} if house
-                         else {"runtime": _bridge(backend)})
+        if stream and stream.startswith(HOUSE_STREAM_PREFIX):
+            out[row.slug] = {"runtime": "house", "house": stream[len(HOUSE_STREAM_PREFIX):]}
+        elif stream or not row.house:
+            out[row.slug] = {"runtime": _bridge(routed[0])}
+        else:
+            out[row.slug] = "unknown"
     return out
 
 
-def _turn_kinds(engine: Any, slugs: list[str]) -> dict[str, str] | None:
-    """``{bot: idle|reserved|executing|ambiguous}`` from turn admission; None if unreadable."""
+def _turns(engine: Any, slugs: list[str]) -> dict[str, dict] | None:
+    """``{bot: {kind, request_id}}`` from turn admission; None if unreadable."""
     try:
         from ..turn_admission import peek_targets
 
-        return {slug: state.kind for slug, state in peek_targets(engine, slugs).items()}
+        out = {}
+        for slug, state in peek_targets(engine, slugs).items():
+            executing = state.executing
+            out[slug] = {"kind": state.kind,
+                         "request_id": executing.get("agent_request_id") if executing else None}
+        return out
     except Exception:
         log.warning("campus: turn state unavailable", exc_info=True)
         return None
@@ -140,7 +151,7 @@ async def campus_snapshot():
     import redis.asyncio as aioredis
 
     from ...bot_location import resolve_locations
-    from ...campus_events import SEQ_KEY
+    from ...campus_events import SEQ_KEY, version_of, visibility
     from ...house_watcher import LEASE_RE
     from ..dependencies import get_bot_profile_store, get_service
 
@@ -158,7 +169,9 @@ async def campus_snapshot():
         client = None
     ts = datetime.now(timezone.utc).isoformat()
     try:
-        rows = sorted(await asyncio.to_thread(store.list_all), key=lambda r: r.slug)
+        every = sorted(await asyncio.to_thread(store.list_all), key=lambda r: r.slug)
+        shown = await asyncio.to_thread(visibility, service.config)
+        rows = [r for r in every if shown(r.slug)]
         if client is not None:
             try:
                 found: dict[str, set[str]] = {}
@@ -170,8 +183,8 @@ async def campus_snapshot():
             except Exception:
                 log.warning("campus: lease read failed", exc_info=True)
         routes = await resolve_locations(rows, client.get if client is not None else None)
-        kinds = await asyncio.to_thread(_turn_kinds, store.engine, [r.slug for r in rows])
-        active = await _active(client, rows, kinds)
+        turns = await asyncio.to_thread(_turns, store.engine, [r.slug for r in rows])
+        active = await _active(client, rows, turns)
     finally:
         if client is not None:
             await client.aclose()
@@ -179,14 +192,18 @@ async def campus_snapshot():
     watcher = getattr(service, "_house_watcher", None)
     watched = dict(watcher.states.state) if watcher is not None else {}
     tenants: dict[str, list[str]] = {}
-    for row in rows:
+    hidden: dict[str, int] = {}
+    for row in every:
         if row.house:
-            tenants.setdefault(row.house, []).append(row.slug)
+            if shown(row.slug):
+                tenants.setdefault(row.house, []).append(row.slug)
+            else:
+                hidden[row.house] = hidden.get(row.house, 0) + 1
     pool = configured_pool()
     return {
         "seq": seq, "ts": ts, "pool_configured": pool is not None,
         "bots": [{"bot_id": row.slug, "assigned": row.house or None,
                   "pinned": bool(row.house_pinned), "route": routes[row.slug],
-                  "active": active[row.slug]} for row in rows],
-        "houses": house_rows(pool, leases, watched, tenants),
+                  "active": active[row.slug], "version": version_of(row)} for row in rows],
+        "houses": house_rows(pool, leases, watched, tenants, hidden),
     }
