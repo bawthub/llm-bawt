@@ -49,39 +49,51 @@ def location_runtimes(location: dict) -> set[str]:
     return names
 
 
+def tenancy(bot_type: Any, agent_backend: Any, house: Any) -> tuple[str, str] | None:
+    """``(backend, house)`` the dispatcher routes by; None for a chat bot."""
+    backend = (agent_backend or "").strip().lower()
+    if normalize_bot_type(bot_type, backend) != "agent" or not backend:
+        return None
+    try:
+        return backend, normalize_house(house)
+    except ValueError:
+        return backend, ""  # the dispatcher sends an invalid house to the mansion
+
+
+def location_of(bot_type: Any, agent_backend: Any, house: Any, pinned: Any,
+                live: bool | None) -> dict:
+    """One bot's location given its house lease liveness (None: unknown)."""
+    routed = tenancy(bot_type, agent_backend, house)
+    if routed is None:
+        return {"runtime": "app"}
+    backend, house = routed
+    if not house:
+        return {"runtime": _bridge(backend)}
+    pin = {"pinned": True} if pinned else {}
+    if live is False:
+        return {"runtime": _bridge(backend), "house": house, "house_live": False, **pin}
+    if live is None:
+        return {"runtime": "house", "house": house, "house_live": None, **pin}
+    return {"runtime": "house", "house": house, **pin}
+
+
 async def resolve_locations(rows: Iterable[Any], read_lease: LeaseReader | None
                             ) -> dict[str, dict]:
     """``{slug: location}``; ``read_lease(key)`` is a Redis GET (None: unreadable)."""
     out: dict[str, dict] = {}
     for row in rows:
-        backend = (getattr(row, "agent_backend", None) or "").strip().lower()
-        if normalize_bot_type(getattr(row, "bot_type", None), backend) != "agent" or not backend:
-            out[row.slug] = {"runtime": "app"}
-            continue
-        try:
-            house = normalize_house(getattr(row, "house", None))
-        except ValueError:
-            house = ""  # the dispatcher sends an invalid house to the mansion
-        if not house:
-            out[row.slug] = {"runtime": _bridge(backend)}
-            continue
-        pinned = {"pinned": True} if getattr(row, "house_pinned", False) else {}
-        live: bool | None
-        if read_lease is None:
-            live = None
-        else:
+        routed = tenancy(getattr(row, "bot_type", None), getattr(row, "agent_backend", None),
+                         getattr(row, "house", None))
+        live: bool | None = None
+        if routed and routed[1] and read_lease is not None:
             try:
-                live = bool(await read_lease(lease_key(house, backend)))
+                live = bool(await read_lease(lease_key(routed[1], routed[0])))
             except Exception:
-                log.warning("bot location: lease for %s unreadable", house, exc_info=True)
-                live = None
-        if live is False:
-            out[row.slug] = {"runtime": _bridge(backend), "house": house,
-                             "house_live": False, **pinned}
-        elif live is None:
-            out[row.slug] = {"runtime": "house", "house": house, "house_live": None, **pinned}
-        else:
-            out[row.slug] = {"runtime": "house", "house": house, **pinned}
+                log.warning("bot location: lease for %s unreadable", routed[1], exc_info=True)
+        out[row.slug] = location_of(getattr(row, "bot_type", None),
+                                    getattr(row, "agent_backend", None),
+                                    getattr(row, "house", None),
+                                    getattr(row, "house_pinned", False), live)
     return out
 
 

@@ -322,6 +322,11 @@ async def lifespan(app):
     from .state_events import MAINTENANCE_JOBS, mark as mark_state, nudge as nudge_state, run_state_watcher
     service._state_watcher_task = asyncio.create_task(
         run_state_watcher(service, model_engine), name="state-watcher")
+    # TASK-2120: house up/down/recreating from lease keyspace events.
+    from ..house_watcher import HouseWatcher
+    service._house_watcher = HouseWatcher(service.config)
+    service._house_watcher_task = asyncio.create_task(
+        service._house_watcher.run(), name="house-watcher")
     if scheduler is not None:
         scheduler.wake_hub = service._commit_wake_hub
         scheduler.on_runs_changed = lambda: mark_state(service, MAINTENANCE_JOBS)
@@ -452,6 +457,7 @@ BACKGROUND_TASK_ATTRIBUTES = (
     "_gate_change_task",
     "_commit_wake_task",
     "_state_watcher_task",
+    "_house_watcher_task",
     "_claude_refresh_task",
     "_codex_refresh_task",
 )

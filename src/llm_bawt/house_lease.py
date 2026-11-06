@@ -30,18 +30,23 @@ SYSTEM_ACTOR = "system:house-lease"
 _TENANTS_SQL = text("SELECT slug FROM bot_profiles WHERE house = :house ORDER BY slug")
 
 
-def keep_house_requested(service: Any, delivery_id: str | None) -> bool:
-    """Whether this reset's persisted intent asked to keep the house."""
+def _reset_intent(service: Any, delivery_id: str | None) -> dict:
+    """This reset's persisted ``new_session_intent`` ({} when there is none)."""
     if not delivery_id:
-        return False
+        return {}
     dispatcher = getattr(service, "_inter_bot_dispatcher", None)
     store = getattr(dispatcher, "store", None)
     if store is None:
-        return False
+        return {}
     record = store.get(delivery_id)
     raw = ((getattr(record, "metadata", None) or {}).get("new_session_intent")
            if record is not None else None)
-    return isinstance(raw, dict) and raw.get("keep_house") is True
+    return raw if isinstance(raw, dict) else {}
+
+
+def keep_house_requested(service: Any, delivery_id: str | None) -> bool:
+    """Whether this reset's persisted intent asked to keep the house."""
+    return _reset_intent(service, delivery_id).get("keep_house") is True
 
 
 def evict_for_reset(service: Any, llm_bawt: Any, bot_id: str, *,
@@ -66,11 +71,15 @@ def evict_for_reset(service: Any, llm_bawt: Any, bot_id: str, *,
         house = (getattr(row, "house", None) or "").strip() if row is not None else ""
         if not house or getattr(row, "house_pinned", False):
             return None
-        if keep_house_requested(service, delivery_id):
+        intent = _reset_intent(service, delivery_id)
+        if intent.get("keep_house") is True:
             logger.info("bot %s keeps house %s through this reset", slug, house)
             return None
         store.upsert({
             "slug": slug, "house": None, "house_pinned": False,
+            # TASK-2120: the idle janitor resets through the scheduler.
+            "_location_reason": ("idle_evict" if intent.get("origin") == "scheduler"
+                                 else "new_session"),
             # Rechecked under the bot lock: a pin or house change that landed
             # after the read above refuses the eviction (ProfileFieldsChanged).
             "expected_fields": {"house": house, "house_pinned": False},

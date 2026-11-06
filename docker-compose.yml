@@ -142,6 +142,7 @@ services:
       - LLM_BAWT_HA_NATIVE_MCP_URL
       - LLM_BAWT_OPS_WORKER_IMAGE
       - LLM_BAWT_OPS_RECEIPT_VOLUME
+      - BAWT_HOUSE_POOL_FILE=/run/llm-bawt-house-pool.json
       # Hugging Face / transformers logging. HF_HOME is deliberately not
       # passed through (TASK-1476): the host value names the HOST cache and
       # the app's default /root/.cache/huggingface is already that mount.
@@ -169,6 +170,10 @@ services:
       # endpoint's dedicated Claude login bundle lives under this (RW) mount at
       # claude-usage/.credentials.json — the app refreshes it in place.
       - ${HOME}/.config/llm-bawt:/root/.config/llm-bawt
+      # TASK-2120: the deployment's house pool file (docs/HOUSES.md), read-only,
+      # so /v1/campus lists configured houses even while empty or down. Unset:
+      # /dev/null, read as "no pool configured".
+      - ${LLM_BAWT_HOUSE_POOL_FILE:-/dev/null}:/run/llm-bawt-house-pool.json:ro
       # TASK-1472: holds only the exported BawtHub service token. A directory
       # volume, not a single-file mount, so atomic replaces reach the reader.
       - bawthub-service-token:/run/bawthub-service-token

@@ -215,3 +215,15 @@ def test_failed_eviction_never_fails_the_reset(monkeypatch):
     service, llm, calls = _rig(monkeypatch, store=store)
     assert house_lease.evict_for_reset(service, llm, "b", delivery_id=None) is None
     assert llm.client._bot_config["house"] == "h1" and calls.recycled == []
+
+
+@pytest.mark.parametrize("intent, reason", [
+    ({"origin": "scheduler"}, "idle_evict"),     # the idle janitor
+    ({"origin": "chat_command"}, "new_session"),  # a manual /new
+    (None, "new_session"),
+])
+def test_eviction_names_its_campus_reason(monkeypatch, intent, reason):
+    store = Store()
+    service, llm, _ = _rig(monkeypatch, store=store, intent=intent)
+    house_lease.evict_for_reset(service, llm, "b", delivery_id="d")
+    assert store.writes[0][0]["_location_reason"] == reason
