@@ -164,7 +164,15 @@ def test_a_row_that_keeps_changing_gives_up_after_three_merges(api, monkeypatch)
     assert len(attempts) == settings._PATCH_ATTEMPTS == 3
 
 
-def test_cli_color_is_validated_normalized_and_clearable(api):  # noqa: F811
+def test_cli_color_is_validated_normalized_and_clearable(api, monkeypatch):  # noqa: F811
+    # The shared ``api`` fixture stubs profile validation out; run the real rules,
+    # minus the two checks that need the service's model catalog.
+    from llm_bawt.service.routes import bot_profile_validation as validation
+
+    monkeypatch.setattr(validation, "_validate_model_endpoint", lambda _payload: None)
+    monkeypatch.setattr(validation, "_normalize_agent_backend_config_model", lambda *_args: None)
+    monkeypatch.setattr(settings, "_validate_profile_payload", validation._validate_profile_payload)
+
     assert api.patch(BOT, cli_color="not-a-color").status_code == 400
     assert api.store.get(BOT).cli_color is None
 

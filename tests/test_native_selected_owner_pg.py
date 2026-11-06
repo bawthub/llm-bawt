@@ -65,6 +65,11 @@ def native_runtime(request, real_storage, rig, monkeypatch):
         return registered(server)
 
     monkeypatch.setattr(CatalogFastMCP, "mark_tools_registered", register_reads)
+    # TASK-2064: this suite counts the exact SQL of each append. The generated-title
+    # worker (covered by test_generated_title_pg) runs on the same engine and would
+    # add its own statements to the capture.
+    monkeypatch.setattr("llm_bawt.sessions.generated_title.schedule_session_title",
+                        lambda *args, **kwargs: None)
     runtime = request.getfixturevalue("http_runtime")
     model_calls, appends, reads, admissions = [], [], [], []
     real_owned = sessions._owned_session_or_404
