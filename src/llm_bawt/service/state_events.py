@@ -38,10 +38,13 @@ APPROVAL_POLICIES = "approval_policies"
 MEDIA = "media"
 SCHEDULES = "schedules"
 MAINTENANCE_JOBS = "maintenance_jobs"
+#: A user-authored fan-out row moved. Its lifecycle frame goes to the sender
+#: bot's stream (``unknown`` for the dashboard), which no browser reads.
+DELIVERIES = "deliveries"
 
 #: Every topic a browser may receive. Closed: the client ignores anything else.
 TOPICS = frozenset({OPS_JOBS, OPS_RELEASES, GPU, QUEUE_HOLD, APPROVAL_POLICIES, MEDIA, SCHEDULES,
-                    MAINTENANCE_JOBS})
+                    MAINTENANCE_JOBS, DELIVERIES})
 
 #: Bursts of commits inside this window produce one fingerprint pass.
 MIN_INTERVAL_SECONDS = 1.0

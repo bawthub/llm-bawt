@@ -135,3 +135,35 @@ def test_helpers_are_noops_without_a_watcher():
     state_events.nudge(service)
     state_events.mark(service, "media")
     state_events.nudge(None)
+
+
+class _BotSubscriber(_Subscriber):
+    def __init__(self):
+        super().__init__()
+        self.tool_events: list[tuple] = []
+
+    async def publish_tool_event(self, bot_id, user_id, event):
+        self.tool_events.append((bot_id, user_id, event))
+
+
+def test_fanout_rows_publish_deliveries_and_other_rows_do_not(monkeypatch):
+    from llm_bawt.service import inter_bot_delivery_events
+    from llm_bawt.service.inter_bot_dispatcher import InterBotDeliveryDispatcher
+
+    async def lifecycle(engine, record, *, default_user):
+        return {"_type": "inter_bot_delivery", "bot_id": record.sender_bot_id, "user_id": default_user}
+
+    monkeypatch.setattr(inter_bot_delivery_events, "lifecycle_event", lifecycle)
+    sub = _BotSubscriber()
+    me = SimpleNamespace(service=SimpleNamespace(_redis_subscriber=sub, config=SimpleNamespace(DEFAULT_USER="u")),
+                         store=SimpleNamespace(engine=None))
+
+    def row(author, metadata):
+        return SimpleNamespace(sender_bot_id="unknown", target_bot_id="al", author_entity_type=author,
+                               author_entity_id="u", metadata=metadata, status="DELIVERED", user_message_id=None)
+
+    asyncio.run(InterBotDeliveryDispatcher._emit(me, row("user", {"batch_id": "b1"})))
+    asyncio.run(InterBotDeliveryDispatcher._emit(me, row("user", {})))
+    asyncio.run(InterBotDeliveryDispatcher._emit(me, row("bot", {"batch_id": "b2"})))
+    assert len(sub.tool_events) == 3
+    assert sub.events == [{"_type": "state_changed", "topics": ["deliveries"]}]

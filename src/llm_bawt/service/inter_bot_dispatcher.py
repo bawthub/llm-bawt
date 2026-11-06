@@ -998,3 +998,9 @@ class InterBotDeliveryDispatcher:
             await subscriber.publish_tool_event(event["bot_id"], event["user_id"], event)
         except Exception:
             logger.warning("could not publish inter-bot lifecycle event", exc_info=True)
+        if record.author_entity_type == "user" and record.metadata.get("batch_id"):
+            # TASK-2109: the dashboard's fan-out dialog waits on this instead of
+            # polling each row; the frame above goes to a stream it can't read.
+            from .state_events import DELIVERIES, publish_state_changed
+
+            await publish_state_changed(self.service, [DELIVERIES])

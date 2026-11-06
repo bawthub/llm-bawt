@@ -16,6 +16,14 @@ from ..scheduler import JobRun, JobStatus, JobType, ScheduledJob, create_schedul
 router = APIRouter()
 
 
+def _mark_jobs_changed() -> None:
+    """Tell open Automation pages (TASK-2109); never fails the write."""
+    try:
+        mark(get_service(), MAINTENANCE_JOBS)
+    except RuntimeError:  # service not initialized (tests, CLI use)
+        pass
+
+
 def _get_scheduler_engine():
     service = get_service()
     if not has_database_credentials(service.config):
@@ -60,7 +68,7 @@ def trigger_job(job_type: str):
         session.add(job)
         session.commit()
 
-    mark(get_service(), MAINTENANCE_JOBS)
+    _mark_jobs_changed()
     return {"success": True, "job_type": normalized_job_type}
 
 
@@ -101,7 +109,7 @@ def update_job_configuration(job_id: str, patch: JobConfigurationPatch):
             job.next_run_at = datetime.now(timezone.utc) + timedelta(minutes=job.interval_minutes)
         session.add(job)
         session.commit()
-    mark(get_service(), MAINTENANCE_JOBS)
+    _mark_jobs_changed()
     return {"success": True, "job_id": job_id}
 
 
