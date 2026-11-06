@@ -48,8 +48,7 @@ def test_the_definition_is_verbatim_in_the_quiesce_request():
         assert wording in FINISHED_DEFINITION
 
 
-def test_the_definition_is_verbatim_in_the_tool_schema():
+def test_the_definition_is_verbatim_in_the_advertised_tool_description():
     [tool] = [t for t in asyncio.run(mcp.list_tools()) if t.name == "ops_quiesce_ack"]
-    status = tool.inputSchema["properties"]["status"]["description"]
-    assert FINISHED_DEFINITION in status and FINISHED_NOTE_RULE in status
-    assert "finished" in tool.description and "stopping" in tool.description
+    assert FINISHED_DEFINITION in tool.description
+    assert FINISHED_NOTE_RULE in tool.description

@@ -5,6 +5,7 @@ Each description must retain side effects and call-critical constraints. Do not
 copy argument types/defaults or tutorials here. See docs/MCP_TOOL_DESIGN.md.
 """
 
+from ..ops.quiesce_prompts import FINISHED_DEFINITION, FINISHED_NOTE_RULE
 from .task_step_types import STEP_STATUSES, TASK_STATUSES
 
 _TASK_STATUS_GUIDE = "|".join(TASK_STATUSES)
@@ -122,7 +123,13 @@ TOOL_SUMMARIES: dict[str, str] = {
     "ops_list_operations": "List ops before ops_run; slug= gives its schema; include_disabled grants no run permission.",
     "ops_run": "Run a discovered op with validated args and idempotency_key. Approval/queued is not success; verify ops_job_status and target health. Never bypass a denial.",
     "ops_job_status": "Read-only ops job state and exit code; the reconciler records progress. output_tail_bytes: bounded output.",
-    "ops_quiesce_ack": "Answer the quiesce holding this turn: finished (no resume; note names what wakes you)|stopping|cannot_stop. In doubt: stopping.",
+    # TASK-2121: Nick required his "finished" definition verbatim in this
+    # description; it is the one tool exempt from the 100-token cap.
+    "ops_quiesce_ack": (
+        "Answer the quiesce holding this turn: finished|stopping|cannot_stop, with a note. "
+        "A stopping bot is resumed with its note; a finished bot is not.\n"
+        + FINISHED_DEFINITION + "\n" + FINISHED_NOTE_RULE
+    ),
     "media_lookup": "Search movie/series titles before media_add; returns exact external IDs and existing-library status. kind: auto|movie|series.",
     "media_add": "Add movie|series and optionally start downloading (search_now defaults true). Prefer external_id from media_lookup; query otherwise picks first match. Advanced options: skill reference.",
     "media_queue": "Read combined Sonarr/Radarr/SABnzbd download queues, bounded per service.",

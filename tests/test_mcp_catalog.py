@@ -125,7 +125,11 @@ async def test_catalog_token_budgets():
     encoder = tiktoken.get_encoding("o200k_base")
     tools = await mcp.list_tools()
     descriptions = [len(encoder.encode(tool.description or "")) for tool in tools]
-    assert max(descriptions) <= 100
+    # TASK-2121: Nick required his "finished" definition verbatim in
+    # ops_quiesce_ack's description, so that one tool has its own cap.
+    exempt = {"ops_quiesce_ack": 303}
+    for tool, size in zip(tools, descriptions):
+        assert size <= exempt.get(tool.name, 100), f"{tool.name}: {size} description tokens"
     # x_counts + x_search relevancy/operator hints: measured 3,251 (was <=3,200).
     # TASK-1147 adds two review tools: measured 3,380 description tokens.
     # TASK-1210: isolated recall + missing TASK-1202 routing contract reconciled.
@@ -189,9 +193,9 @@ async def test_catalog_token_budgets():
     # TASK-1151: ops_list_operations slug= detail (compact list rows) (+3).
     # TASK-2118: self_house (a bot moves itself into a free house or out of its
     # own; the occupied/no-pin rules in-band): 4,606 (+44).
-    # TASK-2121: ops_quiesce_ack names "finished" (no resume, note required)
-    # and "in doubt: stopping": 4,620 (+14).
-    assert sum(descriptions) <= 4620, f"Descriptions grew to {sum(descriptions)} tokens"
+    # TASK-2121: ops_quiesce_ack carries Nick's verbatim "finished"/"stopping"
+    # definition (he required it in the description): 4,878 (+272).
+    assert sum(descriptions) <= 4878, f"Descriptions grew to {sum(descriptions)} tokens"
     definitions = [{"name": f"mcp__bawthub__{t.name}", "description": t.description or "", "input_schema": t.inputSchema} for t in tools]
     total = len(encoder.encode(json.dumps(definitions, ensure_ascii=False, separators=(",", ":"))))
     # TASK-900: explicit X search adds ~160 tokens; measured catalog 11,239.
@@ -295,10 +299,9 @@ async def test_catalog_token_budgets():
     # TASK-2118: self_house (action enum, optional house): 17,568 (+116). One
     # self-only tool replaces a coordinator PATCHing the bot's house field.
     # TASK-2121: ops_quiesce_ack "finished" status with Nick's verbatim
-    # definition on the status field (he required it in the tool description;
-    # the 100-token description cap can't hold it): 17,883 (+315). Claude
-    # bots load the schema only when a quiesce asks them to ack.
-    assert total <= 17883, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # definition in its description: 17,898 (+330). Claude bots load the
+    # schema only when a quiesce asks them to ack.
+    assert total <= 17898, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 

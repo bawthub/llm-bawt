@@ -25,7 +25,7 @@ from typing import Annotated, Any
 
 from pydantic import Field
 
-from ..ops.quiesce_prompts import FINISHED_DEFINITION, FINISHED_NOTE_RULE
+from ..ops.quiesce_prompts import FINISHED_NOTE_RULE
 from ..ops.approved_admission import dispatch_error_text, ops_run_receipt
 from ..ops.service import OpsDispatchError
 from ..task_turn_context import open_task_turn_context
@@ -270,7 +270,7 @@ def _record_quiesce_ack(bot_id: str, turn_id: str, status: str, note: str | None
 
 
 QuiesceAckStatus = Annotated[str, Field(description=(
-    "finished|stopping|cannot_stop.\n" + FINISHED_DEFINITION + "\n" + FINISHED_NOTE_RULE))]
+    "finished|stopping|cannot_stop; definitions in the tool description. In doubt: stopping."))]
 QuiesceAckNote = Annotated[str | None, Field(description=(
     "Required for finished: what wakes you next. stopping: where you stopped, what's next. "
     "cannot_stop: what you are waiting on."))]
@@ -281,7 +281,7 @@ async def ops_quiesce_ack(status: QuiesceAckStatus, note: QuiesceAckNote = None)
     """Answer a quiesce request for your current turn.
 
     An operation is waiting for your turn to end before it runs. ``"finished"``:
-    nothing is left to resume (TASK-2121; definition on ``status``), so you are
+    nothing is left to resume (TASK-2121; Nick's definition is in the catalog description), so you are
     not woken when the operation ends; it needs a ``note`` naming what wakes
     you next. ``"stopping"``: you pause mid-work and are resumed with your note.
     ``"cannot_stop"``: you cannot stop safely; the note says why.
