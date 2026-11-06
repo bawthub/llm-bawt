@@ -12,6 +12,7 @@ from sqlmodel import Session, select
 
 from .approval_events import append_approval_transition
 from .approval_mcp_store import McpApprovalStoreMixin
+from .service.commit_wake import notify_in_transaction
 from .approval_orchestration_store import OrchestrationApprovalStoreMixin
 from .approval_models import (
     ApprovalPersistError,
@@ -262,6 +263,7 @@ class ApprovalRequestStoreMixin(OrchestrationApprovalStoreMixin, McpApprovalStor
                     continuation_id=_continuation_id(request_id),
                 )
             )
+            notify_in_transaction(session.connection(), "continuation")  # TASK-2108
             session.commit()
             return session.get(ToolApprovalRequest, request_id)
 

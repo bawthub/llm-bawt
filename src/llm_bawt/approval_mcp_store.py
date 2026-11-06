@@ -16,6 +16,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from .approval_events import append_approval_transition
+from .service.commit_wake import notify_in_transaction
 from .approval_models import (
     ApprovalDuplicatePending,
     ApprovalPersistError,
@@ -590,6 +591,7 @@ class McpApprovalStoreMixin:
                     continuation_id=row.continuation_id or _continuation_id(request_id),
                 )
             )
+            notify_in_transaction(session.connection(), "continuation")  # TASK-2108: ready work wakes the outbox
             session.commit()
             session.expire_all()
             if int(result.rowcount or 0) != 1:
@@ -628,6 +630,7 @@ class McpApprovalStoreMixin:
                     continuation_next_attempt_at=_utcnow(),
                 )
             )
+            notify_in_transaction(session.connection(), "continuation")  # TASK-2108
             session.commit()
             return session.get(ToolApprovalRequest, request_id)
 
@@ -869,28 +872,38 @@ class McpApprovalStoreMixin:
             )
             return list(session.exec(stmt).all())
 
-    def seconds_until_next_continuation(self, *, include_dispatching_older_than_s: int = 120) -> float | None:
-        """Seconds until the earliest not-yet-due continuation retry or lease expiry (TASK-2108).
+    def seconds_until_next_continuation(
+        self, *, exclude_ids: Collection[str] = (), include_dispatching_older_than_s: int = 120,
+    ) -> float | None:
+        """Seconds until the earliest continuation retry or lease expiry (TASK-2108).
 
-        Rows already due are not counted: they wait on something that wakes
-        the loop itself (an ops job's terminal commit). None when nothing is scheduled.
+        Already-due rows count as 0 (run another pass now), except
+        ``exclude_ids``: rows the last pass left waiting on something that
+        wakes the loop itself (an ops job's terminal commit), so they never
+        spin it. None when nothing is scheduled.
         """
         if self.engine is None:
             raise ApprovalStoreUnavailable("Approval database unavailable")
         now = _utcnow()
         lease = timedelta(seconds=include_dispatching_older_than_s)
+        stmt = (
+            select(ToolApprovalRequest.continuation_state, ToolApprovalRequest.continuation_next_attempt_at)
+            .where(
+                (ToolApprovalRequest.continuation_state == CONT_PENDING)
+                | ((ToolApprovalRequest.continuation_state == CONT_DISPATCHING)
+                   & (ToolApprovalRequest.continuation_delivered_at.is_(None)))
+            )
+        )
+        if exclude_ids:
+            stmt = stmt.where(ToolApprovalRequest.id.not_in(list(exclude_ids)))
         with Session(self.engine) as session:
-            rows = session.exec(
-                select(ToolApprovalRequest.continuation_state, ToolApprovalRequest.continuation_next_attempt_at)
-                .where(
-                    ((ToolApprovalRequest.continuation_state == CONT_PENDING)
-                     & (ToolApprovalRequest.continuation_next_attempt_at > now))
-                    | ((ToolApprovalRequest.continuation_state == CONT_DISPATCHING)
-                       & (ToolApprovalRequest.continuation_delivered_at.is_(None))
-                       & (ToolApprovalRequest.continuation_next_attempt_at > now - lease))
-                )
-            ).all()
-        dues = [at + lease if state == CONT_DISPATCHING else at for state, at in rows if at is not None]
+            rows = session.exec(stmt).all()
+        # A DISPATCHING row without a stamp is never reclaimed by the outbox query; skip it.
+        def aware(at):  # stored naive on some backends; stamps are UTC
+            return at.replace(tzinfo=now.tzinfo) if at is not None and at.tzinfo is None and now.tzinfo else at
+
+        dues = [aware(at) + lease if state == CONT_DISPATCHING else (aware(at) or now)
+                for state, at in rows if at is not None or state == CONT_PENDING]
         if not dues:
             return None
         return max(0.0, (min(dues) - now).total_seconds())

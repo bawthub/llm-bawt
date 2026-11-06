@@ -573,3 +573,48 @@ def test_admission_failure_result_is_written_to_the_tool_card(monkeypatch):
     assert written == [{"tool_use_id": "toolu-1", "approval_request_id": row.id,
                         "approval_status": REQ_APPROVED, "result": failure, "is_error": True}]
     assert continued == [(row.id, None)]
+
+
+# TASK-2108: the loop is woken by commits, so ready work must notify and due work must not wait the backstop.
+
+def test_continuation_ready_commits_notify(monkeypatch):
+    import llm_bawt.approval_mcp_store as mcp_store
+    import llm_bawt.approval_request_store as request_store
+
+    sent = []
+    monkeypatch.setattr(mcp_store, "notify_in_transaction", lambda conn, payload="": sent.append(payload))
+    monkeypatch.setattr(request_store, "notify_in_transaction", lambda conn, payload="": sent.append(payload))
+    store = _store()
+    _ready_row(store)  # complete_mcp_execution + enqueue_continuation
+    assert sent.count("continuation") >= 2
+
+
+def test_already_due_retry_schedules_an_immediate_pass_unless_parked():
+    store = _store()
+    row = _ready_row(store)
+    store.mark_continuation_failed(row.id, error="target busy", backoff_seconds=0,
+                                   claim_token=row.continuation_claim_token)
+    assert store.seconds_until_next_continuation() == 0.0
+    assert store.seconds_until_next_continuation(exclude_ids={row.id}) is None
+
+
+def test_retry_due_later_is_scheduled_for_then():
+    store = _store()
+    row = _ready_row(store)
+    store.mark_continuation_failed(row.id, error="target busy", backoff_seconds=30,
+                                   claim_token=row.continuation_claim_token)
+    due = store.seconds_until_next_continuation()
+    assert due is not None and 25 < due <= 30
+
+
+def test_pass_parks_continuations_waiting_on_an_active_ops_job(monkeypatch):
+    store = _store()
+    row = _ready_row(store, result={"job_id": "job-1", "state": "accepted"})
+    store.mark_continuation_failed(row.id, error="fixture reset", backoff_seconds=0,
+                                   claim_token=row.continuation_claim_token)
+    service = OpsServiceHost({"job_id": "job-1", "state": "running", "terminal": False})
+    monkeypatch.setattr("llm_bawt.service.approval_continuations.recover_approval_requests",
+                        lambda _store: asyncio.sleep(0))
+    parked = asyncio.run(dispatch_due_continuations_once(service, store))
+    assert parked == {row.id}
+    assert store.seconds_until_next_continuation(exclude_ids=parked) is None  # no spin

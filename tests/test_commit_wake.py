@@ -110,7 +110,7 @@ def test_continuation_loop_sleeps_until_the_next_retry_is_due(monkeypatch):
         passes.append(time.monotonic())
 
     monkeypatch.setattr(approval_continuations, "dispatch_due_continuations_once", once)
-    store = SimpleNamespace(seconds_until_next_continuation=lambda: 0.1)
+    store = SimpleNamespace(seconds_until_next_continuation=lambda **_: 0.1)
 
     async def main():
         service = SimpleNamespace(_commit_wake_hub=WakeHub())

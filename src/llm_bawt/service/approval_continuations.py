@@ -389,10 +389,16 @@ async def recover_approval_requests(store):
         await asyncio.to_thread(store.prepare_harness_continuation, row.id)
 
 
-async def dispatch_due_continuations_once(service, store, *, limit: int = 20) -> None:
-    """Run one recover/dispatch pass for the durable continuation outbox."""
+async def dispatch_due_continuations_once(service, store, *, limit: int = 20) -> set[str]:
+    """Run one recover/dispatch pass for the durable continuation outbox.
+
+    Returns the ids left waiting on something that wakes the loop itself (an
+    ops job still active, or a failed status lookup), so the loop schedules
+    every other due row for an immediate pass and does not spin on these.
+    """
     await recover_approval_requests(store)
     due = await asyncio.to_thread(store.find_pending_continuations, limit=limit)
+    parked: set[str] = set()
     for pending in due:
         # An approved restart starts before its continuation. Claiming the
         # continuation while the job is active creates an in-flight agent turn
@@ -407,8 +413,10 @@ async def dispatch_due_continuations_once(service, store, *, limit: int = 20) ->
             # Keep this receipt pending for retry; one failed warning/status
             # lookup must not starve unrelated terminal continuations.
             log.exception("Ops continuation status/notification failed id=%s", pending.id)
+            parked.add(pending.id)
             continue
         if terminal_ops_result is None:
+            parked.add(pending.id)
             continue
         card_result = terminal_ops_result or _admission_card_result(pending)
         if card_result:
@@ -434,6 +442,7 @@ async def dispatch_due_continuations_once(service, store, *, limit: int = 20) ->
             raise
         except Exception:
             log.exception("Approval continuation failed id=%s", claimed.id)
+    return parked
 
 
 async def run_mcp_continuation_outbox(service, store, *, idle_seconds: float = 2.0) -> None:
@@ -449,10 +458,10 @@ async def run_mcp_continuation_outbox(service, store, *, idle_seconds: float = 2
     while True:
         delay = idle_seconds
         try:
-            await dispatch_due_continuations_once(service, store)
+            parked = await dispatch_due_continuations_once(service, store)
             if wake is not None:
                 delay = backstop(service, idle_seconds)
-                due = await asyncio.to_thread(store.seconds_until_next_continuation)
+                due = await asyncio.to_thread(store.seconds_until_next_continuation, exclude_ids=parked or ())
                 if due is not None:
                     delay = min(delay, max(due, 0.05))
         except asyncio.CancelledError:
