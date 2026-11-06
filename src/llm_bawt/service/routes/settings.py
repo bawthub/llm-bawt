@@ -157,6 +157,7 @@ def _to_profile_response(profile, settings: dict[str, object] | None = None,
         agent_backend=profile.agent_backend,
         agent_backend_config=profile.agent_backend_config,
         house=getattr(profile, "house", None),
+        house_pinned=bool(getattr(profile, "house_pinned", False)),
         settings=settings or {},
         created_at=profile.created_at,
         updated_at=profile.updated_at,
@@ -759,6 +760,7 @@ def _patch_payload(existing, request: BotProfilePatchRequest) -> dict[str, objec
         "agent_backend": existing.agent_backend,
         "agent_backend_config": existing.agent_backend_config,
         "house": getattr(existing, "house", None),
+        "house_pinned": bool(getattr(existing, "house_pinned", False)),
     }
     for field_name in request.model_fields_set - {"updated_by"}:
         payload[field_name] = getattr(request, field_name)

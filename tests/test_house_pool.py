@@ -102,6 +102,30 @@ def test_parent_limits_and_per_house_override(config):
     assert services["house-h2"]["mem_limit"] == "6144m"
 
 
+def _mib(size: str) -> int:
+    value, unit = int(size[:-1]), size[-1]
+    return value * {"m": 1, "g": 1024}[unit]
+
+
+def test_tenant_scratch_is_capped_tmpfs_under_the_house_limit(config):
+    base = yaml.safe_load((ROOT / "docker-compose.yml").read_text())
+    shared = {v.split(":")[1] for v in base["services"]["claude-code-bridge"]["volumes"]}
+    for service in render_compose(config, ROOT / "docker-compose.yml")["services"].values():
+        mounts = {entry.split(":", 1)[0]: dict(
+            opt.split("=", 1) for opt in entry.split(":", 1)[1].split(","))
+            for entry in service["tmpfs"]}
+        assert set(mounts) == {"/tmp", "/home/bridge/.cache", "/home/bridge/.config",
+                               "/home/bridge/.codex", "/home/bridge/.npm"}
+        # Image tools under ~/.local and every shared mount stay as they are.
+        assert "/home/bridge/.local" not in mounts and not shared & set(mounts)
+        assert sum(_mib(m["size"]) for m in mounts.values()) < _mib("4g") // 2
+        for path, opts in mounts.items():
+            if path != "/tmp":
+                assert (opts["uid"], opts["gid"]) == ("1001", "1001")
+        # Shared Codex state still binds on top of the scratch ~/.codex.
+        assert "${HOME}/.codex/sessions:/home/bridge/.codex/sessions" in service["volumes"]
+
+
 def test_preview_auth_is_per_house_not_shared_origin(config):
     services = render_compose(config, ROOT / "docker-compose.yml")["services"]
     for index, service in enumerate(services.values(), start=1):

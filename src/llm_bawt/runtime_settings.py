@@ -105,6 +105,10 @@ class BotProfile(SQLModel, table=True):
     agent_backend_config: dict[str, Any] | None = Field(default=None, sa_column=Column(JSONB, nullable=True))
     # TASK-2077: command slot; NULL/'' = mansion (agent_bridge.houses).
     house: str | None = Field(default=None, sa_column=Column(String(32), nullable=True))
+    # TASK-2080: keep the house through /new and the idle janitor.
+    house_pinned: bool = Field(
+        default=False, sa_column=Column(Boolean, nullable=False, server_default=text("false"))
+    )
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),
         sa_column=Column(DateTime(timezone=True), nullable=False),
@@ -230,6 +234,7 @@ class BotProfileStore:
             "ALTER TABLE bot_profiles ADD COLUMN IF NOT EXISTS avatar_render TEXT",
             "ALTER TABLE bot_profiles ADD COLUMN IF NOT EXISTS prompt_override_id INTEGER",
             "ALTER TABLE bot_profiles ADD COLUMN IF NOT EXISTS house VARCHAR(32)",
+            "ALTER TABLE bot_profiles ADD COLUMN IF NOT EXISTS house_pinned BOOLEAN NOT NULL DEFAULT FALSE",
         ]
         for stmt in migrations:
             conn.execute(text(stmt))
@@ -334,6 +339,8 @@ class BotProfileStore:
                     agent_backend=payload_agent_backend,
                     agent_backend_config=payload.get("agent_backend_config"),
                     house=payload.get("house") or None,
+                    house_pinned=bool(payload.get("house_pinned", False)
+                                      and payload.get("house")),
                     created_at=now,
                     updated_at=now,
                 )
@@ -381,6 +388,11 @@ class BotProfileStore:
                     row.agent_backend_config = payload["agent_backend_config"]
                 if "house" in payload:
                     row.house = payload.get("house") or None
+                if "house_pinned" in payload:
+                    row.house_pinned = bool(payload.get("house_pinned"))
+                if not row.house:
+                    # A pin belongs to a tenancy; leaving the house drops it.
+                    row.house_pinned = False
                 if "bot_type" in payload or "agent_backend" in payload or not row.bot_type:
                     # Derive bot_type from a SINGLE source of truth so the two
                     # fields can never drift (TASK-516):

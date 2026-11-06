@@ -82,6 +82,9 @@ class NewSessionIntent:
     # suppresses. Persisted with the intent so the claim-time rotation
     # writes the mode admission accepted.
     include_working_memory: bool | None = None
+    # TASK-2080: a reset vacates the bot's house unless this asks to keep it
+    # (or the profile pins it). Session/context API only; persisted only when set.
+    keep_house: bool = False
 
     @property
     def working_memory_mode(self) -> str:
@@ -134,6 +137,10 @@ class NewSessionIntent:
             or self.origin not in {Origin.CONTEXT_API, Origin.SESSION_API}
         ):
             raise ValueError("include_working_memory is a session or context API boolean")
+        if not isinstance(self.keep_house, bool) or (
+            self.keep_house and self.origin not in {Origin.CONTEXT_API, Origin.SESSION_API}
+        ):
+            raise ValueError("keep_house is a session or context API boolean")
         if self.follow_up is not None and not self.follow_up.strip():
             raise ValueError("follow-up message cannot be blank")
 

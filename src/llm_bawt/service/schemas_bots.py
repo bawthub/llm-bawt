@@ -102,6 +102,7 @@ class BotProfileResponse(BaseModel):
     agent_backend: str | None = None
     agent_backend_config: dict[str, Any] | None = None
     house: str | None = None
+    house_pinned: bool = False
     settings: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime | None = None
     updated_at: datetime | None = None
@@ -132,6 +133,7 @@ class BotProfileUpsertRequest(BaseModel):
     agent_backend: str | None = None
     agent_backend_config: dict[str, Any] | None = None
     house: str | None = None
+    house_pinned: bool | None = None
 
 
 class BotProfilePatchRequest(BaseModel):
@@ -160,6 +162,9 @@ class BotProfilePatchRequest(BaseModel):
     agent_backend: str | None = None
     agent_backend_config: dict[str, Any] | None = None
     house: str | None = None
+    house_pinned: bool | None = Field(
+        default=None,
+        description="Keep the house through /new and the idle janitor (TASK-2080).")
     tags: list[str] | None = Field(
         default=None,
         description="Full-set replace of the bot's tags, validated against the catalog "

@@ -41,6 +41,13 @@ LEASE_REFRESH_S = 10
 TURN_TTL_S = 90
 HOUSE_STREAM_PREFIX = "agent:commands:house:"
 EPOCH_FIELD = "house_epoch"
+# TASK-2080: the app asks a vacated house to restart itself; see HouseSlot.recycle.
+RECYCLE_ACTION = "house.recycle"
+RECYCLE_POLL_S = 1.0
+_RELEASE_LEASE_LUA = (
+    "if redis.call('GET', KEYS[1]) == ARGV[1] then "
+    "return redis.call('DEL', KEYS[1]) else return 0 end"
+)
 
 
 def normalize_house(value: object) -> str:
@@ -168,6 +175,16 @@ async def follow_up_stream(
     return MANSION_COMMANDS_STREAM
 
 
+def recycle_command(house: str, backend: str, epoch: str) -> dict:
+    """The ``house.recycle`` entry for one lease holder (app side, TASK-2080).
+
+    Sent on the house's own command stream, stamped with the live lease epoch,
+    so only the bridge holding the lease now acts on it. A house with no live
+    lease is down or already recycling; it comes back on a fresh container.
+    """
+    return {"action": RECYCLE_ACTION, "backend": backend, "house": house, EPOCH_FIELD: epoch}
+
+
 # ------------------------------------------------------------- bridge side
 
 
@@ -189,6 +206,8 @@ class HouseSlot:
         self._turns: dict[tuple[str, str], float] = {}
         self._task: asyncio.Task | None = None
         self.superseded = False
+        self.recycling = False
+        self._recycle_tasks: set[asyncio.Task] = set()
 
     @property
     def is_house(self) -> bool:
@@ -244,7 +263,9 @@ class HouseSlot:
                                self.house, self.backend, current, self.epoch)
             self.superseded = True
             return
-        await self._redis.set(key, self.epoch, ex=LEASE_TTL_S)
+        if not self.recycling:
+            # A recycling house released its lease and must not take it back.
+            await self._redis.set(key, self.epoch, ex=LEASE_TTL_S)
         now = time.monotonic()
         for (session_key, request_id), seen in list(self._turns.items()):
             live = self._queue.request_phase(session_key, request_id) is not None
@@ -265,6 +286,61 @@ class HouseSlot:
                     s == session_key for s, _ in self._turns):
                 await self._redis.delete(sess_key)
 
+    def busy(self) -> bool:
+        """A turn admitted here is running, or was admitted within GRACE_S.
+
+        The grace covers a send between ``gate_send`` and its task's queue
+        registration, when the queue does not know it yet.
+        """
+        now = time.monotonic()
+        return any(
+            self._queue.request_phase(session_key, request_id) is not None
+            or now - seen < self.GRACE_S
+            for (session_key, request_id), seen in list(self._turns.items())
+        )
+
+    async def recycle(self, fields: dict, msg_id: str, redis: Any, *, group: str,
+                      exit_process: Callable[[], None]) -> bool:
+        """Restart this house for a fresh container, never under a running turn.
+
+        Run as its own task so the listener keeps serving the in-flight turn's
+        steers and aborts. Only the current lease holder acts: the lease is
+        released first (new work for this house now falls back to the mansion),
+        then the bridge waits until no admitted turn is live and nothing is
+        unread on its stream, acks, and exits. Docker's restart policy brings it
+        back; its tmpfs paths start empty. Returns True when it exited.
+        """
+        stale = (not self.is_house or self.superseded or self.recycling
+                 or (fields.get("backend") or "") != self.backend
+                 or (fields.get(EPOCH_FIELD) or "") != (self.epoch or "-"))
+        if stale:
+            logger.info("house %s ignored a recycle for epoch %s (ours %s)",
+                        self.house, fields.get(EPOCH_FIELD), self.epoch)
+            await redis.xack(self.stream, group, msg_id)
+            return False
+        self.recycling = True
+        await redis.eval(_RELEASE_LEASE_LUA, 1, lease_key(self.house, self.backend), self.epoch)
+        logger.info("house %s/%s recycling: lease released, draining", self.house, self.backend)
+        while self.busy() or await self._unread(redis, group):
+            await asyncio.sleep(RECYCLE_POLL_S)
+        await redis.xack(self.stream, group, msg_id)
+        logger.info("house %s/%s idle; exiting for a fresh container", self.house, self.backend)
+        exit_process()
+        return True
+
+    async def _unread(self, redis: Any, group: str) -> int:
+        """Entries on this house's stream not yet read by its group."""
+        try:
+            for info in await redis.xinfo_groups(self.stream):
+                if info.get("name") == group:
+                    lag = info.get("lag")
+                    return int(lag) if lag is not None else 0
+        except Exception:
+            logger.warning("house %s stream lag unreadable; treating as busy", self.house,
+                           exc_info=True)
+            return 1
+        return 0
+
     async def _heartbeat(self) -> None:
         while True:
             await asyncio.sleep(LEASE_REFRESH_S)
@@ -274,6 +350,31 @@ class HouseSlot:
                 raise
             except Exception:
                 logger.exception("house %s heartbeat failed", self.house)
+
+
+def exit_self() -> None:
+    """Graceful bridge shutdown: both ``__main__`` loops stop on SIGTERM."""
+    import os
+    import signal
+
+    os.kill(os.getpid(), signal.SIGTERM)
+
+
+def is_recycle(slot: "HouseSlot | None", fields: dict) -> bool:
+    """A ``house.recycle`` this bridge's house slot handles (else plain-acked)."""
+    return (fields.get("action") == RECYCLE_ACTION
+            and slot is not None and slot.is_house)
+
+
+def start_recycle(slot: "HouseSlot", fields: dict, msg_id: str, redis: Any, *,
+                  group: str) -> asyncio.Task:
+    """Listener entry for ``house.recycle``: drain and exit in its own task."""
+    task = asyncio.create_task(
+        slot.recycle(fields, msg_id, redis, group=group, exit_process=exit_self))
+    # Hold a reference: the loop keeps only weak references to tasks.
+    slot._recycle_tasks.add(task)
+    task.add_done_callback(slot._recycle_tasks.discard)
+    return task
 
 
 async def gate_send(slot: "HouseSlot | None", fields: dict, msg_id: str, redis: Any, *,

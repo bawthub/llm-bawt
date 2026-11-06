@@ -28,6 +28,10 @@ class ContextResetRequest(BaseModel):
             "section, no change notice) for its lifetime; omitted or true pins it"
         ),
     )
+    keep_house: bool = Field(
+        default=False,
+        description="true keeps the bot's house through this reset; by default it is vacated",
+    )
 
 
 def _resolve(bot_id: str, user: str | None):
@@ -81,5 +85,5 @@ async def reset_agent_context(body: ContextResetRequest):
         service, bot_id=bot.slug, user_id=user_id, continuity=continuity,
         origin=Origin.CONTEXT_API, idempotency_key=body.idempotency_key,
         reason=body.reason.strip() or "agent-requested context maintenance",
-        include_working_memory=body.include_working_memory,
+        include_working_memory=body.include_working_memory, keep_house=body.keep_house,
     )

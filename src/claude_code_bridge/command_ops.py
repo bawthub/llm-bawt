@@ -34,7 +34,7 @@ from claude_agent_sdk.types import (
 from agent_bridge.abort_contract import ABORT_TEARDOWN_BOUND_S, AbortState
 from agent_bridge.user_scope import session_user
 from agent_bridge.abort_rpc import answer_abort
-from agent_bridge.houses import HouseSlot, gate_send, house_from_env
+from agent_bridge.houses import HouseSlot, gate_send, house_from_env, is_recycle, start_recycle
 from agent_bridge.ping import PING_METHOD, answer_ping
 from agent_bridge.run_status import RUN_STATUS_METHOD, answer_run_status, queue_run_state
 from agent_bridge.steer_contract import (
@@ -161,6 +161,10 @@ class ClaudeCommandMixin:
                             asyncio.create_task(
                                 self._handle_send(fields, msg_id, async_redis)
                             )
+                        elif is_recycle(getattr(self, "_house_slot", None), fields):
+                            # TASK-2080: drain, then exit for a fresh container.
+                            start_recycle(self._house_slot, fields, msg_id, async_redis,
+                                          group="claude-code-bridge")
                         elif action == "rpc.call":
                             asyncio.create_task(
                                 self._handle_rpc(fields, msg_id, async_redis)

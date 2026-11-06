@@ -52,6 +52,7 @@ def _request_to_profile_payload(
         "agent_backend",
         "agent_backend_config",
         "house",
+        "house_pinned",
     ):
         if field_name in request.model_fields_set:
             payload[field_name] = getattr(request, field_name)
@@ -103,6 +104,11 @@ def _validate_profile_payload(payload: dict[str, object]) -> None:
             payload["house"] = normalize_house(payload["house"]) or None
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if "house_pinned" in payload:
+        if payload["house_pinned"] is None:
+            raise HTTPException(status_code=400, detail="house_pinned must be true or false")
+        if payload["house_pinned"] and "house" in payload and not payload["house"]:
+            raise HTTPException(status_code=400, detail="house_pinned requires a house")
     _normalize_agent_backend_config_model(agent_backend, payload)
     _validate_model_endpoint(payload)
 

@@ -22,6 +22,18 @@ HOSTNAME = re.compile(
 )
 MEMORY = re.compile(r"[1-9][0-9]*(?:[kKmMgG](?:[bB])?)?\Z")
 HARNESSES = {"claude-code": "claude_code_bridge", "codex": "codex_bridge"}
+_BRIDGE_OWNED = "uid=1001,gid=1001"
+# Tenant scratch that would otherwise persist in the container layer across a
+# restart. Shared state (~/.claude, Codex config/sessions, dev, skills) is bind
+# mounted and unaffected; ~/.local holds image tools and stays. Pages count
+# against the house memory limit; the caps total 1.3 GiB.
+HOUSE_TMPFS = (
+    "/tmp:size=512m,mode=1777",
+    f"/home/bridge/.cache:size=512m,{_BRIDGE_OWNED},mode=0755",
+    f"/home/bridge/.config:size=16m,{_BRIDGE_OWNED},mode=0700",
+    f"/home/bridge/.codex:size=64m,{_BRIDGE_OWNED},mode=0755",
+    f"/home/bridge/.npm:size=256m,{_BRIDGE_OWNED},mode=0755",
+)
 POOL_KEYS = {
     "image", "base_image", "memory", "cgroup_parent", "preview_network",
     "service_token_volume", "frontend_env_file", "houses",
@@ -153,6 +165,10 @@ def render_compose(config: object, base_compose: Path) -> dict:
                 "${HOME}/.codex/sessions:/home/bridge/.codex/sessions",
                 "house-service-token:/run/bawthub-service-token:ro",
             ],
+            # TASK-2080: every writable path a tenant touches outside the shared
+            # mounts is size-capped tmpfs, so a restarted house is a fresh
+            # container (nested binds above still mount on top).
+            "tmpfs": list(HOUSE_TMPFS),
             "networks": ["default", "house-previews"],
         }
         if pool.get("cgroup_parent"):

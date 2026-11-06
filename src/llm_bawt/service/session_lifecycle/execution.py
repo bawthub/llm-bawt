@@ -428,6 +428,15 @@ class NewSessionExecution:
                     seed = []
             elif (typed_task is not None or not plan.rotate_here) and backend_name in {"claude-code", "codex"}:
                 bridge_action = "reset_follow_up"
+        if is_agent and plan:
+            # TASK-2080: a new session ends the house tenancy unless kept or
+            # pinned; this reset's own command then publishes to the mansion.
+            from ...house_lease import evict_for_reset
+
+            evict_for_reset(
+                service, llm_bawt, bot_id,
+                delivery_id=getattr(request, "inter_bot_delivery_id", None) or delivery_id,
+            )
         return PreparedNewSession(seed, thread_binding, rotated, bridge_action, typed_task,
                                   reset_scope)
 

@@ -35,6 +35,7 @@ class Bot:
     harness: str | None = None  # Turn execution harness
     endpoint_id: int | None = None  # Canonical normalized model endpoint
     house: str | None = None  # TASK-2077 command slot; None = mansion
+    house_pinned: bool = False  # TASK-2080: keep the house through /new and the janitor
     uses_tools: bool = False  # Whether this bot can use tools (memory search, etc.)
     uses_search: bool = False  # Whether this bot can search the web
     uses_home_assistant: bool = False  # Whether this bot can control Home Assistant via MCP
@@ -220,6 +221,8 @@ def _load_db_bot_profiles() -> dict[str, dict[str, Any]]:
             entry["endpoint_id"] = getattr(row, "endpoint_id", None)
             if getattr(row, "house", None):
                 entry["house"] = row.house
+            if getattr(row, "house_pinned", False):
+                entry["house_pinned"] = True
             if row.color is not None:
                 entry["color"] = row.color
             if row.avatar is not None:
@@ -314,6 +317,7 @@ def _load_bots_config() -> None:
             harness=data.get("harness"),
             endpoint_id=data.get("endpoint_id"),
             house=data.get("house") or None,
+            house_pinned=bool(data.get("house_pinned", False)),
             uses_tools=data.get("uses_tools", False),
             uses_search=data.get("uses_search", False),
             uses_home_assistant=data.get("uses_home_assistant", False),

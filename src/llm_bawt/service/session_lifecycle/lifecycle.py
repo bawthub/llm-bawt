@@ -130,18 +130,21 @@ class NewSessionLifecycle:
         reason = candidates.skip_reason(row, now=datetime.now(timezone.utc), parameters=parameters)
         if reason:
             return reason
-        try:
-            usage = json.loads(row["token_usage_json"] or "null")
-            native = int(usage.get("resident_tokens") or 0)
-            if not native:
-                # Input tokens are only a credible resident-context fallback if
-                # the provider supplied a window for this exact observation.
-                # Billing-wide input totals can be larger than a context window.
-                window = int(usage.get("context_window") or 0)
-                if window <= 0 or int(usage.get("input_tokens") or 0) > window:
-                    return "resident context measurement is not bounded by provider window"
-        except (AttributeError, TypeError, ValueError, OverflowError):
-            return "resident context measurement is invalid"
+        # TASK-2080: an idle, unpinned house tenant is reset (and so evicted)
+        # at any context size; its resident measurement is not a criterion.
+        if not IdleContextCandidates.house_idle_only(row):
+            try:
+                usage = json.loads(row["token_usage_json"] or "null")
+                native = int(usage.get("resident_tokens") or 0)
+                if not native:
+                    # Input tokens are only a credible resident-context fallback if
+                    # the provider supplied a window for this exact observation.
+                    # Billing-wide input totals can be larger than a context window.
+                    window = int(usage.get("context_window") or 0)
+                    if window <= 0 or int(usage.get("input_tokens") or 0) > window:
+                        return "resident context measurement is not bounded by provider window"
+            except (AttributeError, TypeError, ValueError, OverflowError):
+                return "resident context measurement is invalid"
         state = classify_target(conn, intent.bot_id, exclude_turn_id=None)
         if not state.idle:
             return "target has active or reserved work"
@@ -464,6 +467,8 @@ class NewSessionLifecycle:
         if intent.include_working_memory is None:
             # Same for intents admitted before the working-memory flag existed.
             value.pop("include_working_memory", None)
+        if not intent.keep_house:
+            value.pop("keep_house", None)
         return value
 
     @classmethod

@@ -47,12 +47,14 @@ class IdleContextCandidates:
     def _read(self, conn, target_bot: str) -> list[dict]:
         rows = conn.execute(text(f"""
                 WITH targets AS MATERIALIZED (
-                    SELECT bp.slug, bp.last_session_id FROM bot_profiles bp
+                    SELECT bp.slug, bp.last_session_id, bp.house, bp.house_pinned
+                    FROM bot_profiles bp
                     WHERE (:target_bot='*' OR bp.slug=:target_bot)
                       AND lower(bp.slug) != ALL(:protected)
                       AND {_TAGS_ALLOWED}
                 )
-                SELECT b.slug AS bot_id, s.id AS session_id, s.user_id,
+                SELECT b.slug AS bot_id, b.house, b.house_pinned,
+                       s.id AS session_id, s.user_id,
                        t.id AS usage_turn_id, t.ended_at, t.token_usage_json,
                        latest.id AS latest_turn_id,
                        latest.ended_at AS last_completed_at
@@ -78,6 +80,11 @@ class IdleContextCandidates:
         return [dict(row) for row in rows.mappings()]
 
     @staticmethod
+    def house_idle_only(candidate: dict) -> bool:
+        """An unpinned house tenant: idleness alone ends its tenancy (TASK-2080)."""
+        return bool(candidate.get("house")) and not candidate.get("house_pinned")
+
+    @staticmethod
     def skip_reason(
         candidate: dict, *, now: datetime, parameters: IdleContextResetParameters | None = None,
     ) -> str | None:
@@ -91,6 +98,9 @@ class IdleContextCandidates:
         completed = candidate["last_completed_at"]
         if completed is None or now - completed <= timedelta(minutes=parameters.idle_minutes_gt):
             return "idle less than threshold"
+        if IdleContextCandidates.house_idle_only(candidate):
+            # Its scheduled /new vacates the house; no context-size threshold.
+            return None
         try:
             usage = json.loads(candidate["token_usage_json"] or "null")
             if not isinstance(usage, dict):

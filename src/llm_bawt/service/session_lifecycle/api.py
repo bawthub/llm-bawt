@@ -20,13 +20,14 @@ class NewSessionAPI:
         service, *, bot_id: str, user_id: str, continuity: Continuity,
         origin: Origin, idempotency_key: str | None = None,
         reason: str | None = None, include_working_memory: bool | None = None,
+        keep_house: bool = False,
     ) -> dict:
         key = (idempotency_key or "").strip() or f"api-new:{uuid4()}"
         intent = NewSessionIntent(
             bot_id=bot_id, user_id=user_id, author=AuthorReference.user(user_id),
             continuity=continuity, admission=Admission.SKIP,
             origin=origin, idempotency_key=key, reason=reason,
-            include_working_memory=include_working_memory,
+            include_working_memory=include_working_memory, keep_house=keep_house,
         )
         try:
             result = await NewSessionLifecycle(service).submit(intent)

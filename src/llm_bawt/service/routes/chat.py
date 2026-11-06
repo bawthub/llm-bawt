@@ -944,6 +944,10 @@ class SessionResetRequest(BaseModel):
             "section, no change notice) for its lifetime; omitted or true pins it"
         ),
     )
+    keep_house: bool = Field(
+        default=False,
+        description="true keeps the bot's house through this reset; by default it is vacated",
+    )
 
 
 class SessionResetResponse(BaseModel):
@@ -980,6 +984,7 @@ async def session_reset(request: SessionResetRequest) -> SessionResetResponse:
         continuity=Continuity.CLEAN, origin=Origin.SESSION_API,
         idempotency_key=request.idempotency_key,
         include_working_memory=request.include_working_memory,
+        keep_house=request.keep_house,
     )
     return SessionResetResponse(**result)
 
