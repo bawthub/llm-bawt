@@ -21,6 +21,7 @@ from ..schemas import (
     TurnLogListResponse,
 )
 from ..tool_call_events import extract_trigger_message, message_id_matches, parse_message_filters
+from ..llm_response_store import LlmResponseStore, serialize_responses
 from ..tool_call_store import ToolCallRecord, ToolCallStore
 from ..turn_logs import TurnLogStore
 
@@ -98,6 +99,8 @@ def _records_to_calls(records: list[ToolCallRecord], *, turn_ended_at=None) -> l
             # TASK-344: SDK ids so sub-agent nesting survives reload.
             "tool_use_id": row.tool_use_id,
             "parent_tool_use_id": row.parent_tool_use_id,
+            # TASK-2110: requesting LLM response; None = unknown/legacy.
+            "response_id": row.response_id,
             # TASK-305: approval gate data for history-recalled tool cards.
             "approval_request_id": row.approval_request_id,
             "approval_status": row.approval_status,
@@ -120,6 +123,22 @@ def _records_to_calls(records: list[ToolCallRecord], *, turn_ended_at=None) -> l
             },
         })
     return out
+
+
+def _turn_responses(store: TurnLogStore, turns: list) -> dict[str, list[dict]]:
+    """TASK-2110: per-response records for turns, keyed by turn id. Never raises."""
+    turn_ids = [t.id for t in turns if getattr(t, "id", None)]
+    if store.engine is None or not turn_ids:
+        return {}
+    try:
+        rows = LlmResponseStore(store.engine).for_turns(turn_ids)
+    except Exception:
+        return {}
+    ended = {t.id: getattr(t, "ended_at", None) is not None for t in turns}
+    return {
+        turn_id: serialize_responses(records, turn_ended=ended.get(turn_id, False))
+        for turn_id, records in rows.items()
+    }
 
 
 def _enrich_call_attachments(calls: list[dict]) -> None:
@@ -632,6 +651,7 @@ def get_turn_log(turn_id: str):
         response=row.response_text,
         reasoning=getattr(row, "reasoning", None),
         tool_calls=parsed_tools,
+        responses=_turn_responses(store, [row]).get(row.id, []),
         error_text=row.error_text,
         animation=getattr(row, "animation", None),
         agent_session_key=getattr(row, "agent_session_key", None),
@@ -712,6 +732,7 @@ def get_tool_call_events(
         except Exception:
             pass
 
+    responses_by_turn = _turn_responses(store, rows)
     events: list[ToolCallEvent] = []
     for row in rows:
         # TASK-364: tool cards render straight from the canonical
@@ -753,6 +774,7 @@ def get_tool_call_events(
                 message_timestamp=trigger_timestamp,
                 tool_call_count=len(parsed_tools),
                 tool_calls=parsed_tools,
+                responses=responses_by_turn.get(row.id, []),
             )
         )
         if len(events) >= limit:

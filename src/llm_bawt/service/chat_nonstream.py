@@ -312,6 +312,29 @@ class ChatNonStreamMixin:
                 def _bridge_event_callback(item: dict[str, Any]) -> None:
                     nonlocal tool_iteration
                     event_type = item.get("event")
+                    if event_type == "llm_response":
+                        # TASK-2110: same durable per-response record as streaming.
+                        public = tool_events.response({
+                            "turn_id": turn_log_id,
+                            "trigger_message_id": trigger_message_id,
+                            "bot_id": bot_id,
+                            "user_id": user_id,
+                            "response_id": item.get("response_id"),
+                            "host_parent": item.get("host_parent"),
+                            "first_seen_seq": item.get("first_seen_seq"),
+                            "model": item.get("model"),
+                            "usage": item.get("usage"),
+                            "usage_state": item.get("usage_state"),
+                            "ts": time.time(),
+                        })
+                        if public is not None:
+                            asyncio.run_coroutine_threadsafe(
+                                self._publish_nonstream_turn_event(
+                                    bot_id=bot_id, user_id=user_id, event=public
+                                ),
+                                loop,
+                            ).result(timeout=5)
+                        return
                     if event_type not in {"tool_call", "tool_result"}:
                         return
                     tool_use_id = str(item.get("tool_use_id") or "").strip() or None
@@ -334,6 +357,7 @@ class ChatNonStreamMixin:
                             "parent_tool_use_id": item.get("parent_tool_use_id"),
                             "iteration": tool_iteration,
                             "provider": item.get("provider"),
+                            "response_id": item.get("response_id"),
                             "ts": time.time(),
                         })
                     else:

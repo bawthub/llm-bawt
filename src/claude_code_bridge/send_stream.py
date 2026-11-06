@@ -49,6 +49,7 @@ from .proxy.request_context import (
 )
 from .send_errors import is_auth_failure_text
 from .skill_context import skill_context_tokens
+from .response_tracker import ResponseRecord, ResponseTracker
 from .subagent_usage import SubagentUsage
 from .turn_phase import TurnPhaseTracker
 from .worker_liveness import WorkerLiveness
@@ -462,6 +463,37 @@ class ClaudeStreamMixin:
             )
         return seq
 
+    def _publish_llm_response(
+        self, record: ResponseRecord | None, *, request_id: str, session_key: str, seq: int,
+    ) -> int:
+        """TASK-2110: publish a changed per-response record; return the new ``seq``."""
+        if record is None:
+            return seq
+        seq += 1
+        self._publish_event(
+            request_id, session_key, seq,
+            kind=AgentEventKind.LLM_RESPONSE,
+            parent_tool_use_id=record.host_parent,
+            extra_raw=record.payload(),
+        )
+        return seq
+
+    def _observe_llm_response(
+        self, msg, *, request_id: str, session_key: str, seq: int,
+        response_tracker: ResponseTracker, usage_ledger: SubagentUsage | None,
+    ) -> int:
+        """Record an AssistantMessage's response before its tools are published.
+
+        Kept apart from ``_on_assistant_message`` so this bookkeeping event never
+        counts as a model side effect (tool call or answer text).
+        """
+        return self._publish_llm_response(
+            response_tracker.on_assistant_message(
+                msg, host_parent=self._host_parent(msg, usage_ledger), seq=seq + 1,
+            ),
+            request_id=request_id, session_key=session_key, seq=seq,
+        )
+
     def _on_assistant_message(
         self,
         msg,
@@ -474,6 +506,7 @@ class ClaudeStreamMixin:
         latest_assistant_usage: dict | None,
         assistant_snapshot_text: str,
         usage_ledger: SubagentUsage | None = None,
+        response_tracker: ResponseTracker | None = None,
     ) -> tuple[int, dict | None, str]:
         """Handle an AssistantMessage; return
         ``(seq, latest_assistant_usage, assistant_snapshot_text)``."""
@@ -492,6 +525,13 @@ class ClaudeStreamMixin:
         # TASK-1095: resolved through the ledger so a SendMessage-resumed
         # agent nests under the live resume call, not its closed spawn card.
         parent_tuid = self._host_parent(msg, usage_ledger)
+        # TASK-2110: the provider response id groups this snapshot's tools. The
+        # caller records the response first (see _observe_llm_response).
+        response_id: str | None = None
+        if response_tracker is not None and response_tracker.record(
+            getattr(msg, "message_id", None)
+        ) is not None:
+            response_id = msg.message_id
         snapshot_parts: list[str] = []
         for block in getattr(msg, "content", []):
             if isinstance(block, ToolUseBlock):
@@ -539,7 +579,10 @@ class ClaudeStreamMixin:
                     # TASK-1095: this bridge's PreToolUse hook reports the real
                     # execution start, so the UI may show the call as queued
                     # until TOOL_EXECUTING arrives.
-                    extra_raw={"exec_tracked": True},
+                    extra_raw={
+                        "exec_tracked": True,
+                        **({"response_id": response_id} if response_id else {}),
+                    },
                 )
                 continue
             btype = getattr(block, "type", None)

@@ -786,6 +786,25 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                         if evt == "tool_executing":
                             _exec_stamps.on_executing(item)  # TASK-1095 timing only
                             continue
+                        if evt == "llm_response":
+                            # TASK-2110: durable per-response record, upserted
+                            # live (tool-less responses included). Not part of
+                            # the text/tool transcript.
+                            _publish_event_direct({
+                                "_type": "llm_response_observed",
+                                "turn_id": turn_log_id,
+                                "trigger_message_id": item.get("trigger_message_id") or trigger_message_id,
+                                "bot_id": bot_id,
+                                "user_id": user_id,
+                                "response_id": item.get("response_id"),
+                                "host_parent": item.get("host_parent"),
+                                "first_seen_seq": item.get("first_seen_seq"),
+                                "model": item.get("model"),
+                                "usage": item.get("usage"),
+                                "usage_state": item.get("usage_state"),
+                                "ts": time.time(),
+                            })
+                            continue
                         if evt in ("tool_call", "tool_result"):
                             _saw_tool = True
                             # Flush buffered text BEFORE the tool event so
@@ -859,6 +878,8 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                                 "iteration": 1,
                                 "provider": item.get("provider"),
                                 "exec_tracked": bool(item.get("exec_tracked")),
+                                # TASK-2110: requesting LLM response (None = unknown).
+                                "response_id": item.get("response_id"),
                                 "ts": time.time(),
                                 "text_offset": _text_chars[0],
                             })

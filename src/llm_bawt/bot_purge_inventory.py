@@ -52,7 +52,8 @@ DELETED = (
                   "tool_call_record_id IN (SELECT id FROM tool_call_records WHERE bot_id=:slug)", "deleted",
                   "Legacy payloads selected through owned tool records, not shared content-addressed blobs.",
                   (("tool_call_records", ("id", "bot_id")),)),
-    owned("tool_call_records"), owned("turn_logs"), owned("session_resumption_receipts"),
+    owned("tool_call_records"), owned("llm_response_records"), owned("turn_logs"),
+    owned("session_resumption_receipts"),
 )
 
 _RETAINED_REASON = "Not deleted by the existing standalone purge; operational records can survive."

@@ -601,6 +601,9 @@ class AgentBridgeBackend(AgentBackend):
                                     "parent_tool_use_id": event.parent_tool_use_id,
                                     # TASK-1095: backend will report execution start.
                                     "exec_tracked": bool((event.raw or {}).get("exec_tracked")),
+                                    # TASK-2110: provider id of the LLM response
+                                    # that requested this call (None = unknown).
+                                    "response_id": (event.raw or {}).get("response_id") or None,
                                 }
                                 _notify_event(tool_item)
                                 result_queue.put(tool_item)
@@ -649,6 +652,14 @@ class AgentBridgeBackend(AgentBackend):
                                     }
                                     _notify_event(tool_item)
                                     result_queue.put(tool_item)
+
+                            elif event.kind == AgentEventKind.LLM_RESPONSE:
+                                # TASK-2110: per-response identity + usage record.
+                                meta = event.raw if isinstance(event.raw, dict) else {}
+                                if meta.get("response_id"):
+                                    response_item = {"event": "llm_response", **meta}
+                                    _notify_event(response_item)
+                                    result_queue.put(response_item)
 
                             elif event.kind == AgentEventKind.TOOL_EXECUTING:
                                 # TASK-1095: execution start (after queueing and

@@ -13,6 +13,10 @@ class AgentEventKind(str, Enum):
     # Provider-reported usage snapshot for the current model/API iteration.
     # Partial by definition; ASSISTANT_DONE remains the terminal authority.
     USAGE_UPDATE = "usage_update"
+    # TASK-2110: one upstream LLM response's identity, scope and attributable
+    # usage. raw: {response_id, host_parent, first_seen_seq, model, usage,
+    # usage_state}. Re-emitted when the record changes; consumers upsert.
+    LLM_RESPONSE = "llm_response"
     TOOL_START = "tool_start"
     TOOL_END = "tool_end"
     # TASK-1095: the tool actually began executing (PreToolUse allowed it).

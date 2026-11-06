@@ -43,6 +43,7 @@ from .send_result import ClaudeResultMixin
 from .send_stream import ClaudeStreamMixin
 from .send_stream_events import StreamBlockState
 from .send_usage import ClaudeUsageMixin, LiveUsagePublisher, turn_session_ledger
+from .response_tracker import ResponseTracker
 from .subagent_usage import SubagentUsage
 from .worker_liveness import WorkerLiveness
 from .turn_phase import TurnPhaseTracker
@@ -435,6 +436,8 @@ class ClaudeSendMixin(
                     subagent_usage = SubagentUsage(
                         spawn_lookup=AgentSpawnIndex(lambda: resume_id),
                     )
+                    # TASK-2110: per-LLM-response identity + attributable usage.
+                    response_tracker = ResponseTracker()
                     # One request-local publisher merges sparse message_delta
                     # frames and de-duplicates AssistantMessage echoes.
                     live_usage = LiveUsagePublisher(
@@ -663,6 +666,12 @@ class ClaudeSendMixin(
                                 event = msg.event
                                 phase_tracker.on_stream_event(event)
                                 live_usage.observe_stream_event(event, msg.parent_tool_use_id)
+                                seq = self._publish_llm_response(
+                                    response_tracker.on_stream_event(
+                                        event, source=msg.parent_tool_use_id, seq=seq + 1,
+                                    ),
+                                    request_id=request_id, session_key=session_key, seq=seq,
+                                )
                                 if event.get("type") == "message_delta":
                                     seq = live_usage.publish(
                                         seq,
@@ -676,6 +685,11 @@ class ClaudeSendMixin(
                                 seq = self._publish_subagent_live_usage(
                                     msg, request_id=request_id,
                                     session_key=session_key, seq=seq,
+                                    usage_ledger=subagent_usage,
+                                )
+                                seq = self._observe_llm_response(
+                                    msg, request_id=request_id, session_key=session_key,
+                                    seq=seq, response_tracker=response_tracker,
                                     usage_ledger=subagent_usage,
                                 )
                                 # TASK-623: AssistantMessage tool_use / snapshot
@@ -693,6 +707,7 @@ class ClaudeSendMixin(
                                         latest_assistant_usage=latest_assistant_usage,
                                         assistant_snapshot_text=assistant_snapshot_text,
                                         usage_ledger=subagent_usage,
+                                        response_tracker=response_tracker,
                                     )
                                 )
                                 if seq != prior_seq or assistant_snapshot_text != prior_snapshot:

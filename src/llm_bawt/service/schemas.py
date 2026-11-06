@@ -346,6 +346,8 @@ class TurnLogDetail(BaseModel):
     # reload mid-turn can recover already-produced reasoning.
     reasoning: str | None = None
     tool_calls: list[dict[str, Any]] = Field(default_factory=list)
+    # TASK-2110: per-LLM-response records (ordinal derived per host parent).
+    responses: list[dict[str, Any]] = Field(default_factory=list)
     error_text: str | None = None
     animation: str | None = None
     agent_session_key: str | None = None
@@ -407,6 +409,8 @@ class ToolCallEvent(BaseModel):
     message_timestamp: float | None = None
     tool_call_count: int = 0
     tool_calls: list[dict[str, Any]] = Field(default_factory=list)
+    # TASK-2110: per-LLM-response records (ordinal derived per host parent).
+    responses: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ToolCallEventsResponse(BaseModel):

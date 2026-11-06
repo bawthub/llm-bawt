@@ -72,6 +72,11 @@ class TurnStreamPublishMixin:
                 event_dict = _tool_event_coordinator.end(event_dict)
             elif event_dict.get("event") == "tool_executing":
                 event_dict = _tool_event_coordinator.executing(event_dict)
+        elif event_dict.get("_type") == "llm_response_observed":
+            # TASK-2110: persist first; publish only the merged record.
+            event_dict = _tool_event_coordinator.response(event_dict)
+            if event_dict is None:
+                return None
         if not _redis_sub:
             return None
         try:

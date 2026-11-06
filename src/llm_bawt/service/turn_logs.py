@@ -86,6 +86,8 @@ class TurnLogStore:
         # Keep orchestration here while each nested store remains independently
         # guarded for direct callers.
         ToolCallStore(self.engine).ensure_schema()
+        from .llm_response_store import LlmResponseStore
+        LlmResponseStore(self.engine).ensure_schema()
         from .changed_files_store import ChangedFilesStore
         ChangedFilesStore(self.engine).ensure_schema()
 
@@ -770,6 +772,7 @@ class TurnLogStore:
         is_error: bool | None = None,
         tool_use_id: str | None = None,
         parent_tool_use_id: str | None = None,
+        response_id: str | None = None,
     ) -> None:
         """Persist a single tool call record."""
         if self.engine is None:
@@ -787,6 +790,7 @@ class TurnLogStore:
             text_offset=text_offset,
             tool_use_id=tool_use_id,
             parent_tool_use_id=parent_tool_use_id,
+            response_id=response_id,
         )
         if result is not None:
             from agent_bridge.tool_results import ToolResultPayload

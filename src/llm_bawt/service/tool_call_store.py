@@ -101,6 +101,9 @@ class ToolCallRecord(SQLModel, table=True):
     is_error: bool | None = Field(default=None, sa_column=Column(Boolean, nullable=True))
     tool_use_id: str | None = Field(default=None, index=True)
     parent_tool_use_id: str | None = Field(default=None, index=True)
+    # TASK-2110: provider id of the LLM response that requested this call.
+    # NULL = unknown (legacy rows, producers without verified identity).
+    response_id: str | None = Field(default=None, sa_column=Column(String(128), nullable=True))
     approval_request_id: str | None = Field(default=None, index=True)
     approval_status: str | None = Field(default=None)
     preapproved: bool | None = Field(default=None, sa_column=Column(Boolean, nullable=True))
@@ -206,6 +209,8 @@ class ToolCallStore:
                 # TASK-1095: execution start, separate from model emit time.
                 "ALTER TABLE tool_call_records ADD COLUMN IF NOT EXISTS exec_started_at DOUBLE PRECISION",
                 "ALTER TABLE tool_call_records ADD COLUMN IF NOT EXISTS exec_tracked BOOLEAN NOT NULL DEFAULT FALSE",
+                # TASK-2110: per-LLM-response grouping (nullable, additive).
+                "ALTER TABLE tool_call_records ADD COLUMN IF NOT EXISTS response_id VARCHAR(128)",
                 "CREATE INDEX IF NOT EXISTS ix_tool_call_records_turn_call ON tool_call_records (turn_id, call_id)",
                 # TASK-594: content-addressed lookup for the TTL prune keep-set.
                 "CREATE INDEX IF NOT EXISTS ix_tool_call_records_blob_key ON tool_call_records (result_blob_key)",
@@ -258,6 +263,7 @@ class ToolCallStore:
         text_offset: int | None = None,
         tool_use_id: str | None = None,
         parent_tool_use_id: str | None = None,
+        response_id: str | None = None,
     ) -> int | None:
         if self.engine is None:
             return None
@@ -288,6 +294,18 @@ class ToolCallStore:
             row.started_at = started_at
             # A duplicate start without metadata must not erase the capability.
             row.exec_tracked = row.exec_tracked or exec_tracked
+            # TASK-2110: like exec_tracked, the first known response wins. A
+            # replayed start without it never clears membership, and a
+            # contradictory id never silently moves the call to another response.
+            if isinstance(response_id, str) and response_id and len(response_id) <= 128:
+                if row.response_id is None:
+                    row.response_id = response_id
+                elif row.response_id != response_id:
+                    logger.warning(
+                        "Ignoring contradictory response_id for tool call turn=%s "
+                        "tool_use_id=%s kept=%s got=%s",
+                        turn_id, tool_use_id, row.response_id, response_id,
+                    )
             row.text_offset = text_offset
             row.tool_use_id = tool_use_id
             row.parent_tool_use_id = parent_tool_use_id

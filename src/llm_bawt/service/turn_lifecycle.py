@@ -97,6 +97,9 @@ def _normalize_tool_call_details(tool_calls: list[dict] | None) -> list[dict]:
             entry["tool_use_id"] = item["tool_use_id"]
         if item.get("parent_tool_use_id"):
             entry["parent_tool_use_id"] = item["parent_tool_use_id"]
+        # TASK-2110: LLM-response membership (fallback blob for the read model).
+        if item.get("response_id"):
+            entry["response_id"] = item["response_id"]
         # Tool failure flag (SDK ToolResultBlock.is_error), threaded so a
         # recalled turn re-tints failed tool cards red without re-deriving
         # failure from result text. Only persist when true to keep the blob lean.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from typing import Any
@@ -9,7 +10,10 @@ from typing import Any
 from agent_bridge.tool_results import payload_from_event
 
 from ..media.serializers import attachment_refs
+from .llm_response_store import LlmResponseStore
 from .tool_call_store import ToolCallStore
+
+logger = logging.getLogger(__name__)
 
 
 class ToolEventCoordinator:
@@ -17,6 +21,7 @@ class ToolEventCoordinator:
 
     def __init__(self, engine) -> None:
         self.store = ToolCallStore(engine)
+        self.responses = LlmResponseStore(engine)
 
     def start(self, event: dict[str, Any]) -> dict[str, Any]:
         record_id = self.store.save_start(
@@ -32,12 +37,46 @@ class ToolEventCoordinator:
             text_offset=event.get("text_offset"),
             tool_use_id=event.get("tool_use_id"),
             parent_tool_use_id=event.get("parent_tool_use_id"),
+            response_id=event.get("response_id"),
         )
         public = dict(event)
         if record_id is not None:
             public["record_id"] = record_id
         public["_tool_persisted"] = True
         return public
+
+    def response(self, event: dict[str, Any]) -> dict[str, Any] | None:
+        """Upsert one LLM response record; publish the merged state (TASK-2110).
+
+        The public event carries the persisted merge, not the raw observation,
+        so replays and duplicate deliveries converge on the same record.
+        """
+        try:
+            record = self.responses.upsert(
+                turn_id=event.get("turn_id"),
+                response_id=event.get("response_id"),
+                first_seen_seq=event.get("first_seen_seq"),
+                host_parent=event.get("host_parent"),
+                model=event.get("model"),
+                usage=event.get("usage"),
+                usage_state=event.get("usage_state"),
+                bot_id=event.get("bot_id"),
+                user_id=event.get("user_id"),
+            )
+        except Exception:
+            logger.exception("LLM response record upsert failed turn=%s", event.get("turn_id"))
+            return None
+        if record is None:
+            return None
+        return {
+            "_type": "llm_response",
+            "turn_id": event.get("turn_id"),
+            "trigger_message_id": event.get("trigger_message_id"),
+            "bot_id": event.get("bot_id"),
+            "user_id": event.get("user_id"),
+            "ts": event.get("ts"),
+            **record,
+        }
 
     def executing(self, event: dict[str, Any]) -> dict[str, Any]:
         self.store.mark_executing(
