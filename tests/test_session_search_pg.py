@@ -63,6 +63,7 @@ def _populate_first_messages(conn):
         ("sched", "sample-b", "archived", "2026-08-04", {"title": "Hourly watchdog", "title_source": "automation"}),
         ("stale", "sample-a", "archived", "2026-08-05", {"title": "sup", "title_source": "auto"}),
         ("empty", "sample-a", "archived", "2026-08-06", {}),
+        ("mixed", "sample-a", "archived", "2026-08-07", {}),
     ]
     for id_, bot, status, started, meta in sessions:
         conn.execute(text("INSERT INTO sessions VALUES (:id,:bot,'carol',:status,:started,NULL,CAST(:meta AS jsonb))"),
@@ -80,6 +81,9 @@ def _populate_first_messages(conn):
         ("sampleb", "s1", "user", "Run the hourly watchdog", 1.0, "sched", "bot", "snark"),
         ("samplea", "t0", "assistant", "sup", 1.0, "stale", "bot", "sample-a"),
         ("samplea", "t1", "user", "Look into the outage", 2.0, "stale", None, None),
+        # Marker plus non-ASCII Python whitespace: the old writer skipped it.
+        ("samplea", "x1", "user", "#\u00a0", 1.0, "mixed", "bot", "gavel"),
+        ("samplea", "x2", "user", "Please investigate searchable-needle", 2.0, "mixed", "user", "carol"),
     ]
     for row in messages:
         conn.execute(text("INSERT INTO messages VALUES (:b,:i,:r,:c,:t,:s,:at,:ai)"),
@@ -153,6 +157,45 @@ def test_stored_auto_copy_is_not_a_match_source(repository):
     assert stale["initiated_by"] == {"kind": "unknown", "id": None}
 
 
+def test_marker_with_python_whitespace_does_not_displace_the_real_request(repository):
+    mixed = _by_id(repository.search(user_id="carol", query="searchable-needle"))["mixed"]
+    assert mixed["first_message_text"] == "Please investigate searchable-needle"
+    assert mixed["initiated_by"] == {"kind": "user", "id": "carol"}
+
+
+def _retired_writer_title(content):
+    """The retired auto-title rule (f1252ef9 derive_thread_title), uncut."""
+    import re
+
+    text_ = (content or "").strip()
+    if not text_ or text_.startswith("/"):
+        return None
+    text_ = re.sub(r"```[a-zA-Z0-9_-]*", " ", text_).replace("`", " ")
+    for line in text_.splitlines():
+        line = line.strip().lstrip("#>*- ").strip()
+        if line:
+            return re.sub(r"\s+", " ", line).strip() or None
+    return None
+
+
+ELIGIBILITY_CASES = [
+    "hello", "", " ", "\u00a0", "/new", " \u3000/new", "#", "# ", "#\u00a0", "#\x1c", "#\u00a0#",
+    "\u00a0#", "- * > #", "-\u2003-", "```", "```python\n```", "```\n# \n```", "`#`", "``x``",
+    "#\u2028real", "#\x1dreal", "#\x1f#", ">\x85>", "# \r\n> \r\nok", "\x1f", "a\u00a0",
+    "```js\n# heading", "   \t\n\n  *", "**bold**", "\u2029", "#\u2029\u00a0#",
+]
+
+
+def test_sql_eligibility_matches_the_retired_writer(repository):
+    from llm_bawt.sessions.first_message import eligible_sql, first_message_params
+
+    with repository.engine.connect() as conn:
+        for case in ELIGIBILITY_CASES:
+            sql = f"SELECT {eligible_sql('m')} FROM (SELECT 'user'::text AS role, CAST(:c AS text) AS content) m"
+            got = conn.execute(text(sql), {"c": case, **first_message_params()}).scalar_one()
+            assert got is (_retired_writer_title(case) is not None), repr(case)
+
+
 def test_given_names_match_and_rank_as_labels(repository):
     named = _by_id(repository.search(user_id="carol", query="renamed thread"))["named"]
     assert named["rank"] == 4 and named["title_source"] == "user"
@@ -217,5 +260,5 @@ def test_thread_list_query_searches_full_history_before_limit(repository):
     # The stale auto copy "sup" is not a source; the assistant reply is.
     assert ids(query="sup") == ["stale"]
     assert ids(query="%_") == []
-    assert len(ids(query="", limit=200)) == 4
+    assert len(ids(query="", limit=200)) == 5  # sample-a sessions of carol
     assert ids(query="zebra", limit=1) == ["long"]

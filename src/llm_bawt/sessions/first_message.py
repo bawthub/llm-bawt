@@ -22,18 +22,36 @@ from __future__ import annotations
 PYTHON_STRIP_CHARS = "".join(c for c in map(chr, range(0x110000)) if c.isspace())
 
 
+# Every character Python's str.splitlines() breaks on.
+PYTHON_LINE_BREAKS = "".join(
+    c for c in map(chr, range(0x110000)) if len(f"a{c}b".splitlines()) == 2)
+
+
 def first_message_params() -> dict:
-    return {"fm_strip": PYTHON_STRIP_CHARS}
+    return {"fm_strip": PYTHON_STRIP_CHARS, "fm_lines": f"[{PYTHON_LINE_BREAKS}]"}
 
 
 def eligible_sql(alias: str) -> str:
-    """SQL predicate: ``alias`` is an eligible first-message row."""
+    """SQL predicate: ``alias`` is an eligible first-message row.
+
+    Step for step the retired writer's rule: strip (Python whitespace); not
+    empty and not a slash command; code-fence openers and backticks become
+    spaces; some line (split as ``str.splitlines``) is non-empty after
+    ``strip().lstrip("#>*- ").strip()``. Per line, because a marker after
+    non-ASCII whitespace (``"#\\u00a0#"``) is content, and a line made only
+    of markers and such whitespace is not.
+    """
+    content = f"btrim({alias}.content, :fm_strip)"
     return f"""(
         {alias}.role = 'user'
-        AND btrim({alias}.content, :fm_strip) <> ''
-        AND left(btrim({alias}.content, :fm_strip), 1) <> '/'
-        AND regexp_replace({alias}.content,
-                '```[a-zA-Z0-9_-]*|[`#>*[:space:]-]', '', 'g') <> ''
+        AND {content} <> ''
+        AND left({content}, 1) <> '/'
+        AND EXISTS (
+            SELECT 1 FROM regexp_split_to_table(
+                replace(regexp_replace({content}, '```[a-zA-Z0-9_-]*', ' ', 'g'), '`', ' '),
+                :fm_lines) AS line
+            WHERE btrim(ltrim(btrim(line, :fm_strip), '#>*- '), :fm_strip) <> ''
+        )
     )"""
 
 

@@ -297,7 +297,7 @@ class PostgreSQLShortTermManager(ShortTermMessageReadsMixin, ShortTermMessageMut
         messages_table = self._backend._messages_table_name
         needle = (query or "").strip().lower()
         if needle:
-            from ..sessions.first_message import first_message_params, given_title_sql
+            from ..sessions.first_message import first_message_params, given_title_sql, storage_bot_sql
 
             escaped = needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             params.update({"query": needle, "query_like": f"%{escaped}%", **first_message_params()})
@@ -305,7 +305,7 @@ class PostgreSQLShortTermManager(ShortTermMessageReadsMixin, ShortTermMessageMut
                 strpos(LOWER({given_title_sql('s')}), :query) > 0
                 OR EXISTS (
                     SELECT 1 FROM {messages_table if target_bot else 'messages'} mq
-                    WHERE mq.session_id = s.id
+                    WHERE mq.session_id = s.id AND mq.bot_id = {storage_bot_sql('s.bot_id')}
                       AND mq.role IN ('user', 'assistant', 'summary')
                       AND mq.content ILIKE :query_like ESCAPE '\\'
                 )

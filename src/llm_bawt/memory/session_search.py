@@ -171,7 +171,11 @@ class SessionSearch:
                 LEFT JOIN page ON TRUE
                 ORDER BY {orders[sort_by]}
             """
-        with self.engine.connect() as conn:
+        with self.engine.begin() as conn:
+            # Interactive and sub-second; the per-session lateral's row estimate
+            # is far too high, and JIT compile alone measured ~2.5s of a 3s run.
+            if conn.dialect.name == "postgresql":
+                conn.execute(text("SET LOCAL jit = off"))
             rows = conn.execute(text(sql), params).mappings().all()
         return {
             "sessions": [_public(row) for row in rows if row["id"] is not None],
