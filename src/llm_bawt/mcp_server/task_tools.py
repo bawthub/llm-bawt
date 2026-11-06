@@ -62,6 +62,27 @@ TASKS_LIST_MAX_LIMIT = 25
 SEMANTIC_DEFAULT_LIMIT = 10
 SEMANTIC_MAX_LIMIT = 25
 
+OUTCOME_MAX_CHARS = 400
+OutcomeText = Annotated[
+    str | None,
+    Field(description=(
+        "Shown as What changed: 1-3 plain sentences, max 400 chars, on what's "
+        "different for the user. No task IDs, receipts, tests, file names or "
+        "review steps; use response/check_links."
+    )),
+]
+
+
+def _outcome_error(outcome: str | None) -> dict | None:
+    if outcome is not None and len(outcome) > OUTCOME_MAX_CHARS:
+        return {"error": (
+            f"outcome exceeds {OUTCOME_MAX_CHARS} characters. Keep What changed "
+            "to 1-3 plain sentences; put technical details/test receipts in "
+            "response and review steps in check_links."
+        )}
+    return None
+
+
 async def list_projects() -> list[dict] | dict:
     """Compatibility wrapper; the registered tool lives in project_tools."""
     try:
@@ -373,7 +394,7 @@ async def update_task(
     model_id: str | None = None,
     title: str | None = None,
     description: str | None = None,
-    outcome: str | None = None,
+    outcome: OutcomeText = None,
     priority: str | None = None,
     planned: bool | None = None,
     project_id: str | None = None,
@@ -499,6 +520,8 @@ async def update_task(
     Returns:
         Compact updated task summary, or error dict. Use tasks_get for full detail.
     """
+    if error := _outcome_error(outcome):
+        return error
     logger.debug("MCP tool invoked: tools/update_task id=%s status=%s", task_id, status)
     body: dict[str, Any] = {}
     if status is not None:
@@ -807,7 +830,7 @@ async def regenerate_task(
 async def create_task(
     title: str,
     description: str | None = None,
-    outcome: str | None = None,
+    outcome: OutcomeText = None,
     project_id: str | None = None,
     priority: str = "MEDIUM",
     status: str = "QUEUED",
@@ -858,6 +881,8 @@ async def create_task(
     Returns:
         Created task with generated shortId and, when requested, an association result.
     """
+    if error := _outcome_error(outcome):
+        return error
     logger.debug("MCP tool invoked: tools/create_task title=%s", title)
     body: dict[str, Any] = {
         "title": title,

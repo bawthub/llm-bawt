@@ -110,6 +110,17 @@ def test_nested_schema_keywords_and_data_are_distinct():
 
 
 @pytest.mark.anyio
+async def test_task_outcome_guidance_survives_catalog_compaction():
+    tools = {tool.name: tool for tool in await mcp.list_tools()}
+    for name in ("tasks_create", "tasks_update"):
+        field = tools[name].inputSchema["properties"]["outcome"]
+        for wording in ("What changed", "1-3 plain sentences", "400 chars",
+                        "No task IDs", "receipts", "tests", "file names",
+                        "review steps", "response/check_links"):
+            assert wording in field["description"]
+
+
+@pytest.mark.anyio
 async def test_catalog_token_budgets():
     encoder = tiktoken.get_encoding("o200k_base")
     tools = await mcp.list_tools()
@@ -275,7 +286,8 @@ async def test_catalog_token_budgets():
     # ~15k chars of descriptions/schemas to compact rows.
     # TASK-1383: role wording ("the user", "a coordinator") replaces names (+35).
     # TASK-2066: notifications_list, read-only bell history for bots (+28).
-    assert total <= 17314, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-2083: outcome Field guidance on create/update (+92), measured17,406.
+    assert total <= 17406, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 

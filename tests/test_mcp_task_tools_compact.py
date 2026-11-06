@@ -3,8 +3,10 @@ import json
 from typing import Any
 
 import pytest
+from mcp.server.fastmcp import FastMCP
 
 from llm_bawt.mcp_server import task_tools
+from llm_bawt.mcp_server.server import mcp
 
 
 GIANT_TEXT = "x" * 20_000
@@ -419,6 +421,60 @@ def test_create_forwards_outcome(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert calls[0]["path"] == "/tasks"
     assert calls[0]["json"]["outcome"] == "Users can do X."
+
+
+@pytest.mark.parametrize("operation", ["create", "update"])
+@pytest.mark.parametrize("length", [401, 600])
+def test_long_outcome_is_rejected_before_any_side_effect(monkeypatch, operation, length):
+    async def unexpected(*args, **kwargs):
+        pytest.fail("Invalid outcome must not read, write, resolve images or associate a task")
+
+    for name in ("_api_get", "_api_post", "_api_patch", "resolve_image_refs",
+                 "linked_turn_images", "associate_current_task"):
+        monkeypatch.setattr(task_tools, name, unexpected)
+    function = task_tools.create_task if operation == "create" else task_tools.update_task
+    result = _run(function("TASK-1", outcome="x" * length, associate_current_turn=True))
+    assert "400" in result["error"]
+    assert "response" in result["error"]
+    assert "check_links" in result["error"]
+
+
+@pytest.mark.parametrize("name,key", [("tasks_create", "title"), ("tasks_update", "task_id")])
+def test_long_outcome_error_reaches_mcp_caller(monkeypatch, name, key):
+    async def unexpected(*args, **kwargs):
+        pytest.fail("Rejected outcome must not reach BawtHub")
+
+    monkeypatch.setattr(task_tools, "_api_post", unexpected)
+    monkeypatch.setattr(task_tools, "_api_patch", unexpected)
+    content = _run(FastMCP.call_tool(
+        mcp, name, {key: "TASK-1", "outcome": "x" * 600},
+    ))
+    structured = json.loads(content[0].text)
+    assert "400" in structured["error"]
+    assert "response" in structured["error"]
+    assert "check_links" in structured["error"]
+
+
+@pytest.mark.parametrize("operation", ["create", "update"])
+@pytest.mark.parametrize("outcome", [None, "", "x" * 400, "🐕" * 400])
+def test_outcome_limit_preserves_optional_and_boundary_values(monkeypatch, operation, outcome):
+    calls = []
+
+    async def fake_write(path, **kwargs):
+        calls.append(kwargs["json"])
+        return _full_task()
+
+    monkeypatch.setattr(task_tools, "_api_post", fake_write)
+    monkeypatch.setattr(task_tools, "_api_patch", fake_write)
+    if operation == "create":
+        _run(task_tools.create_task("New thing", outcome=outcome))
+    else:
+        _run(task_tools.update_task("TASK-1", outcome=outcome, response=GIANT_TEXT))
+        assert calls[0]["response"] == GIANT_TEXT
+    if outcome is None:
+        assert "outcome" not in calls[0]
+    else:
+        assert calls[0]["outcome"] == outcome
 
 
 def test_update_forwards_blocked_reason_and_compact_shows_it(monkeypatch: pytest.MonkeyPatch) -> None:
