@@ -145,6 +145,9 @@ services:
     dns_search: ["."]
     container_name: bawthub-claude-code-bridge
     command: ["python", "-m", "claude_code_bridge"]
+    # TASK-2072: init reaps orphaned test children; 0 or unset = no memory cap.
+    init: true
+    mem_limit: ${CLAUDE_CODE_BRIDGE_MEM_LIMIT:-0}
     env_file:
       - ./.env
     environment:

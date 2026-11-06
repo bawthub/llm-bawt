@@ -247,6 +247,10 @@ services:
     <<: *agent-bridge-image
     container_name: llm-bawt-claude-code-bridge
     command: ["python", "-m", "claude_code_bridge"]
+    # TASK-2072: init reaps orphaned test children (esbuild/vitest zombies).
+    # The memory cap is deployment data (.env); 0 or unset means unlimited.
+    init: true
+    mem_limit: ${CLAUDE_CODE_BRIDGE_MEM_LIMIT:-0}
     # TASK-1476: no env_file (see the app). z.ai and Kimi keys come from the
     # app broker (records); their env names are no longer passed.
     environment:
@@ -349,6 +353,9 @@ services:
     <<: *agent-bridge-image
     container_name: llm-bawt-codex-bridge
     command: ["python", "-m", "codex_bridge"]
+    # TASK-2072: see claude-code-bridge (init + .env memory cap).
+    init: true
+    mem_limit: ${CODEX_BRIDGE_MEM_LIMIT:-0}
     # TASK-1476: no env_file. Codex reads nothing else from .env (it scrubs
     # OPENAI_API_KEY anyway: codex_bridge/transport.py).
     environment:
@@ -569,6 +576,9 @@ services:
   playwright-mcp:
     image: mcp/playwright
     container_name: llm-bawt-playwright-mcp
+    # TASK-2072: init reaps orphaned Chrome children; .env memory cap, 0 = unlimited.
+    init: true
+    mem_limit: ${PLAYWRIGHT_MCP_MEM_LIMIT:-0}
     ports:
       - "${PLAYWRIGHT_MCP_PORT:-8931}:8931"
     # Token-cost guard:
