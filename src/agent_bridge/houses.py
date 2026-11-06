@@ -1,0 +1,283 @@
+"""Per-house command routing (TASK-2077, houses T6).
+
+A *house* is an isolated bridge slot. A bot profile's ``house`` field (empty =
+mansion) is the only routing input. The mansion keeps the historical
+``agent:commands`` stream, so with zero houses every key below collapses to
+today's behaviour.
+
+Keys (all plain Redis strings unless noted):
+
+``agent:commands:house:<H>``            house H's command stream
+``agent:house:<H>:lease:<backend>``     liveness lease, value = epoch, TTL
+``agent:house:<H>:epoch:<backend>``     INCR'd by each bridge start
+``agent:turn:req:<request_id>``         stream a running turn was admitted on
+``agent:turn:sess:<backend>:<session>`` same, by session (steer/answer)
+
+Fencing: the dispatch decision for a new ``chat.send`` is made exactly once,
+at publish time. Nothing is ever republished or claimed across streams, so an
+in-flight turn never moves. A ``chat.send`` routed to a house carries the
+lease epoch it saw; a house bridge refuses one from an older epoch, so a
+command queued while the house was dead cannot run late after a restart.
+"""
+
+from __future__ import annotations
+
+import re
+
+import asyncio
+import logging
+import time
+from collections.abc import Awaitable, Callable
+from typing import Any
+
+from .publisher import MANSION_COMMANDS_STREAM
+
+logger = logging.getLogger(__name__)
+
+HOUSE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,30}$")
+HOUSE_ENV = "BAWT_HOUSE"
+LEASE_TTL_S = 30
+LEASE_REFRESH_S = 10
+TURN_TTL_S = 90
+HOUSE_STREAM_PREFIX = "agent:commands:house:"
+EPOCH_FIELD = "house_epoch"
+
+
+def normalize_house(value: object) -> str:
+    """Return a valid house id, '' for the mansion; raise ValueError otherwise."""
+    if value is None:
+        return ""
+    text = str(value).strip().lower()
+    if not text:
+        return ""
+    if not HOUSE_ID_RE.fullmatch(text):
+        raise ValueError(
+            "house must match ^[a-z0-9][a-z0-9-]{0,30}$ (empty = mansion)"
+        )
+    return text
+
+
+def commands_stream(house: str) -> str:
+    return f"{HOUSE_STREAM_PREFIX}{house}" if house else MANSION_COMMANDS_STREAM
+
+
+def lease_key(house: str, backend: str) -> str:
+    return f"agent:house:{house}:lease:{backend}"
+
+
+def epoch_key(house: str, backend: str) -> str:
+    return f"agent:house:{house}:epoch:{backend}"
+
+
+def turn_request_key(request_id: str) -> str:
+    return f"agent:turn:req:{request_id}"
+
+
+def turn_session_key(backend: str, session_key: str) -> str:
+    return f"agent:turn:sess:{backend}:{session_key}"
+
+
+def house_from_env(environ=None) -> str:
+    """The bridge's own slot from ``BAWT_HOUSE``; a bad value fails startup."""
+    import os
+
+    env = os.environ if environ is None else environ
+    return normalize_house(env.get(HOUSE_ENV, ""))
+
+
+def fallback_notice_key(house: str, backend: str) -> str:
+    return f"agent:house:{house}:fallback_notified:{backend}"
+
+
+FALLBACK_NOTICE_TTL_S = 900
+
+FallbackNotifier = Callable[[str, str, str], Awaitable[None]]
+"""``(house, backend, bot_id)``: tell the user new work fell back to the mansion."""
+
+
+# ---------------------------------------------------------------- app side
+
+
+async def route_new_command(
+    redis: Any,
+    *,
+    house: str | None,
+    backend: str | None,
+    bot_id: str | None,
+    notify: FallbackNotifier | None = None,
+) -> tuple[str, str | None]:
+    """Pick the stream for a NEW ``chat.send``: ``(stream, epoch)``.
+
+    No house -> the mansion, no Redis read (zero-house byte-identical). A
+    house with a live lease for this backend -> its stream plus the lease
+    epoch the house bridge will fence on. Otherwise the mansion, with one
+    deduplicated notice per outage. Callers decide once; nothing re-routes.
+    """
+    try:
+        house = normalize_house(house)
+    except ValueError:
+        logger.warning("bot %s has an invalid house %r; using the mansion", bot_id, house)
+        return MANSION_COMMANDS_STREAM, None
+    if not house:
+        return MANSION_COMMANDS_STREAM, None
+    backend = (backend or "").strip()
+    epoch = await redis.get(lease_key(house, backend)) if backend else None
+    if epoch:
+        return commands_stream(house), str(epoch)
+    logger.warning("house %s/%s has no live lease; bot %s falls back to the mansion",
+                   house, backend or "?", bot_id)
+    if notify is not None and backend:
+        try:
+            first = await redis.set(fallback_notice_key(house, backend), "1",
+                                    nx=True, ex=FALLBACK_NOTICE_TTL_S)
+            if first:
+                await notify(house, backend, bot_id or "")
+        except Exception:
+            logger.exception("house fallback notice failed: house=%s", house)
+    return MANSION_COMMANDS_STREAM, None
+
+
+async def follow_up_stream(
+    redis: Any,
+    *,
+    request_id: str | None = None,
+    backend: str | None = None,
+    session_key: str | None = None,
+) -> str:
+    """Where a follow-up (steer/answer/approval/abort) for a turn must go.
+
+    House bridges record their admitted turns; a missing record means the
+    turn runs in the mansion (always true with zero houses).
+    """
+    keys: list[str] = []
+    if request_id:
+        keys.append(turn_request_key(request_id))
+    if backend and session_key:
+        keys.append(turn_session_key(backend, session_key))
+    try:
+        for key in keys:
+            stream = await redis.get(key)
+            if stream:
+                return str(stream)
+    except Exception:
+        # A failed lookup must not block an abort: house turns are only ever
+        # reached through their record, so the mansion is the safe default.
+        logger.warning("turn location lookup failed; using the mansion", exc_info=True)
+    return MANSION_COMMANDS_STREAM
+
+
+async def record_turn(redis: Any, *, stream: str, request_id: str,
+                      backend: str | None, session_key: str | None) -> None:
+    """Pin a house-routed turn's follow-ups to *stream* (TTL; bridge renews)."""
+    await redis.set(turn_request_key(request_id), stream, ex=TURN_TTL_S)
+    if backend and session_key:
+        await redis.set(turn_session_key(backend, session_key), stream, ex=TURN_TTL_S)
+
+
+# ------------------------------------------------------------- bridge side
+
+
+class HouseSlot:
+    """A bridge's house membership: lease heartbeat, epoch fence, turn records.
+
+    For the mansion (``house == ''``) every method is a no-op and ``admit``
+    accepts everything, so mansion bridges behave exactly as before.
+    """
+
+    GRACE_S = 10.0
+
+    def __init__(self, house: str, backend: str, queue: Any) -> None:
+        self.house = normalize_house(house)
+        self.backend = backend
+        self.stream = commands_stream(self.house)
+        self._queue = queue
+        self.epoch: str | None = None
+        self._turns: dict[tuple[str, str], float] = {}
+        self._task: asyncio.Task | None = None
+
+    @property
+    def is_house(self) -> bool:
+        return bool(self.house)
+
+    async def start(self, redis: Any) -> None:
+        if not self.is_house or self._task is not None:
+            return
+        self._redis = redis
+        self.epoch = str(await redis.incr(epoch_key(self.house, self.backend)))
+        await redis.set(lease_key(self.house, self.backend), self.epoch, ex=LEASE_TTL_S)
+        await redis.delete(fallback_notice_key(self.house, self.backend))
+        logger.info("house %s/%s lease held, epoch %s", self.house, self.backend, self.epoch)
+        self._task = asyncio.create_task(self._heartbeat())
+
+    def admit(self, fields: dict) -> bool:
+        """False for a send routed under an older epoch (fenced, never run)."""
+        if not self.is_house:
+            return True
+        return (fields.get(EPOCH_FIELD) or "") == (self.epoch or "-")
+
+    def track(self, fields: dict) -> None:
+        if not self.is_house:
+            return
+        request_id = (fields.get("request_id") or "").strip()
+        session_key = (fields.get("session_key") or "").strip()
+        if not request_id or not session_key:
+            return
+        self._turns[(session_key, request_id)] = time.monotonic()
+        asyncio.create_task(self._write_turn(session_key, request_id))
+
+    async def _write_turn(self, session_key: str, request_id: str) -> None:
+        try:
+            await self._redis.set(turn_request_key(request_id), self.stream, ex=TURN_TTL_S)
+            await self._redis.set(turn_session_key(self.backend, session_key), self.stream,
+                                  ex=TURN_TTL_S)
+        except Exception:
+            logger.exception("turn record write failed: request=%s", request_id)
+
+    async def refresh(self) -> None:
+        """One heartbeat: renew the lease and live turns, drop finished ones."""
+        await self._redis.set(lease_key(self.house, self.backend), self.epoch, ex=LEASE_TTL_S)
+        now = time.monotonic()
+        for (session_key, request_id), seen in list(self._turns.items()):
+            live = self._queue.request_phase(session_key, request_id) is not None
+            if live or now - seen < self.GRACE_S:
+                await self._redis.expire(turn_request_key(request_id), TURN_TTL_S)
+                await self._redis.expire(turn_session_key(self.backend, session_key), TURN_TTL_S)
+                continue
+            self._turns.pop((session_key, request_id), None)
+            await self._redis.delete(turn_request_key(request_id))
+            sess_key = turn_session_key(self.backend, session_key)
+            if await self._redis.get(sess_key) == self.stream and not any(
+                    s == session_key for s, _ in self._turns):
+                await self._redis.delete(sess_key)
+
+    async def _heartbeat(self) -> None:
+        while True:
+            await asyncio.sleep(LEASE_REFRESH_S)
+            try:
+                await self.refresh()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("house %s heartbeat failed", self.house)
+
+
+async def gate_send(slot: "HouseSlot | None", fields: dict, msg_id: str, redis: Any, *,
+                    group: str, publisher: Any) -> bool:
+    """Admit a ``chat.send`` read by this bridge; refuse a fenced one.
+
+    A refused send gets the run's ``done`` sentinel (``disconnect=refused``,
+    nothing ran) and is acked, so the app's wait ends and it never runs.
+    """
+    if slot is None or slot.admit(fields):
+        if slot is not None:
+            slot.track(fields)
+        return True
+    from .run_contract import REFUSED
+
+    request_id = (fields.get("request_id") or "").strip()
+    logger.warning("house %s fenced a stale send: request=%s epoch=%s current=%s",
+                   slot.house, request_id, fields.get(EPOCH_FIELD), slot.epoch)
+    if request_id:
+        publisher.publish_run_done(request_id, teardown=REFUSED)
+    await redis.xack(slot.stream, group, msg_id)
+    return False

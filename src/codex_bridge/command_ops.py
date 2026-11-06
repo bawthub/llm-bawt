@@ -15,6 +15,7 @@ from typing import Any
 
 import httpx
 from agent_bridge.abort_rpc import answer_abort
+from agent_bridge.houses import HouseSlot, gate_send, house_from_env
 from agent_bridge.user_scope import session_user
 from agent_bridge.run_status import RUN_STATUS_METHOD, answer_run_status, queue_run_state
 from agent_bridge.send_admission import admit_send
@@ -88,6 +89,10 @@ class CodexCommandMixin(CodexAppServerMixin):
             "Command listener started on %s (group=%s)",
             COMMANDS_STREAM, CONSUMER_GROUP,
         )
+        # TASK-2077: a house bridge holds its lease; the mansion slot is inert.
+        if getattr(self, "_house_slot", None) is None:
+            self._house_slot = HouseSlot(house_from_env(), self._backend_name, self._session_queue)
+        await self._house_slot.start(async_redis)
 
         while True:
             try:
@@ -117,6 +122,11 @@ class CodexCommandMixin(CodexAppServerMixin):
                             continue
 
                         if action == "chat.send":
+                            if not await gate_send(
+                                getattr(self, "_house_slot", None), fields, msg_id, async_redis,
+                                group=CONSUMER_GROUP, publisher=self._publisher,
+                            ):
+                                continue
                             asyncio.create_task(
                                 self._handle_send(fields, msg_id, async_redis)
                             )

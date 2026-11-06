@@ -103,6 +103,8 @@ class BotProfile(SQLModel, table=True):
     bot_type: str | None = Field(default=None, sa_column=Column(String(32), nullable=True))
     agent_backend: str | None = Field(default=None, sa_column=Column(String(128), nullable=True))
     agent_backend_config: dict[str, Any] | None = Field(default=None, sa_column=Column(JSONB, nullable=True))
+    # TASK-2077: command slot; NULL/'' = mansion (agent_bridge.houses).
+    house: str | None = Field(default=None, sa_column=Column(String(32), nullable=True))
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),
         sa_column=Column(DateTime(timezone=True), nullable=False),
@@ -227,6 +229,7 @@ class BotProfileStore:
             "ALTER TABLE bot_profiles ADD COLUMN IF NOT EXISTS avatar VARCHAR(512)",
             "ALTER TABLE bot_profiles ADD COLUMN IF NOT EXISTS avatar_render TEXT",
             "ALTER TABLE bot_profiles ADD COLUMN IF NOT EXISTS prompt_override_id INTEGER",
+            "ALTER TABLE bot_profiles ADD COLUMN IF NOT EXISTS house VARCHAR(32)",
         ]
         for stmt in migrations:
             conn.execute(text(stmt))
@@ -330,6 +333,7 @@ class BotProfileStore:
                     bot_type=normalize_bot_type(payload.get("bot_type"), payload_agent_backend),
                     agent_backend=payload_agent_backend,
                     agent_backend_config=payload.get("agent_backend_config"),
+                    house=payload.get("house") or None,
                     created_at=now,
                     updated_at=now,
                 )
@@ -375,6 +379,8 @@ class BotProfileStore:
                         row.agent_backend_config = {}
                 if "agent_backend_config" in payload:
                     row.agent_backend_config = payload["agent_backend_config"]
+                if "house" in payload:
+                    row.house = payload.get("house") or None
                 if "bot_type" in payload or "agent_backend" in payload or not row.bot_type:
                     # Derive bot_type from a SINGLE source of truth so the two
                     # fields can never drift (TASK-516):

@@ -9,6 +9,7 @@ from collections.abc import Mapping, Sequence
 
 from .continuity import RESET_SKILLS_FIELD, SEED_FRAMING_FIELD, SeedFraming, reset_skills_field
 from .publisher import COMMANDS_STREAM
+from .houses import EPOCH_FIELD, record_turn, route_new_command
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +78,8 @@ class CommandPublisherMixin:
         access_path_provider: str | None = None,
         skill_selection: Mapping | None = None,
         injected_skills: Sequence[str] | None = None,
+        house: str | None = None,
+        on_house_fallback=None,
     ) -> None:
         """Publish one idempotent ``chat.send`` command to the bridge stream.
 
@@ -188,6 +191,20 @@ class CommandPublisherMixin:
         if access_path_provider:
             fields["access_path_provider"] = access_path_provider
 
+        # TASK-2077: decided once, here. No house -> the mansion, unchanged.
+        stream = COMMANDS_STREAM
+        if house:
+            stream, epoch = await route_new_command(
+                self._pub_redis, house=house, backend=backend, bot_id=bot_id,
+                notify=on_house_fallback,
+            )
+            if epoch is not None:
+                fields[EPOCH_FIELD] = epoch
+                # Record the turn's slot before publishing, so a follow-up
+                # sent right after (dispatch-time abort) cannot miss it.
+                await record_turn(self._pub_redis, stream=stream, request_id=request_id,
+                                  backend=backend, session_key=session_key)
+
         dedupe_key = f"agent:command:request:{request_id}"
         flat_fields: list[str] = []
         for key, value in fields.items():
@@ -211,7 +228,7 @@ class CommandPublisherMixin:
                 script,
                 2,
                 dedupe_key,
-                COMMANDS_STREAM,
+                stream,
                 "1000",
                 request_id,
                 *flat_fields,
@@ -222,7 +239,7 @@ class CommandPublisherMixin:
                 published, stream_id = eval_result
         else:
             stream_id = await self._pub_redis.xadd(
-                COMMANDS_STREAM, fields, maxlen=1000, approximate=True
+                stream, fields, maxlen=1000, approximate=True
             )
             published = 1
         logger.debug(

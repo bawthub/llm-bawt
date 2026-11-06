@@ -101,6 +101,7 @@ class BotProfileResponse(BaseModel):
     endpoint_id: int | None = None
     agent_backend: str | None = None
     agent_backend_config: dict[str, Any] | None = None
+    house: str | None = None
     settings: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime | None = None
     updated_at: datetime | None = None
@@ -130,6 +131,7 @@ class BotProfileUpsertRequest(BaseModel):
     endpoint_id: int | None = None
     agent_backend: str | None = None
     agent_backend_config: dict[str, Any] | None = None
+    house: str | None = None
 
 
 class BotProfilePatchRequest(BaseModel):
@@ -157,6 +159,7 @@ class BotProfilePatchRequest(BaseModel):
     endpoint_id: int | None = None
     agent_backend: str | None = None
     agent_backend_config: dict[str, Any] | None = None
+    house: str | None = None
     tags: list[str] | None = Field(
         default=None,
         description="Full-set replace of the bot's tags, validated against the catalog "

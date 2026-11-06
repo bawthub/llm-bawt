@@ -26,10 +26,27 @@ from .run_contract import (
 
 logger = logging.getLogger(__name__)
 
+
+def _bridge_commands_stream(mansion: str) -> str:
+    import os
+    import re
+
+    house = (os.environ.get("BAWT_HOUSE") or "").strip().lower()
+    if not house:
+        return mansion
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,30}", house):
+        raise RuntimeError("BAWT_HOUSE must match ^[a-z0-9][a-z0-9-]{0,30}$")
+    return f"{mansion}:house:{house}"
+
 # Stream names
 EVENTS_STREAM_PREFIX = "agent:events:"
 HISTORY_STREAM = "agent:history"
-COMMANDS_STREAM = "agent:commands"
+# TASK-2077: a bridge process started with BAWT_HOUSE=<H> reads, acks and
+# claims only its house stream, so every bridge reader site follows this one
+# name. The app never sets BAWT_HOUSE; its publishers route explicitly through
+# ``agent_bridge.houses`` and keep the mansion name below.
+MANSION_COMMANDS_STREAM = "agent:commands"
+COMMANDS_STREAM = _bridge_commands_stream(MANSION_COMMANDS_STREAM)
 RUN_STREAM_PREFIX = "agent:run:"
 # Unified event stream for all bots: events:{bot_id}:{user_id}
 UNIFIED_EVENTS_PREFIX = "events:"

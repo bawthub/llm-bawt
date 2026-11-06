@@ -96,6 +96,8 @@ class ServiceLLMBawt(BaseLLMBawt):
             # per-bot and per-user sessions deterministically.
             self.client._bot_config["bot_id"] = self.bot_id
             self.client._bot_config["user_id"] = self.user_id
+            if getattr(self.bot, "house", None):  # TASK-2077
+                self.client._bot_config["house"] = self.bot.house
             # Canonical model injection: the bot's default_model is THE model
             # reference for agent bots.  Resolve it through the catalog and
             # inject the SDK model_id into the bridge config — this overrides

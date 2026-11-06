@@ -51,6 +51,7 @@ def _request_to_profile_payload(
         "endpoint_id",
         "agent_backend",
         "agent_backend_config",
+        "house",
     ):
         if field_name in request.model_fields_set:
             payload[field_name] = getattr(request, field_name)
@@ -96,6 +97,12 @@ def _validate_profile_payload(payload: dict[str, object]) -> None:
             raise HTTPException(status_code=400, detail="codex_transport requires the Codex backend")
         if config["codex_transport"] not in CODEX_TRANSPORTS:
             raise HTTPException(status_code=400, detail="codex_transport must be one of: " + ", ".join(CODEX_TRANSPORTS))
+    if "house" in payload:
+        from agent_bridge.houses import normalize_house
+        try:
+            payload["house"] = normalize_house(payload["house"]) or None
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     _normalize_agent_backend_config_model(agent_backend, payload)
     _validate_model_endpoint(payload)
 

@@ -171,7 +171,7 @@ async def _abort_bridge_run(service, turn, execution) -> dict:
             "chat.abort",
             {"sessionKey": turn.agent_session_key, "requestId": turn.agent_request_id},
             f"abort_{uuid.uuid4().hex}",
-            timeout_s=ABORT_RPC_TIMEOUT_S, backend=backend,
+            timeout_s=ABORT_RPC_TIMEOUT_S, backend=backend, bot_id=turn.bot_id,
         )
     except Exception as exc:
         log.warning("Abort acknowledgement unavailable for turn %s: %s", turn.id, exc)

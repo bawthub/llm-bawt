@@ -296,6 +296,8 @@ class AgentBridgeBackend(AgentBackend):
                             execution.check_cancelled()
                             # A worker detached before publication never starts the run.
                             execution.check_detached()
+                        from llm_bawt.house_fallback import house_fallback_for
+
                         await local_sub.send_command(
                             session_key=session_key,
                             message=prompt,
@@ -318,6 +320,8 @@ class AgentBridgeBackend(AgentBackend):
                             skill_bundle=config.get("skill_bundle"),
                             skill_selection=config.get("skill_selection"),
                             injected_skills=config.get("injected_skills"),
+                            house=config.get("house"),
+                            on_house_fallback=house_fallback_for(config),
                             subagent_model=(
                                 str(config.get("subagent_model")).strip()
                                 if config.get("subagent_model") else None
@@ -400,6 +404,7 @@ class AgentBridgeBackend(AgentBackend):
                                 "chat.abort", {"sessionKey": session_key, "requestId": request_id},
                                 f"abort_{uuid.uuid4().hex}", timeout_s=ABORT_RPC_TIMEOUT_S,
                                 backend=self.name,
+                                bot_id=str(config.get("bot_id") or "").strip() or None,
                             )
                             if result.get("cancelled") is not True:
                                 logger.warning("Dispatch-time abort unconfirmed request=%s", request_id)

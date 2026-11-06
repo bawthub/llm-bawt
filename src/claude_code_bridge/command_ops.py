@@ -34,6 +34,7 @@ from claude_agent_sdk.types import (
 from agent_bridge.abort_contract import ABORT_TEARDOWN_BOUND_S, AbortState
 from agent_bridge.user_scope import session_user
 from agent_bridge.abort_rpc import answer_abort
+from agent_bridge.houses import HouseSlot, gate_send, house_from_env
 from agent_bridge.ping import PING_METHOD, answer_ping
 from agent_bridge.run_status import RUN_STATUS_METHOD, answer_run_status, queue_run_state
 from agent_bridge.steer_contract import (
@@ -116,6 +117,11 @@ class ClaudeCommandMixin:
 
         logger.info("Command listener started on %s (group=claude-code-bridge)", COMMANDS_STREAM)
 
+        # TASK-2077: a house bridge holds its lease; the mansion slot is inert.
+        if getattr(self, "_house_slot", None) is None:
+            self._house_slot = HouseSlot(house_from_env(), self._backend_name, self._session_queue)
+        await self._house_slot.start(async_redis)
+
         # TASK-291: subscribe to approval-policy reload broadcasts so admin
         # edits drop the cached bundle without a restart. Best-effort.
         if self._approval_reload_task is None or self._approval_reload_task.done():
@@ -147,6 +153,11 @@ class ClaudeCommandMixin:
                             continue
 
                         if action == "chat.send":
+                            if not await gate_send(
+                                getattr(self, "_house_slot", None), fields, msg_id, async_redis,
+                                group="claude-code-bridge", publisher=self._publisher,
+                            ):
+                                continue
                             asyncio.create_task(
                                 self._handle_send(fields, msg_id, async_redis)
                             )

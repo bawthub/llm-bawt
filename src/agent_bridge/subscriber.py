@@ -15,6 +15,7 @@ import redis.asyncio as aioredis
 from redis.asyncio import BlockingConnectionPool
 
 from .command_publisher import CommandPublisherMixin
+from .houses import follow_up_stream
 from .events import AgentEvent, AgentEventKind
 from .run_contract import DONE_FIELD, RunContractError, RunTerminal, run_terminal_key
 from .steer_contract import (
@@ -195,8 +196,12 @@ class RedisSubscriber(CommandPublisherMixin):
             redis.call('SET', KEYS[1], stream_id, 'EX', 604800)
             return {1, stream_id}
         """
+        stream = await follow_up_stream(
+            self._pub_redis, request_id=target_request_id, backend=backend,
+            session_key=session_key,
+        )
         await self._pub_redis.eval(
-            script, 2, dedupe_key, COMMANDS_STREAM, "1000", *flat_fields
+            script, 2, dedupe_key, stream, "1000", *flat_fields
         )
 
         stream_key = f"agent:rpc:{request_id}"
@@ -254,7 +259,8 @@ class RedisSubscriber(CommandPublisherMixin):
         if answers:
             fields["answers_json"] = json.dumps(answers, ensure_ascii=False)
         await self._pub_redis.xadd(
-            COMMANDS_STREAM,
+            await follow_up_stream(self._pub_redis, request_id=request_id,
+                                   backend=backend, session_key=session_key),
             fields,
             maxlen=1000,
             approximate=True,
@@ -292,7 +298,9 @@ class RedisSubscriber(CommandPublisherMixin):
         if request_id:
             fields["request_id"] = request_id
         await self._pub_redis.xadd(
-            COMMANDS_STREAM, fields, maxlen=1000, approximate=True,
+            await follow_up_stream(self._pub_redis, request_id=request_id,
+                                   backend=backend, session_key=session_key),
+            fields, maxlen=1000, approximate=True,
         )
         logger.info(
             "Sent approval.grant: session=%s grant_key=%s backend=%s ttl=%ds",
@@ -333,8 +341,13 @@ class RedisSubscriber(CommandPublisherMixin):
         *,
         timeout_s: float = 15,
         backend: str | None = None,
+        bot_id: str | None = None,
     ) -> dict:
         """Send an RPC command to the bridge and wait for the result.
+
+        TASK-2077: an RPC about one turn (``params`` naming its
+        ``request_id``/``session_key``, e.g. ``chat.abort``) follows that
+        turn's slot; anything else goes to the mansion.
 
         If ``backend`` is provided it is included in the message so bridges
         that filter by backend (e.g. codex-bridge) can ACK and skip RPCs
@@ -351,9 +364,17 @@ class RedisSubscriber(CommandPublisherMixin):
         }
         if backend:
             fields["backend"] = backend
+        if bot_id:
+            fields["bot_id"] = bot_id
 
+        target = params if isinstance(params, dict) else {}
         await self._pub_redis.xadd(
-            COMMANDS_STREAM,
+            await follow_up_stream(
+                self._pub_redis,
+                request_id=str(target.get("requestId") or target.get("request_id") or "") or None,
+                backend=backend,
+                session_key=str(target.get("sessionKey") or target.get("session_key") or "") or None,
+            ),
             fields,
             maxlen=1000,
             approximate=True,
