@@ -42,6 +42,7 @@ def test_schedule_runs_once_per_session(monkeypatch):
     import llm_bawt.service.dependencies as deps
     monkeypatch.setattr(deps, "_service", object())
     monkeypatch.setattr(gt, "_attempted", set()); monkeypatch.setattr(gt, "_pending", set()); monkeypatch.setattr(gt, "_triggers", {}); monkeypatch.setattr(gt, "_running", set())
+    monkeypatch.setattr(gt, "_resolve_queue", []); monkeypatch.setattr(gt, "_resolve_draining", [False])
     for _ in range(3):
         gt.schedule_session_title("E", session_id="once", bot_id="b", user_id="u", message_id="m", content="hi")
     assert len(started) == 1
@@ -155,3 +156,34 @@ def test_unresolved_writes_claim_in_write_order(monkeypatch):
     assert len(workers) == 1
     assert gt._triggers["sess"] == {"first", "second"}
     assert gt._resolve_draining == [False]
+
+
+def test_implicit_then_explicit_writes_keep_write_order(monkeypatch):
+    """r7: a known-session write must not overtake an unresolved earlier one."""
+    import llm_bawt.service.dependencies as deps
+    monkeypatch.setattr(deps, "_service", object())
+    for name, val in (("_attempted", set()), ("_pending", set()), ("_triggers", {}),
+                      ("_running", set()), ("_resolve_queue", []), ("_resolve_draining", [False])):
+        monkeypatch.setattr(gt, name, val)
+    deferred, workers = [], []
+
+    class T:
+        def __init__(self, target, args=(), **kw):
+            self.target, self.args = target, args
+        def start(self):
+            (workers if self.target is gt._worker else deferred).append(self)
+    monkeypatch.setattr(gt.threading, "Thread", T)
+
+    class Conn:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def execute(self, stmt, params):
+            return type("R", (), {"scalar": lambda self: "s"})()
+    engine = type("E", (), {"connect": lambda self: Conn()})()
+
+    gt.schedule_session_title(engine, session_id=None, bot_id="b", user_id="u", message_id="first", content="q1")
+    gt.schedule_session_title(engine, session_id="s", bot_id="b", user_id="u", message_id="second", content="q2")
+    assert workers == [] and len(deferred) == 1  # explicit write waits its turn
+    deferred[0].target()
+    assert len(workers) == 1
+    assert gt._triggers["s"] == {"first", "second"}

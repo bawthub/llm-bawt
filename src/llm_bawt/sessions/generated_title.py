@@ -232,13 +232,11 @@ def schedule_session_title(engine, *, session_id: str | None, bot_id: str,
             engine = get_shared_engine(_service.config)
             if engine is None:
                 return
-        if session_id:
-            _claim(engine, session_id, bot_id, user_id, message_id)
-            return
-        # One FIFO drainer, so writes claim in write order: a later write can
-        # never claim (and be judged NOT_TRIGGERED) before an earlier one.
+        # Every write, known thread or not, claims through one FIFO drainer,
+        # so a later write can never claim (and be judged NOT_TRIGGERED)
+        # before an earlier one that is still resolving its thread.
         with _resolve_lock:
-            _resolve_queue.append((engine, bot_id, user_id, message_id))
+            _resolve_queue.append((engine, session_id, bot_id, user_id, message_id))
             if _resolve_draining[0]:
                 return
             _resolve_draining[0] = True
@@ -263,13 +261,15 @@ def _drain_resolutions() -> None:
         _resolve_and_claim(*item)
 
 
-def _resolve_and_claim(engine, bot_id: str, user_id: str | None, message_id: str) -> None:
+def _resolve_and_claim(engine, session_id: str | None, bot_id: str,
+                       user_id: str | None, message_id: str) -> None:
     try:
-        from sqlalchemy import text
-        with engine.connect() as conn:
-            session_id = conn.execute(
-                text("SELECT session_id FROM messages WHERE id = :id"),
-                {"id": message_id}).scalar()
+        if not session_id:
+            from sqlalchemy import text
+            with engine.connect() as conn:
+                session_id = conn.execute(
+                    text("SELECT session_id FROM messages WHERE id = :id"),
+                    {"id": message_id}).scalar()
         if session_id:
             _claim(engine, str(session_id), bot_id, user_id, message_id)
     except Exception as error:
