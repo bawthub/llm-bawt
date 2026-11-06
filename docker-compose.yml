@@ -297,6 +297,9 @@ services:
       - BRIDGE_BROKER_TOKEN_FILE=/run/llm-bawt-bridge-tokens/broker
       - BRIDGE_GIT_CREDENTIAL_TOKEN_FILE=/run/llm-bawt-bridge-tokens/git-credential
       - CRAWL4AI_API_TOKEN_FILE=/run/llm-bawt-bridge-tokens/crawl4ai
+      # TASK-2072: bawt-wt defaults to the host-identical root (mounted below),
+      # so new worktrees' gitdir links also resolve on the host.
+      - BAWT_WT_DEV_ROOT=${HOME}/dev
       # -- From .env (TASK-1476) --
       - CLAUDE_CODE_CWD
       - CLAUDE_CODE_PERMISSION_MODE
@@ -379,6 +382,8 @@ services:
       - BRIDGE_BROKER_TOKEN_FILE=/run/llm-bawt-bridge-tokens/broker
       - BRIDGE_GIT_CREDENTIAL_TOKEN_FILE=/run/llm-bawt-bridge-tokens/git-credential
       - CRAWL4AI_API_TOKEN_FILE=/run/llm-bawt-bridge-tokens/crawl4ai
+      # TASK-2072: see claude-code-bridge (host-identical bawt-wt root).
+      - BAWT_WT_DEV_ROOT=${HOME}/dev
       # The openai-codex-sdk wheel ships without the codex Rust binary; use the
       # one baked into the image by openai-codex-cli-bin (Dockerfile.agent-bridge).
       # Never bind-mount the host's npm @openai/codex vendor dir: `codex` self-update
