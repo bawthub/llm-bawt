@@ -240,6 +240,33 @@ async def test_untagged_wakeup_inherits_the_current_turn_task(rig):
 
 
 @pytest.mark.anyio
+async def test_an_associated_turn_cuid_resolves_to_its_short_id(rig, monkeypatch):
+    """Associations stamp the canonical cuid; the wake-up stores TASK-N."""
+    from llm_bawt.mcp_server import task_api
+
+    async def fake_get(path):
+        return {"shortId": "TASK-2070"} if path == "/tasks/cmw492nry00gx0mp8d9kvwglt" else None
+
+    monkeypatch.setattr(task_api, "api_get", fake_get)
+    rig.turn_task = "cmw492nry00gx0mp8d9kvwglt"
+    await schedule_tools.schedule_wakeup(message="check", in_minutes=30)
+    assert [c for c in rig.calls if c[0] == "POST"][-1][3]["task_id"] == "TASK-2070"
+
+
+@pytest.mark.anyio
+async def test_an_unknown_cuid_leaves_the_wakeup_untagged(rig, monkeypatch):
+    from llm_bawt.mcp_server import task_api
+
+    async def fake_get(path):
+        raise RuntimeError("404")
+
+    monkeypatch.setattr(task_api, "api_get", fake_get)
+    rig.turn_task = "cmwunknown"
+    await schedule_tools.schedule_wakeup(message="check", in_minutes=30)
+    assert [c for c in rig.calls if c[0] == "POST"][-1][3]["task_id"] is None
+
+
+@pytest.mark.anyio
 async def test_no_current_turn_task_leaves_the_wakeup_untagged(rig):
     await schedule_tools.schedule_wakeup(message="ping", in_minutes=5)
     assert [c for c in rig.calls if c[0] == "POST"][-1][3]["task_id"] is None

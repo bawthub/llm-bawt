@@ -66,10 +66,12 @@ def _caller(arguments: dict):
 
 
 def current_turn_task() -> str | None:
-    """The ``TASK-N`` the trusted current turn is working on, if it resolves to one.
+    """The task ref (``TASK-N`` or a BawtHub cuid) the trusted current turn is on.
 
     Untagged wake-ups inherit it so a stale one can skip itself when it
-    fires (TASK-2056). Any failure leaves the wake-up untagged, as before.
+    fires (TASK-2056). Associations stamp the canonical cuid, so callers
+    resolve a cuid with :func:`short_task_id`. Any failure leaves the
+    wake-up untagged, as before.
     """
     try:
         from llm_bawt.turn_task import resolve_turn_tasks
@@ -84,10 +86,24 @@ def current_turn_task() -> str | None:
     except Exception:
         logger.debug("No current-turn task for schedule_wakeup", exc_info=True)
         return None
-    for item in found:
-        if _TASK_RE.match(item.task_ref):
-            return item.task_ref
-    return None
+    return found[0].task_ref if found else None
+
+
+async def short_task_id(ref: str | None) -> str | None:
+    """``TASK-N`` for a ``TASK-N`` or a cuid BawtHub knows; None otherwise."""
+    if not ref:
+        return None
+    if _TASK_RE.match(ref):
+        return ref
+    try:
+        from .task_api import api_get
+
+        found = await api_get(f"/tasks/{quote(ref, safe='')}")
+    except Exception:
+        logger.debug("No shortId for %s", ref, exc_info=True)
+        return None
+    short = str((found or {}).get("shortId") or "").strip().upper() if isinstance(found, dict) else ""
+    return short if _TASK_RE.match(short) else None
 
 
 async def task_owner(task: str) -> str | None:
@@ -245,7 +261,7 @@ async def schedule_wakeup(
     if task and not _TASK_RE.match(task):
         return _error("invalid_request", "task_id must look like TASK-123")
     if task is None:
-        task = await asyncio.to_thread(current_turn_task)
+        task = await short_task_id(await asyncio.to_thread(current_turn_task))
     timing, problem = _timing(at, in_minutes, cron, timezone)
     if problem:
         return _error("invalid_request", problem)
