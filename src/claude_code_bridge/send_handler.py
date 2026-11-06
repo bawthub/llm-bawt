@@ -539,6 +539,7 @@ class ClaudeSendMixin(
                             _publish_run_signal(AgentEventKind.SYSTEM_NOTE, {"turn_health": health})
 
                         phase_tracker.on_turn_start()
+                        response_tracker.on_turn_start()  # TASK-2114 wait boundary
 
                         watchdog = TurnWatchdog(
                             self._request_timeout,
@@ -720,6 +721,7 @@ class ClaudeSendMixin(
                             elif isinstance(msg, UserMessage):
                                 # TASK-623: UserMessage tool_result (TOOL_END)
                                 # handling extracted into _on_user_message_tool_results.
+                                response_tracker.on_user_message(msg)  # TASK-2114
                                 seq = await self._on_user_message_tool_results(
                                     msg,
                                     request_id=request_id,
@@ -759,6 +761,7 @@ class ClaudeSendMixin(
                                     # will never receive SDK tool_result blocks.
                                     # Close their UI cards honestly before the
                                     # replacement query starts emitting events.
+                                    response_tracker.on_query_replaced()
                                     for tool_use_id, tool_name in list(
                                         tool_names_by_id.items()
                                     ):

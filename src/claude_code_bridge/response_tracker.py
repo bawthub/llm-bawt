@@ -21,11 +21,25 @@ Usage attribution (verified against live SDK 0.2.177 snapshots):
 
 Counters are max-merged per field, never summed: repeated or partial snapshots
 of the same response must not double-count it.
+
+Timing (TASK-2114), main thread only, on a monotonic clock at the bridge:
+
+* ``wait_ms``: from the response's ready boundary to its ``message_start``.
+  The boundary is the turn start for the first response, otherwise the last
+  main-thread tool_result handed back to the SDK. Each boundary is consumed by
+  exactly one response; a response with no fresh boundary (a steer
+  replacement, a continuation without tool results) has no wait.
+* ``stream_ms``: from ``message_start`` to ``message_stop``.
+
+Both include Claude Code overhead and any SDK retry, and stay None when
+unknown; they are never estimated from tool timestamps. Subagent responses
+have no stream frames here, so they never get timing.
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 # Anthropic-shaped counters as reported; normalized input (fresh + cache read +
 # cache write) is derived by readers, so a missing field is never added as 0.
@@ -52,6 +66,9 @@ class ResponseRecord:
     model: str | None = None
     usage: dict[str, int] = field(default_factory=dict)
     usage_state: str = PROVISIONAL
+    wait_ms: int | None = None
+    stream_ms: int | None = None
+    first_event_at: float | None = field(default=None, repr=False)
 
     def payload(self) -> dict:
         return {
@@ -61,16 +78,43 @@ class ResponseRecord:
             "model": self.model,
             "usage": dict(self.usage),
             "usage_state": self.usage_state,
+            "wait_ms": self.wait_ms,
+            "stream_ms": self.stream_ms,
         }
 
 
 class ResponseTracker:
     """Request-local response ledger. Returns the records that changed."""
 
-    def __init__(self) -> None:
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
         self._records: dict[str, ResponseRecord] = {}
         self._open_main: str | None = None
         self._published: dict[str, tuple] = {}
+        self._clock = clock
+        # Ready boundary for the next main-thread response (TASK-2114).
+        self._ready_at: float | None = None
+
+    def on_turn_start(self) -> None:
+        """A query was sent to the SDK: the first response's wait starts now."""
+        self._ready_at = self._clock()
+
+    def on_query_replaced(self) -> None:
+        """A steer replaced the query at an unknown moment: no honest boundary."""
+        self._ready_at = None
+
+    def on_user_message(self, msg: Any) -> None:
+        """A main-thread tool_result went back to the SDK: the next wait starts."""
+        if getattr(msg, "parent_tool_use_id", None) is not None:
+            return
+        content = getattr(msg, "content", None)
+        if not isinstance(content, list):
+            return
+        if any(
+            getattr(block, "type", None) == "tool_result" or type(block).__name__ == "ToolResultBlock"
+            or (isinstance(block, dict) and block.get("type") == "tool_result")
+            for block in content
+        ):
+            self._ready_at = self._clock()
 
     def record(self, response_id: str | None) -> ResponseRecord | None:
         return self._records.get(response_id or "")
@@ -105,6 +149,12 @@ class ResponseTracker:
                 self._open_main = None
                 return None
             record = self._ensure(response_id, None, seq)
+            if record.first_event_at is None:
+                now = self._clock()
+                record.first_event_at = now
+                if self._ready_at is not None and now >= self._ready_at:
+                    record.wait_ms = round((now - self._ready_at) * 1000)
+                self._ready_at = None
             if isinstance(message.get("model"), str) and not record.model:
                 record.model = message["model"]
             self._merge_usage(record, message.get("usage"))
@@ -117,6 +167,8 @@ class ResponseTracker:
             self._merge_usage(record, event.get("usage"))
             return self._changed(record)
         if kind == "message_stop":
+            if record.stream_ms is None and record.first_event_at is not None:
+                record.stream_ms = max(0, round((self._clock() - record.first_event_at) * 1000))
             record.usage_state = FINAL
             self._open_main = None
             return self._changed(record)
@@ -139,7 +191,10 @@ class ResponseTracker:
         return self._changed(record)
 
     def _changed(self, record: ResponseRecord) -> ResponseRecord | None:
-        signature = (record.model, tuple(sorted(record.usage.items())), record.usage_state)
+        signature = (
+            record.model, tuple(sorted(record.usage.items())), record.usage_state,
+            record.wait_ms, record.stream_ms,
+        )
         if self._published.get(record.response_id) == signature:
             return None
         self._published[record.response_id] = signature

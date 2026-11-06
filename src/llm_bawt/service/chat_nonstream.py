@@ -325,6 +325,8 @@ class ChatNonStreamMixin:
                             "model": item.get("model"),
                             "usage": item.get("usage"),
                             "usage_state": item.get("usage_state"),
+                            "wait_ms": item.get("wait_ms"),
+                            "stream_ms": item.get("stream_ms"),
                             "ts": time.time(),
                         })
                         if public is not None:

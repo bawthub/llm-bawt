@@ -10,6 +10,8 @@ Merge rules (idempotent under replay and duplicate delivery):
 * Usage counters are max-merged per field, never summed; a write that omits a
   field keeps the known value.
 * ``usage_state`` only moves provisional -> final.
+* ``wait_ms``/``stream_ms`` (TASK-2114, bridge-measured) are set once by the
+  first write that knows them; later writes never change or clear them.
 
 Display ordinals are derived on read from persisted first-seen order within
 (turn_id, host_parent); they are never stored.
@@ -22,6 +24,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import Column, DateTime, Integer, String, UniqueConstraint
+from sqlalchemy import text as sa_text
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Field, Session, SQLModel, select
 
@@ -61,6 +64,8 @@ class LlmResponseRecord(SQLModel, table=True):
     cache_write_tokens: int | None = Field(default=None, sa_column=Column(Integer, nullable=True))
     output_tokens: int | None = Field(default=None, sa_column=Column(Integer, nullable=True))
     usage_state: str = Field(default=PROVISIONAL, sa_column=Column(String(16), nullable=False))
+    wait_ms: int | None = Field(default=None, sa_column=Column(Integer, nullable=True))
+    stream_ms: int | None = Field(default=None, sa_column=Column(Integer, nullable=True))
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),
         sa_column=Column(DateTime(timezone=True), nullable=False),
@@ -114,6 +119,8 @@ def _public(row: LlmResponseRecord, *, ordinal: int, turn_ended: bool) -> dict:
         "model": row.model,
         "usage": usage,
         "usage_state": state,
+        "wait_ms": row.wait_ms,
+        "stream_ms": row.stream_ms,
     }
 
 
@@ -129,6 +136,11 @@ class LlmResponseStore:
 
         def bootstrap(conn) -> None:
             SQLModel.metadata.create_all(bind=conn, tables=[LlmResponseRecord.__table__])
+            # TASK-2114: bridge-measured per-response timing (nullable, additive).
+            for column in ("wait_ms", "stream_ms"):
+                conn.execute(sa_text(
+                    f"ALTER TABLE llm_response_records ADD COLUMN IF NOT EXISTS {column} INTEGER"
+                ))
 
         self._schema_guard.run(self.engine, "llm-response-store", bootstrap)
 
@@ -142,6 +154,8 @@ class LlmResponseStore:
         model: str | None = None,
         usage: dict | None = None,
         usage_state: str | None = None,
+        wait_ms: Any = None,
+        stream_ms: Any = None,
         bot_id: str | None = None,
         user_id: str | None = None,
     ) -> dict | None:
@@ -161,7 +175,10 @@ class LlmResponseStore:
                             user_id=user_id, host_parent=host_parent or None,
                             first_seen_seq=first_seen_seq,
                         )
-                    self._merge(row, model=model, usage=usage, usage_state=usage_state)
+                    self._merge(
+                        row, model=model, usage=usage, usage_state=usage_state,
+                        timing={"wait_ms": wait_ms, "stream_ms": stream_ms},
+                    )
                     session.add(row)
                     session.commit()
                     session.refresh(row)
@@ -180,7 +197,7 @@ class LlmResponseStore:
         )).first()
 
     @staticmethod
-    def _merge(row: LlmResponseRecord, *, model, usage, usage_state) -> None:
+    def _merge(row: LlmResponseRecord, *, model, usage, usage_state, timing=None) -> None:
         if isinstance(model, str) and model and not row.model:
             row.model = model[:128]
         if isinstance(usage, dict):
@@ -191,6 +208,10 @@ class LlmResponseStore:
                     setattr(row, column, value)
         if usage_state == FINAL:
             row.usage_state = FINAL
+        for column, value in (timing or {}).items():
+            # Plausible bound: a wait or stream longer than a day is not a measurement.
+            if getattr(row, column) is None and _count(value) and value < 86_400_000:
+                setattr(row, column, value)
         row.updated_at = datetime.now(timezone.utc)
 
     @staticmethod

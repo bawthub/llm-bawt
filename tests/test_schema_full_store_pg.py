@@ -145,3 +145,23 @@ def test_upgrade_synthetic_legacy_converges(full_store_db, tmp_path, monkeypatch
         "before_sha256": hashlib.sha256((evidence_dir / "synthetic-legacy-before.jsonl").read_bytes()).hexdigest(),
         "after_sha256": hashlib.sha256((evidence_dir / "synthetic-legacy-after.jsonl").read_bytes()).hexdigest(),
     }, sort_keys=True) + "\n")
+
+
+def test_llm_response_timing_columns_upgrade_in_place(full_store_db):
+    """TASK-2114: an existing llm_response_records table gains nullable timing columns."""
+    from llm_bawt.schema_bootstrap import bootstrap_full_store
+    from llm_bawt.service.llm_response_store import LlmResponseStore
+
+    config, engine = full_store_db
+    bootstrap_full_store(config, engine)
+    with engine.begin() as conn:
+        conn.exec_driver_sql("ALTER TABLE public.llm_response_records DROP COLUMN wait_ms, DROP COLUMN stream_ms")
+    LlmResponseStore._schema_guard.reset_for_tests(engine)
+    LlmResponseStore(engine).ensure_schema()
+    LlmResponseStore(engine).ensure_schema()  # idempotent
+    with engine.connect() as conn:
+        rows = conn.execute(text(
+            "SELECT column_name, is_nullable, data_type FROM information_schema.columns "
+            "WHERE table_name = 'llm_response_records' AND column_name IN ('wait_ms', 'stream_ms')"
+        )).all()
+    assert sorted(rows) == [("stream_ms", "YES", "integer"), ("wait_ms", "YES", "integer")]

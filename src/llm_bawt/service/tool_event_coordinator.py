@@ -60,6 +60,8 @@ class ToolEventCoordinator:
                 model=event.get("model"),
                 usage=event.get("usage"),
                 usage_state=event.get("usage_state"),
+                wait_ms=event.get("wait_ms"),
+                stream_ms=event.get("stream_ms"),
                 bot_id=event.get("bot_id"),
                 user_id=event.get("user_id"),
             )

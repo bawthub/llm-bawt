@@ -15,7 +15,8 @@ class AgentEventKind(str, Enum):
     USAGE_UPDATE = "usage_update"
     # TASK-2110: one upstream LLM response's identity, scope and attributable
     # usage. raw: {response_id, host_parent, first_seen_seq, model, usage,
-    # usage_state}. Re-emitted when the record changes; consumers upsert.
+    # usage_state, wait_ms, stream_ms}. Re-emitted when the record changes;
+    # consumers upsert. Timing (TASK-2114) is bridge-measured, main thread only.
     LLM_RESPONSE = "llm_response"
     TOOL_START = "tool_start"
     TOOL_END = "tool_end"
