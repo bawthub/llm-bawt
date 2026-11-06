@@ -11,10 +11,13 @@ owned by the `agent_bridge` house router.
 A bot moves itself with the `self_house` MCP tool (`/v1/houses/self`, signed
 turn only, no bot argument; rules in `llm_bawt/house_tenancy.py`):
 
-- `list`: houses with a live lease or a tenant, their tenants (private bots
-  masked) and a status for the caller's harness: `free`, `occupied`, `down`
-  (no live lease), `recycling` (asked to restart at the current lease epoch)
-  or `draining` (an admitted turn is still running there).
+- `list`: the configured pool (`BAWT_HOUSE_POOL_FILE`, this deployment's pool
+  file mounted read-only) plus any house holding a lease or tenant, their
+  tenants (private bots masked) and a status for the caller's harness: `free`,
+  `occupied`, `unconfigured` (not in the pool, or no pool), `incompatible`
+  (another harness), `down` (no live lease), `recycling` (asked to restart at
+  the current lease epoch) or `draining` (a turn running, or a send unread or
+  unacked on its stream).
 - `move_in`: a named house, or any free one; only `free` is claimable, so an
   occupied house is always refused. A bot housed elsewhere must move out
   first. Never pins. Applies from the bot's next turn.
@@ -23,7 +26,9 @@ turn only, no bot argument; rules in `llm_bawt/house_tenancy.py`):
 
 Every write of a bot's `house` (profile PATCH, `/new`, the idle janitor, self
 moves) takes one advisory lock in `BotProfileStore.upsert`, so a race has one
-winner. Unreadable Redis refuses rather than guesses.
+winner. Recycling an emptied house rechecks for tenants under that lock, so a
+claim racing a release either cancels the recycle or is refused. Unreadable
+Redis refuses rather than guesses.
 
 Only `claude-code` bots are eligible for now (by runtime, not name); others
 get `unsupported_harness`.
