@@ -82,6 +82,9 @@ def _summary(task: dict, reviews: Any, project: Any, size: int) -> dict:
               "modelId", "createdAt", "updatedAt")
     out = _row(task, "/task", 128, fields)
     out.update(_row(task, "/task", size, ("title", "blockedReason", "outcome")))
+    # TASK-2115: a WAITING task's point is what it waits on and since when.
+    if task.get("status") == "WAITING":
+        out.update(_row(task, "/task", size, ("waitingOn", "waitingReason", "waitingSince")))
     for key in ("description", "response"):
         if key in task:
             out[key] = _preview(task[key], f"/task/{key}", size * 3)

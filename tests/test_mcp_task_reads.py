@@ -93,6 +93,19 @@ def test_compact_defaults_preserve_current_owner_blocker_next_action_and_counts(
     assert task["reviews"]["shown"] == 3
     assert task["reviews"]["next_cursor"] == "3"
     assert wire_size(result) <= MAX_BUDGET
+    assert "waitingOn" not in task
+
+
+@pytest.mark.parametrize("reader", [task_tools.get_task, project_tools.get_task_context])
+def test_compact_summary_shows_what_a_waiting_task_waits_on(monkeypatch, reader):
+    # TASK-2115: the summary carries WAITING's kind, releasing event and age.
+    api = Api()
+    api.task = {**api.task, "status": "WAITING", "blockedReason": None, "waitingOn": "RELEASE",
+                "waitingReason": "Next prod release.", "waitingSince": "2026-11-06T22:30:00.000Z"}
+    install(monkeypatch, api)
+    task = run(reader("TASK-1907"))["task"]
+    assert (task["status"], task["waitingOn"], task["waitingReason"], task["waitingSince"]) == (
+        "WAITING", "RELEASE", "Next prod release.", "2026-11-06T22:30:00.000Z")
     assert not api.task.get("view"), "Never mutate the source"
     if reader is project_tools.get_task_context:
         assert task["project"]["contextPrompt"] == api.project["contextPrompt"]
