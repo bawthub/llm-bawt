@@ -15,6 +15,7 @@ from uvicorn.protocols.http.h11_impl import H11Protocol
 from .service_identity import PROJECT_PATTERN, SERVICE_PATTERN
 
 CHANGES_HOLD_SECONDS = 25.0
+MAX_CHANGE_WAITERS = 8  # of uvicorn's 32 slots, shared with /health/ready
 SERVICE_ID = re.compile(rf"{PROJECT_PATTERN}\.{SERVICE_PATTERN}")
 
 
@@ -22,6 +23,7 @@ def create_health_app(state, *, lifespan=None):
     """Keep the existing exact, GET-only wire contract and private listener."""
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None,
                   openapi_url=None, redirect_slashes=False)
+    waiters = {"n": 0}  # event-loop only, so no lock
 
     @app.middleware("http")
     async def fixed_surface(request: Request, call_next):
@@ -66,7 +68,16 @@ def create_health_app(state, *, lifespan=None):
         # from ``seen`` (use 0 to read it), else after a change or the hold.
         if not seen.isdigit() or len(seen) > 18:
             return JSONResponse({"error": "not found"}, status_code=404)
-        version = await run_in_threadpool(state.wait_for_change, int(seen), CHANGES_HOLD_SECONDS)
+        # The waiting thread can't see a client disconnect, so an abandoned poll
+        # holds its slot until the hold ends. Cap waiters well under the shared
+        # uvicorn limit; beyond it, answer at once (the client just asks again).
+        if waiters["n"] >= MAX_CHANGE_WAITERS:
+            return {"schemaVersion": 1, "version": state.wait_for_change(int(seen), 0)}
+        waiters["n"] += 1
+        try:
+            version = await run_in_threadpool(state.wait_for_change, int(seen), CHANGES_HOLD_SECONDS)
+        finally:
+            waiters["n"] -= 1
         return {"schemaVersion": 1, "version": version}
 
     @app.get("/v1/health/services/{service_id}")

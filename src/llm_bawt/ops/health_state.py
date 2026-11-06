@@ -192,7 +192,10 @@ class OpsHealthState:
         self._changed.notify_all()
 
     def wait_for_change(self, seen: int, timeout: float) -> int:
-        """Block until the version differs from ``seen``, stop, or timeout; return the version."""
+        """Block until the version differs from ``seen``, stop, or timeout; return the version.
+
+        Intentional: a sample aging out to stale (a hung collector) does not
+        bump the version; consumers see it on their 60s reconciliation run."""
         with self._changed:
             self._changed.wait_for(lambda: self._version != seen or self._stopping, timeout)
             return self._version
