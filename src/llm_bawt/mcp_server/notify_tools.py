@@ -110,3 +110,43 @@ async def notify_user(
     await _record_bell(receipt, bot_id=bot_id, user_id=getattr(caller, "user_id", None),
                        message=message, title=title, urgency=urgency, link=link)
     return receipt
+
+
+NotificationKind = Literal["bot_reply", "push", "approval", "agent_task", "alert", "other"]
+
+
+def _caller_user(arguments: dict) -> str | None:
+    """The signed caller's user: whose bell this reads. None when unverified."""
+    from .bot_access_identity import trusted_caller
+    try:
+        caller = trusted_caller("notifications_list", arguments)
+    except BotAccessError:
+        return None
+    return getattr(caller, "user_id", None) if caller is not None else None
+
+
+@mcp.tool()
+async def notifications_list(
+    bot_id: Identifier,
+    kind: NotificationKind | None = None,
+    since: str | None = None,
+    limit: Annotated[int, Field(ge=1, le=100)] = 20,
+) -> dict:
+    """Read what the user's notification bell recorded (TASK-2066). Read-only."""
+    arguments = {"bot_id": bot_id, "kind": kind, "since": since, "limit": limit}
+    user_id = await asyncio.to_thread(_caller_user, arguments)
+    if not user_id:
+        return {"error": "caller_unverified"}
+    params = {"user": user_id, "limit": str(limit)}
+    for key, value in (("kind", kind), ("since", since)):
+        if value:
+            params[key] = value
+    async with _bell_http() as http:
+        response = await http.get("/internal/notifications", params=params)
+    if not response.is_success:
+        try:
+            detail = response.json().get("error")
+        except ValueError:
+            detail = None
+        return {"error": detail or f"HTTP {response.status_code}"}
+    return response.json()

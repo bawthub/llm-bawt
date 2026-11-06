@@ -274,7 +274,8 @@ async def test_catalog_token_budgets():
     # TASK-1151: ops_list_operations slug= (+23), so each catalog read drops
     # ~15k chars of descriptions/schemas to compact rows.
     # TASK-1383: role wording ("the user", "a coordinator") replaces names (+35).
-    assert total <= 17286, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-2066: notifications_list, read-only bell history for bots (+28).
+    assert total <= 17314, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 
