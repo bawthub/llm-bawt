@@ -46,12 +46,19 @@ def test_expiry_timer_targets_the_earliest_future_expiry():
     assert changes._expiry is None and timer.finished.is_set()  # cancelled
 
 
-def test_expiry_fires_a_publish():
+def test_expiry_fires_a_publish(monkeypatch):
+    real_timer, requested = threading.Timer, []
+
+    def quick_timer(interval, function, args=()):
+        requested.append(interval)  # record the real delay, then don't wait it out
+        return real_timer(0.01, function, args=args)
+
+    monkeypatch.setattr(hc.threading, "Timer", quick_timer)
     changes = HealthChanges(delay=0)
     v = changes.version
     now = time.time() * 1000
-    # arm_expiry adds 1s; aim just behind now so it fires within ~1s.
     changes.arm_expiry([now + 10], now_ms=now)
+    assert len(requested) == 1 and 1.0 < requested[0] < 1.1  # expiry + 1s grace
     assert changes.wait_for_change(v, 3.0) == v + 1
 
 

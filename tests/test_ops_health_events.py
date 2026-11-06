@@ -104,6 +104,7 @@ def test_run_wakes_early_on_event():
             wake.set()  # an event arrived mid-collection
         else:
             stop.set()
+            wake.set()  # run()'s contract: whoever sets stop also sets wake
     OpsHealthCollector.run(collect, stop, interval=60, wake=wake)
     assert len(calls) == 2
 
