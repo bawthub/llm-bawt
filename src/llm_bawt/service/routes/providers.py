@@ -24,7 +24,13 @@ from ...task_turn_context import (
 )
 from .. import bridge_gate
 from ..dependencies import get_service
-from ..providers.base import AUTH_API_KEY, AUTH_CLI_OAUTH, AUTH_DEVICE_OAUTH
+from ..providers.base import (
+    AUTH_API_KEY,
+    AUTH_CLI_OAUTH,
+    AUTH_DEVICE_OAUTH,
+    load_alert_prefs,
+    set_alerts_enabled,
+)
 from ..providers.ollama import AUTH_ENDPOINT
 from ..providers.github import GitHubAdapter, GitHubConfigError, GitHubNotConnectedError, parse_repository
 from ..providers.registry import all_adapters, get_adapter
@@ -47,6 +53,12 @@ class CliLoginCompleteRequest(BaseModel):
 class SelectReposRequest(BaseModel):
     installation_id: int
     repos: list[str] | None = None
+
+
+class AlertsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
 
 
 class ApiKeyRequest(BaseModel):
@@ -86,6 +98,11 @@ async def providers_health():
 
     def _collect() -> list[dict]:
         out = []
+        try:
+            alerts = load_alert_prefs(service.config)
+        except Exception as e:  # noqa: BLE001 — a settings outage must not hide health
+            logger.warning("provider alert switches unavailable: %s", type(e).__name__)
+            alerts = {}
         for a in all_adapters(service.config):
             try:
                 h = a.health()
@@ -94,10 +111,33 @@ async def providers_health():
                 # error names the DB host and user (TASK-1561).
                 logger.warning("health probe failed for %s: %s", a.id, e)
                 h = {"state": "unknown", "detail": f"health probe failed ({type(e).__name__})"}
-            out.append({"id": a.id, "label": a.label, **h})
+            out.append({
+                "id": a.id,
+                "label": a.label,
+                **h,
+                # TASK-2104: UI alerting switch, and whether the provider is a
+                # server URL (its failures aren't credential problems).
+                "alerts": alerts.get(a.id, True),
+                "endpoint": AUTH_ENDPOINT in a.auth_methods,
+            })
         return out
 
     return {"providers": await run_in_threadpool(_collect)}
+
+
+@router.put("/v1/providers/{provider_id}/alerts")
+async def set_provider_alerts(provider_id: str, body: AlertsRequest):
+    """Per-provider "Alert on problems" switch (TASK-2104), stored in the DB.
+
+    Off keeps the provider out of attention surfaces; its own health is still
+    reported unchanged.
+    """
+    adapter = _adapter_or_404(provider_id)
+    try:
+        await run_in_threadpool(set_alerts_enabled, get_service().config, adapter.id, body.enabled)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    return {"id": adapter.id, "alerts": body.enabled}
 
 
 @router.get("/v1/providers/{provider_id}")

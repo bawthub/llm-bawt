@@ -45,6 +45,13 @@ class _Response:
             raise httpx.HTTPStatusError("err", request=request, response=httpx.Response(self.status_code, request=request))
 
 
+@pytest.fixture(autouse=True)
+def _fresh_health_cache():
+    ollama.clear_health_cache()
+    yield
+    ollama.clear_health_cache()
+
+
 @pytest.fixture
 def path_url(monkeypatch):
     state = {"url": None}
@@ -164,7 +171,28 @@ def test_health_reports_unreachable_configured_server(monkeypatch, path_url):
 
     monkeypatch.setattr(ollama.httpx, "get", boom)
     health = adapter.health()
-    assert health["state"] == "broken" and "http://box:1" in health["detail"]
+    # Switched off is "offline", not a broken credential (TASK-2104).
+    assert health["state"] == "offline" and "http://box:1" in health["detail"]
+    assert health["fix"] is None
+
+
+@pytest.mark.parametrize("error", [httpx.ConnectTimeout("slow"), httpx.ReadTimeout("slow"), httpx.ConnectError("no route")])
+def test_health_is_offline_when_nothing_answers(monkeypatch, path_url, error):
+    path_url["url"] = "http://box:11434/v1"
+
+    def boom(*_a, **_k):
+        raise error
+
+    monkeypatch.setattr(ollama.httpx, "get", boom)
+    assert _adapter().health()["state"] == "offline"
+
+
+@pytest.mark.parametrize("status", [401, 403, 500])
+def test_health_stays_broken_when_the_server_answers_with_an_error(monkeypatch, path_url, status):
+    path_url["url"] = "http://box:11434/v1"
+    monkeypatch.setattr(ollama.httpx, "get", lambda *_a, **_k: _Response(status=status))
+    health = _adapter().health()
+    assert health["state"] == "broken" and health["fix"] == "reconnect"
 
 
 def test_discovery_lists_chat_models_with_context(monkeypatch, path_url):
@@ -235,3 +263,38 @@ def test_ollama_factory_sends_the_stored_key(monkeypatch):
     config = SimpleNamespace(OLLAMA_URL="http://localhost:11434")
     background_clients.OllamaFactory().build(config, {"type": "ollama", "model_id": "m", "base_url": "http://box:11434/v1"}, "m")
     assert built["api_key"] == "k-9" and built["base_url"] == "http://box:11434/v1"
+
+
+def test_health_probe_is_reused_for_a_minute(monkeypatch, path_url):
+    path_url["url"] = "http://box:11434/v1"
+    calls = []
+    clock = [1000.0]
+    monkeypatch.setattr(ollama.time, "monotonic", lambda: clock[0])
+
+    def get(*_a, **_k):
+        calls.append(1)
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr(ollama.httpx, "get", get)
+    adapter = _adapter()
+    assert adapter.health()["state"] == "offline"
+    clock[0] += 59
+    assert adapter.health()["state"] == "offline"
+    assert len(calls) == 1
+    clock[0] += 2
+    adapter.health()
+    assert len(calls) == 2
+
+
+def test_successful_connect_drops_the_cached_health(monkeypatch, path_url):
+    path_url["url"] = "http://box:11434/v1"
+
+    def boom(*_a, **_k):
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr(ollama.httpx, "get", boom)
+    adapter = _adapter()
+    assert adapter.health()["state"] == "offline"
+    monkeypatch.setattr(ollama.httpx, "get", lambda *_a, **_k: _Response(payload={"version": "1"}))
+    assert adapter.connect_endpoint("http://box:11434").ok
+    assert adapter.health()["state"] == "ok"

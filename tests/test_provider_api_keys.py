@@ -206,6 +206,7 @@ def test_providers_health_does_not_echo_a_probe_error(monkeypatch) -> None:
     class _Broken:
         id = "broken"
         label = "Broken"
+        auth_methods = ("api_key",)
 
         def health(self):
             raise RuntimeError(leak)
@@ -221,4 +222,5 @@ def test_providers_health_does_not_echo_a_probe_error(monkeypatch) -> None:
     assert response.json() == {"providers": [{
         "id": "broken", "label": "Broken", "state": "unknown",
         "detail": "health probe failed (RuntimeError)",
+        "alerts": True, "endpoint": False,
     }]}

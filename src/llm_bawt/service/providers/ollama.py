@@ -21,6 +21,8 @@ or not this connection was ever saved.
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -28,6 +30,7 @@ import httpx
 
 from .base import (
     HEALTH_BROKEN,
+    HEALTH_OFFLINE,
     HEALTH_OK,
     HEALTH_UNCONFIGURED,
     STATUS_CONNECTED,
@@ -46,6 +49,29 @@ ACCESS_PATH_KEY = "ollama"
 _SECRET_FIELD = "api_key"
 _PROBE_TIMEOUT = 5.0
 _HEALTH_TIMEOUT = 2.0
+# Health result reuse window: every open tab polls /v1/providers/health, and a
+# switched-off server costs a full timeout per probe (TASK-2104).
+_HEALTH_CACHE_SECONDS = 60.0
+_health_cache: dict[tuple[str, str | None], tuple[float, tuple[str | None, str | None, bool]]] = {}
+_health_cache_lock = threading.Lock()
+
+
+def _cached_health_probe(root: str, key: str | None) -> tuple[str | None, str | None, bool]:
+    now = time.monotonic()
+    with _health_cache_lock:
+        hit = _health_cache.get((root, key))
+        if hit and now - hit[0] < _HEALTH_CACHE_SECONDS:
+            return hit[1]
+    result = _probe(root, key, timeout=_HEALTH_TIMEOUT)
+    with _health_cache_lock:
+        _health_cache.clear()  # one server URL at a time; drop stale entries
+        _health_cache[(root, key)] = (time.monotonic(), result)
+    return result
+
+
+def clear_health_cache() -> None:
+    with _health_cache_lock:
+        _health_cache.clear()
 
 
 class OllamaUrlError(ValueError):
@@ -126,12 +152,25 @@ def _headers(api_key: str | None) -> dict[str, str]:
 
 def probe(url: str, api_key: str | None, *, timeout: float = _PROBE_TIMEOUT) -> tuple[str | None, str | None]:
     """``(version, error)`` from ``GET {url}/api/version`` — exactly one is set."""
+    version, detail, _unreachable = _probe(url, api_key, timeout=timeout)
+    return version, detail
+
+
+def _probe(url: str, api_key: str | None, *, timeout: float) -> tuple[str | None, str | None, bool]:
+    """``probe`` plus whether the failure was "nothing answered" (server off)."""
     try:
         response = httpx.get(f"{url}/api/version", headers=_headers(api_key), timeout=timeout)
     except httpx.TimeoutException:
-        return None, f"Ollama at {url} did not answer within {timeout:g}s"
+        return None, f"Ollama at {url} did not answer within {timeout:g}s", True
+    except httpx.NetworkError as exc:
+        return None, f"Couldn't reach Ollama at {url} ({type(exc).__name__})", True
     except httpx.HTTPError as exc:
-        return None, f"Couldn't reach Ollama at {url} ({type(exc).__name__})"
+        return None, f"Couldn't reach Ollama at {url} ({type(exc).__name__})", False
+    version, detail = _version_from(url, response)
+    return version, detail, False
+
+
+def _version_from(url: str, response: httpx.Response) -> tuple[str | None, str | None]:
     if response.status_code in (401, 403):
         return None, f"Ollama at {url} rejected the request (HTTP {response.status_code}); check the API key"
     if response.is_error:
@@ -189,6 +228,7 @@ class OllamaAdapter(ProviderAdapter):
             secret={_SECRET_FIELD: key} if key else {},
         ))
         logger.info("Ollama server configured (%s)", account)
+        clear_health_cache()
         return ValidateResult(ok=True, account=account)
 
     def disconnect(self) -> bool:
@@ -197,6 +237,7 @@ class OllamaAdapter(ProviderAdapter):
         Clearing the URL would silently repoint every Ollama model at the
         ``OLLAMA_URL`` default, which on many installs is not a server at all.
         """
+        clear_health_cache()
         return super().disconnect()
 
     def validate(self, record: ConnectionRecord) -> ValidateResult:
@@ -215,8 +256,11 @@ class OllamaAdapter(ProviderAdapter):
         # configuration even without a connection record, so check it.
         root = server_url(self.config)
         key = (record.secret or {}).get(_SECRET_FIELD) if connected else None
-        version, detail = probe(root, key, timeout=_HEALTH_TIMEOUT)
+        version, detail, unreachable = _cached_health_probe(root, key)
         if version is None:
+            # A server that's switched off isn't a credential problem (TASK-2104).
+            if unreachable:
+                return health_block(HEALTH_OFFLINE, detail=detail)
             return health_block(HEALTH_BROKEN, detail=detail, fix="reconnect")
         return health_block(HEALTH_OK, detail=f"Ollama {version} · {root}")
 
