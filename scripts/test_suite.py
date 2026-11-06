@@ -20,6 +20,8 @@ import time
 from unittest.mock import patch
 
 from tests.suite_manifest import PG_SELECTORS
+from scripts.heavy_guard import in_bridge, queue_message
+from scripts.heavy_slot import heavy_slot
 
 ROOT = Path(__file__).resolve().parents[1]
 UNIT = "not integration and not service and not llm_call and not external"
@@ -424,33 +426,10 @@ def timing_report(out: Path = TIMING_REPORT_OUT) -> dict[str, list]:
 def runner_lock(wait_seconds: float | None = None, poll_seconds: float = 1.0):
     # All heavy suites on one runner serialize, even across separate worktrees.
     # The descriptor releases on process exit, including Ctrl-C and pytest failure.
-    try:
-        import fcntl
-    except ImportError as exc:
-        raise RuntimeError("test-suite serialization requires a Unix runner") from exc
     wait = lock_wait_seconds() if wait_seconds is None else wait_seconds
     lock_path = Path(tempfile.gettempdir()) / "llm-bawt-test-suite.lock"
-    with lock_path.open("w") as handle:
-        started = time.monotonic()
-        announced = False
-        while True:
-            try:
-                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError as exc:
-                waited = time.monotonic() - started
-                if waited >= wait:
-                    detail = f" (waited {waited:.1f}s)" if wait else ""
-                    raise RuntimeError(
-                        f"another llm-bawt test suite is running on this host{detail}"
-                    ) from exc
-                if not announced:
-                    print(f"Test runner lock: busy, waiting up to {wait:.0f}s", flush=True)
-                    announced = True
-                time.sleep(min(poll_seconds, wait - waited))
-        if announced:
-            print(f"Test runner lock: acquired after {time.monotonic() - started:.1f}s",
-                  flush=True)
+    with heavy_slot(kind="gate", wait_seconds=wait, poll_seconds=poll_seconds,
+                    lock_path=lock_path, clock=time.monotonic, sleep=time.sleep):
         yield
 
 
@@ -487,6 +466,9 @@ def main(argv: list[str] | None = None) -> int:
     ):
         parser.error(f"{args.suite} requires safe tests/... node IDs")
     try:
+        if in_bridge() and args.suite not in {"target", "sdk-probe"}:
+            raise RuntimeError(queue_message([sys.executable, "-m", "scripts.test_suite",
+                                              *(argv if argv is not None else sys.argv[1:])]))
         wait = lock_wait_seconds()
         # The wait is the runner's own setting; the tests it launches never inherit it.
         os.environ.pop(LOCK_WAIT_ENV, None)

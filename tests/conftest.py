@@ -25,6 +25,8 @@ import pytest
 from _pytest.runner import runtestprotocol
 
 from collections import defaultdict
+from pathlib import Path
+from scripts.heavy_guard import guard_pytest
 from tests import pg_connection_guard
 from tests import time_budget
 from tests.suite_manifest import PG_ACCEPTANCE_SUITES
@@ -57,6 +59,7 @@ def _require_pg_acceptance(config):
 
 
 def pytest_configure(config):
+    guard_pytest(config.args, Path(config.invocation_params.dir), Path(__file__).resolve().parents[1])
     if config.getoption("--require-pg-acceptance"):
         pg_connection_guard.require_private_only()
     # Per-file counters of deselected vs surviving items. Populated across the

@@ -215,5 +215,13 @@ RUN chmod 0755 /usr/local/bin/gh \
 USER bridge
 RUN gh --version
 
+# Refuse broad checks before direct Node CLIs fan out. Repo-local entrypoints
+# also enforce this policy so their protection does not wait for image rollout.
+USER root
+COPY docker/bridge-node-check-preload.cjs /usr/local/libexec/bridge-node-check-preload.cjs
+USER bridge
+ENV BAWT_AGENT_BRIDGE=1 \
+    NODE_OPTIONS="--require=/usr/local/libexec/bridge-node-check-preload.cjs"
+
 # Default command — overridden per service in docker-compose.yml
 CMD ["python", "-m", "claude_code_bridge"]

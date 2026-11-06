@@ -317,7 +317,7 @@ endif  # not Windows
 # Dev tools share that locked, isolated env: the shared .venv has no dev extra
 # (no ruff/mypy) and must not be re-synced from a target (TASK-1666).
 DEV_ENV := uv run --isolated --frozen --extra dev --extra service --extra mcp --extra search --extra memory
-TEST_RUNNER := $(DEV_ENV) python -m scripts.test_suite
+TEST_RUNNER := python3 -m scripts.heavy_guard runner -- $(DEV_ENV) python -m scripts.test_suite
 
 lint: ## Lint with ruff
 	$(DEV_ENV) ruff check src/
@@ -326,7 +326,7 @@ format: ## Format with ruff
 	$(DEV_ENV) ruff format src/
 
 typecheck: ## Type-check with mypy
-	$(DEV_ENV) mypy src/
+	python3 -m scripts.heavy_guard full -- $(DEV_ENV) mypy src/
 
 test: ## Fast hermetic unit suite; enforce setup+call+teardown <1s
 	$(TEST_RUNNER) unit
