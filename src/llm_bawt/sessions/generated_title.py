@@ -235,11 +235,32 @@ def schedule_session_title(engine, *, session_id: str | None, bot_id: str,
         if session_id:
             _claim(engine, session_id, bot_id, user_id, message_id)
             return
-        threading.Thread(target=_resolve_and_claim,
-                         args=(engine, bot_id, user_id, message_id),
-                         daemon=True, name="session-title").start()
+        # One FIFO drainer, so writes claim in write order: a later write can
+        # never claim (and be judged NOT_TRIGGERED) before an earlier one.
+        with _resolve_lock:
+            _resolve_queue.append((engine, bot_id, user_id, message_id))
+            if _resolve_draining[0]:
+                return
+            _resolve_draining[0] = True
+        threading.Thread(target=_drain_resolutions, daemon=True,
+                         name="session-title").start()
     except Exception as error:
         logger.warning("session title scheduling failed (%s)", type(error).__name__)
+
+
+_resolve_lock = threading.Lock()
+_resolve_queue: list = []
+_resolve_draining = [False]
+
+
+def _drain_resolutions() -> None:
+    while True:
+        with _resolve_lock:
+            if not _resolve_queue:
+                _resolve_draining[0] = False
+                return
+            item = _resolve_queue.pop(0)
+        _resolve_and_claim(*item)
 
 
 def _resolve_and_claim(engine, bot_id: str, user_id: str | None, message_id: str) -> None:
