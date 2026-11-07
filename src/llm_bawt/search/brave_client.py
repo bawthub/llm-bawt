@@ -27,7 +27,8 @@ _KNOWN_CODES = frozenset({
 DEFAULT_INTERVAL = 1.05  # Free plan: 1 request per 1-second window, plus margin
 _MARGIN = 0.05
 _MAX_RETRY_DELAY = 2.0
-_sleep = time.sleep  # indirection so tests can record waits
+_sleep = time.sleep  # indirections so tests can drive a virtual clock
+_monotonic = time.monotonic
 
 
 @dataclass(frozen=True)
@@ -78,39 +79,158 @@ class _RateLimits:
         return min(max(float(base), 0.0) + _MARGIN, _MAX_RETRY_DELAY)
 
 
-class _Pacer:
-    """Process-wide spacing of Brave calls: one slot per interval, in order."""
+_MAX_WAIT = 10.0  # longest a call queues for a slot before failing
+_PACE_KEY = "llm_bawt:brave:next_slot_ms"
+_COOL_KEY = "llm_bawt:brave:cooldown_until_ms"
 
-    def __init__(self, interval: float = DEFAULT_INTERVAL):
+# Atomically reserve the next slot shared by every process. Returns ms to wait,
+# or -1 when the queue is longer than the bound (nothing reserved).
+_RESERVE = """
+local t = redis.call('TIME')
+local now = t[1] * 1000 + math.floor(t[2] / 1000)
+local nxt = tonumber(redis.call('GET', KEYS[1]) or '0')
+local start = math.max(now, nxt)
+if start - now > tonumber(ARGV[2]) then return -1 end
+redis.call('SET', KEYS[1], start + tonumber(ARGV[1]), 'PX', start - now + tonumber(ARGV[1]) + 1000)
+return start - now
+"""
+_DEFER = """
+local t = redis.call('TIME')
+local now = t[1] * 1000 + math.floor(t[2] / 1000)
+local want = now + tonumber(ARGV[1])
+local nxt = tonumber(redis.call('GET', KEYS[1]) or '0')
+if want > nxt then redis.call('SET', KEYS[1], want, 'PX', tonumber(ARGV[1]) + 1000) end
+local cool = tonumber(redis.call('GET', KEYS[2]) or '0')
+if want > cool then redis.call('SET', KEYS[2], want, 'PX', tonumber(ARGV[1]) + 1000) end
+return 0
+"""
+# ms left on a cooldown set after the caller reserved its slot (0 = clear to send).
+_COOLING = """
+local t = redis.call('TIME')
+local now = t[1] * 1000 + math.floor(t[2] / 1000)
+local cool = tonumber(redis.call('GET', KEYS[2]) or '0')
+return math.max(cool - now, 0)
+"""
+
+
+class PacingBusy(Exception):
+    """More Brave calls are queued than fit in the wait bound."""
+
+
+def _default_redis() -> Any:
+    try:
+        import redis
+
+        from ..utils.config import Config
+        url = getattr(Config(), "REDIS_URL", None)
+        if not url:
+            return None
+        return redis.Redis.from_url(url, socket_timeout=1.0, socket_connect_timeout=1.0)
+    except Exception:  # noqa: BLE001 — pacing degrades to process-local
+        logger.warning("Brave pacing: Redis unavailable, pacing within this process only")
+        return None
+
+
+class _Pacer:
+    """Spacing of Brave calls across every app process: one slot per interval.
+
+    Slots are reserved atomically in Redis so llm-service and the MCP server
+    share the plan's window. If Redis is unreachable it falls back to a
+    process-local reservation.
+    """
+
+    def __init__(self, interval: float = DEFAULT_INTERVAL, redis_factory: Any = _default_redis):
         self.interval = interval
         self._lock = threading.Lock()
         self._next = 0.0
+        self._cool = 0.0
+        self._redis_factory = redis_factory
+        self._redis: Any = None
+        self._redis_tried = False
+
+    def _client(self) -> Any:
+        if not self._redis_tried:
+            self._redis_tried = True
+            self._redis = self._redis_factory() if self._redis_factory else None
+        return self._redis
+
+    def _shared(self, script: str, *args: int) -> int | None:
+        client = self._client()
+        if client is None:
+            return None
+        try:
+            return int(client.eval(script, 2, _PACE_KEY, _COOL_KEY, *args))
+        except Exception as e:  # noqa: BLE001 — fall back to local pacing
+            logger.warning("Brave pacing: Redis call failed (%s); pacing locally", type(e).__name__)
+            return None
+
+    def _reserve(self) -> float:
+        """Reserve the next spaced slot; seconds to wait. Raises PacingBusy."""
+        ms = self._shared(_RESERVE, int(self.interval * 1000), int(_MAX_WAIT * 1000))
+        if ms is not None:
+            if ms < 0:
+                raise PacingBusy()
+            return ms / 1000
+        with self._lock:
+            now = self._now()
+            start = max(now, self._next)
+            if start - now > _MAX_WAIT:
+                raise PacingBusy()
+            self._next = start + self.interval
+            return start - now
+
+    def _cooling(self) -> float:
+        """Seconds left on a 429 cooldown set while this caller slept."""
+        ms = self._shared(_COOLING)
+        if ms is not None:
+            return ms / 1000
+        with self._lock:
+            return max(self._cool - self._now(), 0.0)
 
     def wait(self) -> None:
-        with self._lock:
-            now = time.monotonic()
-            start = max(now, self._next)
-            self._next = start + self.interval
-        if start > now:
-            _sleep(start - now)
+        """Sleep until this caller may send. A 429 cooldown raised while it
+        slept makes it take a fresh slot behind the cooldown, so queued callers
+        stay spaced instead of bunching at the reset."""
+        waited = 0.0
+        while True:
+            delay = self._reserve()
+            if waited + delay > _MAX_WAIT:
+                raise PacingBusy()
+            if delay > 0:
+                _sleep(delay)
+                waited += delay
+            if self._cooling() <= 0:
+                return
 
     def defer(self, delay: float) -> None:
-        """Push the next slot out to at least ``delay`` seconds from now."""
+        """Hold every caller, including ones already waiting, for ``delay`` seconds."""
+        if self._shared(_DEFER, int(delay * 1000)) is not None:
+            return
         with self._lock:
-            self._next = max(self._next, time.monotonic() + delay)
+            until = self._now() + delay
+            self._next = max(self._next, until)
+            self._cool = max(self._cool, until)
+
+    @staticmethod
+    def _now() -> float:
+        return _monotonic()
 
     def learn(self, limits: _RateLimits) -> None:
         interval = limits.interval()
         if interval is not None:
             self.interval = interval
 
-    def reset(self, interval: float = DEFAULT_INTERVAL) -> None:
+    def reset(self, interval: float = DEFAULT_INTERVAL, redis_factory: Any = None) -> None:
         with self._lock:
             self.interval = interval
             self._next = 0.0
+            self._cool = 0.0
+            self._redis_factory = redis_factory
+            self._redis = None
+            self._redis_tried = False
 
 
-_PACER = _Pacer()
+_PACER = _Pacer()  # Redis resolved lazily on first call
 
 
 class BraveSearchClient(SearchClient):
@@ -182,6 +302,10 @@ class BraveSearchClient(SearchClient):
                 response.raise_for_status()
                 return response.json()
             raise AssertionError("unreachable")  # pragma: no cover
+        except PacingBusy:
+            logger.warning("Brave pacing queue full; refusing instead of waiting past %.0fs", _MAX_WAIT)
+            raise SearchError(self.PROVIDER, "Brave Search is busy: too many searches are queued for its "
+                              "one-per-second limit. Try again in a few seconds.", status_code=429) from None
         except httpx.HTTPStatusError as e:
             raise _status_error(e.response) from None
         except httpx.RequestError as e:

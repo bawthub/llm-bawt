@@ -14,10 +14,66 @@ from llm_bawt.search.brave_client import BRAVE_API_BASE, BraveSearchClient, is_b
 def _no_pacing_waits(monkeypatch):
     """Unit tests don't wait out Brave's 1/s window; sleeps are recorded instead."""
     slept: list[float] = []
+    now = [0.0]
+
+    def sleep(dt):
+        slept.append(dt)
+        now[0] += dt
     brave_client._PACER.reset(0.0)
-    monkeypatch.setattr(brave_client, "_sleep", slept.append)
+    monkeypatch.setattr(brave_client, "_sleep", sleep)
+    monkeypatch.setattr(brave_client, "_monotonic", lambda: now[0])
     yield slept
-    brave_client._PACER.reset()
+    brave_client._PACER.reset(redis_factory=brave_client._default_redis)
+
+
+class _Clock:
+    """Virtual monotonic clock; sleeping advances it."""
+
+    def __init__(self):
+        self.now = 0.0
+        self.on_first_sleep = None
+
+    def advance(self, dt):
+        self.now += dt
+
+    def sleep(self, dt):
+        hook, self.on_first_sleep = self.on_first_sleep, None
+        if hook:
+            hook()
+            dt = max(dt - 0.1, 0.0)
+        self.now += dt
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    c = _Clock()
+    monkeypatch.setattr(brave_client, "_sleep", c.sleep)
+    monkeypatch.setattr(brave_client, "_monotonic", lambda: c.now)
+    return c
+
+
+class _FakeRedis:
+    """Runs the pacer's three scripts with the semantics of their Lua."""
+
+    def __init__(self, clock):
+        self.clock, self.kv = clock, {}
+
+    def eval(self, script, nkeys, pace, cool, *args):
+        now = int(round(self.clock.now * 1000))
+        nxt, cd = self.kv.get(pace, 0), self.kv.get(cool, 0)
+        if script is brave_client._RESERVE:
+            interval, bound = args
+            start = max(now, nxt)
+            if start - now > bound:
+                return -1
+            self.kv[pace] = start + interval
+            return start - now
+        if script is brave_client._DEFER:
+            want = now + args[0]
+            self.kv[pace], self.kv[cool] = max(nxt, want), max(cd, want)
+            return 0
+        assert script is brave_client._COOLING
+        return max(cd - now, 0)
 
 
 class TestBraveSearchClient:
@@ -249,20 +305,60 @@ def _brave_sequence(*answers) -> tuple[BraveSearchClient, list[httpx.Request]]:
 class TestBravePacing:
     """TASK-2139: Free plan allows 1 request/second; pace instead of failing."""
 
-    def test_concurrent_calls_are_spaced_by_the_interval(self, monkeypatch):
-        import threading
-        import time as real_time
-        monkeypatch.setattr(brave_client, "_sleep", real_time.sleep)
-        pacer = brave_client._Pacer(0.2)
-        starts: list[float] = []
-        threads = [threading.Thread(target=lambda: (pacer.wait(), starts.append(real_time.monotonic())))
-                   for _ in range(3)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-        starts.sort()
-        assert all(b - a >= 0.18 for a, b in zip(starts, starts[1:]))
+    def test_queued_calls_are_spaced_by_the_interval(self, clock):
+        pacer = brave_client._Pacer(1.05, redis_factory=None)
+        sent = []
+        for _ in range(3):
+            pacer.wait()
+            sent.append(clock.now)
+        assert sent == pytest.approx([0.0, 1.05, 2.1])
+
+    def test_a_cooldown_reaches_a_caller_already_waiting(self, clock):
+        """Codex finding: defer must move a sleeper that reserved its slot earlier."""
+        pacer = brave_client._Pacer(1.05, redis_factory=None)
+        pacer.wait()  # first request goes at t=0
+        clock.on_first_sleep = lambda: (clock.advance(0.1), pacer.defer(2.0))  # its 429 at t=.1
+        pacer.wait()  # second had reserved t=1.05
+        assert clock.now >= 2.1
+
+    def test_the_queue_is_bounded(self, clock):
+        pacer = brave_client._Pacer(1.05, redis_factory=None)
+        for _ in range(10):
+            pacer.wait()
+        pacer.defer(30.0)
+        with pytest.raises(brave_client.PacingBusy):
+            pacer.wait()
+
+    def test_slots_are_shared_through_redis(self, clock):
+        shared = _FakeRedis(clock)
+        one = brave_client._Pacer(1.05, redis_factory=lambda: shared)
+        two = brave_client._Pacer(1.05, redis_factory=lambda: shared)
+        sent = []
+        for pacer in (one, two, one):
+            pacer.wait()
+            sent.append(clock.now)
+        assert sent == pytest.approx([0.0, 1.05, 2.1])
+        clock.on_first_sleep = lambda: (clock.advance(0.1), one.defer(2.0))
+        two.wait()
+        assert clock.now >= 2.1 + 2.0 - 0.01
+
+    def test_redis_failure_falls_back_to_local_pacing(self, clock):
+        class Broken:
+            def eval(self, *a):
+                raise ConnectionError("down")
+        pacer = brave_client._Pacer(1.05, redis_factory=Broken)
+        sent = []
+        for _ in range(2):
+            pacer.wait()
+            sent.append(clock.now)
+        assert sent == pytest.approx([0.0, 1.05])
+
+    def test_a_full_queue_is_a_clear_error(self):
+        brave_client._PACER.defer(60.0)
+        client, seen = _brave_sequence()
+        with pytest.raises(SearchError, match="busy"):
+            client.search("q")
+        assert seen == []
 
     def test_the_interval_is_learned_from_the_policy_header(self):
         client, _ = _brave_sequence((200, FREE))
