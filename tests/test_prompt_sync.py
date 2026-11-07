@@ -201,9 +201,22 @@ def test_health_check_degrades_only_on_stale_drift(monkeypatch) -> None:
     monkeypatch.setattr(registry, "PromptResolver", FakeResolver)
     rows[0].updated_at = now - timedelta(hours=2)
     fresh = health_checks.check_prompt_sync(None, now)
-    assert fresh["status"] == "ok" and "edited" in fresh["reason"]
+    assert fresh["status"] == "ok"
+    assert fresh["reason"] == ("1 edited prompt not yet synced to the shipped defaults; "
+                               "oldest unsynced edit: today. Prompts: edited")
     rows[0].updated_at = now - timedelta(hours=72)
-    assert health_checks.check_prompt_sync(None, now)["status"] == "degraded"
+    stale = health_checks.check_prompt_sync(None, now)
+    assert stale["status"] == "degraded"
+    assert "oldest unsynced edit: 3 days." in stale["reason"]
+    rows[0].updated_at = now - timedelta(hours=30)
+    assert "oldest unsynced edit: 1 day." in health_checks.check_prompt_sync(None, now)["reason"]
+    rows[:] = [_row(f"k{i}", "x") for i in range(7)]
+    for row in rows:
+        row.updated_at = now - timedelta(hours=1)
+    many = health_checks.check_prompt_sync(None, now)["reason"]
+    assert many.startswith("7 edited prompts") and many.endswith("k4 and 2 more")
+    rows[:] = [_row("edited", "B2")]
+    rows[0].updated_at = now
     rows[0].body = "B"
     assert health_checks.check_prompt_sync(None, now)["reason"] == "product prompts match shipped defaults"
 

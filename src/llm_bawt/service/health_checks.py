@@ -177,8 +177,14 @@ def check_prompt_sync(config: Any, now: datetime | None = None) -> dict:
         for item in drift if item.updated_at
     ]
     oldest = max(ages, default=0.0)
-    keys = ", ".join(item.key for item in drift[:5]) + (" …" if len(drift) > 5 else "")
-    reason = f"{len(drift)} product prompt(s) differ from shipped defaults, oldest {int(oldest // 3600)}h: {keys}"
+    keys = ", ".join(item.key for item in drift[:5])
+    if len(drift) > 5:
+        keys += f" and {len(drift) - 5} more"
+    days = int(oldest // 86400)
+    age = "today" if days == 0 else f"{days} day{'s' if days != 1 else ''}"
+    noun = "prompt" if len(drift) == 1 else "prompts"
+    reason = (f"{len(drift)} edited {noun} not yet synced to the shipped defaults; "
+              f"oldest unsynced edit: {age}. Prompts: {keys}")
     return _check("prompts.sync", DEGRADED if oldest > PROMPT_DRIFT_STALE_SECONDS else OK, reason)
 
 
