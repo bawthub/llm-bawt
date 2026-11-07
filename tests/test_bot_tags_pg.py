@@ -19,6 +19,7 @@ from llm_bawt.bot_access import BotAccessError
 from tests.bot_policy_helpers import warm_policy_resolver
 from llm_bawt.bot_access.policy import TrustedCaller
 from llm_bawt.bot_tags import BehaviorTag, BotTags, sql_allowed
+from llm_bawt.bot_tags.catalog import STARTER_ROLES
 from llm_bawt.bot_tags.vocabulary import BEHAVIOR_TAGS, LEGACY_FLAG_ASSIGNER, MIGRATION_ASSIGNER
 from llm_bawt.orphan_partitions import protected_storage_ids, read_protected_slugs
 from llm_bawt.runtime_settings import BotProfile, BotProfileStore
@@ -149,9 +150,9 @@ def test_catalog_constraints_refuse_a_referenced_delete_and_a_system_role(rig):
 
 def test_seeds_are_idempotent_and_restore_behaviour_rows_from_code(rig):
     rig.store()
-    # TASK-1249: a fresh catalog holds exactly the behaviour tags; no role is seeded.
+    # A fresh catalog holds the behaviour tags plus the TASK-2127 starter roles.
     assert rig.scalar("SELECT array_agg(slug::text ORDER BY slug) FROM bot_tag_catalog") == sorted(
-        str(t.slug) for t in BEHAVIOR_TAGS)
+        [str(t.slug) for t in BEHAVIOR_TAGS] + [r[0] for r in STARTER_ROLES])
     with rig.engine.begin() as conn:
         conn.exec_driver_sql("UPDATE bot_tag_catalog SET name='Wrong', description='edited' "
                              "WHERE slug='private'")
@@ -161,7 +162,7 @@ def test_seeds_are_idempotent_and_restore_behaviour_rows_from_code(rig):
                              "VALUES ('fixture_bot', 'fixture_role', 'operator')")
     rig.store()
 
-    assert rig.scalar("SELECT count(*) FROM bot_tag_catalog") == len(BEHAVIOR_TAGS) + 1
+    assert rig.scalar("SELECT count(*) FROM bot_tag_catalog") == len(BEHAVIOR_TAGS) + len(STARTER_ROLES) + 1
     assert rig.scalar("SELECT name FROM bot_tag_catalog WHERE slug='private'") == "Private"
     # TASK-1362: the opt-in behaviour tag is seeded from code like the others.
     assert rig.scalar("SELECT kind FROM bot_tag_catalog WHERE slug='external' AND system") == "behavior"
@@ -214,7 +215,7 @@ def test_a_completely_empty_schema_gets_every_table_and_copies_nothing(rig):
                         "WHERE n.nspname='fresh' AND c.relkind='r'")
     assert {"bot_profiles", "bot_tag_catalog", "bot_profile_tags"} <= set(tables)
     assert rig.scalar("SELECT count(*) FROM fresh.bot_profile_tags") == 0
-    assert rig.scalar("SELECT count(*) FROM fresh.bot_tag_catalog") == len(BEHAVIOR_TAGS)
+    assert rig.scalar("SELECT count(*) FROM fresh.bot_tag_catalog") == len(BEHAVIOR_TAGS) + len(STARTER_ROLES)
 
 
 # --- §10.7 the intermediate deploy (S1–S4, legacy writers only) -------------
@@ -501,3 +502,23 @@ def test_a_dry_run_takes_no_lock(rig, purge):
         holder.rollback()
     assert set(result["orphaned_bot_ids"]) == {"fixture-gone", "fixture-orphan"}
     assert len(remaining(rig)) == 3
+
+
+def test_starter_roles_are_insert_only_and_seeded_only_at_creation(rig):
+    rig.store()
+    assert rig.scalar("SELECT prompt_key FROM bot_tag_catalog WHERE slug='coder'") == "role.coder"
+    assert rig.scalar("SELECT capabilities::text FROM bot_tag_catalog WHERE slug='arbiter'") == \
+        '["ship_check", "mediate"]'
+    with rig.engine.begin() as conn:
+        conn.exec_driver_sql("DELETE FROM bot_tag_catalog WHERE slug='reviewer'")
+        conn.exec_driver_sql("UPDATE bot_tag_catalog SET description='mine' WHERE slug='coder'")
+    rig.store()
+    # Not recreated on a later bootstrap; the operator edit stays.
+    assert rig.scalar("SELECT count(*) FROM bot_tag_catalog WHERE slug='reviewer'") == 0
+    assert rig.scalar("SELECT description FROM bot_tag_catalog WHERE slug='coder'") == "mine"
+    from llm_bawt.bot_tags.catalog import seed_starter_roles
+    with rig.engine.begin() as conn:
+        conn.exec_driver_sql("UPDATE bot_tag_catalog SET slug='checker', name='REVIEWER' "
+                             "WHERE slug='coordinator'")
+        # Name clash (case-insensitive) skips reviewer; existing rows are untouched.
+        assert seed_starter_roles(conn) == []

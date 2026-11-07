@@ -207,6 +207,7 @@ class BotProfileStore:
             tag_catalog.ensure_schema(conn)
             tag_catalog.seed(conn)
             if not tags_existed:
+                tag_catalog.seed_starter_roles(conn)
                 migrated = tag_catalog.migrate_legacy_flag(conn)
                 # WARNING, not INFO: this first bootstrap usually runs at module
                 # import, before service logging is configured, and only the

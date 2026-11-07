@@ -7,6 +7,7 @@ transaction; nothing here commits. Existence checks are pinned to
 """
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Iterable, Mapping
 
@@ -152,6 +153,43 @@ def seed(conn) -> None:
         changed = changed or bool(result.rowcount)
     if changed:
         policy_changed(conn)
+
+
+#: Generic starter roles for a new install (TASK-2127). Instructions live in
+#: the prompt registry under ``prompt_key`` and ship as synced prompt defaults.
+STARTER_ROLES = (
+    ("coordinator", "Coordinator", "Keeps work moving and stays available to the user.", ("coordinate",)),
+    ("coder", "Coder", "Takes implementation work.", ("implement",)),
+    ("reviewer", "Reviewer", "Reviews other bots' work.", ("review",)),
+    ("arbiter", "Arbiter",
+     "Resolves repo conflicts and gives the neutral process check before push.", ("ship_check", "mediate")),
+)
+
+
+def seed_starter_roles(conn) -> list[str]:
+    """Insert the starter role tags; only on the bootstrap that created the catalog.
+
+    Insert-only: a role whose slug, name or prompt key is already present is
+    skipped, and nothing existing is updated or deleted. Running only at
+    creation means an operator who removes a starter role keeps it removed.
+    """
+    inserted: list[str] = []
+    for slug, name, description, capabilities in STARTER_ROLES:
+        prompt_key = f"role.{slug}"
+        result = conn.execute(text("""
+            INSERT INTO bot_tag_catalog (slug, name, description, kind, prompt_key, capabilities)
+            SELECT :slug, :name, :description, 'role', :prompt_key, CAST(:capabilities AS jsonb)
+             WHERE NOT EXISTS (
+                   SELECT 1 FROM bot_tag_catalog
+                    WHERE slug = :slug OR lower(name) = lower(:name) OR prompt_key = :prompt_key)
+            ON CONFLICT DO NOTHING
+        """), {"slug": slug, "name": name, "description": description, "prompt_key": prompt_key,
+               "capabilities": json.dumps(list(capabilities))})
+        if result.rowcount:
+            inserted.append(slug)
+    if inserted:
+        policy_changed(conn)
+    return inserted
 
 
 def migrate_legacy_flag(conn) -> int:

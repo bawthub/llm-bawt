@@ -25,6 +25,9 @@ pytestmark = pytest.mark.integration
 def tags(api):  # noqa: F811
     SQLModel.metadata.create_all(
         api.rig.engine, tables=[PromptTemplate.__table__, PromptTemplateVersion.__table__])
+    # These tests assert exact catalogs; drop the TASK-2127 starter roles.
+    with api.rig.engine.begin() as conn:
+        conn.execute(text("DELETE FROM bot_tag_catalog WHERE kind = 'role'"))
     api.client.post("/v1/bot-tags", json={
         "slug": "fixture_role", "name": "Fixture Role", "capabilities": ["review"]})
     api.patch("fixture-bot", tags=["fixture_role"])

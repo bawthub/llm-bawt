@@ -188,3 +188,29 @@ def test_health_check_degrades_only_on_stale_drift(monkeypatch) -> None:
     assert health_checks.check_prompt_sync(None, now)["status"] == "degraded"
     rows[0].body = "B"
     assert health_checks.check_prompt_sync(None, now)["reason"] == "product prompts match shipped defaults"
+
+
+def test_save_committed_during_seed_pass_is_not_overwritten(store, monkeypatch, tmp_path) -> None:
+    """Codex TASK-2127 blocker: seed read a following row, a save commits, follow must lose."""
+    s, defs = store
+    # File-backed SQLite so the interleaved save uses a real second connection.
+    s.engine = create_engine(f"sqlite:///{tmp_path / 'race.db'}")
+    SQLModel.metadata.create_all(s.engine, tables=[PromptTemplate.__table__, PromptTemplateVersion.__table__])
+    s.seed_defaults()
+    defs["k.follow"] = _defn("k.follow", "v2")
+
+    original = PromptTemplateStore._follow_default
+
+    def interleaved(session, row, body, sha, now):
+        if row.key == "k.follow":
+            other = PromptTemplateStore.__new__(PromptTemplateStore)
+            other.engine = s.engine
+            other.upsert(key="k.follow", body="TENANT CUSTOMIZATION", updated_by="tenant",
+                         metadata=json.loads(row.metadata_json))
+        return original(session, row, body, sha, now)
+
+    monkeypatch.setattr(PromptTemplateStore, "_follow_default", staticmethod(interleaved))
+    result = s.seed_defaults()
+    assert "k.follow" not in result["followed_keys"]
+    assert _bodies(s)["k.follow"].body == "TENANT CUSTOMIZATION"
+    assert [v.body for v in s.list_versions("k.follow")][0] == "TENANT CUSTOMIZATION"

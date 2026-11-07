@@ -10,6 +10,7 @@ import re
 from typing import Any
 
 from sqlalchemy import Column, DateTime, String, Text, UniqueConstraint
+from sqlalchemy import update as sa_update
 from sqlmodel import Field, SQLModel, Session, select
 
 # Re-exported for existing importers; the catalog lives in prompt_definitions.
@@ -458,43 +459,62 @@ class PromptTemplateStore:
 
     @staticmethod
     def _follow_default(session: Session, row: PromptTemplate, body: str, sha: str, now: datetime) -> str | None:
-        metadata = _parse_json_dict(row.metadata_json)
-        live_sha = body_sha256(row.body)
-        if live_sha == sha:
+        """Adopt or follow one row with a compare-and-swap update.
+
+        The guard re-checks the exact body, metadata and writer this pass read,
+        so a prompt save that commits in between makes the update a no-op and
+        the customization stands (TASK-2127 review). Nothing is written through
+        the ORM row, which may be stale.
+        """
+        seen_body, seen_meta, seen_by = row.body, row.metadata_json, row.updated_by
+        metadata = _parse_json_dict(seen_meta)
+        if body_sha256(seen_body) == sha:
             if metadata.get(DEFAULT_SHA_KEY) == sha:
                 return None
             metadata[DEFAULT_SHA_KEY] = sha
-            row.metadata_json = json.dumps(metadata)
-            session.add(row)
-            return "adopted"
-        if not is_following(row):
+            values: dict[str, Any] = {"metadata_json": json.dumps(metadata)}
+            outcome = "adopted"
+        elif is_following(row):
+            metadata[DEFAULT_SHA_KEY] = sha
+            values = {"body": body, "metadata_json": json.dumps(metadata),
+                      "updated_by": SYNC_ACTOR, "updated_at": now}
+            outcome = "followed"
+        else:
             return None
-        versions = session.exec(
-            select(PromptTemplateVersion.version).where(
-                PromptTemplateVersion.key == row.key,
-                PromptTemplateVersion.scope_type == row.scope_type,
-                PromptTemplateVersion.scope_id == row.scope_id,
+        table = PromptTemplate.__table__
+        result = session.execute(
+            sa_update(table)
+            .where(
+                table.c.id == row.id,
+                table.c.body == seen_body,
+                table.c.metadata_json.is_not_distinct_from(seen_meta),
+                table.c.updated_by.is_not_distinct_from(seen_by),
             )
-        ).all()
-        metadata[DEFAULT_SHA_KEY] = sha
-        row.body = body
-        row.metadata_json = json.dumps(metadata)
-        row.updated_by = SYNC_ACTOR
-        row.updated_at = now
-        session.add(row)
-        session.add(
-            PromptTemplateVersion(
-                key=row.key,
-                scope_type=row.scope_type,
-                scope_id=row.scope_id,
-                version=max(versions, default=0) + 1,
-                body=body,
-                change_note="Followed updated code default",
-                created_by=SYNC_ACTOR,
-                created_at=now,
-            )
+            .values(**values)
         )
-        return "followed"
+        if result.rowcount != 1:
+            return None
+        if outcome == "followed":
+            versions = session.exec(
+                select(PromptTemplateVersion.version).where(
+                    PromptTemplateVersion.key == row.key,
+                    PromptTemplateVersion.scope_type == row.scope_type,
+                    PromptTemplateVersion.scope_id == row.scope_id,
+                )
+            ).all()
+            session.add(
+                PromptTemplateVersion(
+                    key=row.key,
+                    scope_type=row.scope_type,
+                    scope_id=row.scope_id,
+                    version=max(versions, default=0) + 1,
+                    body=body,
+                    change_note="Followed updated code default",
+                    created_by=SYNC_ACTOR,
+                    created_at=now,
+                )
+            )
+        return outcome
 
     def set_sync_class(
         self, key: str, value: str | None, scope_type: str = "global", scope_id: str | None = None
