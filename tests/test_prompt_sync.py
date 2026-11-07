@@ -159,6 +159,23 @@ def test_untouched_rows_follow_new_default_and_custom_rows_stay(store) -> None:
     assert s.seed_defaults()["followed_keys"] == []
 
 
+def test_followed_row_takes_the_new_required_vars_and_custom_rows_keep_theirs(store) -> None:
+    s, defs = store
+    for key in ("k.follow", "k.custom"):
+        defs[key] = PromptDefinition(key=key, title=key, category="agents",
+                                     loader=lambda: "{a} {b}", required_vars=("a", "b"))
+    s.seed_defaults()
+    seeded = _bodies(s)
+    s.upsert(key="k.custom", body="mine {a} {b}", required_vars=["a", "b"],
+             metadata=json.loads(seeded["k.custom"].metadata_json), updated_by="nick")
+    for key in ("k.follow", "k.custom"):
+        defs[key] = PromptDefinition(key=key, title=key, category="agents", loader=lambda: "{a}", required_vars=("a",))
+    assert s.seed_defaults()["followed_keys"] == ["k.follow"]
+    rows = _bodies(s)
+    assert rows["k.follow"].body == "{a}" and json.loads(rows["k.follow"].required_vars_json) == ["a"]
+    assert json.loads(rows["k.custom"].required_vars_json) == ["a", "b"]
+
+
 def test_customized_row_matching_new_default_starts_following(store) -> None:
     s, defs = store
     s.seed_defaults()
@@ -232,13 +249,13 @@ def test_save_committed_during_seed_pass_is_not_overwritten(store, monkeypatch, 
 
     original = PromptTemplateStore._follow_default
 
-    def interleaved(session, row, body, sha, now):
+    def interleaved(session, row, body, sha, now, *rest):
         if row.key == "k.follow":
             other = PromptTemplateStore.__new__(PromptTemplateStore)
             other.engine = s.engine
             other.upsert(key="k.follow", body="TENANT CUSTOMIZATION", updated_by="tenant",
                          metadata=json.loads(row.metadata_json))
-        return original(session, row, body, sha, now)
+        return original(session, row, body, sha, now, *rest)
 
     monkeypatch.setattr(PromptTemplateStore, "_follow_default", staticmethod(interleaved))
     result = s.seed_defaults()

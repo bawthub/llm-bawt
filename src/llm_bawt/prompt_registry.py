@@ -400,7 +400,8 @@ class PromptTemplateStore:
                 row = existing.get(key)
                 if row is not None:
                     skipped += 1
-                    outcome = self._follow_default(session, row, body, sha, now)
+                    required_vars_json = json.dumps(list(definition.required_vars)) if definition.required_vars else None
+                    outcome = self._follow_default(session, row, body, sha, now, required_vars_json)
                     if outcome == "followed":
                         followed.append(key)
                     elif outcome == "adopted":
@@ -458,13 +459,17 @@ class PromptTemplateStore:
         }
 
     @staticmethod
-    def _follow_default(session: Session, row: PromptTemplate, body: str, sha: str, now: datetime) -> str | None:
+    def _follow_default(
+        session: Session, row: PromptTemplate, body: str, sha: str, now: datetime,
+        required_vars_json: str | None = None,
+    ) -> str | None:
         """Adopt or follow one row with a compare-and-swap update.
 
         The guard re-checks the exact body, metadata and writer this pass read,
         so a prompt save that commits in between makes the update a no-op and
         the customization stands (TASK-2127 review). Nothing is written through
-        the ORM row, which may be stale.
+        the ORM row, which may be stale. A followed row also takes the
+        definition's required variables, so its contract matches its new body.
         """
         seen_body, seen_meta, seen_by = row.body, row.metadata_json, row.updated_by
         metadata = _parse_json_dict(seen_meta)
@@ -477,6 +482,7 @@ class PromptTemplateStore:
         elif is_following(row):
             metadata[DEFAULT_SHA_KEY] = sha
             values = {"body": body, "metadata_json": json.dumps(metadata),
+                      "required_vars_json": required_vars_json,
                       "updated_by": SYNC_ACTOR, "updated_at": now}
             outcome = "followed"
         else:
