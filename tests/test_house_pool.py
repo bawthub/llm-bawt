@@ -128,12 +128,17 @@ def test_tenant_scratch_is_capped_tmpfs_under_the_house_limit(config):
         assert "${HOME}/.codex/sessions:/home/bridge/.codex/sessions" in service["volumes"]
 
 
-def test_preview_auth_is_per_house_not_shared_origin(config):
+def test_preview_auth_comes_only_from_the_shared_frontend_env(config):
+    # TASK-2135: a preview signs in exactly like the shared dev site; the
+    # renderer never forces sessions or a per-house auth origin.
     services = render_compose(config, ROOT / "docker-compose.yml")["services"]
-    for index, service in enumerate(services.values(), start=1):
+    for service in services.values():
         env = service["environment"]
-        assert env["BAWTHUB_AUTH_URL"] == f"https://dev{index}.example.test"
-        assert env["BAWTHUB_AUTH_SESSIONS"] == "on"
+        assert "BAWTHUB_AUTH_URL" not in env
+        assert "BAWTHUB_AUTH_SESSIONS" not in env
+        assert service["env_file"] == [config["frontend_env_file"]]
+        assert env["BAWT_HOUSE_PREVIEW"] == "on"
+        assert env["npm_config_store_dir"] == "/home/bridge/dev/.pnpm-store"
         assert env["BAWTHUB_LLM_URL"] == "http://app:8642"
         assert env["BAWTHUB_SERVICE_TOKEN_FILE"] == "/run/bawthub-service-token/token"
         assert "DATABASE_URL" not in env  # only a deployment-local env_file reference
@@ -236,11 +241,13 @@ def test_bad_harness_and_unknown_config_fail_closed(config):
 
 def test_launcher_has_no_schema_or_backend_startup():
     script = (ROOT / "docker" / "house-preview").read_text()
-    assert "--strictPort" in script
-    assert "vite --host 0.0.0.0" in script
-    assert "tsx watch server/index.ts" in script
-    assert "BAWTHUB_AUTH_SESSIONS" in script
-    assert "exec pnpm exec concurrently" in script
+    assert "exec python -m agent_bridge.house_preview_supervisor use" in script
+    assert "BAWTHUB_AUTH_SESSIONS" not in script
+    from agent_bridge.house_preview_supervisor import PAIR
+    pair = " ".join(PAIR)
+    assert "--strictPort" in pair and "vite --host 0.0.0.0" in pair
+    assert "tsx watch server/index.ts" in pair
+    assert "db:push" not in pair and "migrate" not in pair
     assert "db:push" not in script
     assert "db:migrate" not in script
     assert "uvicorn" not in script

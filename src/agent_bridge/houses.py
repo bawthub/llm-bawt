@@ -22,6 +22,7 @@ command queued while the house was dead cannot run late after a restart.
 
 from __future__ import annotations
 
+import os
 import re
 
 import asyncio
@@ -226,6 +227,13 @@ class HouseSlot:
         await redis.delete(fallback_notice_key(self.house, self.backend))
         logger.info("house %s/%s lease held, epoch %s", self.house, self.backend, self.epoch)
         self._task = asyncio.create_task(self._heartbeat())
+        # TASK-2135: the house serves its occupant's preview (or a page saying
+        # why there is none) from its own startup, so a restart brings it back.
+        # The pool renderer turns it on; tests and ad hoc bridges leave it off.
+        if os.environ.get("BAWT_HOUSE_PREVIEW", "").strip().lower() == "on":
+            from .house_preview_supervisor import PreviewSupervisor
+            self._supervisor = PreviewSupervisor(self.house, redis)
+            self._supervisor.start()
 
     def admit(self, fields: dict) -> bool:
         """False for a send routed under an older epoch (fenced, never run)."""

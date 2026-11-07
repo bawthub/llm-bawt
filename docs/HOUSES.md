@@ -92,23 +92,42 @@ renderer still accepts only bare HTTPS origins. See `deploy/README.md` there.
 ## Preview frontend
 
 The private `frontend_env_file` contains the same shared frontend `DATABASE_URL`
-and nonsecret application configuration as regular dev. The existing exported
-service-token volume is mounted read-only. Never copy secrets into pool JSON,
-generated routes, logs or source. Each house overrides `BAWTHUB_AUTH_URL` to its
-own HTTPS origin and requires sign-in sessions; cookies remain origin-scoped.
+and nonsecret application configuration as regular dev, and nothing else
+decides how a preview signs in: a preview authenticates exactly like the shared
+dev site (TASK-2135). If dev runs without sign-in sessions, so do previews, and
+`/api/auth` and `/api/setup` answer 404, so the owner-setup wizard can't run or
+write to the shared DB. Never add an owner account to the shared DB for a
+preview. The existing exported service-token volume is mounted read-only.
+Never copy secrets into pool JSON, generated routes, logs or source.
 
-Inside the house, install dependencies in its task worktree using the normal
-frontend workflow, then run:
+The house runs its preview itself (`agent_bridge.house_preview_supervisor`,
+enabled by `BAWT_HOUSE_PREVIEW=on` in the rendered service). Port 5173 always
+answers:
+
+- Empty house, or an occupant with no BawtHub task worktree: a built-in page
+  says so, names the occupant and explains how a preview starts. No 502.
+- Occupied: the checkout is the occupant's choice, else its most recently used
+  `.worktrees/.wt-bawthub-<bot>-TASK-N`. The house installs from the lockfile
+  (`pnpm install --frozen-lockfile --prefer-offline`, shared store at
+  `<dev>/.pnpm-store`, linked rather than copied), runs `prisma generate`, then
+  starts the normal Vite + Hono pair on 5173/3001. The page shows progress, or
+  the log tail if the install or the preview fails, and it retries with backoff.
+- After any house or container restart the same preview comes back by itself.
+  An empty house forgets the occupant's choice.
+
+To serve a different checkout, the occupant runs either of:
 
 ```sh
 house-preview /home/bridge/dev/.worktrees/<task>/frontend
+python -m agent_bridge.house_preview_supervisor use /home/bridge/dev/.worktrees/<task>/frontend
 ```
 
-This starts the normal Vite + Hono pair on 5173/3001. A conflicting port fails,
-not a silent move to 5174. No dependency install, Prisma migrate/db push or
-schema change runs in the launcher. Hono is part of the frontend; llm-bawt
-app/router, voice, schedulers and DB stay shared. Do not start per-house Python
-backend apps or perform shared schema mutations from a preview.
+`python -m agent_bridge.house_preview_supervisor clear` goes back to the latest
+task worktree. Don't start a second Vite on
+5173 by hand. No Prisma migrate/db push or schema change runs; Hono is part of
+the frontend; llm-bawt app/router, voice, schedulers and DB stay shared. Do not
+start per-house Python backend apps from a preview. Campus links only to a live
+preview; otherwise it says the preview is starting or not running.
 
 Install the generated route file alongside the existing watched Traefik file.
 It clones the owning frontend/frontend-api rules so API prefixes stay in sync;
@@ -132,7 +151,8 @@ Do not run concurrent full gates merely because pytest is now available.
 
 Verify both harness startup commands, identical mounts/session visibility,
 healthy bridge, per-container limit/init, and later the aggregate slice. Final
-acceptance requires HMR and real sign-in on the configured HTTPS origin.
+acceptance requires HMR on the configured HTTPS origin, with the same sign-in
+behavior as the shared dev site.
 Before the aggregate slice lands, temporary smoke houses must be capped and
 removed after checking; do not assign bots. Remove only named house containers,
 not shared volumes, sessions, worktrees, app or mansion bridges. Keep receipts

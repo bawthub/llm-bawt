@@ -178,8 +178,12 @@ def render_compose(config: object, base_compose: Path) -> dict:
                 "CODEX_BAWTHUB_MCP_URL": "http://app:8001/mcp",
                 "CODEX_CRAWL4AI_MCP_URL": "http://crawl4ai:11235/mcp/sse",
                 "CODEX_LOCAL_PLUGINS_SRC": "/home/bridge/dev/agent-skills/codex",
-                "BAWTHUB_AUTH_SESSIONS": "on",
-                "BAWTHUB_AUTH_URL": house["origin"],
+                # TASK-2135: a preview authenticates exactly like the shared
+                # dev site, so sign-in settings come only from the same
+                # frontend env file (no sessions there means none here).
+                # The house serves its occupant's preview itself.
+                "BAWT_HOUSE_PREVIEW": "on",
+                "npm_config_store_dir": "/home/bridge/dev/.pnpm-store",
                 "BAWTHUB_SERVICE_TOKEN_FILE": "/run/bawthub-service-token/token",
                 "BAWTHUB_LLM_URL": "http://app:8642",
             },
