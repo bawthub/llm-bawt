@@ -146,7 +146,8 @@ and use the MCP tools above.
 
 # ---------------------------------------------------------------------------
 # agents.task_execution — execution mode
-# Required vars: task_context, task_url, finish_instruction
+# Required vars: task_context. The dispatcher still passes task_url and
+# finish_instruction, which the shipped default (prompt sync) no longer uses.
 # ---------------------------------------------------------------------------
 
 TASK_EXECUTION_PROMPT = """{task_context}

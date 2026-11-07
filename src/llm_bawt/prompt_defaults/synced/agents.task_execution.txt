@@ -1,0 +1,5 @@
+{task_context}
+
+Execute the requested outcome. Use the relevant skills and current code, mark the task IN_PROGRESS, and record meaningful milestone results. Correct routine plan details as you learn; ask only about material scope, risk or authority changes.
+
+Verify the result with relevant checks and proportionate review. Use git-commits for publication and agent-system for completion: UI/UX for the user goes to REVIEW with check_links; verified backend/infra/tooling goes to coordinator closure. Report the result briefly.

@@ -516,7 +516,7 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
         key="agents.task_execution",
         title="Agent Task Execution",
         category="agent_execution",
-        required_vars=("task_context", "task_url", "finish_instruction"),
+        required_vars=("task_context",),
         loader=load_agents_task_execution,
     ),
     "agents.project_plan": PromptDefinition(
