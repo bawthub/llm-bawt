@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from llm_bawt.core.base import BaseLLMBawt
-from llm_bawt.core.prompt_builder import GLOBAL_SYSTEM_PROMPT, PromptBuilder, SectionPosition
+from llm_bawt.core.prompt_builder import PromptBuilder, SectionPosition
 from llm_bawt.prompt_definitions import DEFAULT_PROMPT_DEFINITIONS
 from llm_bawt.utils.config import Config
 
@@ -84,19 +84,19 @@ def test_native_agent_harness_prompt_omits_app_tool_protocol(model_type, harness
 
 
 def test_registered_recall_seed_prefers_bounded_evidence_over_bulk_history():
-    definition = DEFAULT_PROMPT_DEFINITIONS["chat.global_recall_guidance"]
-    assert definition.default_body() == GLOBAL_SYSTEM_PROMPT
+    # The shipped default is the synced body when present (TASK-2127).
+    body = DEFAULT_PROMPT_DEFINITIONS["chat.global_recall_guidance"].default_body()
     ordered = ("tasks_board", "context_recall", "messages_find", "messages_context",
                "messages_get_by_id", "messages_get", "messages_search_all")
-    positions = [GLOBAL_SYSTEM_PROMPT.index(f"`{name}`") for name in ordered]
+    positions = [body.index(f"`{name}`") for name in ordered]
     assert positions == sorted(positions)
-    assert "insufficient_evidence" in GLOBAL_SYSTEM_PROMPT
-    assert "unavailable source" in GLOBAL_SYSTEM_PROMPT
-    assert "protected bots" in GLOBAL_SYSTEM_PROMPT
+    assert "insufficient_evidence" in body
+    assert "unavailable source" in body
+    assert "protected bots" in body
     for retired in ("`get_messages`", "`search_memories`", "`search_all_messages`",
                     "`search_all_memories`", "`list_memory_sources`",
                     "`search_memory_source`"):
-        assert retired not in GLOBAL_SYSTEM_PROMPT
+        assert retired not in body
 
 
 def test_chat_prompt_still_receives_its_model_format_instructions():

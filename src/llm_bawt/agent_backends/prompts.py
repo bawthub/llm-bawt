@@ -42,9 +42,8 @@ from __future__ import annotations
 
 # ---------------------------------------------------------------------------
 # agents.task_spec — planning / spec mode
-# Required vars: task_context, task_url, extra_api_lines
-# (task_url and extra_api_lines are kept for dispatcher compatibility; the
-# agent should prefer MCP calls over hitting them directly.)
+# Required vars: task_context. The dispatcher still passes task_url and
+# extra_api_lines, which the shipped default (prompt sync) no longer uses.
 # ---------------------------------------------------------------------------
 
 TASK_SPEC_PROMPT = """{task_context}

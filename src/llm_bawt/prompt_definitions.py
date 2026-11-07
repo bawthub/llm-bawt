@@ -494,7 +494,7 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
         key="agents.task_spec",
         title="Agent Task Spec (Planning Mode)",
         category="agent_execution",
-        required_vars=("task_context", "task_url", "extra_api_lines"),
+        required_vars=("task_context",),
         loader=load_agents_task_spec,
     ),
     "agents.task_execution": PromptDefinition(

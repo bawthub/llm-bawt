@@ -70,9 +70,9 @@ def test_scoped_commit_prompt_is_catalog_owned_and_renders_runtime_scope() -> No
         variables={"scope": "Repository: bawthub\n- frontend/src/app/chat/ChangedFilesRow.tsx"},
     )
     assert "Repository: bawthub" in rendered
-    assert "selected conversation scope" in rendered
-    assert "stage only your hunks" in rendered
-    assert "Do not amend or push" in rendered
+    assert "within this scope" in rendered
+    assert "preserve others' unfinished work" in rendered
+    assert "Commit only; no push or deployment." in rendered
 
 
 def test_chat_system_prompt_refine_instruction_is_registered_and_seeded() -> None:
