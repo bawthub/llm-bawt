@@ -337,7 +337,7 @@ def test_every_subscription_ack_rereads_leases(monkeypatch):
     emitted: list = []
 
     class PubSub:
-        async def psubscribe(self, pattern):
+        async def psubscribe(self, *patterns):
             pass
 
         async def listen(self):
@@ -374,6 +374,11 @@ def test_every_subscription_ack_rereads_leases(monkeypatch):
 
     monkeypatch.setattr(watcher, "_read_leases", read)
     monkeypatch.setattr(watcher, "_emit", emit)
+
+    async def no_previews(client):
+        return {}
+
+    monkeypatch.setattr(hw, "read_previews", no_previews)
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(watcher.run())
     assert emitted == [[("h1", UP, DOWN)]] and Client.flag_reads == 2

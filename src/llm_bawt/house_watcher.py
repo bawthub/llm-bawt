@@ -13,6 +13,10 @@ Each house transition sends ``house_state_changed`` and, for every tenant,
 ``bot_location_changed`` (``house_down_fallback`` going down/recreating,
 ``house_up`` coming back): the dispatcher's routing changed with the lease.
 
+The same subscription covers ``agent:house:<H>:preview`` (TASK-2131), which a
+house bridge sets only when its preview changes, deletes when it stops and
+lets expire when the house dies: each sends ``house_preview_changed``.
+
 Keyspace events are fire-and-forget, so each (re)subscribe reads the leases
 once and emits whatever changed while nobody listened. The watcher turns on the
 keyspace flags it needs (``K$gx``) and keeps any already configured.
@@ -21,6 +25,7 @@ keyspace flags it needs (``K$gx``) and keeps any already configured.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from typing import Any
@@ -28,6 +33,7 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 LEASE_RE = re.compile(r"^agent:house:([a-z0-9][a-z0-9-]{0,30}):lease:([a-z0-9_-]+)$")
+PREVIEW_RE = re.compile(r"^agent:house:([a-z0-9][a-z0-9-]{0,30}):preview$")
 #: K keyspace channel, $ string commands (SET), g generic (DEL), x expired.
 REQUIRED_FLAGS = "K$gx"
 RECONNECT_SECONDS = 5.0
@@ -89,6 +95,36 @@ class HouseStates:
         return out
 
 
+def parse_preview(raw: str | None) -> dict | None:
+    """A stored preview value, or None when absent or malformed."""
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+async def read_previews(client: Any) -> dict[str, dict]:
+    """Every published house preview, by house (snapshot and resubscribe)."""
+    found: dict[str, dict] = {}
+    async for key in client.scan_iter(match="agent:house:*:preview", count=200):
+        match = PREVIEW_RE.match(key)
+        if match:
+            value = parse_preview(await client.get(key))
+            if value is not None:
+                found[match.group(1)] = value
+    return found
+
+
+def preview_frames(changes: list[tuple[str, dict | None]]) -> list[dict]:
+    from .campus_events import HOUSE_PREVIEW_CHANGED
+
+    return [{"_type": HOUSE_PREVIEW_CHANGED, "house_id": house, "preview": preview}
+            for house, preview in changes]
+
+
 def _tenants(config: Any, house: str) -> list[Any]:
     from sqlalchemy import text
 
@@ -135,6 +171,36 @@ class HouseWatcher:
     def __init__(self, config: Any) -> None:
         self.config = config
         self.states = HouseStates()
+        #: house -> its preview value; a house with none is absent.
+        self.previews: dict[str, dict] = {}
+
+    def _set_preview(self, house: str, value: dict | None) -> list[tuple[str, dict | None]]:
+        if self.previews.get(house) == value:
+            return []
+        if value is None:
+            self.previews.pop(house, None)
+        else:
+            self.previews[house] = value
+        return [(house, value)]
+
+    def reseed_previews(self, found: dict[str, dict]) -> list[tuple[str, dict | None]]:
+        out: list[tuple[str, dict | None]] = []
+        for house in sorted(set(self.previews) - set(found)):
+            out += self._set_preview(house, None)
+        for house, value in sorted(found.items()):
+            out += self._set_preview(house, value)
+        return out
+
+    async def _emit_previews(self, changes: list[tuple[str, dict | None]]) -> None:
+        if not changes:
+            return
+        from .campus_events import publish_frames
+
+        try:
+            await asyncio.to_thread(publish_frames, preview_frames(changes), self.config)
+        except Exception:
+            log.warning("house watcher preview emit failed", exc_info=True)
+
 
     async def _emit(self, transitions: list) -> None:
         if not transitions:
@@ -169,6 +235,15 @@ class HouseWatcher:
 
     async def handle(self, client: Any, channel: str, op: str) -> None:
         key = channel.split(":", 1)[1] if channel.startswith("__keyspace@") else channel
+        preview = PREVIEW_RE.match(key)
+        if preview:
+            house = preview.group(1)
+            if op == "set":
+                await self._emit_previews(
+                    self._set_preview(house, parse_preview(await client.get(key))))
+            elif op in ("del", "expired"):
+                await self._emit_previews(self._set_preview(house, None))
+            return
         match = LEASE_RE.match(key)
         if not match:
             return
@@ -195,7 +270,8 @@ class HouseWatcher:
             pubsub = client.pubsub()
             try:
                 db = client.connection_pool.connection_kwargs.get("db", 0)
-                await pubsub.psubscribe(f"__keyspace@{db}__:agent:house:*:lease:*")
+                await pubsub.psubscribe(f"__keyspace@{db}__:agent:house:*:lease:*",
+                                        f"__keyspace@{db}__:agent:house:*:preview")
                 async for message in pubsub.listen():
                     kind = message.get("type")
                     if kind == "psubscribe":
@@ -203,10 +279,14 @@ class HouseWatcher:
                         # own resubscribe after a reconnect: re-apply the flags
                         # (a restarted Redis loses them) and re-read the leases.
                         await self._ensure_flags(client)
+                        # Two patterns: two confirmations per (re)subscribe.
+                        # The second rereads nothing new, so it emits nothing.
                         transitions = self.states.reseed(await self._read_leases(client))
+                        previews = self.reseed_previews(await read_previews(client))
                         # The first read only learns the pool; later ones report changes.
                         if not first:
                             await self._emit(transitions)
+                            await self._emit_previews(previews)
                         first = False
                     elif kind == "pmessage":
                         await self.handle(client, message["channel"], message["data"])

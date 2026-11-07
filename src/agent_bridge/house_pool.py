@@ -37,6 +37,8 @@ HOUSE_TMPFS = (
 POOL_KEYS = {
     "image", "base_image", "memory", "cgroup_parent", "preview_network",
     "service_token_volume", "frontend_env_file", "houses",
+    # Optional: the shared dev site the mansion serves, linked from Campus.
+    "mansion_origin",
 }
 HOUSE_KEYS = {"id", "harness", "origin", "memory"}
 
@@ -108,6 +110,8 @@ def validate_pool(config: object) -> dict:
             _text(config.get(key), key)
         if not Path(config["frontend_env_file"]).is_absolute():
             raise ValueError("frontend_env_file must be an absolute deployment-local path")
+    if config.get("mansion_origin") is not None:
+        result["mansion_origin"], _ = _origin(config["mansion_origin"])
     parent = config.get("cgroup_parent", "")
     if not isinstance(parent, str) or "\n" in parent:
         raise ValueError("cgroup_parent must be a string (empty means engine default)")

@@ -17,6 +17,8 @@ a client drops events with ``seq <= snapshot.seq`` and refetches once on a gap:
   while an assignment frame's route was read once, possibly before it.
 * ``house_state_changed {event_id, seq, ts, house_id, from, to, tenants}``;
   states are ``up`` / ``down`` / ``recreating``.
+* ``house_preview_changed {event_id, seq, ts, house_id, preview}`` (TASK-2131):
+  the house's preview started, stopped, came up or switched checkout.
 
 Tenancy changes are captured at the one place a bot's ``house`` is written,
 ``BotProfileStore.upsert``, via :func:`note_tenancy_change`. The frame is sent
@@ -43,6 +45,9 @@ log = logging.getLogger(__name__)
 SEQ_KEY = "campus:seq"
 BOT_LOCATION_CHANGED = "bot_location_changed"
 HOUSE_STATE_CHANGED = "house_state_changed"
+#: ``{house_id, preview}``: what a house's preview serves changed (TASK-2131);
+#: ``preview`` is :mod:`agent_bridge.house_preview`'s value or null (none running).
+HOUSE_PREVIEW_CHANGED = "house_preview_changed"
 #: ``kind``: a committed change to the bot's assigned house/pin, or a change of
 #: its next-turn route with no profile write (the house's lease came or went).
 ASSIGNMENT, ROUTE = "assignment", "route"
@@ -140,7 +145,8 @@ def visibility(config: Any = None):
     return lambda slug: snapshot.excluded_reason(slug) is None
 
 
-CAMPUS_FRAME_TYPES = frozenset({BOT_LOCATION_CHANGED, HOUSE_STATE_CHANGED})
+CAMPUS_FRAME_TYPES = frozenset({BOT_LOCATION_CHANGED, HOUSE_STATE_CHANGED,
+                                HOUSE_PREVIEW_CHANGED})
 
 
 def redact_for_delivery(frame: dict, shown) -> dict | None:

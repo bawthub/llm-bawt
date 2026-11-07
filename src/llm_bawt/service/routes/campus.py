@@ -17,6 +17,12 @@ would run, TASK-2116) and ``active`` (where its running turn executes: null
 idle, ``unknown`` when that can't be established) and ``version`` (see
 :func:`llm_bawt.campus_events.version_of`). Private and inactive bots are left
 out; a house counts them in ``hidden_tenants``.
+
+Previews (TASK-2131): each house row carries ``preview``, what its preview
+serves now (:mod:`agent_bridge.house_preview`; null when none is running,
+``"unknown"`` when Redis can't be read), and ``mansion.preview_host`` is the
+pool's ``mansion_origin``, the shared dev site. ``house_preview_changed``
+frames keep ``preview`` current.
 """
 
 from __future__ import annotations
@@ -28,20 +34,25 @@ from typing import Any
 
 from fastapi import APIRouter
 
-from ...house_pool_config import POOL_FILE_ENV, configured_pool  # noqa: F401
+from ...house_pool_config import POOL_FILE_ENV, configured_pool, mansion_origin  # noqa: F401
 
 log = logging.getLogger(__name__)
 router = APIRouter()
 
 def house_rows(pool: list[dict] | None, leases: dict[str, set[str]] | None,
                watched: dict[str, str], tenants: dict[str, list[str]],
-               hidden: dict[str, int] | None = None) -> list[dict]:
-    """The house list; ``leases`` None means Redis couldn't be read."""
+               hidden: dict[str, int] | None = None,
+               previews: dict[str, dict] | None = None) -> list[dict]:
+    """The house list; ``leases`` None means Redis couldn't be read.
+
+    ``previews`` None means the preview keys couldn't be read.
+    """
     from ...house_watcher import DOWN, UNKNOWN, UP
 
     configured = {h["id"]: h for h in pool or []}
     hidden = hidden or {}
-    observed = set(tenants) | set(hidden) | set(leases or ()) | set(watched)
+    observed = (set(tenants) | set(hidden) | set(leases or ()) | set(watched)
+                | set(previews or ()))
     rows = []
     for house in sorted(set(configured) | observed):
         conf = configured.get(house)
@@ -60,6 +71,7 @@ def house_rows(pool: list[dict] | None, leases: dict[str, set[str]] | None,
             "tenants": sorted(tenants.get(house, [])),
             "hidden_tenants": hidden.get(house, 0),
             "preview_host": conf["preview_host"] if conf else None,
+            "preview": "unknown" if previews is None else previews.get(house),
         })
     return rows
 
@@ -130,7 +142,7 @@ async def campus_snapshot():
 
     from ...bot_location import resolve_locations
     from ...campus_events import SEQ_KEY, version_of, visibility
-    from ...house_watcher import LEASE_RE
+    from ...house_watcher import LEASE_RE, read_previews
     from ..dependencies import get_bot_profile_store, get_service
 
     service = get_service()
@@ -138,6 +150,7 @@ async def campus_snapshot():
     client = None
     seq: int | None = None
     leases: dict[str, set[str]] | None = None
+    previews: dict[str, dict] | None = None
     try:
         client = aioredis.from_url(service.config.REDIS_URL, decode_responses=True,
                                    socket_timeout=2.0, socket_connect_timeout=2.0)
@@ -160,6 +173,10 @@ async def campus_snapshot():
                 leases = found
             except Exception:
                 log.warning("campus: lease read failed", exc_info=True)
+            try:
+                previews = await read_previews(client)
+            except Exception:
+                log.warning("campus: preview read failed", exc_info=True)
         routes = await resolve_locations(rows, client.get if client is not None else None)
         turns = await asyncio.to_thread(_turns, store.engine, [r.slug for r in rows])
         active = await _active(client, rows, turns)
@@ -180,8 +197,9 @@ async def campus_snapshot():
     pool = configured_pool()
     return {
         "seq": seq, "ts": ts, "pool_configured": pool is not None,
+        "mansion": {"preview_host": mansion_origin()},
         "bots": [{"bot_id": row.slug, "assigned": row.house or None,
                   "pinned": bool(row.house_pinned), "route": routes[row.slug],
                   "active": active[row.slug], "version": version_of(row)} for row in rows],
-        "houses": house_rows(pool, leases, watched, tenants, hidden),
+        "houses": house_rows(pool, leases, watched, tenants, hidden, previews),
     }

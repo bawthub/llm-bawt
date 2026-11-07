@@ -210,6 +210,8 @@ class HouseSlot:
         # Set once a recycle decided to exit: nothing is admitted after it.
         self.closed = False
         self._recycle_tasks: set[asyncio.Task] = set()
+        # What this house's preview serves (house_preview.PreviewPublisher).
+        self._preview: Any = None
 
     @property
     def is_house(self) -> bool:
@@ -268,6 +270,7 @@ class HouseSlot:
         if not self.recycling:
             # A recycling house released its lease and must not take it back.
             await self._redis.set(key, self.epoch, ex=LEASE_TTL_S)
+            await self._publish_preview()
         now = time.monotonic()
         for (session_key, request_id), seen in list(self._turns.items()):
             live = self._queue.request_phase(session_key, request_id) is not None
@@ -287,6 +290,16 @@ class HouseSlot:
             if await self._redis.get(sess_key) == self.stream and not any(
                     s == session_key for s, _ in self._turns):
                 await self._redis.delete(sess_key)
+
+    async def _publish_preview(self) -> None:
+        """Campus preview status (TASK-2131); never fails the heartbeat."""
+        try:
+            if self._preview is None:
+                from .house_preview import PreviewPublisher
+                self._preview = PreviewPublisher(self.house)
+            await self._preview.publish(self._redis)
+        except Exception:
+            logger.warning("house %s preview probe failed", self.house, exc_info=True)
 
     def busy(self) -> bool:
         """A turn admitted here is running, or was admitted within GRACE_S.
