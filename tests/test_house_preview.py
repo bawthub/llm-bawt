@@ -282,8 +282,11 @@ def test_pool_accepts_an_optional_mansion_origin(tmp_path, monkeypatch):
     assert "mansion_origin" not in validate_pool({"houses": []})
     assert validate_pool({"houses": [], "mansion_origin": "https://dev.example.test/"})[
         "mansion_origin"] == "https://dev.example.test"
+    # A tenant serves the shared site on a plain-http published port (TASK-2129).
+    assert validate_pool({"houses": [], "mansion_origin": "http://host.example.test:3101"})[
+        "mansion_origin"] == "http://host.example.test:3101"
     with pytest.raises(ValueError):
-        validate_pool({"houses": [], "mansion_origin": "http://dev.example.test"})
+        validate_pool({"houses": [], "mansion_origin": "https://dev.example.test/app"})
     pool = tmp_path / "houses.json"
     pool.write_text(json.dumps({"houses": [], "mansion_origin": "https://dev.example.test"}))
     monkeypatch.setenv(POOL_FILE_ENV, str(pool))
