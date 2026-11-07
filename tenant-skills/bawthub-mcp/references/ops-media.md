@@ -36,9 +36,9 @@ may decide other bots' pending ops_run approval cards:
 
 You act only as yourself (the signed turn decides who you are). Refusal codes:
 grant_required (you don't hold approve_ops), self_approval_refused (your own
-bot's card: another holder or Nick decides it), not_ops_card (only ops_run
+bot's card: another holder or the user decides it), not_ops_card (only ops_run
 cards; other approvals stay with a person), not_found, already_resolved (with
-the stored decision; first decision wins, Nick's included), unauthorized /
+the stored decision; first decision wins, the user's included), unauthorized /
 turn_capability_required / turn_capability_invalid (no valid signed turn).
 
 The grant moves only through bots_grant_set(bot_id, tag, granted, reason), or
@@ -210,7 +210,7 @@ browser or `curl` gets the sign-in page or a 401. `browser_check_session`
 `browser-check` account on your behalf:
 - The bot is taken from your trusted turn and recorded on the session.
 - The session lasts at most 1h and never renews. Call the tool again for a fresh one.
-- It is non-admin. Admin-only pages need Nick.
+- It is non-admin. Admin-only pages need the user.
 
 It returns `{origin, entityId, expiresAt, cookies}`. The cookies are
 already in Playwright's `addCookies` shape:

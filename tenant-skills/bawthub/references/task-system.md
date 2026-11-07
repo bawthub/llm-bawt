@@ -2,11 +2,11 @@
 
 > Part of the bawthub skill. Moved verbatim from `bawthub/SKILL.md` (TASK-1640); the rules stay in the parent.
 
-Task pipeline: humans direct → bots plan, execute and verify → Nick reviews visually confirmable UI/UX only. Every bot work interaction goes through this.
+Task pipeline: humans direct → bots plan, execute and verify → the user reviews visually confirmable UI/UX only. Every bot work interaction goes through this.
 
 **Data models** (Prisma): `AgentTask` (`shortId` TASK-N, status QUEUED → PLANNING → REFINED → IN_PROGRESS → REVIEW → COMPLETED/FAILED, relations steps[]/project/activities[]/uploads[]) · `AgentStep` (`orderIndex`, PENDING → RUNNING → COMPLETED/FAILED, typed PLAN/READ_FILE/EDIT_FILE/RUN_COMMAND/…) · `AgentProject` (groups tasks; `contextPrompt` injected into agent docs; optional PM bot) · `AgentActivity` (audit log via `recordActivity()`).
 
-**REVIEW is Nick's visually confirmable UI/UX queue**: set `check_links` (app-relative pages with plain steps, required for bots; open each first). For non-visual work, Snark or Rook checks peer-review (Tier 0: self-check), attributable pushed commit and test/live-check receipts, then closes complete tasks as COMPLETED. Never close incomplete work or clear BUG. Steps MAY be COMPLETED by agents.
+**REVIEW is the user's visually confirmable UI/UX queue**: set `check_links` (app-relative pages with plain steps, required for bots; open each first). For non-visual work, Snark or Rook checks peer-review (Tier 0: self-check), attributable pushed commit and test/live-check receipts, then closes complete tasks as COMPLETED. Never close incomplete work or clear BUG. Steps MAY be COMPLETED by agents.
 
 **Dispatch:** `POST /api/tasks/tasks/[id]/dispatch` {botId, userId} → IN_PROGRESS immediately → background `after()` builds prompt (task + project context + steps) → llm-bawt `/v1/chat/completions` → agent PATCHes progress → REVIEW with summary.
 

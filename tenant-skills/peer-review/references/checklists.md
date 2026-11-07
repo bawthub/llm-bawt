@@ -43,12 +43,12 @@ evidence (file:line, query, test), not a box to tick.
 - Mira's partition excluded. DB access only through `pgq`; no inline secrets.
 - Migrations: reversible? Lock duration on big tables? Batched backfill? A
   verification query afterwards that should return zero rows?
-- Irreversible or destructive writes are Nick's call, whatever the review
+- Irreversible or destructive writes are the user's call, whatever the review
   verdict.
 
 **Bridge and turn lifecycle**
 - Restarting a `*-bridge` kills live agent sessions. Is a restart required to
-  ship this, and has it been requested from Nick?
+  ship this, and has it been requested from the user?
 - Timers, watchdogs and stop paths: can anything outlive its cap, or kill a
   healthy sibling?
 
@@ -131,5 +131,5 @@ Look in the diff for:
 6. How will we see it failing (health, logs, UI)?
 7. Rollout and rollback: what needs a restart, migration or backfill, and in
    what order? Can it be undone?
-8. Which decisions belong to Nick (scope, product, irreversible)? List them
+8. Which decisions belong to the user (scope, product, irreversible)? List them
    explicitly with a recommended default. Don't decide them in review.

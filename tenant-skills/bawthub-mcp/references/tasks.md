@@ -19,7 +19,7 @@ architecture. MCP names below are stable; harnesses may prefix `mcp__bawthub__`.
    plain-language change. Verify objective UI acceptance yourself on dev
    (Playwright, phone and desktop width), record it and attach the screenshots
    (`add_image_urls=[<asset_id>, ...]` from each screenshot result); Snark or Rook closes
-   that as `COMPLETED`. Only when Nick must judge it himself (subjective
+   that as `COMPLETED`. Only when the user must judge it himself (subjective
    look/feel, his device/account, a product call), submit `REVIEW`
    with `check_links` ("Where to look", required for bots): the pages to open,
    each `{label, path, steps}` with an app-relative path ("/tools/approvals",
@@ -51,11 +51,11 @@ do not create the task again to repair a link.
 - Follow `agent-system` for the one-executable-task-per-bot rule and task
   lifecycle. BLOCKED includes internal and external dependencies when no useful
   next step can proceed. Set `blocked_reason` to the concrete dependency, its
-  responsible owner and release condition; identify Nick-only decisions rather
+  responsible owner and release condition; identify the user-only decisions rather
   than presenting bot-owned blockers as his action items. An empty reason or a
   reason without BLOCKED is rejected (400). Surplus deliberately paused or
   unstarted work belongs in QUEUED, not IN_PROGRESS or an invented blocker.
-- REVIEW is for what only Nick can judge (see step 4), and a bot, cron or system caller entering
+- REVIEW is for what only the user can judge (see step 4), and a bot, cron or system caller entering
   it must send `check_links` (400 without; people moving a card are exempt).
   Links show at the top of the task popup and as a pill on REVIEW cards;
   `check_links` replaces the list. Paths are app-relative and open on whatever
@@ -63,7 +63,7 @@ do not create the task again to repair a link.
   on the dev site. For backend, infra,
   tooling and skill work, record the review, pushed commit and verification;
   Snark or Rook closes `COMPLETED` after checking the receipts. Do not park
-  non-visual work, or UI a bot can verify, in REVIEW for Nick.
+  non-visual work, or UI a bot can verify, in REVIEW for the user.
 - Priority: URGENT, HIGH, MEDIUM, LOW, NONE.
 - `tasks_update` patches provided non-null fields; do not assume null clears a
   field. `model_id` is the actual execution model; `agent_bot_id` assigns owner.
@@ -109,7 +109,7 @@ re-capture with Playwright.
 
 Any bot or user may change these; BawtHub records who did.
 
-- Focus is Nick's ranked list. `tasks_list(focused=true)` returns it in rank
+- Focus is the user's ranked list. `tasks_list(focused=true)` returns it in rank
   order (`focusRank` 1 first); `focused=false` returns the unfocused backlog.
 - `tasks_update(focus="on"|"off", focus_position, focus_anchor)`. `on` alone
   appends an unfocused task at the bottom and leaves a focused task in place.

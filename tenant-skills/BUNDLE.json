@@ -1,13 +1,12 @@
 {
   "source": "agent-skills",
-  "revision": "510efcbfddbb266dad07d48ecbc882dcc3fda223",
+  "revision": "58007d1c57625e443b97ce9566af69c399cb352f",
   "dirty": false,
   "skills": [
     "agent-system",
     "bawthub",
     "bawthub-mcp",
     "bawthub-ops",
-    "continuous-development",
     "frontend-design",
     "git-commits",
     "grok-imagine-prompts",

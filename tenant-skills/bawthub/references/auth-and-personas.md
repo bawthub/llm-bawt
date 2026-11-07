@@ -4,9 +4,10 @@
 
 ## Authentication & user model
 
-Reverse proxy injects `x-forwarded-email`/`x-forwarded-user` on OAuth-gated hosts; absent on `dev.bawthub.com` (LAN, no auth). Email → llm-bawt `entity_id` via `/v1/profiles/lookup` (cached 5 min). User-switcher (`AppMainNav.tsx`) lists `entity_type=user` profiles, writes `selectedUser` to Zustand + localStorage (`bawthub-selected-user`); a real lookup `entity_id` always beats stale localStorage. `display_name` comes from the llm-bawt profile (`/tools/profile`).
+Reverse proxy injects `x-forwarded-email`/`x-forwarded-user` on OAuth-gated hosts; absent on `<dev-host>` (LAN, no auth). Email → llm-bawt `entity_id` via `/v1/profiles/lookup` (cached 5 min). User-switcher (`AppMainNav.tsx`) lists `entity_type=user` profiles, writes `selectedUser` to Zustand + localStorage (`bawthub-selected-user`); a real lookup `entity_id` always beats stale localStorage. `display_name` comes from the llm-bawt profile (`/tools/profile`).
 
-**Playwright browses dev as `nick` by default (TASK-1375).** `llm-bawt/playwright-gpu.config.json` seeds every isolated Playwright MCP context with the `bawthub-subject=nick` cookie and the `bawthub-selected-user` localStorage record, so `dev.bawthub.com` opens without the "Who are you?" picker. To test the picker itself, clear that cookie and localStorage key first (e.g. `browser_evaluate` → `localStorage.removeItem('bawthub-selected-user'); document.cookie='bawthub-subject=; Path=/; Max-Age=0; Secure; SameSite=Strict'`, then reload).
+A Playwright MCP context can be pre-seeded with a `bawthub-subject=<user>` cookie and the `bawthub-selected-user` localStorage record so the dev host opens without the "Who are you?" picker; use the installation's own owner identity, never a guessed one.
+
 
 ### Personas (TASK-477)
 

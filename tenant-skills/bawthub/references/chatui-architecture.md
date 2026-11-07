@@ -196,10 +196,10 @@ split-view same-bot hydrate limits, which are chat-module concerns).
 2. Tests: `npx -y tsx --test src/app/chat/multiBot.test.ts src/app/chat/useChatStore.dedupe.test.ts src/app/chat/history/normalize.test.ts src/app/chat/activity/agentActivity.parser.test.ts src/app/chat/activity/toolCallDerivation.test.ts src/app/chat/viewport/useChatScrollLock.test.ts` (53 tests).
 3. `npx eslint src/app/chat` — 0 NEW problems. Baseline (June 2026): 10
    pre-existing set-state-in-effect errors + ~8 warnings in legacy files.
-4. Manual smoke on `dev.bawthub.com` for timing-sensitive paths:
+4. Manual smoke on `<dev-host>` for timing-sensitive paths:
    load-older scroll preservation, deep-link `?message=` landing, send/stream
    round-trip, abort mid-turn.
-5. Once reviewed, pushed work is ready, bots file the enabled `bawthub.release-prod` ops card (see `prod-release.md`); a different bot whose tags grant `approve_ops`, or Nick, approves. Never substitute local Make rebuild.
+5. Once reviewed, pushed work is ready, bots file the enabled `bawthub.release-prod` ops card (see `prod-release.md`); a different bot whose tags grant `approve_ops`, or the user, approves. Never substitute local Make rebuild.
 
 ## Chat hot facts (moved from SKILL.md, TASK-1640)
 

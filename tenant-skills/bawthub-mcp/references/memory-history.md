@@ -102,7 +102,7 @@ llm-bawt `docs/WORKING_MEMORY.md`.
   returns `revision_conflict` with the current item and writes nothing; re-read
   and retry. Omitted fields stay as they are; to clear next_action,
   checkpoint or priority, list them in `clear`. `done`/`cancelled` archives.
-  There's no delete tool: Nick deletes via REST `/v1/working-memory`.
+  There's no delete tool: the user deletes via REST `/v1/working-memory`.
 - **Errors are JSON** `{"error": code, ...}`. `unavailable` means storage
   failed. It is NOT an empty list: don't conclude you have no items.
 

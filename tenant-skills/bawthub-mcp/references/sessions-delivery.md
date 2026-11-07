@@ -179,8 +179,8 @@ restart that ships it).
   (`tag_locked`). An endpoint outside the target's catalog is
   `unknown_endpoint`; no null endpoint. Your own model is `self_model`.
 - Private and unknown bots both answer `access_denied`. The `private` tag can't
-  be added or removed here; that is Nick's UI action. You can't change your own
-  tags (`self_tag_edit_refused`); ask another bot or Nick. Your other fields are
+  be added or removed here; that is the user's UI action. You can't change your own
+  tags (`self_tag_edit_refused`); ask another bot or the user. Your other fields are
   editable.
 - Every write is a compare-and-set. Pass `expected` with the values you read
   when you are acting on an earlier read; fields you leave out are pinned to

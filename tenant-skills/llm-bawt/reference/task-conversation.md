@@ -41,7 +41,7 @@ active thread and does NOT participate in the one-active-per-`(bot, user)`
 partial unique invariant. Response carries `status: "archived"`, `rotated:
 false`; `session_metadata.created_inactive = true` marks the row so operators
 can distinguish background/task threads from UI-archived ones. Background
-task dispatch uses this so a queued task never disturbs Nick's live
+task dispatch uses this so a queued task never disturbs the user's live
 conversation. Subsequent `POST /v1/chat/completions` with an explicit
 `session_id` continues the archived thread untouched.
 

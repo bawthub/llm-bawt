@@ -4,7 +4,7 @@
 
 ### Shared notifications — one system
 
-**All user-facing notifications use the shared notification system unless Nick
+**All user-facing notifications use the shared notification system unless the user
 explicitly approves an exception.** Do not add component-local toast state,
 portals, stacks, dismissal/expiry timers, or a second notification library.
 Refactor an existing custom result popup through the shared system when touching
@@ -37,7 +37,7 @@ most common visual regression; they are not interchangeable.
 | **In-page controls** — buttons, rows, menus | lucide stroke icon, `white/60`–`white/90` | component-local |
 
 **Launcher tiles are emoji, not line icons.** When "main menu" / "home tiles"
-comes up, Nick means the **emoji launcher**, not the nav pills. Twelve thin
+comes up, the user means the **emoji launcher**, not the nav pills. Twelve thin
 monochrome strokes at tile size read as one texture and force you to read the
 label to find anything — which defeats a launcher. A color pictograph is
 identifiable pre-attentively. Do NOT "upgrade" a launcher to lucide icons, and
@@ -182,7 +182,7 @@ Rules:
 
 Reference implementation for dense, multi-pane work surfaces (file lists, diff
 documents, grouped rails): `repos/page.tsx`, `repos/workspace/GroupedFileRail.tsx`,
-`diffs/DiffDocumentSection.tsx`, `diffs/ContinuousDiffViewer.tsx`. Nick iterated
+`diffs/DiffDocumentSection.tsx`, `diffs/ContinuousDiffViewer.tsx`. The user iterated
 on this directly; these are his calls, not taste to relitigate.
 
 **Separation = wireframe + space, never colored rails.** Distinguish items (a file,
@@ -205,7 +205,7 @@ sticky element gets a `top` offset, scroll-landing math must add it
 Document headers (the per-file band) stay mostly solid for contrast against code:
 `bg-slate-800/70` + `from-sky-300/[0.08]` sheen + inset top highlight.
 
-**"Selected/active" = background lift, never a border.** Nick: *the effect is
+**"Selected/active" = background lift, never a border.** The user: *the effect is
 applied to the background within the element* — do not add solid/bright borders
 or rings to show state. Active group/file: `bg-sky-400/[0.055]` (he halved it
 from 11%; subtle is the target). Siblings of an active scope dim to
@@ -229,8 +229,8 @@ Mouse only; touch keeps native scroll.
 
 Building/modifying UI components → load the **`ui-ux-guidelines`** skill (container-first thinking, flex/grid decision tree). Design treatments → **`references/design-system.md`** before touching launcher tiles, nav icons, or floating surfaces. Hot rules:
 
-- **Three icon systems, not interchangeable:** launcher tiles (home + `/tools`) = **color emoji, no frame** (when Nick says "main menu"/"home tiles" he means the emoji launcher — do NOT "upgrade" to lucide or add a disc); nav pills = lucide + per-tone color (`AppMainNav.tsx`); in-page controls = lucide `white/60`–`white/90`.
-- **Which "menu" Nick means:** "Tools menu" = the `/tools` launcher tiles (`TOOLS_MENU_ITEMS` in `tools/page.tsx`). The **top menu** (`AppMainNav`) is fixed `NAV_ITEMS` + the user's toggleable favorites (bookmark icon / Settings → Appearance) — never hardcode extra links there (TASK-866 wrongly pinned Approvals/Models; removed in TASK-940).
+- **Three icon systems, not interchangeable:** launcher tiles (home + `/tools`) = **color emoji, no frame** (when the user says "main menu"/"home tiles" he means the emoji launcher — do NOT "upgrade" to lucide or add a disc); nav pills = lucide + per-tone color (`AppMainNav.tsx`); in-page controls = lucide `white/60`–`white/90`.
+- **Which "menu" the user means:** "Tools menu" = the `/tools` launcher tiles (`TOOLS_MENU_ITEMS` in `tools/page.tsx`). The **top menu** (`AppMainNav`) is fixed `NAV_ITEMS` + the user's toggleable favorites (bookmark icon / Settings → Appearance) — never hardcode extra links there (TASK-866 wrongly pinned Approvals/Models; removed in TASK-940).
 - **Page controls go in the section bar (the third menu).** Filters, search, view switches and page tools sit after the section tabs on one row that folds, then scrolls sideways. No in-page toolbar rows or phone-only filter panels. See `references/design-system.md` § Section bar.
 - **Floating surfaces reuse `floating-glass-surface`** (globals.css) — never copy the gradient/filter inline; children stay transparent; no `transform` on ancestors of backdrop-filtered UI; never nest backdrop filters.
 - **Home tiles must mirror `AppMainNav` `NAV_ITEMS`** — new nav route ⇒ new tile.

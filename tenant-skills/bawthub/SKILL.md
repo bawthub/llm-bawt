@@ -28,7 +28,7 @@ To mock up a BawtHub UI change in chat, use a ```html-card title="…" styles="a
 | Relay pills / bot-bar delivery feedback | [references/inter-bot-relay.md](references/inter-bot-relay.md) |
 | Task data models, dispatch, PM cron, `/api/tasks/*` routes | [references/task-system.md](references/task-system.md) |
 | Task ↔ conversation association | [references/task-conversation.md](references/task-conversation.md) |
-| Auth headers, user switcher, Playwright's default `nick` identity, Personas UI (backend is llm-bawt) | [references/auth-and-personas.md](references/auth-and-personas.md) |
+| Auth headers, user switcher, Playwright's default identity, Personas UI (backend is llm-bawt) | [references/auth-and-personas.md](references/auth-and-personas.md) |
 | Mobile keyboard/scroll/layout | [references/mobile-troubleshooting.md](references/mobile-troubleshooting.md) |
 | Any other symptom | [references/pitfalls.md](references/pitfalls.md) |
 | Vite migration history | references/vite-migration-architecture.md (not included in this install) |

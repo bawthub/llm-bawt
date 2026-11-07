@@ -13,8 +13,8 @@ Source of truth in the BawtHub repo:
 
 1. Confirm these files and the installer are present on the dev working surface.
    This is **dev-only** (`import.meta.env.DEV`), not enabled by a production URL.
-2. Give Nick a direct link to his affected chat with `viewportTrace=1` appended:
-   `https://dev.bawthub.com/chat/al?viewportTrace=1` (example; preserve an existing
+2. Give the user a direct link to his affected chat with `viewportTrace=1` appended:
+   `https://<dev-host>/chat/al?viewportTrace=1` (example; preserve an existing
    query with `&viewportTrace=1`). Use the affected, permitted bot; never test a
    protected personal bot. No console, cable, developer mode, or broad logging
    switch is required on the phone.
@@ -24,7 +24,7 @@ Source of truth in the BawtHub repo:
    messages autonomously merely to test telemetry.
 4. Read the dev `/api/clog` buffer immediately. Confirm the target-device UA and
    fresh capture timestamp, not just that some trace exists. If a useful capture
-   arrived, tell Nick you have it; don't ask for repetitive reproductions.
+   arrived, tell the user you have it; don't ask for repetitive reproductions.
 5. Return to the ordinary unflagged URL after diagnosis. The flag is not stored
    in preferences; a fresh unflagged page load installs no recorder.
 
@@ -54,7 +54,7 @@ Source of truth in the BawtHub repo:
 Command from the bridge, with `HOST` set to the Traefik host's LAN address (host routing matters):
 
 ```bash
-curl -fsS -H 'Host: dev.bawthub.com' \
+curl -fsS -H 'Host: <dev-host>' \
   "http://$HOST/api/clog?limit=1000" | python3 -c '
 import json, sys
 prefix = "[submit-viewport] "
@@ -119,7 +119,7 @@ settled, but transcript height rose 48px, fell 48px, then grew for the live repl
 The ordinary queue status contributed a 44px Cancel button plus 4px margin.
 A browser fixture reproduced the same +48/-48px flash. Delaying only queue
 presentation 300ms avoided fast-admission flashes while retaining cancellation
-for real queues. Nick subsequently confirmed the fix on his iPhone. This is a
+for real queues. The user subsequently confirmed the fix on his iPhone. This is a
 case study, NOT evidence that every mobile jitter is a queued-status bug.
 
 ## Adapt the pattern for other mobile-only symptoms
@@ -139,7 +139,7 @@ fixtures for regression coverage without sending real chat or mutating backend
 history. Mock all relevant history/tool sources together—mixing synthetic rows
 with live refreshes can manufacture unrelated jumps. Desktop simulation is useful
 for the fix but not proof of native resolution; finish with device evidence or
-Nick's explicit confirmation.
+the user's explicit confirmation.
 
 If the link shows a blank page, inspect `[RootErrorBoundary]` entries and the UA
 first; see [blank-screen triage](pitfalls.md). A failed lazy import is a separate

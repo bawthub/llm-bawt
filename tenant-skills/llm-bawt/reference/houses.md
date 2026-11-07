@@ -23,7 +23,7 @@ not a removed Codex service.
 - Each house bridge holds `agent:house:<id>:lease:<harness>` (TTL 30 s,
   renewed every 10 s) and a start epoch. New turns go to the house only while
   that lease exists.
-- Lease missing: new turns run in the mansion, and Nick gets one push/bell
+- Lease missing: new turns run in the mansion, and the user gets one push/bell
   notice per outage. In-flight turns never move; a command from an older epoch
   is refused, never run late or twice.
 - Steer, approval, answer and abort follow the turn's recorded location, not
@@ -45,7 +45,7 @@ elsewhere moves out first. Self-moves never pin. The move applies from the
 next turn. Codex/native and chat bots are refused for now.
 
 Bots never patch another bot's `house`. Assigning someone else or setting a
-pin is a coordinator's or Nick's call, via the profile API
+pin is a coordinator's or the user's call, via the profile API
 (`PATCH /v1/bots/<slug>/profile`, between that bot's turns). Every `house`
 write shares one lock, so it cannot race a self-move.
 
@@ -64,7 +64,7 @@ empty; delete the bots and their retained rows afterwards.
 | Focused tests (named files/nodes), lint on changed files | In place, in your task worktree, from your bridge or house. Houses have pytest (`/opt/house-tests`) and Node/pnpm. |
 | Full suites, project-wide `tsc`, mypy, broad pytest/vitest | The heavy queue (`heavy-queue submit … -- <cmd>`), which runs one capped job at a time and calls you back. Bridge guards refuse these locally. |
 | Exhaustive gate with private PostgreSQL | The integrator's `make gate` / exact-SHA batch gate. Not the queue. |
-| Live UI for your change | Your house preview: `house-preview <worktree>/frontend`, then the house's HTTPS origin with real sign-in. Shared `dev.bawthub.com` shows integrated `main`, not branch work. |
+| Live UI for your change | Your house preview: `house-preview <worktree>/frontend`, then the house's HTTPS origin with real sign-in. Shared `<dev-host>` shows integrated `main`, not branch work. |
 | Browser checks and screenshots | Playwright MCP against the house origin or the deployed dev surface, at phone and desktop width. |
 
 Rules:

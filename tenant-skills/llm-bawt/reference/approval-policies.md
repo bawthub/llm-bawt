@@ -74,7 +74,7 @@ clients remain outside a universal bridge hook.
   `allow` rule above a broad `require_approval` to carve a safe exception.
 
 **Inspect / change rules** (API is proxied through the frontend at
-`/api/chat/proxy/v1/*`; reach it from the bridge with `-H "Host: dev.bawthub.com"
+`/api/chat/proxy/v1/*`; reach it from the bridge with `-H "Host: <dev-host>"
 http://$HOST`, `HOST` = the Traefik host's LAN address):
 - List: `GET /v1/tool-approval-policies` · bundle: `GET …/bundle`
 - Create `POST`, update `PATCH /v1/tool-approval-policies/{id}`, delete `DELETE`

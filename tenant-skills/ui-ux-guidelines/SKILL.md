@@ -48,7 +48,7 @@ narrow screens.
 - Never block user input during animations
 - Never require pixel-perfect taps
 
-### Drag and drop (Nick's standard)
+### Drag and drop (the user's standard)
 
 - The dragged item follows the cursor: a lifted copy of the card (shadow + accent ring, slight scale) rendered in a drag overlay (dnd-kit `DragOverlay`, high `zIndex`). Never a drag with no visible moving item.
 - Source stays in place but dimmed; the valid drop target highlights (tint + inset ring) while hovered.
@@ -150,7 +150,7 @@ Before writing any layout:
 - Modals are not for primary navigation
 - Dangerous actions (delete, logout) visually and spatially separated
 
-### Overlays and split screen (Nick's standard)
+### Overlays and split screen (the user's standard)
 
 BawtHub can pin a chat beside any app page (`WorkspaceSplitLayout`). The routed pane is a CSS container (`container-type: inline-size`), and that makes it the containing block for `position: fixed`. A `fixed inset-0` overlay rendered inline is therefore laid out inside the pane and under the chat (TASK-1407).
 

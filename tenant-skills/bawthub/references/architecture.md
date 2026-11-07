@@ -4,30 +4,24 @@
 
 ## Frontend surfaces
 
-Two frontend surfaces, both fronted by Traefik on the host:
+Two frontend surfaces, both fronted by Traefik on the host: a **dev/HMR** surface (`bawthub-frontend-1`, live `./frontend` mount, instant `.ts/.tsx/.css` pickup) and a **baked prod** surface (`bawthub-frontend-prod-1`, changes only on a prod image rebuild). Each installation configures its own hostnames and sign-in; read them from its Traefik routes and environment rather than assuming another installation's.
 
-| Surface | Container | Hostnames | Code source |
-|---|---|---|---|
-| **Dev / HMR** (integrated `main`) | `bawthub-frontend-1` | `dev.bawthub.com` (LAN-only HTTPS, no OAuth) | live `./frontend` mount — instant `.ts/.tsx/.css` pickup |
-| **Baked prod** (what users see) | `bawthub-frontend-prod-1` | `app.bawthub.com` only (Authelia 2FA). Legacy `echo.*`/`bawthub.*`/`snapshot.*` aliases retired (TASK-1180) — never re-add | **baked image** — changes ONLY on prod rebuild |
 
 **Host-only Make commands** (on the host from `~/dev/bawthub`; from a bridge, run them over SSH to the host): `make mode-status` (always run first if unsure) · `make dev-mode` / `make prod-mode` (toggle HMR only — **neither changes that canonical = baked prod**) · `make up-dev` · `make logs / logs-backend / logs-prod`.
 
 ## Architecture
 
 ```
-Cloudflare edge
-├─ bawthub.com / www              → Cloudflare Pages            [marketing site, separate repo]
-├─ app.bawthub.com                → Authelia → Traefik          [baked prod]
-└─ auth.bawthub.com               → Authelia portal
-
 Traefik (host:80)
-├─ app.bawthub.com                                 → frontend-prod  (baked)
+├─ <prod host>                                     → frontend-prod  (baked)
 │   └─ frontend-owned /api/* prefixes (priority=200) → frontend-prod
-├─ dev.bawthub.com                                 → frontend       (vite dev + HMR)
+├─ <dev host>                                      → frontend       (vite dev + HMR)
 │   └─ same /api/* prefixes (priority=200)         → frontend
 └─ /api/* catch-all (priority=100)                 → backend (Python FastAPI)
+```
 
+
+```
 External: llm-bawt :8642 (BAWTHUB_LLM_URL=http://host.docker.internal:8642) · STT :8090 · TTS :8089 · PostgreSQL :5432
 ```
 
