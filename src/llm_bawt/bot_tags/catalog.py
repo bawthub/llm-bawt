@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Iterable, Mapping
+from pathlib import Path
 
 from sqlalchemy import text
 
@@ -155,14 +156,12 @@ def seed(conn) -> None:
         policy_changed(conn)
 
 
-#: Generic starter roles for a new install (TASK-2127). Instructions live in
-#: the prompt registry under ``prompt_key`` and ship as synced prompt defaults.
-STARTER_ROLES = (
-    ("coordinator", "Coordinator", "Keeps work moving and stays available to the user.", ("coordinate",)),
-    ("coder", "Coder", "Takes implementation work.", ("implement",)),
-    ("reviewer", "Reviewer", "Reviews other bots' work.", ("review",)),
-    ("arbiter", "Arbiter",
-     "Resolves repo conflicts and gives the neutral process check before push.", ("ship_check", "mediate")),
+#: Generic starter roles for a new install (TASK-2127), shipped as data in
+#: ``starter_roles.json`` so role slugs stay out of source (TASK-1249 guard).
+#: Instructions live in the prompt registry under ``role.<slug>``.
+STARTER_ROLES = tuple(
+    (r["slug"], r["name"], r["description"], tuple(r["capabilities"]))
+    for r in json.loads((Path(__file__).with_name("starter_roles.json")).read_text(encoding="utf-8"))
 )
 
 

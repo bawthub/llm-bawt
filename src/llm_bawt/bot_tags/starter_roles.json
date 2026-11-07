@@ -1,0 +1,6 @@
+[
+  {"slug": "coordinator", "name": "Coordinator", "description": "Keeps work moving and stays available to the user.", "capabilities": ["coordinate"]},
+  {"slug": "coder", "name": "Coder", "description": "Takes implementation work.", "capabilities": ["implement"]},
+  {"slug": "reviewer", "name": "Reviewer", "description": "Reviews other bots' work.", "capabilities": ["review"]},
+  {"slug": "arbiter", "name": "Arbiter", "description": "Resolves repo conflicts and gives the neutral process check before push.", "capabilities": ["ship_check", "mediate"]}
+]
