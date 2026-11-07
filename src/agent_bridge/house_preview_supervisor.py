@@ -12,11 +12,18 @@ A house bridge keeps port 5173 answering at all times:
 Because the bridge does this from its own startup, a preview comes back by
 itself after any house or container restart.
 
-Which checkout: the one the occupant chose with ``use`` (kept in Redis at
-``agent:house:<H>:preview_target``), else the occupant's most recently used
-``<dev>/.worktrees/.wt-bawthub-<bot>-TASK-N`` worktree. An empty house clears
-the choice, so the next occupant starts fresh. Occupancy is read from the
-app's ``/v1/campus``; if that can't be read the current state is kept.
+Which checkout: the one the occupant chose with ``use``, else the occupant's
+most recently used ``<dev>/.worktrees/.wt-bawthub-<bot>-TASK-N`` worktree. A
+choice is kept in Redis at ``agent:house:<H>:preview_target`` as
+``{"bot", "path"}`` and only counts while that bot's profile still names this
+house, checked on every tick: a new occupant never inherits it, even when the
+old one left and the new one arrived between two ticks. An empty house clears
+it. Occupancy is read from the app's ``/v1/campus``; if the app can't be read
+the current state is kept.
+
+Each preview step runs in its own process group. Stopping it ends the whole
+group (TERM, then KILL after a grace), even when the launcher already exited,
+so no leftover server holds the preview ports.
 
 Nothing here runs installs into shared checkouts, migrations, schema pushes or
 a per-house backend: Hono is part of the frontend, everything else is shared.
@@ -111,6 +118,28 @@ def occupancy_from_campus(snapshot: dict, house: str) -> Occupancy | None:
             return Occupancy(tuple(row.get("tenants") or ()),
                              int(row.get("hidden_tenants") or 0))
     return Occupancy((), 0) if isinstance(snapshot.get("houses"), list) else None
+
+
+def parse_choice(raw: Any) -> tuple[str, str] | None:
+    """``(bot, path)`` from the stored value; anything else is no choice."""
+    if isinstance(raw, bytes):
+        raw = raw.decode(errors="replace")
+    try:
+        value = json.loads(raw) if raw else None
+    except ValueError:
+        return None
+    if (isinstance(value, dict) and isinstance(value.get("bot"), str)
+            and isinstance(value.get("path"), str) and value["bot"]):
+        return value["bot"], value["path"]
+    return None
+
+
+def worktree_bot(front: Path) -> str | None:
+    """The bot named by a ``.wt-bawthub-<bot>-TASK-N/frontend`` path."""
+    import re
+
+    match = re.fullmatch(r"\.wt-bawthub-([a-z0-9][a-z0-9_-]*?)-TASK-\d+", front.parent.name)
+    return match.group(1) if match else None
 
 
 def choose_target(occ: Occupancy, declared: str | None, dev_root: Path) -> Path | None:
@@ -219,10 +248,12 @@ class PreviewSupervisor:
 
     def __init__(self, house: str, redis: Any, *,
                  fetch_campus: Callable[[], Any] | None = None,
+                 fetch_house_of: Callable[[str], Any] | None = None,
                  dev_root: Path = DEV_ROOT, fallback: FallbackServer | None = None) -> None:
         self.house = house
         self._redis = redis
         self._fetch = fetch_campus or self._fetch_campus
+        self._house_of = fetch_house_of or fetch_house_of_bot
         self.dev_root = dev_root
         self.fallback = fallback or FallbackServer()
         self.occ: Occupancy | None = None
@@ -230,6 +261,8 @@ class PreviewSupervisor:
         self.target: Path | None = None
         self._run: asyncio.Task | None = None
         self._proc: asyncio.subprocess.Process | None = None
+        # Process groups this supervisor started and has not yet ended.
+        self._groups: set[int] = set()
         self._failures = 0
         self._retry_at = 0.0
         self._task: asyncio.Task | None = None
@@ -278,9 +311,7 @@ class PreviewSupervisor:
             await self._redis.delete(key)
             declared = None
         else:
-            declared = await self._redis.get(key)
-            if isinstance(declared, bytes):
-                declared = declared.decode()
+            declared = await self._valid_choice(key)
         target = choose_target(self.occ, declared, self.dev_root)
         if target != self.target:
             await self._stop_run()
@@ -297,6 +328,24 @@ class PreviewSupervisor:
         if self._run is None or self._run.done():
             if time.monotonic() >= self._retry_at:
                 self._run = asyncio.create_task(self._serve(self.target))
+
+    async def _valid_choice(self, key: str) -> str | None:
+        """The stored path if its bot still lives here; a stale choice is deleted."""
+        choice = parse_choice(await self._redis.get(key))
+        if choice is None:
+            await self._redis.delete(key)
+            return None
+        bot, path = choice
+        house = await self._house_of(bot)
+        if house is UNKNOWN:
+            # App unreadable: keep serving what we serve, choose nothing new.
+            return str(self.target) if self.target and str(self.target) == path else None
+        if house != self.house:
+            logger.info("house %s: dropping %s's preview choice (now in %s)",
+                        self.house, bot, house or "the mansion")
+            await self._redis.delete(key)
+            return None
+        return path
 
     async def _show(self, status: str, detail: str) -> None:
         self.fallback.page = render_page(self.house, self.occ, status, detail, self.campus_url)
@@ -317,15 +366,17 @@ class PreviewSupervisor:
         if not ok:
             return await self._failed(front, "dependency install failed")
         await self.fallback.stop()
-        try:
-            with LOG_PATH.open("ab") as log:
-                self._proc = await asyncio.create_subprocess_exec(
-                    *PAIR, cwd=front, env=_child_env(), stdout=log,
-                    stderr=asyncio.subprocess.STDOUT, start_new_session=True)
-            logger.info("house %s preview started: %s pid %s", self.house, front, self._proc.pid)
-            code = await self._proc.wait()
-        finally:
-            self._proc = None
+        with LOG_PATH.open("ab") as log:
+            self._proc = await asyncio.create_subprocess_exec(
+                *PAIR, cwd=front, env=_child_env(), stdout=log,
+                stderr=asyncio.subprocess.STDOUT, start_new_session=True)
+        self._groups.add(self._proc.pid)
+        logger.info("house %s preview started: %s pid %s", self.house, front, self._proc.pid)
+        code = await self._proc.wait()
+        # The launcher is gone; end anything it left behind before the page
+        # (or a new attempt) takes the port.
+        await self._end_groups()
+        self._proc = None
         if self.target == front:
             await self._failed(front, f"preview exited (code {code})")
 
@@ -336,14 +387,14 @@ class PreviewSupervisor:
             proc = await asyncio.create_subprocess_exec(
                 *argv, cwd=front, env=_child_env(), stdout=log,
                 stderr=asyncio.subprocess.STDOUT, start_new_session=True)
+            self._groups.add(proc.pid)
             try:
-                return await asyncio.wait_for(proc.wait(), INSTALL_TIMEOUT_S) == 0
+                code = await asyncio.wait_for(proc.wait(), INSTALL_TIMEOUT_S)
             except asyncio.TimeoutError:
-                _killpg(proc.pid, signal.SIGKILL)
-                return False
-            except asyncio.CancelledError:
-                _killpg(proc.pid, signal.SIGKILL)
-                raise
+                code = None
+            # On cancel, _stop_run ends the group after awaiting this run.
+            await self._end_groups()
+            return code == 0
 
     async def _failed(self, front: Path, why: str) -> None:
         self._failures += 1
@@ -360,8 +411,7 @@ class PreviewSupervisor:
             f"<pre>{html.escape(tail)}</pre>"))
 
     async def _stop_run(self) -> None:
-        """Cancel the run first (so it can't report a failure), then end the pair."""
-        proc = self._proc
+        """Cancel the run first (so it can't report a failure), then end every group."""
         if self._run is not None and not self._run.done():
             self._run.cancel()
             try:
@@ -369,14 +419,25 @@ class PreviewSupervisor:
             except (asyncio.CancelledError, Exception):
                 pass
         self._run = None
+        await self._end_groups()
         self._proc = None
-        if proc is not None and proc.returncode is None:
-            _killpg(proc.pid, signal.SIGTERM)
-            try:
-                await asyncio.wait_for(proc.wait(), STOP_GRACE_S)
-            except asyncio.TimeoutError:
-                _killpg(proc.pid, signal.SIGKILL)
-                await proc.wait()
+
+    async def _end_groups(self) -> None:
+        """TERM each owned group, KILL what outlives the grace, wait until empty.
+
+        Independent of the leader: a launcher that already exited can leave a
+        server in its group holding the port.
+        """
+        for pgid in list(self._groups):
+            if _group_alive(pgid):
+                _killpg(pgid, signal.SIGTERM)
+                if not await _wait_group_gone(pgid, STOP_GRACE_S):
+                    _killpg(pgid, signal.SIGKILL)
+                    if not await _wait_group_gone(pgid, 5.0):
+                        logger.warning("house %s: process group %s survived KILL",
+                                       self.house, pgid)
+                        continue
+            self._groups.discard(pgid)
 
 
 def _killpg(pid: int, sig: int) -> None:
@@ -384,6 +445,46 @@ def _killpg(pid: int, sig: int) -> None:
         os.killpg(pid, sig)
     except (ProcessLookupError, PermissionError):
         pass
+
+
+def _group_alive(pgid: int) -> bool:
+    """Any process still in the group (a reaped leader doesn't count)."""
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+async def _wait_group_gone(pgid: int, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while _group_alive(pgid):
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(0.1)
+    return True
+
+
+#: The profile lookup failed; distinct from "not in any house" (None).
+UNKNOWN = object()
+
+
+async def fetch_house_of_bot(bot: str) -> Any:
+    """The house a bot's profile names (None = the mansion), or :data:`UNKNOWN`."""
+    import httpx
+
+    base = os.environ.get("LLM_BAWT_API_URL") or "http://app:8642"
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(f"{base}/v1/bots/{bot}/profile")
+            if resp.status_code == 404:
+                return None
+            resp.raise_for_status()
+            return (resp.json().get("house") or None)
+    except Exception:
+        return UNKNOWN
 
 
 # ------------------------------------------------------------- CLI
@@ -394,6 +495,8 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
     use = sub.add_parser("use", help="serve this checkout's frontend")
     use.add_argument("frontend", type=Path)
+    use.add_argument("--bot", help="the occupant making the choice (default: from the "
+                     "worktree name)")
     sub.add_parser("clear", help="go back to the occupant's latest task worktree")
     args = parser.parse_args(argv)
     house = (os.environ.get("BAWT_HOUSE") or "").strip().lower()
@@ -410,7 +513,15 @@ def main(argv: list[str] | None = None) -> int:
     front = args.frontend.resolve()
     if not is_frontend(front):
         parser.exit(2, f"{front} is not an absolute frontend directory with package.json\n")
-    client.set(target_key(house), str(front))
+    bot = args.bot or worktree_bot(front)
+    if not bot:
+        parser.exit(2, "can't tell which bot this choice is for: pass --bot <your id>\n")
+    lives = asyncio.run(fetch_house_of_bot(bot))
+    if lives is UNKNOWN:
+        parser.exit(1, "the app can't be read right now; try again\n")
+    if lives != house:
+        parser.exit(2, f"{bot} doesn't live in house {house}; move in first\n")
+    client.set(target_key(house), json.dumps({"bot": bot, "path": str(front)}))
     print(f"house {house}: preview will serve {front} within {int(CHECK_S)}s")
     return 0
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import socket
 import sys
@@ -104,15 +105,20 @@ async def _http_get(port: int) -> str:
     return data.decode()
 
 
-def _supervisor(tmp_path, monkeypatch, campus, redis=None):
+def _supervisor(tmp_path, monkeypatch, campus, redis=None, homes=None):
     port = _free_port()
     monkeypatch.setattr(sup, "LOG_PATH", tmp_path / "preview.log")
+    homes = homes if homes is not None else {}
 
     async def fetch():
         return campus["value"]
 
+    async def house_of(bot):
+        return homes.get(bot, "h1")
+
     s = sup.PreviewSupervisor("h1", redis or FakeRedis(), fetch_campus=fetch,
-                              dev_root=tmp_path, fallback=sup.FallbackServer(port))
+                              fetch_house_of=house_of, dev_root=tmp_path,
+                              fallback=sup.FallbackServer(port))
     return s, port
 
 
@@ -215,4 +221,142 @@ async def test_unreadable_campus_keeps_the_current_state(tmp_path, monkeypatch):
         await s.tick()
         assert "Nobody lives here" in await _http_get(port)
     finally:
+        await s.fallback.stop()
+
+
+# --- review round 1: choices belong to a bot; groups end completely ----------
+
+def _choice(bot, path):
+    return json.dumps({"bot": bot, "path": str(path)})
+
+
+def test_choice_parsing_and_worktree_bot(tmp_path):
+    assert sup.parse_choice(_choice("nova", "/x")) == ("nova", "/x")
+    assert sup.parse_choice(b'{"bot": "nova", "path": "/x"}') == ("nova", "/x")
+    for raw in (None, "", "/plain/path", "{", '{"path": "/x"}', '{"bot": "", "path": "/x"}'):
+        assert sup.parse_choice(raw) is None
+    front = tmp_path / ".wt-bawthub-nova-TASK-12" / "frontend"
+    assert sup.worktree_bot(front) == "nova"
+    assert sup.worktree_bot(tmp_path / "bawthub" / "frontend") is None
+
+
+@pytest.mark.asyncio
+async def test_new_occupant_never_inherits_the_last_ones_choice(tmp_path, monkeypatch):
+    chosen = _worktree(tmp_path, ".wt-bawthub-first-TASK-1", 100)
+    second = _worktree(tmp_path, ".wt-bawthub-second-TASK-2", 50)
+    redis = FakeRedis({sup.target_key("h1"): _choice("first", chosen)})
+    campus = {"value": _campus(tenants=["first"])}
+    homes = {"first": "h1"}
+    s, _ = _supervisor(tmp_path, monkeypatch, campus, redis, homes)
+
+    async def never(self, front):
+        return None
+
+    monkeypatch.setattr(sup.PreviewSupervisor, "_serve", never)
+    try:
+        await s.tick()
+        assert s.target == chosen
+        # first leaves and second arrives between two ticks: no empty sample.
+        homes["first"] = None
+        campus["value"] = _campus(tenants=["second"])
+        await s.tick()
+        assert s.target == second
+        assert sup.target_key("h1") not in redis.data
+    finally:
+        await s._stop_run()
+        await s.fallback.stop()
+
+
+@pytest.mark.asyncio
+async def test_private_occupant_swap_also_drops_the_choice(tmp_path, monkeypatch):
+    chosen = _worktree(tmp_path, ".wt-bawthub-ghost-TASK-1", 100)
+    redis = FakeRedis({sup.target_key("h1"): _choice("ghost", chosen)})
+    homes = {"ghost": "h1"}
+    s, _ = _supervisor(tmp_path, monkeypatch, {"value": _campus(hidden=1)}, redis, homes)
+
+    async def never(self, front):
+        return None
+
+    monkeypatch.setattr(sup.PreviewSupervisor, "_serve", never)
+    try:
+        await s.tick()
+        assert s.target == chosen
+        homes["ghost"] = "h2"  # another private bot now holds h1
+        await s.tick()
+        assert s.target is None and sup.target_key("h1") not in redis.data
+    finally:
+        await s.fallback.stop()
+
+
+@pytest.mark.asyncio
+async def test_legacy_or_unreadable_choice_is_ignored(tmp_path, monkeypatch):
+    newest = _worktree(tmp_path, ".wt-bawthub-nova-TASK-2", 300)
+    other = _worktree(tmp_path, ".wt-bawthub-nova-TASK-1", 100)
+    redis = FakeRedis({sup.target_key("h1"): str(other)})
+    s, _ = _supervisor(tmp_path, monkeypatch, {"value": _campus(tenants=["nova"])}, redis)
+
+    async def never(self, front):
+        return None
+
+    monkeypatch.setattr(sup.PreviewSupervisor, "_serve", never)
+    try:
+        await s.tick()
+        assert s.target == newest and sup.target_key("h1") not in redis.data
+    finally:
+        await s.fallback.stop()
+
+
+# A launcher that leaves a TERM-ignoring server in its process group.
+_SERVER = (
+    "import signal,socket,sys,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);"
+    "s=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);"
+    "s.bind(('127.0.0.1',int(sys.argv[1])));s.listen();"
+    "open(sys.argv[2],'w').write('up');time.sleep(600)"
+)
+
+
+def _stubborn_pair(port, ready, leader_exits):
+    # Exit only once the server is listening, so it is the one left behind.
+    tail = (f"while [ ! -f {ready} ]; do sleep 0.05; done; exit 0" if leader_exits
+            else "wait")
+    return ["sh", "-c", f'"{sys.executable}" -c "$0" {port} {ready} & {tail}', _SERVER]
+
+
+async def _until(cond, timeout=10.0):
+    for _ in range(int(timeout / 0.05)):
+        if cond():
+            return True
+        await asyncio.sleep(0.05)
+    return False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("leader_exits", [False, True])
+async def test_stopping_ends_the_whole_group(tmp_path, monkeypatch, leader_exits):
+    _worktree(tmp_path, ".wt-bawthub-nova-TASK-7", 100)
+    campus = {"value": _campus(tenants=["nova"])}
+    s, port = _supervisor(tmp_path, monkeypatch, campus)
+    ready = tmp_path / "ready"
+    monkeypatch.setattr(sup, "STOP_GRACE_S", 0.5)
+    monkeypatch.setattr(sup, "RETRY_S", (600.0,))
+
+    async def step(self, cwd, argv):
+        return True
+
+    monkeypatch.setattr(sup.PreviewSupervisor, "_step", step)
+    monkeypatch.setattr(sup, "PAIR", _stubborn_pair(port, ready, leader_exits))
+    try:
+        await s.tick()
+        assert await _until(ready.exists)
+        if leader_exits:
+            # The launcher exited on its own; its server must not keep the port.
+            assert await _until(lambda: s._run.done())
+            assert "preview exited (code 0)" in await _http_get(port)
+        else:
+            campus["value"] = _campus()  # occupant leaves: stop the preview
+            await s.tick()
+            assert "House h1: empty" in await _http_get(port)
+        assert s._groups == set()
+    finally:
+        await s._stop_run()
         await s.fallback.stop()
