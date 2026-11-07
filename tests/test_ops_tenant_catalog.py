@@ -1,36 +1,33 @@
 """TASK-2128: the tenant installer's restart-row classifier."""
 
 import json
-from types import SimpleNamespace
 
-from llm_bawt.ops import tenant_catalog
+import pytest
+from sqlalchemy.pool import StaticPool
+from sqlmodel import create_engine
+
+from llm_bawt.ops import OpsStore, tenant_catalog
 from llm_bawt.ops.executor import validate_spec
-from llm_bawt.ops.seeds import SEEDS
-
-SERVICES = {
-    "app": "t1-app", "agent-bridge": "t1-agent-bridge", "frontend": "t1-frontend",
-    "redis": "t1-redis", "postgres": "t1-postgres", "pocket-tts": "t1-pocket-tts",
-    "house-h1": "t1-house-h1", "house-h2": "t1-house-h2",
-}
+from llm_bawt.ops.seeds import seed_all
 
 
-class FakeStore:
-    def __init__(self):
-        self.rows = {s["slug"]: SimpleNamespace(**{**s, "soft_deleted_at": None}) for s in SEEDS}
-        self.updates = []
+def services(project):
+    names = ["app", "agent-bridge", "frontend", "redis", "postgres", "pocket-tts", "house-h1", "house-h2"]
+    return {s: f"{project}-{s}" for s in names}
 
-    def get_operation_by_slug(self, slug):
-        return self.rows.get(slug)
 
-    def update_operation(self, slug, data, *, actor=None):
-        self.updates.append((slug, actor))
-        for k, v in data.items():
-            setattr(self.rows[slug], k, v)
-        return self.rows[slug]
+def _store():
+    store = object.__new__(OpsStore)
+    store.events = None
+    store.engine = create_engine("sqlite://", connect_args={"check_same_thread": False},
+                                 poolclass=StaticPool)
+    store._ensure_tables_exist()
+    seed_all(store)
+    return store
 
 
 def test_plan_specs_are_valid_and_target_tenant_containers():
-    planned = tenant_catalog.plan("t1", SERVICES)
+    planned = tenant_catalog.plan("t1", services("t1"))
     assert set(planned) == {
         "llm-bawt.restart-app", "llm-bawt.restart-bridge", "bawthub.restart-frontend",
         "llm-bawt.restart-redis", "llm-bawt.restart-aux", "llm-bawt.restart-house"}
@@ -47,23 +44,35 @@ def test_absent_services_are_not_planned():
     assert set(tenant_catalog.plan("t1", {"app": "t1-app"})) == {"llm-bawt.restart-app"}
 
 
-def test_classify_enables_once_and_respects_operator_edits():
-    store = FakeStore()
-    first = tenant_catalog.classify(store, "t1", SERVICES)
+# "llm-bawt" makes the app and house targets identical to the seed's scripts.
+@pytest.mark.parametrize("project", ["t1", "llm-bawt"])
+def test_classify_enables_once_and_never_overrides_the_operator(project):
+    store = _store()
+    first = tenant_catalog.classify(store, project, services(project))
     assert len(first["classified"]) == 6 and not first["unchanged"]
-    assert all(store.rows[s].enabled for s in first["classified"])
-    assert all(actor == tenant_catalog.ACTOR for _, actor in store.updates)
-    # Unclassified echo-only rows stay disabled.
-    assert not store.rows["llm-bawt.reconcile-app-config"].enabled
+    for slug in first["classified"]:
+        row = store.get_operation_by_slug(slug)
+        assert row.enabled and row.updated_by == tenant_catalog.ACTOR
+    assert not store.get_operation_by_slug("llm-bawt.reconcile-app-config").enabled
 
-    store.rows["llm-bawt.restart-redis"].enabled = False  # operator turns one off
-    store.updates.clear()
-    again = tenant_catalog.classify(store, "t1", SERVICES)
+    for slug in ("llm-bawt.restart-app", "llm-bawt.restart-house"):
+        store.update_operation(slug, {"enabled": False}, actor="operator")
+    again = tenant_catalog.classify(store, project, services(project))
     assert again["classified"] == [] and len(again["unchanged"]) == 6
-    assert store.updates == [] and not store.rows["llm-bawt.restart-redis"].enabled
+    for slug in ("llm-bawt.restart-app", "llm-bawt.restart-house"):
+        assert not store.get_operation_by_slug(slug).enabled
+
+
+def test_compare_and_set_refuses_a_row_changed_after_it_was_read():
+    store = _store()
+    row = store.get_operation_by_slug("llm-bawt.restart-redis")
+    store.update_operation("llm-bawt.restart-redis", {"enabled": False}, actor="operator")
+    assert store.update_operation("llm-bawt.restart-redis", {"enabled": True}, actor="x",
+                                  expect_version=row.version) is None
+    assert not store.get_operation_by_slug("llm-bawt.restart-redis").enabled
 
 
 def test_soft_deleted_row_is_reported_missing():
-    store = FakeStore()
-    store.rows["llm-bawt.restart-app"].soft_deleted_at = "x"
+    store = _store()
+    store.soft_delete_operation("llm-bawt.restart-app", actor="operator")
     assert tenant_catalog.classify(store, "t1", {"app": "t1-app"})["missing"] == ["llm-bawt.restart-app"]

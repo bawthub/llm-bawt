@@ -338,12 +338,16 @@ class OpsStore:
                         .values(version=OpsOperation.version).execution_options(synchronize_session=False))
         return session.exec(select(OpsOperation).where((OpsOperation.id == slug_or_id) | (OpsOperation.slug == slug_or_id))).first()
 
-    def update_operation(self, slug_or_id, data, *, actor=None, _delete=False):
+    def update_operation(self, slug_or_id, data, *, actor=None, _delete=False, expect_version=None):
+        """``expect_version``: write only if the locked row is still at that
+        version (compare-and-set); otherwise return None without writing."""
         self._require()
         clean = self._clean_op(data)
         with Session(self.engine) as session:
             row = self._lock_operation(session, slug_or_id)
             if row is None:
+                return None
+            if expect_version is not None and row.version != expect_version:
                 return None
             if "slug" in clean and clean["slug"] != row.slug:
                 raise ValueError("operation slug is immutable; create a new operation")

@@ -6,8 +6,9 @@ name: Tenant app image
 # latest. Master pushes build nothing; a tenant install or upgrade dispatches
 # this for the SHA it needs and pins the digests the run reports.
 #
-# Two tenant images come from this repo: the CPU app and the agent bridge
-# every tenant runs for its first agent (TASK-1293). The bridge image is built
+# Three tenant images come from this repo: the CPU app, the agent bridge
+# every tenant runs for its first agent (TASK-1293), and the ops job worker
+# (TASK-2128). The bridge image is built
 # with Bitwarden's public server as its vault default: Dockerfile.agent-bridge
 # defaults to the operator's own vault, which a tenant must never point at.
 on:
@@ -34,7 +35,7 @@ jobs:
       fail-fast: false
       matrix:
         arch: [amd64, arm64]
-        image: [app, agent-bridge]
+        image: [app, agent-bridge, ops-worker]
         include:
           - image: app
             dockerfile: Dockerfile.app
@@ -42,6 +43,11 @@ jobs:
           - image: agent-bridge
             dockerfile: Dockerfile.agent-bridge
             build-args: BW_SERVER_URL=https://vault.bitwarden.com
+          # TASK-2128: the stdlib-only job worker the tenant ops runner
+          # launches per approved action (entrypoint + capability labels).
+          - image: ops-worker
+            dockerfile: docker/Dockerfile.ops-worker
+            build-args: OPS_PYTHON_BASE=python:3.12-slim
     steps:
       - uses: actions/checkout@v5
         with:
@@ -91,7 +97,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: [app, agent-bridge]
+        image: [app, agent-bridge, ops-worker]
     steps:
       - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4

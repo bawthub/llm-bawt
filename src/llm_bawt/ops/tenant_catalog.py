@@ -31,6 +31,8 @@ from typing import Any
 from .seeds import SEEDS
 
 ACTOR = "tenant-install"
+#: The actor ``OpsStore.seed_operation_if_missing`` records on a fresh seed row.
+SEED_ACTOR = "system-seed"
 _HOUSE = re.compile(r"^house-[a-z0-9][a-z0-9-]{0,30}$")
 #: Optional single-container services the aux restart may target.
 AUX_SERVICES = ("pocket-tts", "voice-backend", "local-model-bridge")
@@ -63,7 +65,11 @@ def plan(project: str, services: dict[str, str]) -> dict[str, dict[str, Any]]:
             "command_script": _spec(action="restart", container_name=services["agent-bridge"],
                                     **_BRIDGE_HEALTH),
             "args_schema_json": _schema({}, []),
+            # One fixed bridge, so the drain scope is static (the seed's scope
+            # keyed off the removed `bridge` argument). Off until an operator
+            # turns it on, as on echo.
             "quiesce_enabled": False,
+            "quiesce_scope_json": json.dumps({"backends": ["claude-code"]}),
         }
     if "frontend" in services:
         out["bawthub.restart-frontend"] = {
@@ -98,11 +104,16 @@ def classify(store, project: str, services: dict[str, str]) -> dict[str, list[st
         if row is None or row.soft_deleted_at is not None:
             result["missing"].append(slug)
             continue
-        if row.command_script != seeds[slug]["command_script"]:
-            result["unchanged"].append(slug)  # already classified or operator-edited
+        # Untouched seed only: last written by the seeder with the seed's
+        # script. After classification (or any operator edit) updated_by
+        # changes, so a rerun never re-enables a row even when the tenant
+        # target string equals the seed's (e.g. a project named llm-bawt).
+        if row.updated_by != SEED_ACTOR or row.command_script != seeds[slug]["command_script"]:
+            result["unchanged"].append(slug)
             continue
-        store.update_operation(slug, {**fields, "enabled": True}, actor=ACTOR)
-        result["classified"].append(slug)
+        written = store.update_operation(slug, {**fields, "enabled": True}, actor=ACTOR,
+                                         expect_version=row.version)
+        result["classified" if written is not None else "unchanged"].append(slug)
     return result
 
 
