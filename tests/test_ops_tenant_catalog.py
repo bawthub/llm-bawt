@@ -76,3 +76,20 @@ def test_soft_deleted_row_is_reported_missing():
     store = _store()
     store.soft_delete_operation("llm-bawt.restart-app", actor="operator")
     assert tenant_catalog.classify(store, "t1", {"app": "t1-app"})["missing"] == ["llm-bawt.restart-app"]
+
+
+def test_main_seeds_a_fresh_catalog_before_classifying(monkeypatch, capsys):
+    # A fresh tenant has no rows until first-run setup; the installer step must
+    # still enable the restarts (found on the TASK-2128 fresh-VM run).
+    store = object.__new__(OpsStore)
+    store.events = None
+    store.engine = create_engine("sqlite://", connect_args={"check_same_thread": False},
+                                 poolclass=StaticPool)
+    store._ensure_tables_exist()
+    assert store.get_operation_by_slug("llm-bawt.restart-app") is None
+    monkeypatch.setattr("llm_bawt.ops.store.OpsStore", lambda _config: store)
+    monkeypatch.setattr("llm_bawt.utils.config.Config", lambda: None)
+    monkeypatch.setattr("sys.stdin", __import__("io").StringIO(json.dumps(services("t1"))))
+    assert tenant_catalog.main(["--project", "t1"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert len(out["classified"]) == 6 and not out["missing"]

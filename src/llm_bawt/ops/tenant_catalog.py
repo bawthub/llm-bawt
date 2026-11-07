@@ -28,7 +28,7 @@ import re
 import sys
 from typing import Any
 
-from .seeds import SEEDS
+from .seeds import SEEDS, seed_all
 
 ACTOR = "tenant-install"
 #: The actor ``OpsStore.seed_operation_if_missing`` records on a fresh seed row.
@@ -132,10 +132,11 @@ def main(argv: list[str] | None = None) -> int:
     if store.engine is None:
         print("ops store unavailable", file=sys.stderr)
         return 2
+    # A fresh tenant has no catalog rows until first-run setup seeds them, so
+    # seed here first. Insert-if-missing: existing rows and edits are kept.
+    seed_all(store)
     result = classify(store, args.project, services)
     print(json.dumps(result, sort_keys=True))
-    # Missing rows usually mean the app has not seeded the catalog yet; the
-    # installer retries on a nonzero exit.
     return 3 if result["missing"] else 0
 
 
