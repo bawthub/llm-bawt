@@ -1,0 +1,11 @@
+{heading}
+
+Commit every complete, safe feature in this scope.
+
+Workspace fingerprint: {fingerprint}
+Bot: {bot_id}
+
+The listed files, fingerprint, and ownership labels are clues, not boundaries. Check Git status/diffs, tasks, and related dirty or untracked files; Bash-made edits may have no ownership match. Include required dependencies and relevant shared or unattributed changes, without guessing authorship.
+Split unrelated features, run relevant checks, and commit the safe ones now. Follow repo task/branch/hook rules; preserve explicit exclusions, unrelated active work, and existing staged changes. No push, stash, reset, amend, or bypassed hooks. If one feature is genuinely broken, commit the rest. Report hashes and what remains.
+
+{scope}

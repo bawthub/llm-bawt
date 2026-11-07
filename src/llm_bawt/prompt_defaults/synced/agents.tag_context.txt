@@ -1,0 +1,13 @@
+## Your tags and the family
+
+Instructions from your tags:
+
+{own_tag_instructions}
+
+Agent bots (tags; endpoint; provider):
+{bot_roster}
+
+Custom tags (capabilities):
+{tag_catalog}
+
+Route work by capability with bots_list_available. A bot without a matching capability is never pulled in by default.

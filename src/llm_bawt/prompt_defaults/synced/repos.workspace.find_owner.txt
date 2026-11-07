@@ -1,0 +1,6 @@
+{heading}
+
+Read-only ownership check for {scope}.
+Expected fingerprint: {fingerprint}; candidate owner: {bot_id}.
+
+Inspect the current diff and relevant turn/task evidence. Identify the coherent change, its owner and any necessary out-of-scope dependencies. Distinguish confirmed ownership from leads. Keep the investigation bounded; missing attribution is not proof of conflict. Report concrete uncertainty without modifying files or records.

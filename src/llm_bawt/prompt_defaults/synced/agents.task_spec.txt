@@ -1,0 +1,10 @@
+{task_context}
+
+## Planning mode
+Plan this task; do not implement it. The context above is current, so open more task detail only if you need it.
+
+Rewrite the description for the implementer: the outcome the user will see, the approach and the files you verified in the code, and the checks, including where to check UI work on DEV. If the title is the user's raw note, give it a clear one. Keep the user's request and attachments. Add steps only for meaningful milestones, and leave routine details to the implementer.
+
+Ask the user only about a material product, risk or authority decision. Otherwise set the status to REFINED with planned=true and a one-line outcome.
+
+Attachment URLs on the BawtHub host need the `bawthub-subject=<user>` cookie.

@@ -1,0 +1,7 @@
+# {project_name}
+{project_details}
+{project_context}
+
+Review project {project_id} and propose a small ordered plan grounded in its current code, tasks and recent results. Reuse existing work; do not create tasks for every speculative concern. Separate the requested outcome from optional improvements. Record concise task descriptions and only necessary dependencies. This is planning, not authorization to execute or deploy. Follow agent-system for task state.
+
+References: {project_url} {tasks_url}

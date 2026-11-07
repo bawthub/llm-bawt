@@ -1,0 +1,112 @@
+{
+  "about": "Prompt defaults added by the prompt sync for keys with no Python definition.",
+  "prompts": {
+    "repos.workspace.commit_aggregate": {
+      "title": "Repos workspace: commit aggregate",
+      "category": "repos",
+      "format": "plain_text",
+      "required_vars": [
+        "heading",
+        "fingerprint",
+        "bot_id",
+        "scope"
+      ]
+    },
+    "repos.workspace.commit_bot": {
+      "title": "Repos workspace: commit bot",
+      "category": "repos",
+      "format": "plain_text",
+      "required_vars": [
+        "heading",
+        "fingerprint",
+        "bot_id",
+        "scope"
+      ]
+    },
+    "repos.workspace.commit_safe": {
+      "title": "Repos workspace: commit safe",
+      "category": "repos",
+      "format": "plain_text",
+      "required_vars": [
+        "heading",
+        "fingerprint",
+        "bot_id",
+        "scope"
+      ]
+    },
+    "repos.workspace.commit_task": {
+      "title": "Repos workspace: commit task",
+      "category": "repos",
+      "format": "plain_text",
+      "required_vars": [
+        "heading",
+        "fingerprint",
+        "bot_id",
+        "scope"
+      ]
+    },
+    "repos.workspace.commit_turn": {
+      "title": "Repos workspace: commit turn",
+      "category": "repos",
+      "format": "plain_text",
+      "required_vars": [
+        "heading",
+        "fingerprint",
+        "bot_id",
+        "scope"
+      ]
+    },
+    "repos.workspace.find_owner": {
+      "title": "Repos workspace: find owner",
+      "category": "repos",
+      "format": "plain_text",
+      "required_vars": [
+        "heading",
+        "fingerprint",
+        "bot_id",
+        "scope"
+      ]
+    },
+    "repos.workspace.review": {
+      "title": "Repos workspace: review",
+      "category": "repos",
+      "format": "plain_text",
+      "required_vars": [
+        "heading",
+        "fingerprint",
+        "bot_id",
+        "scope"
+      ]
+    },
+    "role.arbiter": {
+      "title": "Bot tag: Arbiter",
+      "category": "bot_tag",
+      "format": "plain_text",
+      "required_vars": []
+    },
+    "role.coder": {
+      "title": "role.coder",
+      "category": "bot_tag",
+      "format": "plain_text",
+      "required_vars": []
+    },
+    "role.coordinator": {
+      "title": "Bot tag: Coordinator",
+      "category": "bot_tag",
+      "format": "plain_text",
+      "required_vars": []
+    },
+    "role.reviewer": {
+      "title": "role.reviewer",
+      "category": "bot_tag",
+      "format": "plain_text",
+      "required_vars": []
+    },
+    "tts-prepare": {
+      "title": "tts-prepare",
+      "category": "custom",
+      "format": "plain_text",
+      "required_vars": []
+    }
+  }
+}

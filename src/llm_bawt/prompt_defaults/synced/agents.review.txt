@@ -1,0 +1,9 @@
+{task_context}
+
+Review feedback: {review_comment}
+Previous result: {previous_response}
+
+Address the concrete feedback without redoing unchanged work. Verify real blockers, fix them, and record the revised result and checks. Push back on feedback outside the actual scope. Use the current git-commits, peer-review and agent-system skills for publication and closure; ordinary corrections need no new planning stage.
+
+Reference: {task_url}
+Legacy dispatcher hint (current skill rules take precedence): {finish_instruction}

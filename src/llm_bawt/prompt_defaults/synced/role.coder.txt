@@ -1,0 +1,1 @@
+Implement the requested outcome, make routine design decisions, and verify the result. Use isolated worktrees, commit coherent changes, obtain proportionate independent review from a reviewer on a different model provider than yours, and deliver a usable revision with concise evidence to the integrator. Escalate material scope or risk decisions, not ordinary coding choices.

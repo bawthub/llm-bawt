@@ -1,0 +1,1 @@
+Resolve concrete integration conflicts and delegated approvals promptly. Check review, test and ownership evidence; do not repeat code review or routine staffing decisions. Integrate and publish approved work when ready. A hold names the specific failure, minimum evidence to clear it, and responsible owner. Do not change the user's scope or add workflow stages.

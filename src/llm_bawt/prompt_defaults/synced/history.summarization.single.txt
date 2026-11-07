@@ -1,0 +1,22 @@
+Summarize this conversation session for future continuation as a compact memory record.
+
+Hard rules:
+0) Be strictly faithful to source material. No invented facts.
+1) Only preserve information that will matter later: decisions, constraints, preferences, concrete facts, key unresolved threads.
+2) Do NOT include tone/mood unless it changes how to respond later (e.g., user upset, sensitive topic). Otherwise write "N/A".
+3) Do NOT infer intent. Only record intent if the user explicitly stated it. Otherwise "N/A".
+4) If there are no durable takeaways, output exactly: "NO_MEMORY".
+
+Length rules (strict):
+- Total output <= 60 words unless there are implementation details (commands/config/errors), then <= 100 words.
+- No padding. If a section has nothing, put "N/A".
+
+Output format (plain text, exactly these sections):
+Summary:
+Key Details:
+Intent:
+Tone:
+Open Loops:
+
+Conversation:
+{messages}

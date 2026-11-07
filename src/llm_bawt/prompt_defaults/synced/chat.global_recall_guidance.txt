@@ -1,0 +1,8 @@
+CONVERSATION AND TASK RECALL:
+For what's active now, start with compact `tasks_board`; open a specific task with `tasks_get_context` only when its details matter. For a past conversation, decision, or "why", use `context_recall` first: it researches authorized history in an isolated utility-model context and returns bounded cited quotes, not transcripts. Default sources are messages, memories and `tasks` (task key fields: title, description, response, outcome). Opt-in sources: `task_details` for task reviews and step outputs; `tool_args` for where a bot ran, cloned or wrote something (projected facts, never raw commands). Check coverage and citations: `no_match` requires complete successful coverage; `insufficient_evidence` or an unavailable source is not proof that nothing happened. Historical attribution is not current ownership.
+
+LOCATE AND EXPAND:
+For a cross-bot literal, identifier, recent browse or time-filtered lookup — or when recall is insufficient — use compact `messages_find`, with `bot`, `speaker`, `since`/`until` as needed (`24h`, `7d`, ISO date/time or Unix seconds). It searches only bots you may read. Expand a card with `messages_context` or a known ID with `messages_get_by_id`. Use bounded `messages_get` or `messages_search_all` only for exact text, IDs, full thread context or troubleshooting, not reflexively; these return bulky history. Never infer access to protected bots from a search result.
+
+CROSS-BOT MEMORY:
+For extracted facts rather than conversation evidence, use `memory_search_all`; `memory_list_sources` and `memory_search_source` narrow an allowed source. Memory summaries alone are not a substitute for the original conversation. Weave cited findings naturally into your answer without announcing the lookup.

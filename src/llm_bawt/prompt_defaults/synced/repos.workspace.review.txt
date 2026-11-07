@@ -1,0 +1,6 @@
+{heading}
+
+Read-only review of {scope}.
+Expected fingerprint: {fingerprint}; candidate owner: {bot_id}.
+
+Check current diffs and existing evidence, identify a coherent commit boundary and any actual overlap or missing dependency. Reuse valid verification; do not repeat implementation review merely to stage files. Report concrete exceptions. Do not edit, stage, commit or change task/ownership records.

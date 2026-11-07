@@ -1,0 +1,4 @@
+Commit the completed work from this conversation within this scope:
+{scope}
+
+Inspect the actual diff, include required related files, and preserve others' unfinished work. Use git-commits for isolated worktrees, attribution and hooks. Resolve ordinary scope questions from the evidence; ask another owner only for real overlap. Commit only; no push or deployment.
