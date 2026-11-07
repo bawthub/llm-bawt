@@ -120,7 +120,7 @@ class ServiceTokenSource:
         return self._publish(self._resolve(), force=force)
 
     def _publish(self, token: str | None, *, force: bool = False) -> ExportResult:
-        from .token_export import publish  # token_export imports this module
+        from .token_export import EXPORT_GID_ENV, publish  # token_export imports this module
 
         raw = (self._environ.get(EXPORT_FILE_ENV) or "").strip()
         if not raw:
@@ -132,7 +132,7 @@ class ServiceTokenSource:
                 return ExportResult.UNCHANGED
             path = Path(raw)
             try:
-                result = publish(path, token, self._environ)
+                result = publish(path, token, self._environ, gid_env=EXPORT_GID_ENV)
             except (OSError, ValueError) as error:
                 if not self._publish_failing:
                     self._publish_failing = True

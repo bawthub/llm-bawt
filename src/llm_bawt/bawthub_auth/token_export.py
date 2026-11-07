@@ -14,6 +14,9 @@ master key it is derived from.
 * ``BAWTHUB_SERVICE_TOKEN_EXPORT_UID`` chowns the file to the reader's uid. The
   app runs as root and a root-owned 0600 file is unreadable by a non-root
   reader (BawtHub's prod image runs as its own user).
+* ``BAWTHUB_SERVICE_TOKEN_EXPORT_GID`` adds a reader group: the file becomes
+  0640 to that gid. A tenant's house previews run as the agent-bridge user,
+  not the frontend's, and read the same file through the group.
 * With no usable token the stale file is removed, so both sides fail closed
   together instead of BawtHub accepting a token llm-bawt no longer holds.
 * Unset export path = nothing to do (a bare dev run without BawtHub).
@@ -29,7 +32,9 @@ from pathlib import Path
 from .service_token import ExportResult, ServiceTokenSource, service_token_source
 
 EXPORT_UID_ENV = "BAWTHUB_SERVICE_TOKEN_EXPORT_UID"
+EXPORT_GID_ENV = "BAWTHUB_SERVICE_TOKEN_EXPORT_GID"
 _MODE = 0o600
+_GROUP_MODE = 0o640
 
 
 def export_service_token(source: ServiceTokenSource | None = None) -> ExportResult:
@@ -38,21 +43,24 @@ def export_service_token(source: ServiceTokenSource | None = None) -> ExportResu
 
 
 def publish(path: Path, token: str | None, environ: Mapping[str, str], *,
-            uid_env: str = EXPORT_UID_ENV) -> ExportResult:
+            uid_env: str = EXPORT_UID_ENV,
+            gid_env: str | None = None) -> ExportResult:
     """Write ``token`` to ``path``, or remove ``path`` when there is none.
 
     ``uid_env`` names the env var holding the reader's uid (the bridge-token
-    exports use their own, TASK-1477). Raises ``ValueError`` (bad uid, nothing
-    written) or ``OSError``; the caller reports those. Never logs.
+    exports use their own, TASK-1477); ``gid_env``, when given, names an
+    optional reader group. Raises ``ValueError`` (bad id, nothing written) or
+    ``OSError``; the caller reports those. Never logs.
 
-    Withdrawal comes before uid validation: a broken uid setting must never
+    Withdrawal comes before id validation: a broken uid setting must never
     keep a stale token on disk after the app lost the means to produce it.
     """
     if token is None:
         path.unlink(missing_ok=True)
         return ExportResult.REMOVED
     uid = _reader_uid(environ, uid_env)
-    _write_atomically(path, token, uid)
+    gid = _reader_uid(environ, gid_env) if gid_env else None
+    _write_atomically(path, token, uid, gid)
     return ExportResult.WRITTEN
 
 
@@ -65,11 +73,12 @@ def _reader_uid(environ: Mapping[str, str], uid_env: str) -> int | None:
     if not raw:
         return None
     if not raw.isdigit() or int(raw) > _MAX_UID:
-        raise ValueError(f"{uid_env} must be a numeric uid (0..{_MAX_UID})")
+        raise ValueError(f"{uid_env} must be a numeric id (0..{_MAX_UID})")
     return int(raw)
 
 
-def _write_atomically(path: Path, token: str, uid: int | None) -> None:
+def _write_atomically(path: Path, token: str, uid: int | None,
+                      gid: int | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     # mkstemp creates the file 0600 with O_EXCL, so no reader ever sees a
     # wider mode or a partial write under the final name.
@@ -79,9 +88,9 @@ def _write_atomically(path: Path, token: str, uid: int | None) -> None:
             handle.write(token + "\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.chmod(tmp, _MODE)
-        if uid is not None:
-            os.chown(tmp, uid, -1)
+        os.chmod(tmp, _MODE if gid is None else _GROUP_MODE)
+        if uid is not None or gid is not None:
+            os.chown(tmp, -1 if uid is None else uid, -1 if gid is None else gid)
         os.replace(tmp, path)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)

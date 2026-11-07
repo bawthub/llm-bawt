@@ -19,11 +19,12 @@ from .service_token import (
     service_auth,
     service_token_source,
 )
-from .token_export import EXPORT_UID_ENV, export_service_token
+from .token_export import EXPORT_GID_ENV, EXPORT_UID_ENV, export_service_token
 
 __all__ = [
     "DERIVATION_LABEL",
     "EXPORT_FILE_ENV",
+    "EXPORT_GID_ENV",
     "EXPORT_UID_ENV",
     "TOKEN_ENV",
     "TOKEN_FILE_ENV",

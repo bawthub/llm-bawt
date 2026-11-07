@@ -12,6 +12,7 @@ import httpx
 
 from llm_bawt.bawthub_auth import (
     EXPORT_FILE_ENV,
+    EXPORT_GID_ENV,
     EXPORT_UID_ENV,
     TOKEN_ENV,
     TOKEN_FILE_ENV,
@@ -93,6 +94,27 @@ def test_chowns_to_the_reader_uid(derived, target, monkeypatch):
     monkeypatch.setattr(os, "chown", lambda path, uid, gid: calls.append((uid, gid)))
     assert _export(target, **{EXPORT_UID_ENV: "1001"}) is ExportResult.WRITTEN
     assert calls == [(1001, -1)]
+
+
+def test_reader_group_makes_the_export_0640_to_that_gid(derived, target, monkeypatch):
+    calls = []
+    monkeypatch.setattr(os, "chown", lambda path, uid, gid: calls.append((uid, gid)))
+    env = {EXPORT_UID_ENV: "1001", EXPORT_GID_ENV: "1000"}
+    assert _export(target, **env) is ExportResult.WRITTEN
+    assert calls == [(1001, 1000)]
+    assert stat.S_IMODE(target.stat().st_mode) == 0o640
+
+
+def test_reader_group_alone_keeps_the_owner(derived, target):
+    assert _export(target, **{EXPORT_GID_ENV: str(os.getgid())}) is ExportResult.WRITTEN
+    assert (target.stat().st_uid, target.stat().st_gid) == (os.getuid(), os.getgid())
+    assert stat.S_IMODE(target.stat().st_mode) == 0o640
+
+
+@pytest.mark.parametrize("gid", ["bridge", "-1", str(2**32 - 1)])
+def test_bad_reader_group_refuses_to_write(derived, target, gid):
+    assert _export(target, **{EXPORT_GID_ENV: gid}) is ExportResult.FAILED
+    assert not target.exists()
 
 
 def test_chown_to_own_uid_really_applies(derived, target):
