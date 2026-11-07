@@ -79,6 +79,16 @@ that service with `up -d --no-deps`, never recreate the mansion to start a house
 Houses do not allocate themselves or write bot profiles/Redis leases. Do not
 route bots into them before the house-reader/fencing change is active.
 
+## Self-hosted tenants
+
+A tenant installed with `bawthub/deploy/bootstrap.sh` does not use the
+renderers above. Its installer writes its own house services (`house-<id>`,
+the tenant's pinned agent-bridge image, which carries `house-preview`) and a
+pool file holding only `houses`; the app checks just those rows
+(`validate_houses`). A tenant preview origin may be `http` and carry a port:
+each house publishes its Vite port on the tenant's own host. The Traefik route
+renderer still accepts only bare HTTPS origins. See `deploy/README.md` there.
+
 ## Preview frontend
 
 The private `frontend_env_file` contains the same shared frontend `DATABASE_URL`

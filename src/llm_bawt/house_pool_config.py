@@ -28,7 +28,9 @@ def _validated_pool() -> dict | None:
             raw = handle.read()
         if not raw.strip():
             return None
-        return validate_pool(json.loads(raw))
+        # The app only reads the pool; renderer-only keys (image, networks,
+        # volumes) belong to the echo-style renderers, not a tenant's file.
+        return validate_pool(json.loads(raw), renderer=False)
     except Exception:
         logger.warning("house pool file %s unreadable", path, exc_info=True)
         return None

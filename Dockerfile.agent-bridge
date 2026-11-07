@@ -168,6 +168,11 @@ RUN mkdir -p /home/bridge/.codex /home/bridge/dev /home/bridge/.claude \
 # and are unaffected by this layer.
 COPY docker/git-credential-bawthub /usr/local/bin/git-credential-bawthub
 RUN chmod 0755 /usr/local/bin/git-credential-bawthub
+# TASK-2129: a self-hosted tenant runs its houses on this same image (no
+# separate house image to pin), so the preview launcher ships here too.
+# Dockerfile.house still copies it, for house builds on an older base.
+COPY docker/house-preview /usr/local/bin/house-preview
+RUN chmod 0755 /usr/local/bin/house-preview
 
 USER bridge
 

@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from agent_bridge.house_pool import render_compose, render_routes, validate_pool
+from agent_bridge.house_pool import render_compose, render_routes, validate_houses, validate_pool
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -174,8 +174,10 @@ def test_invalid_house_ids(config, house_id):
 
 
 @pytest.mark.parametrize("origin", [
-    "http://dev1.example.test", "https://dev1.example.test/path",
-    "https://dev1.example.test:443", "https://user@dev1.example.test",
+    "https://dev1.example.test/path",
+    "https://dev1.example.test:443", "http://dev1.example.test:80",
+    "http://host.example.test:0", "http://host.example.test:99999",
+    "ftp://dev1.example.test", "https://user@dev1.example.test",
     "https://dev1.example.test?x=1", "https://dev1.example.test/#x",
     "https://dev1..example.test", "https://-dev.example.test", None,
 ])
@@ -183,6 +185,29 @@ def test_invalid_preview_origin(config, origin):
     config["houses"][0]["origin"] = origin
     with pytest.raises(ValueError):
         validate_pool(config)
+
+
+def test_tenant_pool_previews_on_ports_of_one_http_origin():
+    """TASK-2129: a self-hosted tenant ships only houses; previews are ports."""
+    tenant = {"houses": [
+        {"id": "h1", "harness": "claude-code", "origin": "http://10.0.0.20:3101", "memory": "3g"},
+        {"id": "h2", "harness": "claude-code", "origin": "http://10.0.0.20:3102/", "memory": "3g"},
+    ]}
+    houses = validate_houses(tenant)
+    assert [h["origin"] for h in houses] == ["http://10.0.0.20:3101", "http://10.0.0.20:3102"]
+    with pytest.raises(ValueError, match="image"):
+        validate_pool(tenant)  # the echo renderers still need their deployment keys
+    tenant["houses"][1]["origin"] = "http://10.0.0.20:3101"
+    with pytest.raises(ValueError, match="unique"):
+        validate_houses(tenant)
+
+
+def test_routes_refuse_ported_or_http_origins(config, template):
+    for origin in ("http://dev1.example.test", "https://dev1.example.test:8443"):
+        config["houses"][0]["origin"] = origin
+        validate_pool(config)
+        with pytest.raises(ValueError, match="bare HTTPS"):
+            render_routes(config, template)
 
 
 @pytest.mark.parametrize("memory", ["0", 0, -1, "", None, "unlimited", "0g", "4g\n"])
@@ -219,6 +244,11 @@ def test_launcher_has_no_schema_or_backend_startup():
     assert "db:push" not in script
     assert "db:migrate" not in script
     assert "uvicorn" not in script
+
+
+def test_tenant_bridge_image_ships_the_preview_launcher():
+    dockerfile = (ROOT / "Dockerfile.agent-bridge").read_text()
+    assert "COPY docker/house-preview /usr/local/bin/house-preview" in dockerfile
 
 
 def test_image_keeps_tests_separate_from_harness_environment():

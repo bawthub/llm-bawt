@@ -57,23 +57,46 @@ def _memory(value: object) -> str:
 
 
 def _origin(value: object) -> tuple[str, str]:
+    """A bare http(s) origin, optionally with a port: ``(origin, host[:port])``.
+
+    A self-hosted tenant serves each preview on a published port of its own
+    origin (TASK-2129); the Traefik route renderer accepts only bare HTTPS.
+    """
     value = _text(value, "origin")
     parsed = urlsplit(value)
+    try:
+        port = parsed.port
+    except ValueError:
+        port = -1
+    host = parsed.hostname or ""
+    netloc = f"{host}:{port}" if port else host
     if (
-        parsed.scheme != "https"
-        or not parsed.hostname
-        or not HOSTNAME.fullmatch(parsed.hostname)
-        or parsed.netloc != parsed.hostname
+        parsed.scheme not in ("http", "https")
+        or not HOSTNAME.fullmatch(host)
+        # Default ports are written bare, so one origin has one spelling.
+        or port in (-1, 0) or port == {"http": 80, "https": 443}.get(parsed.scheme)
+        or parsed.netloc != netloc
         or parsed.path not in ("", "/")
         or parsed.query
         or parsed.fragment
     ):
-        raise ValueError("origin must be a bare HTTPS hostname (no port or credentials)")
-    return f"https://{parsed.hostname}", parsed.hostname
+        raise ValueError("origin must be a bare http(s) origin, e.g. https://dev1.example.test or "
+                         "http://host:3101 (no path or credentials)")
+    return f"{parsed.scheme}://{netloc}", netloc
 
 
-def validate_pool(config: object) -> dict:
-    """Fail before rendering any services when deployment input is ambiguous."""
+def validate_houses(config: object) -> list[dict]:
+    """The pool's house rows; all a reader of the pool (the app) needs checked."""
+    return validate_pool(config, renderer=False)["houses"]
+
+
+def validate_pool(config: object, *, renderer: bool = True) -> dict:
+    """Fail before rendering any services when deployment input is ambiguous.
+
+    ``renderer=False`` skips the image/network/volume/env-file keys only the
+    echo-style renderers below use; a self-hosted tenant's installer renders
+    its own services and ships a pool file with just ``houses``.
+    """
     if not isinstance(config, dict) or config.keys() - POOL_KEYS:
         raise ValueError("pool must be an object containing only documented keys")
     houses = config.get("houses", [])
@@ -102,7 +125,7 @@ def validate_pool(config: object) -> dict:
             "memory": _memory(row.get("memory", config.get("memory"))),
         })
     # With zero houses nothing else is required and no resources are produced.
-    if houses:
+    if houses and renderer:
         for key in (
             "image", "base_image", "preview_network", "service_token_volume",
             "frontend_env_file",
@@ -197,6 +220,8 @@ def render_routes(config: object, template: dict) -> dict:
     routers = {}
     services = {}
     for house in pool["houses"]:
+        if not house["origin"].startswith("https://") or ":" in house["host"]:
+            raise ValueError("Traefik preview routes need a bare HTTPS origin (no port)")
         service_name = f"house-{house['id']}"
         for source in ("frontend", "frontend-api"):
             router = copy.deepcopy(template["http"]["routers"][source])

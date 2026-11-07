@@ -447,5 +447,10 @@ def test_pool_file_exposes_only_id_harness_and_origin(tmp_path, monkeypatch):
     monkeypatch.setenv(POOL_FILE_ENV, str(pool))
     assert configured_pool() == [{"id": "h1", "harness": "claude-code",
                                   "preview_host": "https://dev1.example.test"}]
+    # A self-hosted tenant's pool file holds only houses (TASK-2129).
+    pool.write_text(json.dumps({"houses": [
+        {"id": "h1", "harness": "claude-code", "origin": "http://10.0.0.20:3101", "memory": "3g"}]}))
+    assert configured_pool() == [{"id": "h1", "harness": "claude-code",
+                                  "preview_host": "http://10.0.0.20:3101"}]
     pool.write_text("{not json")
     assert configured_pool() is None
