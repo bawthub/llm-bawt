@@ -54,6 +54,10 @@ RUN uv sync --locked --no-dev --extra mcp --extra service --extra search
 # Runtime dirs
 RUN mkdir -p /app/.run /app/.logs /root/.config/llm-bawt
 
+# TASK-2130: the product skills the tenant agent-bridge also bakes, at the
+# same path, so the app's skill catalog and injected skills see that tree.
+COPY tenant-skills/ /opt/bawthub/skills/
+
 ENV PATH="/app/.venv/bin:$PATH" \
     TZ=America/New_York \
     PYTHONUNBUFFERED=1

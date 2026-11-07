@@ -1,0 +1,21 @@
+{
+  "source": "agent-skills",
+  "revision": "510efcbfddbb266dad07d48ecbc882dcc3fda223",
+  "dirty": false,
+  "skills": [
+    "agent-system",
+    "bawthub",
+    "bawthub-mcp",
+    "bawthub-ops",
+    "continuous-development",
+    "frontend-design",
+    "git-commits",
+    "grok-imagine-prompts",
+    "llm-bawt",
+    "peer-review",
+    "peer-review-reviewer",
+    "skill-creation",
+    "skill-maintenance",
+    "ui-ux-guidelines"
+  ]
+}
