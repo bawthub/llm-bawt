@@ -22,6 +22,8 @@ from .prompt_definitions import (  # noqa: F401
     DEFAULT_PROMPT_DEFINITIONS,
     PromptDefinition,
 )
+from .prompt_sync import DEFAULT_SHA_KEY, SEED_ACTOR, SYNC_ACTOR, SYNC_METADATA_KEY, is_following
+from .prompt_synced_defaults import body_sha256
 from .utils.config import Config, has_database_credentials
 from .utils.schema import SchemaBootstrapGuard
 
@@ -361,34 +363,50 @@ class PromptTemplateStore:
             logger.info("Seeded %s default prompt templates into DB", result["created"])
 
     def seed_defaults(self) -> dict[str, Any]:
-        """Insert built-in prompt defaults into DB when missing."""
+        """Insert missing built-in defaults; move untouched rows to new defaults.
+
+        A row "follows" its code default while its body still equals the
+        default it was seeded or last synced with (``default_sha256`` in its
+        metadata; rows never written by anyone but ``system:seed`` count as
+        following too). When the shipped default changes, a following row is
+        updated with a version entry. Customized rows are never touched; a
+        customized row whose body equals the current default starts following.
+        """
         if self.engine is None:
             raise RuntimeError("Prompt template DB unavailable")
 
         definitions = DEFAULT_PROMPT_DEFINITIONS
         global_scope_type = "global"
         global_scope_id = "*"
-        existing_keys: set[str] = set()
 
         with Session(self.engine) as session:
-            statement = select(PromptTemplate.key).where(
+            statement = select(PromptTemplate).where(
                 PromptTemplate.scope_type == global_scope_type,
                 PromptTemplate.scope_id == global_scope_id,
             )
-            existing_keys = {str(key) for key in session.exec(statement).all()}
+            existing = {str(row.key): row for row in session.exec(statement).all()}
 
             now = datetime.now(timezone.utc)
             created = 0
             skipped = 0
+            followed: list[str] = []
+            adopted: list[str] = []
             seeded_keys: list[str] = []
 
             for key, definition in definitions.items():
-                if key in existing_keys:
+                body = definition.default_body()
+                sha = body_sha256(body)
+                row = existing.get(key)
+                if row is not None:
                     skipped += 1
+                    outcome = self._follow_default(session, row, body, sha, now)
+                    if outcome == "followed":
+                        followed.append(key)
+                    elif outcome == "adopted":
+                        adopted.append(key)
                     continue
 
-                body = definition.default_body()
-                metadata = {"seeded_from": "code_default"}
+                metadata = {"seeded_from": "code_default", DEFAULT_SHA_KEY: sha}
 
                 session.add(
                     PromptTemplate(
@@ -403,7 +421,7 @@ class PromptTemplateStore:
                         if definition.required_vars
                         else None,
                         metadata_json=json.dumps(metadata),
-                        updated_by="system:seed",
+                        updated_by=SEED_ACTOR,
                         created_at=now,
                         updated_at=now,
                     )
@@ -416,23 +434,95 @@ class PromptTemplateStore:
                         version=1,
                         body=body,
                         change_note="Seeded from code default",
-                        created_by="system:seed",
+                        created_by=SEED_ACTOR,
                         created_at=now,
                     )
                 )
                 created += 1
                 seeded_keys.append(key)
 
-            if created > 0:
+            if created or followed or adopted:
                 session.commit()
 
+        if followed:
+            logger.info("Prompt rows moved to new code defaults: %s", ", ".join(followed))
         total = len(definitions)
         return {
             "created": created,
             "skipped": skipped,
             "total": total,
             "seeded_keys": seeded_keys,
+            "followed_keys": followed,
+            "adopted_keys": adopted,
         }
+
+    @staticmethod
+    def _follow_default(session: Session, row: PromptTemplate, body: str, sha: str, now: datetime) -> str | None:
+        metadata = _parse_json_dict(row.metadata_json)
+        live_sha = body_sha256(row.body)
+        if live_sha == sha:
+            if metadata.get(DEFAULT_SHA_KEY) == sha:
+                return None
+            metadata[DEFAULT_SHA_KEY] = sha
+            row.metadata_json = json.dumps(metadata)
+            session.add(row)
+            return "adopted"
+        if not is_following(row):
+            return None
+        versions = session.exec(
+            select(PromptTemplateVersion.version).where(
+                PromptTemplateVersion.key == row.key,
+                PromptTemplateVersion.scope_type == row.scope_type,
+                PromptTemplateVersion.scope_id == row.scope_id,
+            )
+        ).all()
+        metadata[DEFAULT_SHA_KEY] = sha
+        row.body = body
+        row.metadata_json = json.dumps(metadata)
+        row.updated_by = SYNC_ACTOR
+        row.updated_at = now
+        session.add(row)
+        session.add(
+            PromptTemplateVersion(
+                key=row.key,
+                scope_type=row.scope_type,
+                scope_id=row.scope_id,
+                version=max(versions, default=0) + 1,
+                body=body,
+                change_note="Followed updated code default",
+                created_by=SYNC_ACTOR,
+                created_at=now,
+            )
+        )
+        return "followed"
+
+    def set_sync_class(
+        self, key: str, value: str | None, scope_type: str = "global", scope_id: str | None = None
+    ) -> PromptTemplate | None:
+        """Set or clear a row's sync class without writing a new body version."""
+        if self.engine is None:
+            raise RuntimeError("Prompt template DB unavailable")
+        normalized_type, normalized_id = _normalize_scope(scope_type, scope_id)
+        with Session(self.engine) as session:
+            row = session.exec(
+                select(PromptTemplate).where(
+                    PromptTemplate.key == key,
+                    PromptTemplate.scope_type == normalized_type,
+                    PromptTemplate.scope_id == normalized_id,
+                )
+            ).first()
+            if row is None:
+                return None
+            metadata = _parse_json_dict(row.metadata_json)
+            if value is None:
+                metadata.pop(SYNC_METADATA_KEY, None)
+            else:
+                metadata[SYNC_METADATA_KEY] = value
+            row.metadata_json = json.dumps(metadata) if metadata else None
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+            return row
 
     def get_exact(self, key: str, scope_type: str = "global", scope_id: str | None = None) -> PromptTemplate | None:
         if self.engine is None:

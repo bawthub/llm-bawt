@@ -136,7 +136,7 @@ package-dir = {"" = "src"}
 include-package-data = true
 
 [tool.setuptools.package-data]
-llm_bawt = ["*.yaml"]
+llm_bawt = ["*.yaml", "prompt_defaults/synced/*.txt", "prompt_defaults/synced/*.json"]
 
 [build-system]
 requires = ["setuptools>=61.0"]

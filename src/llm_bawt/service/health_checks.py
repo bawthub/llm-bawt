@@ -156,6 +156,32 @@ def check_system_events(service) -> dict:
     return _check("system.events", OK, f"{count} event(s) awaiting fan-out")
 
 
+#: Product prompt drift is exported by a daily sync; older drift means it stalled.
+PROMPT_DRIFT_STALE_SECONDS = 48 * 3600
+
+
+def check_prompt_sync(config: Any, now: datetime | None = None) -> dict:
+    """Live product prompt edits not yet shipped as code defaults (TASK-2127)."""
+    from ..prompt_registry import PromptResolver
+    from ..prompt_sync import compute_drift
+
+    resolver = PromptResolver(config)
+    if resolver.store.engine is None:
+        return _check("prompts.sync", DEGRADED, "prompt template DB unavailable")
+    drift = compute_drift(resolver.store.list_rows(), resolver.definitions())
+    if not drift:
+        return _check("prompts.sync", OK, "product prompts match shipped defaults")
+    now = now or datetime.now(timezone.utc)
+    ages = [
+        (now - datetime.fromisoformat(item.updated_at)).total_seconds()
+        for item in drift if item.updated_at
+    ]
+    oldest = max(ages, default=0.0)
+    keys = ", ".join(item.key for item in drift[:5]) + (" …" if len(drift) > 5 else "")
+    reason = f"{len(drift)} product prompt(s) differ from shipped defaults, oldest {int(oldest // 3600)}h: {keys}"
+    return _check("prompts.sync", DEGRADED if oldest > PROMPT_DRIFT_STALE_SECONDS else OK, reason)
+
+
 def collect(config: Any, ops_store, ops_service, *, service=None) -> dict:
     from .runtime_health import RuntimeHealthChecks
 
@@ -169,6 +195,7 @@ def collect(config: Any, ops_store, ops_service, *, service=None) -> dict:
         ("ops.executors", lambda: check_ops_executors(ops_service)),
         ("ops.queue", lambda: [check_ops_queue(ops_store)]),
         ("bridge_gate", lambda: bridge_gates().health_checks()),
+        ("prompts.sync", lambda: [check_prompt_sync(config)]),
     ]
     if service is not None:
         runtime = RuntimeHealthChecks(service)

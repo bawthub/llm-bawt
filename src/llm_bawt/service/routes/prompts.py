@@ -224,6 +224,38 @@ def seed_prompt_defaults():
     return PromptTemplateSeedResponse(**result)
 
 
+@router.get("/v1/prompts/sync/drift", tags=["Admin"])
+def prompt_sync_drift(include_body: bool = Query(default=False)):
+    """Product prompt rows whose live body is not the shipped default."""
+    from ...prompt_sync import drift_report
+
+    service = get_service()
+    resolver = PromptResolver(service.config)
+    if resolver.store.engine is None:
+        raise HTTPException(status_code=503, detail="Prompt template DB unavailable")
+    return drift_report(resolver.store.list_rows(), resolver.definitions(), include_body=include_body)
+
+
+@router.put("/v1/prompts/{key}/sync-class", tags=["Admin"])
+def set_prompt_sync_class(key: str, request: dict[str, Any]):
+    """Classify a live prompt row as ``product`` or ``install`` (or clear with null)."""
+    from ...prompt_sync import SYNC_CLASSES, classify
+
+    value = request.get("sync")
+    if value is not None and value not in SYNC_CLASSES:
+        raise HTTPException(status_code=400, detail=f"sync must be one of {list(SYNC_CLASSES)} or null")
+    service = get_service()
+    resolver = PromptResolver(service.config)
+    if resolver.store.engine is None:
+        raise HTTPException(status_code=503, detail="Prompt template DB unavailable")
+    row = resolver.store.set_sync_class(
+        key, value, scope_type=str(request.get("scope_type") or "global"), scope_id=request.get("scope_id")
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No stored prompt row for {key}")
+    return {"key": key, "sync": classify(row), "explicit": value}
+
+
 @router.get("/v1/prompts/{key}/versions", response_model=PromptTemplateVersionsResponse, tags=["Admin"])
 def list_prompt_versions(
     key: str,

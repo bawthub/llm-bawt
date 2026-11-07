@@ -92,6 +92,7 @@ from .prompt_default_loaders import (
 )
 
 from .ops.gate_receipt import DEFAULT_GATE_RECEIPT, GATE_RECEIPT_KEY
+from .prompt_synced_defaults import load_manifest, synced_body
 
 COMPACT_SUMMARY_KEY = "agents.compaction_summary"
 
@@ -109,6 +110,9 @@ class PromptDefinition:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def default_body(self) -> str:
+        synced = synced_body(self.key)
+        if synced is not None:
+            return synced
         if self.loader is None:
             return ""
         return self.loader()
@@ -1015,3 +1019,21 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
         metadata={"notes": "Target text is encoded as a JSON string and inserted only after one-pass variable rendering."},
     ),
 }
+
+
+def _register_synced_definitions() -> None:
+    """Add manifest-only synced prompts (no Python definition) as built-ins."""
+    for key, entry in load_manifest().items():
+        if key in DEFAULT_PROMPT_DEFINITIONS or synced_body(key) is None:
+            continue
+        DEFAULT_PROMPT_DEFINITIONS[key] = PromptDefinition(
+            key=key,
+            title=str(entry.get("title") or key),
+            category=str(entry.get("category") or "custom"),
+            required_vars=tuple(str(v) for v in entry.get("required_vars") or ()),
+            format=str(entry.get("format") or "plain_text"),
+            metadata=dict(entry.get("metadata") or {}),
+        )
+
+
+_register_synced_definitions()
