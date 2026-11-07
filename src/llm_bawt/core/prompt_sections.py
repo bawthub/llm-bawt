@@ -182,6 +182,13 @@ class PromptSectionsMixin:
                 "agents.global_prompt", scope_type="bot", scope_id=self.bot_id
             )
             agent_global_body = resolved.body if resolved else None
+            # TASK-2127: install-only notes ride right after the shared prompt.
+            notes = self.config_resolver.resolve_body(
+                "agents.install_notes", scope_type="bot", scope_id=self.bot_id
+            )
+            if notes and notes.body and notes.body.strip():
+                agent_global_body = "\n\n".join(
+                    part for part in (agent_global_body, notes.body.strip()) if part)
             if agent_global_body:
                 builder.add_section(
                     "agent_global_prompt",

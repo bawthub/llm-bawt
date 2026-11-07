@@ -379,6 +379,21 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
             ),
         },
     ),
+    "agents.install_notes": PromptDefinition(
+        key="agents.install_notes",
+        title="Agent Install Notes",
+        category="install",
+        required_vars=(),
+        loader=lambda: "",
+        metadata={
+            "notes": (
+                "Install-specific agent rules (people, hosts, protected systems), "
+                "appended after the agent global prompt wherever that prompt is "
+                "injected. Empty by default and never exported by the prompt sync. "
+                "TASK-2127."
+            ),
+        },
+    ),
     "agents.global_prompt": PromptDefinition(
         key="agents.global_prompt",
         title="Agent Global System Prompt",

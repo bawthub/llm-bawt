@@ -33,7 +33,7 @@ SYNC_METADATA_KEY = "sync"
 PRODUCT = "product"
 INSTALL = "install"
 SYNC_CLASSES = (PRODUCT, INSTALL)
-INSTALL_CATEGORIES = frozenset({"persona"})
+INSTALL_CATEGORIES = frozenset({"persona", "install"})
 SEED_ACTOR = "system:seed"
 SYNC_ACTOR = "system:sync"
 #: Writers whose rows still carry a code default (rows predating the hash).
@@ -149,21 +149,38 @@ def _item_dict(item: DriftItem, include_body: bool) -> dict[str, Any]:
     return data
 
 
-def export_report(report: dict[str, Any], root: Path) -> dict[str, Any]:
+def install_terms_in(body: str, terms: Iterable[str]) -> list[str]:
+    """Install-specific terms (whole words, case-sensitive) found in ``body``."""
+    import re
+
+    return sorted({t for t in terms if t and re.search(rf"(?<!\w){re.escape(t)}(?!\w)", body)})
+
+
+def export_report(
+    report: dict[str, Any], root: Path, install_terms: Iterable[str] = ()
+) -> dict[str, Any]:
     """Write a drift report (with bodies) as synced default files under ``root``.
 
     ``root`` is ``src/llm_bawt/prompt_defaults/synced`` of a source checkout,
-    never the running install's package directory.
+    never the running install's package directory. A body naming any
+    ``install_terms`` (bot or user names, hosts) is held, not written: reword
+    the live row or mark it ``install`` first.
     """
+    terms = [str(t) for t in install_terms if str(t).strip()]
     root.mkdir(parents=True, exist_ok=True)
     manifest = load_manifest(root)
     written: list[str] = []
+    held: dict[str, list[str]] = {}
     manifest_changed = False
     for item in report.get("drift", []):
         body = item.get("body")
         if body is None:
             raise ValueError(f"drift item {item.get('key')!r} has no body; request include_body")
         key = str(item["key"])
+        found = install_terms_in(body, terms)
+        if found:
+            held[key] = found
+            continue
         body_path(key, root).write_text(body, encoding="utf-8")
         written.append(key)
         if item.get("kind") == "new":
@@ -176,7 +193,8 @@ def export_report(report: dict[str, Any], root: Path) -> dict[str, Any]:
             manifest_changed = True
     if manifest_changed:
         write_manifest(manifest, root)
-    return {"written": sorted(written), "count": len(written), "root": str(root), "suffix": BODY_SUFFIX}
+    return {"written": sorted(written), "count": len(written), "held": held,
+            "root": str(root), "suffix": BODY_SUFFIX}
 
 
 def _fetch_report(api: str) -> dict[str, Any]:
@@ -185,6 +203,15 @@ def _fetch_report(api: str) -> dict[str, Any]:
 
     with urlopen(f"{api.rstrip('/')}/v1/prompts/sync/drift?include_body=true", timeout=30) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def _fetch_bot_terms(api: str) -> list[str]:
+    """Bot slugs and display names from the live install (always install-specific)."""
+    from urllib.request import urlopen
+
+    with urlopen(f"{api.rstrip('/')}/v1/bots", timeout=30) as response:
+        bots = json.loads(response.read().decode("utf-8")).get("data", [])
+    return [str(v) for bot in bots for v in (bot.get("slug"), bot.get("name")) if v]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -199,14 +226,24 @@ def main(argv: list[str] | None = None) -> int:
         "--root", required=True, type=Path,
         help="prompt_defaults/synced directory of the source checkout to write",
     )
+    sub.choices["export"].add_argument(
+        "--install-term", action="append", default=[],
+        help="extra install-specific term (user name, host) that must not ship; repeatable."
+             " PROMPT_SYNC_INSTALL_TERMS (comma-separated) adds more",
+    )
     args = parser.parse_args(argv)
     report = _fetch_report(args.api)
     if args.command == "check":
         print(json.dumps({k: v for k, v in report.items() if k != "drift"} | {
             "keys": [item["key"] for item in report.get("drift", [])]}, indent=2))
         return 0 if report.get("in_sync") else 1
-    print(json.dumps(export_report(report, args.root), indent=2))
-    return 0
+    import os
+
+    terms = _fetch_bot_terms(args.api) + list(args.install_term) + [
+        t.strip() for t in os.environ.get("PROMPT_SYNC_INSTALL_TERMS", "").split(",")]
+    result = export_report(report, args.root, terms)
+    print(json.dumps(result, indent=2))
+    return 4 if result["held"] else 0
 
 
 if __name__ == "__main__":

@@ -83,6 +83,24 @@ def test_export_writes_bodies_and_manifest(tmp_path: Path) -> None:
     assert manifest["brand.new"]["required_vars"] == ["thing"]
 
 
+def test_export_holds_bodies_naming_install_terms(tmp_path: Path) -> None:
+    rows = [_row("clean", "Ask the user first."), _row("named", "Ask Pat first; never touch Zed."),
+            _row("partial", "Patterns and Zedonk are fine.")]
+    result = export_report(drift_report(rows, {}, include_body=True), tmp_path, ["Pat", "Zed", " "])
+    assert result["written"] == ["clean", "partial"]
+    assert result["held"] == {"named": ["Pat", "Zed"]}
+    assert not (tmp_path / "named.txt").exists()
+    assert "named" not in load_manifest(tmp_path)
+
+
+def test_install_notes_prompt_is_install_only() -> None:
+    from llm_bawt.prompt_definitions import DEFAULT_PROMPT_DEFINITIONS
+
+    definition = DEFAULT_PROMPT_DEFINITIONS["agents.install_notes"]
+    assert definition.default_body() == ""
+    assert classify(_row("agents.install_notes", "Never touch Zed.", category="install")) == INSTALL
+
+
 def test_export_rejects_report_without_bodies(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         export_report(drift_report([_row("brand.new", "N")], {}), tmp_path)
@@ -214,3 +232,26 @@ def test_save_committed_during_seed_pass_is_not_overwritten(store, monkeypatch, 
     assert "k.follow" not in result["followed_keys"]
     assert _bodies(s)["k.follow"].body == "TENANT CUSTOMIZATION"
     assert [v.body for v in s.list_versions("k.follow")][0] == "TENANT CUSTOMIZATION"
+
+
+@pytest.mark.parametrize(("notes", "expected"), [
+    ("Never touch Zed.\n", "Shared rules.\n\nNever touch Zed."),
+    ("   ", "Shared rules."),
+    (None, "Shared rules."),
+])
+def test_install_notes_follow_the_agent_global_prompt(notes, expected) -> None:
+    from types import SimpleNamespace
+
+    from llm_bawt.core.prompt_builder import PromptBuilder
+    from llm_bawt.core.prompt_sections import PromptSectionsMixin
+
+    bodies = {"agents.global_prompt": "Shared rules.", "agents.install_notes": notes}
+    probe = SimpleNamespace(
+        bot_id="b1",
+        _resolve_setting=lambda name, default: True,
+        config_resolver=SimpleNamespace(resolve_body=lambda key, **_: (
+            SimpleNamespace(body=bodies[key], source="db") if bodies[key] is not None else None)),
+    )
+    builder = PromptBuilder()
+    PromptSectionsMixin._sec_agent_global_prompt(probe, builder, "hi")
+    assert builder.get_section("agent_global_prompt").content == expected
