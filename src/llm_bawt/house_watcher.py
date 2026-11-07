@@ -281,8 +281,13 @@ class HouseWatcher:
                         await self._ensure_flags(client)
                         # Two patterns: two confirmations per (re)subscribe.
                         # The second rereads nothing new, so it emits nothing.
-                        transitions = self.states.reseed(await self._read_leases(client))
-                        previews = self.reseed_previews(await read_previews(client))
+                        # Read everything before touching either baseline: a
+                        # failed read must leave both intact so the next
+                        # subscription still reports what changed.
+                        leases = await self._read_leases(client)
+                        current_previews = await read_previews(client)
+                        transitions = self.states.reseed(leases)
+                        previews = self.reseed_previews(current_previews)
                         # The first read only learns the pool; later ones report changes.
                         if not first:
                             await self._emit(transitions)

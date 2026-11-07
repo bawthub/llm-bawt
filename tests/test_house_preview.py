@@ -198,6 +198,72 @@ def test_reseed_reports_previews_changed_while_disconnected():
         ("h1", None), ("h3", {"up": False})]
 
 
+def test_failed_preview_read_on_reconnect_does_not_swallow_lease_transitions(monkeypatch):
+    """A lease vanishes while disconnected; the first resubscribe's preview read
+    fails. The next successful resubscribe must still report the house down."""
+    import redis.asyncio as aioredis
+
+    class PubSub:
+        def __init__(self, last):
+            self.last = last
+
+        async def psubscribe(self, *patterns):
+            pass
+
+        async def listen(self):
+            yield {"type": "psubscribe"}
+            if self.last:
+                raise asyncio.CancelledError()
+            raise OSError("disconnect")
+
+        async def aclose(self):
+            pass
+
+    class Client:
+        connection_pool = SimpleNamespace(connection_kwargs={"db": 0})
+
+        def __init__(self, last):
+            self.last = last
+
+        def pubsub(self):
+            return PubSub(self.last)
+
+        async def aclose(self):
+            pass
+
+    watcher = hw.HouseWatcher(SimpleNamespace(REDIS_URL="redis://offline"))
+    clients = iter([Client(False), Client(False), Client(True)])
+    leases = iter([{("h1", "claude-code"): "1"}, {}, {}])
+    reads = {"n": 0}
+    sent: list = []
+
+    async def nothing(*_):
+        return None
+
+    async def read_leases(_):
+        return next(leases)
+
+    async def read_previews(_):
+        reads["n"] += 1
+        if reads["n"] == 2:
+            raise TimeoutError("preview scan timed out")
+        return {}
+
+    async def emit(transitions):
+        sent.extend(transitions)
+
+    monkeypatch.setattr(watcher, "_ensure_flags", nothing)
+    monkeypatch.setattr(watcher, "_read_leases", read_leases)
+    monkeypatch.setattr(watcher, "_emit", emit)
+    monkeypatch.setattr(aioredis, "from_url", lambda *a, **k: next(clients))
+    monkeypatch.setattr(hw, "read_previews", read_previews)
+    monkeypatch.setattr(hw.asyncio, "sleep", nothing)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(watcher.run())
+    assert ("h1", "up", "down") in sent
+
+
 def test_malformed_preview_value_is_ignored():
     assert hw.parse_preview("not json") is None and hw.parse_preview("[1]") is None
 
