@@ -276,7 +276,7 @@ services:
       - PYTHONPYCACHEPREFIX=/tmp/llm-bawt-pycache
       # TASK-2134: keep uv's cache on the dev filesystem so task-worktree
       # .venvs reflink from it instead of full copies off the overlay.
-      - UV_CACHE_DIR=${BRIDGE_UV_CACHE_DIR:-/home/bridge/dev/.uv-cache}
+      - UV_CACHE_DIR=/home/bridge/dev/.uv-cache
       - UV_LINK_MODE=clone
       - LLM_BAWT_API_URL=http://app:8642
       # Override SERVICE_HOST inherited from .env (which is 0.0.0.0 — meant

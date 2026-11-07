@@ -83,6 +83,7 @@ _TZ = re.compile(r"[A-Za-z0-9_+-]{1,64}(?:/[A-Za-z0-9_+-]{1,64}){0,3}")
 _HOSTNAME = re.compile(r"[A-Za-z0-9.-]{0,253}")
 BRIDGE_NODE_PRELOAD = "/usr/local/libexec/bridge-node-check-preload.cjs"
 BRIDGE_NODE_OPTIONS = f"--require={BRIDGE_NODE_PRELOAD}"
+BRIDGE_UV_CACHE_DIR = "/home/bridge/dev/.uv-cache"
 RESERVED_ENV = frozenset({
     "ENV", "BASH_ENV", "SHELLOPTS", "BASHOPTS", "IFS", "CDPATH", "GLOBIGNORE", "PS1", "PS2", "PS3", "PS4",
     "PROMPT_COMMAND", "HOME", "PATH", "SHELL", "TMPDIR", "TERMINFO", "TERMINFO_DIRS", "HOSTALIASES",
@@ -153,6 +154,12 @@ PRODUCT_ENV = {
     # lock: 0/false would let `uv run` resolve afresh, so they stay refused.
     "UV_COMPILE_BYTECODE": lambda v, _m: v in ("0", "1", "true", "false"),
     "UV_LOCKED": lambda v, _m: v in ("1", "true"),
+    # TASK-2134 (agent bridge): uv's cache on the dev filesystem so task
+    # worktree venvs reflink instead of copying. Exactly this path: it sits on
+    # the bridge's writable data mount, beside venvs and source the bots can
+    # already write, so it adds no write surface. Any other value is refused.
+    "UV_CACHE_DIR": lambda v, _m: v == BRIDGE_UV_CACHE_DIR,
+    "UV_LINK_MODE": lambda v, _m: v == "clone",
     "HOSTNAME": lambda v, _m: bool(_HOSTNAME.fullmatch(v)),
     "LANG": _locale,
     "TZ": lambda v, _m: bool(_TZ.fullmatch(v)),
