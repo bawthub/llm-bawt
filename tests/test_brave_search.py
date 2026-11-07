@@ -6,7 +6,18 @@ import httpx
 import pytest
 
 from llm_bawt.search.base import SearchError, SearchProvider
+from llm_bawt.search import brave_client
 from llm_bawt.search.brave_client import BRAVE_API_BASE, BraveSearchClient, is_brave_available
+
+
+@pytest.fixture(autouse=True)
+def _no_pacing_waits(monkeypatch):
+    """Unit tests don't wait out Brave's 1/s window; sleeps are recorded instead."""
+    slept: list[float] = []
+    brave_client._PACER.reset(0.0)
+    monkeypatch.setattr(brave_client, "_sleep", slept.append)
+    yield slept
+    brave_client._PACER.reset()
 
 
 class TestBraveSearchClient:
@@ -213,3 +224,71 @@ class TestBraveAvailability:
     def test_is_brave_available(self):
         """httpx should always be available."""
         assert is_brave_available() is True
+
+
+FREE = {"x-ratelimit-policy": "1;w=1, 2000;w=2592000", "x-ratelimit-limit": "1, 2000"}
+
+
+def _brave_sequence(*answers) -> tuple[BraveSearchClient, list[httpx.Request]]:
+    """A client whose transport replays ``(status, headers)`` answers in order."""
+    seen: list[httpx.Request] = []
+    queue = list(answers)
+
+    def handler(request):
+        seen.append(request)
+        status, headers = queue.pop(0)
+        body = {"web": {"results": [{"title": "t", "url": "https://e.x"}]}} if status == 200 else {
+            "error": {"code": "RATE_LIMITED"}}
+        return httpx.Response(status, json=body, headers=headers)
+
+    client = BraveSearchClient(api_key="test-key")
+    client._client = httpx.Client(base_url=BRAVE_API_BASE, transport=httpx.MockTransport(handler))
+    return client, seen
+
+
+class TestBravePacing:
+    """TASK-2139: Free plan allows 1 request/second; pace instead of failing."""
+
+    def test_concurrent_calls_are_spaced_by_the_interval(self, monkeypatch):
+        import threading
+        import time as real_time
+        monkeypatch.setattr(brave_client, "_sleep", real_time.sleep)
+        pacer = brave_client._Pacer(0.2)
+        starts: list[float] = []
+        threads = [threading.Thread(target=lambda: (pacer.wait(), starts.append(real_time.monotonic())))
+                   for _ in range(3)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        starts.sort()
+        assert all(b - a >= 0.18 for a, b in zip(starts, starts[1:]))
+
+    def test_the_interval_is_learned_from_the_policy_header(self):
+        client, _ = _brave_sequence((200, FREE))
+        client.search("q")
+        assert brave_client._PACER.interval == pytest.approx(1.05)
+
+    def test_a_per_second_429_is_retried_once_after_the_reset(self, _no_pacing_waits):
+        limited = {**FREE, "x-ratelimit-remaining": "0, 1931", "x-ratelimit-reset": "1, 1987654"}
+        ok = {**FREE, "x-ratelimit-remaining": "0, 1930", "x-ratelimit-reset": "1, 1987653"}
+        client, seen = _brave_sequence((429, limited), (200, ok))
+        assert [r.title for r in client.search("q")] == ["t"]
+        assert len(seen) == 2
+        assert max(_no_pacing_waits) >= 1.0
+
+    def test_a_second_per_second_429_fails(self):
+        limited = {**FREE, "x-ratelimit-remaining": "0, 1931", "x-ratelimit-reset": "1, 1987654"}
+        client, seen = _brave_sequence((429, limited), (429, limited))
+        with pytest.raises(SearchError, match="rate limit exceeded"):
+            client.search("q")
+        assert len(seen) == 2
+
+    def test_monthly_exhaustion_fails_at_once_and_says_when(self):
+        spent = {**FREE, "x-ratelimit-remaining": "0, 0", "x-ratelimit-reset": "1, 1987654"}
+        client, seen = _brave_sequence((429, spent))
+        with pytest.raises(SearchError) as caught:
+            client.search("q")
+        assert len(seen) == 1
+        assert caught.value.status_code == 429
+        assert str(caught.value) == "Brave Search's monthly quota is used up (HTTP 429). It resets in about 23 days."

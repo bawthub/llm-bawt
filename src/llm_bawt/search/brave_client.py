@@ -1,6 +1,10 @@
 """Brave Search client implementation."""
 
 import logging
+import re
+import threading
+import time
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -18,6 +22,95 @@ _KNOWN_CODES = frozenset({
     "SUBSCRIPTION_TOKEN_INVALID", "RATE_LIMITED", "OPTION_NOT_IN_PLAN",
     "VALIDATION", "RESOURCE_NOT_FOUND", "UNAUTHORIZED", "FORBIDDEN",
 })
+
+
+DEFAULT_INTERVAL = 1.05  # Free plan: 1 request per 1-second window, plus margin
+_MARGIN = 0.05
+_MAX_RETRY_DELAY = 2.0
+_sleep = time.sleep  # indirection so tests can record waits
+
+
+@dataclass(frozen=True)
+class _RateLimits:
+    """Brave's ``x-ratelimit-*`` headers: comma lists, shortest window first.
+
+    e.g. policy ``1;w=1, 2000;w=2592000``, remaining ``0, 1931``,
+    reset ``1, 1987654`` (seconds until each window resets).
+    """
+
+    policy: tuple[tuple[int, int], ...] = ()
+    remaining: tuple[int, ...] = ()
+    reset: tuple[int, ...] = ()
+
+    @classmethod
+    def from_headers(cls, headers: Any) -> "_RateLimits":
+        if not isinstance(headers, (httpx.Headers, dict)):
+            return cls()
+
+        def ints(name: str) -> tuple[int, ...]:
+            try:
+                return tuple(int(v.strip()) for v in str(headers.get(name, "")).split(",") if v.strip())
+            except ValueError:
+                return ()
+
+        policy = []
+        for part in str(headers.get("x-ratelimit-policy", "")).split(","):
+            m = re.fullmatch(r"\s*(\d+)\s*;\s*w\s*=\s*(\d+)\s*", part)
+            if m:
+                policy.append((int(m.group(1)), int(m.group(2))))
+        return cls(tuple(policy), ints("x-ratelimit-remaining"), ints("x-ratelimit-reset"))
+
+    def interval(self) -> float | None:
+        """Spacing for the shortest window, or None when not advertised."""
+        if not self.policy:
+            return None
+        limit, window = self.policy[0]
+        return window / limit + _MARGIN if limit > 0 and window <= 60 else None
+
+    def monthly_exhausted(self) -> bool:
+        return len(self.remaining) > 1 and any(r <= 0 for r in self.remaining[1:])
+
+    def retryable(self) -> bool:
+        return not self.monthly_exhausted()
+
+    def second_reset(self) -> float:
+        base = self.reset[0] if self.reset else DEFAULT_INTERVAL
+        return min(max(float(base), 0.0) + _MARGIN, _MAX_RETRY_DELAY)
+
+
+class _Pacer:
+    """Process-wide spacing of Brave calls: one slot per interval, in order."""
+
+    def __init__(self, interval: float = DEFAULT_INTERVAL):
+        self.interval = interval
+        self._lock = threading.Lock()
+        self._next = 0.0
+
+    def wait(self) -> None:
+        with self._lock:
+            now = time.monotonic()
+            start = max(now, self._next)
+            self._next = start + self.interval
+        if start > now:
+            _sleep(start - now)
+
+    def defer(self, delay: float) -> None:
+        """Push the next slot out to at least ``delay`` seconds from now."""
+        with self._lock:
+            self._next = max(self._next, time.monotonic() + delay)
+
+    def learn(self, limits: _RateLimits) -> None:
+        interval = limits.interval()
+        if interval is not None:
+            self.interval = interval
+
+    def reset(self, interval: float = DEFAULT_INTERVAL) -> None:
+        with self._lock:
+            self.interval = interval
+            self._next = 0.0
+
+
+_PACER = _Pacer()
 
 
 class BraveSearchClient(SearchClient):
@@ -74,9 +167,21 @@ class BraveSearchClient(SearchClient):
             logger.error("Brave API key not configured")
             raise SearchError(self.PROVIDER, "Brave Search has no API key. Connect it in Settings → Providers.")
         try:
-            response = self._get_client().get(path, params=params)
-            response.raise_for_status()
-            return response.json()
+            for attempt in range(2):
+                _PACER.wait()
+                response = self._get_client().get(path, params=params)
+                limits = _RateLimits.from_headers(getattr(response, "headers", None))
+                _PACER.learn(limits)
+                if response.status_code == 429 and attempt == 0 and limits.retryable():
+                    delay = limits.second_reset()
+                    logger.info("Brave per-second limit hit; retrying once in %.2fs", delay)
+                    _PACER.defer(delay)
+                    continue
+                if response.status_code == 429 and limits.monthly_exhausted():
+                    raise _quota_error(limits)
+                response.raise_for_status()
+                return response.json()
+            raise AssertionError("unreachable")  # pragma: no cover
         except httpx.HTTPStatusError as e:
             raise _status_error(e.response) from None
         except httpx.RequestError as e:
@@ -216,6 +321,20 @@ def _status_error(response: httpx.Response) -> SearchError:
         logger.error("Brave search HTTP error (%s)", detail)
         message = f"Brave Search failed ({detail})."
     return SearchError(SearchProvider.BRAVE, message, status_code=status)
+
+
+def _quota_error(limits: _RateLimits) -> SearchError:
+    """The plan's monthly quota is used up: say so and when it resets."""
+    when = ""
+    if len(limits.reset) > 1:
+        days = limits.reset[1] / 86400
+        when = " It resets today." if days < 1 else f" It resets in about {round(days)} day{'s' if round(days) != 1 else ''}."
+    logger.warning("Brave monthly quota exhausted")
+    return SearchError(
+        SearchProvider.BRAVE,
+        f"Brave Search's monthly quota is used up (HTTP 429).{when}",
+        status_code=429,
+    )
 
 
 def is_brave_available() -> bool:
