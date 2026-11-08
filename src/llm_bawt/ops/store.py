@@ -33,6 +33,7 @@ from .models import (EXECUTOR_DOCKER, EXECUTOR_RELEASE, JOB_ACCEPTED, JOB_DISPAT
                      OpsOperationRevision)
 from .quiesce_settings import validate_quiesce_settings
 from .operation_revision import OperationChanged, changed_reason
+from .sequence import initial_ledger, interrupted, read_ledger
 from .worker_slots import UNRETIRED_GATE_SLOT
 from .gate_history import gate_plan_key, migrate_gate_history
 from .validation import canonical_json, validate_catalog
@@ -508,13 +509,11 @@ class OpsStore:
                 fence(session)
             snapshot = json.loads(invocation_snapshot_json) if invocation_snapshot_json else {}
             if is_sequence_snapshot(snapshot):
-                from .sequence import initial_ledger, read_ledger
-
                 row.sequence_json = canonical_json(read_ledger(initial_ledger(snapshot)))
             operations = lock_snapshot_operations(session.connection(), snapshot, operation_slug=operation.slug)
             reason = changed_reason(operation.to_api(), operations[operation.slug])
-            reason = reason or snapshot_changed_reason(snapshot, operations,
-                                                       require_enabled=is_sequence_snapshot(snapshot))
+            if is_sequence_snapshot(snapshot):
+                reason = reason or snapshot_changed_reason(snapshot, operations, require_enabled=True)
             if reason:
                 raise OperationChanged(reason)
             session.add(row)
@@ -691,8 +690,6 @@ class OpsStore:
         return self._transition(job_id, (JOB_DISPATCHING, JOB_ACCEPTED), {"state": JOB_RUNNING, "started_at": started_at or _utcnow()})
 
     def mark_sequence(self, job_id, ledger):
-        from .sequence import read_ledger
-
         return self._transition(job_id, _OPEN_STATES, {"sequence_json": canonical_json(read_ledger(ledger))})
 
     def mark_terminal(self, job_id, *, state, exit_code=None, output_tail=None, error_text=None, started_at=None,
@@ -704,16 +701,12 @@ class OpsStore:
         if started_at is not None:
             values["started_at"] = started_at
         if sequence is not None:
-            from .sequence import read_ledger
-
             values["sequence_json"] = canonical_json(read_ledger(sequence))
         elif state != JOB_SUCCEEDED:
             # Admission/quiesce/preflight can end a parent before a worker exists.
             # Those callbacks still carry every step, all explicitly unsubmitted.
             job = self.get_job(job_id)
             if job and job.sequence_json:
-                from .sequence import interrupted, read_ledger
-
                 ledger = read_ledger(json.loads(job.sequence_json))
                 values["sequence_json"] = canonical_json(interrupted(
                     ledger, error_text or state, unknown=state in ("lost", "timed_out")))
