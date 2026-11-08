@@ -18,6 +18,7 @@ import pytest
 from fastapi import HTTPException
 
 from llm_bawt.service.http_errors import internal_error
+from llm_bawt.service.routes import history_search
 from llm_bawt.service.routes.memory import get_memory_stats
 
 SERVICE_ROOT = Path(__file__).resolve().parents[1] / "src" / "llm_bawt" / "service"
@@ -50,37 +51,53 @@ def _unnarrowed_nodes(node: ast.AST, name: str):
         yield from _unnarrowed_nodes(child, name)
 
 
+BROAD = {"Exception", "BaseException"}
+
+
+def _broad_scopes(tree: ast.AST):
+    """(scope, name) pairs where ``name`` may hold any exception.
+
+    Catch-all ``except`` handlers, plus helpers taking an ``Exception``-typed
+    parameter, since a route can delegate its catch-all to one of those.
+    """
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ExceptHandler) and node.name:
+            if (ast.unparse(node.type) if node.type else "BaseException") in BROAD:
+                yield node, node.name
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for arg in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]:
+                if arg.annotation is not None and ast.unparse(arg.annotation) in BROAD:
+                    yield node, arg.arg
+
+
 def _catch_all_echo_sites(root: Path = SERVICE_ROOT) -> list[str]:
-    """``except Exception``/bare handlers raising HTTPException(detail=<uses exc text>)."""
-    sites = []
+    """Catch-all scopes raising HTTPException(detail=<uses the exception's text>)."""
+    sites = set()
     for path in sorted(root.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
-        for handler in ast.walk(tree):
-            if not isinstance(handler, ast.ExceptHandler) or not handler.name:
-                continue
-            caught = ast.unparse(handler.type) if handler.type else "BaseException"
-            if caught not in {"Exception", "BaseException"}:
-                continue
-            for node in _unnarrowed_nodes(handler, handler.name):
+        for scope, name in _broad_scopes(tree):
+            for node in _unnarrowed_nodes(scope, name):
                 if not (isinstance(node, ast.Call) and ast.unparse(node.func).endswith("HTTPException")):
                     continue
                 detail = next((k.value for k in node.keywords if k.arg == "detail"), None)
                 if detail is None:
                     continue
-                # ``type(exc).__name__`` is safe; any other use of the bound name is not.
+                # ``type(exc)`` and the type-only ``internal_error_detail(exc)`` are
+                # safe; any other use of the bound name is not.
                 uses = [
                     n for n in ast.walk(detail)
-                    if isinstance(n, ast.Name) and n.id == handler.name
+                    if isinstance(n, ast.Name) and n.id == name
                 ]
                 type_only = sum(
                     1 for n in ast.walk(detail)
-                    if isinstance(n, ast.Call) and ast.unparse(n.func) == "type"
-                    and len(n.args) == 1 and isinstance(n.args[0], ast.Name)
-                    and n.args[0].id == handler.name
+                    if isinstance(n, ast.Call)
+                    and ast.unparse(n.func) in {"type", "internal_error_detail"}
+                    and n.args and isinstance(n.args[0], ast.Name)
+                    and n.args[0].id == name
                 )
                 if len(uses) > type_only:
-                    sites.append(f"{path.relative_to(root)}:{node.lineno}")
-    return sites
+                    sites.add(f"{path.relative_to(root)}:{node.lineno}")
+    return sorted(sites, key=lambda s: (s.split(":")[0], int(s.split(":")[1])))
 
 
 def test_catch_all_handlers_do_not_echo_exception_text():
@@ -108,10 +125,12 @@ def test_ratchet_scanner_flags_raw_echo(tmp_path):
         "    except Exception as e:\n"
         "        if isinstance(e, KeyError):\n"
         "            raise HTTPException(status_code=400, detail=str(e))\n"
-        "        raise HTTPException(status_code=500, detail=str(e))\n",
+        "        raise HTTPException(status_code=500, detail=str(e))\n"
+        "def handle(query: str, error: Exception) -> None:\n"
+        "    raise HTTPException(status_code=500, detail=str(error))\n",
         encoding="utf-8",
     )
-    assert _catch_all_echo_sites(tmp_path) == ["routes.py:5", "routes.py:19"]
+    assert _catch_all_echo_sites(tmp_path) == ["routes.py:5", "routes.py:19", "routes.py:21"]
 
 
 def test_internal_error_hides_text_and_logs_it(caplog):
@@ -125,6 +144,22 @@ def test_internal_error_hides_text_and_logs_it(caplog):
     record = caplog.records[-1]
     assert "Failed to do the thing" in record.getMessage() and LEAK in record.getMessage()
     assert record.exc_info and record.exc_info[1] is exc
+
+
+@pytest.mark.parametrize("route", [history_search.search_history, history_search.search_history_get])
+def test_history_search_delegated_failure_hides_db_details(route, monkeypatch, caplog):
+    """Both methods hand their catch-all to a shared helper (Codex, TASK-1565 review)."""
+    def fail(**_kwargs):
+        raise RuntimeError(LEAK)
+
+    monkeypatch.setattr(history_search, "_run_history_search_route", fail)
+    with caplog.at_level(logging.ERROR, logger="llm_bawt.service.http_errors"):
+        with pytest.raises(HTTPException) as caught:
+            route(query="needle", bot_id="example", limit=5, before=None, since=None, until=None)
+
+    assert caught.value.status_code == 500
+    assert caught.value.detail == "Internal error (RuntimeError); see the app log"
+    assert "needle" in caplog.records[-1].getMessage() and LEAK in caplog.records[-1].getMessage()
 
 
 def test_memory_stats_db_failure_keeps_500_without_db_details():

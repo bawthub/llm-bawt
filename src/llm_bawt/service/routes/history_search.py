@@ -226,11 +226,6 @@ def _search_history_docstring() -> str:
     return "Search conversation history for a bot with cursor paging and optional time bounds."
 
 
-def _search_history_error_log_message(query: str, error: Exception) -> str:
-    """Format the per-bot history search error log."""
-    return f"Failed to search history for query {query!r}: {error}"
-
-
 def _resolve_search_limit(limit: int) -> int:
     """Normalize per-bot history search page size."""
     return max(0, limit)
@@ -286,8 +281,7 @@ def _search_history_route_impl(
 
 def _handle_history_search_exception(query: str, error: Exception) -> None:
     """Log and raise a consistent per-bot search failure."""
-    log.error(_search_history_error_log_message(query, error))
-    raise HTTPException(status_code=500, detail=str(error))
+    raise internal_error(error, f"Failed to search history for query {query!r}") from error
 
 
 def _run_history_search_route(
