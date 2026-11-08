@@ -55,6 +55,8 @@ from sqlalchemy import text
 
 from agent_bridge.maintenance import is_compact_command, is_new_command
 
+from .prompt_stale import clear_on_verified_boundary, reconcile_kept
+
 from .turn_termination import dump_payload, turn_payload
 
 logger = logging.getLogger(__name__)
@@ -765,6 +767,13 @@ class SystemPromptPinStore:
                     injected_skills=_refs_value(
                         record.get(INJECTED_SKILLS_KEY) if isinstance(record, dict) else None),
                 )
+                # TASK-1771: record (or reconcile) drift from the held prompt.
+                reconcile_kept(
+                    conn, session_id=session_id, metadata=session_metadata,
+                    pinned_text=pinned_text, pinned_sha=pin["sha256"],
+                    rendered=rendered, rendered_sha=rendered_sha,
+                    verified=not pin.get("snapshot_unverified"),
+                )
             else:  # pin_move_reason keeps a pin only when both exist
                 raise RuntimeError("system prompt pin kept without pinned text")
             if not decision.is_boundary and PENDING_KEY in session_metadata:
@@ -819,6 +828,7 @@ class SystemPromptPinStore:
                 """),
                 {"pin": json.dumps(staged), "sid": session_id},
             )
+            clear_on_verified_boundary(conn, session_id=session_id, metadata=metadata, staged=staged)
             if turn is not None:
                 turn_request = turn_payload(turn[0])
                 audit = turn_request.get(PIN_KEY)

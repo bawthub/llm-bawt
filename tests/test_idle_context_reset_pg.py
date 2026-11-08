@@ -326,3 +326,44 @@ def test_manual_retry_of_failed_scheduled_reset_is_fenced_at_claim(rig, real_lif
                             {"bot": rig.bot}).scalar_one() == 1
         assert conn.execute(text("SELECT COUNT(*) FROM turn_logs WHERE id=:id"),
                             {"id": child.turn_id}).scalar_one() == 0
+
+
+# -- TASK-1771: stale prompt trigger at admission and claim -------------------
+
+def _stale_intent(rig, parameters):
+    from dataclasses import replace
+
+    return replace(scheduled_intent(rig), scheduler_parameters=parameters)
+
+
+def _set(rig, *, usage=None, stale=None):
+    from llm_bawt.service.prompt_stale import STALE_KEY
+
+    with rig.engine.begin() as conn:
+        if usage is not None:
+            conn.execute(text("UPDATE turn_logs SET token_usage_json=:u WHERE id=:id"),
+                         {"u": json.dumps(usage), "id": rig.turn_id})
+        conn.execute(text("UPDATE sessions SET session_metadata=CAST(:m AS jsonb) WHERE id=:id"),
+                     {"m": json.dumps({STALE_KEY: stale} if stale else {}), "id": rig.session_id})
+
+
+def test_lifecycle_recheck_lets_a_settled_stale_session_skip_only_the_size_check(rig):
+    from llm_bawt.service.job_parameters import IdleContextResetParameters
+
+    on = IdleContextResetParameters(reset_when_prompt_stale=True, prompt_stale_settle_minutes=10)
+    stamp = (rig.now - timedelta(minutes=30)).isoformat()
+    # Input tokens without a provider window: the size path cannot trust it.
+    _set(rig, usage={"input_tokens": 200_000},
+         stale={"since": stamp, "changed_at": stamp, "sections": ["Rules"]})
+    with rig.engine.begin() as conn:
+        assert NewSessionLifecycle.scheduled_skip_reason(conn, _stale_intent(rig, on)) is None
+        off = IdleContextResetParameters()
+        assert NewSessionLifecycle.scheduled_skip_reason(conn, _stale_intent(rig, off)) == \
+            "resident context measurement is not bounded by provider window"
+    # Cleared (a boundary ran) or still changing before claim: back to size rules.
+    fresh = rig.now.isoformat()
+    for stale in (None, {"since": stamp, "changed_at": fresh, "sections": ["Rules"]}):
+        _set(rig, stale=stale)
+        with rig.engine.begin() as conn:
+            assert NewSessionLifecycle.scheduled_skip_reason(conn, _stale_intent(rig, on)) == \
+                "resident context measurement is not bounded by provider window"

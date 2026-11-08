@@ -45,9 +45,15 @@ class IdleContextResetJob:
                 else self.candidates.skip_reason(
                     candidate, now=datetime.now(timezone.utc), parameters=self.parameters,
                 ))
+            stale = None
             if reason:
                 result = NewSessionResult(outcome=Outcome.SKIPPED, stage=Stage.ADMISSION, detail=reason)
             else:
+                stale = (self.candidates.stale_marker(candidate)
+                         if self.candidates.stale_trigger(candidate, now=datetime.now(timezone.utc),
+                                                          parameters=self.parameters) else None)
+                # A stale reset is keyed by the render change, so one edit burst = one reset.
+                stale_key = f":stale:{stale.get('changed_at')}" if stale else ""
                 try:
                     intent = NewSessionIntent(
                         bot_id=bot_id, user_id=candidate["user_id"],
@@ -60,7 +66,7 @@ class IdleContextResetJob:
                         # Rechecking the same measured context attaches to the
                         # SAME operation even after a timeout or a later sweep.
                         idempotency_key=(f"idle-context:{job_id}:{candidate['session_id']}:"
-                                         f"{candidate['usage_turn_id']}"),
+                                         f"{candidate['usage_turn_id']}{stale_key}"),
                     )
                     if self._lifecycle is None:
                         from ..session_lifecycle.lifecycle import NewSessionLifecycle
@@ -78,5 +84,7 @@ class IdleContextResetJob:
                     )
             counts["reset" if result.outcome is Outcome.COMPLETED else result.outcome.value] += 1
             results[bot_id] = asdict(result)
+            if not reason and stale:
+                results[bot_id]["trigger"] = "prompt_stale"
         return {"scanned": len(rows), **counts, "bots": results,
                 "parameters": self.parameters.model_dump(mode="json")}

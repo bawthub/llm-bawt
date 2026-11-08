@@ -47,6 +47,16 @@ class IdleContextResetParameters(JobParameters):
                      "change the bot's setting."),
         json_schema_extra={"x-enum-titles": list(RESET_CONTINUITY_TITLES.values())},
     )
+    reset_when_prompt_stale: bool = Field(
+        default=False, strict=True, title="Reset stale prompts",
+        description=("Also reset an idle session whose pinned system prompt is older than the "
+                     "current one, at any context size."),
+    )
+    prompt_stale_settle_minutes: int = Field(
+        default=10, strict=True, ge=0, le=1_440, title="Stale settle time",
+        description=("Wait this many minutes after the prompt last changed, so a burst of edits "
+                     "costs one reset."),
+    )
 
     @property
     def history_scope_override(self) -> str | None:

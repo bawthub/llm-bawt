@@ -168,5 +168,6 @@ def test_empty_sweep_never_constructs_lifecycle():
     job.candidates.read = Mock(return_value=[])
     assert run(job) == {"scanned": 0, "reset": 0, "skipped": 0, "failed": 0, "ambiguous": 0, "bots": {},
                         "parameters": {"resident_tokens_gt": 100000, "idle_minutes_gt": 15,
-                                       "protected_bot_ids": [], "continuity": "configured"}}
+                                       "protected_bot_ids": [], "continuity": "configured",
+                                       "reset_when_prompt_stale": False, "prompt_stale_settle_minutes": 10}}
     assert job._lifecycle is None

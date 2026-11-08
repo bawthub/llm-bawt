@@ -12,6 +12,7 @@ from sqlalchemy import text
 
 from ...bot_tags import BehaviorTag, sql_allowed
 from ..job_parameters import IdleContextResetParameters
+from ..prompt_stale import STALE_KEY, marker_value, settled
 
 # Compatibility exports; the parameter model owns defaults.
 MIN_RESIDENT_TOKENS = IdleContextResetParameters().resident_tokens_gt
@@ -55,6 +56,7 @@ class IdleContextCandidates:
                 )
                 SELECT b.slug AS bot_id, b.house, b.house_pinned,
                        s.id AS session_id, s.user_id,
+                       s.session_metadata AS session_metadata,
                        t.id AS usage_turn_id, t.ended_at, t.token_usage_json,
                        latest.id AS latest_turn_id,
                        latest.ended_at AS last_completed_at
@@ -85,6 +87,31 @@ class IdleContextCandidates:
         return bool(candidate.get("house")) and not candidate.get("house_pinned")
 
     @staticmethod
+    def stale_marker(candidate: dict) -> dict | None:
+        metadata = candidate.get("session_metadata")
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except ValueError:
+                return None
+        return marker_value(metadata.get(STALE_KEY)) if isinstance(metadata, dict) else None
+
+    @staticmethod
+    def stale_trigger(
+        candidate: dict, *, now: datetime, parameters: IdleContextResetParameters | None = None,
+    ) -> bool:
+        """Opted in, stale, and the render has stopped changing (TASK-1771).
+
+        Only the size criterion is replaced; session, measurement, newer-activity
+        and idle fences in :meth:`skip_reason` still apply first.
+        """
+        parameters = parameters or IdleContextResetParameters()
+        return bool(parameters.reset_when_prompt_stale) and settled(
+            IdleContextCandidates.stale_marker(candidate), now=now,
+            settle_minutes=parameters.prompt_stale_settle_minutes,
+        )
+
+    @staticmethod
     def skip_reason(
         candidate: dict, *, now: datetime, parameters: IdleContextResetParameters | None = None,
     ) -> str | None:
@@ -100,6 +127,9 @@ class IdleContextCandidates:
             return "idle less than threshold"
         if IdleContextCandidates.house_idle_only(candidate):
             # Its scheduled /new vacates the house; no context-size threshold.
+            return None
+        if IdleContextCandidates.stale_trigger(candidate, now=now, parameters=parameters):
+            # TASK-1771: a settled stale prompt is refreshed at any context size.
             return None
         try:
             usage = json.loads(candidate["token_usage_json"] or "null")

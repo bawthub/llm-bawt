@@ -644,3 +644,82 @@ def test_a_corrupt_pinned_selection_fails_the_turn(rig):
                            {"id": second}).scalar_one()
     assert raw is None or PIN_KEY not in json.loads(raw)
     assert rig.store.get(rig.session_id)["turn_id"] == first
+
+
+# -- TASK-1771: stale pinned prompt marker ------------------------------------
+
+from llm_bawt.service.prompt_stale import STALE_KEY  # noqa: E402
+
+V1 = "intro\n## Rules\nnever release\n## Skill: git\nworktrees\n"
+V2 = V1.replace("never release", "release via ops cards")
+V3 = V2.replace("worktrees", "task worktrees")
+
+
+def test_identical_render_never_marks_stale(rig):
+    rig.resolve(rig.add_turn(), V1, cold=True)
+    rig.resolve(rig.add_turn(), V1)
+    assert STALE_KEY not in rig.metadata()
+
+
+def test_drift_marks_stale_with_changed_sections_and_keeps_since(rig):
+    rig.resolve(rig.add_turn(), V1, cold=True)
+    rig.resolve(rig.add_turn(), V2)
+    first = rig.metadata()[STALE_KEY]
+    assert first["sections"] == ["Rules"] and first["pinned_sha256"] == prompt_sha256(V1)
+    assert first["rendered_sha256"] == prompt_sha256(V2)
+    rig.resolve(rig.add_turn(), V2)  # same render: untouched
+    assert rig.metadata()[STALE_KEY] == first
+    rig.resolve(rig.add_turn(), V3)  # a further edit moves changed_at, not since
+    later = rig.metadata()[STALE_KEY]
+    assert later["since"] == first["since"] and later["changed_at"] >= first["changed_at"]
+    assert later["sections"] == ["Rules", "Skill: git"]
+
+
+def test_rollback_to_the_verified_pin_clears_stale(rig):
+    rig.resolve(rig.add_turn(), V1, cold=True)
+    rig.resolve(rig.add_turn(), V2)
+    rig.resolve(rig.add_turn(), V1)
+    assert STALE_KEY not in rig.metadata()
+
+
+def test_verified_boundary_clears_stale(rig):
+    rig.resolve(rig.add_turn(), V1, cold=True)
+    rig.resolve(rig.add_turn(), V2)
+    boundary = rig.add_turn()
+    rig.resolve(boundary, V2, cold=True, dispatched=False)
+    assert STALE_KEY in rig.metadata()  # staged, not yet proven
+    assert rig.store.confirm(session_id=rig.session_id, turn_id=boundary)
+    assert STALE_KEY not in rig.metadata()
+
+
+def test_unverified_fallback_keeps_stale_until_a_real_boundary(rig):
+    first = rig.add_turn()
+    rig.resolve(first, V1, cold=True)
+    rig.resolve(rig.add_turn(), V2)
+    with rig.engine.begin() as conn:  # pin row lost: harness may still hold V1
+        conn.execute(text("DELETE FROM turn_logs WHERE id=:id"), {"id": first})
+    moved = rig.resolve(rig.add_turn(), V2)
+    assert moved.reason == MISSING_ROW and moved.snapshot_unverified
+    assert STALE_KEY in rig.metadata()
+    # V2-vs-V2 on the unverified pin must not erase the uncertainty.
+    kept = rig.resolve(rig.add_turn(), V2)
+    assert kept.action == "kept" and kept.snapshot_unverified
+    assert STALE_KEY in rig.metadata()
+    rig.resolve(rig.add_turn(), V2, cold=True)
+    assert STALE_KEY not in rig.metadata()
+
+
+def test_bookkeeping_failure_leaves_the_kept_decision_intact(rig, monkeypatch):
+    from llm_bawt.service import prompt_stale
+
+    rig.resolve(rig.add_turn(), V1, cold=True)
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("bookkeeping down")
+
+    monkeypatch.setattr(prompt_stale, "_write", boom)
+    turn = rig.add_turn()
+    kept = rig.resolve(turn, V2)
+    assert (kept.action, kept.text) == ("kept", V1)
+    assert rig.turn_request(turn)[PIN_KEY]["rendered_sha256"] == prompt_sha256(V2)
+    assert STALE_KEY not in rig.metadata()

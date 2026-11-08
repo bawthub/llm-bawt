@@ -46,6 +46,12 @@ class AgentContextCapabilities:
         }
 
 
+def _prompt_stale(metadata: dict) -> dict | None:
+    from .service.prompt_stale import STALE_KEY, public_view
+
+    return public_view(metadata.get(STALE_KEY))
+
+
 def capabilities_for_backend(backend: str | None) -> AgentContextCapabilities:
     name = (backend or "").strip().lower()
     if name == "claude-code":
@@ -416,6 +422,8 @@ class AgentContextStore:
             "usage_turn_id": turn.get("id") if turn else None,
             "usage_observed_at": turn.get("ended_at").isoformat() if turn and turn.get("ended_at") else None,
             "last_lifecycle_action": latest_action,
+            # TASK-1771: the pinned prompt drifted from the current render.
+            "prompt_stale": _prompt_stale(metadata),
         }
 
     def reset_idle_session(

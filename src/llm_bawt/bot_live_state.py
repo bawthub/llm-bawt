@@ -191,6 +191,7 @@ class BotLiveStateReader:
     @staticmethod
     def _sessions(conn, slugs: list[str]) -> Mapping[str, Any]:
         from .bot_session_state import BotSessionState
+        from .service.prompt_stale import STALE_KEY, public_view
 
         resolved = BotSessionState.resolve_many(conn, bot_ids=slugs)
         sessions: dict[str, Any] = {}
@@ -200,6 +201,10 @@ class BotLiveStateReader:
             row = resolved[slug]
             sessions[slug] = None if row is None else {
                 "id": row["id"], "started_at": _iso(row["started_at"]),
+                # TASK-1771: pinned prompt drifted from the current render.
+                "prompt_stale": public_view(
+                    (row.get("session_metadata") or {}).get(STALE_KEY)
+                    if isinstance(row.get("session_metadata"), dict) else None),
             }
         return sessions
 

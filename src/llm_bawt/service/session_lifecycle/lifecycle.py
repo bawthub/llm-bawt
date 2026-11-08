@@ -132,7 +132,10 @@ class NewSessionLifecycle:
             return reason
         # TASK-2080: an idle, unpinned house tenant is reset (and so evicted)
         # at any context size; its resident measurement is not a criterion.
-        if not IdleContextCandidates.house_idle_only(row):
+        # TASK-1771: a settled stale prompt is the reason, not context size.
+        now = datetime.now(timezone.utc)
+        if not (IdleContextCandidates.house_idle_only(row)
+                or IdleContextCandidates.stale_trigger(row, now=now, parameters=parameters)):
             try:
                 usage = json.loads(row["token_usage_json"] or "null")
                 native = int(usage.get("resident_tokens") or 0)

@@ -29,6 +29,9 @@ from llm_bawt.service.session_lifecycle.intent import (
 from llm_bawt.service.session_lifecycle.lifecycle import NewSessionLifecycle
 from tests.bot_tag_fixtures import static_tags
 
+# TASK-1771 defaults every effective idle-reset parameter set now carries.
+STALE_DEFAULTS = {"reset_when_prompt_stale": False, "prompt_stale_settle_minutes": 10}
+
 
 @pytest.fixture(autouse=True)
 def tags(monkeypatch):
@@ -69,7 +72,7 @@ def test_listing_effective_defaults_and_unmigrated_compatibility(api):
     assert "prompt" not in rows
     reset = rows["reset"]
     assert reset["parameters"] == {"resident_tokens_gt": 100000, "idle_minutes_gt": 15, "protected_bot_ids": [],
-                                   "continuity": "configured"}
+                                   "continuity": "configured", **STALE_DEFAULTS}
     assert reset["parameter_schema"]["properties"]["idle_minutes_gt"]["minimum"] == 1
     assert rows["legacy"]["parameter_schema"] is None
     assert rows["legacy"]["parameters"] is None
@@ -171,7 +174,8 @@ def test_pause_and_cadence_do_not_repair_or_replace_invalid_parameters(api, stor
         assert client.patch("/v1/jobs/reset", json={"parameters": {"idle_minutes_gt": 15}}).status_code == 200
         with Session(engine) as session:
             row = session.get(ScheduledJob, "reset")
-            assert json.loads(row.config_json) == {**stored, "idle_minutes_gt": 15, "continuity": "configured"}
+            assert json.loads(row.config_json) == {**stored, "idle_minutes_gt": 15, "continuity": "configured",
+                                                   **STALE_DEFAULTS}
 
 
 def candidate():
@@ -335,7 +339,7 @@ def test_failed_sweep_keeps_snapshot_visible_during_and_after_execution(api, mon
     _, engine = api
     saved = {"resident_tokens_gt": 350000, "idle_minutes_gt": 20,
              "protected_bot_ids": ["fixture-protected"]}
-    effective = {**saved, "continuity": "configured"}
+    effective = {**saved, "continuity": "configured", **STALE_DEFAULTS}
     with Session(engine) as session:
         job = session.get(ScheduledJob, "reset")
         job.enabled, job.config_json = True, json.dumps(saved)
