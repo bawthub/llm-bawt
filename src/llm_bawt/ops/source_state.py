@@ -34,6 +34,8 @@ back and any path shown is sanitised. Any unexpected exit or output is
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import posixpath
 import re
 
@@ -356,10 +358,25 @@ class SourceChecker:
         except SealedRunError as exc:
             raise SourceStateError("source_unverifiable", detail=f"sealed git {exc.kind}") from None
 
+    def check_revision(self, project_dir: str, plan: dict, revision: str) -> dict:
+        """Verify only runtime paths against a tested revision, not mutable HEAD.
+
+        Non-runtime changes (for example tests) do not invalidate a restart.
+        The existing reconcile check above deliberately remains repository-wide.
+        """
+        if not isinstance(revision, str) or not SHA.fullmatch(revision):
+            raise SourceStateError("source_unverifiable", detail="expected revision must be a full SHA")
+        try:
+            with self.sealed.session(env=list(_GIT_ENV), directory=project_dir) as run:
+                return _Steps(run, project_dir, plan, revision=revision).verify()
+        except SealedRunError as exc:
+            raise SourceStateError("source_unverifiable", detail=f"sealed git {exc.kind}") from None
+
 
 class _Steps:
-    def __init__(self, run, project_dir: str, plan: dict):
+    def __init__(self, run, project_dir: str, plan: dict, *, revision=None):
         self.run, self.project, self.plan = run, project_dir, plan
+        self.revision = revision
         self.base = ["git", "-c", f"safe.directory={project_dir}", "-c", "core.fsmonitor=false",
                      "-c", "core.ignoreStat=false", "-c", "core.untrackedCache=false",
                      "-c", "core.checkStat=default", "-c", "core.trustctime=true",
@@ -371,14 +388,17 @@ class _Steps:
             raise SourceStateError("source_unverifiable", detail=f"git {args[0]} exited {code}")
         return out
 
-    def verify(self) -> str:
+    def verify(self) -> str | dict:
         paths, compose = self.plan["paths"], self.plan["compose_files"]
         lines = self.git("rev-parse", "--show-toplevel", "HEAD^{commit}").decode("utf-8", "replace").split("\n")
         if len(lines) != 3 or lines[2] != "" or not SHA.fullmatch(lines[1]):
             raise SourceStateError("source_unverifiable", detail="rev-parse output")
         if lines[0] != self.project:
             raise SourceStateError("source_tree_unsupported", detail="project directory is not the repository root")
-        head = lines[1]
+        observed_head = lines[1]
+        head = self.revision or observed_head
+        if self.revision and self.git("rev-parse", f"{head}^{{commit}}").decode().strip() != head:
+            raise SourceStateError("source_unverifiable", detail="expected revision is not a commit")
         # A compose-only plan (TASK-1831: a tagged image has no source mounts)
         # names no paths; git reads an empty pathspec as the whole repository,
         # so the per-path steps scope to the Compose files instead.
@@ -387,9 +407,12 @@ class _Steps:
         if flagged:
             raise SourceStateError("source_index_flags", flagged)
         self.git("read-tree", head, fresh=True)
-        dirty = _records(self.git("status", "--porcelain=v2", "-z", "--untracked-files=no", fresh=True))
+        dirty = (_records(self.git("diff", "--no-ext-diff", "--no-textconv", "--name-only", "-z",
+                                  head, "--", *scoped, fresh=True))
+                 if self.revision else
+                 _records(self.git("status", "--porcelain=v2", "-z", "--untracked-files=no", fresh=True)))
         if dirty:
-            raise SourceStateError("source_dirty", _status_names(dirty))
+            raise SourceStateError("source_dirty", dirty if self.revision else _status_names(dirty))
         others = [] if not paths else _records(self.git("ls-files", "-z", "--others", "--directory",
                                                         "--no-empty-directory", "--", *paths, fresh=True))
         cache = [p for p in others if PYCACHE_DIR in p.split("/")]
@@ -410,7 +433,7 @@ class _Steps:
             # Python would load a forged .pyc whose header matches its source.
             raise SourceStateError("source_bytecode_unsafe", cache, detail=f"{PYCACHE_PREFIX} not outside every mount")
         blobs = self._tree(head, paths) if paths else {}
-        tracked = self._tree(head, compose, recursive=False)
+        tracked = self._tree(head, compose, recursive=False) if compose else {}
         bad_compose = [c for c in compose if c not in tracked or tracked[c][0] != "100644"]
         if bad_compose:
             raise SourceStateError("source_compose_untracked", bad_compose)
@@ -431,6 +454,10 @@ class _Steps:
             changed += [name for name, digest in zip(chunk, hashes) if digest != expected[name][1]]
         if changed:
             raise SourceStateError("source_dirty", changed, detail="raw bytes differ from HEAD")
+        if self.revision:
+            identity = json.dumps(sorted(expected.items()), separators=(",", ":")).encode()
+            return {"expected_runtime_sha": head, "observed_head": observed_head,
+                    "runtime_tree_hash": hashlib.sha256(identity).hexdigest()}
         return head
 
     def _tree(self, head: str, paths: list, *, recursive: bool = True) -> dict:

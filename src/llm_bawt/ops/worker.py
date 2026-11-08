@@ -30,6 +30,7 @@ if __package__:
     from .image_deploy import IMAGE_ACTIONS, ImageDeployer
     from .plan_reconcile import ACTION as PLAN_ACTION, PlanReconciler
     from .restart_health import has_health, wait_healthy
+    from .runtime_source import verify_runtime_source
     from .routing_reconcile import ACTION as ROUTING_ACTION, RoutingReconciler
     from .tagged_config_reconcile import ACTION as TAGGED_CONFIG_ACTION, TaggedConfigReconciler
 else:  # pragma: no cover - standalone worker image
@@ -43,6 +44,7 @@ else:  # pragma: no cover - standalone worker image
     from image_deploy import IMAGE_ACTIONS, ImageDeployer
     from plan_reconcile import ACTION as PLAN_ACTION, PlanReconciler
     from restart_health import has_health, wait_healthy
+    from runtime_source import verify_runtime_source
     from routing_reconcile import ACTION as ROUTING_ACTION, RoutingReconciler
     from tagged_config_reconcile import ACTION as TAGGED_CONFIG_ACTION, TaggedConfigReconciler
 
@@ -173,7 +175,8 @@ class DockerAPI:
             raise
         return _AttachStream(conn, response)
 
-    def execute(self, spec: dict, args: dict) -> str:
+    def execute(self, spec: dict, args: dict, *, runtime_snapshot=None, receipt=None, tag=None,
+                before_submit=None) -> str:
         name, filters = target_selector(spec, args)
         if name is not None:
             container = self.request("GET", f"/containers/{quote(name, safe='')}/json")
@@ -186,6 +189,9 @@ class DockerAPI:
         action = spec["action"]
         container_id = quote(container["Id"], safe="")
         grace = spec.get("stop_grace_seconds", 10)
+        if "runtime_source" in spec:
+            verified = verify_runtime_source(self, runtime_snapshot, container, tag=tag)
+            receipt["runtime_source"] = verified
         if action == "pull":
             image = container["Config"]["Image"]
             path = "/images/create?" + urlencode({"fromImage": image})
@@ -193,6 +199,8 @@ class DockerAPI:
             path = f"/containers/{container_id}/{action}"
             if action in ("stop", "restart"):
                 path += f"?t={grace}"
+        if before_submit is not None:
+            before_submit()
         # Once handed to Docker, timeout/transport failure means the side effect
         # MAY still finish in the daemon. Never interpret that as safe to retry.
         self.side_effect_started = True
@@ -200,7 +208,13 @@ class DockerAPI:
         done = f"Docker {action} completed for {container['Id']}"
         if has_health(spec):
             # TASK-1697: Docker accepting the restart is not the service being up.
-            return f"{done}; " + wait_healthy(self, container_id, spec, clock=self.clock, sleep=self.sleep)
+            done += "; " + wait_healthy(self, container_id, spec, clock=self.clock, sleep=self.sleep)
+        if "runtime_source" in spec:
+            after = self.request("GET", f"/containers/{container_id}/json")
+            receipt["runtime_source_after"] = verify_runtime_source(self, runtime_snapshot, after, tag=tag)
+            done += (f"; expected_runtime_sha={verified['expected_runtime_sha']}"
+                     f"; observed_head={verified['observed_head']}"
+                     f"; runtime_tree_hash={verified['runtime_tree_hash']}")
         return done
 
 
@@ -306,6 +320,18 @@ def run(request_path: Path, expected_hash: str, *, api_factory=DockerAPI, sleep=
             elif snapshot["spec"]["action"] in IMAGE_ACTIONS:
                 output = ImageDeployer(api, snapshot, job_id,
                                            lock_root=request_path.parent.parent / ".target-locks").run()
+            elif "runtime_source" in snapshot["spec"]:
+                def before_runtime_submit():
+                    # Sealed source verification takes time. Do not let it
+                    # carry the target restart past the quiesce start fence.
+                    if fence_expired(request, clock()):
+                        raise RuntimeError("protected interval expired during runtime check; no action submitted")
+                    atomic_json(status_path, receipt)
+
+                output = api.execute(snapshot["spec"], snapshot["resolved_args"],
+                                     runtime_snapshot=snapshot, receipt=receipt,
+                                     tag="rt" + hashlib.sha256(job_id.encode()).hexdigest()[:20],
+                                     before_submit=before_runtime_submit)
             else:
                 output = api.execute(snapshot["spec"], snapshot["resolved_args"])
             receipt.update(state="succeeded", exit_code=0, output_tail=output)

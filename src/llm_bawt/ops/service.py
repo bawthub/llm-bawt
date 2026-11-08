@@ -16,6 +16,7 @@ from .dev_config_reconcile import ACTION as DEV_CONFIG_ACTION, valid_dev_binding
 from .tagged_config_reconcile import ACTION as TAGGED_CONFIG_ACTION, valid_tagged_binding
 from .plan_reconcile import ACTION as PLAN_ACTION, valid_plan_snapshot
 from .container_remove import ACTION as REMOVE_ACTION, valid_remove_binding  # TASK-1439 T2c
+from .runtime_source import valid_runtime_binding
 from .executor import (ConfigCheckError, DockerExecutor, Executor, ExecutorError, QuiesceFenceUnsupported,
                        validate_spec)
 from .execution_mode import snapshot_execution_mode
@@ -351,6 +352,8 @@ class OpsService:
             # executor's Docker daemon does not have.
             try:
                 executor.check_target(spec, merged)
+                if "runtime_source" in spec:
+                    snapshot["runtime_source"] = executor.runtime_source_approval(spec, merged)
                 if is_release_spec(spec):
                     snapshot["release_source"] = executor.approval_source(spec, merged)
             except ConfigCheckError as exc:  # TASK-1518: the release's deploy would refuse
@@ -416,6 +419,8 @@ class OpsService:
                 raise ValueError("snapshot routing binding mismatch")
             if not valid_remove_binding(detached):
                 raise ValueError("snapshot removal binding mismatch")
+            if not valid_runtime_binding(detached):
+                raise ValueError("snapshot runtime source binding mismatch")
             if not _valid_config_snapshot(detached):
                 raise ValueError("snapshot config binding mismatch")
             if detached["spec"].get("action") == PLAN_ACTION:

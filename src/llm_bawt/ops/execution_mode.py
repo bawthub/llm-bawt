@@ -88,6 +88,15 @@ def card_lines(snapshot: Mapping[str, Any], *, self_target: bool = False) -> lis
     lines = [_CARD_LINES[snapshot_execution_mode(snapshot)]]
     if self_target:
         lines.append(SELF_TARGET_CARD_LINE)
+    runtime = snapshot.get("runtime_source")
+    if runtime:
+        lines.extend([
+            f"Tested runtime revision: {runtime['expected_runtime_sha']}",
+            f"Observed checkout HEAD: {runtime['observed_head']}",
+            f"Runtime tree identity: {runtime['runtime_tree_hash']}",
+            "Runtime bytes and source mounts are rechecked immediately before restart; "
+            "changed runtime source refuses with tree_changed. Non-runtime changes are allowed.",
+        ])
     return lines
 
 

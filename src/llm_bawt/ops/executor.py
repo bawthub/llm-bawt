@@ -44,6 +44,8 @@ from .service_identity import SPEC_PATTERNS as COMPOSE_SPEC_PATTERNS
 from .routing_reconcile import (ACTION as ROUTING_ACTION, WORKER_CAPABILITY_LABEL,
                                 routing_binding, validate_routing_spec)
 from .source_state import SourceChecker
+from .runtime_source import (WORKER_CAPABILITY_LABEL as RUNTIME_SOURCE_LABEL, bind_runtime_source,
+                             validate_runtime_source)
 from .tagged_config_reconcile import (ACTION as TAGGED_CONFIG_ACTION, TAGGED_GUARD_LABEL, needs_tagged_guard_worker,
                                       source_guarded, tagged_config_binding, validate_tagged_spec)
 from .validation import canonical_json
@@ -82,6 +84,8 @@ def spec_capability_labels(spec: dict) -> tuple[str, ...]:
     built before them would refuse the spec mid-job (or, for a probe, verify
     the wrong port), so every action carrying them is refused before dispatch."""
     labels = []
+    if "runtime_source" in spec:
+        labels.append(RUNTIME_SOURCE_LABEL)
     if "health_probe" in spec:
         labels.append(HEALTH_PROBE_LABEL)
     config = spec.get("compose_config") or {}
@@ -293,14 +297,16 @@ def validate_spec(command_script: str) -> dict:
             raise ValueError("batch_gate spec carries no other fields")
         return spec
     allowed = {"action", "container_name", "container_name_from_arg", "compose_project",
-               "compose_service", "compose_service_from_arg", "stop_grace_seconds", *RESTART_HEALTH_KEYS}
+               "compose_service", "compose_service_from_arg", "stop_grace_seconds", "runtime_source",
+               *RESTART_HEALTH_KEYS}
     if not isinstance(spec, dict) or set(spec) - allowed:
         raise ValueError("Docker spec must be an object with supported fields only")
     if not isinstance(spec.get("action"), str) or spec["action"] not in SUPPORTED_ACTIONS:
         raise ValueError("unsupported Docker action")
     validate_restart_health(spec)  # TASK-1697: optional post-action health probe
+    validate_runtime_source(spec)
     for k, v in spec.items():
-        if k in RESTART_HEALTH_KEYS:
+        if k in RESTART_HEALTH_KEYS or k == "runtime_source":
             continue
         if k != "stop_grace_seconds" and (not isinstance(v, str) or not v.strip()):
             raise ValueError(f"Docker spec {k} must be a nonempty string")
@@ -656,6 +662,26 @@ class DockerExecutor(Executor):
             raise ExecutorError(
                 f"compose selector {filters['label']} matched {len(matches)} containers on this "
                 "executor's Docker host, expected one")
+
+    def runtime_source_approval(self, spec, args):
+        self._check_spec_capabilities(self.execution_settings(spec), spec)
+        name, filters = target_selector(spec, args)
+        try:
+            if name is not None:
+                target = self.client.containers.get(name)
+            else:
+                matches = [row for row in self.client.containers.list(all=True, filters=filters)
+                           if not is_ops_worker(row.labels)]
+                if len(matches) != 1:
+                    raise ValueError("runtime source selector must resolve exactly one container")
+                target = matches[0]
+            target.reload()
+            return bind_runtime_source(self._render_api_factory(), spec, args, target.attrs,
+                                       tag="rt" + os.urandom(4).hex())
+        except ComposeError as exc:
+            raise ConfigCheckError(exc.code, str(exc)) from exc
+        except (KeyError, ValueError) as exc:
+            raise ExecutorError(f"cannot bind runtime source: {exc}") from exc
 
     def self_target(self, snapshot):
         return classify_self_target(snapshot, own=self._own_identity, inspect=self._container_identity)

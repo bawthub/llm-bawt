@@ -53,6 +53,56 @@ the configured image cannot rewrite queued jobs: historical image IDs and volume
 mounts must remain available for their lifetime. `max_concurrent` counts claimed,
 accepted, and running jobs; the smallest limit among overlapping snapshots wins.
 
+## Tested runtime fence for source restarts (TASK-1410 / TASK-1496)
+
+A restart spec may declare `runtime_source` with:
+
+- `project_dir`: the absolute host checkout root (no deployment-specific default);
+- `checker_image`: a digest-pinned tool image containing Git and `sleep`, as for
+  the existing sealed source checker;
+- `paths`: repository-relative runtime paths, including source, startup scripts,
+  mounted constraints, dependency manifests and relevant Compose/Dockerfiles;
+- `mounts`: source destination → checked repository-relative path;
+- `data_mounts`: every other inspected container mount destination. Unclassified,
+  missing, changed or shadowed source mounts refuse rather than being guessed.
+
+The row must declare and require the string argument `expected_runtime_sha`.
+The requester supplies the full commit tested by the gate. This is an asserted
+tested revision, not independent proof of a gate pass; retain the normal
+exact-SHA gate receipt. An omitted/invalid revision cannot prepare an approval.
+There is no automatic fallback to the checkout's current HEAD.
+
+Preparation verifies runtime bytes against that revision in the existing sealed
+Git helper: a fresh index, raw hashes, file types/modes, unexpected source files
+and index flags. The approval binds the full target container ID/image, expected
+revision, observed HEAD and scoped runtime-tree hash. Its text displays the
+revision/hash. Test/docs-only changes outside `paths` can pass, even if HEAD has
+moved. Runtime changes, whether staged, committed, ignored or untracked, refuse.
+Bytecode is ignored only when the **inspected container's** `PYTHONPYCACHEPREFIX`
+is outside all mounts, never because the catalog claims it is safe.
+
+The immutable worker requires `llm-bawt.ops.runtime-source="1"`. After its start
+delay and immediately before the Docker action it re-inspects/rechecks the
+binding; `[tree_changed]` means nothing was submitted. A successful receipt
+contains `runtime_source` and `runtime_source_after`, and its output includes
+the tested revision, observed HEAD and runtime-tree hash. A failed completion
+recheck is **not success**: restart already happened, so the outcome is `lost`
+with `side_effect_unknown=true` and no automatic retry.
+
+This is a dispatch fence, **not an immutable source deployment or writer lock**.
+Source may still change between reads or during later lazy imports; a completion
+recheck detects drift it sees, not every transient mutation. Pinned worktrees
+and stronger process/source custody remain separate work.
+
+Activation order: publish/review/gate the source; build and pin the worker;
+reload the reconciler and app; then patch the live source-activating restart
+row's spec and required argument schema together. Preserve existing targeting,
+quiesce, approval and health settings; resolve pending old unguarded invocations
+before changing that row. No seed rewrites a live operator configuration.
+The immediate rollout targets the app restart. Bridge/auxiliary source restart
+rows are not implicitly guarded: they need their own explicit mount/path
+classification. Image-only tenants need no runtime-source binding.
+
 ## Same-image routing repair (TASK-1179; activated on echo 2026-10-19)
 
 See [OPS_ROUTING_REPAIR.md](OPS_ROUTING_REPAIR.md) for the disabled-by-default
