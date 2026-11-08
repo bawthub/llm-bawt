@@ -1003,6 +1003,7 @@ class DockerExecutor(Executor):
                           fence: dict | None = None):
         directory = Path(snapshot["execution"]["receipt_root"]) / job_id
         digest = hashlib.sha256(canonical_json(worker_request(job_id, snapshot, fence)).encode()).hexdigest()
+        is_sequence = snapshot.get("spec", {}).get("action") == sequence.ACTION
         try:
             receipt = None
             path = directory / "receipt.json"
@@ -1021,8 +1022,8 @@ class DockerExecutor(Executor):
                     if state == "succeeded" and receipt.get("exit_code") != 0:
                         raise ExecutorError("invalid success receipt")
                     ledger = sequence.read_ledger(
-                        receipt.get("sequence"), snapshot if snapshot["spec"]["action"] == sequence.ACTION else None)
-                    if snapshot["spec"]["action"] == sequence.ACTION:
+                        receipt.get("sequence"), snapshot if is_sequence else None)
+                    if is_sequence:
                         if state == "succeeded" and (
                                 not ledger or ledger["state"] != "succeeded"
                                 or any(step["state"] != "succeeded" for step in ledger["steps"])):
@@ -1037,7 +1038,7 @@ class DockerExecutor(Executor):
                         sequence=ledger)
             def lost(message, output=None):
                 ledger = None
-                if snapshot["spec"]["action"] == sequence.ACTION:
+                if is_sequence:
                     ledger = sequence.interrupted(
                         sequence.read_ledger((receipt or {}).get("sequence"), snapshot) or sequence.initial_ledger(snapshot),
                         message)
@@ -1049,7 +1050,7 @@ class DockerExecutor(Executor):
                     revalidate=lambda: self.self_target(snapshot))
             except RecoveryRefused as exc:
                 result = self._refuse_recovery_start(path, job_id, digest, exc)
-                if snapshot["spec"]["action"] == sequence.ACTION:
+                if is_sequence:
                     result.sequence = sequence.interrupted(
                         sequence.read_ledger((receipt or {}).get("sequence"), snapshot) or sequence.initial_ledger(snapshot),
                         result.error, unknown=result.state == "lost")
@@ -1080,7 +1081,7 @@ class DockerExecutor(Executor):
             if receipt and receipt.get("state") == "running":
                 return ReconcileResult("running", started_at=receipt.get("started_at"),
                                        sequence=sequence.read_ledger(
-                                           receipt.get("sequence"), snapshot if snapshot["spec"]["action"] == sequence.ACTION else None))
+                                           receipt.get("sequence"), snapshot if is_sequence else None))
             return ReconcileResult("accepted")
         except ExecutorError:
             raise
