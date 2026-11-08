@@ -183,4 +183,9 @@ def bootstrap_delivery_schema(conn) -> None:
         ON inter_bot_deliveries (available_at, ordinal)
         WHERE status = 'QUEUED'
     """))
+    conn.execute(sa_text("""
+        CREATE INDEX IF NOT EXISTS ix_inter_bot_delivery_restart_retry_pending
+        ON inter_bot_deliveries (updated_at, ordinal)
+        WHERE status = 'FAILED' AND metadata_json->>'restart_retry_pending' = 'true'
+    """))
     ensure_control_lane_schema(conn)  # TASK-1431 control lane

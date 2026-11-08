@@ -38,6 +38,7 @@ from agent_bridge.abort_contract import ABORT_CAUSE_KEY, HOST_SHUTDOWN
 from .bot_identities import SYSTEM_BOT_ID
 from .inter_bot_delivery import FAILED, InterBotDeliveryStore
 from .inter_bot_delivery_record import DeliveryRecord
+from .inter_bot_delivery_recovery import RESTART_RETRY_PENDING
 from .message_authorship import AuthorReference
 
 logger = logging.getLogger(__name__)
@@ -86,7 +87,8 @@ RETRY_ORIGINAL_AUTHOR = "retry_original_author"
 # Why a host-shutdown FAILED delivery did or did not come back (audit only).
 RESTART_RETRY_OUTCOME = "restart_retry_outcome"
 _EXECUTION_METADATA = frozenset({
-    "maintenance_barrier", "_failure_notice", RETRY_ORIGINAL_AUTHOR, RESTART_RETRY_OUTCOME, *RETRY_MARKERS,
+    "maintenance_barrier", "_failure_notice", RETRY_ORIGINAL_AUTHOR, RESTART_RETRY_OUTCOME,
+    RESTART_RETRY_PENDING, *RETRY_MARKERS,
 })
 
 
@@ -466,31 +468,53 @@ def _restart_retry_failed(
     return stamped, child
 
 
-def restart_retry_recovered(store: InterBotDeliveryStore, failed: list[DeliveryRecord]) -> list[DeliveryRecord]:
-    """Restart-retry deliveries ``recover_expired`` just FAILED (TASK-1258).
+_PENDING_BATCH = 50
+
+
+def restart_retry_recovered(store: InterBotDeliveryStore) -> list[DeliveryRecord]:
+    """Restart-retry deliveries lease recovery FAILED after their turn ended (TASK-1258).
 
     A lease expires when the app restarted along with the bridge host, so this
     is the whole-stack restart case the live dispatcher's aborted branch never
-    sees. Each delivery gets its own transaction in the admission lock order
+    sees. ``recover_expired`` marks each such row :data:`RESTART_RETRY_PENDING`
+    in the commit that FAILs it; this pass decides each one and clears the
+    marker in the same transaction. A crash, or a DB error on one row, leaves
+    the marker for the next sweep; the deterministic restart key keeps a
+    repeat from inserting a second child.
+
+    Each delivery gets its own transaction in the admission lock order
     (target lock, then rows): ``recover_expired`` holds delivery row locks
     without the target lock, so retrying inside it would invert that order.
-    A crash between the two commits leaves the delivery FAILED with no
-    outcome, as before this change. Returns the inserted children.
+    Returns the inserted children.
     """
     from .service.turn_admission import lock_target
 
+    if store.engine is None:
+        return []
+    with store.engine.connect() as conn:
+        pending = conn.execute(sa_text(f"""
+            SELECT id, target_bot_id, turn_id FROM inter_bot_deliveries
+            WHERE status='FAILED' AND metadata_json->>'{RESTART_RETRY_PENDING}'='true'
+            ORDER BY updated_at, ordinal LIMIT {_PENDING_BATCH}
+        """)).mappings().all()
     children = []
-    for record in failed:
-        if store.engine is None or record.delivery_mode == "steer":
+    for row in pending:
+        try:
+            with store.engine.begin() as conn:
+                lock_target(conn, row["target_bot_id"])
+                status = conn.execute(sa_text(
+                    "SELECT status FROM inter_bot_deliveries WHERE id=:id FOR UPDATE"
+                ), {"id": row["id"]}).scalar_one_or_none()
+                child = None
+                if status == FAILED:
+                    _, child = _restart_retry_failed(store, conn, row["id"], row["turn_id"])
+                conn.execute(sa_text(
+                    "UPDATE inter_bot_deliveries SET metadata_json = metadata_json - CAST(:key AS text)"
+                    " WHERE id=:id"
+                ), {"id": row["id"], "key": RESTART_RETRY_PENDING})
+        except Exception:
+            logger.exception("restart retry of recovered delivery %s deferred to the next sweep", row["id"])
             continue
-        with store.engine.begin() as conn:
-            lock_target(conn, record.target_bot_id)
-            status = conn.execute(sa_text(
-                "SELECT status FROM inter_bot_deliveries WHERE id=:id FOR UPDATE"
-            ), {"id": record.id}).scalar_one_or_none()
-            if status != FAILED:
-                continue
-            _, child = _restart_retry_failed(store, conn, record.id, record.turn_id)
         if child is not None:
             children.append(child)
     return children

@@ -15,6 +15,7 @@ from sqlalchemy import event, text
 
 from llm_bawt.bot_identities import SYSTEM_BOT_ID
 from llm_bawt.inter_bot_delivery import InterBotDeliveryStore
+from llm_bawt.inter_bot_delivery_recovery import RESTART_RETRY_PENDING
 from llm_bawt.inter_bot_delivery_retry import (
     DEFAULT_RESTART_RETRY_CONTINUE, RESTART_RETRY_OUTCOME, DeliveryRetryConflict,
     fail_claim_with_restart_retry, restart_abort_cause, restart_retry_delivery, retry_failed_delivery,
@@ -581,8 +582,40 @@ def test_lease_expiry_restart_retries_a_host_shutdown_turn(delivery, turn_cleanu
     assert store.get(child_id).status == "QUEUED"
     assert store.get(original.id).metadata[RESTART_RETRY_OUTCOME] == {
         "outcome": "retried", "child_delivery_id": child_id}
+    assert RESTART_RETRY_PENDING not in store.get(original.id).metadata
+    assert RESTART_RETRY_PENDING not in store.get(child_id).metadata
     store.recover_expired()  # a later sweep adds nothing
     assert _children(store, original.id) == [child_id]
+
+
+def test_an_interrupted_lease_expiry_retry_is_finished_by_the_next_sweep(delivery, turn_cleanup, monkeypatch):
+    """Codex TASK-1258 SHOULD_FIX: FAILED commits before the retry transaction.
+    A DB error there leaves the pending marker, and the next sweep retries."""
+    from llm_bawt.service import turn_admission
+
+    store, slug = delivery
+    original = submit(store, slug)
+    end_turn(store, original, audit=SHUTDOWN)
+    _lease_expired(store, original)
+    real_lock_target = turn_admission.lock_target
+
+    def lost_connection(conn, target_bot_id):
+        raise RuntimeError("server closed the connection unexpectedly")
+
+    monkeypatch.setattr(turn_admission, "lock_target", lost_connection)
+    store.recover_expired()
+
+    failed = store.get(original.id)
+    assert failed.status == "FAILED"
+    assert failed.metadata[RESTART_RETRY_PENDING] is True
+    assert not _children(store, original.id)
+
+    monkeypatch.setattr(turn_admission, "lock_target", real_lock_target)
+    recovered = store.recover_expired()
+
+    [child_id] = _children(store, original.id)
+    assert child_id in [record.id for record in recovered]
+    assert RESTART_RETRY_PENDING not in store.get(original.id).metadata
 
 
 @pytest.mark.parametrize("session_policy, audit", [
@@ -600,3 +633,4 @@ def test_lease_expiry_never_restart_retries_other_endings(delivery, turn_cleanup
 
     assert store.get(original.id).status in {"FAILED", "CANCELLED"}
     assert not _children(store, original.id)
+    assert RESTART_RETRY_PENDING not in store.get(original.id).metadata

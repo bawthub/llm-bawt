@@ -16,6 +16,10 @@ from .inter_bot_delivery_ledger import DeliveryTransitionEvents
 from .inter_bot_delivery_record import DeliveryRecord
 from .inter_bot_delivery_steer_fence import pending_rejection, rejection_error, rejection_merge
 
+# TASK-1258: set on a turn delivery that lease recovery FAILED after its turn
+# ended, until restart_retry_recovered decides whether to restart-retry it.
+RESTART_RETRY_PENDING = "restart_retry_pending"
+
 
 class DeliveryLeaseRecovery:
     """Settle or re-arm expired and orphaned claims against a store."""
@@ -73,7 +77,6 @@ class DeliveryLeaseRecovery:
         from .service.session_lifecycle.recovery import NewSessionRecovery
         recovered: list[DeliveryRecord] = []
         settled_turn_ids: list[str] = []
-        ended_failed: list[DeliveryRecord] = []
         orphan = (" OR (d.delivery_mode='turn' AND t.ended_at IS NOT NULL"
                   " AND d.claim_owner IS DISTINCT FROM :live_owner)") if live_owner else ""
         with store.engine.begin() as conn:
@@ -120,7 +123,11 @@ class DeliveryLeaseRecovery:
                     assignments = (
                         "status='DELIVERED', delivered_at=COALESCE(delivered_at, now()), claim_token=NULL, claim_owner=NULL, lease_expires_at=NULL, last_error=NULL"
                         if success else
-                        "status='FAILED', claim_token=NULL, claim_owner=NULL, lease_expires_at=NULL, last_error=COALESCE(last_error, 'target turn ended unsuccessfully')"
+                        # TASK-1258: the pending marker commits with FAILED, so a
+                        # restart retry interrupted after this commit is retried
+                        # by a later sweep (restart_retry_recovered clears it).
+                        "status='FAILED', claim_token=NULL, claim_owner=NULL, lease_expires_at=NULL, last_error=COALESCE(last_error, 'target turn ended unsuccessfully'), "
+                        f"metadata_json=COALESCE(metadata_json, '{{}}'::jsonb) || '{{\"{RESTART_RETRY_PENDING}\": true}}'::jsonb"
                     )
                 elif not is_turn and (proof := pending_rejection(row)) is not None:
                     # TASK-1300: this claim's command is proven not to have run;
@@ -173,19 +180,15 @@ class DeliveryLeaseRecovery:
                                 || jsonb_build_object('inter_bot_delivery_id', CAST(:delivery_id AS text)))::text
                         WHERE id=:turn_id AND ended_at IS NULL
                     """), {"turn_id": row["turn_id"], "delivery_id": row["id"]})
-                record = DeliveryRecord.from_mapping(updated)
-                if (is_turn and not user_stopped and row.get("turn_ended_at") is not None
-                        and updated["status"] == "FAILED"):
-                    ended_failed.append(record)
-                recovered.append(record)
+                recovered.append(DeliveryRecord.from_mapping(updated))
         from .service.turn_termination import reconcile_finished_tool_safely
         for turn_id in settled_turn_ids:
             reconcile_finished_tool_safely(store.engine, turn_id=turn_id)
-        if ended_failed:
-            # TASK-1258: a turn its host killed on a whole-stack restart gets
-            # the same restart retry as the live dispatcher's aborted branch.
-            from .inter_bot_delivery_retry import restart_retry_recovered
-            recovered.extend(restart_retry_recovered(store, ended_failed))
+        # TASK-1258: a turn its host killed on a whole-stack restart gets the
+        # same restart retry as the live dispatcher's aborted branch. Every
+        # sweep finishes pending ones, including those an earlier sweep left.
+        from .inter_bot_delivery_retry import restart_retry_recovered
+        recovered.extend(restart_retry_recovered(store))
         return recovered
 
     @staticmethod
