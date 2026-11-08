@@ -161,14 +161,16 @@ def sibling_project_dir(api, container: dict) -> str:
 
     Config files are not compared: a different overlay list in the same tree is
     that container's own choice. No sibling, or siblings that disagree, is a
-    refusal, never a guess."""
+    refusal, never a guess. A container with the project label but no
+    working_dir was not created by Compose (an ops worker or other run of an
+    image built with that label inherits it) and is not a sibling."""
     project = (container.get("Config", {}).get("Labels") or {}).get(_PROJECT) or ""
     if not project:
         raise ComposeError("compose_source_unresolved", detail="target has no Compose project label")
     rows = api.request("GET", "/containers/json?" + urlencode(
         {"filters": json.dumps({"label": [f"{_PROJECT}={project}"], "status": ["running"]})}))
-    dirs = {(row.get("Labels") or {}).get(_WORKING_DIR) or "" for row in rows or []
-            if row.get("Id") != container.get("Id")}
+    dirs = {(row.get("Labels") or {}).get(_WORKING_DIR) for row in rows or []
+            if row.get("Id") != container.get("Id")} - {None, ""}
     if not dirs:
         raise ComposeError("compose_source_unresolved", detail="no other running container in the Compose project")
     if len(dirs) > 1:
