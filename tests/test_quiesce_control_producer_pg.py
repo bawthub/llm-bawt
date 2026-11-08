@@ -9,6 +9,7 @@ ask the run. "One ask" is counted at that route.
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 
 import pytest
@@ -16,6 +17,7 @@ import pytest
 from llm_bawt.bot_identities import SYSTEM_BOT_ID
 from llm_bawt.message_authorship import AuthorReference
 from llm_bawt.ops.quiesce import release_job_gates
+from llm_bawt.ops.quiesce_status import live_holds
 from llm_bawt.service.quiesce_control import (
     ENQUEUED,
     LINKED,
@@ -349,6 +351,53 @@ def test_h_an_accepted_row_absorbs_a_new_job_and_is_never_asked_again(rig, secon
     member = _member(rig, turn_id, _gate(rig, job_b))
     assert (member["control_state"], member["control_delivery_id"]) == ("steering", control["id"])
     assert len(_controls(rig)) == 1 and _claim(rig) is None  # nothing else to ask
+
+
+@pytest.mark.parametrize("generation", [None, 0, 3], ids=["legacy-zero", "zero", "later"])
+def test_cancelled_uncertain_control_absorbs_but_displays_unconfirmed(rig, second, generation):
+    turn_id = _turn(rig)
+    job_a = _open(rig)
+    producer = _producer(rig)
+    assert producer.run_pass().enqueued == 1
+    [control] = _controls(rig)
+    marker = {"steer_uncertain": {"generation": generation or 0, "reason": "barrier_timeout"}}
+    if generation is not None:
+        marker["steer_generation"] = generation
+    rig.sql("UPDATE inter_bot_deliveries SET metadata_json = metadata_json || CAST(:m AS jsonb)"
+            " WHERE id=:id", m=json.dumps(marker), id=control["id"])
+    with rig.engine.begin() as conn:
+        release_job_gates(conn, job_a)
+    released = _row(rig, control["id"])
+    assert (released["status"], released["delivery_mode"], released["last_error"]) == (
+        "CANCELLED", "skipped", "not_needed:control_released")
+
+    job_b = second()
+    result = producer.run_pass()
+    assert (result.linked, result.enqueued) == (1, 0)
+    gate_b = _gate(rig, job_b)
+    member = _member(rig, turn_id, gate_b)
+    assert (member["control_state"], member["control_delivery_id"]) == ("steering", control["id"])
+    assert len(_controls(rig)) == 1 and _claim(rig) is None  # absorption never resends
+
+    def states():
+        [visible] = rig.service.get_job_status(job_b, reconcile_if_active=False)["quiesce"]["members"]
+        hold = next(h for h in live_holds(rig.engine) if h["gate_id"] == gate_b)
+        assert visible["control_error"] == "not_needed:control_released"  # retain stored diagnostic
+        return visible["control_state"], hold["members"]["by_control_state"]
+
+    assert states() == ("unconfirmed", {"unconfirmed": 1})
+    assert _row(rig, control["id"]) == released
+    assert _member(rig, turn_id, gate_b) == member
+
+    # A missing, stale, or non-object marker must not override ordinary cancellation.
+    for uncertain in (None, [], {}, {"generation": (generation or 0) + 1}):
+        metadata = {**released["metadata_json"], "steer_uncertain": uncertain}
+        rig.sql("UPDATE inter_bot_deliveries SET metadata_json=CAST(:m AS jsonb) WHERE id=:id",
+                m=json.dumps(metadata), id=control["id"])
+        assert states() == ("not_needed", {"not_needed": 1})
+    rig.sql("UPDATE inter_bot_deliveries SET metadata_json=CAST(:m AS jsonb) WHERE id=:id",
+            m=json.dumps(released["metadata_json"]), id=control["id"])
+    assert rig.driver.step(job_b).outcome == "holding"  # display is never drain proof
 
 
 def test_i_a_key_collision_with_a_foreign_row_is_unconfirmed_and_not_linked(rig):

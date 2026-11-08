@@ -22,11 +22,16 @@ from ..service.turn_gates import ensure_gate_schema
 
 # Design §5: a ``steering`` member reports its linked delivery's state. A
 # DELIVERED row means the run was asked, not that it stopped: the drain never
-# reads this. Every other stored state is reported as it is.
+# reads this. Release can cancel a queued row whose current steer is uncertain;
+# keep that uncertainty visible, just as the unchanged producer absorption does.
 _CONTROL_SQL = """
     CASE WHEN m.control_state <> 'steering' OR d.id IS NULL THEN m.control_state
          WHEN d.status IN ('QUEUED', 'STEERING') THEN 'steering'
          WHEN d.status = 'DELIVERED' THEN 'steered'
+         WHEN d.status = 'CANCELLED'
+              AND jsonb_typeof(d.metadata_json->'steer_uncertain') = 'object'
+              AND d.metadata_json->'steer_uncertain'->>'generation'
+                  = COALESCE(d.metadata_json->>'steer_generation', '0') THEN 'unconfirmed'
          WHEN d.status = 'CANCELLED' AND d.last_error LIKE 'not\\_needed:%' THEN 'not_needed'
          WHEN d.status = 'CANCELLED' THEN 'cancelled'
          WHEN d.status = 'FAILED' THEN 'unconfirmed'
