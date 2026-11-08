@@ -73,6 +73,7 @@ class DeliveryLeaseRecovery:
         from .service.session_lifecycle.recovery import NewSessionRecovery
         recovered: list[DeliveryRecord] = []
         settled_turn_ids: list[str] = []
+        ended_failed: list[DeliveryRecord] = []
         orphan = (" OR (d.delivery_mode='turn' AND t.ended_at IS NOT NULL"
                   " AND d.claim_owner IS DISTINCT FROM :live_owner)") if live_owner else ""
         with store.engine.begin() as conn:
@@ -172,10 +173,19 @@ class DeliveryLeaseRecovery:
                                 || jsonb_build_object('inter_bot_delivery_id', CAST(:delivery_id AS text)))::text
                         WHERE id=:turn_id AND ended_at IS NULL
                     """), {"turn_id": row["turn_id"], "delivery_id": row["id"]})
-                recovered.append(DeliveryRecord.from_mapping(updated))
+                record = DeliveryRecord.from_mapping(updated)
+                if (is_turn and not user_stopped and row.get("turn_ended_at") is not None
+                        and updated["status"] == "FAILED"):
+                    ended_failed.append(record)
+                recovered.append(record)
         from .service.turn_termination import reconcile_finished_tool_safely
         for turn_id in settled_turn_ids:
             reconcile_finished_tool_safely(store.engine, turn_id=turn_id)
+        if ended_failed:
+            # TASK-1258: a turn its host killed on a whole-stack restart gets
+            # the same restart retry as the live dispatcher's aborted branch.
+            from .inter_bot_delivery_retry import restart_retry_recovered
+            recovered.extend(restart_retry_recovered(store, ended_failed))
         return recovered
 
     @staticmethod

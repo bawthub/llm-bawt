@@ -75,6 +75,8 @@ class RetryPolicy:
         return f"{self.key_prefix}:{original_id}"
 
 
+# One marker per RetryPolicy: add a new policy's marker here too, or
+# ``_existing_child`` will not recognise its children.
 RETRY_MARKERS = ("manual_retry_of", "restart_retry_of")
 # Stamped by RequestIdentityResolver over any caller metadata, so a sender
 # cannot forge a retry child with a matching key and marker.
@@ -216,6 +218,8 @@ def restart_abort_cause(turn: Any) -> str | None:
     Reads the per-attempt ``request_json.abort_cause`` audit stamped by the
     stream consumer. Only an ended ``aborted`` turn qualifies, and any explicit
     ``abort_request`` wins: a Stop the user asked for is never retried.
+    That includes an ``abort_request`` a re-arm preserved from an earlier
+    attempt: it is read as a user Stop too (conservative; unreachable today).
     """
     if turn is None or getattr(turn, "status", None) != "aborted" or getattr(turn, "ended_at", None) is None:
         return None
@@ -405,44 +409,91 @@ def fail_claim_with_restart_retry(
         failed = store.fail_claim(record.id, claim_token, error, connection=conn)
         if failed is None:
             return None, None
-        child, outcome, shutdown = None, None, False
-        try:
-            # Every read and write that can fail stays inside the SAVEPOINT,
-            # so the outer transaction (the FAILED write) is always usable.
-            # Whether the host killed this turn is decided first, from the
-            # turn row: a refusal from ``_retry`` (e.g. a session reset) says
-            # nothing about why the turn ended (Vex 1231B DESIGN r2 C1).
-            with conn.begin_nested():
-                shutdown = restart_abort_cause(
-                    _RowView(_turn_row(conn, record.turn_id))) == HOST_SHUTDOWN
-                result = (restart_retry_delivery(store, record.id, connection=conn)
-                          if shutdown else None)
-            if result is not None:
-                child = result[0]
-                outcome = {"outcome": "retried", "child_delivery_id": child.id}
-            elif shutdown:
-                outcome = {"outcome": "refused", "reason": (
-                    "not eligible: a session reset or /new, schedule, maintenance, "
-                    "context maintenance, or already a restart retry")}
-        except DeliveryRetryConflict as conflict:
-            logger.info("delivery %s not restart-retried: %s", record.id, conflict)
-            if shutdown:
-                outcome = {"outcome": "refused", "reason": str(conflict)}
-        except Exception as exc:
-            logger.exception("restart retry of delivery %s failed; it stays FAILED", record.id)
-            if shutdown:
-                outcome = {"outcome": "error", "reason": str(exc) or exc.__class__.__name__}
-        if outcome is not None:
-            row = conn.execute(sa_text("""
-                UPDATE inter_bot_deliveries
-                SET metadata_json = COALESCE(metadata_json, '{}'::jsonb)
-                    || jsonb_build_object(CAST(:key AS text), CAST(:outcome AS jsonb))
-                WHERE id=:id RETURNING *
-            """), {"id": record.id, "key": RESTART_RETRY_OUTCOME,
-                  "outcome": json.dumps(outcome)}).mappings().first()
-            if row is not None:
-                failed = DeliveryRecord.from_mapping(row)
+        stamped, child = _restart_retry_failed(store, conn, record.id, record.turn_id)
+        if stamped is not None:
+            failed = stamped
     return failed, child
+
+
+def _restart_retry_failed(
+    store: InterBotDeliveryStore, conn: Connection, delivery_id: str, turn_id: str | None,
+) -> tuple[DeliveryRecord | None, DeliveryRecord | None]:
+    """Insert the restart retry of a just-FAILED delivery and stamp its outcome.
+
+    Runs in the caller's transaction, under the target lock it already holds.
+    Returns ``(stamped, child)``: the FAILED row re-read after its
+    :data:`RESTART_RETRY_OUTCOME` stamp (None when its turn wasn't killed by a
+    host shutdown, so nothing was stamped) and the child, if one was inserted.
+    """
+    stamped = None
+    child, outcome, shutdown = None, None, False
+    try:
+        # Every read and write that can fail stays inside the SAVEPOINT,
+        # so the outer transaction (the FAILED write) is always usable.
+        # Whether the host killed this turn is decided first, from the
+        # turn row: a refusal from ``_retry`` (e.g. a session reset) says
+        # nothing about why the turn ended (Vex 1231B DESIGN r2 C1).
+        with conn.begin_nested():
+            shutdown = restart_abort_cause(
+                _RowView(_turn_row(conn, turn_id))) == HOST_SHUTDOWN
+            result = (restart_retry_delivery(store, delivery_id, connection=conn)
+                      if shutdown else None)
+        if result is not None:
+            child = result[0]
+            outcome = {"outcome": "retried", "child_delivery_id": child.id}
+        elif shutdown:
+            outcome = {"outcome": "refused", "reason": (
+                "not eligible: a session reset or /new, schedule, maintenance, "
+                "context maintenance, or already a restart retry")}
+    except DeliveryRetryConflict as conflict:
+        logger.info("delivery %s not restart-retried: %s", delivery_id, conflict)
+        if shutdown:
+            outcome = {"outcome": "refused", "reason": str(conflict)}
+    except Exception as exc:
+        logger.exception("restart retry of delivery %s failed; it stays FAILED", delivery_id)
+        if shutdown:
+            outcome = {"outcome": "error", "reason": str(exc) or exc.__class__.__name__}
+    if outcome is not None:
+        row = conn.execute(sa_text("""
+            UPDATE inter_bot_deliveries
+            SET metadata_json = COALESCE(metadata_json, '{}'::jsonb)
+                || jsonb_build_object(CAST(:key AS text), CAST(:outcome AS jsonb))
+            WHERE id=:id RETURNING *
+        """), {"id": delivery_id, "key": RESTART_RETRY_OUTCOME,
+              "outcome": json.dumps(outcome)}).mappings().first()
+        if row is not None:
+            stamped = DeliveryRecord.from_mapping(row)
+    return stamped, child
+
+
+def restart_retry_recovered(store: InterBotDeliveryStore, failed: list[DeliveryRecord]) -> list[DeliveryRecord]:
+    """Restart-retry deliveries ``recover_expired`` just FAILED (TASK-1258).
+
+    A lease expires when the app restarted along with the bridge host, so this
+    is the whole-stack restart case the live dispatcher's aborted branch never
+    sees. Each delivery gets its own transaction in the admission lock order
+    (target lock, then rows): ``recover_expired`` holds delivery row locks
+    without the target lock, so retrying inside it would invert that order.
+    A crash between the two commits leaves the delivery FAILED with no
+    outcome, as before this change. Returns the inserted children.
+    """
+    from .service.turn_admission import lock_target
+
+    children = []
+    for record in failed:
+        if store.engine is None or record.delivery_mode == "steer":
+            continue
+        with store.engine.begin() as conn:
+            lock_target(conn, record.target_bot_id)
+            status = conn.execute(sa_text(
+                "SELECT status FROM inter_bot_deliveries WHERE id=:id FOR UPDATE"
+            ), {"id": record.id}).scalar_one_or_none()
+            if status != FAILED:
+                continue
+            _, child = _restart_retry_failed(store, conn, record.id, record.turn_id)
+        if child is not None:
+            children.append(child)
+    return children
 
 
 def verified_retry_child(store: Any, original: DeliveryRecord) -> DeliveryRecord | None:

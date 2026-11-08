@@ -552,3 +552,51 @@ def test_restart_child_of_an_ordinary_chat_send_is_published_to_its_user(deliver
     assert child_event["status"] == "QUEUED" and child_event["delivery_id"] != original.id
     assert child_event["user_id"] == "nick" and child_event["ordinary_chat"] is True
     assert child_event["bot_id"] == slug and child_event["session_id"] == "s-1"
+
+
+def _lease_expired(store, record, token="claim-1258"):
+    """A claim its app restarted away from: accepted, lease already past."""
+    _claimed(store, record, token)
+    with store.engine.begin() as conn:
+        conn.execute(text("""
+            UPDATE inter_bot_deliveries SET transport_accepted_at=now() - interval '2 minutes',
+                lease_expires_at=now() - interval '1 second'
+            WHERE id=:id
+        """), {"id": record.id})
+
+
+def test_lease_expiry_restart_retries_a_host_shutdown_turn(delivery, turn_cleanup):
+    """TASK-1258: the whole-stack restart. No live dispatcher saw the abort;
+    recover_expired fails the delivery and inserts its one restart child."""
+    store, slug = delivery
+    original = submit(store, slug)
+    end_turn(store, original, audit=SHUTDOWN)
+    _lease_expired(store, original)
+
+    recovered = store.recover_expired()
+
+    assert store.get(original.id).status == "FAILED"
+    [child_id] = _children(store, original.id)
+    assert child_id in [record.id for record in recovered]
+    assert store.get(child_id).status == "QUEUED"
+    assert store.get(original.id).metadata[RESTART_RETRY_OUTCOME] == {
+        "outcome": "retried", "child_delivery_id": child_id}
+    store.recover_expired()  # a later sweep adds nothing
+    assert _children(store, original.id) == [child_id]
+
+
+@pytest.mark.parametrize("session_policy, audit", [
+    ("continue", None),
+    ("continue", {"abort_request": {"source": "chat_stop"}}),
+    ("reset_retain_history", SHUTDOWN),
+], ids=["plain-abort", "user-stop", "session-reset"])
+def test_lease_expiry_never_restart_retries_other_endings(delivery, turn_cleanup, session_policy, audit):
+    store, slug = delivery
+    original = submit(store, slug, session_policy=session_policy)
+    end_turn(store, original, audit=audit)
+    _lease_expired(store, original)
+
+    store.recover_expired()
+
+    assert store.get(original.id).status in {"FAILED", "CANCELLED"}
+    assert not _children(store, original.id)
