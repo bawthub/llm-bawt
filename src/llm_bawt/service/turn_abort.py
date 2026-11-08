@@ -190,6 +190,29 @@ async def _abort_bridge_run(service, turn, execution) -> dict:
             "contract": reply.contract, "detail": reply.detail}
 
 
+def abort_bridge_run_before_app_error(service, turn_id: str, execution, loop) -> str:
+    """TASK-1385: before the app marks a turn errored, abort its bridge run.
+
+    Called from the stream worker thread when an app-side exception ends the
+    turn. Uses the Stop path's exact (session, request) abort, so it can only
+    hit this turn's own run; the bridge replies not-active if that run is gone.
+    Best-effort: returns the bridge state for the error record and never raises.
+    """
+    try:
+        turn = service._turn_log_store.get_turn(turn_id)
+        if turn is None:
+            return "no_turn_row"
+        from agent_bridge.abort_contract import ABORT_RPC_TIMEOUT_S
+
+        future = asyncio.run_coroutine_threadsafe(_abort_bridge_run(service, turn, execution), loop)
+        outcome = future.result(timeout=ABORT_RPC_TIMEOUT_S + 5)
+        state = str(outcome.get("bridge_state") or "unknown")
+    except Exception as exc:
+        state = f"abort_failed:{type(exc).__name__}"
+    log.warning("Turn %s ending on app-side error; bridge abort -> %s", turn_id, state)
+    return state
+
+
 def _bot_backend(service, bot_id: str | None) -> str | None:
     from ..bots import BotManager
 

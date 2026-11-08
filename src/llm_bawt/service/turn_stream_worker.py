@@ -1055,12 +1055,21 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                 put_queue_item_threadsafe(loop, chunk_queue, e)
             elapsed_ms = (time.time() - timing_holder[0]) * 1000 if timing_holder[0] else None
             if not externally_aborted:
+                error_text = str(e)
+                if is_agent_backend:
+                    # TASK-1385: never claim the run ended while the bridge
+                    # keeps running it; stop it first and record the ack.
+                    from .turn_abort import abort_bridge_run_before_app_error
+
+                    bridge_state = abort_bridge_run_before_app_error(
+                        self, turn_log_id, execution, loop)
+                    error_text = f"{error_text} [bridge abort: {bridge_state}]"
                 self._update_turn_log(
                     turn_id=turn_log_id,
                     status="error",
                     latency_ms=elapsed_ms,
                     response_text=full_response_holder[0] or None,
-                    error_text=str(e),
+                    error_text=error_text,
                     token_usage=_usage_so_far(),
                 )
         finally:
