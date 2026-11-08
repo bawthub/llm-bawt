@@ -25,7 +25,8 @@ from llm_bawt.clients.base import LLMClient
 from llm_bawt.memory.extraction.prompts import get_profile_curation_prompt
 from llm_bawt.models.message import Message
 from llm_bawt.profiles import (
-    STATUS_CANDIDATE, STATUS_LIVE, STATUS_RETIRED, AttributeCategory, EntityType, ProfileManager,
+    STATUS_CANDIDATE, STATUS_LIVE, STATUS_RETIRED, AttributeCategory, CurationConflict, EntityType,
+    ProfileManager,
 )
 from llm_bawt.utils.error_text import safe_error_text
 
@@ -49,6 +50,10 @@ class ProfileCurationResult:
 def _row(attr: Any) -> dict[str, Any]:
     return {"id": attr.id, "category": attr.category, "key": attr.key, "value": attr.value,
             "source": attr.source, "source_message_id": attr.source_message_id}
+
+
+def _is_id(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def _text(value: Any) -> str | None:
@@ -95,7 +100,16 @@ class ProfileCurationService:
 
         changes, result.applied, result.rejected = plan_changes(ops, live, candidates)
         if not dry_run and changes:
-            self.profile_manager.apply_curation(kind, entity_id, changes)
+            seen = {**live, **candidates}
+            expected = {c["id"]: ProfileManager.curation_snapshot(seen[c["id"]]) for c in changes}
+            try:
+                self.profile_manager.apply_curation(kind, entity_id, changes, expected)
+            except CurationConflict as conflict:
+                # Nothing applied; remaining candidates stay pending for the next run.
+                logger.warning("Profile curation %s skipped: %s", entity_id, conflict)
+                result.applied = []
+                result.error = "profile changed during curation; nothing applied"
+                return result
         for op in result.applied:
             logger.info("Profile curation %s: %s", entity_id, json.dumps(op, ensure_ascii=False))
         for op in result.rejected:
@@ -143,6 +157,12 @@ def plan_changes(ops: list[dict[str, Any]], live: dict[int, Any], candidates: di
         reason = _text(op.get("reason"))
         if not reason:
             reject(op, "no reason")
+            continue
+        cited = op.get("candidate_ids")
+        if not all(_is_id(op.get(f)) for f in ("id", "candidate_id") if f in op) or (
+                "candidate_ids" in op
+                and not (isinstance(cited, list) and all(_is_id(c) for c in cited))):
+            reject(op, "ids must be integers")
             continue
         if kind == "add":
             cid = op.get("candidate_id")

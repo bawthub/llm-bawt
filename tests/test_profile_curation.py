@@ -154,4 +154,49 @@ def test_apply_curation_rejects_foreign_rows(pm):
     pm.set_attribute(U, "other", "fact", "city", "Paris", source="explicit")
     (row,) = pm.attributes_with_status(U, "other", (STATUS_LIVE,))
     with pytest.raises(ValueError):
-        pm.apply_curation(U, "alex", [{"id": row.id, "status": STATUS_RETIRED}])
+        pm.apply_curation(U, "alex", [{"id": row.id, "status": STATUS_RETIRED}],
+                          {row.id: ProfileManager.curation_snapshot(row)})
+
+
+@pytest.mark.parametrize("edit", ["live_value", "retire_candidate"])
+def test_stale_plan_applies_nothing(pm, edit):
+    live, cands = _rows(pm)
+    (lid,) = live
+    c_city, c_dog, *_ = cands
+    reply = json.dumps({"ops": [
+        {"op": "update", "id": lid, "candidate_ids": [c_city], "value": "Denver", "reason": "moved"},
+        {"op": "add", "candidate_id": c_dog, "reason": "stable"},
+    ]})
+
+    def query(*_a, **_k):  # a manual edit or another run lands while the model thinks
+        if edit == "live_value":
+            pm.update_attribute_by_id(lid, value="Seattle")
+        else:
+            row = pm.attributes_with_status(U, "alex", (STATUS_CANDIDATE,))[1]
+            pm.apply_curation(U, "alex", [{"id": c_dog, "status": STATUS_RETIRED}],
+                              {c_dog: ProfileManager.curation_snapshot(row)})
+        return reply
+
+    client = MagicMock()
+    client.query.side_effect = query
+    with patch("llm_bawt.memory.profile_maintenance.get_profile_curation_prompt",
+               return_value="prompt"):
+        result = ProfileCurationService(pm, client).run("alex")
+
+    assert "nothing applied" in result.error and not result.applied
+    city = pm.get_attribute(U, "alex", "fact", "city").value
+    assert city == ("Seattle" if edit == "live_value" else "Boston")
+    assert pm.get_attribute(U, "alex", "fact", "dog") is None
+    assert any(r.id == c_city for r in pm.attributes_with_status(U, "alex", (STATUS_CANDIDATE,)))
+
+
+@pytest.mark.parametrize("op", [
+    {"op": "add", "candidate_id": [], "reason": "x"},
+    {"op": "retire", "id": {}, "reason": "x"},
+    {"op": "update", "id": 1, "candidate_ids": [[]], "value": "v", "reason": "x"},
+    {"op": "add", "candidate_id": True, "reason": "x"},
+])
+def test_malformed_ids_are_rejected_not_raised(pm, op):
+    live, cands = _rows(pm)
+    _, _, rejected = plan_changes([op], live, cands)
+    assert rejected[0]["rejected"] == "ids must be integers"

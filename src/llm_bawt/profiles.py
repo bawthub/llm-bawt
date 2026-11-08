@@ -8,6 +8,7 @@ This enables:
 Uses SQLModel ORM with PostgreSQL for storage.
 """
 
+import json
 import logging
 from datetime import datetime, timezone
 from enum import Enum
@@ -24,6 +25,10 @@ logger = logging.getLogger(__name__)
 STATUS_LIVE = "live"
 STATUS_CANDIDATE = "candidate"
 STATUS_RETIRED = "retired"
+
+
+class CurationConflict(RuntimeError):
+    """A row changed between the curation model's snapshot and apply."""
 
 
 class EntityType(str, Enum):
@@ -480,20 +485,38 @@ class ProfileManager:
             ).distinct()
             return sorted(session.exec(statement).all())
 
+    @staticmethod
+    def curation_snapshot(attr: ProfileAttribute) -> tuple[Any, ...]:
+        """Row state a curation plan was based on; apply refuses if it changed."""
+        return (attr.status, attr.category, attr.key, json.dumps(attr.value, sort_keys=True,
+                default=str), attr.updated_at)
+
     def apply_curation(self, entity_type: EntityType, entity_id: str,
-                       changes: list[dict[str, Any]]) -> None:
+                       changes: list[dict[str, Any]],
+                       expected: dict[int, tuple[Any, ...]]) -> None:
         """Apply validated curation changes in one transaction.
 
         Each change: ``{"id", "status", "value"?, "category"?, "key"?,
         "source_message_id"?, "retire_reason"?}`` for an existing row of this entity.
+        ``expected`` maps every changed id to its ``curation_snapshot`` when the
+        model saw it. If any row changed since (a manual edit or another run),
+        nothing is applied and ``CurationConflict`` is raised.
         """
         entity_id = entity_id.lower().strip()
         now = datetime.now(timezone.utc)
+        ids = sorted(change["id"] for change in changes)
         with Session(self.engine) as session:
+            rows = {a.id: a for a in session.exec(
+                select(ProfileAttribute).where(ProfileAttribute.id.in_(ids))  # type: ignore[union-attr]
+                .order_by(ProfileAttribute.id).with_for_update()).all()}
             for change in changes:
-                attr = session.get(ProfileAttribute, change["id"])
+                attr = rows.get(change["id"])
                 if attr is None or attr.entity_type != entity_type or attr.entity_id != entity_id:
                     raise ValueError(f"attribute {change['id']} is not part of {entity_id}")
+                if change["id"] not in expected or self.curation_snapshot(attr) != expected[change["id"]]:
+                    raise CurationConflict(f"attribute {change['id']} changed during curation")
+            for change in changes:
+                attr = rows[change["id"]]
                 for field in ("status", "value", "category", "key", "source_message_id",
                               "retire_reason"):
                     if field in change:
