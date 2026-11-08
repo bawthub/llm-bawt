@@ -13,6 +13,17 @@ from ...bot_session_state import BotSessionState
 from ..turn_admission import AdmissionFenceLost, lock_target
 
 
+def _delivery_stays_in_background(conn, *, bot_id: str, session_id: str) -> bool:
+    """True when the bound session is inactive and not the bot's current one."""
+    row = conn.execute(text("""
+        SELECT s.status, b.last_session_id FROM sessions s
+        LEFT JOIN bot_profiles b ON b.slug = s.bot_id
+        WHERE s.id = :session AND s.bot_id = :bot
+    """), {"session": session_id, "bot": bot_id}).mappings().one_or_none()
+    return (row is not None and row["status"] not in ("active", "deleted")
+            and row["last_session_id"] != session_id)
+
+
 def accept_session_binding(
     engine, *, turn_id: str, bot_id: str, user_id: str, session_id: str,
     claim=None, record_resumption: bool = False,
@@ -45,6 +56,13 @@ def accept_session_binding(
         """), {"bot": bot_id, "started": current["created_at"], "id": turn_id}).first()
         if newer is not None:
             raise AdmissionFenceLost(f"turn '{turn_id}' was superseded before binding")
+        if getattr(claim, "reservation_delivery_id", None) and _delivery_stays_in_background(
+                conn, bot_id=bot_id, session_id=session_id):
+            # TASK-2144: a delivered turn (scheduled wake-up, bot message) bound
+            # to a session that is neither active nor current runs there without
+            # becoming the bot's current session, so the next ordinary prompt in
+            # the main conversation is not a "resumption" of it.
+            return None
         receipt = None
         if record_resumption:
             from ..session_resumption import record

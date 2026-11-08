@@ -166,6 +166,63 @@ def test_default_B_explicit_A_default_B_live_receipts_survive_reload(db):
     ]) == {"prompt": away, "return-prompt": back}
 
 
+def _delivery(delivery_id="delivery-1"):
+    return SimpleNamespace(fence=lambda _c: True, reservation_delivery_id=delivery_id)
+
+
+def _next_turn(db, turn_id, created_at, trigger):
+    with db.begin() as conn:
+        conn.exec_driver_sql(
+            f"UPDATE turn_logs SET ended_at={created_at}, status='completed' WHERE ended_at IS NULL")
+        conn.exec_driver_sql(
+            f"INSERT INTO turn_logs VALUES ('{turn_id}','fixture','owner',{created_at},NULL,'streaming','{trigger}')")
+
+
+def test_scheduled_run_in_isolated_session_leaves_no_resumption_on_next_prompt(db):
+    """TASK-2144: main -> isolated scheduled run -> next ordinary prompt = no receipt."""
+    with db.begin() as conn:
+        conn.exec_driver_sql("INSERT INTO messages VALUES ('main-prior','fixture','current','assistant')")
+        conn.exec_driver_sql("""INSERT INTO sessions VALUES ('wake','fixture','owner','archived',
+            '2026-11-08 03:00:00','{"created_inactive":true,"origin":"automation","title":"wake-up","title_source":"automation"}')""")
+        conn.exec_driver_sql("INSERT INTO messages VALUES ('wake-prior','fixture','wake','assistant')")
+    _next_turn(db, "wake-turn", 2, "wake-prompt")
+    assert accept(db, turn_id="wake-turn", session_id="wake", claim=_delivery()) is None
+    assert pointer(db) == "current"
+    _next_turn(db, "user-turn", 3, "user-prompt")
+    assert accept(db, turn_id="user-turn", session_id="current") is None
+    assert pointer(db) == "current" and stored(db) == []
+
+
+def test_delivery_into_current_or_active_session_still_stamps_pointer(db):
+    with db.begin() as conn:
+        conn.exec_driver_sql("UPDATE bot_profiles SET last_session_id='old' WHERE slug='fixture'")
+        conn.exec_driver_sql("INSERT INTO messages VALUES ('main-prior','fixture','current','assistant')")
+    # A delivery into the archived session the user already resumed stays put.
+    assert accept(db, claim=_delivery()) is None
+    assert pointer(db) == "old"
+    # A delivery into the active default conversation is an ordinary binding.
+    _next_turn(db, "to-main", 2, "to-main-prompt")
+    receipt = accept(db, turn_id="to-main", session_id="current", claim=_delivery("delivery-2"))
+    assert pointer(db) == "current" and receipt["previous_session_id"] == "old"
+
+
+def test_user_resume_of_an_isolated_session_is_still_a_resumption(db):
+    with db.begin() as conn:
+        conn.exec_driver_sql("""INSERT INTO sessions VALUES ('wake','fixture','owner','archived',
+            '2026-11-08 03:00:00','{"created_inactive":true,"origin":"automation"}')""")
+        conn.exec_driver_sql("INSERT INTO messages VALUES ('wake-prior','fixture','wake','assistant')")
+    receipt = accept(db, session_id="wake")
+    assert receipt["previous_session_id"] == "current" and pointer(db) == "wake"
+
+
+def test_delivery_into_a_deleted_session_is_still_refused(db):
+    with db.begin() as conn:
+        conn.exec_driver_sql("UPDATE sessions SET status='deleted' WHERE id='old'")
+    with pytest.raises(ValueError):
+        accept(db, claim=_delivery())
+    assert pointer(db) == "current" and stored(db) == []
+
+
 def test_history_is_exact_bot_message_session_and_owner_scoped(db):
     accept(db)
     with db.begin() as conn:
