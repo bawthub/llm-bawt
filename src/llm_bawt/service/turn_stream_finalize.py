@@ -123,6 +123,7 @@ class TurnStreamFinalizer:
         upstream_error, upstream_error_text = (False, None)
         if not externally_aborted:
             upstream_error, upstream_error_text = self._turn_has_upstream_error()
+        speech_failure_suffix = ""
 
         # A live answer continues this very turn; only an unanswered question
         # should mark the terminal as a deferred question.
@@ -187,9 +188,8 @@ class TurnStreamFinalizer:
                 # response_text below, so live clients render the same marker
                 # without a history refetch.
                 _partial = ctx.full_response_holder[0] or ""
-                _final_text = _partial.rstrip() + turn_failure_suffix(
-                    _partial, upstream_error_text
-                )
+                speech_failure_suffix = turn_failure_suffix(_partial, upstream_error_text)
+                _final_text = _partial.rstrip() + speech_failure_suffix
                 ctx.full_response_holder[0] = _final_text
                 svc._finalize_turn(
                     llm_bawt=ctx.llm_bawt,
@@ -350,7 +350,11 @@ class TurnStreamFinalizer:
         if ctx.tts_scrubber is not None and status not in ("cancelled", "aborted"):
             try:
                 tts_offset = ctx.tts_scrubber.offset
-                tts_tail = ctx.tts_scrubber.flush()
+                # The visible failure marker is appended during finalization,
+                # outside the worker's ordinary text/speech stream. Include it
+                # in both the final speech delta and canonical terminal text.
+                tts_tail = ctx.tts_scrubber.feed(speech_failure_suffix)
+                tts_tail += ctx.tts_scrubber.flush()
             except Exception:
                 tts_tail = ""  # Optional speech cleanup cannot strand text clients.
             if tts_tail:

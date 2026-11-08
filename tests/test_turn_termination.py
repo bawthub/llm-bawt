@@ -192,6 +192,40 @@ def finalizer_context(store, monkeypatch, *, partial="partial"):
     return ctx
 
 
+@pytest.mark.parametrize("partial", [
+    "",
+    "Partial **answer**.",
+    "First **paragraph**.\n\nLast sentence.",
+    "First **paragraph**.\n\n",
+])
+def test_upstream_error_speech_retains_failure_marker_and_offsets(store, monkeypatch, partial):
+    from llm_bawt.bots import StreamingTTSScrubber
+
+    ctx = finalizer_context(store, monkeypatch, partial=partial)
+    ctx.tts_scrub = True
+    ctx.tts_scrubber = StreamingTTSScrubber()
+    prefix = ctx.tts_scrubber.feed(partial)
+    store.update_turn(
+        turn_id="turn", status="error", end_reason="upstream_error",
+        error_text="Backend unavailable.",
+    )
+    events = []
+    TurnStreamFinalizer(ctx, publish_event_direct=events.append, enrich_attachment_refs=lambda refs: refs).finalize(prepared_messages=[])
+    speech = [event for event in events if event["_type"] == "tts_delta"]
+    assert len(speech) == 1
+    assert speech[0]["tts_offset"] == len(prefix)
+    terminal = events[-1]
+    assert terminal["_type"] == "turn_complete" and terminal["status"] == "error"
+    text = terminal["tts_text"]
+    assert text == prefix + speech[0]["delta"]
+    assert text.count("Turn failed") == 1 and "Backend unavailable." in text
+    assert "**" not in text
+    if partial:
+        assert ("Partial answer." if partial.startswith("Partial") else "First paragraph.") in text
+    if "Last sentence." in partial:
+        assert "Last sentence." in text
+
+
 @pytest.mark.parametrize("partial", ["", "partial"])
 def test_finalizer_race_preserves_partial_and_cancelled_outcome(store, monkeypatch, partial):
     ctx = finalizer_context(store, monkeypatch, partial=partial)
