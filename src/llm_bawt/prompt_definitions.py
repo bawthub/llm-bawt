@@ -108,6 +108,14 @@ class PromptDefinition:
     format: str = "plain_text"
     loader: Callable[[], str] | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Set on a retired prompt: the key that replaced it. Nothing renders a
+    # deprecated key; its row and version history stay readable, and the
+    # registry API refuses edits and resets so nobody tunes a dead prompt.
+    replaced_by: str | None = None
+
+    @property
+    def deprecated(self) -> bool:
+        return self.replaced_by is not None
 
     def default_body(self) -> str:
         synced = synced_body(self.key)
@@ -139,6 +147,7 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
         category="memory_extraction",
         required_vars=("conversation",),
         loader=load_memory_extraction_fact,
+        replaced_by="memory.extraction.fact.sourced",
     ),
     "memory.extraction.fact.sourced": PromptDefinition(
         key="memory.extraction.fact.sourced",

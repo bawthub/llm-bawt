@@ -712,6 +712,9 @@ class PromptTemplateResponse(BaseModel):
     placeholders: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
     updated_at: datetime | None = None
+    # A retired built-in prompt: read-only, superseded by ``replaced_by``.
+    deprecated: bool = False
+    replaced_by: str | None = None
 
 
 class PromptTemplateListResponse(BaseModel):
@@ -745,6 +748,8 @@ class PromptTemplateSummary(BaseModel):
     source: str
     body_length: int = 0
     updated_at: datetime | None = None
+    deprecated: bool = False
+    replaced_by: str | None = None
 
 
 class PromptTemplateIndexResponse(BaseModel):

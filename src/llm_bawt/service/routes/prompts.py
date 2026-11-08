@@ -6,6 +6,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 
+from ...prompt_definitions import DEFAULT_PROMPT_DEFINITIONS
 from ...prompt_registry import COMPACT_SUMMARY_KEY, PromptResolver, PromptTemplate, extract_placeholders
 from ..dependencies import get_service
 from ..schemas import (
@@ -27,10 +28,36 @@ from ..schemas import (
 router = APIRouter()
 
 
+def _deprecation(key: str) -> dict[str, Any]:
+    """Deprecation fields for one key, from its built-in definition."""
+    definition = DEFAULT_PROMPT_DEFINITIONS.get(key)
+    if definition is None or not definition.deprecated:
+        return {}
+    return {"deprecated": True, "replaced_by": definition.replaced_by}
+
+
+def _refuse_deprecated_write(key: str) -> None:
+    """Stop edits and resets of a retired prompt; point at its replacement."""
+    definition = DEFAULT_PROMPT_DEFINITIONS.get(key)
+    if definition is not None and definition.deprecated:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "prompt_deprecated",
+                "message": (
+                    f"Prompt '{key}' is retired and no longer used. "
+                    f"Edit '{definition.replaced_by}' instead."
+                ),
+                "replaced_by": definition.replaced_by,
+            },
+        )
+
+
 def _row_to_response(row: PromptTemplate) -> PromptTemplateResponse:
     from ...prompt_registry import _parse_json_dict, _parse_json_list
 
     return PromptTemplateResponse(
+        **_deprecation(row.key),
         key=row.key,
         title=row.title or row.key,
         category=row.category or "custom",
@@ -48,6 +75,7 @@ def _row_to_response(row: PromptTemplate) -> PromptTemplateResponse:
 
 def _resolved_to_response(resolved) -> PromptTemplateResponse:
     return PromptTemplateResponse(
+        **_deprecation(resolved.key),
         key=resolved.key,
         title=resolved.title,
         category=resolved.category,
@@ -75,6 +103,8 @@ def _response_to_summary(item: PromptTemplateResponse) -> PromptTemplateSummary:
         source=item.source,
         body_length=len(item.body or ""),
         updated_at=item.updated_at,
+        deprecated=item.deprecated,
+        replaced_by=item.replaced_by,
     )
 
 
@@ -331,6 +361,7 @@ def get_prompt(
 @router.patch("/v1/prompts/{key}", response_model=PromptTemplateResponse, tags=["Admin"])
 def upsert_prompt(key: str, request: PromptTemplateUpsertRequest):
     """Create or update one prompt template override."""
+    _refuse_deprecated_write(key)
     service = get_service()
     resolver = PromptResolver(service.config)
     if resolver.store.engine is None:
@@ -458,6 +489,7 @@ def reset_prompt(
     scope_id: str | None = Query(None, description="Scope ID for bot-scoped prompts"),
 ):
     """Delete a DB override and fall back to the code-default prompt."""
+    _refuse_deprecated_write(key)
     service = get_service()
     resolver = PromptResolver(service.config)
     if resolver.store.engine is None:
