@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from llm_bawt.media.clients.base import resolve_media_api_key
 from llm_bawt.service.connection_secrets import ConnectionUnavailable
 from llm_bawt.service.model_discovery import ExistingFetcherProvider, ModelDiscoveryError
 from llm_bawt.service.providers.api_key import resolve_api_key, resolve_stored_api_key
@@ -58,6 +59,23 @@ def test_explicit_credentials_still_win_without_store_access(monkeypatch, adapte
     reads = stub_stored_keys(monkeypatch, {adapter_cls.id: ConnectionUnavailable("store_unavailable")})
     assert resolve_api_key(SimpleNamespace(), adapter_cls.id, env_names, explicit="explicit-key") == "explicit-key"
     assert reads == []
+
+
+@pytest.mark.parametrize("adapter_cls,env_names", PROVIDERS)
+@pytest.mark.parametrize("failure", ["config", "resolver"])
+def test_media_lookup_failure_never_resurrects_env(monkeypatch, adapter_cls, env_names, failure):
+    for name in env_names:
+        monkeypatch.setenv(name, "retired-env-key")
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("synthetic lookup failure")
+
+    target = "llm_bawt.utils.config.Config" if failure == "config" else (
+        "llm_bawt.service.providers.api_key.resolve_api_key"
+    )
+    monkeypatch.setattr(target, broken)
+    config = None if failure == "config" else SimpleNamespace()
+    assert resolve_media_api_key(config, adapter_cls.id, env_names) == ""
 
 
 @pytest.mark.parametrize("adapter_cls,env_names", PROVIDERS)

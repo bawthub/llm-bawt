@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import abc
 import logging
-import os
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Optional
@@ -20,11 +19,10 @@ def resolve_media_api_key(
     explicit: str | None = None,
     config_attr: str | None = None,
 ) -> str:
-    """A media provider's API key: explicit, then the stored connection, then env.
+    """A media key using the LLM clients' credential resolution policy.
 
-    Same order as the LLM clients (``resolve_api_key``): the CredentialStore
-    record wins and the env vars stay a deprecated fallback (TASK-1612).
-    Returns ``""`` when no key is found.
+    Explicit keys win; OpenAI/xAI otherwise require their stored connection.
+    Returns ``""`` when no key is found or credential resolution fails.
     """
     if explicit:
         return explicit
@@ -38,9 +36,9 @@ def resolve_media_api_key(
             env_vars=env_vars,
             config_attr=config_attr,
         ) or ""
-    except Exception as error:  # noqa: BLE001 — a broken resolver must not hide the env key
+    except Exception as error:  # noqa: BLE001 — media remains unconfigured if lookup fails
         logger.debug("Media key lookup for %s failed: %s", provider_id, type(error).__name__)
-        return next((os.environ[name] for name in env_vars if os.environ.get(name)), "")
+        return ""
 
 
 @dataclass
