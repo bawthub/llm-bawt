@@ -131,6 +131,25 @@ def test_turn_usage_coordinator_checkpoints_and_builds_both_channels() -> None:
     }
 
 
+def test_usage_checkpoint_write_failure_does_not_end_the_turn() -> None:
+    """TASK-1385: a lock timeout on a mid-run checkpoint must not raise."""
+    class LockedStore:
+        def update_turn(self, **_kwargs) -> None:
+            raise RuntimeError("canceling statement due to lock timeout")
+
+    event = TurnUsageCoordinator(LockedStore()).capture(
+        turn_id="turn-1",
+        trigger_message_id="user-1",
+        bot_id="caid",
+        user_id="nick",
+        model="m",
+        token_usage={"resident_tokens": 10, "usage_status": "partial"},
+    )
+
+    assert event is not None
+    assert event["token_usage"] == {"resident_tokens": 10, "usage_status": "partial"}
+
+
 def test_usage_update_round_trips_through_agent_event_transport() -> None:
     event = AgentEvent(
         event_id="evt-usage",

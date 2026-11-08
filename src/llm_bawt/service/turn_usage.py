@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 
 def access_path_snapshot(catalog: Any, model_ref: str | None) -> dict[str, Any] | None:
@@ -76,7 +79,15 @@ class TurnUsageCoordinator:
         # iteration checkpoints remain partial; never downgrade a final snapshot.
         status = "final" if token_usage.get("usage_status") == "final" else "partial"
         snapshot = {**token_usage, "usage_status": status}
-        self._turn_log_store.update_turn(turn_id=turn_id, token_usage=snapshot)
+        # TASK-1385: a mid-run usage checkpoint is telemetry. If it fails (e.g.
+        # a turn_logs row-lock timeout), the bridge run is still going; raising
+        # here would end the app's turn as an error the bridge never confirmed.
+        # The next checkpoint or finalization rewrites the snapshot.
+        try:
+            self._turn_log_store.update_turn(turn_id=turn_id, token_usage=snapshot)
+        except Exception as err:
+            log.warning("Usage checkpoint for turn %s not persisted (%s: %s); turn continues",
+                        turn_id, type(err).__name__, err)
         return {
             "_type": "turn_usage",
             "turn_id": turn_id,
