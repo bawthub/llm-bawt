@@ -23,6 +23,8 @@ logger = logging.getLogger(__name__)
 # Wire prefix of a negotiated extension frame (chat_response_adapter's
 # EXTENSION_COMMENT). Kept local so the CLI client does not import FastAPI.
 _EXTENSION_EVENT = ": llm-bawt-event "
+# Receipt of a queued (agent) turn the service then waits on and streams.
+_ADMISSION_EVENT = ": llm-bawt-admission "
 
 # Check for optional httpx
 try:
@@ -317,8 +319,11 @@ class ServiceClient:
         # The route sends a stock OpenAI stream. Warnings and server-run tool
         # calls arrive only when negotiated, as ": llm-bawt-event " comments
         # carrying the same JSON a data frame would.
+        # Admission comments identify a queued turn, so its recorded tool
+        # calls can be shown; the service still streams that turn's reply.
         headers = {"Content-Type": "application/json",
-                   "X-LLM-Bawt-Extension-Events": "comment"}
+                   "X-LLM-Bawt-Extension-Events": "comment",
+                   "X-LLM-Bawt-Admission-Events": "comment"}
         body = json.dumps(payload).encode()
 
         req = urllib.request.Request(url, data=body, headers=headers, method="POST")
@@ -334,6 +339,14 @@ class ServiceClient:
                     if not raw_line:
                         break
                     line = raw_line.decode().strip()
+                    if line.startswith(_ADMISSION_EVENT.strip()):
+                        try:
+                            admitted = json.loads(line[len(_ADMISSION_EVENT.strip()):])
+                        except json.JSONDecodeError:
+                            continue
+                        if is_accepted_receipt(admitted):
+                            yield {"admitted": admitted}
+                        continue
                     if line.startswith(_EXTENSION_EVENT):
                         line = "data: " + line[len(_EXTENSION_EVENT):]
                     if line.startswith("data: "):

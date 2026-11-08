@@ -134,8 +134,17 @@ def query_via_service(
 
             def content_iterator() -> Iterator[str]:
                 nonlocal actual_model, got_metadata, accepted_receipt
+                admitted: dict | None = None
                 for item in raw_iterator:
-                    if is_accepted_receipt(item):
+                    if isinstance(item, dict) and "admitted" in item:
+                        # The service waits on this queued turn and streams its
+                        # text only once it ends, so its tool calls are recorded.
+                        admitted = item["admitted"]
+                    elif isinstance(item, str) and admitted is not None:
+                        render_recorded_tools({"turn_id": admitted.get("turn_id")}, admitted)
+                        admitted = None
+                        yield item
+                    elif is_accepted_receipt(item):
                         accepted_receipt = True
                         answer = resolve_accepted_receipt(item)
                         if answer:

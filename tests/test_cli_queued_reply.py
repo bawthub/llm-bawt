@@ -216,6 +216,47 @@ def test_queued_cli_tool_lookup_failure_still_prints_answer(monkeypatch, capsys)
     assert "It printed hi." in capsys.readouterr().out
 
 
+def test_cli_stream_reads_admission_comment(monkeypatch):
+    """TASK-1394: the service resolves a queued turn itself and streams only its
+    text; the CLI asks for the admission comment to learn which turn it was."""
+    import json
+    sent = {}
+
+    def urlopen(req, **_kwargs):
+        sent.update({key.lower(): value for key, value in req.header_items()})
+        return io.BytesIO(_wire(
+            f": llm-bawt-admission {json.dumps(ACK)}\n\n",
+            ": llm-bawt-admission {not json\n\n",
+            ": waiting for admitted turn\n\n",
+            _data({"object": "chat.completion.chunk", "model": "m",
+                   "choices": [{"index": 0, "delta": {"content": "done"}}]}),
+            "data: [DONE]\n\n",
+        ))
+
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    client = ServiceClient(http_url="http://example.invalid")
+    items = list(client._stream_chat_completion({"messages": [], "stream": True}))
+    assert sent["x-llm-bawt-admission-events"] == "comment"
+    assert items == [{"admitted": ACK}, {"model": "m"}, "done"]
+
+
+def test_admitted_stream_renders_tool_calls_before_text(monkeypatch, capsys):
+    client = ServiceClient(http_url="http://example.invalid")
+    monkeypatch.setattr(client, "_request", lambda *_a, **_k: {"events": [
+        {"turn_id": "turn-delivery-1", "tool_calls": [
+            {"name": "Bash", "arguments": {"command": "echo hi"}, "result": "hi"}]},
+    ]})
+    monkeypatch.setattr(client, "chat_completion", lambda **_kwargs: iter(
+        [{"admitted": dict(ACK)}, {"model": "m"}, "It printed hi."]))
+    display_cmd, config, output = _queued_cli(monkeypatch, client)
+    assert display_cmd.query_via_service("run echo hi", model=None, bot_id="selected-bot",
+                                         user_id="selected-user", plaintext_output=True,
+                                         stream=True, config=config) is True
+    text = output.getvalue()
+    assert "-> Bash: Bash(command=echo hi)" in text
+    assert "It printed hi." in capsys.readouterr().out + text
+
+
 def test_turn_tool_calls_without_turn_id_skips_lookup(monkeypatch):
     client = ServiceClient(http_url="http://example.invalid")
     monkeypatch.setattr(client, "_request", lambda *_a, **_k: pytest.fail("no lookup"))
