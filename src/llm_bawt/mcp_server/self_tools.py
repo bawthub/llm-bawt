@@ -294,13 +294,15 @@ async def self_system_prompt(
             replace it wholesale with ``new_prompt``.
         new_prompt: The full replacement system prompt (required for
             action="edit"). This is a FULL replace, not an append — send the
-            complete desired prompt. The prior prompt is returned in the result
-            (``old_prompt``) so it stays recoverable in your transcript.
+            complete desired prompt. The prior prompt is not echoed back; read
+            it first with action="view" if you want it in your transcript.
 
     Returns:
         view: {bot_id, action, system_prompt, length, name, bot_type, updated_at}
-        edit: {bot_id, action, updated, old_prompt, old_length, new_prompt,
-               new_length, name, bot_type, updated_at}
+        edit: {bot_id, action, updated, old_length, new_length, changes,
+               name, bot_type, updated_at, note}; ``changes`` counts added and
+               removed lines with a few short samples. Neither prompt is
+               echoed.
         On failure: {bot_id, action, error, ...}.
     """
     import httpx
@@ -354,8 +356,7 @@ async def self_system_prompt(
             "error": "action='edit' requires a non-empty 'new_prompt' (full replacement text).",
         }
 
-    # Read the current prompt first so the old value is recoverable in the
-    # transcript and we can report a no-op.
+    # Read the current prompt first to report a no-op and the change summary.
     try:
         before = await _fetch_bot_profile(bot_id)
     except httpx.HTTPStatusError as e:
@@ -382,25 +383,52 @@ async def self_system_prompt(
             "bot_id": bot_id,
             "action": action,
             "error": f"Update rejected ({e.response.status_code}): {e.response.text}",
-            "old_prompt": old_prompt,
         }
     except Exception as e:
-        return {"bot_id": bot_id, "action": action, "error": f"Update failed: {e}", "old_prompt": old_prompt}
+        return {"bot_id": bot_id, "action": action, "error": f"Update failed: {e}"}
 
     updated_prompt = after.get("system_prompt") or ""
     return {
         "bot_id": bot_id,
         "action": action,
         "updated": updated_prompt != old_prompt,
-        "old_prompt": old_prompt,
         "old_length": len(old_prompt),
-        "new_prompt": updated_prompt,
         "new_length": len(updated_prompt),
+        "changes": _prompt_change_summary(old_prompt, updated_prompt),
         "name": after.get("name"),
         "bot_type": after.get("bot_type"),
         "updated_at": after.get("updated_at"),
         "note": _prompt_edit_note({**before, **after}),
     }
+
+
+_CHANGE_SAMPLES = 3
+_SAMPLE_CHARS = 120
+
+
+def _prompt_change_summary(old: str, new: str) -> dict:
+    """Line-level added/removed counts plus a few truncated samples of each."""
+    import difflib
+
+    added: list[str] = []
+    removed: list[str] = []
+    diff = difflib.unified_diff(old.splitlines(), new.splitlines(), lineterm="", n=0)
+    for index, line in enumerate(diff):
+        # The first two lines are the ---/+++ file headers; content lines may
+        # themselves begin with "++" or "--" (markdown rules), so skip by position.
+        if index < 2 or line.startswith("@@"):
+            continue
+        if line.startswith("+"):
+            added.append(line[1:])
+        elif line.startswith("-"):
+            removed.append(line[1:])
+
+    def sample(lines: list[str]) -> list[str]:
+        shown = [ln.strip() for ln in lines if ln.strip()][:_CHANGE_SAMPLES]
+        return [ln if len(ln) <= _SAMPLE_CHARS else ln[:_SAMPLE_CHARS - 1] + "…" for ln in shown]
+
+    return {"lines_added": len(added), "lines_removed": len(removed),
+            "added_sample": sample(added), "removed_sample": sample(removed)}
 
 
 def _backend_pins_prompt(profile: dict) -> bool:

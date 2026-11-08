@@ -72,3 +72,60 @@ def test_catalog_summary_distinguishes_pinned_sessions() -> None:
     summary = catalog_contracts.TOOL_SUMMARIES["self_system_prompt"]
     assert "next turn" in summary
     assert "pinned sessions at next boundary" in summary
+
+
+# TASK-1482: the edit reply is compact — lengths plus a short change summary,
+# never either full prompt (view first to keep the old one).
+def _edit_texts(monkeypatch, old: str, new: str) -> dict:
+    class _FakeClient:
+        def __init__(self, *args: Any, **kw: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *exc: object) -> None:
+            return None
+
+        async def patch(self, url: str, json: dict, timeout: float) -> httpx.Response:
+            body = {"bot_type": "chat", "system_prompt": json["system_prompt"]}
+            return httpx.Response(200, json=body, request=httpx.Request("PATCH", url))
+
+    async def fetch(bot_id: str) -> dict:
+        return {"bot_type": "chat", "system_prompt": old}
+
+    monkeypatch.setattr(st, "_fetch_bot_profile", fetch)
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+    return asyncio.run(st.self_system_prompt(bot_id="probe", action="edit", new_prompt=new))
+
+
+def test_edit_reply_omits_both_prompts_and_summarises_changes(monkeypatch) -> None:
+    keep = "\n".join(f"stable line {i} " + "x" * 200 for i in range(40))
+    old = keep + "\nTone: formal.\nSign off as Probe."
+    new = keep + "\nTone: casual.\n" + "Long rule " + "y" * 300 + "\nAlso add rule A.\nAlso add rule B."
+    res = _edit_texts(monkeypatch, old, new)
+    assert "old_prompt" not in res and "new_prompt" not in res
+    assert res["updated"] is True
+    assert (res["old_length"], res["new_length"]) == (len(old), len(new))
+    changes = res["changes"]
+    assert (changes["lines_added"], changes["lines_removed"]) == (4, 2)
+    assert changes["removed_sample"] == ["Tone: formal.", "Sign off as Probe."]
+    assert len(changes["added_sample"]) == 3
+    assert all(len(s) <= 120 for s in changes["added_sample"])
+    assert changes["added_sample"][1].endswith("…")
+    assert len(str(res)) < 1500 < len(old) + len(new)
+
+
+def test_markdown_rule_lines_count_as_changes(monkeypatch) -> None:
+    res = _edit_texts(monkeypatch, "intro\n---\nbody", "intro\n+++ note\nbody")
+    changes = res["changes"]
+    assert (changes["lines_added"], changes["lines_removed"]) == (1, 1)
+    assert changes["removed_sample"] == ["---"]
+    assert changes["added_sample"] == ["+++ note"]
+
+
+def test_unchanged_edit_reports_no_changes(monkeypatch) -> None:
+    res = _edit_texts(monkeypatch, "same", "same")
+    assert res["updated"] is False
+    assert res["changes"] == {"lines_added": 0, "lines_removed": 0,
+                              "added_sample": [], "removed_sample": []}
