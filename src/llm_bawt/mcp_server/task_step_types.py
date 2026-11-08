@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Literal, NotRequired, Required, TypedDict
+from typing import Literal, NotRequired, Required
+
+from pydantic import ConfigDict, with_config
+from typing_extensions import TypedDict
 
 StepType = Literal[
     "PLAN",
@@ -75,6 +78,10 @@ STEP_STATUSES: tuple[StepStatus, ...] = (
 _STEP_STATUS_SET = frozenset(STEP_STATUSES)
 
 
+# TASK-1663: argument validation used to drop unknown keys (e.g. description)
+# and the write still succeeded. They are refused before BawtHub is called, and
+# the published schema says so. (The docstring is published in tool schemas.)
+@with_config(ConfigDict(extra="forbid"))
 class TaskStepInput(TypedDict, total=False):
     """JSON shape accepted by task creation and step-list mutation tools."""
 
@@ -84,6 +91,9 @@ class TaskStepInput(TypedDict, total=False):
     output: NotRequired[str]
     file_path: NotRequired[str]
     filePath: NotRequired[str]
+
+
+_STEP_INPUT_FIELDS: tuple[str, ...] = tuple(TaskStepInput.__annotations__)
 
 
 class CheckLinkInput(TypedDict):
@@ -118,6 +128,12 @@ def validate_step_inputs(steps: list[TaskStepInput]) -> str | None:
     for index, step in enumerate(steps):
         if not isinstance(step, dict):
             return f"steps[{index}] must be an object"
+        unknown = sorted(str(key) for key in step if key not in _STEP_INPUT_FIELDS)
+        if unknown:
+            return (
+                f"steps[{index}] has unknown field(s): {', '.join(unknown)}; "
+                f"allowed: {', '.join(_STEP_INPUT_FIELDS)}. Nothing was written."
+            )
         title = step.get("title")
         if not isinstance(title, str) or not title.strip():
             return f"steps[{index}].title must be a non-empty string"

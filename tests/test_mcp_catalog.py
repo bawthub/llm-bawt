@@ -313,7 +313,9 @@ async def test_catalog_token_budgets():
     # TASK-1581: bots_profile_patch names agent backend+config: 18,061 (+5).
     # TASK-1389: ops_approval_withdraw(request_id, reason): 18,150 (+89).
     # TASK-471: attachment_get(ref, max_images): 18,234 (+84).
-    assert total <= 18234, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-1663: step schemas forbid unknown fields (additionalProperties:
+    # false on steps_add/steps_set/tasks_create) so they can't vanish: 18,249 (+15).
+    assert total <= 18249, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 
