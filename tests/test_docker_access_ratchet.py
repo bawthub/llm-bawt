@@ -68,6 +68,7 @@ OPS_ADAPTER = {
     "llm_bawt/ops/worker_launch.py": ({"daemon socket"}, "mounts the daemon socket into the isolated worker"),
     "llm_bawt/ops/health_collector.py": ({"import docker"}, "samples container state for /v1/health"),
     "llm_bawt/ops/worker.py": ({"daemon socket", "engine api"}, "the one-shot worker's daemon connection"),
+    "llm_bawt/ops/wake_on_lan.py": ({"engine api"}, "worker-side fixed-target wake helper create/start/remove"),
     "llm_bawt/ops/sealed_container.py": ({"engine api"}, "worker-side sealed container create/start/exec"),
     "llm_bawt/ops/image_deploy.py": ({"engine api"}, "worker-side pinned image deploy/rollback"),
     "llm_bawt/ops/app_config_reconcile.py": ({"engine api"}, "worker-side container lookup for app-config apply"),
