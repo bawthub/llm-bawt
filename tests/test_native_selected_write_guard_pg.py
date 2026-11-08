@@ -216,25 +216,28 @@ def test_supported_physical_purge_after_admission_denies_real_native_append(
     assert len(purges) == 1
     assert len(proofs) == 1
     assert {token for _, token in invocations} == {proofs[0].capability}
-    if stream:
+    if stream and phase == "before-initial":
+        # Denial happens before the first byte, so the stream returns the
+        # real HTTP error instead of 200 + an in-band SSE error frame.
+        assert response.status_code >= 400, response.text
+        assert "access_denied" in response.text
+        assert "data: " not in response.text
+    elif stream:
         assert response.status_code == 200
         frames = [json.loads(line[6:]) for line in response.text.splitlines()
                   if line.startswith("data: ") and line != "data: [DONE]"]
         errors = [frame["error"] for frame in frames if "error" in frame]
-        if phase == "before-initial":
-            assert errors and "access_denied" in json.dumps(errors), response.text
-        else:
-            # Existing streaming-finalizer contract reports persistence failure
-            # on authoritative turn_complete, NOT on the direct HTTP SSE tail.
-            # Keep this limitation explicit; do not claim SSE error propagation.
-            assert not errors
-            assert any(frame["choices"][0]["finish_reason"] == "stop" for frame in frames)
-            assert len(terminal_events) == 1
-            terminal = terminal_events[0]
-            assert terminal["status"] == "error" and terminal["end_reason"] == "upstream_error"
-            assert "access_denied" in terminal["error_text"]
-            record_property("streaming_finalizer_terminal", json.dumps(terminal))
-            record_property("direct_sse_final_append_error_surfaced", False)
+        # Existing streaming-finalizer contract reports persistence failure
+        # on authoritative turn_complete, NOT on the direct HTTP SSE tail.
+        # Keep this limitation explicit; do not claim SSE error propagation.
+        assert not errors
+        assert any(frame["choices"][0]["finish_reason"] == "stop" for frame in frames)
+        assert len(terminal_events) == 1
+        terminal = terminal_events[0]
+        assert terminal["status"] == "error" and terminal["end_reason"] == "upstream_error"
+        assert "access_denied" in terminal["error_text"]
+        record_property("streaming_finalizer_terminal", json.dumps(terminal))
+        record_property("direct_sse_final_append_error_surfaced", False)
     else:
         assert response.status_code >= 400, response.text
         assert "access_denied" in response.text
