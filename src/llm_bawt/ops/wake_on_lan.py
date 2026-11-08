@@ -232,6 +232,7 @@ def main() -> int:
     signal.signal(signal.SIGALRM, expired)
     signal.alarm(spec["wait_seconds"] + 1)
     result = wake(spec)
+    signal.alarm(0)
     print(json.dumps(result, sort_keys=True), flush=True)
     return 0 if result["ready"] else 1
 

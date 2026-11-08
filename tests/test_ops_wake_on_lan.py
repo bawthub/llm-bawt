@@ -302,6 +302,18 @@ def test_alarm_retains_sent_packet_and_last_readiness_state():
     assert result["error"] == "readiness deadline exceeded"
 
 
+def test_main_disarms_alarm_before_printing_known_result(monkeypatch, capsys):
+    events = []
+    monkeypatch.setattr(wol.sys, "argv", ["wake_on_lan.py", json.dumps(SPEC)])
+    monkeypatch.setattr(wol.signal, "signal", lambda *a: None)
+    monkeypatch.setattr(wol.signal, "alarm", lambda seconds: events.append(seconds))
+    result = {"ready": False, "packet_sent": True}
+    monkeypatch.setattr(wol, "wake", lambda spec: events.append("wake") or result)
+    assert wol.main() == 1
+    assert events == [11, "wake", 0]
+    assert json.loads(capsys.readouterr().out) == result
+
+
 def test_no_packet_after_initial_probe_exhausts_deadline():
     clock = Clock()
 
