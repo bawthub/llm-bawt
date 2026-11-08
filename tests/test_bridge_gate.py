@@ -189,6 +189,7 @@ def test_health_states():
     assert gates.state(BROKER) is State.OPEN_UNAUTHENTICATED
     row = _row(gates, BROKER)
     assert row["status"] == "ok" and row["reason"].startswith("warning:")
+    clock.now += bridge_gate.RECENT_SECONDS + 1
     gates.check(BROKER, DERIVED[BROKER.label])
     assert gates.state(BROKER) is State.OPEN_DERIVED_SEEN
     assert _row(gates, BROKER)["status"] == "degraded"
@@ -198,6 +199,29 @@ def test_health_states():
     enforced = make(legacy_env(BROKER))
     row = _row(enforced, BROKER)
     assert row["state"] == "enforced" and row["enforced"] is True and row["status"] == "ok"
+
+
+def test_mixed_traffic_does_not_recommend_enforcing():
+    # TASK-1670: a few derived requests amid many token-less ones must not
+    # recommend enforcement, which would 401 every token-less bridge.
+    clock = Clock()
+    gates = make(clock=clock)
+    for _ in range(3):
+        gates.check(BROKER, None)
+    gates.check(BROKER, DERIVED[BROKER.label])
+    assert gates.state(BROKER) is State.OPEN_MIXED
+    row = _row(gates, BROKER)
+    assert row["status"] == "ok" and row["reason"].startswith("warning:")
+    assert "don't set" in row["reason"]
+    # Legacy callers still pass under enforcement, so they don't block it.
+    legacy = make(legacy_env(BROKER), Settings({BROKER.setting_key: False}), clock=clock)
+    legacy.check(BROKER, LEGACY[BROKER])
+    legacy.check(BROKER, DERIVED[BROKER.label])
+    assert legacy.state(BROKER) is State.OPEN_DERIVED_SEEN
+    # Once token-less traffic ages out, the recommendation returns.
+    clock.now += bridge_gate.RECENT_SECONDS + 1
+    gates.check(BROKER, DERIVED[BROKER.label])
+    assert gates.state(BROKER) is State.OPEN_DERIVED_SEEN
 
 
 def test_collect_includes_gate_rows(monkeypatch):

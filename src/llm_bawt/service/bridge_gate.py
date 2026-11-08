@@ -85,6 +85,8 @@ class Outcome(enum.Enum):
 class State(enum.Enum):
     ENFORCED = "enforced"
     OPEN_DERIVED_SEEN = "open_derived_seen"  # a bridge can authenticate; the gate is still open
+    # Derived and token-less callers both seen recently: enforcing would 401 the latter.
+    OPEN_MIXED = "open_mixed"
     OPEN_UNAUTHENTICATED = "open_unauthenticated"  # network-only traffic, no derived yet
     IDLE = "idle"
 
@@ -235,7 +237,8 @@ class BridgeGates:
 
         with self._lock:
             if recent(Outcome.DERIVED):
-                return State.OPEN_DERIVED_SEEN
+                # Legacy tokens still pass when enforced; only MISSING would be refused.
+                return State.OPEN_MIXED if recent(Outcome.MISSING) else State.OPEN_DERIVED_SEEN
             if recent(Outcome.MISSING) and self._counts[gate.slug][Outcome.DERIVED] == 0:
                 return State.OPEN_UNAUTHENTICATED
         return State.IDLE
@@ -250,6 +253,10 @@ class BridgeGates:
                 status, reason = DEGRADED, (
                     f"{gate.slug} bridge gate is open while bridges send the derived token; "
                     f"set {gate.setting_key}=true")
+            elif state is State.OPEN_MIXED:
+                status, reason = OK, (
+                    f"warning: {gate.slug} bridge gate is open and some bridges still send no "
+                    f"token; don't set {gate.setting_key}=true yet")
             elif state is State.OPEN_UNAUTHENTICATED:
                 # Warning, not degraded: this is a network-only install's normal state
                 # until its bridges send the derived token.
