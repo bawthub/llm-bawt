@@ -27,11 +27,22 @@ image** (`compose_config.renderer_image`) as a sealed one-shot container
   dropped, `no-new-privileges`, memory and PID limits;
 - log driver `none`, so rendered values never reach daemon logs. Output is read
   once through `attach`, and the container is removed in every outcome;
-- exactly one read-only bind: the target's own Compose working directory at the
+- exactly one read-only bind: the project's Compose working directory at the
   same path, so relative paths and the project `.env` resolve as they do for the
-  operator. Directory and files come from the target container's
-  `com.docker.compose.project.working_dir`/`config_files` labels and must equal
-  the spec's `compose_files` basenames in order. No host path lives in a seed;
+  operator. File names come from the target container's
+  `com.docker.compose.project.working_dir`/`config_files` labels (which must be
+  valid) and must equal the spec's `compose_files` basenames in order. The
+  directory is the `working_dir` shared by every *other* running container of
+  the same Compose project; containers without a `working_dir` label (ops
+  workers, one-off runs of an image carrying the project label) are ignored,
+  and `config_files` differences between containers are not compared. No such
+  sibling, or siblings that disagree, refuses with `compose_source_unresolved`
+  — a single-container project cannot be reconciled. When the target was
+  created from a different directory, drift includes
+  `compose_source:<actual>-><desired>` and the recreate (same image) stamps the
+  new directory; a bind under the old directory may move to the same relative
+  path in the new one, any other bind source change still refuses
+  `mount_source_changed`. No host path lives in a seed;
 - fixed argv (`compose -p <project> -f … config --format json <service>`, then
   `config --hash <service>`) and one injected variable: the pinned image
   reference, under `compose_config.image_variable`.
