@@ -40,15 +40,17 @@ logger = logging.getLogger(__name__)
 
 #: Default user-facing origin for clickable asset links (TASK-847). Mirrors
 #: ``Config.PUBLIC_ORIGIN``; read straight from the environment here so the
-#: serializers stay import-light and usable without a Config instance.
-DEFAULT_PUBLIC_ORIGIN = "https://app.bawthub.com"
+#: serializers stay import-light and usable without a Config instance. No
+#: product default names a deployment's domain (TASK-2140): unset means
+#: same-origin relative links.
+DEFAULT_PUBLIC_ORIGIN = ""
 
 #: BawtHub's same-origin proxy prefix for llm-bawt ``/v1/uploads/...``.
 PUBLIC_UPLOADS_PREFIX = "/api/chat/uploads"
 
 
 def public_origin() -> str:
-    """User-facing BawtHub origin, or ``""`` when public links are disabled."""
+    """User-facing BawtHub origin, or ``""`` for same-origin relative links."""
     return (os.environ.get("LLM_BAWT_PUBLIC_ORIGIN", DEFAULT_PUBLIC_ORIGIN) or "").rstrip("/")
 
 
@@ -77,12 +79,10 @@ def public_urls(asset_id: str, kind: str = "image", origin: str | None = None) -
     """Clickable BawtHub URLs for an asset: ``{"url": ..., "download": ...}``.
 
     Routed through BawtHub's ``/api/chat/uploads`` proxy so the browser hits
-    the same origin (and auth) it already uses for chat thumbnails. Empty
-    when no public origin is configured.
+    the same origin (and auth) it already uses for chat thumbnails. With no
+    public origin configured the links are relative to that same origin.
     """
     o = public_origin() if origin is None else origin.rstrip("/")
-    if not o:
-        return {}
     base = f"{o}{PUBLIC_UPLOADS_PREFIX}/{asset_id}"
     out = {"url": base}
     if kind_by_name(kind) is not IMAGE_KIND:

@@ -273,6 +273,18 @@ def test_an_upload_path_on_a_foreign_host_is_refused(ref: str) -> None:
         task_images.parse_image_ref(ref)
 
 
+def test_a_self_hosted_install_accepts_its_own_public_origin(monkeypatch: pytest.MonkeyPatch) -> None:
+    # TASK-2140: a tenant's share links are on its own origin, not bawthub.com.
+    monkeypatch.setenv("LLM_BAWT_PUBLIC_ORIGIN", "http://tenant.example.test:3000")
+    assert task_images.parse_image_ref(f"http://tenant.example.test:3000/api/chat/uploads/{ID}") == (
+        ID, f"/api/chat/uploads/{ID}")
+    with pytest.raises(task_images.ImageRefError):
+        task_images.parse_image_ref(f"http://other.example.test:3000/api/chat/uploads/{ID}")
+    monkeypatch.delenv("LLM_BAWT_PUBLIC_ORIGIN")
+    with pytest.raises(task_images.ImageRefError):
+        task_images.parse_image_ref(f"http://tenant.example.test:3000/api/chat/uploads/{ID}")
+
+
 class Turn:
     """Signed-turn double: the trigger message's attachments and the associations made."""
 

@@ -592,13 +592,22 @@ def test_image_response_has_content_disposition_and_public_url(
     assert orig.headers["content-disposition"] == 'inline; filename="cat photo.webp"'
 
 
-def test_public_url_omitted_when_origin_blank(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("LLM_BAWT_PUBLIC_ORIGIN", "")
+@pytest.mark.parametrize("blank", [None, ""])
+def test_public_url_is_same_origin_relative_without_an_origin(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, blank: str | None
+) -> None:
+    # TASK-2140: no product default names a deployment's domain.
+    if blank is None:
+        monkeypatch.delenv("LLM_BAWT_PUBLIC_ORIGIN", raising=False)
+    else:
+        monkeypatch.setenv("LLM_BAWT_PUBLIC_ORIGIN", blank)
     resp = client.post(
         "/v1/uploads", headers={"X-Entity-Id": "nick"}, files={"file": ("n.txt", b"n", "text/plain")}
     )
     assert resp.status_code == 200
-    assert resp.json()["public_url"] is None
+    body = resp.json()
+    assert body["public_url"] == f"/api/chat/uploads/{body['asset_id']}"
+    assert body["public_download_url"] == f"/api/chat/uploads/{body['asset_id']}?download=1"
 
 
 def test_unicode_filename_gets_rfc5987_fallback(client: TestClient) -> None:

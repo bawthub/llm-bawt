@@ -23,7 +23,7 @@ from typing import Any, Iterable
 from urllib.parse import urlsplit
 
 from llm_bawt.media.asset_kinds import IMAGE_KIND, kind_by_name
-from llm_bawt.media.serializers import PUBLIC_UPLOADS_PREFIX
+from llm_bawt.media.serializers import PUBLIC_UPLOADS_PREFIX, public_origin
 
 logger = logging.getLogger(__name__)
 
@@ -42,13 +42,16 @@ class ImageRefError(ValueError):
 
 
 def _first_party(host: str) -> bool:
-    """BawtHub's public domain, or one of the product's own service hosts.
+    """BawtHub's public domain, this install's public origin, or a product service host.
 
     A link on any other host is someone else's page, even when its path looks
-    like an upload, so it is refused rather than mapped to one of ours.
+    like an upload, so it is refused rather than mapped to one of ours. A
+    self-hosted install's own links use its public origin (TASK-2140).
     """
     host = host.lower()
-    return host in _SERVICE_HOSTS or host == _PRODUCT_DOMAIN or host.endswith(f".{_PRODUCT_DOMAIN}")
+    own = (urlsplit(public_origin()).hostname or "").lower()
+    return (host in _SERVICE_HOSTS or host == _PRODUCT_DOMAIN or host.endswith(f".{_PRODUCT_DOMAIN}")
+            or (bool(own) and host == own))
 
 
 def parse_image_ref(ref: Any) -> tuple[str | None, str]:

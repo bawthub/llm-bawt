@@ -246,12 +246,14 @@ class Config(RuntimeTunables, BaseSettings):
         ),
     )
     PUBLIC_ORIGIN: str = Field(
-        default="https://app.bawthub.com",
+        default="",
         description=(
             "User-facing BawtHub origin used to build clickable links to "
             "uploaded assets (TASK-847): <origin>/api/chat/uploads/<asset_id>. "
             "Returned as public_url from POST /v1/uploads and echoed in the "
-            "agent-visible attachment manifest. Empty = omit public links. "
+            "agent-visible attachment manifest. Empty = same-origin relative "
+            "links (/api/chat/uploads/<asset_id>), which work inside BawtHub; "
+            "notification links still need an absolute origin (TASK-2140). "
             "Set via LLM_BAWT_PUBLIC_ORIGIN."
         ),
     )
