@@ -218,3 +218,49 @@ def test_extension_fields_ride_extra_body(harness, monkeypatch, headers, stream)
         list(response)
     (request,) = harness.seen
     assert (request.bot_id, request.user, request.augment_memory) == ("test-bot", "test-user", False)
+
+
+# TASK-1418: a failure before any stream output is a real HTTP error status,
+# as on the non-stream path, not an HTTP 200 stream carrying an error event.
+@pytest.mark.parametrize("headers", BOTH_PASS)
+def test_stream_failure_before_output_is_a_real_http_status(harness, monkeypatch, headers):
+    monkeypatch.setattr(adapter, "observe_receipt", AsyncMock(return_value={
+        "status": "FAILED", "error": "Cannot accept session for bot"}))
+    harness.service.stream_events = QUEUED_STREAM
+    with pytest.raises(openai.APIStatusError, match="Cannot accept session") as raised:
+        harness.sdk(headers).chat.completions.create(
+            model="test-model", messages=MESSAGES, stream=True, extra_body=EXTRA)
+    assert raised.value.status_code == 502
+
+
+@pytest.mark.parametrize(("error", "status"), [
+    (ValueError("unknown model"), 400),
+    (RuntimeError("bridge down"), 502),
+])
+def test_stream_exception_before_output_keeps_its_status(harness, error, status):
+    async def failing(request):
+        yield ": connected\n\n"
+        raise error
+
+    harness.service.chat_completion_stream = failing
+    with pytest.raises(openai.APIStatusError) as raised:
+        harness.sdk(DEFAULT).chat.completions.create(
+            model="test-model", messages=MESSAGES, stream=True, extra_body=EXTRA)
+    assert raised.value.status_code == status
+
+
+def test_slow_first_frame_still_streams_after_the_header_hold(harness, monkeypatch):
+    import asyncio
+
+    monkeypatch.setattr(adapter, "PRE_HEADER_SECONDS", 0.05)
+
+    async def slow(request):
+        yield ": connected\n\n"
+        await asyncio.sleep(0.2)  # Past the hold: headers go out, the step resumes.
+        for event in DIRECT_STREAM[1:]:
+            yield event
+
+    harness.service.chat_completion_stream = slow
+    stream = harness.sdk(DEFAULT).chat.completions.create(
+        model="test-model", messages=MESSAGES, stream=True, extra_body=EXTRA)
+    _assert_one_answer(_strict_chunks(stream), "Let me check. It is noon.")

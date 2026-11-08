@@ -21,6 +21,10 @@ from .schemas import (
 )
 
 REPLY_TIMEOUT_SECONDS = 300.0
+# TASK-1418: how long a public stream may hold its headers waiting for the
+# first real frame, so a failure before it can still set the HTTP status.
+# Bounded well under gateway timeouts; after it, headers go out as before.
+PRE_HEADER_SECONDS = 5.0
 _PENDING = frozenset({"QUEUED", "STEERING", "DISPATCHING", "IN_FLIGHT"})
 
 
@@ -275,5 +279,111 @@ async def completion_stream(
                 yield frame
     except Exception as exc:
         # Once StreamingResponse has sent headers, HTTPException cannot change
-        # status. A concrete error event is the only honest in-band outcome.
-        yield _stream_error(str(exc))
+        # status. A concrete error event is the only honest in-band outcome;
+        # open_stream turns it into the real status if no output preceded it.
+        yield _stream_error(str(exc), _exception_status(exc))
+
+
+def _exception_status(exc: Exception) -> int:
+    """The status the non-stream route gives the same failure."""
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int):
+        return status
+    return 400 if isinstance(exc, ValueError) else 502
+
+
+def _early_error(frame: str) -> HTTPException | None:
+    """An error frame as an HTTP error, when it is the stream's first output."""
+    if not frame.startswith("data: "):
+        return None
+    try:
+        error = json.loads(frame[6:]).get("error")
+    except (ValueError, AttributeError):
+        return None
+    if not isinstance(error, dict):
+        return None
+    status = error.get("code")
+    status = status if isinstance(status, int) and 400 <= status <= 599 else 502
+    return HTTPException(status_code=status, detail=str(error.get("message") or "stream failed"))
+
+
+async def open_stream(
+    frames: AsyncIterator[str], *, timeout: float | None = None,
+) -> AsyncIterator[str]:
+    """Hold a stream's headers until its first real frame (TASK-1418).
+
+    Leading SSE comments are buffered until a data frame, an admission
+    comment, the end of the stream or ``timeout``. An error frame that arrives
+    first raises HTTPException with its real status, so a stock OpenAI client
+    sees a non-2xx error instead of an HTTP 200 stream carrying one. After
+    that, the remaining frames pass through unchanged.
+    """
+    iterator = frames.__aiter__()
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + (PRE_HEADER_SECONDS if timeout is None else timeout)
+    held: list[str] = []
+    pending: asyncio.Future | None = None
+    finished = False
+    try:
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            if pending is None:
+                pending = asyncio.ensure_future(iterator.__anext__())
+            done, _ = await asyncio.wait({pending}, timeout=remaining)
+            if not done:
+                break  # Keep the in-flight step; the body resumes it.
+            step, pending = pending, None
+            try:
+                frame = step.result()
+            except StopAsyncIteration:
+                finished = True
+                break
+            error = _early_error(frame)
+            if error is not None:
+                finished = True
+                raise error
+            held.append(frame)
+            if frame.startswith("data: ") or frame.startswith(": llm-bawt-admission"):
+                break
+    except BaseException:
+        await _drop(pending)
+        await _aclose(iterator)
+        raise
+
+    async def body() -> AsyncIterator[str]:
+        try:
+            for frame in held:
+                yield frame
+            if finished:
+                return
+            if pending is not None:
+                try:
+                    yield await pending
+                except StopAsyncIteration:
+                    return
+            async for frame in iterator:
+                yield frame
+        finally:
+            if pending is not None and not pending.done():
+                await _drop(pending)
+            await _aclose(iterator)
+
+    return body()
+
+
+async def _drop(pending: asyncio.Future | None) -> None:
+    # The step must settle before aclose(); a generator mid-step cannot close.
+    if pending is not None:
+        pending.cancel()
+        await asyncio.gather(pending, return_exceptions=True)
+
+
+async def _aclose(iterator: Any) -> None:
+    aclose = getattr(iterator, "aclose", None)
+    if aclose is not None:
+        try:
+            await aclose()
+        except Exception:
+            pass

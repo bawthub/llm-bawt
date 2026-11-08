@@ -1006,7 +1006,7 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
     tracked before it completes submits /v1/inter-bot-deliveries instead.
     """
     from fastapi.responses import StreamingResponse
-    from ..chat_response_adapter import completion_response, completion_stream
+    from ..chat_response_adapter import completion_response, completion_stream, open_stream
 
     service = get_service()
 
@@ -1044,18 +1044,22 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
             extensions = "comment"
         else:
             extensions = "data" if admission_comment else "none"
-        # Streaming response
+        # Streaming response. TASK-1418: headers wait (bounded) for the first
+        # real frame, so a failure before any output keeps its real status.
         try:
+            frames = await open_stream(completion_stream(
+                service, request, admission_comment=admission_comment, extensions=extensions,
+            ))
             return StreamingResponse(
-                completion_stream(
-                    service, request, admission_comment=admission_comment, extensions=extensions,
-                ),
+                frames,
                 media_type="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",
                     "Connection": "keep-alive",
                 },
             )
+        except HTTPException:
+            raise
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         except Exception as e:

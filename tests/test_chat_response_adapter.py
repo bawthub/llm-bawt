@@ -107,27 +107,29 @@ def test_nonstream_failure_never_returns_receipt(monkeypatch, reply, code):
     service.chat_completion.assert_awaited_once()
 
 
-@pytest.mark.parametrize("reply,success", [
-    ({"status": "DELIVERED", "response_text": "the answer"}, True),
-    ({"status": "IN_FLIGHT"}, False),
-    ({"status": "FAILED", "error": "bridge rejected"}, False),
+@pytest.mark.parametrize("reply,status", [
+    ({"status": "DELIVERED", "response_text": "the answer"}, 200),
+    ({"status": "IN_FLIGHT"}, 504),
+    ({"status": "FAILED", "error": "bridge rejected"}, 502),
 ])
-def test_stream_receipt_exact_reply_or_error(monkeypatch, reply, success):
+def test_stream_receipt_exact_reply_or_error(monkeypatch, reply, status):
     events = [": connected\n\n", f"data: {json.dumps(RECEIPT)}\n\n", "data: [DONE]\n\n"]
     observer = AsyncMock(return_value=reply)
     monkeypatch.setattr(adapter, "observe_receipt", observer)
     client, service, path = _client(monkeypatch, stream_events=events)
     with client:
         response = client.post(path, json={**BODY, "stream": True})
-    chunks = [line[6:] for line in response.text.split("\n\n") if line.startswith("data: ")]
-    assert all("chat.completion.queued" not in item for item in chunks)
-    assert (chunks[-1] == "[DONE]") is success
-    if success:
+    # TASK-1418: a reply failure before any output is the real HTTP status,
+    # with the same status the non-stream route gives it.
+    assert response.status_code == status
+    if status == 200:
+        chunks = [line[6:] for line in response.text.split("\n\n") if line.startswith("data: ")]
+        assert all("chat.completion.queued" not in item for item in chunks)
+        assert chunks[-1] == "[DONE]"
         assert json.loads(chunks[0])["choices"][0]["delta"]["content"] == "the answer"
         assert json.loads(chunks[1])["choices"][0]["finish_reason"] == "stop"
     else:
-        assert len(chunks) == 1
-        assert "error" in json.loads(chunks[0])
+        assert "choices" not in response.json()
     observer.assert_awaited_once()
     service.chat_completion.assert_not_awaited()
 
@@ -142,8 +144,23 @@ def test_stream_failure_never_emits_success_trailer(monkeypatch, warning):
         response = client.post(path, json={**BODY, "stream": True})
     assert "[DONE]" not in response.text
     assert "finish_reason" not in response.text
-    assert json.loads(response.text.strip()[6:])["error"]["message"] == warning
+    # TASK-1418: the failure precedes any output, so it is an HTTP error.
+    assert response.status_code == 502
+    assert response.json()["detail"] == warning
     service.chat_completion.assert_not_awaited()
+
+
+@pytest.mark.parametrize("warning", ["request_failed: denied", "stream_interrupted: dropped"])
+def test_stream_failure_after_output_stays_in_band(monkeypatch, warning):
+    events = ['data: {"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"hi"}}]}\n\n',
+              "data: " + json.dumps({"object": "service.warning", "warnings": [warning]}) + "\n\n",
+              "data: [DONE]\n\n"]
+    client, _service, path = _client(monkeypatch, stream_events=events)
+    with client:
+        response = client.post(path, json={**BODY, "stream": True})
+    assert response.status_code == 200
+    assert "[DONE]" not in response.text
+    assert json.loads(response.text.strip().split("\n\n")[-1][6:])["error"]["message"] == warning
 
 
 def test_negotiated_admission_comment_is_not_an_openai_data_frame(monkeypatch):
