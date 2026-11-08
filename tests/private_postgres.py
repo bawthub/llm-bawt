@@ -131,11 +131,14 @@ def private_pg(tmp_path_factory):
     owner = uuid.uuid4().hex
     name = f"llm-bawt-pgtest-{owner[:12]}"
     # No -p and --network none: neither an operational server nor the LAN is
-    # reachable. The container's writable data layer is deleted by --rm.
+    # reachable. PGDATA is a bounded, worker-owned tmpfs, removed with the
+    # container. Avoid overlay-filesystem IO without disabling PostgreSQL's
+    # fsync/commit settings; these clusters never hold recoverable data.
     command = ["docker", "run", "--detach", "--rm", "--network", "none",
                "--name", name, "--label", "llm-bawt.pg-acceptance=true",
                "--label", f"llm-bawt.pg-acceptance.owner={owner}",
                "--mount", f"type=bind,source={socket},target=/var/run/postgresql",
+               "--tmpfs", "/var/lib/postgresql/data:rw,size=512m",
                "--env", "POSTGRES_HOST_AUTH_METHOD=trust",
                "--env", "POSTGRES_USER=test_user",
                "--env", "POSTGRES_DB=llm_bawt_test",

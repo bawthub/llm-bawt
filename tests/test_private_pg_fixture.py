@@ -29,6 +29,12 @@ def test_docker_launch_failure_removes_fixture_socket(monkeypatch, tmp_path):
     with pytest.raises(subprocess.CalledProcessError):
         next(fixture)
     assert [command[1] for command in commands] == ["run", "inspect"]
+    launch = commands[0]
+    assert launch[launch.index("--tmpfs") + 1] == "/var/lib/postgresql/data:rw,size=512m"
+    assert launch[launch.index("--network") + 1] == "none"
+    assert launch[launch.index(pg.IMAGE) + 1:] == [
+        "-c", "listen_addresses=", "-c", f"port={pg.PORT}",
+    ]  # Keep PostgreSQL durability settings; only the private storage changes.
     assert not (tmp_path / "socket").exists()
     assert commands[-1][-1].startswith("llm-bawt-pgtest-")
 

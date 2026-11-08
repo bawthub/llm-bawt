@@ -182,7 +182,13 @@ Raw pytest still has its historical hermetic default but is not a full gate.
 
 The PostgreSQL fixture runs one pinned, networkless Docker container per pytest
 session (one per xdist worker if workers are used), bound only to a
-pytest-owned Unix socket with **no published port**. Each module receives its
+pytest-owned Unix socket with **no published port**. Its disposable PGDATA uses
+a 512 MiB tmpfs per worker (at most 4 GiB with the default eight-worker cap),
+removed with the container; PostgreSQL's fsync and commit settings are unchanged.
+This avoids overlay-filesystem startup and schema-write costs without changing
+the suite manifest, worker scheduling or host runner lock. An isolated ops gate's
+externally provisioned sidecar storage is unaffected.
+Each module receives its
 own randomly named `_test` database; function-level schema/DB tests retain
 independent transactions/databases. Only the `postgres` maintenance database
 is used for CREATE/DROP DATABASE and connection identity checks. The DBAPI
