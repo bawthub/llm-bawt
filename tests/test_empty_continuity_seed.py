@@ -14,9 +14,10 @@ from llm_bawt.memory.session_continuity import (
 )
 from llm_bawt.service.session_lifecycle.receipt import reset_confirmation
 
+# Stored order: the app commits the receipt just before its command (receipt.py).
 NEW_EXCHANGE = [
+    {"role": "assistant", "content": "Session reset. Ready for a new conversation.", "timestamp": 9.9999},
     {"role": "user", "content": "/new", "timestamp": 10.0},
-    {"role": "assistant", "content": "Session reset. Ready for a new conversation.", "timestamp": 11.0},
 ]
 CAPPED = {"history_scope": "inline", "history_max_age_hours": 6}
 
@@ -25,7 +26,9 @@ CAPPED = {"history_scope": "inline", "history_max_age_hours": 6}
     ([], False),
     (NEW_EXCHANGE, False),
     (NEW_EXCHANGE * 2, False),
-    ([{"role": "user", "content": "/new please"}], False),
+    (NEW_EXCHANGE[::-1], False),
+    ([{"role": "assistant", "content": "Session reset. Seeded 4 recent messages (~1k tokens)."}], False),
+    ([{"role": "user", "content": "/new Keep this task"}], True),
     ([{"role": "summary", "content": "s"}], True),
     ([{"role": "user", "content": "hello"}], True),
     ([{"role": "assistant", "content": "hi"}, *NEW_EXCHANGE], True),
@@ -84,15 +87,36 @@ def test_incident_age_cap_leaves_only_the_new_exchange_and_is_reported():
     history.messages = [
         Message("user", "outgoing thread question", timestamp=now - 12 * 3600),
         Message("assistant", "outgoing thread answer", timestamp=now - 12 * 3600 + 60),
+        Message("assistant", "Session reset. Ready for a new conversation.", timestamp=now - 2.0001),
         Message("user", "/new", timestamp=now - 2),
-        Message("assistant", "Session reset. Ready for a new conversation.", timestamp=now - 1),
     ]
     payload = history.build_context_payload(
         include_history=True, include_summaries=False, delivery="seed", max_tokens=12000)
     seed = [{"role": m.role, "content": m.content} for m in payload.seed_messages]
-    assert [m["content"] for m in seed] == ["/new", "Session reset. Ready for a new conversation."]
+    assert [m["content"] for m in seed] == ["Session reset. Ready for a new conversation.", "/new"]
     assert seed_empty_reason(seed, CAPPED) == (
         "no messages from the last 6h (history_max_age_hours); summaries are off")
+
+
+def test_a_retained_new_task_turn_is_prior_context_through_selection():
+    """Codex review: a tight budget sheds the receipt but keeps /new <task> + answer."""
+    import time
+
+    from llm_bawt.models.message import Message
+    from tests.test_history_context import _getter, _history
+
+    now = time.time()
+    history = _history(_getter({"history_tokens": 1}))
+    history.messages = [
+        Message("assistant", "Session reset. Ready for a new conversation.", timestamp=now - 3),
+        Message("user", "/new Keep this task", timestamp=now - 2),
+        Message("assistant", "Task completed: the report is filed.", timestamp=now - 1),
+    ]
+    payload = history.build_context_payload(
+        include_history=True, include_summaries=False, delivery="seed", max_tokens=12000)
+    seed = [{"role": m.role, "content": m.content} for m in payload.seed_messages]
+    assert [m["content"] for m in seed] == ["/new Keep this task", "Task completed: the report is filed."]
+    assert seed_empty_reason(seed, {"history_scope": "inline"}) is None
 
 
 def _llm(scope="inline", max_age=6):

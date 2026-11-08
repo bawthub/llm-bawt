@@ -5,29 +5,32 @@ import json
 import time
 from sqlalchemy import bindparam, text
 from agent_bridge.continuity import continuity_digest
-from agent_bridge.maintenance import is_new_command
+
+# Every app-authored /new receipt starts with this (agent_bridge.continuity).
+_RESET_RECEIPT_PREFIX = "Session reset."
+
+
+def _is_reset_bookkeeping(message: dict) -> bool:
+    """A bare ``/new`` or the receipt the app stored for a reset.
+
+    Receipts are committed just before their command (receipt.py), so order
+    is not a signal. ``/new <task>`` is a real request: neither it nor its
+    answer is bookkeeping.
+    """
+    role, content = message.get("role"), (message.get("content") or "").strip()
+    if role == "user":
+        return content == "/new"
+    return role == "assistant" and content.startswith(_RESET_RECEIPT_PREFIX)
 
 
 def carries_prior_context(messages: list[dict]) -> bool:
-    """True when the seed holds a summary or a turn other than a /new exchange.
+    """True when the seed holds a summary or any row besides reset bookkeeping.
 
-    A /new command and the receipt answering it are reset bookkeeping, not
-    conversation: a seed of only those rows restores nothing (TASK-851).
+    A bare /new and its receipt are not conversation: a seed of only those
+    rows restores nothing (TASK-851).
     """
-    after_new = False
-    for m in messages:
-        role = m.get("role")
-        if role == "summary":
-            return True
-        if role == "user":
-            after_new = is_new_command(m.get("content"))
-            if not after_new:
-                return True
-        elif role == "assistant":
-            if not after_new:
-                return True
-            after_new = False
-    return False
+    return any(m.get("role") in ("summary", "user", "assistant") and not _is_reset_bookkeeping(m)
+               for m in messages)
 
 
 def seed_empty_reason(messages: list[dict], settings: dict) -> str | None:
