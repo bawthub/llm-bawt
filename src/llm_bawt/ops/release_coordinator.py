@@ -78,7 +78,7 @@ _SHA = re.compile(r"^[0-9a-f]{40}$")
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _VERSION = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 # Definitive refusals from OpsService.dispatch_job: nothing was created.
-_DEPLOY_REFUSALS = {"operation_disabled", "operation_not_found", "snapshot_invalid", "args_invalid"}
+_DEPLOY_REFUSALS = {"operation_disabled", "operation_not_found", "operation_changed", "snapshot_invalid", "args_invalid"}
 _BINDING_KEYS = ("workflow_run_id", "workflow_run_attempt", "source_sha", "version", "tag", "digest",
                  "image_repository")
 
