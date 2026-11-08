@@ -43,15 +43,13 @@ BOOTSTRAP = frozenset({
 
 #: Credentials that still ship through env, each with why. Shrink only.
 PENDING_RETIREMENT: dict[str, str] = {
-    # Readers are already DB-first. The env entry goes when the live record is
-    # verified and the container is recreated (TASK-1518 window).
-    "XAI_API_KEY": "TASK-1476: xai connection is DB-first; env is the legacy fallback",
-    "LLM_BAWT_XAI_API_KEY": "TASK-1476: xai connection is DB-first; env is the legacy fallback",
-    "OPENAI_API_KEY": "TASK-1476: openai-api connection is DB-first; env is the legacy fallback",
+    # App OpenAI/xAI readers are store-only; bridge declarations remain until
+    # the already-planned bridge restart and its live credential acceptance.
+    "XAI_API_KEY": "TASK-1681: retained only for bridge activation follow-through",
+    "LLM_BAWT_XAI_API_KEY": "TASK-1681: retained only for bridge activation follow-through",
+    "OPENAI_API_KEY": "TASK-1681: retained only for bridge activation follow-through",
     "ANTHROPIC_API_KEY": "TASK-1476: anthropic-api connection is DB-first; env is the legacy fallback",
-    "CLAUDE_CODE_OAUTH_TOKEN": "TASK-1476: the claude connection feeds the bridge; env is a dead fallback",
-    "LLM_BAWT_HA_NATIVE_MCP_TOKEN": "TASK-1476: home-assistant connection is record-first",
-    "LLM_BAWT_HA_MCP_AUTH_TOKEN": "TASK-1476: reserved HA MCP auth; folds into home-assistant",
+    "CLAUDE_CODE_OAUTH_TOKEN": "TASK-1681: held until planned bridge restart live credential check",
     # Still env-only; each needs a DB home first.
     "LLM_BAWT_REDDIT_CLIENT_SECRET": "TASK-1476: Reddit search credentials have no connection yet",
     "LLM_BAWT_TALK_PROVISIONER_TOKEN": "TASK-1476: talk provisioner token has no connection yet",
@@ -173,6 +171,25 @@ def test_the_retirement_list_only_shrinks():
     stale = sorted(name for name in PENDING_RETIREMENT if name not in shipped)
     assert not stale, f"No longer shipped; delete from PENDING_RETIREMENT: {stale}"
     assert not BOOTSTRAP & PENDING_RETIREMENT.keys()
+
+
+def test_store_only_app_credentials_do_not_return_via_bridge_allowances():
+    """Bridge rollout holds must not permit reintroducing retired app env."""
+    retired = {
+        "OPENAI_API_KEY", "XAI_API_KEY", "LLM_BAWT_XAI_API_KEY",
+        "LLM_BAWT_HA_NATIVE_MCP_TOKEN", "LLM_BAWT_HA_MCP_AUTH_TOKEN",
+    }
+    app_names: set[str] = set()
+    for path in _compose_files():
+        app = ((yaml.safe_load(path.read_text()) or {}).get("services") or {}).get("app") or {}
+        for scalar in _scalars(app):
+            app_names |= interpolated_names(scalar)
+        env = app.get("environment") or {}
+        app_names.update(
+            env if isinstance(env, dict)
+            else (str(entry).split("=", 1)[0].strip() for entry in env)
+        )
+    assert not retired & app_names, f"Retired app credential env: {sorted(retired & app_names)}"
 
 
 # --- the guard itself (Loopy r1 on 986f6dd) -------------------------------------

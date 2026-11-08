@@ -153,16 +153,11 @@ services:
       - TOKENIZERS_PARALLELISM
       - TRANSFORMERS_NO_ADVISORY_WARNINGS
       - TRANSFORMERS_VERBOSITY
-      # Credentials still read from env: each is in PENDING_RETIREMENT
-      # (tests/test_env_secret_guard.py) and leaves when its reader is
-      # record-only.
-      - OPENAI_API_KEY
-      - XAI_API_KEY
-      - LLM_BAWT_XAI_API_KEY
+      # Remaining legacy credentials are tracked in PENDING_RETIREMENT
+      # (tests/test_env_secret_guard.py). Migrated OpenAI/xAI and HA readers
+      # are store-only and no longer receive their former env credentials.
       - ANTHROPIC_API_KEY
       - CLAUDE_CODE_OAUTH_TOKEN
-      - LLM_BAWT_HA_MCP_AUTH_TOKEN
-      - LLM_BAWT_HA_NATIVE_MCP_TOKEN
       - LLM_BAWT_REDDIT_CLIENT_SECRET
       - LLM_BAWT_TALK_PROVISIONER_TOKEN
     ports:
