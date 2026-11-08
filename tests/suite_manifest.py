@@ -33,6 +33,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_operator_message_search_pg.py::",
     "test_fts_query_pg.py::",
     "test_messages_find_pg.py::",
+    "test_tool_calls_pg.py::",
     "test_messages_context_pg.py::",
     "test_message_tsv_pg.py::",
     "test_message_author_backfill_pg.py::",

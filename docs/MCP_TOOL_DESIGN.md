@@ -198,6 +198,17 @@ cancel another requester's card or approved/running work. Measured locally:
 over 4,881/18,056. Caps match this measurement; no warnings were removed.
 This source measurement does not imply live activation.
 
+TASK-1755 adds one `tool_calls` lookup: list recent calls, or select an id for
+detail, with results behind explicit `include_result`. The fresh history-read
+boundary covers arguments as well as results; best-effort scrubbing is not a
+secrecy guarantee. Measured local discovery: **120 tools, 5,036 description
+tokens, 11,253 input-schema tokens, 18,565 full-definition tokens**. Compared
+with the prior caps (4,959 / 18,249), the increase is +77 / +316. The typed
+list/detail selectors replace hand-written database queries without adding a
+second tool. No existing warnings were removed. See
+[TOOL_CALL_LOOKUP.md](TOOL_CALL_LOOKUP.md) for bounds, paging and integrity.
+This is source discovery, not activation or a provider billing measurement.
+
 ## Provider loading caveat
 
 `claude_code_bridge/proxy/translate.py::_tools_to_responses` forwards supplied

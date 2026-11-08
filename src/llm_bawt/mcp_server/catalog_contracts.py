@@ -43,6 +43,7 @@ TOOL_SUMMARIES: dict[str, str] = {
     "messages_search_all": "Full-text search across bots for exact text; try context_recall (decisions) or messages_find (locate) first. bot_id restricts scope. since/until: ISO dates or Unix seconds; sort_by: relevance|recent. Respect protected bots.",
     "messages_find": "Locate messages across bots you may read: compact session cards (best + latest), bot/age/speaker facets. Identifiers match exactly. No query browses recent; handle alone pages. ok|no_match|unavailable.",
     "messages_context": "Expand one message with same-session neighbour snippets. Anchor bot+id, or handle+card_ref from a messages_find card. Long anchors continue at next_offset; cursors page a side. ok|not_found|unavailable.",
+    "tool_calls": "List calls by readable bot/turn, or inspect id. Args/results are bounded with best-effort secret scrubbing, not a secrecy guarantee. Results require id+include_result. List defaults to 24h; next plus same filters pages. NULL is_error is not an error; unreadable-trigger turns omitted.",
     "messages_get": "Read your user's history for bot_id; trusted caller required. session_id scopes one thread; summaries_only selects summaries; exclude_summarized avoids duplicate raw context.",
     "messages_get_by_id": "Read a message by UUID or unique prefix (minimum 8 chars), optionally with before/after neighbors.",
     "messages_add": "Write a history message, not a bot turn. Use session_id or user_id to resolve the intended thread; role: user|assistant|system.",
@@ -156,7 +157,7 @@ TOOL_SUMMARIES: dict[str, str] = {
 # Group references are loaded on demand, not injected with the whole catalog.
 REFERENCE_GROUPS: dict[str, tuple[str, ...]] = {
     "tasks": ("tasks_", "steps_", "projects_", "activity_", "initiative_"),
-    "memory-history": ("memory_", "messages_", "context_", "facts_", "system_", "profile", "working_memory_"),
+    "memory-history": ("memory_", "messages_", "context_", "facts_", "system_", "profile", "working_memory_", "tool_calls"),
     "sessions-delivery": ("sessions_", "bots_", "agent_", "self_", "schedule_"),
     "ops-media": ("ops_", "media_", "generate_", "web_", "x_", "speech_", "home_audio_", "notify_", "notifications_", "browser_", "attachment_"),
 }
