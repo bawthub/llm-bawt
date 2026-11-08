@@ -111,6 +111,9 @@ class TurnLog(SQLModel, table=True):
     # Surfaced on TurnLogListItem / TurnLogDetail so the chat UI's per-bubble
     # usage pill survives reloads and history syncs.
     token_usage_json: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
+    # TASK-1501: the account quota report cached for this turn's access path
+    # when it ended (see turn_quota_snapshot). NULL when none was cached.
+    quota_snapshot_json: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
     # Whether this turn's assistant output was scrubbed for TTS (voice-optimized
     # bots). Recorded so the scrub decision is tracked on the turn, not just
     # recomputed — single source of truth is should_scrub_for_tts().
@@ -207,6 +210,9 @@ def bootstrap_turn_log_schema(conn) -> None:
         ))
         conn.execute(sa_text(
             "ALTER TABLE turn_logs ADD COLUMN IF NOT EXISTS token_usage_json TEXT"
+        ))
+        conn.execute(sa_text(
+            "ALTER TABLE turn_logs ADD COLUMN IF NOT EXISTS quota_snapshot_json TEXT"
         ))
         # Tracks whether the turn's output was scrubbed for TTS.
         conn.execute(sa_text(

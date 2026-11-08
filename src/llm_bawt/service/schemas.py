@@ -299,6 +299,8 @@ class TurnLogListItem(BaseModel):
     #         output_tokens, context_window, max_output_tokens, total_cost_usd}.
     # None when the upstream backend doesn't expose usage info.
     token_usage: dict[str, Any] | None = None
+    # TASK-1501: the account quota reading cached when the turn ended; None if none.
+    quota_snapshot: dict[str, Any] | None = None
     # TASK-269 turn lifecycle / continuation chain.
     end_reason: str | None = None
     question_id: str | None = None
@@ -353,6 +355,7 @@ class TurnLogDetail(BaseModel):
     agent_session_key: str | None = None
     agent_request_id: str | None = None
     token_usage: dict[str, Any] | None = None
+    quota_snapshot: dict[str, Any] | None = None
     # TASK-269 turn lifecycle / continuation chain.
     end_reason: str | None = None
     question_id: str | None = None
@@ -381,6 +384,7 @@ class RecentBotTurn(BaseModel):
     response_preview_truncated: bool = False
     tool_call_count: int = 0
     token_usage: dict[str, Any] | None = None
+    quota_snapshot: dict[str, Any] | None = None
     trigger_message_id: str | None = None
 
 

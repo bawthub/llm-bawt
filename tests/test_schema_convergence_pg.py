@@ -93,6 +93,34 @@ def test_fresh_column_contract_from_real_catalog(schema_db):
     )
 
 
+def test_turn_quota_snapshot_column_is_additive_and_nullable(schema_db):
+    """TASK-1501: fresh and upgraded schemas carry a nullable TEXT column, no backfill."""
+    from llm_bawt.service.turn_log_schema import TurnLog, bootstrap_turn_log_schema
+
+    _, engine = schema_db
+
+    def column():
+        with engine.connect() as conn:
+            return conn.execute(text("""
+                SELECT data_type, is_nullable FROM information_schema.columns
+                WHERE table_name='turn_logs' AND column_name='quota_snapshot_json'
+            """)).first()
+
+    assert tuple(column()) == ("text", "YES")
+    turn_id = str(uuid.uuid4())
+    with engine.begin() as conn:
+        conn.execute(TurnLog.__table__.insert().values(id=turn_id, created_at=datetime.now(timezone.utc)))
+        conn.execute(text("ALTER TABLE turn_logs DROP COLUMN quota_snapshot_json"))
+    assert column() is None
+    with engine.begin() as conn:
+        bootstrap_turn_log_schema(conn)
+    assert tuple(column()) == ("text", "YES")
+    with engine.connect() as conn:
+        assert conn.execute(text("SELECT quota_snapshot_json FROM turn_logs WHERE id=:id"),
+                            {"id": turn_id}).scalar_one() is None
+    assert "quota_snapshot_json" in TurnLog.__table__.c
+
+
 def test_fresh_foreign_keys_and_delete_paths(schema_db):
     _, engine = schema_db
     with engine.connect() as conn:

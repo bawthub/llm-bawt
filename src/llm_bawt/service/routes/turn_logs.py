@@ -439,6 +439,7 @@ def list_turn_logs(
                 session_id=active_sessions.get(row.id),
                 assistant_message_id=getattr(row, "assistant_message_id", None),
                 token_usage=_parse_token_usage(getattr(row, "token_usage_json", None)),
+                quota_snapshot=_parse_token_usage(getattr(row, "quota_snapshot_json", None)),
                 end_reason=getattr(row, "end_reason", None),
                 question_id=getattr(row, "question_id", None),
                 parent_turn_id=getattr(row, "parent_turn_id", None),
@@ -556,6 +557,7 @@ def recent_turns_by_bot(
                 ),
                 tool_call_count=tool_call_count,
                 token_usage=_parse_token_usage(getattr(row, "token_usage_json", None)),
+                quota_snapshot=_parse_token_usage(getattr(row, "quota_snapshot_json", None)),
                 trigger_message_id=getattr(row, "trigger_message_id", None),
             )
         )
@@ -657,6 +659,7 @@ def get_turn_log(turn_id: str):
         agent_session_key=getattr(row, "agent_session_key", None),
         agent_request_id=getattr(row, "agent_request_id", None),
         token_usage=_parse_token_usage(getattr(row, "token_usage_json", None)),
+        quota_snapshot=_parse_token_usage(getattr(row, "quota_snapshot_json", None)),
         end_reason=getattr(row, "end_reason", None),
         question_id=getattr(row, "question_id", None),
         parent_turn_id=getattr(row, "parent_turn_id", None),

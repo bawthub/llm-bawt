@@ -37,6 +37,7 @@ def test_turn_meta_maps_reply_edge_model_usage_and_completion():
             "model": "gpt-6-astra@openai-oauth",
             "token_usage_json": '{"input_tokens": 519, "cache_read_tokens": 77824, '
                                 '"cache_creation_tokens": 0, "output_tokens": 193}',
+            "quota_snapshot_json": '{"provider": "p1", "fetched_at": 1793000000, "limits": []}',
             "ended_at": ended,
         },
         {
@@ -62,12 +63,15 @@ def test_turn_meta_maps_reply_edge_model_usage_and_completion():
             "input_tokens": 519, "cache_read_tokens": 77824,
             "cache_creation_tokens": 0, "output_tokens": 193,
         },
+        "quota_snapshot": {"provider": "p1", "fetched_at": 1793000000, "limits": []},
         "completed_at": ended.timestamp(),
     }
     # In-flight / legacy rows degrade to empty stats instead of failing the page.
     assert meta["a2"] == {
-        "reply_to_message_id": None, "model": None, "token_usage": None, "completed_at": None,
+        "reply_to_message_id": None, "model": None, "token_usage": None,
+        "quota_snapshot": None, "completed_at": None,
     }
+    assert "quota_snapshot_json" in captured[0][0]
     # Only assistant ids on this page are looked up.
     assert captured[0][1] == {"bot_id": "snark", "assistant_ids": ["a1", "a2"]}
 

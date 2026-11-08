@@ -15,6 +15,9 @@ def record_terminal_effects(session, row) -> None:
     from .turn_termination import interrupt_unresolved_tools
     from .usage.balance import record_turn_charge
 
+    from .turn_quota_snapshot import record_turn_quota
+
+    record_turn_quota(row)
     interrupt_unresolved_tools(session, row.id, row.ended_at)
     session.flush()
     record_turn_context(session, row)

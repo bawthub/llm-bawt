@@ -83,6 +83,8 @@ class HistoryMessage(BaseModel):
     # seconds; ``timestamp`` may be an ordering key). None when unknown.
     model: str | None = None
     token_usage: dict | None = None
+    # TASK-1501: account quota cached when the turn ended (fetched_at may predate it).
+    quota_snapshot: dict | None = None
     completed_at: float | None = None
     # Mid-turn steering anchor for user rows. Both fields are populated together.
     interrupt_source_message_id: str | None = None

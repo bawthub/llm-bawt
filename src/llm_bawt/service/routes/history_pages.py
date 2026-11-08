@@ -176,7 +176,7 @@ def _hydrate_turn_meta_for_page(
             rows = conn.execute(
                 text(
                     "SELECT assistant_message_id, trigger_message_id, model, "
-                    "token_usage_json, ended_at FROM turn_logs "
+                    "token_usage_json, quota_snapshot_json, ended_at FROM turn_logs "
                     "WHERE bot_id=:bot_id AND assistant_message_id = ANY(:assistant_ids)"
                 ),
                 {"bot_id": bot_id, "assistant_ids": assistant_ids},
@@ -193,6 +193,7 @@ def _hydrate_turn_meta_for_page(
                 ),
                 "model": row.get("model") or None,
                 "token_usage": _parse_token_usage(row.get("token_usage_json")),
+                "quota_snapshot": _parse_token_usage(row.get("quota_snapshot_json")),
                 "completed_at": ended_at.timestamp() if ended_at is not None else None,
             }
         return meta
@@ -541,6 +542,7 @@ def _build_history_response(
             reply_to_message_id=turn_meta.get("reply_to_message_id"),
             model=turn_meta.get("model"),
             token_usage=turn_meta.get("token_usage"),
+            quota_snapshot=turn_meta.get("quota_snapshot"),
             completed_at=turn_meta.get("completed_at"),
             interrupt_source_message_id=(interrupt_anchor[0] if interrupt_anchor else None),
             interrupt_content_offset=(interrupt_anchor[1] if interrupt_anchor else None),

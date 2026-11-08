@@ -339,6 +339,9 @@ class TurnLogStore:
                 if _is_terminal(status, None) else None
             ),
         )
+        if row.ended_at is not None:
+            from .turn_quota_snapshot import record_turn_quota
+            record_turn_quota(row)
 
         with Session(self.engine) as session:
             session.add(row)
