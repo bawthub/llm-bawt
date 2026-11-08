@@ -74,6 +74,7 @@ OPS_ADAPTER = {
     "llm_bawt/ops/config_reconcile.py": ({"engine api"}, "worker-side exec for config apply"),
     "llm_bawt/ops/routing_reconcile.py": ({"engine api"}, "worker-side exec for routing apply"),
     "llm_bawt/ops/plan_reconcile.py": ({"engine api"}, "worker-side plan volumes and container inspect"),
+    "llm_bawt/ops/compose_render.py": ({"engine api"}, "worker-side sibling container inspect for checkout-aware render"),
     "llm_bawt/ops/container_remove.py": ({"engine api"}, "worker-side inspect/delete of one stopped orphan"),
     "llm_bawt/ops/gate_runner.py": ({"engine api"}, "fixed-workload socketless gate launcher (reconciler child)"),
     "llm_bawt/ops/gate_custody.py": ({"engine api"}, "GET-only nonce-bound gate recovery observation"),
