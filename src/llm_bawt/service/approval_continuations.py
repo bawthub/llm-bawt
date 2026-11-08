@@ -13,7 +13,7 @@ import logging
 from datetime import timedelta
 from uuid import NAMESPACE_URL, uuid5
 from ..approval_policies import KIND_MCP, REQ_APPROVED, REQ_DENIED, REQ_CANCELLED, REQ_RESPONDED, CONT_DISPATCHING
-from ..approval_models import CONTINUATION_LEASE_SECONDS, OPS_RUN_TOOL, _as_aware_utc, _utcnow, is_approved_ops_run
+from ..approval_models import CONTINUATION_LEASE_SECONDS, OPS_RUN_TOOL, REQ_SUPERSEDED, _as_aware_utc, _utcnow, is_approved_ops_run
 from ..ops.approved_admission import ops_receipt_is_error
 from ..mcp_result_envelope import (
     MCP_RESULT_ENVELOPE_PREFIX, append_reset_guidance, format_mcp_result_envelope,
@@ -131,7 +131,9 @@ def _admission_card_result(row) -> Any:
     Its resolve recorded the decision only, so the card still shows the
     approval placeholder until this result is written (TASK-1220).
     """
-    if not is_approved_ops_run(row) or row.result_json is None:
+    if (not is_approved_ops_run(row) and not (
+            row.request_kind == KIND_MCP and row.tool_name == OPS_RUN_TOOL and row.status == REQ_SUPERSEDED
+    )) or row.result_json is None:
         return None
     try:
         return json.loads(row.result_json)

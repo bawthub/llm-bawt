@@ -339,6 +339,9 @@ class McpApprovalStoreMixin:
             )
         try:
             with Session(self.engine) as session:
+                from .approval_ops_supersede import lock_singleton, supersede_pending
+
+                target = lock_singleton(session, tool_name, operations_snapshot)
                 # TASK-959: one pending approval per identical call. The lock
                 # serializes concurrent identical calls through the pending
                 # check + insert below; it is released at commit/rollback.
@@ -404,6 +407,7 @@ class McpApprovalStoreMixin:
                 )
                 session.add(row)
                 session.flush()
+                supersede_pending(session, row, target, getattr(self, "events", None))
                 append_approval_transition(getattr(self, "events", None), session.connection(), row)
                 session.commit()
                 session.refresh(row)

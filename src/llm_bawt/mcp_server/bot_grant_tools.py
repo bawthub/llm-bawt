@@ -140,3 +140,17 @@ async def ops_approval_resolve(request_id: str, decision: str, reason: str) -> s
         "POST", f"/v1/ops-approvals/{quote(request_id.strip(), safe='')}/resolve",
         {"decision": decision.strip().lower(), "reason": reason},
         unknown="the decision's outcome is unknown; check ops_approvals_list")
+
+
+@mcp.tool(name="ops_approval_withdraw")
+async def ops_approval_withdraw(request_id: str, reason: str) -> str:
+    """Cancel your own pending ops approval without an approve_ops grant.
+
+    The signed calling bot and user must match the requester. This cannot
+    approve or withdraw another bot's card, or cancel approved/running work.
+    """
+    if not _all_text(request_id, reason):
+        return _error("invalid_request", "request_id and reason are required")
+    return await _forward(
+        "POST", f"/v1/ops-approvals/{quote(request_id.strip(), safe='')}/withdraw",
+        {"reason": reason}, unknown="the withdrawal's outcome is unknown")

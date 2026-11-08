@@ -107,6 +107,7 @@ TOOL_SUMMARIES: dict[str, str] = {
     "ops_approvals_list": "approve_ops holders: other bots' pending ops approvals you may decide; sensitive args masked.",
     "ops_approvals_get": "approve_ops holders: read one ops approval you may decide by ID, pending or resolved; sensitive args masked.",
     "ops_approval_resolve": "approve_ops holders: approve or deny another bot's pending ops approval with a reason; never your own. Loser of a race gets already_resolved.",
+    "ops_approval_withdraw": "Cancel your own pending ops approval with a reason, no grant required; never approves or cancels approved/running work.",
     "bots_send_message": "Durable async message: steer a busy capable bot or start one idle turn. delivery=when_idle skips steering; steer_only never starts a turn; wait_for_reply blocks. targets fans out (key required). force never permits concurrent turns.",
     "bots_route_message": "Queue a separate routed bot turn using trusted caller identity; never steer or broaden opt-in. Reuse idempotency_key for retries.",
     "bots_delivery_get": "Read durable delivery status/error by delivery_id; accepted or queued is not completed.",

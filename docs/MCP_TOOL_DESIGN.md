@@ -191,6 +191,13 @@ message frame. The latter's authorship, framing and editable guidance are not
 changed or reused as a paging protocol. Harness size enforcement remains intact.
 No service activation or fresh runtime discovery is implied by source tests.
 
+TASK-1389 adds `ops_approval_withdraw(request_id, reason)`, a signed requester's
+cancel-only path with no approval grant and no decision parameter. It cannot
+cancel another requester's card or approved/running work. Measured locally:
+**118 tools, 4,919 description tokens, 18,145 full-definition tokens**, +38/+89
+over 4,881/18,056. Caps match this measurement; no warnings were removed.
+This source measurement does not imply live activation.
+
 ## Provider loading caveat
 
 `claude_code_bridge/proxy/translate.py::_tools_to_responses` forwards supplied

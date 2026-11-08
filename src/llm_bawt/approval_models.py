@@ -121,6 +121,7 @@ REQ_SUPERSEDED = "superseded"
 # RESOLVED_VIA_BOT_GRANT, so it alone attests that a bot resolved the card.
 RESOLVED_VIA_USER = "user"
 RESOLVED_VIA_BOT_GRANT = "bot_grant"
+RESOLVED_VIA_REQUESTER = "requester"
 # The human route refuses resolved_by values carrying this prefix, so no
 # unattested row can look like a bot's decision.
 BOT_RESOLVER_PREFIX = "bot:"

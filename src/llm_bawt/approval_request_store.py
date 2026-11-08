@@ -30,6 +30,7 @@ from .approval_models import (
     REQ_RESPONDED,
     REQ_SUPERSEDED,
     RESOLVED_VIA_BOT_GRANT,
+    RESOLVED_VIA_REQUESTER,
     RESOLVED_VIA_USER,
     ToolApprovalRequest,
     _utcnow,
@@ -173,8 +174,10 @@ class ApprovalRequestStoreMixin(OrchestrationApprovalStoreMixin, McpApprovalStor
             REQ_SUPERSEDED,
         ):
             raise ValueError("Invalid approval resolution status")
-        if resolved_via not in (RESOLVED_VIA_USER, RESOLVED_VIA_BOT_GRANT):
+        if resolved_via not in (RESOLVED_VIA_USER, RESOLVED_VIA_BOT_GRANT, RESOLVED_VIA_REQUESTER):
             raise ValueError("Invalid approval resolver kind")
+        if resolved_via == RESOLVED_VIA_REQUESTER and status != REQ_CANCELLED:
+            raise ValueError("A requester may only cancel")
         with Session(self.engine) as session:
             if status == REQ_APPROVED:
                 row = session.get(ToolApprovalRequest, request_id)

@@ -39,7 +39,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from ...approval_models import BOT_RESOLVER_PREFIX, REQ_APPROVED, REQ_DENIED, REQ_PENDING, RESOLVED_VIA_BOT_GRANT
+from ...approval_models import BOT_RESOLVER_PREFIX, REQ_APPROVED, REQ_DENIED, REQ_PENDING, RESOLVED_VIA_BOT_GRANT, RESOLVED_VIA_REQUESTER
 from ...bot_tags.catalog import lock_bot
 from ...ops.release_approval import InvalidReleaseApproval, is_release_deploy_card, validate_release_approval
 from ...ops.service import display_args
@@ -65,6 +65,11 @@ LIST_LIMIT = 100
 class OpsApprovalDecision(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     decision: Literal["approve", "deny"]
+    reason: str = Field(min_length=1, max_length=REASON_MAX)
+
+
+class OpsApprovalWithdrawal(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     reason: str = Field(min_length=1, max_length=REASON_MAX)
 
 
@@ -285,6 +290,31 @@ async def resolve_ops_approval(request_id: str, request: Request):
     won = (final.resolved_via == RESOLVED_VIA_BOT_GRANT and final.resolved_by == resolver
            and final.resolved_turn_id == caller.turn_id)
     if not won:
+        raise _refuse(409, "already_resolved", "another resolver decided first",
+                      **_result(final).model_dump())
+    return _result(final, result)
+
+
+@router.post("/v1/ops-approvals/{request_id}/withdraw", response_model=OpsApprovalResult)
+async def withdraw_ops_approval(request_id: str, request: Request):
+    """A signed requester may cancel its own pending MCP ops card, never approve."""
+    caller = _caller(request)
+    body = await read_body(request, OpsApprovalWithdrawal)
+    store = _store()
+    row = await asyncio.to_thread(store.get_request, request_id)
+    if row is None or row.bot_id != caller.bot_id or row.user_id != caller.user_id:
+        raise _refuse(404, "not_found", "no such approval request")
+    if not is_ops_card(row):
+        raise _refuse(409, "not_ops_card", "only pending ops_run approvals can be withdrawn here")
+    if row.status != REQ_PENDING:
+        raise _refuse(409, "already_resolved", "the request is already resolved",
+                      **_result(row).model_dump())
+    resolver = f"requester:{caller.bot_id}"
+    result, final = await resolve_mcp_card(
+        store, row, outcome="cancel", message=body.reason, resolved_by=resolver,
+        resolved_via=RESOLVED_VIA_REQUESTER, resolved_turn_id=caller.turn_id)
+    if (final.resolved_via, final.resolved_by, final.resolved_turn_id) != (
+            RESOLVED_VIA_REQUESTER, resolver, caller.turn_id):
         raise _refuse(409, "already_resolved", "another resolver decided first",
                       **_result(final).model_dump())
     return _result(final, result)

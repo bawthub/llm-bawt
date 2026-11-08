@@ -445,6 +445,23 @@ class ApprovalAwareFastMCP(FastMCP):
             }
 
         if created:
+            if name == "ops_run":
+                from ..approval_ops_supersede import singleton_target, superseded_by
+
+                if singleton_target(operations_snapshot) is not None:
+                    # Project already-committed terminal results through the
+                    # normal resolver: no approval/grant or tool execution.
+                    # The durable outbox repairs history after an app crash.
+                    from ..service.routes.approval_policies import resolve_mcp_card
+
+                    try:
+                        for previous in superseded_by(store, row.id):
+                            await resolve_mcp_card(
+                                store, previous, outcome="deny",
+                                message=previous.resolution_message, resolved_by=previous.resolved_by,
+                            )
+                    except Exception:
+                        logger.exception("Could not project superseded ops cards for %s", row.id)
             await self._publish_approval_required(
                 {
                     "_type": "tool_approval_required",

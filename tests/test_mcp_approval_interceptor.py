@@ -193,6 +193,32 @@ def test_require_commits_before_publish_and_returns_pending(capability):
     assert row.bot_id == "snark"
 
 
+def test_singleton_projects_committed_superseded_cards_before_publishing_new_card(capability, monkeypatch):
+    from llm_bawt import approval_ops_supersede
+    from llm_bawt.service.routes import approval_policies
+    from tests.test_ops_singleton_approvals import snapshot
+
+    order, executed = [], []
+    store = FakeStore(_policy(PolicyAction.REQUIRE_APPROVAL), order)
+    mcp = _server(store, order, executed)
+    approved = snapshot()
+    approved["execution"]["timeout_seconds"] = 300
+    mcp._operations_preparer = lambda operation, args: approved
+    previous = SimpleNamespace(id="old-card", resolution_message="Superseded by new-card",
+                               resolved_by="system:singleton_replaced")
+    monkeypatch.setattr(approval_ops_supersede, "superseded_by", lambda _store, _id: [previous])
+
+    async def project(_store, row, **kwargs):
+        assert _store is store and row is previous
+        assert kwargs["resolved_by"] == previous.resolved_by
+        order.append("resolve_old")
+
+    monkeypatch.setattr(approval_policies, "resolve_mcp_card", project)
+    assert _call(mcp, capability, _stamped_args(capability))["status"] == "approval_required"
+    assert order == ["persist", "resolve_old", "publish"]
+    assert executed == []
+
+
 def test_routing_approval_displays_exact_target_image_and_delta(capability):
     from tests.test_ops_routing_reconcile import RoutingDocker, snapshot
 

@@ -68,6 +68,33 @@ approval. Already-dispatched jobs remain bound to their original snapshot;
 idempotent reads of those jobs still work after edits. This does not cancel
 actions already submitted to Docker or replace their approved settings.
 
+### Pending singleton cards and requester withdrawal (TASK-1389)
+
+Recording a new MCP `ops_run` approval replaces older **pending** cards for
+the same user, operation and known singleton target. This applies only when
+the pinned `max_concurrent` is 1 and the action is `release_orchestrate` or a
+single-container/service `restart`. A release target is its fixed deploy
+operation; restart argument selectors are resolved before grouping. Other
+actions, non-singleton operations and different targets remain separate.
+Requesters may differ: a coordinator handoff must not preserve a stale pending
+release for the same user's target. This does not rank commits or verify that
+the newer invocation is a descendant of the older source.
+
+Insertion and supersession share the catalog-row lock and one transaction.
+Identical-call deduplication still refuses without mutation; retrying an
+existing request never replaces its successor. The old card becomes
+`superseded`, names the new request ID, and carries a skipped result through
+the existing continuation outbox. It cannot be approved or execute afterward.
+Approved/running requests are never cancelled by replacement.
+
+`ops_approval_withdraw(request_id, reason)` maps to
+`POST /v1/ops-approvals/{id}/withdraw`. A signed requester can cancel only its
+own same-user pending MCP ops card, without an `approve_ops` grant. There is no
+decision parameter and no approval authority. Withdrawal uses the existing
+pending-only resolution CAS, records `resolved_via=requester`, stays silent,
+and refuses already-approved/running work. It cannot withdraw coordinator-owned
+deployment-orchestration cards.
+
 ## Tested runtime fence for source restarts (TASK-1410 / TASK-1496)
 
 A restart spec may declare `runtime_source` with:

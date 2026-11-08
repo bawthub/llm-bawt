@@ -197,6 +197,171 @@ def test_a_holder_cannot_approve_its_own_request(ops):
     assert ops.store.get_request(request_id).status == REQ_PENDING and ops.events == []
 
 
+def _withdraw(ops, bot, request_id, body=None, **kwargs):
+    return ops.api.client.post(
+        f"/v1/ops-approvals/{request_id}/withdraw",
+        json=body or {"reason": "request replaced"},
+        headers=kwargs.get("headers", {TASK_TURN_CONTEXT_HEADER: f"turn:{bot}"}),
+    )
+
+
+def test_requester_without_a_grant_can_only_withdraw_its_own_pending_card(ops):
+    from llm_bawt.approval_models import EXEC_SKIPPED, REQ_CANCELLED, RESOLVED_VIA_REQUESTER
+
+    request_id = ops.card()
+    response = _withdraw(ops, REQUESTER, request_id)
+    assert response.status_code == 200, response.text
+    row = ops.store.get_request(request_id)
+    assert (row.status, row.execution_state, row.resolved_via) == (
+        REQ_CANCELLED, EXEC_SKIPPED, RESOLVED_VIA_REQUESTER)
+    assert row.resolved_by == f"requester:{REQUESTER}"
+    assert row.resolved_by_bot is None  # not an approve_ops decision
+    assert row.continuation_state != "pending"  # cancellation stays silent
+    assert ops.store.find_admittable_ops_requests() == []
+    assert ops.events[0][1]["status"] == REQ_CANCELLED
+
+
+@pytest.mark.parametrize("caller", [HOLDER, BYSTANDER])
+def test_other_bots_cannot_withdraw_even_with_approve_ops(ops, caller):
+    request_id = ops.card()
+    response = _withdraw(ops, caller, request_id)
+    assert response.status_code == 404 and _code(response) == "not_found"
+    assert ops.store.get_request(request_id).status == REQ_PENDING
+
+
+def test_withdraw_cannot_cross_user_or_approve_or_cancel_approved_work(ops):
+    foreign = ops.card(user="fixture-other-user")
+    assert _withdraw(ops, REQUESTER, foreign).status_code == 404
+    request_id = ops.card()
+    response = _withdraw(ops, REQUESTER, request_id, {"reason": "x", "decision": "approve"})
+    assert response.status_code == 422
+    assert ops.store.get_request(request_id).status == REQ_PENDING
+    assert ops.resolve(REQUESTER, request_id).status_code == 403
+    assert ops.resolve(HOLDER, request_id).status_code == 200
+    response = _withdraw(ops, REQUESTER, request_id)
+    assert response.status_code == 409
+    assert ops.store.get_request(request_id).status == REQ_APPROVED
+
+
+def test_withdraw_obeys_the_winning_concurrent_approval(ops, monkeypatch):
+    request_id = ops.card()
+    stale = ops.store.get_request(request_id)
+    assert ops.resolve(HOLDER, request_id).status_code == 200
+    real_get = ops.store.get_request
+    monkeypatch.setattr(ops.store, "get_request", lambda rid: stale)
+    response = _withdraw(ops, REQUESTER, request_id)
+    assert response.status_code == 409
+    assert real_get(request_id).status == REQ_APPROVED
+
+
+@pytest.mark.parametrize("headers", [{}, {TASK_TURN_CONTEXT_HEADER: "forged"}])
+def test_withdraw_requires_a_signed_turn(ops, headers):
+    request_id = ops.card()
+    assert _withdraw(ops, REQUESTER, request_id, headers=headers).status_code == 403
+    assert ops.store.get_request(request_id).status == REQ_PENDING
+
+
+@pytest.fixture
+def singleton_ops(ops):
+    from sqlmodel import Session
+    from llm_bawt.ops.models import OpsOperation
+    from tests.test_ops_singleton_approvals import snapshot
+
+    # Disposable PG database only. No release executor or live catalog involved.
+    OpsOperation.__table__.create(ops.api.rig.engine)
+    op = OpsOperation(id="fixture-singleton", slug="fixture.release", executor_kind="release",
+                      max_concurrent=1, command_script="{}", script_hash="fixture-hash")
+    with Session(ops.api.rig.engine) as session:
+        session.add(op)
+        session.commit()
+        session.refresh(op)
+    snap = snapshot()
+    snap["operation"] = op.to_api()
+    return ops, snap
+
+
+def test_pg_singleton_replacement_serializes_concurrent_new_cards(singleton_ops):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    from llm_bawt.approval_models import REQ_SUPERSEDED
+
+    ops, snap = singleton_ops
+    first = ops.card(snapshot=snap)
+    start = Barrier(2)
+
+    def submit():
+        start.wait(timeout=20)
+        return ops.card(snapshot=snap)
+
+    with ThreadPoolExecutor(2) as pool:
+        futures = [pool.submit(submit) for _ in range(2)]
+        ids = [first, *(future.result(timeout=30) for future in futures)]
+    rows = [ops.store.get_request(rid) for rid in ids]
+    assert sorted(row.status for row in rows) == [REQ_PENDING, REQ_SUPERSEDED, REQ_SUPERSEDED]
+    assert ops.store.count_requests(status=REQ_PENDING, user_id=USER) == 1
+    assert ops.store.find_admittable_ops_requests() == []
+    by_id = {row.id: row for row in rows}
+    for row in rows:
+        if row.status == REQ_SUPERSEDED:
+            successor = json.loads(row.result_json)["superseded_by"]
+            assert successor in by_id and successor != row.id
+    # No cycle; every replaced card eventually points to the pending winner.
+    for row in rows:
+        seen = set()
+        while row.status == REQ_SUPERSEDED:
+            assert row.id not in seen
+            seen.add(row.id)
+            row = by_id[json.loads(row.result_json)["superseded_by"]]
+        assert row.status == REQ_PENDING
+
+
+def test_pg_new_singleton_card_racing_approval_never_reopens_the_old_card(singleton_ops):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    from llm_bawt.approval_models import REQ_SUPERSEDED
+
+    ops, snap = singleton_ops
+    first = ops.card(snapshot=snap)
+    start = Barrier(2)
+
+    def approve():
+        start.wait(timeout=20)
+        return ops.store.resolve_request(first, status=REQ_APPROVED, resolved_by="fixture-person")
+
+    def replace():
+        start.wait(timeout=20)
+        return ops.card(snapshot=snap)
+
+    with ThreadPoolExecutor(2) as pool:
+        approval, replacement = pool.submit(approve), pool.submit(replace)
+        approval.result(timeout=30)
+        new = replacement.result(timeout=30)
+    assert ops.store.get_request(first).status in (REQ_SUPERSEDED, REQ_APPROVED)
+    assert ops.store.get_request(new).status == REQ_PENDING
+    ops.store.resolve_request(first, status=REQ_APPROVED)
+    # First terminal decision is absorbing, regardless of the race's winner.
+    old_status = ops.store.get_request(first).status
+    assert old_status in (REQ_SUPERSEDED, REQ_APPROVED)
+
+
+def test_committed_supersession_projects_result_and_event_without_changing_decision(singleton_ops):
+    import asyncio
+    from llm_bawt.approval_models import REQ_SUPERSEDED
+
+    ops, snap = singleton_ops
+    old_id = ops.card(snapshot=snap)
+    new_id = ops.card(snapshot=snap)
+    old = ops.store.get_request(old_id)
+    result, final = asyncio.run(approval_routes.resolve_mcp_card(
+        ops.store, old, outcome="deny", message=old.resolution_message, resolved_by=old.resolved_by))
+    assert (result["status"], final.status) == (REQ_SUPERSEDED, REQ_SUPERSEDED)
+    assert result["result"]["superseded_by"] == new_id
+    assert ops.store.find_admittable_ops_requests() == []
+    assert [kind for kind, _ in ops.cards] == ["result"]
+    assert ops.events[0][1]["status"] == REQ_SUPERSEDED
+    assert ops.events[0][1]["result"]["superseded_by"] == new_id
+
+
 @pytest.mark.parametrize("headers,code", [
     ({}, "turn_capability_required"),
     ({TASK_TURN_CONTEXT_HEADER: "forged"}, "turn_capability_invalid"),
