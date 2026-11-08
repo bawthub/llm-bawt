@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 import time
 
 from .health_checks import DEGRADED, DOWN, OK, _check
+from .http_errors import client_error_text
 
 
 class LoopHealth:
@@ -19,7 +20,9 @@ class LoopHealth:
         self.error = None
 
     def failed(self, exc: Exception):
-        self.error = f"{type(exc).__name__}: {exc}"
+        # Shown in /v1/health/checks: a DB/Redis driver error stays in the log.
+        self.error = f"{type(exc).__name__}: " + client_error_text(
+            exc, "Background sweep failed", "Sweep failed")
 
     def check(self, name, task, *, stale_seconds):
         if task is None or task.done():

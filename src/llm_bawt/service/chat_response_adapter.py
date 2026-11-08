@@ -15,6 +15,7 @@ from typing import Any, AsyncIterator
 from fastapi import HTTPException
 
 from .delivery_reply import DeliveryReplyMismatch, is_accepted_receipt, wait_for_receipt_reply
+from .http_errors import client_error_text
 from .schemas import (
     ChatCompletionChoice, ChatCompletionRequest, ChatCompletionResponse,
     ChatMessage,
@@ -281,7 +282,8 @@ async def completion_stream(
         # Once StreamingResponse has sent headers, HTTPException cannot change
         # status. A concrete error event is the only honest in-band outcome;
         # open_stream turns it into the real status if no output preceded it.
-        yield _stream_error(str(exc), _exception_status(exc))
+        yield _stream_error(
+            client_error_text(exc, "Public chat stream failed"), _exception_status(exc))
 
 
 def _exception_status(exc: Exception) -> int:

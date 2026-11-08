@@ -40,3 +40,37 @@ def internal_error(
     """
     logger.error("%s: %s", context, exc, exc_info=exc)
     return HTTPException(status_code=status_code, detail=internal_error_detail(exc, public))
+
+
+# TASK-1611: driver packages whose exception text names the DB/Redis host, IP
+# or user. Matched on the top-level module of every exception in the chain, so
+# a domain error raised ``from`` a driver error is caught too.
+_INFRASTRUCTURE_MODULES = frozenset({"psycopg", "psycopg2", "psycopg_pool", "sqlalchemy", "asyncpg", "redis"})
+
+
+def names_infrastructure(exc: BaseException) -> bool:
+    """True if ``exc`` or anything in its cause/context chain is a DB/Redis driver error."""
+    seen: set[int] = set()
+    pending: list[BaseException | None] = [exc]
+    while pending:
+        current = pending.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        if type(current).__module__.split(".", 1)[0] in _INFRASTRUCTURE_MODULES:
+            return True
+        pending.extend((current.__cause__, current.__context__))
+    return False
+
+
+def client_error_text(exc: BaseException, context: str, public: str = "Internal error") -> str:
+    """Text for a caller-visible error frame or detail field.
+
+    Domain errors keep their message (it is written for the caller); a
+    DB/Redis driver error anywhere in the chain is logged in full under
+    ``context`` and replaced by the type-only :func:`internal_error_detail`.
+    """
+    if not names_infrastructure(exc):
+        return str(exc)
+    logger.error("%s: %s", context, exc, exc_info=exc)
+    return internal_error_detail(exc, public)

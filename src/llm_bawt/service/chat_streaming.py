@@ -23,6 +23,7 @@ from ..bots import (
 )
 from .inter_bot_claims import continuation_author, turn_admission_claim, validate_inter_bot_claim
 from .session_lifecycle.bridge_reset import BridgeSessionResetMixin
+from .http_errors import client_error_text
 from .logging import RequestContext, generate_request_id, get_service_logger
 from .schemas import ChatCompletionRequest
 from .stream_request_attachments import has_user_turn, prepare_stream_request_attachments
@@ -47,7 +48,8 @@ def stream_stop_events(response_id: str, created: int, model: str) -> list[str]:
 
 def request_failed_events(response_id: str, created: int, model: str, error: Exception) -> list[str]:
     """In-band failure for a stream whose 200 headers were already sent."""
-    warning = {"object": "service.warning", "model": model, "warnings": [f"request_failed: {error}"]}
+    warning = {"object": "service.warning", "model": model, "warnings": [
+        f"request_failed: {client_error_text(error, 'Streaming request failed')}"]}
     return [f"data: {json.dumps(warning)}\n\n", *stream_stop_events(response_id, created, model)]
 
 # TASK-622: the streaming coalescing (_TEXT_DELTA_FLUSH_CHARS) and approval-
@@ -720,7 +722,8 @@ class ChatStreamingMixin(BridgeSessionResetMixin):
                     warning_data = {
                         "object": "service.warning",
                         "model": model_alias,
-                        "warnings": [f"stream_interrupted: {chunk}"],
+                        "warnings": [
+                            f"stream_interrupted: {client_error_text(chunk, 'Streaming backend failed', 'Stream interrupted')}"],
                     }
                     yield (f"data: {json.dumps(warning_data)}\n\n")
 

@@ -1,0 +1,157 @@
+"""DB/Redis driver text never reaches a caller-visible frame or field (TASK-1611).
+
+TASK-1565 sanitized catch-all HTTPException bodies. These cover the paths it
+left: in-band SSE error frames, ``/v1/health/checks`` reasons and background
+task results. A driver error anywhere in the exception chain is replaced by
+generic text plus the type and logged in full; a domain error keeps its
+message, which is written for the caller.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+from types import SimpleNamespace
+
+import pytest
+
+from llm_bawt.service import health_checks
+from llm_bawt.service.chat_response_adapter import completion_stream
+from llm_bawt.service.chat_streaming import request_failed_events
+from llm_bawt.service.http_errors import client_error_text, names_infrastructure
+from llm_bawt.service.runtime_health import LoopHealth
+from llm_bawt.service.schemas import ChatCompletionRequest
+from llm_bawt.service.turn_admission import AdmissionUnavailable
+
+LEAK = 'connection to server at "db.internal" (192.0.2.7) failed for user "tenant_user"'
+HTTP_ERRORS_LOGGER = "llm_bawt.service.http_errors"
+
+
+class FakeDriverError(Exception):
+    """Stands in for psycopg2.OperationalError without needing a live server."""
+
+
+FakeDriverError.__module__ = "psycopg2.errors"
+
+
+def _driver_error() -> FakeDriverError:
+    return FakeDriverError(LEAK)
+
+
+def _wrapped_driver_error() -> AdmissionUnavailable:
+    """The real shape: turn admission wraps the driver error, text included."""
+    try:
+        try:
+            raise _driver_error()
+        except FakeDriverError as inner:
+            raise AdmissionUnavailable(f"turn admission failed: {inner}") from inner
+    except AdmissionUnavailable as outer:
+        return outer
+
+
+def _assert_clean(text: str) -> None:
+    for fragment in ("db.internal", "192.0.2.7", "tenant_user"):
+        assert fragment not in text
+
+
+def test_real_driver_modules_are_recognised():
+    sqlalchemy_exc = pytest.importorskip("sqlalchemy.exc")
+    redis_exc = pytest.importorskip("redis.exceptions")
+    assert names_infrastructure(sqlalchemy_exc.OperationalError("SELECT 1", {}, Exception(LEAK)))
+    assert names_infrastructure(redis_exc.ConnectionError(LEAK))
+    assert not names_infrastructure(ValueError("bad input"))
+
+
+def test_wrapped_driver_error_is_hidden_and_logged(caplog):
+    exc = _wrapped_driver_error()
+    with caplog.at_level(logging.ERROR, logger=HTTP_ERRORS_LOGGER):
+        text = client_error_text(exc, "Admission")
+
+    assert text == "Internal error (AdmissionUnavailable); see the app log"
+    assert LEAK in caplog.records[-1].getMessage()
+
+
+def test_domain_error_keeps_its_message(caplog):
+    with caplog.at_level(logging.ERROR, logger=HTTP_ERRORS_LOGGER):
+        assert client_error_text(ValueError("bot is busy"), "Admission") == "bot is busy"
+    assert not caplog.records
+
+
+def test_request_failed_sse_frame_hides_driver_text():
+    events = request_failed_events("chatcmpl-x", 0, "model", _wrapped_driver_error())
+    warning = json.loads(events[0][len("data: "):])
+
+    assert warning["warnings"] == [
+        "request_failed: Internal error (AdmissionUnavailable); see the app log"]
+    _assert_clean("".join(events))
+
+
+def test_request_failed_sse_frame_keeps_domain_refusal():
+    events = request_failed_events("chatcmpl-x", 0, "model", ValueError("No user message found"))
+    assert "request_failed: No user message found" in events[0]
+
+
+def test_public_stream_error_frame_hides_driver_text():
+    class Service:
+        async def chat_completion_stream(self, _request):
+            raise _driver_error()
+            yield  # pragma: no cover - makes this an async generator
+
+    async def collect():
+        request = ChatCompletionRequest(model="m", messages=[{"role": "user", "content": "hi"}])
+        return [frame async for frame in completion_stream(Service(), request)]
+
+    frames = asyncio.run(collect())
+    error = json.loads(frames[-1][len("data: "):])["error"]
+    assert error["message"] == "Internal error (FakeDriverError); see the app log"
+    _assert_clean("".join(frames))
+
+
+def test_database_health_reason_hides_driver_text(caplog):
+    class Engine:
+        def connect(self):
+            raise _driver_error()
+
+    with caplog.at_level(logging.ERROR, logger=HTTP_ERRORS_LOGGER):
+        row = health_checks.check_database(Engine())
+
+    assert row["status"] == health_checks.DOWN
+    assert row["reason"] == "Database unreachable (FakeDriverError); see the app log"
+    assert LEAK in caplog.records[-1].getMessage()
+
+
+def test_redis_health_reason_hides_driver_text(monkeypatch):
+    redis = pytest.importorskip("redis")
+
+    def from_url(*_args, **_kwargs):
+        raise redis.exceptions.ConnectionError(LEAK)
+
+    monkeypatch.setattr(redis.Redis, "from_url", staticmethod(from_url))
+    row = health_checks.check_redis("redis://example:6379")
+
+    assert row["reason"] == "Redis unreachable (ConnectionError); see the app log"
+
+
+def test_failed_sweep_health_reason_hides_driver_text():
+    health = LoopHealth()
+    health.failed(_driver_error())
+    row = health.check("scheduler.prompts", SimpleNamespace(done=lambda: False), stale_seconds=60)
+
+    assert row["reason"] == (
+        "last sweep failed: FakeDriverError: Sweep failed (FakeDriverError); see the app log")
+
+
+def test_background_task_failure_result_hides_driver_text():
+    from llm_bawt.service.background_tasks import BackgroundTasksMixin
+    from llm_bawt.service.tasks import Task, TaskStatus, TaskType
+
+    class Processor(BackgroundTasksMixin):
+        def _process_memory_extraction(self, _task):
+            raise _driver_error()
+
+    task = Task(task_type=TaskType.MEMORY_EXTRACTION, payload={}, bot_id="example", user_id="u")
+    result = Processor()._run_task(task)
+
+    assert result.status == TaskStatus.FAILED
+    assert result.error == "Task failed (FakeDriverError); see the app log"

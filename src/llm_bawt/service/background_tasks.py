@@ -12,6 +12,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
+from .http_errors import client_error_text
 from .logging import get_service_logger
 from .tasks import Task, TaskResult, TaskStatus, TaskType
 
@@ -74,7 +75,8 @@ class BackgroundTasksMixin:
             return TaskResult(
                 task_id=task.task_id,
                 status=TaskStatus.FAILED,
-                error=str(e),
+                # Served by GET /v1/tasks/{id}; driver text stays in the log.
+                error=client_error_text(e, f"Background task {task.task_id} failed", "Task failed"),
                 processing_time_ms=elapsed_ms,
             )
 
@@ -552,7 +554,8 @@ class BackgroundTasksMixin:
         try:
             backend = PostgreSQLMemoryBackend(self.config, bot_id=bot_id)
         except Exception as e:
-            return {"error": f"Failed to create memory backend: {e}"}
+            return {"error": "Failed to create memory backend: " + client_error_text(
+                e, "Memory extraction backend failed", "Backend unavailable")}
 
         unprocessed = backend.get_unprocessed_messages(limit=batch_size)
 

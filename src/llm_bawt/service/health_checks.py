@@ -26,6 +26,7 @@ from typing import Any, Iterable
 
 from ..mcp_server.registry import tools_registration_complete
 from ..ops.approved_admission import ADMISSION_WINDOW_SECONDS
+from .http_errors import client_error_text
 
 OK, DEGRADED, DOWN = "ok", "degraded", "down"
 _RANK = {OK: 0, DEGRADED: 1, DOWN: 2}
@@ -57,7 +58,8 @@ def check_database(engine) -> dict:
             conn.execute(text("SELECT 1"))
         return _check("database", OK)
     except Exception as exc:  # noqa: BLE001 - reported, not raised
-        return _check("database", DOWN, f"{type(exc).__name__}: {exc}")
+        return _check("database", DOWN, client_error_text(
+            exc, "Health check: database unreachable", "Database unreachable"))
 
 
 def check_redis(url: str) -> dict:
@@ -73,7 +75,8 @@ def check_redis(url: str) -> dict:
             client.close()
         return _check("redis", OK)
     except Exception as exc:  # noqa: BLE001
-        return _check("redis", DOWN, f"{type(exc).__name__}: {exc}")
+        return _check("redis", DOWN, client_error_text(
+            exc, "Health check: redis unreachable", "Redis unreachable"))
 
 
 def check_ops_executors(ops) -> list[dict]:
@@ -324,5 +327,6 @@ def collect(config: Any, ops_store, ops_service, *, service=None) -> dict:
         try:
             checks.extend(probe())
         except Exception as exc:  # A broken capability must not hide the others.
-            checks.append(_check(name, DOWN, f"{type(exc).__name__}: {exc}"))
+            checks.append(_check(name, DOWN, f"{type(exc).__name__}: " + client_error_text(
+                exc, f"Health check {name} failed", "Check failed")))
     return {"status": overall(checks), "checks": checks}
