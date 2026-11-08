@@ -308,6 +308,7 @@ def test_summarize_thread_load_failure_hides_driver_text():
     _assert_clean(error)
 
 
+@pytest.mark.real_process(reason="starts a fresh interpreter to import the base-install modules without FastAPI")
 def test_sanitizer_imports_without_the_web_stack():
     """core.status and the memory jobs are used by the base install (no FastAPI)."""
     import subprocess
