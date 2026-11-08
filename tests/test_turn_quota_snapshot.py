@@ -2,6 +2,7 @@
 
 from datetime import datetime, timedelta, timezone
 import json
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -9,7 +10,11 @@ from sqlmodel import Session, SQLModel, create_engine, select
 
 from llm_bawt.service import usage
 from llm_bawt.service.turn_logs import TurnLog, TurnLogStore
-from llm_bawt.service.turn_quota_snapshot import LATE_REPLAY_SECONDS, record_turn_quota
+from llm_bawt.service.turn_quota_snapshot import (
+    LATE_REPLAY_SECONDS,
+    MAX_READING_AGE_SECONDS,
+    record_turn_quota,
+)
 from llm_bawt.service.usage.canonical import STATUS_OK, ProviderUsage, UsageBalance, UsageLimit
 
 PATH = "test-path"
@@ -26,7 +31,7 @@ def cached(monkeypatch):
     def put(**overrides):
         fields = dict(
             provider="test-provider", display_name="Test", available=True, status=STATUS_OK,
-            fetched_at=1793000000, raw={"secret": "native"},
+            fetched_at=int(time.time()), raw={"secret": "native"},
             limits=[UsageLimit(id="w1", label="Window", used_pct=42.0, resets_at=1793003600, window="5h")],
         )
         snap = ProviderUsage(**{**fields, **overrides})
@@ -55,11 +60,11 @@ def _finish(store, turn_id, token_usage=USAGE):
 
 
 def test_cached_report_is_stored_on_the_terminal_write(cached):
-    cached(balance=UsageBalance(amount_usd=None, remaining_usd=3.5, used_usd=None, as_of=None,
-                                source="provider_reported"))
+    snap = cached(balance=UsageBalance(amount_usd=None, remaining_usd=3.5, used_usd=None, as_of=None,
+                                       source="provider_reported"))
     row = _finish(_store(), "t-cached")
     stored = json.loads(row.quota_snapshot_json)
-    assert stored["provider"] == "test-provider" and stored["fetched_at"] == 1793000000
+    assert stored["provider"] == "test-provider" and stored["fetched_at"] == snap.fetched_at
     assert stored["limits"][0]["used_pct"] == 42.0 and stored["limits"][0]["resets_at"] == 1793003600
     assert stored["balance"]["remaining_usd"] == 3.5
     assert "raw" not in stored  # provider-native payloads stay out of history
@@ -91,13 +96,25 @@ def test_first_reading_is_kept_on_later_terminal_updates(cached):
 
 
 def test_late_replay_does_not_stamp_a_reading_taken_after_the_fact(cached):
-    cached()
     ended = datetime(2026, 11, 8, 12, 0, tzinfo=timezone.utc)
+    cached(fetched_at=int(ended.timestamp()) - 30)
     row = SimpleNamespace(id="t-late", ended_at=ended, quota_snapshot_json=None,
                           token_usage_json=json.dumps(USAGE))
     record_turn_quota(row, now=ended + timedelta(seconds=LATE_REPLAY_SECONDS + 1))
     assert row.quota_snapshot_json is None
     record_turn_quota(row, now=ended + timedelta(seconds=5))
+    assert row.quota_snapshot_json is not None
+
+
+def test_reading_older_than_the_age_limit_is_not_stored(cached):
+    ended = datetime(2026, 11, 8, 12, 0, tzinfo=timezone.utc)
+    row = SimpleNamespace(id="t-old", ended_at=ended, quota_snapshot_json=None,
+                          token_usage_json=json.dumps(USAGE))
+    cached(fetched_at=int(ended.timestamp()) - MAX_READING_AGE_SECONDS - 1)
+    record_turn_quota(row, now=ended)
+    assert row.quota_snapshot_json is None
+    cached(fetched_at=int(ended.timestamp()) - MAX_READING_AGE_SECONDS)
+    record_turn_quota(row, now=ended)
     assert row.quota_snapshot_json is not None
 
 

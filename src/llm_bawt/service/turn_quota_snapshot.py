@@ -1,10 +1,12 @@
 """TASK-1501: stamp a finished turn with the account quota cached for its route.
 
 The reading is the usage report already cached for the turn's frozen access
-path (``token_usage_json.access_path``); no provider call is made. Its
-``fetched_at`` can predate the turn by up to the usage cache TTL, so it shows a
-trend over time, not an exact per-turn delta. With no cached report the column
-stays NULL rather than holding an invented value.
+path (``token_usage_json.access_path``); no provider call is made. The cache
+keeps its last good report indefinitely, so a reading fetched more than
+``MAX_READING_AGE_SECONDS`` before the turn ended is not stored; a stored
+``fetched_at`` can still predate the turn by up to that limit, so it shows a
+trend over time, not an exact per-turn delta. With no usable cached report the
+column stays NULL rather than holding an invented value.
 """
 
 from __future__ import annotations
@@ -19,6 +21,8 @@ log = logging.getLogger(__name__)
 # A terminal replay long after the turn ended (late usage, recovery) must not
 # stamp it with a reading taken well after the fact.
 LATE_REPLAY_SECONDS = 600
+# get_cached() never ages a report out; an older reading says nothing about this turn.
+MAX_READING_AGE_SECONDS = 900
 
 
 def _frozen_access_path(token_usage_json: str | None) -> str | None:
@@ -61,5 +65,5 @@ def record_turn_quota(row, *, now: datetime | None = None) -> None:
     except Exception:  # noqa: BLE001 - telemetry must never fail the turn's terminal write
         log.warning("quota snapshot skipped for turn %s", row.id, exc_info=True)
         return
-    if snapshot is not None:
+    if snapshot is not None and ended.timestamp() - snapshot["fetched_at"] <= MAX_READING_AGE_SECONDS:
         row.quota_snapshot_json = json.dumps(snapshot, ensure_ascii=False, default=str)
