@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from sqlalchemy import delete, select, text
@@ -23,6 +24,20 @@ logger = logging.getLogger(__name__)
 
 class PostgreSQLSemanticMemoryMixin:
     """Distilled semantic-memory behavior for PostgreSQLMemoryBackend."""
+
+    @contextmanager
+    def _memory_write_transaction(self):
+        """Serialize dedup + write by storage partition, after remote embedding.
+
+        READ COMMITTED gives each dedup query a fresh snapshot after the lock
+        wait. The transaction releases the lock on commit, rollback or error.
+        """
+        with self.engine.begin() as conn:
+            conn.execute(text("""
+                SELECT pg_advisory_xact_lock(
+                    hashtext('memory-dedup'), hashtext(:partition))
+            """), {"partition": self._memories_table_name})
+            yield conn
 
     def add_memory(
         self,
@@ -74,9 +89,9 @@ class PostgreSQLSemanticMemoryMixin:
                 logger.debug(f"Could not generate meaning embedding: {e}")
         if meaning_embedding:
             meaning_updated_at = meaning_updated_at or datetime.now(timezone.utc)
-        
-        with self.engine.connect() as conn:
-            try:
+
+        try:
+            with self._memory_write_transaction() as conn:
                 # Check for duplicate/similar content BEFORE inserting
                 # Use embedding similarity if available, otherwise exact content match
                 # Threshold from config (default 0.85) - catches semantic duplicates
@@ -186,12 +201,10 @@ class PostgreSQLSemanticMemoryMixin:
                         "meaning_embedding": f"[{','.join(str(x) for x in meaning_embedding)}]" if meaning_embedding else None,
                         "meaning_updated_at": meaning_updated_at,
                     })
-                
-                conn.commit()
-                logger.debug(f"Added memory {memory_id} to {self._memories_table_name}")
-            except Exception as e:
-                conn.rollback()
-                logger.error(f"Failed to add memory {memory_id}: {e}")
+
+            logger.debug(f"Added memory {memory_id} to {self._memories_table_name}")
+        except Exception as e:
+            logger.error(f"Failed to add memory {memory_id}: {e}")
 
     def update_memory(
         self,
@@ -256,7 +269,7 @@ class PostgreSQLSemanticMemoryMixin:
             "meaning_embedding": (f"[{','.join(str(x) for x in meaning_embedding)}]"
                                   if meaning_embedding else None),
         }
-        with self.engine.begin() as conn:
+        with self._memory_write_transaction() as conn:
             if changed:
                 threshold = getattr(self.config, "MEMORY_DEDUP_SIMILARITY", 0.85)
                 # A prior embedding outage leaves NULL vectors. Exact matches
