@@ -8,7 +8,15 @@ When a settings-resolved maintenance call's provider answers ``spending_limit``
 later calls skip it until a cooldown passes. After the cooldown exactly one call
 (the probe) touches the primary again; it never costs its job, because a probe
 that hits the limit again falls through to the backup in the same call and
-re-arms the cooldown. Nothing else (rate limits, auth, timeouts…) ever switches.
+re-arms the cooldown.
+
+An unreachable primary (connection refused/failed or timed out, no HTTP reply:
+typically a local server that is off) switches the same way, with cause
+``unreachable`` (TASK-1716). Rate limits, auth and HTTP errors never switch.
+Recovery from ``unreachable`` can be pushed: ``POST /v1/maintenance/primary-available``
+(:func:`announce_available`) ends the cooldown, so the next maintenance call is
+the probe. It does not clear the state itself; only a real successful call does,
+so a stray or early announce costs at most one fallen-through probe.
 
 The bell is pull-based: BawtHub polls ``/v1/health/maintenance``. The switched
 state is read from the durable Redis record on every poll, so a switch notice
@@ -33,7 +41,8 @@ from typing import Any, Callable
 
 from .logging import get_service_logger
 from .maintenance_health import (
-    SPENDING_LIMIT, MaintenanceHealth, MonitoredClient, classify_failure, maintenance_health,
+    SPENDING_LIMIT, TIMEOUT, MaintenanceHealth, MonitoredClient, _status_of, classify_failure,
+    maintenance_health,
 )
 
 log = get_service_logger(__name__)
@@ -43,6 +52,10 @@ COOLDOWN_SETTING = "maintenance_fallback_cooldown_seconds"
 INCOMPATIBLE = "fallback_incompatible"
 STATE_UNAVAILABLE = "fallback_state_unavailable"
 STATE_JOB = "maintenance_fallback_state"
+UNREACHABLE = "unreachable"
+_CAUSE_TEXT = {SPENDING_LIMIT: "spending limit", UNREACHABLE: "unreachable"}
+_CONNECT_TEXT = ("connection error", "connection refused", "connecterror",
+                 "name or service not known", "failed to establish")
 
 _KEY = "maintenance:fallback:{provider}"
 _PROBE = "maintenance:fallback:{provider}:probe"
@@ -64,6 +77,39 @@ class StateUnavailable(RuntimeError):
     """The shared exhaustion state can't be read or written (Redis down)."""
 
 
+def is_unreachable(error: Any) -> bool:
+    """No HTTP reply at all: connect refused/failed, DNS failure, or a timeout.
+
+    An HTTP status (5xx included) means the server answered, so it never counts.
+    """
+    if _status_of(error) is not None:
+        return False
+    if classify_failure(error) == TIMEOUT:
+        return True
+    seen: set[int] = set()
+    current: Any = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        name = type(current).__name__.lower()
+        if name in ("connecterror", "connecttimeout", "apiconnectionerror",
+                    "connectionrefusederror", "connectionerror"):
+            return True
+        text = str(current).lower()
+        if any(marker in text for marker in _CONNECT_TEXT):
+            return True
+        current = getattr(current, "__cause__", None) if isinstance(current, BaseException) else None
+    return False
+
+
+def switch_cause(error: Any) -> str | None:
+    """``spending_limit`` / ``unreachable`` when this failure moves to the backup, else None."""
+    if classify_failure(error) == SPENDING_LIMIT:
+        return SPENDING_LIMIT
+    if is_unreachable(error):
+        return UNREACHABLE
+    return None
+
+
 @dataclass
 class Exhaustion:
     provider: str
@@ -72,6 +118,7 @@ class Exhaustion:
     hint_source: str
     backup: str | None = None
     edge: int = 0
+    cause: str = SPENDING_LIMIT
 
 
 def _iso(ts: float) -> str:
@@ -87,6 +134,7 @@ class Episode:
     recovered_at: float
     episodes: int
     edge: int = 0
+    cause: str = SPENDING_LIMIT
 
 
 class ExhaustionStore(ABC):
@@ -116,6 +164,10 @@ class ExhaustionStore(ABC):
     @abstractmethod
     def clear(self, provider: str, since: float, token: str) -> bool:
         """Successful probe: delete the record and record the episode (next edge number), if still the holder."""
+
+    @abstractmethod
+    def expedite(self, provider: str, now: float) -> bool:
+        """Announced back: pull an ``unreachable`` record's ``until`` to ``now`` so the next call probes."""
 
     @abstractmethod
     def all(self) -> list[Exhaustion]: ...
@@ -167,7 +219,7 @@ local rec = cjson.decode(raw)
 if string.format('%d', rec['since']) ~= ARGV[1] then return 0 end
 if redis.call('GET', KEYS[2]) ~= ARGV[2] then return 0 end
 local ep = {first_since = rec['since'], recovered_at = tonumber(ARGV[3]), episodes = 1,
-            edge = next_edge(KEYS[4])}
+            edge = next_edge(KEYS[4]), cause = rec['cause'] or 'spending_limit'}
 local old = redis.call('GET', KEYS[3])
 if old then
   local prev = cjson.decode(old)
@@ -176,6 +228,18 @@ if old then
 end
 redis.call('DEL', KEYS[1], KEYS[2])
 redis.call('SET', KEYS[3], cjson.encode(ep), 'EX', tonumber(ARGV[4]))
+return 1
+"""
+
+# Only an unreachable record, and only ever earlier. KEYS: record. ARGV: now.
+_EXPEDITE = """
+local raw = redis.call('GET', KEYS[1])
+if not raw then return 0 end
+local rec = cjson.decode(raw)
+if rec['cause'] ~= 'unreachable' then return 0 end
+if tonumber(rec['until']) <= tonumber(ARGV[1]) then return 0 end
+rec['until'] = tonumber(ARGV[1])
+redis.call('SET', KEYS[1], cjson.encode(rec))
 return 1
 """
 
@@ -195,6 +259,7 @@ class RedisExhaustionStore(ExhaustionStore):
         self._rearm = self._redis.register_script(_REARM)
         self._clear = self._redis.register_script(_CLEAR)
         self._mark = self._redis.register_script(_MARK)
+        self._expedite = self._redis.register_script(_EXPEDITE)
 
     def _run(self, fn: Callable[[], Any]) -> Any:
         try:
@@ -209,7 +274,8 @@ class RedisExhaustionStore(ExhaustionStore):
         data = json.loads(raw)
         return Exhaustion(provider=data["provider"], since=data["since"] / 1000,
                           until=data["until"], hint_source=data["hint_source"],
-                          backup=data.get("backup"), edge=int(data.get("edge", 0)))
+                          backup=data.get("backup"), edge=int(data.get("edge", 0)),
+                          cause=data.get("cause") or SPENDING_LIMIT)
 
     def get(self, provider: str) -> Exhaustion | None:
         return self._load(self._run(lambda: self._redis.get(_KEY.format(provider=provider))))
@@ -237,6 +303,10 @@ class RedisExhaustionStore(ExhaustionStore):
                   _RECOVERED.format(provider=provider), _EDGE.format(provider=provider)],
             args=[_ms(since), token, time.time(), RECOVERED_ROW_SECONDS])))
 
+    def expedite(self, provider: str, now: float) -> bool:
+        return bool(self._run(lambda: self._expedite(
+            keys=[_KEY.format(provider=provider)], args=[now])))
+
     def all(self) -> list[Exhaustion]:
         def scan() -> list[Exhaustion]:
             keys = [k for k in self._redis.scan_iter(match=_KEY.format(provider="*"))
@@ -256,7 +326,8 @@ class RedisExhaustionStore(ExhaustionStore):
                                        first_since=data["first_since"] / 1000,
                                        recovered_at=float(data["recovered_at"]),
                                        episodes=int(data["episodes"]),
-                                       edge=int(data.get("edge", 0))))
+                                       edge=int(data.get("edge", 0)),
+                                       cause=data.get("cause") or SPENDING_LIMIT))
             return out
         return self._run(scan)
 
@@ -340,7 +411,7 @@ class MemoryExhaustionStore(ExhaustionStore):
                 provider=provider,
                 first_since=min(record.since, prev.first_since) if prev else record.since,
                 recovered_at=now, episodes=(prev.episodes + 1) if prev else 1,
-                edge=self._next_edge(provider))
+                edge=self._next_edge(provider), cause=record.cause)
             del self._records[provider]
             del self._probes[provider]
             return True
@@ -350,6 +421,15 @@ class MemoryExhaustionStore(ExhaustionStore):
         if episode and episode.recovered_at + RECOVERED_ROW_SECONDS > self._clock():
             return episode
         return None
+
+    def expedite(self, provider: str, now: float) -> bool:
+        self._check()
+        with self._lock:
+            record = self._records.get(provider)
+            if record is None or record.cause != UNREACHABLE or record.until <= now:
+                return False
+            record.until = now
+            return True
 
     def all(self) -> list[Exhaustion]:
         self._check()
@@ -421,7 +501,7 @@ class Backup:
 
 
 class FallbackClient:
-    """Wraps the primary ``MonitoredClient``; only ``spending_limit`` reaches the backup.
+    """Wraps the primary ``MonitoredClient``; only a spending limit or an unreachable primary reaches the backup.
 
     ``last_served_model`` / ``last_served_provider`` / ``last_via_fallback`` say
     which model answered the most recent call, for callers that report it.
@@ -497,34 +577,35 @@ class FallbackClient:
         try:
             result = getattr(self._primary, method)(*args, **kwargs)
         except Exception as error:
-            if classify_failure(error) != SPENDING_LIMIT:
+            cause = switch_cause(error)
+            if cause is None:
                 raise
-            return self._spending_limit(error, probing, stateful, method, args, kwargs)
+            return self._switch(error, cause, probing, stateful, method, args, kwargs)
         if isinstance(result, str) and result.lstrip().startswith("ERROR:") \
-                and classify_failure(result) == SPENDING_LIMIT:
-            return self._spending_limit(result, probing, stateful, method, args, kwargs)
+                and (cause := switch_cause(result)) is not None:
+            return self._switch(result, cause, probing, stateful, method, args, kwargs)
         self._served(self._model, self._provider, False)
         if probing is not None:
             switched_back, _ = self._state_op(
                 lambda: self._store.clear(self._provider, probing[0].since, probing[1]), False)
             if switched_back:
-                log.warning("Maintenance: %s spending limit cleared, back on primary %s",
-                            self._provider, self._model)
+                log.warning("Maintenance: %s %s cleared, back on primary %s", self._provider,
+                            _CAUSE_TEXT.get(probing[0].cause, probing[0].cause), self._model)
         return result
 
-    def _spending_limit(self, error: Any, probing: tuple[Exhaustion, str] | None, stateful: bool,
-                        method: str, args: tuple, kwargs: dict) -> Any:
+    def _switch(self, error: Any, cause: str, probing: tuple[Exhaustion, str] | None,
+                stateful: bool, method: str, args: tuple, kwargs: dict) -> Any:
         until, source = self._until(error)
         if probing is not None:
             self._state_op(lambda: self._store.rearm(
                 self._provider, probing[0].since, probing[1], until), False)
         elif stateful:
             record = Exhaustion(provider=self._provider, since=self._clock(), until=until,
-                                hint_source=source)
+                                hint_source=source, cause=cause)
             switched, _ = self._state_op(lambda: self._store.mark(record), False)
             if switched:
-                log.warning("Maintenance: %s spending limit, switching to backup until %s (%s)",
-                            self._provider, _iso(until), source)
+                log.warning("Maintenance: %s %s, switching to backup until %s (%s)",
+                            self._provider, _CAUSE_TEXT[cause], _iso(until), source)
         return self._via_backup(method, error, args, kwargs)
 
     def _via_backup(self, method: str, primary_error: Any, args: tuple, kwargs: dict) -> Any:
@@ -571,7 +652,8 @@ def fallback_checks(store: ExhaustionStore) -> list[dict[str, Any]]:
         rows[episode.provider] = {
             "name": f"maintenance_fallback_recovered:{episode.provider}", "status": "degraded",
             "episode": str(episode.edge),
-            "reason": f"{episode.provider} spending limit: maintenance was on the backup model "
+            "reason": f"{episode.provider} {_CAUSE_TEXT.get(episode.cause, episode.cause)}: "
+                      f"maintenance was on the backup model "
                       f"from {_iso(episode.first_since)} to {_iso(episode.recovered_at)} "
                       f"({count}); back on primary",
         }
@@ -579,11 +661,23 @@ def fallback_checks(store: ExhaustionStore) -> list[dict[str, Any]]:
         rows[record.provider] = {
             "name": f"maintenance_fallback:{record.provider}", "status": "degraded",
             "episode": str(record.edge),
-            "reason": f"{record.provider} spending limit since {_iso(record.since)}: "
+            "reason": f"{record.provider} {_CAUSE_TEXT.get(record.cause, record.cause)} "
+                      f"since {_iso(record.since)}: "
                       f"maintenance on the backup model; next primary probe after "
                       f"{_iso(record.until)}",
         }
     return [rows[p] for p in sorted(rows)]
+
+
+def announce_available(store: ExhaustionStore, *, now: float | None = None) -> list[str]:
+    """A primary announced it is back: every ``unreachable`` provider probes on its next call.
+
+    Takes no provider from the caller, so the announcer needs no llm-bawt ids
+    and an unauthenticated call can do no more than bring a probe forward.
+    """
+    at = now if now is not None else time.time()
+    return sorted(r.provider for r in store.all()
+                  if r.cause == UNREACHABLE and store.expedite(r.provider, at))
 
 
 _store: ExhaustionStore | None = None

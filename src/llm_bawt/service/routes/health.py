@@ -98,6 +98,29 @@ def get_maintenance_health():
     return payload
 
 
+@router.post("/v1/maintenance/primary-available", tags=["System"])
+def announce_maintenance_primary_available():
+    """A local maintenance primary announces it is back (TASK-1716).
+
+    Push-based recovery: ends the cooldown of every provider switched to the
+    backup as ``unreachable``, so the next maintenance call probes the primary.
+    Takes no input and clears nothing itself: only that real call switches back,
+    so the call is safe without credentials. Idempotent.
+    """
+    from fastapi.responses import JSONResponse
+
+    from ..maintenance_fallback import (
+        StateUnavailable, announce_available, default_state_health, default_store,
+    )
+
+    try:
+        providers = announce_available(default_store(get_service().config))
+    except StateUnavailable as error:
+        default_state_health().unavailable(str(error))
+        return JSONResponse({"error": "fallback_state_unavailable"}, status_code=503)
+    return {"expedited": providers}
+
+
 @router.get("/v1/status", response_model=SystemStatusResponse, tags=["System"])
 def get_system_status():
     """Get full system status (config, service, memory, dependencies)."""

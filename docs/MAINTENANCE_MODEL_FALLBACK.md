@@ -201,6 +201,23 @@ warning chip if the chosen backup shares the maintenance model's provider.
 - Backup also fails → loud alert with both classes, no secrets in reason/log.
 - No model literal: guard test greps the new module.
 
+## Unreachable primary (TASK-1716)
+
+A primary that gives no HTTP reply (connection refused/failed, DNS failure,
+or a timeout) switches exactly like a spending limit, with the record's
+`cause` = `unreachable`. That is typically a local model server that is off.
+An HTTP status, 5xx included, never counts. The bell text names the cause.
+The same cooldown setting and single-probe rule apply.
+
+Recovery is push-based: `POST /v1/maintenance/primary-available` (no body) pulls
+every `unreachable` record's `until` to now, so the next maintenance call is
+the probe and a success switches back. The announce itself clears nothing
+and never touches a spending-limit record, so it needs no credential: a
+stray or early call costs one probe that falls through to the backup. The
+lazy cooldown probe remains the safety net when no announcer is installed.
+The announcer is deployment-side (e.g. run on model-server start), not
+product code.
+
 ## Out of scope
 
 Credential chains, OAuth/sign-in (dropped by Nick). Bot conversation failover.

@@ -83,7 +83,8 @@ def test_spending_limit_serves_backup_and_marks_provider():
 
 
 @pytest.mark.parametrize("error", [_StatusError(429, "slow down"), _StatusError(401),
-                                   TimeoutError("read timed out"), _StatusError(503)])
+                                   _StatusError(503), _StatusError(504, "gateway timed out"),
+                                   ValueError("bad payload")])
 def test_other_failures_never_use_backup(error):
     rig = Rig()
     rig.primary_inner.query.side_effect = error
@@ -403,3 +404,94 @@ def test_claim_probe_failure_after_good_get_is_stateless_per_call():
     assert rig.client().query(messages=[]) == "p"
     rows = [r for r in rig.health.checks_payload()["checks"] if r["name"] == mf.STATE_JOB]
     assert len(rows) == 1 and rows[0]["status"] == "down"
+
+
+# -- TASK-1716: unreachable primary --------------------------------------------
+
+class ConnectError(Exception):
+    """Stands in for httpx.ConnectError (matched by type name, no import)."""
+
+
+def _wrapped_connect() -> Exception:
+    outer = RuntimeError("Connection error.")
+    outer.__cause__ = ConnectError("[Errno 111] refused")
+    return outer
+
+
+@pytest.mark.parametrize("error", [
+    ConnectError("[Errno 111] Connection refused"),
+    _wrapped_connect(),
+    TimeoutError("read timed out"),
+    ConnectionRefusedError(111, "refused"),
+])
+def test_unreachable_primary_switches_with_cause(error):
+    rig = Rig()
+    rig.primary_inner.query.side_effect = error
+    rig.backup_inner.query.return_value = "from backup"
+    client = rig.client()
+    assert client.query(messages=[]) == "from backup"
+    record = rig.store.get(PRIMARY_PROVIDER)
+    assert record is not None and record.cause == mf.UNREACHABLE
+    assert record.until == rig.clock.now + 600
+    [row] = fallback_checks(rig.store)
+    assert "prov-a unreachable since" in row["reason"]
+
+
+@pytest.mark.parametrize("reply", ["ERROR: OpenAI API Error - Connection error.",
+                                   "ERROR: OpenAI API Error - Request timed out."])
+def test_unreachable_error_string_also_triggers(reply):
+    rig = Rig()
+    rig.primary_inner.query.return_value = reply
+    rig.backup_inner.query.return_value = "ok"
+    assert rig.client().query(messages=[]) == "ok"
+    assert rig.store.get(PRIMARY_PROVIDER).cause == mf.UNREACHABLE
+
+
+def test_http_reply_is_never_unreachable():
+    assert not mf.is_unreachable(_StatusError(502, "connection error upstream"))
+    assert mf.switch_cause(_StatusError(503)) is None
+
+
+def test_announce_brings_probe_forward_and_real_call_switches_back():
+    rig = Rig()
+    rig.primary_inner.query.side_effect = ConnectError("refused")
+    rig.backup_inner.query.return_value = "b"
+    client = rig.client()
+    client.query(messages=[])
+    rig.primary_inner.query.reset_mock()
+    rig.clock.now += 10
+    client.query(messages=[])  # inside cooldown: primary untouched
+    rig.primary_inner.query.assert_not_called()
+
+    assert mf.announce_available(rig.store, now=rig.clock.now) == [PRIMARY_PROVIDER]
+    assert rig.store.get(PRIMARY_PROVIDER) is not None  # announce alone clears nothing
+    assert mf.announce_available(rig.store, now=rig.clock.now) == []  # idempotent
+
+    rig.primary_inner.query.side_effect = None
+    rig.primary_inner.query.return_value = "primary"
+    assert client.query(messages=[]) == "primary"
+    assert rig.store.get(PRIMARY_PROVIDER) is None
+    [row] = fallback_checks(rig.store)
+    assert row["name"].startswith("maintenance_fallback_recovered:")
+    assert "prov-a unreachable: maintenance was on the backup" in row["reason"]
+
+
+def test_early_announce_costs_one_fallen_through_probe():
+    rig = Rig()
+    rig.primary_inner.query.side_effect = ConnectError("refused")
+    rig.backup_inner.query.return_value = "b"
+    client = rig.client()
+    client.query(messages=[])
+    mf.announce_available(rig.store, now=rig.clock.now)
+    assert client.query(messages=[]) == "b"  # probe fails, backup serves
+    assert rig.store.get(PRIMARY_PROVIDER).until == rig.clock.now + 600  # rearmed
+
+
+def test_announce_never_touches_a_spending_limit_record():
+    rig = Rig()
+    rig.primary_inner.query.side_effect = _spend()
+    rig.backup_inner.query.return_value = "b"
+    rig.client().query(messages=[])
+    until = rig.store.get(PRIMARY_PROVIDER).until
+    assert mf.announce_available(rig.store, now=rig.clock.now) == []
+    assert rig.store.get(PRIMARY_PROVIDER).until == until
