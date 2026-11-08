@@ -35,6 +35,7 @@ from __future__ import annotations
 import json
 import posixpath
 import re
+from urllib.parse import urlencode
 
 # The container itself is sealed_container's, shared with the TASK-1474 source
 # check. OPS_JOB_LABEL is re-exported for the target selectors.
@@ -48,6 +49,7 @@ else:  # standalone immutable worker
 RENDER_LABEL = "llm-bawt.ops.compose-render"
 RENDER_ROLE = "compose-render"
 MAX_RENDER_BYTES = 4 * 1024 * 1024
+_PROJECT = "com.docker.compose.project"
 _WORKING_DIR = "com.docker.compose.project.working_dir"
 _CONFIG_FILES = "com.docker.compose.project.config_files"
 SAFE_PATH = re.compile(r"/[A-Za-z0-9._/-]{1,255}")
@@ -148,14 +150,52 @@ def renderer_env(config: dict, image_ref: str, project_dir: str) -> list[str]:
             *([f"{variable}={image_ref}"] if variable else []), *declared]
 
 
-def compose_source(spec: dict, container: dict) -> dict:
-    """Project directory and files the target was created from, as the spec allows."""
+def created_from(container: dict) -> str:
+    """The checkout the container was created from (its Compose working_dir label)."""
+    return (container.get("Config", {}).get("Labels") or {}).get(_WORKING_DIR) or ""
+
+
+def sibling_project_dir(api, container: dict) -> str:
+    """TASK-1995: the checkout the target SHOULD come from: the working_dir
+    every other running container of its Compose project was created from.
+
+    Config files are not compared: a different overlay list in the same tree is
+    that container's own choice. No sibling, or siblings that disagree, is a
+    refusal, never a guess."""
+    project = (container.get("Config", {}).get("Labels") or {}).get(_PROJECT) or ""
+    if not project:
+        raise ComposeError("compose_source_unresolved", detail="target has no Compose project label")
+    rows = api.request("GET", "/containers/json?" + urlencode(
+        {"filters": json.dumps({"label": [f"{_PROJECT}={project}"], "status": ["running"]})}))
+    dirs = {(row.get("Labels") or {}).get(_WORKING_DIR) or "" for row in rows or []
+            if row.get("Id") != container.get("Id")}
+    if not dirs:
+        raise ComposeError("compose_source_unresolved", detail="no other running container in the Compose project")
+    if len(dirs) > 1:
+        raise ComposeError("compose_source_unresolved",
+                           detail="the Compose project's other containers disagree on their checkout")
+    (project_dir,) = dirs
+    if not working_dir_valid(project_dir):
+        raise ComposeError("compose_source_unresolved", detail="sibling working directory label")
+    return project_dir
+
+
+def compose_source(spec: dict, container: dict, project_dir: str | None = None) -> dict:
+    """Project directory and files the target is rendered from, as the spec allows.
+
+    ``project_dir`` (TASK-1995) is the checkout it should come from; the same
+    file names are taken from there. Omitted, the target's own checkout."""
     labels = container.get("Config", {}).get("Labels") or {}
     working_dir = labels.get(_WORKING_DIR) or ""
     files = (labels.get(_CONFIG_FILES) or "").split(",")
     names = spec["compose_config"].get("compose_files")
     if not working_dir_valid(working_dir):
         raise ComposeError("compose_source_invalid", detail="working directory label")
+    if project_dir is not None and project_dir != working_dir:
+        if not label_files_valid(working_dir, files):
+            raise ComposeError("compose_source_invalid", detail="config files label")
+        files = [posixpath.join(project_dir, posixpath.basename(f)) for f in files]
+        working_dir = project_dir
     if names is None:
         # TASK-1474: which overlays an install layers is that install's own
         # choice, so the spec names none. The files still must be distinct

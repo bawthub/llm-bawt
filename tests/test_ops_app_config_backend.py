@@ -103,6 +103,7 @@ class BackendDocker(AppDocker):
             "NetworkSettings": {"Networks": {"bawthub_default": {"Aliases": [NAME, "backend", old_id[:12]]}}},
             "State": {"Running": True, "Status": "running", "Health": {"Status": "healthy"}}}}
         self.old_id = old_id
+        self.sibling_dirs = [BACKEND_DIR]
 
     def request(self, method, path, *, body=None, headers=None, raw=False):
         if path.startswith("/exec/health1/") and path.endswith("/start"):

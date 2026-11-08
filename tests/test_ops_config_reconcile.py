@@ -11,7 +11,7 @@ import pytest
 
 from llm_bawt.ops.compose_render import ComposeRenderer
 from llm_bawt.ops.config_reconcile import (
-    SCHEMA, WORKER_CAPABILITY_LABEL, ConfigReconciler, config_binding, valid_config_binding,
+    SCHEMA, WORKER_CAPABILITY_LABEL, ConfigReconciler, approval_text, config_binding, valid_config_binding,
 )
 from llm_bawt.ops.executor import ConfigCheckError, DockerExecutor, validate_spec
 from llm_bawt.ops.health_probe import WORKER_LABEL as HEALTH_PROBE_LABEL
@@ -19,8 +19,8 @@ from llm_bawt.ops.image_deploy import DeployFailed
 from llm_bawt.ops.seeds import SEEDS
 from llm_bawt.ops.worker import run as worker_run
 from tests.test_ops_image_deploy import (
-    CONFIG_HASH, DIGEST, JOB_ID, NAME, OLD_ID, RENDERER, REPO, SOURCE, SPEC as DEPLOY_SPEC, TOKEN_TARGET,
-    FakeDocker, _labels, _worker_request, compose_project,
+    COMPOSE_FILES, CONFIG_HASH, DIGEST, JOB_ID, NAME, OLD_ID, PROJECT_DIR, RENDERER, REPO, SOURCE,
+    SPEC as DEPLOY_SPEC, TOKEN_TARGET, FakeDocker, _labels, _worker_request, compose_project,
 )
 
 SEED = next(s for s in SEEDS if s["slug"] == "bawthub.reconcile-prod-config")
@@ -118,6 +118,37 @@ def test_drift_is_reconciled_at_the_same_image_and_values_stay_private(tmp_path)
     assert SECRET not in json.dumps(snap) and SECRET not in output
     assert not any("/images/create" in p for _, p in api.calls)
     assert api.by_name(NAME)["Id"] != api.old_id and not api.renderers_left()
+
+
+OLD_TREE = "/srv/compose/old-bawthub"
+
+
+def created_in(api, tree):
+    """The target as Compose created it from ``tree``, binds included."""
+    target = api.by_name(NAME)
+    target["Config"]["Labels"].update({
+        "com.docker.compose.project.working_dir": tree,
+        "com.docker.compose.project.config_files": ",".join(f.replace(PROJECT_DIR, tree) for f in COMPOSE_FILES)})
+    target["HostConfig"]["Binds"] = [f"{tree}/token:{TOKEN_TARGET}:ro"]
+
+
+def test_a_target_from_another_checkout_moves_to_its_projects_checkout(tmp_path):
+    """TASK-1995: siblings run from PROJECT_DIR; the target was created from
+    another tree. It is drift naming both trees, rendered from the siblings'
+    tree, and the new container is labelled with that tree and its files."""
+    api = ConfigDocker()
+    created_in(api, OLD_TREE)
+    snap = snapshot(api)
+    assert snap["config"]["drift"] == [f"compose_source:{OLD_TREE}->{PROJECT_DIR}", f"mount:~{TOKEN_TARGET}"]
+    assert snap["config"]["source"] == {"project_dir": PROJECT_DIR, "compose_files": COMPOSE_FILES}
+    assert f"Compose source: {', '.join(COMPOSE_FILES)}" in approval_text(SPEC, snap["config"], None)
+    assert api.render_bodies[0]["HostConfig"]["Binds"] == [f"{PROJECT_DIR}:{PROJECT_DIR}:ro"]
+    json.loads(reconciler(api, tmp_path, snap).run())
+    labels = api.create_bodies[0]["Labels"]
+    assert labels["com.docker.compose.project.working_dir"] == PROJECT_DIR
+    assert labels["com.docker.compose.project.config_files"] == ",".join(COMPOSE_FILES)
+    assert api.create_bodies[0]["Image"] == REF
+    assert api.create_bodies[0]["HostConfig"]["Binds"] == [f"{PROJECT_DIR}/token:{TOKEN_TARGET}:ro"]
 
 
 def test_no_drift_verifies_only_and_recreates_nothing(tmp_path):

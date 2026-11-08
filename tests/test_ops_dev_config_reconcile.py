@@ -93,6 +93,7 @@ class DevDocker(AppDocker):
             "State": {"Running": True, "Status": "running", "Health": {"Status": "healthy"}}},
             REDIS: self.containers[REDIS]}
         self.old_id = old
+        self.sibling_dirs = [DEV_DIR]
 
     def request(self, method, path, *, body=None, headers=None, raw=False):
         # The seed's stat_paths: mode/owner of the service token, never its contents.

@@ -51,6 +51,7 @@ DEPLOY_ACTION = "deploy_image"
 ROLLBACK_ACTION = "rollback_image"
 IMAGE_ACTIONS = frozenset({DEPLOY_ACTION, ROLLBACK_ACTION})
 CONFIG_FILES_LABEL = "com.docker.compose.project.config_files"
+WORKING_DIR_LABEL = "com.docker.compose.project.working_dir"
 
 # Container.Config keys a Compose service may override; when equal to the OLD
 # image's value they were inherited and must come from the NEW image instead.
@@ -206,7 +207,9 @@ class ImageDeployer:
         if self._source:
             # TASK-1801: an adopted target was created from an earlier file
             # list; the new container records the files it was rendered from.
+            # TASK-1995: and the checkout, when the reconcile moved it.
             body["Labels"][CONFIG_FILES_LABEL] = ",".join(self._source["compose_files"])
+            body["Labels"][WORKING_DIR_LABEL] = self._source["project_dir"]
         return body
 
     def _renderer(self):

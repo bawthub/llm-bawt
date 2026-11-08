@@ -506,3 +506,60 @@ def test_mount_source_changes_ignores_read_only_flips_and_added_or_removed_mount
     assert mount_source_changes(want, have) == []
     have["/a"] = {"type": "volume", "source": "/x", "read_only": True}
     assert mount_source_changes(want, have) == ["/a"]
+
+
+# ── TASK-1995: the checkout a target is rendered from ──────────────────────
+
+OTHER_TREE = "/srv/compose/old-bawthub"
+
+
+def _evaluate(api):
+    return evaluate(SPEC, api.by_name(NAME), IMAGE, ComposeRenderer(api, SPEC, tag="t1"), REF)
+
+
+def test_a_target_in_its_projects_checkout_has_no_source_drift():
+    result = _evaluate(FakeDocker())
+    assert result["source"] == {"project_dir": PROJECT_DIR, "compose_files": COMPOSE_FILES}
+    assert not [n for n in result["drift"] if n.startswith("compose_source")]
+
+
+@pytest.mark.parametrize("siblings, detail", [
+    ([], "no other running container"),
+    ([PROJECT_DIR, OTHER_TREE], "disagree"),
+], ids=["no-siblings", "siblings-disagree"])
+def test_an_unresolved_checkout_refuses_before_any_render(siblings, detail):
+    api = FakeDocker()
+    api.sibling_dirs = siblings
+    with pytest.raises(ComposeError) as caught:
+        _evaluate(api)
+    assert caught.value.code == "compose_source_unresolved" and detail in str(caught.value)
+    assert not api.render_bodies
+
+
+def test_a_different_config_file_list_in_the_same_checkout_is_not_drift():
+    """A sibling layering other overlays (a Redis override, a houses file) is
+    its own choice: only the checkout is compared."""
+    api = FakeDocker()
+    rows = api._project_rows
+
+    def with_other_files(query):
+        out = rows(query)
+        for row in out:
+            row["Labels"]["com.docker.compose.project.config_files"] = f"{PROJECT_DIR}/docker-compose.yml," \
+                f"{PROJECT_DIR}/docker-compose.override.yml"
+        return out
+    api._project_rows = with_other_files
+    assert not [n for n in _evaluate(api)["drift"] if n.startswith("compose_source")]
+
+
+def test_a_moved_target_still_refuses_a_bind_that_does_not_move_with_its_checkout():
+    api = FakeDocker()
+    target = api.by_name(NAME)
+    target["Config"]["Labels"].update({
+        "com.docker.compose.project.working_dir": OTHER_TREE,
+        "com.docker.compose.project.config_files": ",".join(f.replace(PROJECT_DIR, OTHER_TREE)
+                                                           for f in COMPOSE_FILES)})
+    target["HostConfig"]["Binds"] = [f"/srv/elsewhere/token:{TOKEN_TARGET}:ro"]
+    with pytest.raises(ComposeError) as caught:
+        _evaluate(api)
+    assert caught.value.code == "mount_source_changed" and caught.value.names == [TOKEN_TARGET]

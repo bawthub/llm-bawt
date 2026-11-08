@@ -45,9 +45,9 @@ import re
 from dataclasses import dataclass
 
 if __package__:
-    from .compose_render import SAFE_PATH, ComposeError, compose_source
+    from .compose_render import SAFE_PATH, ComposeError, compose_source, created_from, sibling_project_dir
 else:  # standalone immutable worker
-    from compose_render import SAFE_PATH, ComposeError, compose_source
+    from compose_render import SAFE_PATH, ComposeError, compose_source, created_from, sibling_project_dir
 
 BOOKKEEPING_PREFIXES = ("com.docker.compose.", "llm-bawt.ops.")
 CONFIG_HASH_LABEL = "com.docker.compose.config-hash"
@@ -750,6 +750,13 @@ def mount_source_changes(desired: dict, actual: dict) -> list[str]:
                   and (want["type"], want["source"]) != (actual[target]["type"], actual[target]["source"]))
 
 
+def _moves_with_checkout(have: str, want: str, created: str, project_dir: str) -> bool:
+    """A bind inside the old checkout that becomes the same path in the new one."""
+    if created == project_dir or not (have == created or have.startswith(created + "/")):
+        return False
+    return want == project_dir + have[len(created):]
+
+
 def mount_list(mounts: dict) -> list[str]:
     return [f"{m['source']}->{target}:{'ro' if m['read_only'] else 'rw'}"
             for target, m in sorted(mounts.items())]
@@ -779,15 +786,27 @@ def evaluate(spec: dict, container: dict, image: dict, renderer, image_ref: str,
     Returns private material (``desired``, values included) and public material
     (hashes, drift names, mounts, A1 display values). ``image`` is the image the
     container RUNS; image-supplied env/labels are normalised against it.
+
+    TASK-1995: the target is rendered from the checkout its Compose project's
+    other running containers come from. A target created from another checkout
+    is drift ``compose_source:<actual>-><desired>``; its binds inside the old
+    checkout move to the same paths in the new one, and no other bind may move.
     """
-    source = compose_source(spec, container)
+    compose_source(spec, container)  # the target's own labels must be valid first
+    created = created_from(container)
+    project_dir = sibling_project_dir(renderer.api, container)
+    source = compose_source(spec, container, project_dir)
     rendered = renderer.render(source, image_ref)
     desired = translate(rendered["config"], spec, image_ref, profile)
     actual = running(container)
-    changed = mount_source_changes(desired["mounts"], actual["mounts"])
+    changed = [target for target in mount_source_changes(desired["mounts"], actual["mounts"])
+               if not _moves_with_checkout(actual["mounts"][target]["source"], desired["mounts"][target]["source"],
+                                           created, project_dir)]
     if changed:
         raise ComposeError("mount_source_changed", changed)
     names = drift(normalized(desired, image), normalized(actual, image))
+    if created != project_dir:
+        names = sorted([*names, f"compose_source:{created}->{project_dir}"])
     return {"source": source, "rendered_hash": rendered["hash"], "desired": desired, "drift": names,
             "desired_hash": canonical_hash({"source": source, "image_ref": image_ref,
                                             "rendered_hash": rendered["hash"], "desired": desired}),
