@@ -53,8 +53,11 @@ PROMPT_MANIFEST: tuple[SectionSpec, ...] = (
     SectionSpec("user_context", STABLE, "_sec_user_context"),
     SectionSpec("bot_traits", STABLE, "_sec_bot_traits"),
     SectionSpec("base_prompt", STABLE, "_sec_base_prompt"),
-    SectionSpec("global_instructions", STABLE, "_sec_global_instructions"),
     # --- per-turn (rides the copy) ---
+    # TASK-1495: registry-backed (chat.global_recall_guidance), so it is resolved
+    # per turn like agent_global_prompt; a registry edit reaches the next prompt
+    # pin without a bot rebuild. Same body -> same bytes, so the cache holds.
+    SectionSpec("global_instructions", PER_TURN, "_sec_global_instructions"),
     # Native agent harnesses (Claude Code, Codex) own their tool
     # schemas and calling protocol. App-side tool prompts are chat-only; injecting
     # them into an agent system prompt duplicates and contradicts the harness.
