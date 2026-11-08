@@ -73,6 +73,29 @@ def test_task_ref_loads_card_images_with_limit_and_per_item_errors(monkeypatch, 
     assert "error" in info["items"][1]
 
 
+def test_chat_storage_outage_is_an_item_error(monkeypatch):
+    """A chat-media outage fails only that item; the others still load (review cmw7o8ovv)."""
+    from llm_bawt.media.object_store import BlobBackendUnavailable
+
+    class Store:
+        def read_variant(self, asset_id, variant):
+            raise BlobBackendUnavailable("down")
+
+    async def fetch(path: str) -> bytes:
+        return PNG
+
+    async def api_get(path: str, **_: Any):
+        return {"imageUrls": [SERVE, f"/api/chat/uploads/{ASSET}", SERVE]}
+
+    monkeypatch.setattr("llm_bawt.media.get_media_store", lambda: Store())
+    monkeypatch.setattr(attachment_tools, "_fetch_task_upload", fetch)
+    monkeypatch.setattr(attachment_tools, "api_get", api_get)
+    out = _run(attachment_tools.attachment_get("TASK-9"))
+    info = out[-1]
+    assert info["images"] == 2
+    assert "unavailable" in info["items"][1]["error"]
+
+
 def test_task_without_images(monkeypatch, fetched):
     async def api_get(path: str, **_: Any):
         return {"imageUrls": []}

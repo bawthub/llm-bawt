@@ -44,6 +44,7 @@ def _uploads_base() -> str:
 def _read_chat_upload(asset_id: str) -> bytes:
     from llm_bawt.media import get_media_store
     from llm_bawt.media.asset_kinds import UnsupportedVariant
+    from llm_bawt.media.object_store import BlobBackendUnavailable
 
     store = get_media_store()
     try:
@@ -54,6 +55,8 @@ def _read_chat_upload(asset_id: str) -> bytes:
         raise ImageRefError(f"unknown upload id: {asset_id}") from exc
     except FileNotFoundError as exc:
         raise ImageRefError(f"upload {asset_id} has no stored image") from exc
+    except BlobBackendUnavailable as exc:
+        raise ImageRefError(f"upload storage is unavailable for {asset_id}") from exc
     return data
 
 
