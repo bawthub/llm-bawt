@@ -24,7 +24,7 @@ from llm_bawt.integrations import ha_credentials
 from llm_bawt.integrations.connections import IntegrationStore
 from llm_bawt.integrations.credential_integrations import CredentialIntegrations
 from llm_bawt.integrations.ha_credentials import HACredentials, HomeAssistantUnavailable, resolve_ha_credentials
-from llm_bawt.integrations.ha_mcp.client import HomeAssistantMCPClient, HomeAssistantNativeClient
+from llm_bawt.integrations.ha_mcp.client import HAToolError, HomeAssistantMCPClient, HomeAssistantNativeClient
 from llm_bawt.integrations.home_audio import HomeAudioClient, HomeAudioSettings
 from llm_bawt.runtime_settings import RuntimeSetting, RuntimeSettingsStore
 from llm_bawt.service import connection_secrets
@@ -160,9 +160,8 @@ def test_native_client_stops_after_a_disconnect_and_never_uses_env(forms, caplog
     _save(forms)
     client, seen = _discovered(_config())
     forms.disconnect("home-assistant")
-    with caplog.at_level(logging.WARNING):
-        result = client.call_tool("HassTurnOn", {})
-    assert result.startswith("Error") and "not configured" in result
+    with caplog.at_level(logging.WARNING), pytest.raises(HAToolError, match="not configured"):
+        client.call_tool("HassTurnOn", {})
     assert seen == [] and client.available is False
     assert "not_connected" in caplog.text and ENV_TOKEN not in caplog.text
 
