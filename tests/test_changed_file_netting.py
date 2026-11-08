@@ -123,18 +123,37 @@ def test_intervening_foreign_owner_prevents_netting(store, foreign_bot, foreign_
     assert summary(store)[0]["total_files"] == 1
 
 
+def _stamp(store, foreign_updated):
+    # Explicit deterministic timestamps, without wall-clock assertions/sleeps:
+    # rows are created at t0+0s (foreign), t0+1s (first), t0+2s (last).
+    t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    with Session(store.engine) as session:
+        for index, row in enumerate(session.exec(select(TurnChangedFile).order_by(TurnChangedFile.id))):
+            row.created_at = row.updated_at = t0 + timedelta(seconds=index)
+            if row.turn_id == "foreign":
+                row.updated_at = foreign_updated and t0 + timedelta(seconds=foreign_updated)
+            session.add(row)
+        session.commit()
+
+
 def test_foreign_edit_before_chain_does_not_prevent_netting(store):
     _conversation(store, session_id="s")
     save(store, "foreign", "X", "A", bot="other")
     save(store, "first", "A", "B")
     save(store, "last", "B", "A")
-    # Explicit deterministic timestamps, without wall-clock assertions/sleeps.
-    with Session(store.engine) as session:
-        for index, row in enumerate(session.exec(select(TurnChangedFile).order_by(TurnChangedFile.id))):
-            row.created_at = datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=index)
-            session.add(row)
-        session.commit()
+    _stamp(store, foreign_updated=0.5)
     assert summary(store)[0]["total_files"] == 0
+
+
+@pytest.mark.parametrize("foreign_updated", [1.5, None])
+def test_foreign_row_created_before_chain_but_updated_during_or_legacy_prevents_netting(
+        store, foreign_updated):
+    _conversation(store, session_id="s")
+    save(store, "foreign", "X", "A", bot="other")
+    save(store, "first", "A", "B")
+    save(store, "last", "B", "A")
+    _stamp(store, foreign_updated)
+    assert summary(store)[0]["total_files"] == 1
 
 
 def test_unrelated_foreign_path_does_not_prevent_netting(store):

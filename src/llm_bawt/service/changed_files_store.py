@@ -905,15 +905,19 @@ class ChangedFilesStore:
                         TurnChangedFile.workspace_repo_id == row.workspace_repo_id,
                         TurnChangedFile.repo_relative_path == row.repo_relative_path,
                     ))
+            # A foreign row first captured before the chain may be upserted
+            # during it; updated_at records that. Legacy rows without it may
+            # have been, so they always count as overlapping.
             statement = select(TurnChangedFile.id).where(
-                TurnChangedFile.created_at >= chain[0].created_at,
+                or_(TurnChangedFile.created_at >= chain[0].created_at,
+                    TurnChangedFile.updated_at.is_(None),
+                    TurnChangedFile.updated_at >= chain[0].created_at),
                 or_(TurnChangedFile.bot_id.is_(None), TurnChangedFile.bot_id != bot_id,
                     TurnChangedFile.user_id.is_(None), TurnChangedFile.user_id != user_id),
                 or_(*identities),
             ).limit(1)
-            # created_at records first capture, not the last upsert. A foreign
-            # edit after the last row's timestamp may still intervene; keep it
-            # visible conservatively rather than guessing an upper time bound.
+            # A foreign edit after the last row's timestamp may still intervene;
+            # keep it visible conservatively rather than guessing an upper bound.
             with Session(self.engine) as session:
                 return session.exec(statement).first() is not None
 
