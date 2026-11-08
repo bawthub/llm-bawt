@@ -83,7 +83,27 @@ def query_via_service(
         if not isinstance(answer, str):
             console.print(f"[yellow]Request {escape(str(reference))} finished without a verified text reply.[/yellow]")
             return None
+        render_recorded_tools(reply, receipt)
         return answer
+
+    def render_recorded_tools(reply: dict, receipt: dict) -> None:
+        """A queued turn never streams its tool events; show the recorded ones."""
+        try:
+            calls = client.turn_tool_calls(
+                reply, user_message_id=receipt["user_message_id"],
+                bot_id=receipt.get("bot_id") or bot_id,
+                user_id=receipt.get("user_id") or user_id,
+            )
+        except Exception as exc:
+            console.print(f"[dim]Tool calls for this turn could not be loaded: {escape(str(exc))}[/dim]")
+            return
+        for call in calls:
+            name = call.get("name") or call.get("tool") or "tool"
+            _render_tool_event(console, tool_name=name, tool_args=call.get("arguments") or {},
+                               plaintext_output=plaintext_output)
+            if call.get("result"):
+                _render_tool_event(console, tool_name=name, result_text=str(call["result"]),
+                                   plaintext_output=plaintext_output)
 
     def format_panel_title(actual_model: str | None) -> str:
         """Format panel title with actual model used."""

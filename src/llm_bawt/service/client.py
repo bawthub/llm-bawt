@@ -443,6 +443,27 @@ class ServiceClient:
                 return None
             time.sleep(min(1, max(0, deadline - time.monotonic())))
 
+    def turn_tool_calls(
+        self, reply: dict[str, Any], *, user_message_id: str,
+        bot_id: str | None, user_id: str | None,
+    ) -> list[dict[str, Any]]:
+        """Recorded tool calls of one delivered turn, in call order.
+
+        Reads the canonical ``tool_call_records`` through ``/v1/tool-calls``
+        (keyed by the trigger message) and keeps only the reply's own turn.
+        """
+        turn_id = reply.get("turn_id")
+        if not isinstance(turn_id, str) or not turn_id:
+            return []
+        params = {"message_id": user_message_id}
+        if bot_id:
+            params["bot_id"] = bot_id
+        if user_id:
+            params["user_id"] = user_id
+        events = self._request("GET", "/v1/tool-calls", params=params).get("events") or []
+        return [call for event in events if event.get("turn_id") == turn_id
+                for call in event.get("tool_calls") or []]
+
     def chat_completion_full(
         self,
         messages: list[dict],

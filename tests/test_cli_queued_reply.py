@@ -146,3 +146,78 @@ def test_cli_stream_error_after_admission_is_handled_not_retried(monkeypatch):
                                          stream=True, config=config) is True
     assert "Reply not ready (IN_FLIGHT)" in output.getvalue()
     assert client.last_error == "Reply not ready (IN_FLIGHT)"
+
+
+def _queued_cli(monkeypatch, client, *, stream=False):
+    from llm_bawt.cli import display_cmd
+
+    monkeypatch.setattr(client, "is_available", lambda **_kwargs: True)
+    config = SimpleNamespace(VERBOSE=False)
+    monkeypatch.setattr(display_cmd, "Config", lambda: config)
+    monkeypatch.setattr(display_cmd, "BotManager", lambda _config: SimpleNamespace(
+        get_bot=lambda _id: SimpleNamespace(name="Selected bot", color="green")))
+    monkeypatch.setattr(display_cmd, "get_service_client", lambda _config: client)
+    output = io.StringIO()
+    monkeypatch.setattr(display_cmd, "console", Console(file=output, width=200))
+    return display_cmd, config, output
+
+
+DELIVERED = {"delivery_id": "delivery-1", "status": "DELIVERED",
+             "turn_id": "turn-delivery-1", "response_text": "It printed hi."}
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_queued_cli_reply_renders_recorded_tool_calls(monkeypatch, capsys, stream):
+    """TASK-1394: an accepted agent turn shows its recorded tool calls."""
+    client = ServiceClient(http_url="http://example.invalid")
+    seen = {}
+
+    def request(method, path, **kwargs):
+        assert (method, path) == ("GET", "/v1/tool-calls")
+        seen.update(kwargs["params"])
+        return {"events": [
+            {"turn_id": "other-turn", "tool_calls": [{"name": "Stray", "arguments": {"command": "nope"}}]},
+            {"turn_id": "turn-delivery-1", "tool_calls": [
+                {"name": "Bash", "arguments": {"command": "echo hi"}, "result": "hi"},
+            ]},
+        ]}
+
+    monkeypatch.setattr(client, "_request", request)
+    monkeypatch.setattr(client, "wait_for_queued_reply", lambda *_a, **_k: dict(DELIVERED))
+    if stream:
+        monkeypatch.setattr(client, "chat_completion", lambda **_kwargs: iter([dict(ACK)]))
+    else:
+        monkeypatch.setattr(client, "chat_completion", lambda **_kwargs: dict(ACK))
+    display_cmd, config, output = _queued_cli(monkeypatch, client)
+    assert display_cmd.query_via_service("run echo hi", model=None, bot_id="selected-bot",
+                                         user_id="selected-user", plaintext_output=True,
+                                         stream=stream, config=config) is True
+    text = output.getvalue()
+    assert "-> Bash: Bash(command=echo hi)" in text
+    assert "hi" in text and "Stray" not in text
+    assert seen == {"message_id": "user-message-1", "bot_id": "selected-bot", "user_id": "selected-user"}
+    assert "It printed hi." in capsys.readouterr().out + text
+
+
+def test_queued_cli_tool_lookup_failure_still_prints_answer(monkeypatch, capsys):
+    client = ServiceClient(http_url="http://example.invalid")
+
+    def request(*_args, **_kwargs):
+        raise RuntimeError("tool lookup down")
+
+    monkeypatch.setattr(client, "_request", request)
+    monkeypatch.setattr(client, "wait_for_queued_reply", lambda *_a, **_k: dict(DELIVERED))
+    monkeypatch.setattr(client, "chat_completion", lambda **_kwargs: dict(ACK))
+    display_cmd, config, output = _queued_cli(monkeypatch, client)
+    assert display_cmd.query_via_service("hello", model=None, bot_id="selected-bot",
+                                         user_id="selected-user", plaintext_output=True,
+                                         stream=False, config=config) is True
+    assert "could not be loaded" in output.getvalue()
+    assert "It printed hi." in capsys.readouterr().out
+
+
+def test_turn_tool_calls_without_turn_id_skips_lookup(monkeypatch):
+    client = ServiceClient(http_url="http://example.invalid")
+    monkeypatch.setattr(client, "_request", lambda *_a, **_k: pytest.fail("no lookup"))
+    assert client.turn_tool_calls({"status": "DELIVERED"}, user_message_id="m",
+                                  bot_id=None, user_id=None) == []
