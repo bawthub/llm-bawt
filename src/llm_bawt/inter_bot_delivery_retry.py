@@ -419,6 +419,7 @@ def fail_claim_with_restart_retry(
 
 def _restart_retry_failed(
     store: InterBotDeliveryStore, conn: Connection, delivery_id: str, turn_id: str | None,
+    *, propagate_errors: bool = False,
 ) -> tuple[DeliveryRecord | None, DeliveryRecord | None]:
     """Insert the restart retry of a just-FAILED delivery and stamp its outcome.
 
@@ -452,6 +453,9 @@ def _restart_retry_failed(
         if shutdown:
             outcome = {"outcome": "refused", "reason": str(conflict)}
     except Exception as exc:
+        if propagate_errors:
+            # Recovery keeps its pending marker and retries on a later sweep.
+            raise
         logger.exception("restart retry of delivery %s failed; it stays FAILED", delivery_id)
         if shutdown:
             outcome = {"outcome": "error", "reason": str(exc) or exc.__class__.__name__}
@@ -507,7 +511,8 @@ def restart_retry_recovered(store: InterBotDeliveryStore) -> list[DeliveryRecord
                 ), {"id": row["id"]}).scalar_one_or_none()
                 child = None
                 if status == FAILED:
-                    _, child = _restart_retry_failed(store, conn, row["id"], row["turn_id"])
+                    _, child = _restart_retry_failed(
+                        store, conn, row["id"], row["turn_id"], propagate_errors=True)
                 conn.execute(sa_text(
                     "UPDATE inter_bot_deliveries SET metadata_json = metadata_json - CAST(:key AS text)"
                     " WHERE id=:id"

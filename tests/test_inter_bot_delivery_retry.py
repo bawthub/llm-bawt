@@ -618,6 +618,36 @@ def test_an_interrupted_lease_expiry_retry_is_finished_by_the_next_sweep(deliver
     assert RESTART_RETRY_PENDING not in store.get(original.id).metadata
 
 
+def test_a_transient_error_inside_the_retry_keeps_it_pending(delivery, turn_cleanup, monkeypatch):
+    """Codex TASK-1258 recheck: an error the live dispatcher would swallow
+    (here reading the turn row) must not clear recovery's pending marker."""
+    from llm_bawt import inter_bot_delivery_retry as retry
+
+    store, slug = delivery
+    original = submit(store, slug)
+    end_turn(store, original, audit=SHUTDOWN)
+    _lease_expired(store, original)
+    real_turn_row = retry._turn_row
+
+    def lost_connection(conn, turn_id):
+        raise RuntimeError("server closed the connection unexpectedly")
+
+    monkeypatch.setattr(retry, "_turn_row", lost_connection)
+    store.recover_expired()
+
+    failed = store.get(original.id)
+    assert failed.metadata[RESTART_RETRY_PENDING] is True
+    assert RESTART_RETRY_OUTCOME not in failed.metadata
+    assert not _children(store, original.id)
+
+    monkeypatch.setattr(retry, "_turn_row", real_turn_row)
+    store.recover_expired()
+
+    [child_id] = _children(store, original.id)
+    assert store.get(original.id).metadata[RESTART_RETRY_OUTCOME]["outcome"] == "retried"
+    assert RESTART_RETRY_PENDING not in store.get(original.id).metadata
+
+
 @pytest.mark.parametrize("session_policy, audit", [
     ("continue", None),
     ("continue", {"abort_request": {"source": "chat_stop"}}),
