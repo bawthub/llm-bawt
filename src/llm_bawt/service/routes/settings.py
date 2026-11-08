@@ -165,8 +165,27 @@ def _to_profile_response(profile, settings: dict[str, object] | None = None,
     )
 
 
+def _bot_profile_setting_keys() -> frozenset[str]:
+    """Global runtime-setting keys a bot profile may show (TASK-1415).
+
+    The global scope also holds connection records, ops evidence and app-wide
+    config, none of which are bot settings. Only keys declared as per-bot
+    tunables (the typed registry plus ``RuntimeTunables``) are inherited.
+    """
+    from ...setting_definitions import SETTING_DEFINITIONS, STORAGE_RUNTIME_SETTING
+    from ...utils.config import RuntimeTunables
+
+    registry = {key for key, definition in SETTING_DEFINITIONS.items()
+                if definition.storage == STORAGE_RUNTIME_SETTING}
+    return frozenset(registry | {name.lower() for name in RuntimeTunables.model_fields})
+
+
 def _effective_bot_settings(service, slug: str) -> dict[str, object]:
-    """Return effective settings with the same precedence as runtime resolution."""
+    """Return effective bot settings with the same precedence as runtime resolution.
+
+    Global rows contribute only declared per-bot tunables; credential rows never
+    appear, whichever scope they were written to (TASK-1415).
+    """
     from ...bots import BotManager
 
     normalized = (slug or "").strip().lower()
@@ -174,12 +193,12 @@ def _effective_bot_settings(service, slug: str) -> dict[str, object]:
     effective: dict[str, object] = dict(getattr(bot, "settings", {}) or {})
 
     store = get_runtime_settings_store(service.config)
-    if store.engine is None:
-        return effective
-
-    effective.update(store.get_scope_settings("global", "*"))
-    effective.update(store.get_scope_settings("bot", normalized))
-    return effective
+    if store.engine is not None:
+        allowed = _bot_profile_setting_keys()
+        effective.update({key: value for key, value in store.get_scope_settings("global", "*").items()
+                          if key in allowed})
+        effective.update(store.get_scope_settings("bot", normalized))
+    return {key: value for key, value in effective.items() if not is_credential_setting_key(key)}
 
 
 async def _publish_bot_profile_changed(service, slug: str) -> None:
