@@ -296,8 +296,8 @@ def test_manual_retry_of_failed_scheduled_reset_is_fenced_at_claim(rig, real_lif
     original = store.get(asyncio.run(real_lifecycle.submit(
         scheduled_intent(rig), timeout_seconds=0)).delivery_id)
     store.mark_failed(original.id, "transport failed")
-    child = retry_failed_delivery(store, original.id)
-    assert child is not None and child.id != original.id
+    child, duplicate = retry_failed_delivery(store, original.id)
+    assert not duplicate and child.id != original.id
     assert child.metadata["manual_retry_of"] == original.id
     assert child.metadata["new_session_intent"] == original.metadata["new_session_intent"]
     assert child.transport_accepted_at is None
