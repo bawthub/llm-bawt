@@ -33,6 +33,7 @@ if __package__:
     from .restart_health import has_health, wait_healthy
     from .runtime_source import verify_runtime_source
     from . import sequence
+    from . import wake_on_lan
     from .routing_reconcile import ACTION as ROUTING_ACTION, RoutingReconciler
     from .tagged_config_reconcile import ACTION as TAGGED_CONFIG_ACTION, TaggedConfigReconciler
 else:  # pragma: no cover - standalone worker image
@@ -48,6 +49,7 @@ else:  # pragma: no cover - standalone worker image
     from restart_health import has_health, wait_healthy
     from runtime_source import verify_runtime_source
     import sequence
+    import wake_on_lan
     from routing_reconcile import ACTION as ROUTING_ACTION, RoutingReconciler
     from tagged_config_reconcile import ACTION as TAGGED_CONFIG_ACTION, TaggedConfigReconciler
 
@@ -284,6 +286,8 @@ def execute_action(api, snapshot, job_id, *, lock_root, receipt, before_submit=N
                    expected_target=None, prelocked=False):
     """The single source of execution semantics for singles and sequence steps."""
     action = snapshot["spec"]["action"]
+    if action == wake_on_lan.ACTION:
+        return wake_on_lan.run_worker(api, snapshot, job_id, receipt)
     cls = action_handler(action)
     if cls is not None:
         handler = cls(api, snapshot, job_id, lock_root=lock_root)

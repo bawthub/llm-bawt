@@ -53,6 +53,53 @@ the configured image cannot rewrite queued jobs: historical image IDs and volume
 mounts must remain available for their lifetime. `max_concurrent` counts claimed,
 accepted, and running jobs; the smallest limit among overlapping snapshots wins.
 
+### Wake-only LAN action (TASK-1734)
+
+`wake_on_lan` is a fixed, operator-configured catalog spec, with no caller
+arguments or power-off counterpart. Targets are deployment configuration in the
+catalog, not host-specific product seeds. For example (documentation addresses):
+
+```json
+{
+  "action": "wake_on_lan",
+  "mac_address": "02:11:22:33:44:55",
+  "broadcast_address": "192.0.2.255",
+  "host_address": "192.0.2.10",
+  "tcp_ports": [22],
+  "health_port": 11434,
+  "health_path": "/api/version",
+  "health_field": "version",
+  "wait_seconds": 150
+}
+```
+
+The worker remains network-isolated. It starts a temporary helper from its
+same immutable worker image using the Docker host's network namespace, so WOL
+reaches that host's LAN. This helper has no mounts, Docker socket, credentials,
+capabilities, shell or writeable root filesystem. It sends at most three UDP
+magic packets to port9, then polls all configured TCP ports and the fixed HTTP
+GET target. Readiness needs HTTP200 with bounded JSON containing a nonempty
+string or `true` at `health_field`; redirects and HTML are not health. An
+already-ready target succeeds without sending a packet.
+
+`wait_seconds` is10..300. The catalog row's `timeout_seconds` must be at least
+`wait_seconds + 30` for helper creation/attach/removal; catalog validation and
+dispatch enforce this. The helper also has its own deadline, including the
+initial probe, so it exits even if its worker dies. Its structured result is
+retained under the job receipt's `wake_on_lan` key, distinguishing already-awake,
+packet-sent/readiness-success and known readiness-timeout outcomes. A lost
+Docker start/attach response remains unknown and is never automatically replayed.
+Normal completion/failure removes the helper; parent death can leave a labelled
+exited helper for operator cleanup. Cleanup failure is explicit, not success.
+
+Activation: publish the reviewed/gated source, build and pin a worker carrying
+`llm-bawt.ops.wake-on-lan="1"`, reload the admission/reconciler processes, then
+create/enable the deployment's fixed wake row through the catalog API. Older
+workers are refused before dispatch. No HA token or SSH credential is needed.
+An already-awake run verifies admission, helper lifecycle and health, but is
+not evidence that a sleeping target's firmware/NIC accepts WOL; retain that
+acceptance until a naturally sleeping target can be woken.
+
 ### Catalog revision changes (TASK-1411)
 
 An approval binds the operation ID, version and script hash. Editing that row

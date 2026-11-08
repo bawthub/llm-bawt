@@ -14,7 +14,8 @@ COPY src/llm_bawt/ops/worker.py src/llm_bawt/ops/image_deploy.py src/llm_bawt/op
      src/llm_bawt/ops/probe_contract.py src/llm_bawt/ops/container_remove.py \
      src/llm_bawt/ops/dev_config_reconcile.py src/llm_bawt/ops/restart_health.py \
      src/llm_bawt/ops/health_probe.py src/llm_bawt/ops/runtime_source.py \
-     src/llm_bawt/ops/sequence.py /ops/
+     src/llm_bawt/ops/sequence.py src/llm_bawt/ops/wake_on_lan.py /ops/
+LABEL llm-bawt.ops.wake-on-lan="1"
 LABEL llm-bawt.ops.operation-sequence="1"
 LABEL llm-bawt.ops.runtime-source="1"
 LABEL llm-bawt.ops.routing-reconcile="1"

@@ -38,6 +38,7 @@ from .worker_slots import UNRETIRED_GATE_SLOT
 from .gate_history import gate_plan_key, migrate_gate_history
 from .validation import canonical_json, validate_catalog
 from .worker_slots import process_spawn_held, process_spawn_hold_available, worker_slot_free
+from .wake_on_lan import ACTION as WAKE_ACTION, validate_budget as validate_wake_budget
 
 logger = logging.getLogger(__name__)
 
@@ -354,6 +355,10 @@ class OpsStore:
         if op.target_host or op.run_as_user or op.working_directory:
             raise ValueError("Operations do not support target_host/run_as_user/working_directory; no SSH or shell runner")
         spec = validate_spec(op.command_script)
+        if spec["action"] == WAKE_ACTION:
+            if schema.get("properties") or json.loads(op.args_defaults_json):
+                raise ValueError("wake_on_lan accepts no caller arguments")
+            validate_wake_budget(spec, op.timeout_seconds)
         # TASK-1030: the release coordinator runs ONLY the pinned release spec,
         # and that spec never reaches the Docker executor.
         if (op.executor_kind == EXECUTOR_RELEASE) != is_release_spec(spec):

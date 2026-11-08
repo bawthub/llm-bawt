@@ -40,11 +40,12 @@ from .executor_types import ExecutorError
 from .plan_reconcile import ACTION as PLAN_ACTION
 from . import sequence
 from .worker import target_selector
+from .wake_on_lan import ACTION as WAKE_ACTION
 
 COMPOSE_PROJECT_LABEL = "com.docker.compose.project"
 COMPOSE_SERVICE_LABEL = "com.docker.compose.service"
 #: ``pull`` fetches an image and touches no container.
-NO_CONTAINER_ACTIONS = frozenset({"pull"})
+NO_CONTAINER_ACTIONS = frozenset({"pull", WAKE_ACTION})
 #: Actions whose end state leaves their target stopped or removed.
 STOPPING_ACTIONS = frozenset({"stop", REMOVE_ACTION})
 

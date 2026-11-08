@@ -17,6 +17,7 @@ from .plan_reconcile import ACTION as PLAN_ACTION
 from .sequence import ACTION as SEQUENCE_ACTION
 from .release_spec import RELEASE_ACTION
 from .worker import target_selector
+from .wake_on_lan import ACTION as WAKE_ACTION
 
 #: The product's own GPU voice services, by Compose identity.
 GPU_VOICE_PROJECT = "bawthub"
@@ -27,7 +28,7 @@ STOP_ACTION = "stop"
 #: on the release executor, which dispatches a workflow and no container; its
 #: image deploy is a separate ``deploy_image`` job, gated on its own.
 #: ``remove`` (TASK-1439 T2c) deletes one stopped container and starts nothing.
-UNGATED_ACTIONS = frozenset({STOP_ACTION, "pull", RELEASE_ACTION, REMOVE_ACTION})
+UNGATED_ACTIONS = frozenset({STOP_ACTION, "pull", RELEASE_ACTION, REMOVE_ACTION, WAKE_ACTION})
 #: Actions the worker resolves with :func:`target_selector`; every other
 #: action names its target by literal Compose identity plus container_name.
 SELECTOR_ACTIONS = frozenset({"start", "restart"})

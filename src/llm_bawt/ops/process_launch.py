@@ -49,7 +49,7 @@ WORKER_FILES = frozenset({
     "config_reconcile.py", "app_config_reconcile.py", "sealed_container.py", "source_state.py",
     "service_identity.py", "tagged_config_reconcile.py", "plan_reconcile.py", "probe_contract.py",
     "container_remove.py", "dev_config_reconcile.py", "restart_health.py", "health_probe.py", "runtime_source.py",
-    "sequence.py",
+    "sequence.py", "wake_on_lan.py",
 })
 BUNDLE_MAX_BYTES = 4 * 1024 * 1024
 EXPORT_MAX_BYTES = 4 * 1024 * 1024 * 1024

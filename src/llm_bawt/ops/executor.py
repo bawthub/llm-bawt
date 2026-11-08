@@ -50,6 +50,7 @@ from .tagged_config_reconcile import (ACTION as TAGGED_CONFIG_ACTION, TAGGED_GUA
                                       source_guarded, tagged_config_binding, validate_tagged_spec)
 from .validation import canonical_json
 from . import sequence
+from . import wake_on_lan
 from .execution_mode import EXECUTION_ISOLATED, EXECUTION_PROCESS, EXECUTOR_MODES, snapshot_execution_mode
 from .process_launch import ProcessLauncher
 from .self_target import (SELF_IDENTITY_UNKNOWN, SELF_TARGET_UNVERIFIABLE, ContainerIdentity, SelfTargetError,
@@ -85,6 +86,8 @@ def spec_capability_labels(spec: dict) -> tuple[str, ...]:
     built before them would refuse the spec mid-job (or, for a probe, verify
     the wrong port), so every action carrying them is refused before dispatch."""
     labels = []
+    if spec.get("action") == wake_on_lan.ACTION:
+        labels.append(wake_on_lan.WORKER_CAPABILITY_LABEL)
     if spec.get("action") == sequence.ACTION:
         labels.append(sequence.WORKER_CAPABILITY_LABEL)
     if "runtime_source" in spec:
@@ -276,6 +279,8 @@ def validate_spec(command_script: str) -> dict:
         spec = json.loads(command_script)
     except (ValueError, TypeError) as exc:
         raise ValueError("command_script must be a Docker JSON spec") from exc
+    if isinstance(spec, dict) and spec.get("action") == wake_on_lan.ACTION:
+        return wake_on_lan.validate_spec(spec)
     if isinstance(spec, dict) and spec.get("action") == ROUTING_ACTION:
         return validate_routing_spec(spec)
     if isinstance(spec, dict) and spec.get("action") == CONFIG_ACTION:
@@ -652,6 +657,12 @@ class DockerExecutor(Executor):
             raise ConfigCheckError(exc.code, str(exc)) from exc
 
     def check_target(self, spec, args):
+        if spec.get("action") == wake_on_lan.ACTION:
+            wake_on_lan.validate_spec(spec)
+            if args:
+                raise ExecutorError("wake_on_lan accepts no caller arguments")
+            self.check_spec_capabilities(spec)
+            return
         # TASK-1002: this executor only reaches its own Docker daemon. A target
         # that lives on another host (e.g. Unraid) must fail HERE, before an
         # approval card, not as a 404 after a human approved it.
@@ -773,6 +784,11 @@ class DockerExecutor(Executor):
         self._check_prerequisites(snapshot["execution"])
         launcher.preflight(snapshot["execution"])
         action = snapshot["spec"].get("action")
+        if action == wake_on_lan.ACTION:
+            try:
+                wake_on_lan.validate_budget(snapshot["spec"], snapshot["execution"]["timeout_seconds"])
+            except ValueError as exc:
+                raise ExecutorError(str(exc)) from exc
         if action == ROUTING_ACTION:
             self._check_routing_worker(snapshot["execution"])
         if action == REMOVE_ACTION:
