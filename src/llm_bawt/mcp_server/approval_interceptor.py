@@ -329,10 +329,9 @@ class ApprovalAwareFastMCP(FastMCP):
                 )
                 if not isinstance(operations_snapshot, dict):
                     raise ValueError("Operation preparer must return a snapshot object")
-                from ..ops.gpu_guard import handoff_only_service
+                from ..ops.gpu_guard import snapshot_handoff_only
 
-                service = handoff_only_service(operations_snapshot.get("spec") or {},
-                                               operations_snapshot.get("resolved_args") or {})
+                service = snapshot_handoff_only(operations_snapshot)
                 if service is not None:
                     # TASK-1707: an approval could never run it, so file no card.
                     return {

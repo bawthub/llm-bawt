@@ -6,6 +6,7 @@ route behind the real ops service, handoff store, adapter and controller.
 import asyncio
 import json
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -26,6 +27,7 @@ from llm_bawt.ops.executor import (
 )
 from llm_bawt.ops.gpu_guard import (
     UNGATED_ACTIONS, GpuGuardUnverifiable, gpu_voice_stop_target, gpu_voice_target, handoff_only_service,
+    snapshot_handoff_only,
 )
 from llm_bawt.ops.image_deploy import IMAGE_ACTIONS
 from llm_bawt.ops.models import OpsJob
@@ -475,6 +477,78 @@ def test_stop_fence_lost_before_dispatch_keeps_the_job_unsubmitted(world):
     run(world.adapter.dispatch(snapshot, user="u", generation=4))
     job = world.ops_store.get_job_by_key(f"gpu-handoff:4:{STOP_TTS}")
     assert job.state == JOB_QUEUED and world.executor.dispatches == []
+
+
+def named_stop_app(world, identity):
+    """A named stop, prepared by the full service (Docker), admitted by the
+    Docker-free app as in production (Loopy r1 B1)."""
+    world.executor.identity = identity
+    world.ops_store.create_operation({"slug": "fixture.stop-named", "enabled": True,
+        "command_script": json.dumps({"action": "stop", "container_name": "fixture-named"}),
+        "args_schema_json": {"type": "object", "properties": {}, "additionalProperties": False}}, actor="t")
+    app = OpsService(world.ops_store, admission_only=True,
+                     preparer=SimpleNamespace(prepare=world.ops.prepare_invocation))
+    return app, app.prepare_invocation("fixture.stop-named", {})
+
+
+def test_admission_only_app_admits_a_named_non_voice_stop(world):
+    app, snapshot = named_stop_app(world, ("bawthub", "frontend"))
+    assert snapshot["gpu_stop_target"] is None
+    app.dispatch_job(operation_slug="fixture.stop-named", args={}, approved_snapshot=snapshot,
+                     idempotency_key="named-stop")
+    assert world.ops_store.get_job_by_key("named-stop") is not None
+
+
+def test_admission_only_app_refuses_a_named_voice_stop(world):
+    app, snapshot = named_stop_app(world, ("bawthub", "tts"))
+    assert snapshot["gpu_stop_target"] == "tts" and snapshot_handoff_only(snapshot) == "tts"
+    with pytest.raises(OpsDispatchError) as exc:
+        app.dispatch_job(operation_slug="fixture.stop-named", args={}, approved_snapshot=snapshot,
+                         idempotency_key="named-stop")
+    assert exc.value.code == "gpu_handoff_required" and job_count(world.engine) == 0
+
+
+@pytest.mark.parametrize("recorded", ["web", "stt"])
+def test_a_recorded_stop_target_must_agree_with_the_spec(world, recorded):
+    add_stop_operation(world)
+    snapshot = {**world.ops.prepare_invocation(STOP_TTS, {}), "gpu_stop_target": recorded}
+    with pytest.raises(GpuGuardUnverifiable):
+        world.ops._gpu_stop_target(snapshot, live=False)
+
+
+def test_named_stop_relabelled_before_dispatch_keeps_the_job_unsubmitted(world):
+    app, snapshot = named_stop_app(world, ("bawthub", "frontend"))
+    world.executor.on_preflight = lambda: setattr(world.executor, "identity", ("bawthub", "tts"))
+    world.ops.dispatch_job(operation_slug="fixture.stop-named", args={}, approved_snapshot=snapshot,
+                           idempotency_key="named-stop")
+    assert world.ops_store.get_job_by_key("named-stop").state == JOB_QUEUED and world.executor.dispatches == []
+
+
+def test_gpu_preflight_still_sees_the_enabled_moshi_operations(world):
+    """Loopy r1 SF: the operator preflight reads the unfiltered catalog."""
+    from llm_bawt.media.gpu_preflight import MORPH_OPS, GpuPreflight
+
+    for slug in MORPH_OPS:
+        if world.ops_store.get_operation_by_slug(slug) is None:
+            world.ops_store.create_operation({"slug": slug, "enabled": True, "command_script": json.dumps(
+                {"action": "start" if "start-" in slug else "stop", "compose_project": "bawthub",
+                 "compose_service": slug.rsplit("-", 1)[1]}),
+                "args_schema_json": {"type": "object", "properties": {}}}, actor="t")
+
+    class CleanVoice(GpuPreflight):
+        async def voice_status(self):
+            return {"active_count": 0, "active_gpu_work": 0, "parked": False}, None
+
+    async def catalog():
+        return world.ops.list_operation_summaries(include_disabled=True)
+
+    result = run(CleanVoice(config=None, http=None, ops=catalog).assess(
+        state=SimpleNamespace(owner="voice", phase="idle"),
+        gpu={"ready": True, "observed_at": datetime.now(UTC).isoformat(), "total_mib": 24000, "free_mib": 18000},
+        model={"installed": True, "resident": False}, active_video_jobs=0, calibration={"supported": True}))
+    assert not any("Moshi start/stop" in issue for issue in result["issues"])
+    route = (Path(__file__).parents[1] / "src/llm_bawt/service/routes/media.py").read_text()
+    assert "list_operations_for_agent" not in route
 
 
 def test_agents_are_not_offered_handoff_only_operations(world):

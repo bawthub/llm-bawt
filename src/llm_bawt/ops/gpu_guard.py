@@ -132,6 +132,13 @@ def handoff_only_service(spec: dict, resolved_args: dict) -> str | None:
         return None
 
 
+def snapshot_handoff_only(snapshot: dict) -> str | None:
+    """:func:`handoff_only_service` for a prepared snapshot: its recorded
+    classification (read from Docker where needed) or its spec's proof."""
+    return (snapshot.get("gpu_target") or snapshot.get("gpu_stop_target")
+            or handoff_only_service(snapshot.get("spec") or {}, snapshot.get("resolved_args") or {}))
+
+
 def _selector_identities(spec: dict, resolved_args: dict, executor) -> list[tuple[str, str]]:
     try:
         name, filters = target_selector(spec, resolved_args)

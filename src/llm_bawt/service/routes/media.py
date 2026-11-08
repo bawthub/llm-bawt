@@ -335,7 +335,8 @@ async def local_video_gpu_status():
     import httpx
     async with httpx.AsyncClient() as http:
         def operations():
-            return get_ops_service(get_service().config).list_operations_for_agent(include_disabled=True)
+            # Unfiltered: the agent list hides the handoff's own Moshi operations.
+            return get_ops_service(get_service().config).list_operation_summaries(include_disabled=True)
 
         preflight = await GpuPreflight(
             config=get_service().config, http=http, ops=lambda: asyncio.to_thread(operations),
