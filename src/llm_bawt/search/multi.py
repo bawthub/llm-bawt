@@ -76,6 +76,8 @@ class SearchOutcome:
     results: list[SearchResult] = field(default_factory=list)
     providers: list[str] = field(default_factory=list)
     errors: dict[str, str] = field(default_factory=dict)
+    # Fallback provider -> the keyed web providers it stood in for (TASK-1619).
+    fallbacks: dict[str, list[str]] = field(default_factory=dict)
 
 
 async def search_all(
@@ -107,6 +109,10 @@ async def search_all_detailed(
             ``available_providers(config)``. A named provider is never
             replaced by another: one that can't be used is reported in
             ``errors`` rather than answered by DuckDuckGo under its name.
+            Without a list, if every keyed web provider fails (e.g. Brave's
+            429), DuckDuckGo runs as a fallback: it answers under its own
+            name, the failures stay in ``errors`` and ``fallbacks`` records
+            what it stood in for.
 
     Returns:
         A :class:`SearchOutcome`. Results are interleaved round-robin across
@@ -160,6 +166,26 @@ async def search_all_detailed(
     answers = await asyncio.gather(*[_run(prov, client) for prov, client in clients])
     outcome.providers = [prov.value for (prov, _), got in zip(clients, answers) if got is not None]
     grouped = [got for got in answers if got]
+
+    # Default fan-out only: keyed web providers bench DuckDuckGo, so when all
+    # of them fail there'd be no web results at all. Run it as the fallback.
+    failed_web = [p.value for p in provider_list if p in _KEYED_WEB and p.value in outcome.errors]
+    if (providers is None and failed_web
+            and not any(p.value in outcome.providers for p in _KEYED_WEB)
+            and SearchProvider.DUCKDUCKGO not in provider_list
+            and is_search_available(SearchProvider.DUCKDUCKGO)):
+        ddg = get_search_client(config, provider=SearchProvider.DUCKDUCKGO,
+                                max_results=max_results, fallback=False)
+        if ddg is None:
+            outcome.errors[SearchProvider.DUCKDUCKGO.value] = get_search_unavailable_reason(
+                config, SearchProvider.DUCKDUCKGO)
+        else:
+            got = await _run(SearchProvider.DUCKDUCKGO, ddg)
+            if got is not None:
+                outcome.providers.append(SearchProvider.DUCKDUCKGO.value)
+                outcome.fallbacks[SearchProvider.DUCKDUCKGO.value] = failed_web
+                if got:
+                    grouped.append(got)
 
     # Round-robin interleave (rank 0 of every provider, then rank 1, …) so every
     # provider is represented even after dedup; drop cross-provider URL

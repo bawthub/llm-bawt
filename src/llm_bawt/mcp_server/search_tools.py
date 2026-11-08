@@ -117,7 +117,9 @@ async def web_search(
         source}``). A named provider is never stood in for by another.
         ``errors`` maps each provider that couldn't be used or failed
         upstream (rejected key, rate limit, outage) to the reason; when
-        nothing came back, ``error`` says why.
+        nothing came back, ``error`` says why. With no ``provider``, if every
+        keyed web provider fails, DuckDuckGo answers under its own name and
+        ``fallbacks``/``note`` say what it stood in for.
     """
     from llm_bawt.search.multi import search_all_detailed
     from llm_bawt.utils.config import config
@@ -143,6 +145,11 @@ async def web_search(
         "count": len(outcome.results),
         "results": [r.to_dict() for r in outcome.results],
     }
+    if outcome.fallbacks:
+        response["fallbacks"] = outcome.fallbacks
+        response["note"] = " ".join(
+            f"{', '.join(failed)} failed (see errors); these results are from {fb} instead."
+            for fb, failed in outcome.fallbacks.items())
     if outcome.errors:
         response["errors"] = outcome.errors
         if not outcome.results:
