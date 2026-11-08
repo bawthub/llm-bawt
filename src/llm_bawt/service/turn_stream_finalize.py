@@ -6,7 +6,6 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from ..bots import scrub_for_tts
 from .chat_stream_worker import put_queue_item_threadsafe
 from .logging import get_service_logger
 from .turn_stream_context import TurnStreamContext
@@ -350,6 +349,7 @@ class TurnStreamFinalizer:
         # scrubbed tail before publishing that terminal event.
         if ctx.tts_scrubber is not None and status not in ("cancelled", "aborted"):
             try:
+                tts_offset = ctx.tts_scrubber.offset
                 tts_tail = ctx.tts_scrubber.flush()
             except Exception:
                 tts_tail = ""  # Optional speech cleanup cannot strand text clients.
@@ -359,6 +359,7 @@ class TurnStreamFinalizer:
                     "turn_id": ctx.turn_log_id,
                     "bot_id": ctx.bot_id,
                     "user_id": ctx.user_id,
+                    "tts_offset": tts_offset,
                     "delta": tts_tail,
                     "ts": time.time(),
                 })
@@ -453,11 +454,12 @@ class TurnStreamFinalizer:
             "changed_files": changed_files,
             "attachments": completed_attachments,
             "response_text": _response_text,
-            # Terminal recovery when the separate tts_delta stream is lost.
-            # Never require an audio consumer to synthesize raw text_delta.
+            # Match the exact scrubbed delta stream, including its separators.
+            # Whole-response re-scrubbing can produce different whitespace and
+            # cannot safely recover a suffix by the delta character offsets.
             "tts_text": (
-                scrub_for_tts(_response_text)
-                if ctx.tts_scrubber is not None and _response_text is not None
+                ctx.tts_scrubber.text
+                if ctx.tts_scrubber is not None and status not in ("cancelled", "aborted")
                 else None
             ),
             "balance_update": balance_update,

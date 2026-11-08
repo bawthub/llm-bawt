@@ -332,9 +332,11 @@ def test_non_voice_optimized_worker_keeps_visual_markdown_and_emits_clean_audio(
     ctx.tts_scrubber = StreamingTTSScrubber() if ctx.tts_scrub else None
     worker._stream_to_queue()
     assert "".join(event["delta"] for event in events if event["_type"] == "text_delta") == raw
-    assert "".join(event["delta"] for event in events if event["_type"] == "tts_delta") == "Hello\nSee docs."
+    speech = [event for event in events if event["_type"] == "tts_delta"]
+    assert "".join(event["delta"] for event in speech) == "Hello\nSee docs."
+    assert [event["tts_offset"] for event in speech] == [0, len("Hello\n")]
     assert events[-1]["_type"] == "turn_complete"
-    assert events[-1]["tts_text"] == "Hello\n\nSee docs."
+    assert events[-1]["tts_text"] == "Hello\nSee docs."
     assert chunks[-1] is None
 
 

@@ -820,6 +820,19 @@ class StreamingTTSScrubber:
 
     def __init__(self) -> None:
         self.buf = ""
+        self.offset = 0
+        self._parts: list[str] = []
+
+    @property
+    def text(self) -> str:
+        """Exact emitted speech, including separators, for terminal recovery."""
+        return "".join(self._parts)
+
+    def _record(self, text: str) -> str:
+        if text:
+            self._parts.append(text)
+            self.offset += len(text)
+        return text
 
     def feed(self, chunk: str) -> str:
         """Accumulate raw text; return scrubbed text for any COMPLETED blocks."""
@@ -849,13 +862,13 @@ class StreamingTTSScrubber:
                 out.append(scrubbed)
         # Trailing newline separates consecutive blocks fed to the TTS engine
         # across successive tts_delta events so words don't run together.
-        return ("\n".join(out) + "\n") if out else ""
+        return self._record(("\n".join(out) + "\n") if out else "")
 
     def flush(self) -> str:
         """Scrub and return the final buffered (partial) block at turn end."""
         scrubbed = scrub_for_tts(self.buf)
         self.buf = ""
-        return scrubbed
+        return self._record(scrubbed)
 
 
 class StreamingEmoteFilter:

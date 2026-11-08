@@ -128,3 +128,30 @@ def test_streaming_scrubber_single_paragraph_is_terminal_tail():
 
     assert scrubber.feed("A complete response. Last sentence.") == ""
     assert scrubber.flush() == "A complete response. Last sentence."
+
+
+def test_terminal_speech_is_exact_stream_including_unicode_and_block_separators():
+    scrubber = StreamingTTSScrubber()
+    events = []
+    for chunk in (
+        "## Hello 😀\n\n",
+        "```python\nvalue = 1\n```\n\n",
+        "See [docs](https://example.com).\n\n",
+        "Final **sentence**.",
+    ):
+        offset = scrubber.offset
+        delta = scrubber.feed(chunk)
+        if delta:
+            events.append((offset, delta))
+    offset = scrubber.offset
+    events.append((offset, scrubber.flush()))
+    assert events == [
+        (0, "Hello 😀\n"),
+        (8, "value = 1\n"),
+        (18, "See docs.\n"),
+        (28, "Final sentence."),
+    ]
+    assert scrubber.text == "".join(delta for _, delta in events)
+    assert scrubber.offset == len(scrubber.text)
+    assert scrubber.flush() == ""
+    assert scrubber.text == "Hello 😀\nvalue = 1\nSee docs.\nFinal sentence."

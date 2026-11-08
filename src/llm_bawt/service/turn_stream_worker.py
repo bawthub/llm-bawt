@@ -512,6 +512,7 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                     # the block-boundary scrubber for audio; text_delta above
                     # keeps the original markdown for the visual stream.
                     if tts_scrubber is not None:
+                        _tts_offset = tts_scrubber.offset
                         _tts_block = tts_scrubber.feed(s)
                         if _tts_block:
                             _publish_event_direct({
@@ -519,6 +520,7 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                                 "turn_id": turn_log_id,
                                 "bot_id": bot_id,
                                 "user_id": user_id,
+                                "tts_offset": _tts_offset,
                                 "delta": _tts_block,
                                 "ts": time.time(),
                             })
