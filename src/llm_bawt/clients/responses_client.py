@@ -12,7 +12,7 @@ from typing import Any, Iterator, List
 
 from openai import OpenAI, OpenAIError
 
-from .base import LLMClient
+from .base import LLMClient, api_error_text
 from .usage_hook import report_usage
 from ..models.message import Message
 from ..utils.config import Config
@@ -440,7 +440,7 @@ class ResponsesClient(LLMClient):
             response = self.client.responses.create(**payload)
         except OpenAIError as e:
             logger.error("Responses API error for model '%s': %s", self.model, e)
-            return f"ERROR: Responses API Error - {e}"
+            return f"ERROR: Responses API Error - {api_error_text(e)}"
 
         report_usage(self, response)
         response_text = self._response_text(response)

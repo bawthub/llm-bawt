@@ -16,6 +16,19 @@ from ..utils.config import Config
 from ..utils.streaming import render_streaming_response
 
 
+def api_error_text(error: Exception) -> str:
+    """SDK error text that keeps the HTTP status for ``ERROR:`` reply strings.
+
+    A non-JSON gateway reply's SDK message is just its body, and callers
+    classify the string later (maintenance fallback), so the status must survive.
+    """
+    text = str(error)
+    status = getattr(error, "status_code", None)
+    if isinstance(status, int) and not text.startswith("Error code:"):
+        return f"Error code: {status} - {text}"
+    return text
+
+
 class LLMClient(ABC):
     """Abstract base class for LLM clients."""
     SUPPORTS_STREAMING = False

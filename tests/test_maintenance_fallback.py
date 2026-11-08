@@ -523,7 +523,7 @@ def test_gateway_5xx_never_unreachable_as_exception_or_client_string(status, bod
     error = _sdk_error(status, body)
     assert mf.switch_cause(error) is None
     # OpenAIClient's real serialization keeps the status in the string.
-    from llm_bawt.clients.openai_client import _api_error_text
+    from llm_bawt.clients.base import api_error_text as _api_error_text
     reply = f"ERROR: OpenAI API Error - {_api_error_text(error)}"
     assert mf.switch_cause(reply) is None
     rig = Rig()
@@ -536,7 +536,7 @@ def test_gateway_5xx_never_unreachable_as_exception_or_client_string(status, bod
 def test_real_sdk_refused_connect_is_unreachable_both_forms():
     error = _sdk_error(None)
     assert mf.switch_cause(error) == mf.UNREACHABLE
-    from llm_bawt.clients.openai_client import _api_error_text
+    from llm_bawt.clients.base import api_error_text as _api_error_text
     assert mf.switch_cause(f"ERROR: OpenAI API Error - {_api_error_text(error)}") == mf.UNREACHABLE
 
 
@@ -559,3 +559,40 @@ def test_failed_probe_records_its_own_cause_both_directions():
     record = _probe_fails_with(rig, client, ConnectError("refused"))
     assert record.cause == mf.UNREACHABLE
     assert mf.announce_available(rig.store, now=rig.clock.now) == [PRIMARY_PROVIDER]
+
+
+def _responses_reply(status: int | None, body: str = "") -> str:
+    """The real ResponsesClient.query reply over a mocked transport."""
+    import httpx
+
+    from llm_bawt.clients.responses_client import ResponsesClient
+    from llm_bawt.utils.config import Config
+
+    def handler(request):
+        if status is None:
+            raise httpx.ConnectError("[Errno 111] Connection refused", request=request)
+        if status == 0:
+            raise httpx.ReadTimeout("timed out", request=request)
+        return httpx.Response(status, text=body, headers={"content-type": "text/plain"})
+
+    client = ResponsesClient("m", config=Config(), base_url="http://model.invalid/v1", api_key="x")
+    import openai
+    client.client = openai.OpenAI(api_key="x", base_url="http://model.invalid/v1", max_retries=0,
+                                  http_client=httpx.Client(transport=httpx.MockTransport(handler)))
+    return client.query([], plaintext_output=True, stream=False)
+
+
+@pytest.mark.parametrize("status", [None, 0])
+def test_responses_client_no_reply_is_unreachable(status):
+    reply = _responses_reply(status)
+    assert reply.startswith("ERROR: Responses API Error -"), reply
+    assert mf.switch_cause(reply) == mf.UNREACHABLE
+
+
+@pytest.mark.parametrize("status, body", [(503, "upstream connection refused"),
+                                          (504, "upstream timed out"),
+                                          (502, "Connection error.")])
+def test_responses_client_gateway_5xx_never_unreachable(status, body):
+    reply = _responses_reply(status, body)
+    assert reply.startswith("ERROR: Responses API Error -"), reply
+    assert mf.switch_cause(reply) is None

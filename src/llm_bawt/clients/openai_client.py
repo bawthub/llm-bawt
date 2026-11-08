@@ -11,7 +11,7 @@ from openai import OpenAI, OpenAIError
 from typing import List, Iterator, Any
 from rich.json import JSON
 from rich.rule import Rule
-from ..clients.base import LLMClient
+from ..clients.base import LLMClient, api_error_text as _api_error_text
 from .usage_hook import report_usage
 from ..utils.config import Config
 from ..models.message import Message
@@ -40,16 +40,6 @@ class _ConnectReportingTransport(httpx.HTTPTransport):
             except Exception:  # noqa: BLE001 — never mask the request error
                 logger.debug("ollama unreachable report failed", exc_info=True)
             raise
-
-
-def _api_error_text(error: Exception) -> str:
-    """SDK error text that keeps the HTTP status: a non-JSON gateway reply's
-    message is just its body, and callers classify the ERROR string later."""
-    text = str(error)
-    status = getattr(error, "status_code", None)
-    if isinstance(status, int) and not text.startswith("Error code:"):
-        return f"Error code: {status} - {text}"
-    return text
 
 
 def _reporting_http_client(base_url: str) -> httpx.Client:

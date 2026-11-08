@@ -58,7 +58,7 @@ _TRANSPORT_TYPES = ("connecterror", "apiconnectionerror", "connectionrefusederro
                     "connectionerror", "gaierror")
 # OpenAIClient's string forms: an SDK error (status dropped; only the SDK's own
 # no-reply messages count) vs a non-SDK exception (transport only, no HTTP body).
-_SDK_ERROR = "ERROR: OpenAI API Error -"
+_SDK_ERROR = ("ERROR: OpenAI API Error -", "ERROR: Responses API Error -")
 _SDK_NO_REPLY = ("Connection error.", "Request timed out.")
 _UNEXPECTED_ERROR = "ERROR: Unexpected error -"
 _CONNECT_TEXT = ("connection refused", "connecterror", "name or service not known",
@@ -113,8 +113,9 @@ def is_unreachable(error: Any) -> bool:
     text = str(error).strip()
     if _status_of(text) is not None:
         return False
-    if text.startswith(_SDK_ERROR):
-        return text[len(_SDK_ERROR):].strip() in _SDK_NO_REPLY
+    for prefix in _SDK_ERROR:
+        if text.startswith(prefix):
+            return text[len(prefix):].strip() in _SDK_NO_REPLY
     if text.startswith(_UNEXPECTED_ERROR):
         lowered = text.lower()
         return any(marker in lowered for marker in _CONNECT_TEXT)
