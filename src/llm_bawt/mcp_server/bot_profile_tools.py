@@ -17,6 +17,12 @@ the bot lock. What this tool adds:
   UI model picker shows for the bot's runtime and writes what a pick writes
   (``default_model``, ``endpoint_id`` and the runtime's ``harness``), so the
   app route applies the same session and prompt handling as a UI switch.
+- The agent runtime (TASK-1581): ``agent_backend`` (null is the chat runtime)
+  is a model switch with the same capability, and names the endpoint from the
+  new runtime's picker. ``agent_backend_config`` is a full replace (null
+  clears). A caller may change its own runtime like its own model: the route
+  reloads the profile and rotates threads on a runtime switch, so the change
+  applies from the bot's next turn; the turn that made it finishes as is.
 - Every write is a compare-and-set. The tool sends ``expected_tags`` (the tag
   set it read) and ``expected_fields`` (the caller's ``expected`` or the values
   it read) for each changed field, so a concurrent write makes this one 409
@@ -226,14 +232,19 @@ def _validate(changes: Any, reason: Any, expected: Any) -> str | None:
     if MODEL in changes and not isinstance(changes[MODEL], str):
         return _error("invalid_request", "default_model must be a model key")
     if BACKEND in changes:
-        if not isinstance(changes[BACKEND], str) or not changes[BACKEND].strip():
-            return _error("invalid_request", "agent_backend must be a backend name; "
-                          "a runtime can be switched, not cleared")
+        # null is the chat runtime (no agent backend): a supported state, and
+        # what a rollback of a chat -> agent switch names.
+        if changes[BACKEND] is not None and (
+                not isinstance(changes[BACKEND], str) or not changes[BACKEND].strip()):
+            return _error("invalid_request", "agent_backend must be a backend name, "
+                          "or null for the chat runtime")
         if ENDPOINT not in changes:
             return _error("invalid_request", "an agent_backend switch names endpoint_id from the "
                           "new runtime's model catalog")
-    if BACKEND_CONFIG in changes and not isinstance(changes[BACKEND_CONFIG], dict):
-        return _error("invalid_request", "agent_backend_config must be an object (a full replace)")
+    if BACKEND_CONFIG in changes and not (
+            changes[BACKEND_CONFIG] is None or isinstance(changes[BACKEND_CONFIG], dict)):
+        return _error("invalid_request",
+                      "agent_backend_config must be an object (a full replace) or null to clear it")
     if TAGS in changes and (not isinstance(changes[TAGS], list)
                             or not all(isinstance(tag, str) for tag in changes[TAGS])):
         return _error("invalid_request", "tags must be a list of tag slugs (a full-set replace)")
@@ -277,7 +288,7 @@ async def bots_profile_patch(
     invalid = _validate(changes, reason, expected)
     if invalid is not None:
         return invalid
-    if BACKEND in changes:
+    if BACKEND in changes and changes[BACKEND] is not None:
         changes = {**changes, BACKEND: changes[BACKEND].strip().lower()}
         try:
             known = _registered_backends()

@@ -527,12 +527,35 @@ def test_a_backend_switch_needs_the_model_switch_capability(rig):
     assert rig.app.writes == []
 
 
+def test_a_chat_to_agent_switch_returns_a_usable_rollback(rig):
+    rig.app.profile = _profile(agent_backend=None, harness="chat")
+    out = _call(changes={"agent_backend": "fixture-proxy", "endpoint_id": 2})
+    assert out["rollback"]["changes"]["agent_backend"] is None
+
+    rig.app.profile = {**rig.app.profile, **rig.app.writes[0]}
+    back = _call(**out["rollback"])
+    assert "error" not in back, back
+    assert rig.catalog_reads[-1] == ""
+    assert rig.app.writes[-1]["agent_backend"] is None
+
+
+def test_a_first_config_returns_a_usable_null_rollback(rig):
+    rig.app.profile = _profile(agent_backend_config=None)
+    out = _call(changes={"agent_backend_config": {"effort": "low"}})
+
+    rig.app.profile = _profile(agent_backend_config={"effort": "low"})
+    back = _call(**out["rollback"])
+    assert "error" not in back, back
+    assert rig.app.writes[-1]["agent_backend_config"] is None
+
+
 @pytest.mark.parametrize("changes", [
     {"agent_backend": "fixture-proxy"},
-    {"agent_backend": None, "endpoint_id": 1},
+    {"agent_backend": None},
+    {"agent_backend": 7, "endpoint_id": 1},
     {"agent_backend": "  ", "endpoint_id": 1},
     {"agent_backend_config": "effort=low"},
-    {"agent_backend_config": None},
+    {"agent_backend_config": ["effort"]},
 ])
 def test_malformed_runtime_changes_are_refused_before_anything_is_read(rig, changes):
     assert _call(changes=changes)["error"] == "invalid_request"
