@@ -990,17 +990,18 @@ async def session_reset(request: SessionResetRequest) -> SessionResetResponse:
     return SessionResetResponse(**result)
 
 
-def _reject_reset_for_unknown_bot(request: ChatCompletionRequest) -> None:
+def _reject_reset_for_unknown_bot(service, request: ChatCompletionRequest) -> None:
     """A typed /new must name a real bot before any session or delivery is written."""
     from agent_bridge.maintenance import is_new_command
 
-    from ...bots import get_bot
+    from ...bots import BotManager
     from ..chat_message_text import last_user_text
 
     bot_id = (request.bot_id or "").strip()
     if not bot_id or not is_new_command(last_user_text(request.messages) or ""):
         return
-    if get_bot(bot_id) is None:
+    # BotManager retries a pending registry reload; the bare cache lookup would not.
+    if BotManager(getattr(service, "config", None)).get_bot(bot_id) is None:
         raise HTTPException(status_code=404, detail=f"Bot '{bot_id}' not found")
 
 
@@ -1049,7 +1050,7 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
             row.get("id"), row.get("bot_id"), row.get("user_id"),
         )
 
-    _reject_reset_for_unknown_bot(request)
+    _reject_reset_for_unknown_bot(service, request)
 
     if request.stream:
         admission_comment = http_request.headers.get("X-LLM-Bawt-Admission-Events") == "comment"
