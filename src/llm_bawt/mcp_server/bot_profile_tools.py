@@ -55,13 +55,18 @@ ENDPOINT = "endpoint_id"
 HARNESS = "harness"
 #: The model switch: an endpoint (and optionally the model it must serve).
 MODEL_FIELDS = frozenset({MODEL, ENDPOINT})
-#: Persona, presentation and capability-flag fields, plus the model switch.
-#: harness is derived from the endpoint, never set; backend, bot_type and the
-#: legacy privacy flag are not editable here.
+#: The agent runtime (TASK-1581). A backend change is a runtime switch: it
+#: needs the model-switch capability and names the new runtime's endpoint.
+BACKEND = "agent_backend"
+#: The runtime's settings object, a full replace validated by the app route.
+BACKEND_CONFIG = "agent_backend_config"
+#: Persona, presentation and capability-flag fields, the model switch and the
+#: agent runtime. harness is derived from the endpoint, never set; bot_type
+#: (derived from the backend) and the legacy privacy flag are not editable here.
 ALLOWED_FIELDS = frozenset({
     TAGS, "name", "description", "color", "cli_color", "avatar", "default_voice", "system_prompt",
     "prompt_override_id", "requires_memory", "voice_optimized", "tts_mode", "uses_tools",
-    "uses_search", "uses_home_assistant", *MODEL_FIELDS,
+    "uses_search", "uses_home_assistant", *MODEL_FIELDS, BACKEND, BACKEND_CONFIG,
 })
 #: Global runtime setting naming the role capability whose holders switch models.
 MODEL_SWITCH_CAPABILITY_SETTING = "bots_model_switch_capability"
@@ -159,11 +164,20 @@ async def _picker_endpoints(agent_backend: str | None) -> list[dict[str, Any]]:
     return list(response.json().get("endpoints") or [])
 
 
+def _registered_backends() -> frozenset[str]:
+    from llm_bawt.agent_backends import list_backends
+    return frozenset(list_backends())
+
+
 async def _model_assignment(changes: dict[str, Any], profile: dict[str, Any]
                             ) -> tuple[dict[str, Any] | None, str | None]:
-    """The profile fields a picker pick of ``changes[endpoint_id]`` writes, or an error."""
+    """The profile fields a picker pick of ``changes[endpoint_id]`` writes, or an error.
+
+    The picker is the one for the bot's runtime after this write, so a backend
+    switch picks from the new backend's list.
+    """
     endpoint_id = changes[ENDPOINT]
-    backend = (profile.get("agent_backend") or "").strip().lower()
+    backend = (changes.get(BACKEND, profile.get(BACKEND)) or "").strip().lower()
     try:
         endpoints = await _picker_endpoints(backend)
     except Exception:
@@ -211,6 +225,15 @@ def _validate(changes: Any, reason: Any, expected: Any) -> str | None:
                       "a bot's model can be switched, not cleared")
     if MODEL in changes and not isinstance(changes[MODEL], str):
         return _error("invalid_request", "default_model must be a model key")
+    if BACKEND in changes:
+        if not isinstance(changes[BACKEND], str) or not changes[BACKEND].strip():
+            return _error("invalid_request", "agent_backend must be a backend name; "
+                          "a runtime can be switched, not cleared")
+        if ENDPOINT not in changes:
+            return _error("invalid_request", "an agent_backend switch names endpoint_id from the "
+                          "new runtime's model catalog")
+    if BACKEND_CONFIG in changes and not isinstance(changes[BACKEND_CONFIG], dict):
+        return _error("invalid_request", "agent_backend_config must be an object (a full replace)")
     if TAGS in changes and (not isinstance(changes[TAGS], list)
                             or not all(isinstance(tag, str) for tag in changes[TAGS])):
         return _error("invalid_request", "tags must be a list of tag slugs (a full-set replace)")
@@ -240,6 +263,9 @@ async def bots_profile_patch(
             private tag and protected roles can't be added or removed.
             ``endpoint_id`` (with optional ``default_model`` it must serve)
             switches the model; it needs the model-switch capability.
+            ``agent_backend`` switches the runtime and must come with an
+            ``endpoint_id`` from that runtime's catalog.
+            ``agent_backend_config`` replaces the runtime settings object.
         reason: Why; stored on the audit row.
         expected: Optional field -> value you read. Fields you change but leave
             out here are pinned to the value read just before the write.
@@ -251,6 +277,16 @@ async def bots_profile_patch(
     invalid = _validate(changes, reason, expected)
     if invalid is not None:
         return invalid
+    if BACKEND in changes:
+        changes = {**changes, BACKEND: changes[BACKEND].strip().lower()}
+        try:
+            known = _registered_backends()
+        except Exception:
+            logger.exception("bots_profile_patch: backend registry unreadable")
+            return _error("unavailable", "agent backend registry unavailable")
+        if changes[BACKEND] not in known:
+            return _error("unknown_backend", f"no agent backend named {changes[BACKEND]!r}",
+                          backends=sorted(known))
     expected = dict(expected or {})
     slug = bot_id.strip().lower() if isinstance(bot_id, str) else ""
     if TAGS in changes and slug == turn.bot_id.strip().lower():
@@ -363,7 +399,7 @@ def _rollback(diff: dict[str, dict[str, Any]], before: dict[str, Any],
     undone as a whole (endpoint and model) even if only one of them changed.
     """
     fields = [field for field in diff if field != HARNESS]
-    if MODEL_FIELDS & set(fields):
+    if (MODEL_FIELDS | {BACKEND}) & set(fields):
         fields = [field for field in fields if field not in MODEL_FIELDS] + [MODEL, ENDPOINT]
     return {"changes": {field: _current(before, field) for field in fields},
             "expected": {field: _current(after, field) for field in fields}}

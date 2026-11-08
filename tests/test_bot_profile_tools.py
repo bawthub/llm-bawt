@@ -93,6 +93,8 @@ def rig(monkeypatch):
     monkeypatch.setattr(tools, "_protected_roles", lambda: frozenset({"fixture-manager"}))
     switchers = {CALLER}
     monkeypatch.setattr(tools, "_may_switch_models", lambda slug: slug in switchers)
+    monkeypatch.setattr(tools, "_registered_backends",
+                        lambda: frozenset({"fixture-harness", "fixture-proxy"}))
     catalog_reads: list[str | None] = []
 
     async def picker(backend):
@@ -138,9 +140,8 @@ def test_the_private_tag_cannot_be_added(rig, tags):
     assert rig.app.writes == []
 
 
-@pytest.mark.parametrize("field", ["agent_backend", "harness", "bot_type",
-                                   "include_in_global_search", "agent_backend_config"])
-def test_runtime_route_and_privacy_fields_are_refused(rig, field):
+@pytest.mark.parametrize("field", ["harness", "bot_type", "include_in_global_search"])
+def test_derived_and_privacy_fields_are_refused(rig, field):
     result = _call(changes={field: "x"})
 
     assert result["error"] == "field_not_allowed"
@@ -461,6 +462,81 @@ def test_unset_capabilities_protect_nothing_and_let_no_bot_switch(monkeypatch):
 
     assert tools._protected_roles() == frozenset()
     assert tools._may_switch_models(CALLER) is False
+
+
+# --- agent runtime (TASK-1581) ---
+
+
+def test_agent_backend_config_is_a_pinned_full_replace(rig):
+    rig.app.profile = _profile(agent_backend_config={"effort": "high"})
+    out = _call(changes={"agent_backend_config": {"effort": "low"}})
+
+    assert out["changed"] == {"agent_backend_config": {"before": {"effort": "high"},
+                                                       "after": {"effort": "low"}}}
+    (write,) = rig.app.writes
+    assert write["agent_backend_config"] == {"effort": "low"}
+    assert write["expected_fields"] == {"agent_backend_config": {"effort": "high"}}
+    assert out["rollback"] == {"changes": {"agent_backend_config": {"effort": "high"}},
+                               "expected": {"agent_backend_config": {"effort": "low"}}}
+
+
+def test_a_stale_agent_backend_config_is_a_conflict_and_writes_nothing(rig):
+    rig.app.profile = _profile(agent_backend_config={"effort": "high"})
+    out = _call(changes={"agent_backend_config": {"effort": "low"}},
+                expected={"agent_backend_config": {"effort": "medium"}})
+
+    assert out["error"] == "conflict"
+    assert out["current"] == {"agent_backend_config": {"effort": "high"}}
+    assert rig.app.writes == []
+
+
+def test_a_config_the_app_refuses_passes_the_400_through(rig):
+    rig.app.patch = _Response(400, {"detail": "codex_transport requires the Codex backend"})
+    out = _call(changes={"agent_backend_config": {"codex_transport": "exec"}})
+
+    assert out["error"] == "rejected"
+    assert out["detail"] == "codex_transport requires the Codex backend"
+
+
+def test_a_backend_switch_picks_from_the_new_runtimes_catalog(rig):
+    out = _call(changes={"agent_backend": " Fixture-Proxy ", "endpoint_id": 2})
+
+    assert rig.catalog_reads == ["fixture-proxy"]
+    (write,) = rig.app.writes
+    assert write["agent_backend"] == "fixture-proxy"
+    assert (write["endpoint_id"], write["default_model"], write["harness"]) == (
+        2, "fixture-model-b", "fixture-proxy")
+    rollback = out["rollback"]["changes"]
+    assert rollback == {"agent_backend": "fixture-harness",
+                        "default_model": "fixture-model-a", "endpoint_id": 1}
+
+
+def test_an_unknown_backend_is_refused_before_anything_is_read(rig):
+    out = _call(changes={"agent_backend": "retired-runtime", "endpoint_id": 1})
+
+    assert out["error"] == "unknown_backend"
+    assert out["backends"] == ["fixture-harness", "fixture-proxy"]
+    assert rig.app.calls == []
+
+
+def test_a_backend_switch_needs_the_model_switch_capability(rig):
+    rig.switchers.clear()
+    out = _call(changes={"agent_backend": "fixture-proxy", "endpoint_id": 2})
+
+    assert out["error"] == "capability_required"
+    assert rig.app.writes == []
+
+
+@pytest.mark.parametrize("changes", [
+    {"agent_backend": "fixture-proxy"},
+    {"agent_backend": None, "endpoint_id": 1},
+    {"agent_backend": "  ", "endpoint_id": 1},
+    {"agent_backend_config": "effort=low"},
+    {"agent_backend_config": None},
+])
+def test_malformed_runtime_changes_are_refused_before_anything_is_read(rig, changes):
+    assert _call(changes=changes)["error"] == "invalid_request"
+    assert rig.app.calls == []
 
 
 class _Engine:
