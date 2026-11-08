@@ -387,7 +387,7 @@ async def expand_media_prompt(request: PromptExpansionRequest):
             duration=request.duration,
             aspect_ratio=request.aspect_ratio,
             source_image=request.source_image,
-            complete=complete_utility,
+            complete=lambda req: complete_utility(req, caller="prompt_expansion"),
         )
     except PromptExpansionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

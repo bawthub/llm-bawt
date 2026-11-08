@@ -49,6 +49,20 @@ def _unavailable(path: str | None) -> ProviderUsage:
     )
 
 
+@router.get("/v1/usage/utility", tags=["Usage"])
+def get_utility_usage(
+    days: int = Query(1, ge=1, le=90, description="UTC days back, today included."),
+) -> dict[str, Any]:
+    """Utility-model calls per UTC day and caller: calls, tokens, estimated, failed (TASK-1538)."""
+    from ..usage.utility_usage import rollup
+
+    engine = get_service()._turn_log_store.engine
+    if engine is None or engine.dialect.name != "postgresql":
+        raise HTTPException(status_code=503, detail="Utility usage needs the PostgreSQL store")
+    with engine.connect() as conn:
+        return {"days": days, "rows": rollup(conn, days=days)}
+
+
 @router.get("/v1/usage", tags=["Usage"])
 async def get_usage_endpoint(
     provider: str | None = Query(None, description="Canonical usage provider id."),

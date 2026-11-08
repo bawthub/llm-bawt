@@ -548,6 +548,7 @@ class LLMServiceClient:
             "prompt": prompt,
             "max_tokens": max_tokens,
             "temperature": temperature,
+            "caller": "consolidation",
         }
         if system:
             payload["system"] = system

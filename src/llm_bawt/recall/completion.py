@@ -1,6 +1,7 @@
 """One isolated utility completion; no bot prompt, transcript, tools or writes."""
 from __future__ import annotations
 
+from contextvars import ContextVar
 from dataclasses import asdict
 
 import httpx
@@ -11,6 +12,10 @@ from .contracts import (
 )
 from .http import BoundedHTTP
 from .prompt import resolve_recall_system_prompt
+
+#: The bot a recall serves, for the utility usage row (TASK-1538). A context
+#: variable rather than a synthesize() argument so Synthesizer stays unchanged.
+CALLING_BOT: ContextVar[str | None] = ContextVar("recall_calling_bot", default=None)
 
 
 def synthesis_prompt(query: str, evidence: list[Evidence]) -> str:
@@ -41,6 +46,8 @@ class UtilitySynthesizer(Synthesizer):
             raise RecallError("input_budget")
         body = {"system": system, "prompt": synthesis_prompt(query, evidence),
                 "max_tokens": min(output_tokens, 1600)}
+        if bot_id := CALLING_BOT.get():
+            body["usage_bot_id"] = bot_id
         async with httpx.AsyncClient(timeout=22.0, follow_redirects=False) as client:
             reader = BoundedHTTP(client, max_calls=1, max_bytes=MAX_MODEL_BYTES)
             try:

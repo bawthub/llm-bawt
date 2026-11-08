@@ -14,7 +14,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .budgets import clip, compact_json, tokens
-from .completion import input_tokens
+from .completion import CALLING_BOT, input_tokens
 from .contracts import (
     MAX_FOLLOW_ONS_PER_HIT, MAX_INPUT_TOKENS, MAX_MODEL_BYTES, MAX_QUERY_TOKENS, MAX_QUOTE_CHARS,
     MAX_QUOTE_TOKENS, MAX_RECORD_CHARS,
@@ -415,8 +415,12 @@ class RecallService:
                 # Transport timeouts (normally 22 s) and this remaining-budget
                 # timeout both preserve only already authorized/admitted evidence.
                 remaining = max(0, deadline - time.monotonic() - 0.25)
-                async with asyncio.timeout(remaining):
-                    raw = await self.synthesizer.synthesize(system, question, evidence, request.output_tokens)
+                bot_token = CALLING_BOT.set(scope.bot_id)
+                try:
+                    async with asyncio.timeout(remaining):
+                        raw = await self.synthesizer.synthesize(system, question, evidence, request.output_tokens)
+                finally:
+                    CALLING_BOT.reset(bot_token)
                 if not isinstance(raw, str) or len(raw.encode("utf-8")) > MAX_MODEL_BYTES:
                     raise RecallError("invalid_synthesis")
                 if tokens(raw) > request.output_tokens:

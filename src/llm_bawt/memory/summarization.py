@@ -749,6 +749,7 @@ def summarize_session_with_llm(
                 "system": summary_system_prompt(config, bot_id=bot_id),
                 "max_tokens": SUMMARY_MAX_OUTPUT_TOKENS,
                 "temperature": 0.3,
+                "caller": "summarization",
             },
             timeout=timeout,
         )

@@ -315,6 +315,8 @@ def bootstrap_turn_log_schema(conn) -> None:
         # transaction, so it must exist whenever turn_logs does.
         from .usage.balance import bootstrap_balance_schema
         bootstrap_balance_schema(conn)
+        from .usage.utility_usage import bootstrap_utility_usage_schema
+        bootstrap_utility_usage_schema(conn)
     except Exception:
         logger.exception("Turn-log additive schema migration failed")
         raise

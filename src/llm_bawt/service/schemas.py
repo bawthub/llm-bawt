@@ -529,6 +529,8 @@ class RawCompletionRequest(BaseModel):
     model: str | None = None  # Inherits global maintenance_model when omitted
     max_tokens: int = 500
     temperature: float = 0.7
+    # Usage-rollup label for the calling feature (TASK-1538); no effect on the call.
+    caller: str | None = Field(default=None, max_length=64, pattern=r"^[a-z0-9_.-]+$")
 
 
 class RawCompletionResponse(BaseModel):

@@ -20,8 +20,16 @@ def report_usage(client: Any, response: Any) -> None:
 
     Never raises: a spend-recording failure must not fail the call that paid.
     """
+    if response is None:
+        return
+    try:
+        # TASK-1538: the open utility call (any path) counts this response too.
+        from ..service.usage.utility_usage import note_response
+        note_response(response)
+    except Exception:  # noqa: BLE001
+        logger.warning("utility usage capture failed", exc_info=True)
     observer = getattr(client, "usage_observer", None)
-    if observer is None or response is None:
+    if observer is None:
         return
     try:
         observer(response)

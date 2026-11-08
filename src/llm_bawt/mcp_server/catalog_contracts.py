@@ -122,6 +122,7 @@ TOOL_SUMMARIES: dict[str, str] = {
     "self_system_prompt": "Read your own durable persona (action=view) or fully replace it (edit, new_prompt). Use your bot_id; lands next turn, pinned sessions at next boundary; not harness wrapper.",
     "self_house": "List houses, or move yourself into a free one (house, or any) or out of yours. Occupied houses are refused; never pins. Applies next turn.",
     "self_model": "View or persistently switch bot_id's model endpoint; applies next turn, not this one. continue_prompt queues one when_idle follow-up turn on the new model.",
+    "usage_utility_rollup": "Utility-model calls and tokens per UTC day and caller (recall, title, ...). Aggregates only.",
     "ops_list_operations": "List ops before ops_run; slug= gives its schema; include_disabled grants no run permission.",
     "ops_run": "Run a discovered op with validated args and idempotency_key. Approval/queued is not success; verify ops_job_status and target health. Never bypass a denial.",
     "ops_job_status": "Read-only ops job state and exit code; the reconciler records progress. output_tail_bytes: bounded output.",
@@ -159,7 +160,7 @@ REFERENCE_GROUPS: dict[str, tuple[str, ...]] = {
     "tasks": ("tasks_", "steps_", "projects_", "activity_", "initiative_"),
     "memory-history": ("memory_", "messages_", "context_", "facts_", "system_", "profile", "working_memory_", "tool_calls"),
     "sessions-delivery": ("sessions_", "bots_", "agent_", "self_", "schedule_"),
-    "ops-media": ("ops_", "media_", "generate_", "web_", "x_", "speech_", "home_audio_", "notify_", "notifications_", "browser_", "attachment_"),
+    "ops-media": ("ops_", "media_", "generate_", "web_", "x_", "speech_", "home_audio_", "notify_", "notifications_", "browser_", "attachment_", "usage_"),
 }
 
 

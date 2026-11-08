@@ -37,6 +37,7 @@ NON_HISTORY_TOOLS = frozenset({
     "notify_user", "notifications_list", "schedule_wakeup",
     "x_search", "x_counts", "web_search", "bots_list_available",
     "ops_approvals_list", "ops_approvals_get", "ops_approval_resolve", "ops_approval_withdraw", "browser_check_session",
+    "usage_utility_rollup",  # TASK-1538: aggregate counts, no bot or content
 })
 # ops_approvals_* (TASK-1609) read and decide approval cards, not history; the
 # route hides private requesters' and other users' cards itself.

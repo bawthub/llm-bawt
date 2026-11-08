@@ -202,7 +202,8 @@ async def test_catalog_token_budgets():
     # TASK-471: attachment_get loads an uploaded image by reference (+35): 4,959.
     # TASK-1755: one scoped tool_calls lookup; args hygiene caveat and opt-in
     # results are call-critical. Measured 5,036 (+77).
-    assert sum(descriptions) <= 5036, f"Descriptions grew to {sum(descriptions)} tokens"
+    # TASK-1538: usage_utility_rollup, utility-model token use (+36): 5,072.
+    assert sum(descriptions) <= 5072, f"Descriptions grew to {sum(descriptions)} tokens"
     definitions = [{"name": f"mcp__bawthub__{t.name}", "description": t.description or "", "input_schema": t.inputSchema} for t in tools]
     total = len(encoder.encode(json.dumps(definitions, ensure_ascii=False, separators=(",", ":"))))
     # TASK-900: explicit X search adds ~160 tokens; measured catalog 11,239.
@@ -319,7 +320,8 @@ async def test_catalog_token_budgets():
     # false on steps_add/steps_set/tasks_create) so they can't vanish: 18,249 (+15).
     # TASK-1755: one list/detail tool with bounded typed selectors, not paired
     # inventory/detail tools. Measured 18,565 (+316); replaces raw DB queries.
-    assert total <= 18565, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-1538: usage_utility_rollup, one aggregate read tool: 18,640 (+75).
+    assert total <= 18640, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 

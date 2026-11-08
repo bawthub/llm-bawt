@@ -31,6 +31,9 @@ class RecallCompletionRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=32_000)
     system: str = Field(min_length=1, max_length=4_000)
     max_tokens: int = Field(default=1000, ge=1, le=1600)
+    # The bot the recall serves: a usage-row label only, never a model, prompt or
+    # identity input (TASK-1538). ``bot_id`` itself stays rejected.
+    usage_bot_id: str | None = Field(default=None, max_length=64, pattern=r"^[A-Za-z0-9_.-]+$")
 
     @field_validator("prompt", "system")
     @classmethod
@@ -75,7 +78,7 @@ class RecallCompletionRunner:
         response = complete_utility(
             RawCompletionRequest(prompt=request.prompt, system=request.system,
                                  max_tokens=request.max_tokens, temperature=0.0),
-            timeout_seconds=COMPLETION_TIMEOUT_SECONDS,
+            timeout_seconds=COMPLETION_TIMEOUT_SECONDS, caller="recall", bot_id=request.usage_bot_id,
         )
         packet = {"content": response.content}
         if (tokens(response.content) > request.max_tokens

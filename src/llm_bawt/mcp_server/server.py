@@ -856,6 +856,9 @@ from . import bot_grant_tools as _bot_grant_tools  # noqa: F401, E402
 # A bot moves itself into a free house or out of its own (TASK-2118)
 from . import house_tools as _house_tools  # noqa: F401, E402
 
+# Utility-model token use per day and caller (TASK-1538)
+from . import usage_tools as _usage_tools  # noqa: F401, E402
+
 # Durable bot wake-ups over prompt schedules (TASK-1719)
 from . import schedule_tools as _schedule_tools  # noqa: F401, E402
 

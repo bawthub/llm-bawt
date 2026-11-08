@@ -165,7 +165,7 @@ def generate_session_title(engine, session_id: str, bot_id: str, user_id: str | 
         from ..service.utility_completion import complete_utility
 
         def complete(request):
-            return complete_utility(request, timeout_seconds=TIMEOUT_SECONDS)
+            return complete_utility(request, timeout_seconds=TIMEOUT_SECONDS, caller="title")
 
     result = complete(RawCompletionRequest(prompt=prompt, max_tokens=64, temperature=0.2))
     title = clean_title(result.content)
