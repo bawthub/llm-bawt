@@ -95,14 +95,7 @@ async def test_no_match_records_the_empty_read_and_errors_record_nothing():
     assert sink.writes[0][3] == [] and sink.writes[0][2] == {"messages": packet["coverage"]["messages"]}
 
     failed = Sink()
-
-    class Busy(Model):
-        async def synthesize(self, *args):
-            raise RecallError("busy")
-
-    # Unusable model output now degrades (TASK-1751); a non-degradable model
-    # failure after retrieval still records nothing.
-    for provider, model in ((named("messages", [message(1)]), Busy()),
+    for provider, model in ((named("messages", [message(1)]), Model("not json")),
                             (Source(error=RecallError("source_unavailable")), Model())):
         service = RecallService([provider], model, ledger=failed)
         packet = await run(service, RecallRequest(query="relay background", sources=("messages",)))

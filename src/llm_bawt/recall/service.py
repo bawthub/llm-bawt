@@ -50,9 +50,10 @@ ERROR_CODES = frozenset({
     "query_budget", "input_budget", "retrieval_budget", "invalid_synthesis",
     "ungrounded_synthesis", "task_provenance_incomplete", "timeout", "busy",
 })
-# Utility-model failures after evidence was retrieved and admitted. Budget,
-# authorization and busy errors are not here: they never degrade to quotes.
-DEGRADABLE_SYNTHESIS_ERRORS = frozenset({"timeout", "model_unavailable", "empty_response", "invalid_synthesis"})
+# Utility-model failures after evidence was retrieved and admitted that the
+# evidence itself cannot provoke. Bad model output (invalid/ungrounded) never
+# degrades to raw evidence, nor do budget, authorization or busy errors.
+DEGRADABLE_SYNTHESIS_ERRORS = frozenset({"timeout", "model_unavailable", "empty_response"})
 
 
 logger = logging.getLogger(__name__)

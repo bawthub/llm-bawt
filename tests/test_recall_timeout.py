@@ -115,7 +115,7 @@ async def test_timeout_handle_refreshes_with_same_authority_and_scope():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("code", ["model_unavailable", "empty_response", "invalid_synthesis"])
+@pytest.mark.parametrize("code", ["model_unavailable", "empty_response"])
 async def test_model_failures_after_retrieval_degrade_to_quotes(code):
     """TASK-1751: a failed utility model keeps the retrieved, authorized evidence."""
     class Failed(Model):
@@ -128,18 +128,7 @@ async def test_model_failures_after_retrieval_degrade_to_quotes(code):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("raw", ["not json", '{"findings": "nope"}', "x " * 5000])
-async def test_unusable_model_output_degrades_instead_of_discarding(raw):
-    class Bad(Model):
-        async def synthesize(self, *args):
-            return raw
-    result = await RecallService([Source()], Bad()).recall(request(), SCOPE)
-    assert result["status"] == "partial" and result["error_code"] == "invalid_synthesis"
-    assert result["findings"] and result["metrics"]["utility_output_tokens"] == 0
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("code", ["busy", "unauthorized", "input_budget"])
+@pytest.mark.parametrize("code", ["busy", "unauthorized", "input_budget", "invalid_synthesis"])
 async def test_other_model_failures_do_not_gain_a_fallback(code):
     class Failed(Model):
         async def synthesize(self, *args):
