@@ -32,7 +32,8 @@ import re
 from urllib.parse import urlencode
 
 if __package__:
-    from .compose_config import BUILT_PROFILE, built_image_tag, evaluate, port_list
+    from .compose_config import (BUILT_PROFILE, GPU_BUILT_PROFILE, ComposeError, built_image_tag, evaluate,
+                                gpu_preflight, gpu_verify, port_list)
     from .compose_render import OPS_JOB_LABEL, SAFE_PATH, label_files_valid, validate_interpolation_env
     from .config_reconcile import (CONTAINER_NAME_PATTERN, ConfigReconciler, check_compose_identity,
                                    current_config_hash, valid_hashes, validate_renderer_image,
@@ -42,7 +43,8 @@ if __package__:
     from .source_state import (SOURCE_FIELDS, SourceChecker, SourceStateError, source_commit, source_plan,
                                valid_classification, valid_source_commit, validate_source_spec)
 else:  # standalone immutable worker
-    from compose_config import BUILT_PROFILE, built_image_tag, evaluate, port_list
+    from compose_config import (BUILT_PROFILE, GPU_BUILT_PROFILE, ComposeError, built_image_tag, evaluate,
+                                gpu_preflight, gpu_verify, port_list)
     from compose_render import OPS_JOB_LABEL, SAFE_PATH, label_files_valid, validate_interpolation_env
     from config_reconcile import (CONTAINER_NAME_PATTERN, ConfigReconciler, check_compose_identity,
                                   current_config_hash, valid_hashes, validate_renderer_image,
@@ -111,8 +113,10 @@ _CLASSES = ("source_mounts", "data_mounts", "opaque_env")
 
 
 def validate_app_spec(spec: dict) -> dict:
-    if not isinstance(spec, dict) or set(spec) != _SPEC_KEYS:
+    if not isinstance(spec, dict) or set(spec) - {"gpu"} != _SPEC_KEYS:
         raise ValueError("app config reconcile spec has missing or unsupported fields")
+    if "gpu" in spec and spec["gpu"] is not True:  # TASK-1844: opt-in only
+        raise ValueError("gpu must be true when present")
     if spec["action"] != ACTION:
         raise ValueError("not an app config reconcile spec")
     validate_target_fields(spec, _PATTERNS)
@@ -120,6 +124,11 @@ def validate_app_spec(spec: dict) -> dict:
     validate_label_compose_config(spec)
     validate_source_spec(spec)
     return spec
+
+
+def app_profile(spec: dict):
+    """TASK-1844: the GPU profile only for a spec that opts in."""
+    return GPU_BUILT_PROFILE if spec.get("gpu") is True else BUILT_PROFILE
 
 
 def image_tag(spec: dict, desired: dict | None = None) -> str:
@@ -150,7 +159,7 @@ def app_config_binding(spec: dict, container: dict, image: dict, renderer, *,
     ref = container["Config"].get("Image", "")
     if image["Id"] != container["Image"]:
         raise ValueError("app config target must run its own Compose-built image")
-    result = evaluate(spec, container, image, renderer, ref, BUILT_PROFILE)
+    result = evaluate(spec, container, image, renderer, ref, app_profile(spec))
     desired = result["desired"]
     tag = image_tag(spec, desired)
     if ref != image["Id"] and ref not in image_refs(tag):
@@ -436,13 +445,39 @@ class AppConfigReconciler(SourceGuardedReconciler):
 
     def _before_swap(self):
         self._check_dependencies()
+        self._check_gpu()
         self._recheck_source()
+
+    def _check_gpu(self):
+        """TASK-1844: the daemon must offer every desired CDI device and the
+        runtime, read now, before anything is created or stopped."""
+        if "gpu" not in self._desired:
+            return
+        self._phase("gpu-preflight")
+        try:
+            info = self.api.request("GET", "/info")
+        except Exception as exc:  # noqa: BLE001 - fail closed, nothing touched
+            self._fail(f"gpu_daemon_unreadable ({type(exc).__name__}); nothing changed", known=True)
+        try:
+            gpu_preflight(self._desired, info)
+        except ComposeError as exc:
+            self._fail(f"{exc}; nothing changed", known=True)
+
+    def _after_create(self, new_id):
+        """TASK-1844: the created container must carry exactly the desired GPU
+        configuration before the old one stops; a dropped key is a failure."""
+        if "gpu" not in self._desired:
+            return
+        created = self.api.request("GET", f"/containers/{new_id}/json")
+        mismatch = gpu_verify(self._desired, created)
+        if mismatch:
+            raise StepError(f"gpu_config_mismatch ({', '.join(mismatch)})")
 
 
 __all__ = ["ACTION", "BUILT_PROFILE_LABEL", "HEALTH_PATTERNS", "PROCESS_PROFILE_LABEL", "SCHEMA",
            "SOURCE_GUARD_LABEL", "WORKER_CAPABILITY_LABEL",
            "AppConfigReconciler", "ServiceConfigReconciler", "SourceGuardedReconciler",
-           "app_config_binding",
+           "app_config_binding", "app_profile",
            "approval_text", "image_refs", "image_tag", "newly_trusted", "snapshot_approval_text", "trust_text",
            "uses_process_profile", "valid_app_binding", "valid_image_tag", "validate_app_spec",
            "validate_health_value",

@@ -307,3 +307,31 @@ pulls, and it binds the image by ID, never by tag.
   row, enable it, then `ops_run`. The generic `ops_run` approval policy gates
   the run. The target is dev only, so the approver is the coordinating arbiter,
   not Nick.
+
+## GPU service kind (TASK-1844)
+
+`llm-bawt.reconcile-local-model-bridge-config` is an app reconcile with
+`gpu: true`. It ships disabled.
+
+- **Profile** (`GPU_BUILT_PROFILE`): the built profile plus `runtime`,
+  `devices` and `ipc`, native CDI only. `runtime` must be absent or `runc`,
+  `ipc` absent or `host`, and every device a CDI name such as
+  `nvidia.com/gpu=all`. Another runtime, a host device path or a duplicate
+  refuses (`unsupported_compose_key`). The recreate sets `Runtime`, `IpcMode`
+  and a `cdi` `DeviceRequest`. Docker adds `label=disable` for host IPC; that
+  option is ignored in drift only when the service did not declare it.
+- **Preflight** (before any mutation): `GET /info` must list the runtime and
+  every desired CDI device (`gpu_runtime_missing`, `gpu_cdi_device_missing`,
+  `gpu_daemon_unreadable`).
+- **Created-container check:** the unstarted container's runtime, IPC, devices
+  and security options must match. A mismatch (`gpu_config_mismatch`) deletes
+  it before the old container stops, so nothing changed.
+- **GPU handoff reservation:** the job insert sets the handoff row to
+  `gpu_reconciling` with the job's key (voice or unknown owner, idle, no open
+  video claims). Handoffs refuse while it is held, and the reconcile refuses
+  while a handoff is active. Dispatch re-checks the key. A known outcome
+  releases it: success, never dispatched, nothing changed, or restored. A
+  lost, timed-out or otherwise uncertain job keeps it held, with the reason in
+  `last_error`, until an operator verifies the target. A plan or sequence
+  carrying a GPU reconcile refuses (`gpu_reconcile_nested`).
+- **Worker capability:** `llm-bawt.ops.gpu-profile`; approval refuses without it.

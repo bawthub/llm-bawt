@@ -314,6 +314,15 @@ class ImageDeployer:
             new_id = self.api.request("POST", "/containers/create?" + urlencode({"name": temp}), body=body)["Id"]
         except Exception as exc:  # noqa: BLE001 - production untouched; never echo the body
             self._fail(f"create failed ({safe_error(exc)}); nothing changed", known=True)
+        try:
+            self._phase("verify-created")
+            self._after_create(new_id)
+        except Exception as exc:  # noqa: BLE001 - production untouched; drop the unstarted container
+            try:
+                self.api.request("DELETE", f"/containers/{new_id}?force=1&v=0")
+            except Exception:  # noqa: BLE001 - the -next name is reported, never reused
+                self.detail["warnings"].append(f"unstarted container {temp} not removed")
+            self._fail(f"verify-created failed ({safe_error(exc)}); nothing changed", known=True)
         self.detail["deployed"] = {"container_id": new_id, "image_id": new_image["Id"], "image_ref": ref,
                                    "release": release_from_labels(new_image["Config"].get("Labels"))}
         self._phase("stop-old")
@@ -333,6 +342,10 @@ class ImageDeployer:
         except Exception as exc:  # noqa: BLE001 - every failure must attempt restore
             self._restore(Swap(old["Id"], new_id, prev), safe_error(exc))
         return Swap(old["Id"], new_id, prev)
+
+    def _after_create(self, new_id):
+        """Read-only check of the created (unstarted) container before the
+        old one stops; raising leaves production untouched. TASK-1844."""
 
     def _commit_swap(self, swap: "Swap"):
         """Delete the stopped previous container. Deployed and verified, so a

@@ -24,6 +24,7 @@ from .execution_mode import snapshot_execution_mode
 from .operation_revision import OperationChanged, changed_reason
 from .gpu_guard import (GPU_VOICE_SERVICES, STOP_ACTION, GpuGuardUnverifiable, gpu_voice_stop_target,
                         gpu_voice_target, handoff_only_service)
+from .gpu_reconcile import is_gpu_reconcile, nested_gpu_reconcile
 from .house_guard import HouseOccupancyUnverifiable, house_targets, occupancy_reader, override_requested
 from .self_target import SelfTargetError
 from .image_deploy import DEPLOY_ACTION, IMAGE_ACTIONS
@@ -588,6 +589,9 @@ class OpsService:
         op = OpsOperation(**{k: v for k, v in snapshot["operation"].items()
                              if k not in {"created_at", "updated_at", "soft_deleted_at"}})
         self._require_gpu_handoff(snapshot, create_fence)
+        create_fence = self._gpu_reconcile_fence(snapshot, create_fence, key, operation_slug)
+        from ..media.gpu_handoff_store import HandoffConflict
+
         quiesce = bool(snapshot.get("quiesce"))
         if quiesce and getattr(getattr(self.store.engine, "dialect", None), "name", None) != "postgresql":
             raise OpsDispatchError("quiesce_unavailable", "quiesce operations require the PostgreSQL ops store")
@@ -616,6 +620,10 @@ class OpsService:
             raise OpsDispatchError("operation_changed", str(exc)) from exc
         except IdempotencyConflict as exc:
             raise OpsDispatchError("idempotency_conflict", str(exc)) from exc
+        except HandoffConflict as exc:  # TASK-1844: nothing inserted, nothing reserved
+            if not is_gpu_reconcile(snapshot.get("spec")):
+                raise  # The handoff controller's own fences keep their contract.
+            raise OpsDispatchError(exc.code, str(exc)) from exc
         # A quiescing job returns at once; the reconciler's driver holds,
         # drains and dispatches it. Admission-only, every job does: the
         # reconciler, woken by the create notify, dispatches it (TASK-1169 S3b).
@@ -680,6 +688,26 @@ class OpsService:
                 f"this operation stops the GPU voice service {stopped!r}; only a GPU handoff "
                 "can run it, because only a handoff can start it again"))
 
+    @staticmethod
+    def _gpu_reconcile_fence(snapshot, create_fence, key, operation_slug):
+        """TASK-1844: a GPU-service reconcile reserves the GPU handoff row in
+        its job-insert transaction, after any approval fence. It runs only as
+        its own job: a plan or sequence carrying one refuses."""
+        from ..media.gpu_handoff_store import GpuHandoffFence
+
+        if nested_gpu_reconcile(snapshot):
+            raise OpsDispatchError("gpu_reconcile_nested", "a GPU service reconcile runs only as its own job")
+        if not is_gpu_reconcile(snapshot.get("spec")):
+            return create_fence
+        reserve = GpuHandoffFence.gpu_reconcile(key, operation_slug)
+        if create_fence is None:
+            return reserve
+
+        def fence(session):
+            create_fence(session)
+            reserve(session)
+        return fence
+
     def _gpu_stop_target(self, snapshot, *, live):
         """The GPU voice service a job would stop (TASK-1707), mirroring
         :meth:`_creation_gpu_target`: at creation, prepare's recorded
@@ -714,6 +742,9 @@ class OpsService:
         so a refusal keeps the job queued with no worker, as any preflight."""
         from ..media.gpu_handoff_store import GpuHandoffStore
 
+        if is_gpu_reconcile(snapshot.get("spec")) and not GpuHandoffStore(self.store.engine).admits(
+                job.idempotency_key, job.operation_slug):
+            raise ExecutorError("gpu_reconcile_unreserved: the GPU handoff no longer holds this reconcile")
         try:
             service = (self._gpu_voice_target(snapshot, live=True)
                        or self._gpu_stop_target(snapshot, live=True))

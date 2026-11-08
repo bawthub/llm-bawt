@@ -577,6 +577,59 @@ _CONFIG_SEEDS: list[dict[str, Any]] = [{
     "category": "configuration",
     "approval_prompt_prefix": "Reconcile llm-bawt app configuration with the same image (cuts in-flight turns)",
 }, {
+    # TASK-1844: the GPU local-model bridge, Compose-built from the CUDA image.
+    # ``gpu: true`` selects the native-CDI GPU profile; the job reserves the
+    # GPU handoff row from insert until its outcome is known.
+    "slug": "llm-bawt.reconcile-local-model-bridge-config",
+    "title": "Reconcile local-model-bridge configuration",
+    "description": (
+        "Recreate the GPU local-model bridge from its declared Compose service using the SAME running image. "
+        "Always recreates to load the approved bind-mounted source. No build or pull; the image is bound by "
+        "ID. Native CDI only: refuses unless the daemon offers every declared CDI device and runc, and the "
+        "created container carries exactly the declared runtime, IPC, devices and security options. Holds "
+        "the GPU handoff for the whole job; refuses while a handoff, video ownership or render is active. "
+        "Verifies health and restores the previous container on failure. Unloads local models and cuts "
+        "in-flight local inference and embeddings."
+    ),
+    "enabled": False,
+    "executor_kind": EXECUTOR_DOCKER,
+    "target_host": "",
+    "working_directory": None,
+    "command_script": _spec(
+        action="reconcile_app_config", container_name="llm-bawt-local-model-bridge",
+        compose_project=_LLM_BAWT_PROJECT, compose_service="local-model-bridge", gpu=True,
+        compose_config={"renderer_image": _PROD_COMPOSE_CONFIG["renderer_image"]},
+        display_values={}, stat_paths=[], stop_grace_seconds=30, health_timeout_seconds=180,
+        health_url="http://127.0.0.1:8683/health", health_field="redis", health_value=True,
+        source_repository="bawthub/llm-bawt", source_branch="master", source_mounts=["/app/src"],
+        # Destinations are the product's own Compose file's container paths.
+        data_mounts=["/app/.logs", "/app/models", "/root/.config/llm-bawt", "/root/.cache/huggingface",
+                     "/root/.cache/llm-bawt/models"],
+        # The service's own Compose environment names (never values).
+        env_names=["FLASHINFER_CUDA_ARCH_LIST", "HF_HUB_DISABLE_PROGRESS_BARS", "HF_HUB_DISABLE_XET", "HF_TOKEN",
+                   "LLAMA_CPP_N_GPU_LAYERS", "LLM_BAWT_API_URL", "LLM_BAWT_DEFAULT_MODEL_ALIAS",
+                   "LLM_BAWT_DEFAULT_USER", "LLM_BAWT_LLAMA_CPP_FLASH_ATTN", "LLM_BAWT_LLAMA_CPP_N_BATCH",
+                   "LLM_BAWT_LLAMA_CPP_N_CTX", "LLM_BAWT_LLAMA_CPP_N_GPU_LAYERS", "LLM_BAWT_LOG_DIR",
+                   "LLM_BAWT_LOG_PREFIX", "LLM_BAWT_MODEL_CACHE_DIR", "LLM_BAWT_POSTGRES_DATABASE",
+                   "LLM_BAWT_POSTGRES_HOST", "LLM_BAWT_POSTGRES_PASSWORD", "LLM_BAWT_POSTGRES_PORT",
+                   "LLM_BAWT_POSTGRES_USER", "LLM_BAWT_REDIS_URL", "LLM_BAWT_SERVICE_HOST",
+                   "LOCAL_MODEL_BACKEND_NAME", "LOCAL_MODEL_BRIDGE_EMBED_PORT", "LOCAL_MODEL_BRIDGE_HEALTH_PORT",
+                   "LOCAL_MODEL_BRIDGE_LOG_LEVEL", "LOCAL_MODEL_BRIDGE_REQUEST_TIMEOUT", "LOCAL_MODEL_EMBED_DEVICE",
+                   "LOCAL_MODEL_VIDEO_PORT", "POSTGRES_DATABASE", "POSTGRES_HOST", "POSTGRES_PASSWORD",
+                   "POSTGRES_PORT", "POSTGRES_USER", "PYTORCH_CUDA_ALLOC_CONF", "REDIS_URL",
+                   "TOKENIZERS_PARALLELISM", "TRANSFORMERS_NO_ADVISORY_WARNINGS", "TRANSFORMERS_VERBOSITY",
+                   "VLLM_USE_FLASHINFER_SAMPLER"],
+    ),
+    "args_schema_json": _schema({}),
+    "args_defaults_json": _defaults(),
+    "timeout_seconds": 900,
+    "start_delay_seconds": 0,
+    "max_output_bytes": 65536,
+    "max_concurrent": 1,
+    "risk_level": RISK_HIGH,
+    "category": "configuration",
+    "approval_prompt_prefix": "Reconcile local-model-bridge configuration with the same image (unloads local models)",
+}, {
     # TASK-1474 step 4: the BawtHub backend, also Compose-built, recreated at
     # the same image. Not a self-target (the app serves the approval), so no
     # start delay. Same refusals and trust block as the app row.

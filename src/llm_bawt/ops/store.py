@@ -710,7 +710,19 @@ class OpsStore:
                 ledger = read_ledger(json.loads(job.sequence_json))
                 values["sequence_json"] = canonical_json(interrupted(
                     ledger, error_text or state, unknown=state in ("lost", "timed_out")))
-        return self._transition(job_id, _OPEN_STATES, values)
+        job = self._transition(job_id, _OPEN_STATES, values)
+        self._settle_gpu_reconcile(job)
+        return job
+
+    def _settle_gpu_reconcile(self, job):
+        """TASK-1844: a terminal GPU-service reconcile releases its GPU handoff
+        reservation on a known outcome, else records why it stays held."""
+        if job is None or job.state not in JOB_TERMINAL_STATES or not job.invocation_snapshot_json:
+            return
+        from .gpu_reconcile import is_gpu_reconcile, settle
+
+        if is_gpu_reconcile(json.loads(job.invocation_snapshot_json).get("spec")):
+            settle(self.engine, job)
 
     def note_queued_error(self, job_id, error):
         return self._transition(job_id, (JOB_QUEUED,), {"error_text": error})
@@ -775,6 +787,8 @@ class OpsStore:
                  "prefix": f"{code}: ", "deadline": float(deadline_seconds)})
             if result.rowcount == 1:
                 append_job_transition_by_id(getattr(self, "events", None), conn, job_id)
+        if result.rowcount == 1:
+            self._settle_gpu_reconcile(self.get_job(job_id))  # TASK-1844: never dispatched
         return result.rowcount == 1
 
     def touch_reconcile(self, job_id):

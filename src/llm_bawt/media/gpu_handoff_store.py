@@ -86,6 +86,9 @@ _state = Table(
     Column("last_error", Text),
     # The ops idempotency key of the one TTS restart this fence admits.
     Column("tts_restart_key", String(160)),
+    # TASK-1844: the ops idempotency key of the one GPU-service reconcile this
+    # reservation admits, held from job insert until a known outcome.
+    Column("reconcile_key", String(160)),
 )
 
 
@@ -110,6 +113,7 @@ class HandoffState:
     last_job_id: str | None
     last_error: str | None
     tts_restart_key: str | None = None
+    reconcile_key: str | None = None
 
 
 def _bootstrap_schema(conn) -> None:
@@ -120,8 +124,13 @@ def _bootstrap_schema(conn) -> None:
         conn.execute(text("ALTER TABLE gpu_handoff_state ALTER COLUMN offer_target TYPE varchar(32)"))
         # v6 (TASK-1171): the TTS restart fence. create_all never adds columns.
         conn.execute(text("ALTER TABLE gpu_handoff_state ADD COLUMN IF NOT EXISTS tts_restart_key varchar(160)"))
-    elif "tts_restart_key" not in {c["name"] for c in inspect(conn).get_columns("gpu_handoff_state")}:
-        conn.execute(text("ALTER TABLE gpu_handoff_state ADD COLUMN tts_restart_key varchar(160)"))
+        # v7 (TASK-1844): the GPU-service reconcile reservation.
+        conn.execute(text("ALTER TABLE gpu_handoff_state ADD COLUMN IF NOT EXISTS reconcile_key varchar(160)"))
+        return
+    columns = {c["name"] for c in inspect(conn).get_columns("gpu_handoff_state")}
+    for column in ("tts_restart_key", "reconcile_key"):
+        if column not in columns:
+            conn.execute(text(f"ALTER TABLE gpu_handoff_state ADD COLUMN {column} varchar(160)"))
 
 
 def _lock_state(conn):
@@ -155,6 +164,16 @@ def _stop_admitted(row, key: str, operation_slug: str) -> bool:
             and row["pending_action"] == action)
 
 
+#: TASK-1844: the phase a GPU-service reconcile holds from job insert until
+#: its outcome is known. offer() admits only idle/offered (and a voice
+#: restore's recovery_required), so every handoff refuses while it is held.
+RECONCILE_PHASE = "gpu_reconciling"
+
+
+def _reconcile_admitted(row, key: str) -> bool:
+    return row["phase"] == RECONCILE_PHASE and row["reconcile_key"] == key
+
+
 def _restart_admitted(row, key: str, operation_slug: str) -> bool:
     return (operation_slug == TTS_RESTART_OPERATION and row["phase"] == "tts_restarting"
             and row["tts_restart_key"] == key)
@@ -169,13 +188,20 @@ class GpuHandoffFence:
     """
 
     def __init__(self, kind: str, *, key: str, operation_slug: str):
-        if kind not in ("tts_restart", "voice_start", "voice_stop"):
+        if kind not in ("tts_restart", "voice_start", "voice_stop", "gpu_reconcile"):
             raise ValueError(f"unknown GPU handoff fence {kind!r}")
         self.kind, self.key, self.operation_slug = kind, key, operation_slug
 
     @classmethod
     def tts_restart(cls, key: str) -> GpuHandoffFence:
         return cls("tts_restart", key=key, operation_slug=TTS_RESTART_OPERATION)
+
+    @classmethod
+    def gpu_reconcile(cls, key: str, operation_slug: str) -> GpuHandoffFence:
+        """TASK-1844: reserve the GPU for one same-image recreate of a GPU
+        Compose service. Persisted, not check-only, so no handoff can begin
+        while the worker it would drive is being replaced or restored."""
+        return cls("gpu_reconcile", key=key, operation_slug=operation_slug)
 
     @classmethod
     def voice_start(cls, *, generation: int, operation_slug: str) -> GpuHandoffFence:
@@ -202,6 +228,9 @@ class GpuHandoffFence:
                 raise HandoffConflict("Moshi stop is no longer this switch's pending action",
                                       code="gpu_handoff_stale")
             return
+        if self.kind == "gpu_reconcile":
+            self._reserve_reconcile(conn, row)
+            return
         if row["phase"] == "tts_restarting":
             if row["tts_restart_key"] == self.key:
                 return  # Same request: the unique key replays the existing job.
@@ -214,6 +243,21 @@ class GpuHandoffFence:
         conn.execute(_state.update().where(_state.c.id == 1).values(
             phase="tts_restarting", generation=row["generation"] + 1, tts_restart_key=self.key))
 
+    def _reserve_reconcile(self, conn, row) -> None:
+        if row["phase"] == RECONCILE_PHASE:
+            if row["reconcile_key"] == self.key:
+                return  # Same request: the unique key replays the existing job.
+            raise HandoffConflict("A GPU service reconcile is already in progress",
+                                  code="gpu_reconcile_in_progress")
+        if row["phase"] != "idle" or row["owner"] not in ("voice", "unknown"):
+            raise HandoffConflict("GPU service reconciles only while voice or no one owns an idle GPU",
+                                  code="gpu_not_idle")
+        if conn.execute(select(_video_jobs.c.id).limit(1)).first() is not None:
+            raise HandoffConflict("Video render claims are still open", code="active_video_claims")
+        _changed(conn)
+        conn.execute(_state.update().where(_state.c.id == 1).values(
+            phase=RECONCILE_PHASE, generation=row["generation"] + 1, reconcile_key=self.key))
+
 
 class GpuHandoffStore:
     """Serialize transitions on one database row; fail closed on ambiguity."""
@@ -222,7 +266,7 @@ class GpuHandoffStore:
 
     def __init__(self, engine: Engine):
         self.engine = engine
-        self._guard.run(engine, "gpu-handoff-v6", _bootstrap_schema)
+        self._guard.run(engine, "gpu-handoff-v7", _bootstrap_schema)
         with engine.begin() as conn:
             # A deployment cannot infer ownership from running services. Reconcile
             # observations before offering a transition from unknown. Upsert so
@@ -242,6 +286,7 @@ class GpuHandoffStore:
             next_action=row["next_action"], pending_action=row["pending_action"],
             expires_at=row["offer_expires"], last_job_id=row["last_job_id"],
             last_error=row["last_error"], tts_restart_key=row["tts_restart_key"],
+            reconcile_key=row["reconcile_key"],
         )
 
     def _locked(self, conn):
@@ -252,7 +297,31 @@ class GpuHandoffStore:
         with self.engine.begin() as conn:
             row = _lock_state(conn)
             return (_start_admitted(row, key, operation_slug) or _stop_admitted(row, key, operation_slug)
-                    or _restart_admitted(row, key, operation_slug))
+                    or _restart_admitted(row, key, operation_slug) or _reconcile_admitted(row, key))
+
+    def release_gpu_reconcile(self, key: str, *, error: str | None = None) -> bool:
+        """Return a held reconcile reservation to idle. Idempotent and
+        key-checked: False when the row no longer holds this key (already
+        released, or never reserved). The caller proves a KNOWN outcome first;
+        an uncertain one must leave it held (``hold_gpu_reconcile``)."""
+        with self.engine.begin() as conn:
+            row = _lock_state(conn)
+            if not _reconcile_admitted(row, key):
+                return False
+            _changed(conn)
+            conn.execute(_state.update().where(_state.c.id == 1).values(
+                phase="idle", generation=row["generation"] + 1, reconcile_key=None, last_error=error))
+            return True
+
+    def hold_gpu_reconcile(self, key: str, reason: str) -> bool:
+        """Record why a reservation stays held after an uncertain outcome."""
+        with self.engine.begin() as conn:
+            row = _lock_state(conn)
+            if not _reconcile_admitted(row, key) or row["last_error"] == reason:
+                return False
+            _changed(conn)
+            conn.execute(_state.update().where(_state.c.id == 1).values(last_error=reason))
+            return True
 
     def release_tts_restart(self, key: str) -> HandoffState:
         """CAS the TTS restart fence back to idle voice. The caller proves the

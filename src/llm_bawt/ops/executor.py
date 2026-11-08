@@ -18,8 +18,8 @@ from ..service.providers.github_deploy import GhcrPullAdapter
 from ..utils.config import Config
 from .app_config_reconcile import (ACTION as APP_CONFIG_ACTION, BUILT_PROFILE_LABEL, PROCESS_PROFILE_LABEL,
                                    SOURCE_GUARD_LABEL, WORKER_CAPABILITY_LABEL as APP_CONFIG_WORKER_LABEL,
-                                   app_config_binding, uses_process_profile, validate_app_spec)
-from .compose_config import (BUILT_PROFILE, DEV_PROFILE, HARDENED_PROFILE, HARDENED_PROFILE_LABEL,
+                                   app_config_binding, app_profile, uses_process_profile, validate_app_spec)
+from .compose_config import (GPU_PROFILE_LABEL, DEV_PROFILE, HARDENED_PROFILE, HARDENED_PROFILE_LABEL,
                              CGROUP_PARENT_PROFILE_LABEL, INIT_MEMORY_PROFILE_LABEL, PINNED_PROCESS_PROFILE,
                              evaluate, needs_cgroup_parent_worker, needs_init_memory_worker,
                              selected_profile)
@@ -556,7 +556,11 @@ class DockerExecutor(Executor):
                     # TASK-1476: an older worker would refuse it mid-job; refuse first.
                     self._check_config_worker(self.execution_settings(spec), spec["action"],
                                               extra=(PROCESS_PROFILE_LABEL,))
-                profile = BUILT_PROFILE
+                if "gpu" in desired:
+                    # TASK-1844: an older worker would refuse the GPU keys mid-job.
+                    self._check_config_worker(self.execution_settings(spec), spec["action"],
+                                              extra=(GPU_PROFILE_LABEL,))
+                profile = app_profile(spec)
             elif spec["action"] == TAGGED_CONFIG_ACTION:
                 checker = (SourceChecker(self._render_api_factory(), spec["compose_config"]["renderer_image"],
                                          tag="src" + os.urandom(4).hex()) if source_guarded(spec) else None)

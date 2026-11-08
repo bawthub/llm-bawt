@@ -125,6 +125,20 @@ BUILT_PROFILE = ServiceProfile("built", frozenset({
     "build", "command", "container_name", "depends_on", "entrypoint", "environment", "extra_hosts", "healthcheck",
     "image", "init", "labels", "networks", "ports", "pull_policy", "restart", "security_opt", "stdin_open", "tmpfs",
     "tty", "volumes", "cgroup_parent", *MEMORY_KEYS}), built=True, models_process=True, pull_policies=BUILT_PULL_POLICIES)
+# TASK-1844: a Compose-built GPU service (local-model-bridge), selected only by
+# ``gpu: true`` on its reconcile spec; every other profile still refuses these
+# keys. Native CDI only: ``runtime`` is the literal ``runc`` (never the legacy
+# NVIDIA hook), ``devices`` are CDI names translated to a ``cdi`` device
+# request, ``ipc`` is ``host`` or undeclared. The desired configuration always
+# carries ``gpu``, so the profile owns all three.
+GPU_KEYS = frozenset({"runtime", "devices", "ipc"})
+GPU_BUILT_PROFILE = ServiceProfile("built-gpu", BUILT_PROFILE.keys | GPU_KEYS, built=True, models_process=True,
+                                   pull_policies=BUILT_PULL_POLICIES)
+# Worker image label proving it models, preflights and verifies the GPU keys.
+GPU_PROFILE_LABEL = "llm-bawt.ops.gpu-profile"
+_CDI_NAME = re.compile(r"[a-z0-9][a-z0-9.-]{0,62}(?:/[a-z0-9][a-z0-9.-]{0,62})+=[A-Za-z0-9_.:-]{1,64}")
+# The daemon adds this when the container shares the host IPC namespace.
+_IMPLICIT_HOST_IPC_OPT = "label=disable"
 # TASK-1476: a third-party image run by a mutable tag (crawl4ai). The rendered
 # ``image`` must equal the declared tag; the reconcile swaps to the RUNNING
 # image ID, so the tag is never re-resolved. Its healthcheck is the image's.
@@ -345,6 +359,85 @@ def _security_opt(value) -> list:
             or len(set(value)) != len(value):
         raise ComposeError("unsupported_compose_key", ["security_opt"])
     return list(value)
+
+
+def _gpu(service: dict) -> dict:
+    """TASK-1844: the GPU keys as the daemon stores them. Refuses anything
+    outside native CDI: another runtime, a host device path, ``gpus``."""
+    runtime = service.get("runtime")
+    if runtime not in (None, "runc"):
+        raise ComposeError("unsupported_compose_key", ["runtime"])
+    ipc = service.get("ipc")
+    if ipc not in (None, "host"):
+        raise ComposeError("unsupported_compose_key", ["ipc"])
+    devices = []
+    for entry in service.get("devices") or []:
+        # Compose renders a short CDI entry as {source, target, permissions}
+        # with source == target == the CDI name; a host path is refused.
+        name = entry.get("source") if isinstance(entry, dict) else entry
+        if (not isinstance(name, str) or not _CDI_NAME.fullmatch(name) or name in devices
+                or (isinstance(entry, dict) and (set(entry) - {"source", "target", "permissions"}
+                                                 or entry.get("target") not in (None, name)))):
+            raise ComposeError("unsupported_compose_key", ["devices"])
+        devices.append(name)
+    return {"runtime": "runc", "ipc": ipc or "", "devices": devices}
+
+
+def _running_gpu(host: dict) -> dict:
+    """The running container on :func:`_gpu`'s fields. A host device mapping
+    or a non-CDI device request has no desired equivalent and shows as such."""
+    ipc = host.get("IpcMode") or ""
+    devices, other = [], bool(host.get("Devices"))
+    for request in host.get("DeviceRequests") or []:
+        if (request or {}).get("Driver") == "cdi" and not request.get("Capabilities"):
+            devices += list(request.get("DeviceIDs") or [])
+        else:
+            other = True
+    if other:
+        devices.append("<non-cdi device>")
+    return {"runtime": host.get("Runtime") or "runc",
+            "ipc": "" if ipc in ("", "private", "shareable") else ipc, "devices": devices}
+
+
+def _security_compared(desired: dict, actual: dict) -> tuple[list, list]:
+    """SecurityOpt as compared: the daemon's own ``label=disable`` for a host
+    IPC namespace is ignored only when the service did not declare it."""
+    want, have = desired.get("security_opt", []), list(actual.get("security_opt", []))
+    if ((desired.get("gpu") or {}).get("ipc") == "host" and _IMPLICIT_HOST_IPC_OPT not in want
+            and _IMPLICIT_HOST_IPC_OPT in have):
+        have.remove(_IMPLICIT_HOST_IPC_OPT)
+    return want, have
+
+
+def gpu_preflight(desired: dict, info: dict) -> None:
+    """TASK-1844: refuse before any mutation unless the daemon offers every
+    desired CDI device and the runtime. ``info`` is ``GET /info``."""
+    gpu = desired.get("gpu")
+    if gpu is None:
+        return
+    if not isinstance(info, dict):
+        raise ComposeError("gpu_daemon_unreadable")
+    if gpu["runtime"] not in (info.get("Runtimes") or {}):
+        raise ComposeError("gpu_runtime_missing", [gpu["runtime"]])
+    found = {d.get("ID") for d in info.get("DiscoveredDevices") or []
+             if isinstance(d, dict) and d.get("Source") == "cdi"}
+    missing = [name for name in gpu["devices"] if name not in found]
+    if missing:
+        raise ComposeError("gpu_cdi_device_missing", missing)
+
+
+def gpu_verify(desired: dict, created: dict) -> list[str]:
+    """Post-create: GPU fields of the created container that differ from
+    desired (empty = verified). A dropped key is a mismatch, never silent."""
+    if "gpu" not in desired:
+        return []
+    actual = {"gpu": _running_gpu(created.get("HostConfig") or {}),
+              "security_opt": list((created.get("HostConfig") or {}).get("SecurityOpt") or [])}
+    names = [f"gpu:~{k}" for k in desired["gpu"] if desired["gpu"][k] != actual["gpu"][k]]
+    want, have = _security_compared(desired, actual)
+    if want != have:
+        names.append("security_opt:~")
+    return names
 
 
 def _duration(value, key: str) -> int:
@@ -609,6 +702,8 @@ def translate(rendered: dict, spec: dict, image_ref: str, profile: ServiceProfil
         desired["memory"] = _memory(service)
     if HARDENING_KEYS <= profile.keys:
         desired["hardening"] = _hardening(service)
+    if GPU_KEYS <= profile.keys:
+        desired["gpu"] = _gpu(service)
     if built_tag is not None:
         desired["image"] = built_tag  # identity only: the swap uses the bound image ID
     return desired
@@ -656,7 +751,7 @@ def running(container: dict) -> dict:
             "stop_timeout": config.get("StopTimeout"), "init": bool(host.get("Init")),
             "cgroup_parent": host.get("CgroupParent") or "",
             "memory": {"Memory": int(host.get("Memory") or 0), "MemorySwap": int(host.get("MemorySwap") or 0)},
-            "hardening": _running_hardening(host)}
+            "hardening": _running_hardening(host), "gpu": _running_gpu(host)}
 
 
 def normalized(state: dict, image: dict) -> dict:
@@ -707,8 +802,13 @@ def drift(desired: dict, actual: dict) -> list[str]:
             names.append(f"{name}:~")
     # A process-modelling profile owns SecurityOpt: an undeclared option on the
     # running container (it can weaken confinement) is drift and is removed.
-    if "ports" in desired and desired.get("security_opt", []) != actual.get("security_opt", []):
-        names.append("security_opt:~")
+    if "ports" in desired:
+        want, have = _security_compared(desired, actual)
+        if want != have:
+            names.append("security_opt:~")
+    # TASK-1844: only the GPU profile compares runtime, IPC and CDI devices.
+    if "gpu" in desired:
+        names += [f"gpu:~{k}" for k in desired["gpu"] if desired["gpu"][k] != actual["gpu"].get(k)]
     # ...and likewise its healthcheck (none declared = the image's own) and
     # tmpfs mounts (an undeclared one is removed).
     if "ports" in desired:
@@ -861,6 +961,13 @@ def apply_desired(body: dict, old: dict, desired: dict, *, container_name: str, 
         host["NanoCpus"] = hardening["NanoCpus"]
         host["PidsLimit"] = hardening["PidsLimit"] or None
         host["ReadonlyRootfs"] = hardening["ReadonlyRootfs"]
+    if "gpu" in desired:  # TASK-1844: exactly what Compose creates for native CDI
+        gpu = desired["gpu"]
+        host["Runtime"] = gpu["runtime"]
+        host["IpcMode"] = gpu["ipc"]  # "" = the daemon's default
+        host["Devices"] = None
+        host["DeviceRequests"] = ([{"Driver": "cdi", "Count": 0, "DeviceIDs": list(gpu["devices"]),
+                                    "Capabilities": None, "Options": None}] if gpu["devices"] else None)
     if host.get("NetworkMode") not in desired["networks"]:
         host["NetworkMode"] = desired["networks"][0]
     current = body.get("NetworkingConfig", {}).get("EndpointsConfig") or {}
