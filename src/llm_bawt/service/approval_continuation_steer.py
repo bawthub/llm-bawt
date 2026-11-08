@@ -55,8 +55,9 @@ def steer_lane(service, row) -> str:
     """Which lane owns this continuation's result, from its steer row.
 
     Only absorbing states decide. CANCELLED/FAILED are never re-queued, so a
-    steer that ended there before transport acceptance can no longer inject
-    the result, and the idle turn cannot duplicate it. Anything still live
+    steer that ended there without ever sending a steer command (skipped,
+    fenced, or last attempt proven rejected) can no longer inject the result,
+    and the idle turn cannot duplicate it. Anything still live
     (QUEUED, STEERING, DISPATCHING, or DELIVERED awaiting its started frame)
     is PENDING. A steer accepted by the bridge that never proved started is
     UNCERTAIN and, like the delivery fence itself, is not replayed.
@@ -81,7 +82,13 @@ def steer_lane(service, row) -> str:
     )):
         return UNCERTAIN
     if found.get("status") in ("CANCELLED", "FAILED"):
-        return UNCERTAIN if found.get("transport_accepted_at") is not None else FALLBACK
+        # A terminal row still in 'steer' mode had a steer RPC sent whose
+        # outcome may be unread (timeout, expired claim): a late started frame
+        # can still land. Only a row that never entered a steer attempt (or
+        # whose last attempt was proven rejected) is proof of non-delivery.
+        if found.get("delivery_mode") == "steer" or found.get("transport_accepted_at") is not None:
+            return UNCERTAIN
+        return FALLBACK
     return PENDING
 
 

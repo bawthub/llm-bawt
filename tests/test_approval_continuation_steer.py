@@ -147,7 +147,9 @@ def test_uncertain_or_accepted_then_ended_steer_is_never_resent():
     uncertain = _started_row(started=False)
     uncertain["metadata_json"]["steer_uncertain"] = {"generation": 1, "reason": "teardown"}
     for found in (uncertain, _started_row(started=False, status="FAILED"),
-                  _started_row(started=False, status="CANCELLED")):
+                  _started_row(started=False, status="CANCELLED"),
+                  # Codex r2: timed-out steer RPC, acceptance never read.
+                  _started_row(started=False, status="FAILED", accepted=False)):
         store = _store()
         row = _ready_row(store)
         service = _service(FakeDeliveryStore(row=found))
