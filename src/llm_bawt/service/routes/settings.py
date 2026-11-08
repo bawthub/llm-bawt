@@ -169,8 +169,10 @@ def _bot_profile_setting_keys() -> frozenset[str]:
     """Global runtime-setting keys a bot profile may show (TASK-1415).
 
     The global scope also holds connection records, ops evidence and app-wide
-    config, none of which are bot settings. Only keys declared as per-bot
-    tunables (the typed registry plus ``RuntimeTunables``) are inherited.
+    config, none of which are bot settings. Only keys declared in the typed
+    setting registry (runtime-setting storage) or ``RuntimeTunables`` are
+    inherited. That registry also declares a few global-only policies (for
+    example ``summarization_job``); they are not secrets, so they may appear.
     """
     from ...setting_definitions import SETTING_DEFINITIONS, STORAGE_RUNTIME_SETTING
     from ...utils.config import RuntimeTunables
@@ -183,7 +185,7 @@ def _bot_profile_setting_keys() -> frozenset[str]:
 def _effective_bot_settings(service, slug: str) -> dict[str, object]:
     """Return effective bot settings with the same precedence as runtime resolution.
 
-    Global rows contribute only declared per-bot tunables; credential rows never
+    Global rows contribute only registry-declared settings; credential rows never
     appear, whichever scope they were written to (TASK-1415).
     """
     from ...bots import BotManager
