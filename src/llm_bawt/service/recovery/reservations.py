@@ -15,6 +15,10 @@ turn row). A stalled claimant that resumes afterwards then fails its fence
   left alone: ``recover_expired`` re-arms it on purpose, so the requeued
   delivery keeps its place ahead of later chats, and its next claim reuses it
   (Vex S2).
+  A row with no delivery id in its payload is matched to its delivery by
+  ``turn_id`` (TASK-2142: a re-armed row that already ran carries the chat
+  payload). If the delivery is terminal but the row shows execution evidence,
+  it is ended ``aborted`` rather than deleted.
 - An unowned ordinary reservation is reported, never released.
 
 The released row is deleted, so the run's stamp goes on its producer's row
@@ -32,13 +36,17 @@ from typing import Any
 from sqlalchemy import text as sa_text
 
 from ...approval_models import CONT_DISPATCHING, CONTINUATION_LEASE_SECONDS
+from ...inter_bot_delivery_recovery import DeliveryLeaseRecovery
 from ..turn_admission import lock_target, release_reservation, requeue_stale_reservation
 from .base import Plan, RecoveryStep, SweepScope
 
 _RESERVED = """
     SELECT t.id AS turn_id, t.bot_id, t.trigger_message_id, t.created_at,
            CAST(t.request_json AS jsonb)->>'reservation_owner' AS owner,
-           CAST(t.request_json AS jsonb)->>'inter_bot_delivery_id' AS delivery_id
+           COALESCE(CAST(t.request_json AS jsonb)->>'inter_bot_delivery_id',
+                    (SELECT d.id FROM inter_bot_deliveries d
+                     WHERE d.turn_id = t.id AND d.delivery_mode <> 'steer'
+                     ORDER BY d.ordinal DESC LIMIT 1)) AS delivery_id
     FROM turn_logs t WHERE t.status = 'reserved' AND t.ended_at IS NULL
     ORDER BY t.created_at
 """
@@ -147,6 +155,13 @@ class OrphanedReservationsStep(RecoveryStep):
                 released = release_reservation(
                     scope.engine, turn_id, delivery_id=candidate["delivery_id"],
                     bot_id=candidate["bot_id"], trigger_message_id=candidate["trigger_message_id"], connection=conn)
+                if not released and delivery is not None and delivery["status"] in ("FAILED", "CANCELLED"):
+                    # TASK-2142: a row re-armed after its run started carries
+                    # execution evidence, so it can't be deleted as unstarted.
+                    # Its delivery is terminal and will never claim it again:
+                    # end it instead of letting it wedge the target's queue.
+                    released = DeliveryLeaseRecovery.settle_withdrawn_turn(
+                        conn, turn_id, cause=f"delivery {delivery['status'].lower()}")
                 if released:
                     conn.execute(sa_text("""
                         UPDATE inter_bot_deliveries

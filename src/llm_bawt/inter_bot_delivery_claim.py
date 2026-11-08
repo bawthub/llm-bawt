@@ -97,12 +97,16 @@ class DeliveryClaim:
                 # whose card was decided) since enqueue is cancelled, not run.
                 fenced = claim_fence(conn, head)
                 if fenced is not None:
-                    DeliveryTransitionEvents.stage(conn, conn.execute(sa_text("""
+                    cancelled = conn.execute(sa_text("""
                         UPDATE inter_bot_deliveries SET status='CANCELLED',
                             next_retry_at=NULL, last_error=:reason, updated_at=now()
                         WHERE id=:id AND status='QUEUED' RETURNING *
-                    """), {"id": head["id"], "reason": fenced}).mappings().first(),
-                        reason_code="approval_fenced")
+                    """), {"id": head["id"], "reason": fenced}).mappings().first()
+                    DeliveryTransitionEvents.stage(conn, cancelled, reason_code="approval_fenced")
+                    if cancelled is not None:
+                        # TASK-2142: a requeued notice's re-armed row must not outlive it.
+                        from .inter_bot_delivery_recovery import DeliveryLeaseRecovery
+                        DeliveryLeaseRecovery.settle_withdrawn_turn(conn, cancelled["turn_id"], cause=fenced)
                     return None
                 if gate_blocks(conn, target, GateActor("delivery_claim", head["turn_id"]),
                                exclude_owner_id=exempt_owner, exclude_gate_ids=forced) is not None:

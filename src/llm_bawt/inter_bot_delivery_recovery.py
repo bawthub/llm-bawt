@@ -161,13 +161,49 @@ class DeliveryLeaseRecovery:
                     if DeliveryLeaseRecovery._settle_stopped_turn(conn, row["turn_id"]):
                         settled_turn_ids.append(row["turn_id"])
                 if updated["status"] == QUEUED and is_turn:
+                    # TASK-2142: a row the run already consumed carries the
+                    # chat payload, not the reservation's delivery link. Re-stamp
+                    # it so the reservation sweep can tie the re-armed row to
+                    # this delivery and settle it if the delivery never runs again.
                     conn.execute(sa_text("""
                         UPDATE turn_logs SET status='reserved', ended_at=NULL,
-                            end_reason=NULL, error_text=NULL
+                            end_reason=NULL, error_text=NULL,
+                            request_json=(COALESCE(CAST(request_json AS jsonb), '{}'::jsonb)
+                                || jsonb_build_object('inter_bot_delivery_id', CAST(:delivery_id AS text)))::text
                         WHERE id=:turn_id AND ended_at IS NULL
-                    """), {"turn_id": row["turn_id"]})
+                    """), {"turn_id": row["turn_id"], "delivery_id": row["id"]})
                 recovered.append(DeliveryRecord.from_mapping(updated))
         from .service.turn_termination import reconcile_finished_tool_safely
         for turn_id in settled_turn_ids:
             reconcile_finished_tool_safely(store.engine, turn_id=turn_id)
         return recovered
+
+    @staticmethod
+    def settle_withdrawn_turn(conn: Connection, turn_id: str | None, *, cause: str) -> bool:
+        """End the re-armed reservation of a QUEUED delivery that was just cancelled.
+
+        TASK-2142: ``recover_expired`` re-arms a requeued delivery's turn row as
+        ``reserved`` so its next claim reuses it. A QUEUED delivery cancelled
+        instead (approval withdrawn, fenced at claim) has no next claim, and an
+        open reserved row would wedge the target's queue. Only an open
+        ``reserved`` row is touched; it ends ``aborted`` with the cause in its
+        ``recovery`` audit, like a Stop on a reservation.
+        """
+        if not turn_id:
+            return False
+        from sqlmodel import Session, select
+
+        from .service.turn_logs import TurnLog
+        from .service.turn_termination import settle_open_turn
+
+        with Session(bind=conn) as session:
+            row = session.exec(select(TurnLog).where(
+                TurnLog.id == turn_id, TurnLog.status == "reserved",
+                TurnLog.ended_at.is_(None),  # type: ignore[union-attr]
+            ).with_for_update(key_share=True)).first()
+            settled = bool(row is not None and settle_open_turn(
+                session, row, audit_key="recovery", now=datetime.now(timezone.utc),
+                audit={"cause": cause, "by": "delivery_cancelled"},
+            ))
+            session.flush()
+            return settled

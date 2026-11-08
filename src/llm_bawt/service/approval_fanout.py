@@ -349,6 +349,9 @@ class ApprovalFanoutPump:
         """), {"id": delivery_id, "reason": reason}).mappings().first()
         if cancelled is not None:
             DeliveryTransitionEvents.stage(conn, cancelled, reason_code="approval_resolved")
+            # TASK-2142: a requeued notice's re-armed row must not outlive it.
+            from ..inter_bot_delivery_recovery import DeliveryLeaseRecovery
+            DeliveryLeaseRecovery.settle_withdrawn_turn(conn, cancelled["turn_id"], cause=reason)
             return True
         status = conn.execute(sa_text("SELECT status FROM inter_bot_deliveries WHERE id=:id"),
                               {"id": delivery_id}).scalar()
