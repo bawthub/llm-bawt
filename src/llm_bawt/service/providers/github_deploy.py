@@ -46,28 +46,36 @@ class _GitHubTokenAdapter(ApiKeyAdapter):
 
     @classmethod
     def _probe(cls, key: str) -> tuple[str | None, str | None]:
+        account, detail, _meta = cls._probe_with_metadata(key)
+        return account, detail
+
+    @classmethod
+    def _probe_with_metadata(cls, key: str) -> tuple[str | None, str | None, dict]:
+        from .api_key_health import github_observation
+
         try:
             resp = httpx.get(_USER_URL, timeout=15.0, headers={
                 "Authorization": f"Bearer {key}", "Accept": "application/vnd.github+json",
                 "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "llm-bawt"})
         except httpx.HTTPError as exc:
-            return None, f"GitHub unreachable: {type(exc).__name__}"
+            return None, f"GitHub unreachable: {type(exc).__name__}", {}
+        meta = github_observation(resp.status_code, resp.headers, resp.content)
         if resp.status_code in (401, 403):
-            return None, "GitHub rejected the token"
+            return None, "GitHub rejected the token", meta
         if resp.is_error:
-            return None, f"GitHub token check returned HTTP {resp.status_code}"
+            return None, f"GitHub token check returned HTTP {resp.status_code}", meta
         if cls.required_scope:
             granted = {s.strip() for s in resp.headers.get("X-OAuth-Scopes", "").split(",") if s.strip()}
             # write:packages implies read:packages.
             if not granted & {cls.required_scope, cls.required_scope.replace("read:", "write:")}:
-                return None, f"token lacks the {cls.required_scope} scope (use a classic token)"
+                return None, f"token lacks the {cls.required_scope} scope (use a classic token)", meta
         try:
             login = str(resp.json().get("login") or "").strip()
         except ValueError:
             login = ""
         if not login:
-            return None, "GitHub returned no account login for this token"
-        return login, None
+            return None, "GitHub returned no account login for this token", meta
+        return login, None, meta
 
 
 class GitHubReleaseAdapter(_GitHubTokenAdapter):

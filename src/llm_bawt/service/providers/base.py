@@ -410,6 +410,10 @@ class ProviderAdapter:
                 detail=str(rec.meta.get("error") or "connection in error state"),
                 fix="reconnect",
             )
+        if rec.auth_method == AUTH_API_KEY:
+            from .api_key_health import api_key_health
+
+            return api_key_health(rec)
         return health_block(HEALTH_OK)
 
     # --- device oauth --------------------------------------------------------

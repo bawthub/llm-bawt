@@ -2,7 +2,7 @@
 
 from ...integrations.x_api import XApiError, request_x
 from .api_key import ApiKeyAdapter
-from .base import HEALTH_BROKEN, HEALTH_OK, HEALTH_UNCONFIGURED, health_block
+from .base import HEALTH_BROKEN, HEALTH_UNCONFIGURED, health_block
 
 
 class XAdapter(ApiKeyAdapter):
@@ -36,4 +36,6 @@ class XAdapter(ApiKeyAdapter):
             return health_block(HEALTH_UNCONFIGURED, detail="not connected")
         if record.status != "connected" or not record.secret.get("api_key"):
             return health_block(HEALTH_BROKEN, detail="X bearer token is unavailable; reconnect.", fix="reconnect")
-        return health_block(HEALTH_OK, detail="Bearer token stored; search availability depends on X API access and credits.")
+        from .api_key_health import api_key_health
+
+        return api_key_health(record, detail="Bearer token stored; search availability depends on X API access and credits.")

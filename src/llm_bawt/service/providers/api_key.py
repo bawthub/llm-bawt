@@ -24,7 +24,6 @@ from ...utils.config import Config
 from .base import (
     AUTH_API_KEY,
     HEALTH_BROKEN,
-    HEALTH_OK,
     HEALTH_UNCONFIGURED,
     HEALTH_UNKNOWN,
     STATUS_CONNECTED,
@@ -90,14 +89,16 @@ class ApiKeyAdapter(ProviderAdapter):
             return health_block(HEALTH_UNKNOWN, detail="credential store unavailable")
         if found is None:
             return health_block(HEALTH_UNCONFIGURED, detail="not connected")
-        return health_block(HEALTH_OK)
+        from .api_key_health import api_key_health
+
+        return api_key_health(self.store.load(self.id))
 
     # --- api key -------------------------------------------------------------
     def set_api_key(self, api_key: str) -> ValidateResult:
         key = (api_key or "").strip()
         if not key:
             return ValidateResult(ok=False, detail="API key is empty")
-        account, detail = self._probe(key)
+        account, detail, meta = self._probe_with_metadata(key)
         if account is None:
             return ValidateResult(ok=False, detail=detail)
         record = ConnectionRecord(
@@ -105,6 +106,7 @@ class ApiKeyAdapter(ProviderAdapter):
             status=STATUS_CONNECTED,
             auth_method=AUTH_API_KEY,
             account=account,
+            meta=meta,
             secret={_SECRET_FIELD: key},
         )
         self.store.save(record)
@@ -115,7 +117,11 @@ class ApiKeyAdapter(ProviderAdapter):
         key = (record.secret or {}).get(_SECRET_FIELD)
         if not key:
             return ValidateResult(ok=False, detail="no API key stored")
-        account, detail = self._probe(key)
+        account, detail, meta = self._probe_with_metadata(key)
+        if meta:
+            from .api_key_health import record_observation
+
+            record_observation(self.store, self.id, key, meta)
         if account is None:
             return ValidateResult(ok=False, detail=detail)
         return ValidateResult(ok=True, account=account)
@@ -131,6 +137,10 @@ class ApiKeyAdapter(ProviderAdapter):
     # --- subclass hook --------------------------------------------------------
     def _probe(self, key: str) -> tuple[str | None, str | None]:
         raise NotImplementedError
+
+    def _probe_with_metadata(self, key: str) -> tuple[str | None, str | None, dict]:
+        account, detail = self._probe(key)
+        return account, detail, {}
 
 
 def resolve_api_key(

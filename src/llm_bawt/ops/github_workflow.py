@@ -116,8 +116,9 @@ class HttpGitHubWorkflowGateway(GitHubWorkflowGateway):
             "X-GitHub-Api-Version": "2022-11-28",
             "User-Agent": "llm-bawt-release-coordinator",
         }
-        if auth:
-            headers["Authorization"] = f"Bearer {self._token()}"
+        token = self._token() if auth else ""
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
         try:
             response = self._client.request(method, url, headers=headers, json=json_body)
         except httpx.HTTPError as exc:
@@ -126,6 +127,11 @@ class HttpGitHubWorkflowGateway(GitHubWorkflowGateway):
                 f"GitHub request failed: {type(exc).__name__}",
                 retryable=True,
             ) from exc
+        if token and self._fixed_token is None and self._token_loader is _stored_dispatch_token:
+            from ..service.providers.api_key_health import observe_github_response
+
+            observe_github_response("github-release-dispatch", token, response.status_code,
+                                    response.headers, response.content)
         if response.status_code == 429 or response.status_code >= 500:
             raise GitHubWorkflowError(
                 "github_transient",

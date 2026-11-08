@@ -122,10 +122,21 @@ class GitHubReleaseVerifier(ReleaseVerifier):
         try:
             response = self._opener.open(urllib.request.Request(url, headers=headers), timeout=20)
             status, location, body = response.status, response.headers.get("Location"), response.read(limit + 1)
+            response_headers = response.headers
+            observation_body = body
         except urllib.error.HTTPError as exc:
             status, location, body = exc.code, exc.headers.get("Location"), b""
+            response_headers = exc.headers
+            try:
+                observation_body = exc.read(4096)
+            except OSError:
+                observation_body = b""
         except OSError as exc:
             raise ReleaseVerificationError(f"GitHub unreachable: {type(exc).__name__}") from exc
+        if auth and self._token and self._fixed_token is None:
+            from ..service.providers.api_key_health import observe_github_response
+
+            observe_github_response("github-release", self._token, status, response_headers, observation_body)
         if len(body) > limit:
             raise ReleaseVerificationError("GitHub response too large")
         return status, location, body

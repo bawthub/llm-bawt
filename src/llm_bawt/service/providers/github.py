@@ -159,6 +159,9 @@ class GitHubAdapter(ApiKeyAdapter):
     def _probe(self, key: str) -> tuple[str | None, str | None]:
         return _GitHubTokenAdapter._probe(key)
 
+    def _probe_with_metadata(self, key: str) -> tuple[str | None, str | None, dict]:
+        return _GitHubTokenAdapter._probe_with_metadata(key)
+
     def set_api_key(self, api_key: str) -> ValidateResult:
         if self.uses_app():
             return ValidateResult(ok=False, detail="This deployment uses a GitHub App, not a personal access token")
