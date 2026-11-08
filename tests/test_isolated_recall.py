@@ -76,9 +76,16 @@ async def test_grounded_compact_packet_exact_count_and_no_transcript():
 ])
 async def test_invalid_or_hallucinated_synthesis_has_no_raw_fallback(raw, code):
     result = await RecallService([Source()], Model(raw)).recall(request(), SCOPE)
+    assert "SECRET" not in compact_json(result)
+    if code == "invalid_synthesis":
+        # TASK-1751: unusable model output degrades to the retrieved source
+        # quotes; the model's own text never reaches the caller.
+        assert result["status"] == "partial" and result["degraded"] is True
+        assert result["error_code"] == code
+        assert all(f["quote"] in Source().rows[0].text for f in result["findings"])
+        return
     assert {k: v for k, v in result.items() if k != "coverage"} == {
         "status": "error", "error_code": code, "findings": [], "handle": None}
-    assert "SECRET" not in compact_json(result)
 
 
 @pytest.mark.asyncio

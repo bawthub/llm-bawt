@@ -50,6 +50,9 @@ ERROR_CODES = frozenset({
     "query_budget", "input_budget", "retrieval_budget", "invalid_synthesis",
     "ungrounded_synthesis", "task_provenance_incomplete", "timeout", "busy",
 })
+# Utility-model failures after evidence was retrieved and admitted. Budget,
+# authorization and busy errors are not here: they never degrade to quotes.
+DEGRADABLE_SYNTHESIS_ERRORS = frozenset({"timeout", "model_unavailable", "empty_response", "invalid_synthesis"})
 
 
 logger = logging.getLogger(__name__)
@@ -155,6 +158,7 @@ class AnswerSet:
         self.rejected = rejected
         self.omitted = 0
         self.degraded = False
+        self.degraded_code = "timeout"
 
     def add(self, answer: GroundedAnswer) -> None:
         if any(answer.keys() <= item.keys() for item in self.answers):
@@ -178,7 +182,8 @@ class AnswerSet:
         self.answers.clear()
 
     def uncertainty(self) -> str:
-        return (("Synthesis timed out; degraded retrieval-ranked quotes, not selected answers. "
+        reason = "timed out" if self.degraded_code == "timeout" else "failed"
+        return ((f"Synthesis {reason}; degraded retrieval-ranked quotes, not selected answers. "
                  if self.degraded else "") + UNCERTAINTY
                 + (INCOMPLETE_NOTE if self.unavailable else "")
                 + (REJECTED_NOTE.format(self.rejected) if self.rejected else "")
@@ -411,23 +416,27 @@ class RecallService:
                 remaining = max(0, deadline - time.monotonic() - 0.25)
                 async with asyncio.timeout(remaining):
                     raw = await self.synthesizer.synthesize(system, question, evidence, request.output_tokens)
-            except (TimeoutError, RecallError) as error:
-                if isinstance(error, RecallError) and error.code != "timeout":
-                    raise
-                answers.degraded = True
-                proposed_findings = [{"source": row.source, "id": row.id,
-                                      "quote": cap_span(row.text.lstrip(), MAX_QUOTE_CHARS, MAX_QUOTE_TOKENS)}
-                                     for row in ranked_evidence]
-            else:
                 if not isinstance(raw, str) or len(raw.encode("utf-8")) > MAX_MODEL_BYTES:
                     raise RecallError("invalid_synthesis")
-                model_output_tokens = tokens(raw)
-                if model_output_tokens > request.output_tokens:
+                if tokens(raw) > request.output_tokens:
                     raise RecallError("invalid_synthesis")
                 try:
                     parsed = Synthesis.model_validate_json(raw)
                 except (ValidationError, ValueError) as error:
                     raise RecallError("invalid_synthesis") from error
+            except (TimeoutError, RecallError) as error:
+                # Model-side failures after retrieval keep the already authorized
+                # evidence as degraded quotes (TASK-1751); policy errors stay errors.
+                code = "timeout" if isinstance(error, TimeoutError) else error.code
+                if code not in DEGRADABLE_SYNTHESIS_ERRORS:
+                    raise
+                answers.degraded = True
+                answers.degraded_code = code
+                proposed_findings = [{"source": row.source, "id": row.id,
+                                      "quote": cap_span(row.text.lstrip(), MAX_QUOTE_CHARS, MAX_QUOTE_TOKENS)}
+                                     for row in ranked_evidence]
+            else:
+                model_output_tokens = tokens(raw)
                 proposed_findings = parsed.findings
             index = {(item.source, item.id): item for item in evidence}
             for proposed in proposed_findings:
@@ -493,7 +502,7 @@ class RecallService:
             },
         }
         if answers.degraded:
-            packet.update(status="partial", degraded=True, error_code="timeout")
+            packet.update(status="partial", degraded=True, error_code=answers.degraded_code)
         admitted_keys = {(row.source, row.id) for row in evidence}
         for entry in read:
             entry["admitted"] = (entry["source"], entry["id"]) in admitted_keys
