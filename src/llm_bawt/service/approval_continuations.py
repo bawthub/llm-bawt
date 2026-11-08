@@ -23,6 +23,7 @@ from typing import Any
 
 from .dependencies import get_ops_service, get_service
 from .approval_continuation_session import approval_delivery_session, approval_origin_session
+from .approval_continuation_steer import request_steer, steer_landed
 from .ops_blocked_notification import OpsBlockedNotifier
 from .schemas import ChatCompletionRequest, ChatMessage, McpToolResultContinuation
 from .tool_call_store import ToolCallStore
@@ -267,6 +268,9 @@ async def dispatch_mcp_result_continuation(
             raise RuntimeError("Previous continuation turn failed; manual reconciliation required")
         # A bare reservation wrote no messages; only a started turn pins identity.
         started = prior is not None and prior.status != RESERVED
+        if not started and await asyncio.to_thread(steer_landed, service, row):
+            # TASK-1357: a busy target already received this result by steer.
+            return
         if not started:
             # Waiting behind a running turn is the common case; skip the
             # session-lineage reads (MCP round trips) until the target looks
@@ -352,6 +356,9 @@ async def dispatch_mcp_result_continuation(
         # Not an attempt: the target is executing (or reserved/ambiguous).
         # Nothing was started; save_turn already dropped its own reservation.
         _release_unstarted(turn_store, identity["inter_bot_turn_id"], admission_claim)
+        # TASK-1357: also offer the result to the running turn. Delivered only
+        # once that steer starts (checked on the next pass); else idle as before.
+        request_steer(service, row, prompt)
         delay = _admission_wait_delay(row)
         if delay >= ADMISSION_WAIT_WARN_S:
             log.warning("Approval continuation id=%s still waiting for idle target: %s", row.id, busy)
