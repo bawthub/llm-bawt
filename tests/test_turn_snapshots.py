@@ -74,9 +74,10 @@ def test_alias_mount_path_is_one_tree(repo: Path, tmp_path: Path) -> None:
     alias = tmp_path / "alias-dev"
     alias.symlink_to(repo.parent, target_is_directory=True)
     obs = TurnSnapshotObserver()
-    bash(obs, "r1", f"ssh host 'sed -i s/bee/BEE/ {alias}/proj/b.txt'", tmp_path)
+    bash(obs, "r1", f"ssh host 'sed -i s/bee/BEE-EDIT/ {alias}/proj/b.txt'", tmp_path)
     bash(obs, "r1", f"cat {repo}/b.txt", tmp_path)
-    (repo / "b.txt").write_text("BEE\n")
+    # Change size so Git's stat cache detects the edit even within one clock tick.
+    (repo / "b.txt").write_text("BEE-EDIT\n")
     files, receipts = obs.finish("r1")
     assert len([r for r in receipts if "status" in r]) == 1
     assert [Path(f["path"]).name for f in files] == ["b.txt"]

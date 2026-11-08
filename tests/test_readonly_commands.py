@@ -148,10 +148,11 @@ def repo(tmp_path: Path) -> Path:
 
 def test_reviewer_reads_do_not_make_authors_tree_busy(repo: Path) -> None:
     author, reviewer = TurnSnapshotObserver(), TurnSnapshotObserver()
-    author.observe_tool(request_id="ra", bot_id="nova", tool_name="Bash", tool_input={"command": "sed -i s/one/ONE/ a.txt"}, cwd=str(repo))
+    author.observe_tool(request_id="ra", bot_id="nova", tool_name="Bash", tool_input={"command": "sed -i s/one/ONE-EDIT/ a.txt"}, cwd=str(repo))
     reviewer.observe_tool(request_id="rb", bot_id="byte", tool_name="Bash", tool_input={"command": f"cd {repo} && git diff"}, cwd=str(repo))
     reviewer.observe_tool(request_id="rb", bot_id="byte", tool_name="Read", tool_input={"file_path": str(repo / "a.txt")}, cwd=str(repo))
-    (repo / "a.txt").write_text("ONE\n")
+    # Change size so Git's stat cache detects the edit even within one clock tick.
+    (repo / "a.txt").write_text("ONE-EDIT\n")
     files_b, receipts_b = reviewer.finish("rb")
     files_a, receipts_a = author.finish("ra")
     assert files_b == [] and receipts_b == []
