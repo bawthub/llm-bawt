@@ -20,14 +20,45 @@ from .task_step_types import (
 )
 from .task_api import (
     api_delete as _api_delete,
+    api_get as _api_get,
     api_patch as _api_patch,
     api_post as _api_post,
     api_put as _api_put,
+    count_by_status,
     headers as _headers,
     http_error as _http_error,
 )
 
 logger = logging.getLogger(__name__)
+
+
+# Step writes answer with a compact receipt (TASK-1494): BawtHub returns whole
+# step rows, outputs included, and the batch/replace routes return every step
+# of the task, which reached 78k characters. The writer already holds what it
+# wrote, so it gets back ids, titles, statuses and the task's status counts.
+
+def _brief(step: Any) -> dict[str, Any]:
+    if not isinstance(step, dict):
+        return {"step": step}
+    return {key: step.get(key) for key in ("id", "title", "status")}
+
+
+def _receipt(task_id: str, touched: list, counts: dict[str, int] | None) -> dict[str, Any]:
+    receipt: dict[str, Any] = {"task_id": task_id, "steps": [_brief(s) for s in touched]}
+    if counts is not None:
+        receipt["stepStatusCounts"] = counts
+    return receipt
+
+
+async def _fetched_counts(task_id: str) -> dict[str, int] | None:
+    """The task's step status counts, or None if the read fails (the write already succeeded)."""
+    try:
+        task = await _api_get(f"/tasks/{task_id}")
+    except httpx.HTTPError:
+        logger.debug("step receipt: status count read failed for %s", task_id, exc_info=True)
+        return None
+    steps = task.get("steps") if isinstance(task, dict) else None
+    return count_by_status(steps) if isinstance(steps, list) else None
 
 @mcp.tool(name="steps_update")
 async def update_step(
@@ -37,7 +68,7 @@ async def update_step(
     output: str | None = None,
     updates: list[dict] | None = None,
     bot_id: str | None = None,
-) -> Any:
+) -> dict[str, Any]:
     """Update one step, or many steps in a single call.
 
     Call this as you work through each step:
@@ -66,8 +97,9 @@ async def update_step(
         bot_id: Your bot ID for activity attribution.
 
     Returns:
-        Single mode: the updated step object. Batch mode: the task's steps in
-        order. Error dict on failure.
+        A compact receipt: ``task_id``, ``steps`` (id/title/status of each
+        updated step) and ``stepStatusCounts`` for the whole task. Outputs are
+        not echoed. Error dict on failure.
     """
     if updates:
         logger.debug("MCP tool invoked: tools/update_step task=%s batch=%d", task_id, len(updates))
@@ -85,13 +117,18 @@ async def update_step(
                 entry["filePath"] = fp
             norm.append(entry)
         try:
-            return await _api_patch(
+            result = await _api_patch(
                 f"/tasks/{task_id}/steps",
                 json={"updates": norm},
                 headers=_headers(bot_id),
             )
         except httpx.HTTPStatusError as e:
             return _http_error(e)
+        if not isinstance(result, list):
+            return result if isinstance(result, dict) else {"result": result}
+        ids = {entry["stepId"] for entry in norm}
+        touched = [s for s in result if isinstance(s, dict) and s.get("id") in ids]
+        return _receipt(task_id, touched, count_by_status(result))
 
     if not step_id:
         return {"error": "Provide step_id (single) or updates (batch)"}
@@ -110,13 +147,16 @@ async def update_step(
         return {"error": "No fields to update"}
 
     try:
-        return await _api_patch(
+        result = await _api_patch(
             f"/tasks/{task_id}/steps/{step_id}",
             json=body,
             headers=_headers(bot_id),
         )
     except httpx.HTTPStatusError as e:
         return _http_error(e)
+    if not isinstance(result, dict) or "error" in result:
+        return result if isinstance(result, dict) else {"result": result}
+    return _receipt(task_id, [result], await _fetched_counts(task_id))
 
 
 @mcp.tool(name="steps_delete")
@@ -125,7 +165,7 @@ async def delete_step(
     step_id: str | None = None,
     step_ids: list[str] | None = None,
     bot_id: str | None = None,
-) -> dict:
+) -> dict[str, Any]:
     """Delete one step, or many steps in a single call.
 
     WARNING: This permanently removes the step(s). Prefer setting status to
@@ -179,7 +219,7 @@ async def add_steps(
     task_id: str,
     steps: list[TaskStepInput],
     bot_id: str | None = None,
-) -> list[dict] | dict:
+) -> dict[str, Any]:
     """Add new steps to a task.
 
     Steps are appended after existing steps. Use when planning work
@@ -196,22 +236,25 @@ async def add_steps(
         bot_id: Your bot ID for activity attribution.
 
     Returns:
-        List of created step objects, or an error dict. The return type
-        admits the dict so FastMCP's output validation cannot replace the
-        real error with a "valid list" message (TASK-1313).
+        A compact receipt: ``task_id``, ``steps`` (id/title/status of each
+        created step) and ``stepStatusCounts`` for the whole task; or an
+        error dict.
     """
     logger.debug("MCP tool invoked: tools/add_steps task=%s count=%d", task_id, len(steps))
     validation_error = validate_step_inputs(steps)
     if validation_error:
         return {"error": validation_error}
     try:
-        return await _api_post(
+        result = await _api_post(
             f"/tasks/{task_id}/steps",
             json=steps,
             headers=_headers(bot_id),
         )
     except httpx.HTTPStatusError as e:
         return _http_error(e)
+    if not isinstance(result, list):
+        return result if isinstance(result, dict) else {"result": result}
+    return _receipt(task_id, result, await _fetched_counts(task_id))
 
 
 @mcp.tool(name="steps_set")
@@ -219,7 +262,7 @@ async def set_steps(
     task_id: str,
     steps: list[TaskStepInput],
     bot_id: str | None = None,
-) -> list[dict] | dict:
+) -> dict[str, Any]:
     """Replace a task's ENTIRE step list in one atomic call.
 
     Deletes all existing steps and recreates them from ``steps``, reindexed
@@ -238,18 +281,22 @@ async def set_steps(
         bot_id: Your bot ID for activity attribution.
 
     Returns:
-        The task's steps in order after the replace, or an error dict. A
-        rejected replace leaves the existing steps untouched.
+        A compact receipt: ``task_id``, ``steps`` (id/title/status of every
+        step, in order, after the replace) and ``stepStatusCounts``; or an
+        error dict. A rejected replace leaves the existing steps untouched.
     """
     logger.debug("MCP tool invoked: tools/set_steps task=%s count=%d", task_id, len(steps))
     validation_error = validate_step_inputs(steps)
     if validation_error:
         return {"error": validation_error}
     try:
-        return await _api_put(
+        result = await _api_put(
             f"/tasks/{task_id}/steps",
             json=steps,
             headers=_headers(bot_id),
         )
     except httpx.HTTPStatusError as e:
         return _http_error(e)
+    if not isinstance(result, list):
+        return result if isinstance(result, dict) else {"result": result}
+    return _receipt(task_id, result, count_by_status(result))

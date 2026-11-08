@@ -90,10 +90,15 @@ def test_step_list_tools_forward_valid_types(
         calls.append((path, json))
         return json
 
+    async def fake_get(path: str, params: dict | None = None) -> dict:
+        return {"steps": [{"id": "s1", "status": "PENDING"}]}
+
     monkeypatch.setattr(step_tools, transport_name, fake_request)
+    monkeypatch.setattr(step_tools, "_api_get", fake_get)
     steps = [{"title": "Run tests", "type": "RUN_COMMAND"}]
 
-    assert run(getattr(step_tools, tool_name)("TASK-872", steps)) == steps
+    receipt = run(getattr(step_tools, tool_name)("TASK-872", steps))
+    assert receipt["steps"] == [{"id": None, "title": "Run tests", "status": None}]
     assert calls == [(expected_path, steps)]
 
 
@@ -170,7 +175,9 @@ def test_steps_update_batch_forwards_valid_statuses(
         for status in ("PENDING", "RUNNING", "COMPLETED", "FAILED", "SKIPPED")
     ]
 
-    assert run(step_tools.update_step("TASK-1313", updates=updates)) == []
+    assert run(step_tools.update_step("TASK-1313", updates=updates)) == {
+        "task_id": "TASK-1313", "steps": [], "stepStatusCounts": {},
+    }
     assert calls == [(
         "/tasks/TASK-1313/steps",
         {"updates": [{"stepId": u["step_id"], "status": u["status"]} for u in updates]},
@@ -238,9 +245,7 @@ def test_bawthub_error_reaches_the_bot_through_mcp(
 
     _content, structured = mcp_call(tool, args)
 
-    assert structured == {
-        "result": {"error": "steps[0].status must be one of: PENDING", "status": 400},
-    }
+    assert structured == {"error": "steps[0].status must be one of: PENDING", "status": 400}
 
 
 def test_step_list_tools_still_return_lists_through_mcp(
@@ -249,14 +254,90 @@ def test_step_list_tools_still_return_lists_through_mcp(
     async def created(path: str, json: list[dict], headers: dict | None = None) -> list[dict]:
         return [{"id": "s1", **json[0]}]
 
+    async def task(path: str, params: dict | None = None) -> dict:
+        return {"steps": [{"id": "s0", "status": "COMPLETED"}, {"id": "s1", "status": "RUNNING"}]}
+
     monkeypatch.setattr(step_tools, "_api_post", created)
+    monkeypatch.setattr(step_tools, "_api_get", task)
 
     _content, structured = mcp_call(
         "steps_add",
         {"task_id": "TASK-1313", "steps": [{"title": "x", "status": "RUNNING"}]},
     )
 
-    assert structured == {"result": [{"id": "s1", "title": "x", "status": "RUNNING"}]}
+    assert structured == {
+        "task_id": "TASK-1313",
+        "steps": [{"id": "s1", "title": "x", "status": "RUNNING"}],
+        "stepStatusCounts": {"COMPLETED": 1, "RUNNING": 1},
+    }
+
+
+# ── Compact write receipts (TASK-1494) ─────────────────────────────────────
+
+LONG_OUTPUT = "x" * 4000
+
+
+def _long_steps(n: int = 40) -> list[dict]:
+    return [
+        {"id": f"s{i}", "taskId": "t", "title": f"Step {i}", "type": "PLAN",
+         "status": "COMPLETED" if i % 2 else "PENDING", "output": LONG_OUTPUT,
+         "filePath": None, "orderIndex": i}
+        for i in range(n)
+    ]
+
+
+@pytest.mark.parametrize("mode", ["single", "batch", "add", "set"])
+def test_step_writes_on_a_task_with_long_outputs_return_a_small_receipt(
+    monkeypatch: pytest.MonkeyPatch, mode: str,
+) -> None:
+    rows = _long_steps()
+
+    async def patch(path: str, json: dict, headers: dict | None = None) -> Any:
+        return rows if path.endswith("/steps") else rows[3]
+
+    async def write_list(path: str, json: list, headers: dict | None = None) -> list:
+        return rows if mode == "set" else rows[-2:]
+
+    async def task(path: str, params: dict | None = None) -> dict:
+        return {"id": "t", "steps": rows}
+
+    monkeypatch.setattr(step_tools, "_api_patch", patch)
+    monkeypatch.setattr(step_tools, "_api_post", write_list)
+    monkeypatch.setattr(step_tools, "_api_put", write_list)
+    monkeypatch.setattr(step_tools, "_api_get", task)
+    new = [{"title": "n", "output": LONG_OUTPUT}]
+    calls = {
+        "single": ("steps_update", {"task_id": "TASK-1494", "step_id": "s3", "status": "COMPLETED"}),
+        "batch": ("steps_update", {"task_id": "TASK-1494", "updates": [
+            {"step_id": "s3", "status": "COMPLETED"}, {"step_id": "s4", "status": "COMPLETED"}]}),
+        "add": ("steps_add", {"task_id": "TASK-1494", "steps": new}),
+        "set": ("steps_set", {"task_id": "TASK-1494", "steps": new}),
+    }
+    name, args = calls[mode]
+
+    content, structured = mcp_call(name, args)
+
+    assert len(str(content)) + len(str(structured)) < 8000  # 40 x 4000-char outputs were echoed before
+    assert LONG_OUTPUT not in str(structured)
+    assert structured["stepStatusCounts"] == {"PENDING": 20, "COMPLETED": 20}
+    expected_ids = {"single": ["s3"], "batch": ["s3", "s4"], "add": ["s38", "s39"],
+                    "set": [f"s{i}" for i in range(40)]}[mode]
+    assert [s["id"] for s in structured["steps"]] == expected_ids
+
+
+def test_a_failed_count_read_still_returns_the_write_receipt(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def patch(path: str, json: dict, headers: dict | None = None) -> dict:
+        return {"id": "s1", "title": "t", "status": "COMPLETED", "output": "o"}
+
+    async def broken(path: str, params: dict | None = None) -> dict:
+        raise httpx.ConnectError("down")
+
+    monkeypatch.setattr(step_tools, "_api_patch", patch)
+    monkeypatch.setattr(step_tools, "_api_get", broken)
+
+    assert run(step_tools.update_step("TASK-1494", step_id="s1", status="COMPLETED")) == {
+        "task_id": "TASK-1494", "steps": [{"id": "s1", "title": "t", "status": "COMPLETED"}],
+    }
 
 
 def test_projects_list_error_reaches_the_bot_through_mcp(
