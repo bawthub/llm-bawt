@@ -132,6 +132,11 @@ class AgentBackendClient(LLMClient):
             }.items()
             if value is not None
         }
+        # TASK-1321: carry the turn's system prompt exactly as stream_raw does;
+        # without it a non-stream turn ran on whatever the harness held.
+        request_local.update(self._system_prompt_config(
+            messages, kwargs.pop("system_prompt_pin", None),
+        ))
 
         # Run the async backend call synchronously.
         # If there's already a running loop we schedule via run_in_executor.
@@ -174,6 +179,26 @@ class AgentBackendClient(LLMClient):
 
     def get_styling(self) -> tuple[str | None, str]:
         return self.bot_name, "cyan"
+
+    def _system_prompt_config(self, messages: List[Message], system_prompt_pin: Any) -> dict[str, Any]:
+        """Bridge config for the turn's system messages, shared by stream and non-stream.
+
+        With a session pin (TASK-1318) the system message already holds the
+        pinned bytes; the backend sends them verbatim instead of re-composing.
+        """
+        config: dict[str, Any] = {}
+        system_parts = [
+            msg.content if isinstance(msg.content, str) else ""
+            for msg in messages if msg.role == "system"
+        ]
+        if system_parts:
+            config["system_prompt"] = "\n\n".join(p for p in system_parts if p)
+        if system_prompt_pin is not None:
+            config["system_prompt_pinned"] = True
+            delivery = self._backend.system_prompt_delivery(system_prompt_pin.is_boundary)
+            if delivery:
+                config["system_prompt_delivery"] = delivery
+        return config
 
     def compose_system_prompt(self, system_prompt: str) -> str:
         """The complete prompt the backend would send for this render (TASK-1318)."""
@@ -251,12 +276,7 @@ class AgentBackendClient(LLMClient):
         # pass it through in the Redis command.
         config = self._with_turn_settings(dict(self._bot_config))
         config["ordered_steer_events"] = bool(kwargs.pop("ordered_steer_events", False))
-        system_parts = []
-        for msg in messages:
-            if msg.role == "system":
-                system_parts.append(msg.content if isinstance(msg.content, str) else "")
-        if system_parts:
-            config["system_prompt"] = "\n\n".join(p for p in system_parts if p)
+        config.update(self._system_prompt_config(messages, system_prompt_pin))
         if inject_messages is not None:
             config["inject_messages"] = inject_messages
         if thread_binding:
@@ -269,11 +289,6 @@ class AgentBackendClient(LLMClient):
             config["bridge_reset_action"] = bridge_reset_action
             if reset_skills is not None:
                 config["reset_skills"] = reset_skills
-        if system_prompt_pin is not None:
-            config["system_prompt_pinned"] = True
-            delivery = self._backend.system_prompt_delivery(system_prompt_pin.is_boundary)
-            if delivery:
-                config["system_prompt_delivery"] = delivery
         if skill_selection is not None:
             config["skill_selection"] = skill_selection
         if injected_skills:

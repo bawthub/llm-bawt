@@ -560,6 +560,51 @@ def test_agent_client_threads_request_local_identity_into_backend_config() -> No
     assert "turn_execution" not in client._bot_config  # shared config untouched
 
 
+def _system_prompt_capture_client(captured: dict):
+    from llm_bawt.clients.agent_backend_client import AgentBackendClient
+
+    class Backend:
+        def system_prompt_delivery(self, is_boundary):
+            return "boundary" if is_boundary else "cached"
+
+        async def chat_full(self, prompt, config, **_kwargs):
+            captured.update(config, prompt=prompt)
+            return SimpleNamespace(text="ok", tool_calls=[], model="m", usage={})
+
+    client = AgentBackendClient.__new__(AgentBackendClient)
+    client._bot_config = {"bot_id": "caid"}
+    client._backend = Backend()
+    return client
+
+
+def test_agent_nonstream_query_forwards_the_turn_system_prompt() -> None:
+    """TASK-1321: the non-stream path sends the system prompt like stream_raw."""
+    from llm_bawt.models.message import Message
+
+    captured: dict = {}
+    client = _system_prompt_capture_client(captured)
+    text = client.query([Message(role="system", content="You are Caid."),
+                         Message(role="user", content="hi")])
+    assert text == "ok"
+    assert captured["prompt"] == "hi"
+    assert captured["system_prompt"] == "You are Caid."
+    assert "system_prompt_pinned" not in captured
+    assert "system_prompt" not in client._bot_config  # shared config untouched
+
+
+def test_agent_nonstream_query_honors_the_session_pin() -> None:
+    """TASK-1321: a pinned prompt is marked so the backend sends the bytes verbatim."""
+    from llm_bawt.models.message import Message
+
+    captured: dict = {}
+    client = _system_prompt_capture_client(captured)
+    client.query([Message(role="system", content="pinned bytes"), Message(role="user", content="hi")],
+                 system_prompt_pin=SimpleNamespace(is_boundary=True))
+    assert captured["system_prompt"] == "pinned bytes"
+    assert captured["system_prompt_pinned"] is True
+    assert captured["system_prompt_delivery"] == "boundary"
+
+
 @pytest.mark.parametrize("model_type,recorded", [("openai", True), ("claude-code", False)])
 def test_chat_bot_nonstream_tool_calls_are_recorded(_isolate, monkeypatch, model_type, recorded) -> None:
     """TASK-1775: stream=false chat-bot tool calls reach tool_call_records
