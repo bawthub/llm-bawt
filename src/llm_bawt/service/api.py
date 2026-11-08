@@ -287,6 +287,7 @@ async def lifespan(app):
             )
         except Exception:
             log.exception("Failed to start shared agent Redis transport")
+            await abandon_redis_subscriber(service, redis_subscriber)
             redis_subscriber = None
 
     if service._system_events is not None and config.REDIS_URL:
@@ -461,6 +462,33 @@ BACKGROUND_TASK_ATTRIBUTES = (
     "_claude_refresh_task",
     "_codex_refresh_task",
 )
+
+
+async def abandon_redis_subscriber(service, subscriber) -> None:
+    """Undo a partly started shared Redis transport (TASK-1265).
+
+    Setup can fail after ``connect()`` and after the subscriber was published
+    globally and on ``service``. Shutdown only closes a subscriber that setup
+    returned, so unpublish it, stop its tool drain and close it here: backends
+    then see no subscriber instead of one nobody will ever close.
+    """
+    if subscriber is None:
+        return
+    from ..agent_backends.agent_bridge import get_agent_subscriber, set_agent_subscriber
+
+    if get_agent_subscriber() is subscriber:
+        set_agent_subscriber(None)
+    if getattr(service, "_redis_subscriber", None) is subscriber:
+        service._redis_subscriber = None
+    task = getattr(service, "_tool_persist_task", None)
+    if task is not None:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        service._tool_persist_task = None
+    try:
+        await subscriber.close()
+    except Exception:
+        log.exception("closing the abandoned Redis subscriber failed")
 
 
 def shutdown_phases(service, *, scheduler, redis_subscriber, home_audio_worker) -> list:
