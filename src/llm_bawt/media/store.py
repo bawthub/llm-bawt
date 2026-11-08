@@ -65,6 +65,8 @@ import hashlib
 import re
 import logging
 import os
+import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Literal, Optional
@@ -126,6 +128,12 @@ logger = logging.getLogger(__name__)
 
 
 DEFAULT_MEDIA_ROOT = Path("/var/lib/llm-bawt/media/blobs")
+
+
+def resolve_media_root() -> Path:
+    """The FS blob root: ``LLM_BAWT_MEDIA_ROOT`` or :data:`DEFAULT_MEDIA_ROOT`."""
+    env_root = os.environ.get("LLM_BAWT_MEDIA_ROOT")
+    return Path(env_root) if env_root else DEFAULT_MEDIA_ROOT
 
 ALLOWED_SOURCES = ("chat_upload", "tool_generated", "agent_attachment")
 
@@ -191,10 +199,7 @@ class MediaStore:
         db: MediaAssetStore | None = None,
         backend: BlobBackend | None = None,
     ):
-        if root is None:
-            env_root = os.environ.get("LLM_BAWT_MEDIA_ROOT")
-            root = Path(env_root) if env_root else DEFAULT_MEDIA_ROOT
-        self.root = Path(root)
+        self.root = Path(root) if root is not None else resolve_media_root()
         if backend is None:
             # Default backend: env-driven (``fs`` unless STORAGE_BACKEND=s3).
             # Construction performs no network I/O — boto3 client is lazy.
@@ -522,6 +527,49 @@ class MediaStore:
 # ---------------------------------------------------------------------------
 
 _singleton: MediaStore | None = None
+_singleton_lock = threading.Lock()
+
+# DB-construction retry state. A failed build (e.g. a lock timeout during
+# the runtime schema bootstrap) must not leave the process DB-less until a
+# restart, so later calls retry with a capped exponential backoff.
+_DB_RETRY_INITIAL_S = 5.0
+_DB_RETRY_MAX_S = 300.0
+_db_retry_at: float = 0.0
+_db_retry_delay: float = _DB_RETRY_INITIAL_S
+
+
+def _build_media_asset_db() -> MediaAssetStore:
+    from ..utils.config import Config  # late import to avoid cycle
+
+    return MediaAssetStore(Config())
+
+
+def _attach_db_if_due(store: MediaStore) -> None:
+    """Try to attach the metadata DB to a DB-less store, honouring backoff.
+
+    Called with ``_singleton_lock`` held. On success the existing store is
+    mutated in place, so callers that kept a reference recover too.
+    """
+    global _db_retry_at, _db_retry_delay
+    now = time.monotonic()
+    if now < _db_retry_at:
+        return
+    try:
+        db = _build_media_asset_db()
+    except Exception as e:
+        # Keep serving the blob path (tests + early boot), but log loudly
+        # so prod doesn't silently lose metadata, and try again later.
+        logger.warning(
+            "MediaStore has no DB (retrying in %.0fs): %s", _db_retry_delay, e
+        )
+        _db_retry_at = now + _db_retry_delay
+        _db_retry_delay = min(_db_retry_delay * 2, _DB_RETRY_MAX_S)
+        return
+    if _db_retry_at:
+        logger.info("MediaStore DB connected after earlier failure")
+    store.db = db
+    _db_retry_at = 0.0
+    _db_retry_delay = _DB_RETRY_INITIAL_S
 
 
 def get_media_store() -> MediaStore:
@@ -530,26 +578,26 @@ def get_media_store() -> MediaStore:
     Wires up the shared :class:`MediaAssetStore` against the active
     :class:`Config` so route handlers can grab a Store without DI plumbing.
     Mirrors :func:`llm_bawt.service.dependencies._get_or_build_store` in
-    spirit — a single Store per process, lazy-built.
+    spirit — a single Store per process, lazy-built. If the DB could not
+    be built, later calls retry (with backoff) instead of caching the
+    DB-less store forever.
     """
     global _singleton
-    if _singleton is None:
-        from ..utils.config import Config  # late import to avoid cycle
-
-        config = Config()
-        try:
-            db = MediaAssetStore(config)
-        except Exception as e:
-            # No DB? Construct anyway — tests + early boot can still use
-            # the on-disk path. Log loudly so prod doesn't silently lose
-            # metadata.
-            logger.warning("MediaStore initialized without DB: %s", e)
-            db = None
-        _singleton = MediaStore(db=db)
-    return _singleton
+    store = _singleton
+    if store is not None and store.db is not None:
+        return store
+    with _singleton_lock:
+        if _singleton is None:
+            _singleton = MediaStore(db=None)
+        if _singleton.db is None:
+            _attach_db_if_due(_singleton)
+        return _singleton
 
 
 def reset_media_store() -> None:
     """Drop the singleton. Tests only — don't call in production."""
-    global _singleton
-    _singleton = None
+    global _singleton, _db_retry_at, _db_retry_delay
+    with _singleton_lock:
+        _singleton = None
+        _db_retry_at = 0.0
+        _db_retry_delay = _DB_RETRY_INITIAL_S

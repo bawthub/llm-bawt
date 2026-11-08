@@ -17,7 +17,10 @@ doesn't know, so ``reason`` must stand on its own.
 
 from __future__ import annotations
 
+import os
+import threading
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Iterable
 
 from ..mcp_server.registry import tools_registration_complete
@@ -188,6 +191,58 @@ def check_prompt_sync(config: Any, now: datetime | None = None) -> dict:
     return _check("prompts.sync", DEGRADED if oldest > PROMPT_DRIFT_STALE_SECONDS else OK, reason)
 
 
+MEDIA_PROBE_TIMEOUT_SECONDS = 3.0
+
+
+def check_media_root(root: Path | None = None, *, timeout: float = MEDIA_PROBE_TIMEOUT_SECONDS) -> dict:
+    """Whether the FS media blob root is readable (TASK-2149).
+
+    A network mount can go stale under a running container ("Stale file
+    handle") while the host path is fine; uploads and image reads then fail
+    until the mount is fixed. Skipped (ok) when blobs live only in S3. The
+    probe runs on a daemon thread so a hung mount reports down instead of
+    stalling the whole health response.
+    """
+    from ..media.object_store import _env_backend_kind, _env_bool
+    from ..media.store import resolve_media_root
+
+    if root is None:
+        if _env_backend_kind() != "fs" and not _env_bool("LLM_BAWT_S3_FALLBACK_FS"):
+            return _check("media.storage", OK, "object storage; no local media directory")
+        root = resolve_media_root()
+    outcome: dict[str, Any] = {}
+
+    def probe() -> None:
+        try:
+            try:
+                os.listdir(root)  # not exists(): it can hide ESTALE as "missing"
+                outcome["result"] = (OK, None)
+            except FileNotFoundError:
+                # FsBlobBackend creates it on first write; the nearest
+                # existing ancestor must still be readable.
+                ancestor = root.parent
+                while True:
+                    try:
+                        os.listdir(ancestor)
+                        break
+                    except FileNotFoundError:
+                        if ancestor.parent == ancestor:
+                            raise
+                        ancestor = ancestor.parent
+                outcome["result"] = (OK, f"{root} not created yet")
+        except OSError as exc:
+            outcome["result"] = (DOWN, f"media directory {root} is unreadable: "
+                                       f"{type(exc).__name__}: {exc.strerror or exc}")
+
+    worker = threading.Thread(target=probe, name="media-root-probe", daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if "result" not in outcome:
+        return _check("media.storage", DOWN, f"media directory {root} did not respond within {timeout:g}s")
+    status, reason = outcome["result"]
+    return _check("media.storage", status, reason)
+
+
 def collect(config: Any, ops_store, ops_service, *, service=None) -> dict:
     from .runtime_health import RuntimeHealthChecks
 
@@ -202,6 +257,7 @@ def collect(config: Any, ops_store, ops_service, *, service=None) -> dict:
         ("ops.queue", lambda: [check_ops_queue(ops_store)]),
         ("bridge_gate", lambda: bridge_gates().health_checks()),
         ("prompts.sync", lambda: [check_prompt_sync(config)]),
+        ("media.storage", lambda: [check_media_root()]),
     ]
     if service is not None:
         runtime = RuntimeHealthChecks(service)
