@@ -67,6 +67,16 @@ def test_an_unreadable_or_non_object_request_payload_reads_as_empty(request_json
     assert turn_payload(request_json) == {}
 
 
+@pytest.mark.parametrize(("request_json", "warned"), [
+    ("not json", True), ("[1]", True), ("null", True), (None, False), ("", False), ('{"a": 1}', False),
+])
+def test_an_unreadable_request_payload_leaves_a_warning(request_json, warned, caplog):
+    """TASK-1259 N2: callers overwrite the row from this dict, so say so."""
+    with caplog.at_level("WARNING", logger="llm_bawt.service.turn_termination"):
+        turn_payload(request_json)
+    assert ("not a JSON object" in caplog.text) is warned
+
+
 def test_a_turn_with_an_unreadable_request_payload_still_stops_and_settles(store):
     from datetime import datetime, timezone
 

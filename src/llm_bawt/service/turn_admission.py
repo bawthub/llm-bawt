@@ -505,7 +505,10 @@ def revoke_reservation(
       the row is released, so the held work re-claims after thaw.
 
     Returns the producer outcome, or None, with nothing written, when
-    ``turn_id`` is not (or is no longer) an open reservation. ``connection``
+    ``turn_id`` is not (or is no longer) an open reservation. Raises
+    ``ReservationContended``, with nothing written, when the producer changed
+    on every attempt: the row is still an open reservation (TASK-1259).
+    ``connection``
     runs inside the caller's transaction (``activate_hold``).
 
     Every lock is taken, and the turn row re-checked, BEFORE any write (Vex
@@ -522,7 +525,19 @@ def revoke_reservation(
         if outcome is not _PRODUCER_CHANGED:
             return outcome
     log.warning("reservation %s changed producer on every revoke attempt; left open", turn_id)
-    return None
+    raise ReservationContended(turn_id)
+
+
+class ReservationContended(RuntimeError):
+    """The reservation stayed open but its producer kept changing; nothing written.
+
+    Distinct from ``revoke_reservation``'s None ("not an open reservation"):
+    a caller must not treat a still-open row as consumed (TASK-1259).
+    """
+
+    def __init__(self, turn_id: str):
+        super().__init__(f"reservation {turn_id} changed producer on every revoke attempt")
+        self.turn_id = turn_id
 
 
 # The head read is unlocked, so the row's producer can change before it is
@@ -785,10 +800,13 @@ def _capture_member(conn, gate: GateBlock, spec: GateSpec, bot_id: str, row) -> 
                 "id": delivery_id, "claim": owner}
     status = row["status"]
     if status == RESERVED and not has_execution_evidence(row):
-        outcome = revoke_reservation(
-            None, row["id"], disposition="hold", connection=conn,
-            audit={"reason": f"held by system gate {gate.id}"},
-        )
+        try:
+            outcome = revoke_reservation(
+                None, row["id"], disposition="hold", connection=conn,
+                audit={"reason": f"held by system gate {gate.id}"},
+            )
+        except ReservationContended:
+            outcome = None  # still open: the re-read below captures it as running
         if outcome is not None:
             disposition, producer = REVOKED_UNSTARTED, outcome
         else:

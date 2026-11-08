@@ -78,12 +78,22 @@ ATTEMPT_HISTORY_LIMIT = 10
 
 
 def turn_payload(request_json: str | None) -> dict:
-    """A turn row's ``request_json`` as a dict; unreadable or non-object → {}."""
-    try:
-        payload = json.loads(request_json) if request_json else {}
-    except (TypeError, ValueError):
+    """A turn row's ``request_json`` as a dict; unreadable or non-object → {}.
+
+    Callers then write the dict back, replacing the row's original text, so a
+    non-empty value that isn't a JSON object leaves a warning (TASK-1259).
+    """
+    if not request_json:
         return {}
-    return payload if isinstance(payload, dict) else {}
+    try:
+        payload = json.loads(request_json)
+    except (TypeError, ValueError):
+        payload = None
+    if isinstance(payload, dict):
+        return payload
+    logging.getLogger(__name__).warning(
+        "turn request_json is not a JSON object; treating it as empty: %.80r", request_json)
+    return {}
 
 
 def dump_payload(payload: dict) -> str:

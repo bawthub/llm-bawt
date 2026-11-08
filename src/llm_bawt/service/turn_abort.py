@@ -32,7 +32,9 @@ CONFIRMED_STATES = frozenset({"cancelled", "worker_finalized"})
 
 
 async def abort_turn(service, turn, *, source: str, peer: str | None) -> str:
-    """Stop ``turn`` and return ``aborted:<bridge_state>`` or ``already_completed``."""
+    """Stop ``turn`` and return ``aborted:<bridge_state>``, ``already_completed``
+    or ``contended`` (a reservation whose producer kept changing: nothing
+    written, so a retried Stop takes the revoke path again; TASK-1259)."""
     store = service._turn_log_store
     current = store.get_turn(turn.id)
     if current is not None and current.status == "reserved" and current.ended_at is None:
@@ -98,7 +100,7 @@ async def _stop_reservation(service, turn, *, source: str, peer: str | None) -> 
     A user Stop opens the queue hold in the revoke's own transaction, so the
     cancel and the hold commit together (TASK-1327).
     """
-    from .turn_admission import revoke_reservation
+    from .turn_admission import ReservationContended, revoke_reservation
     from .user_stop_hold import hold_quietly, stop_hold_ttl
 
     engine = service._turn_log_store.engine
@@ -112,7 +114,11 @@ async def _stop_reservation(service, turn, *, source: str, peer: str | None) -> 
                 hold_quietly(conn, turn.bot_id, ttl)
             return producer
 
-    producer = await asyncio.to_thread(revoke_and_hold)
+    try:
+        producer = await asyncio.to_thread(revoke_and_hold)
+    except ReservationContended:
+        log.warning("Stop on turn %s contended: reservation left open, nothing written", turn.id)
+        return "contended"
     if producer is None:
         return None
     _wake_dispatcher(service)

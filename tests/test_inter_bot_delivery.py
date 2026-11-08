@@ -1639,6 +1639,41 @@ def test_stop_racing_consumption_never_revokes_a_live_runs_delivery(delivery_sto
     assert stop["bridge_state"] == "cancelled" and "reservation_producer" not in stop
 
 
+def test_stop_on_a_reservation_whose_producer_keeps_changing_is_contended_and_writes_nothing(
+        delivery_store, monkeypatch):
+    """TASK-1259 N1: an exhausted revoke is not "consumed". Stop must leave the
+    reservation open and its producer untouched, so a retried Stop revokes it."""
+    from llm_bawt.service import turn_admission
+    from llm_bawt.service.turn_abort import abort_turn
+
+    store, sender, target = delivery_store
+    original, _ = _enqueue(store, sender, target, "re-armed on every revoke attempt")
+    claim = store.claim_next(target, claim_owner="owner", steer_capable=False)
+    assert claim and claim.id == original.id
+    turns = TurnLogStore(store.config)
+    reserved = turns.get_turn(original.turn_id)
+    attempts = []
+
+    def always_changed(conn, session, turn_id, **kwargs):
+        attempts.append(turn_id)
+        return turn_admission._PRODUCER_CHANGED
+
+    monkeypatch.setattr(turn_admission, "_lock_open_reservation", always_changed)
+    svc = SimpleNamespace(_turn_log_store=turns, config=store.config, _redis_subscriber=None)
+
+    assert asyncio.run(abort_turn(svc, reserved, source="chat_stop", peer=None)) == "contended"
+    assert len(attempts) == turn_admission._REVOKE_ATTEMPTS
+    row = turns.get_turn(original.turn_id)
+    assert (row.status, row.ended_at) == ("reserved", None)
+    assert "user_stop" not in json.loads(row.request_json or "{}")
+    live = store.get(original.id)
+    assert (live.status, live.claim_token) == ("DISPATCHING", claim.claim_token)
+
+    monkeypatch.undo()  # the producer settles down: a retried Stop revokes it
+    assert asyncio.run(abort_turn(svc, reserved, source="chat_stop", peer=None)) == "aborted:reserved"
+    assert store.get(original.id).status == "CANCELLED"
+
+
 def test_rearm_keeps_audits_but_drops_per_attempt_keys(delivery_store):
     """TASK-1232 r2-M1: both re-arm writes keep AUDIT_KEYS; ATTEMPT_KEYS drop."""
     from llm_bawt.service.turn_admission import write_reservation
