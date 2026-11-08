@@ -142,8 +142,8 @@ async def search_all_detailed(
         else:
             clients.append((prov, client))
 
-    if not clients:
-        return outcome
+    # No early return when nothing resolved: a default search whose keyed web
+    # providers became unusable must still reach the fallback below.
 
     async def _run(prov: SearchProvider, client) -> list[SearchResult] | None:
         try:

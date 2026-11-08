@@ -10,12 +10,20 @@ consider Tavily or another official API.
 import logging
 from typing import TYPE_CHECKING
 
-from .base import SearchClient, SearchResult, SearchProvider
+from .base import SearchClient, SearchError, SearchResult, SearchProvider
 
 if TYPE_CHECKING:
     from ddgs import DDGS
 
 logger = logging.getLogger(__name__)
+
+# ddgs raises its base exception with this exact message when every engine ran
+# without error and found nothing; any other exception is a real failure.
+_NO_RESULTS = "No results found."
+
+
+def _is_no_results(exc: Exception) -> bool:
+    return type(exc).__name__ == "DDGSException" and str(exc) == _NO_RESULTS
 
 # Suppress noisy ddgs internal logging (backend errors for Wikipedia, etc.)
 logging.getLogger("ddgs").setLevel(logging.WARNING)
@@ -72,12 +80,16 @@ class DuckDuckGoClient(SearchClient):
             region: Region code like 'us-en', 'uk-en', etc.
             
         Returns:
-            List of SearchResult objects
+            List of SearchResult objects; empty only when the search found nothing.
+
+        Raises:
+            SearchError: The search couldn't run (library missing, rate limit,
+                timeout, network), so a failure never reads as "no results".
         """
         if not is_ddgs_available():
             logger.error("ddgs library not installed. Install with: pip install ddgs")
-            return []
-        
+            raise SearchError(self.PROVIDER, "DuckDuckGo search is unavailable: the ddgs library isn't installed.")
+
         max_results = max_results or self.max_results
         
         try:
@@ -106,14 +118,17 @@ class DuckDuckGoClient(SearchClient):
             
             logger.debug(f"DuckDuckGo search '{query}' returned {len(results)} results")
             return results
-            
+
         except Exception as e:
-            # Check for rate limiting
-            if "ratelimit" in str(e).lower():
+            if _is_no_results(e):
+                return []
+            # TASK-1619: report the failure; [] would read as an empty answer.
+            if "ratelimit" in type(e).__name__.lower() or "ratelimit" in str(e).lower():
                 logger.warning(f"DuckDuckGo rate limit hit: {e}")
-            else:
-                logger.error(f"DuckDuckGo search failed: {e}")
-            return []
+                raise SearchError(self.PROVIDER, "DuckDuckGo is rate limiting searches. Try again shortly.",
+                                  status_code=429) from None
+            logger.error(f"DuckDuckGo search failed: {e}")
+            raise SearchError(self.PROVIDER, f"DuckDuckGo search failed ({type(e).__name__}).") from None
     
     def search_news(
         self,

@@ -90,6 +90,70 @@ def test_failed_fallback_reports_both_errors(clients):
     assert set(out.errors) == {"brave", "duckduckgo"}
 
 
+def _real_ddg(text):
+    """Production DuckDuckGoClient with only ddgs's network call stubbed."""
+    from llm_bawt.search.ddgs_client import DuckDuckGoClient
+
+    client = DuckDuckGoClient()
+    client._client = SimpleNamespace(text=text)
+    return client
+
+
+def _raise(exc):
+    def text(*a, **kw):
+        raise exc
+    return text
+
+
+def test_real_duckduckgo_rate_limit_is_a_failure_not_an_answer(clients):
+    from ddgs.exceptions import RatelimitException
+
+    clients[SearchProvider.DUCKDUCKGO] = _real_ddg(_raise(RatelimitException("202 Ratelimit")))
+    out = _search()
+    assert out.providers == [] and out.results == [] and out.fallbacks == {}
+    assert out.errors["brave"] == BRAVE_429
+    assert "rate limiting" in out.errors["duckduckgo"]
+
+
+def test_real_duckduckgo_other_failure_is_reported(clients):
+    clients[SearchProvider.DUCKDUCKGO] = _real_ddg(_raise(RuntimeError("connection reset")))
+    out = _search(providers=["duckduckgo"])
+    assert out.providers == []
+    assert out.errors == {"duckduckgo": "DuckDuckGo search failed (RuntimeError)."}
+
+
+def test_real_duckduckgo_no_results_stays_an_empty_answer(clients):
+    from ddgs.exceptions import DDGSException
+
+    clients[SearchProvider.DUCKDUCKGO] = _real_ddg(_raise(DDGSException("No results found.")))
+    out = _search()
+    assert out.providers == ["duckduckgo"] and out.results == []
+    assert out.fallbacks == {"duckduckgo": ["brave"]}
+    assert "duckduckgo" not in out.errors
+
+
+def test_real_duckduckgo_results_are_returned(clients):
+    clients[SearchProvider.DUCKDUCKGO] = _real_ddg(
+        lambda *a, **kw: [{"title": "t", "href": "https://example.com/a", "body": "b"}])
+    out = _search()
+    assert out.providers == ["duckduckgo"] and [r.url for r in out.results] == ["https://example.com/a"]
+
+
+def test_fallback_runs_when_the_keyed_client_cannot_be_built(clients):
+    del clients[SearchProvider.BRAVE]  # key disconnected after provider selection
+    out = _search()
+    assert out.providers == ["duckduckgo"]
+    assert set(out.errors) == {"brave"}
+    assert out.fallbacks == {"duckduckgo": ["brave"]}
+
+
+def test_named_provider_that_cannot_be_built_is_not_swapped(clients):
+    del clients[SearchProvider.BRAVE]
+    out = _search(providers=["brave"])
+    assert out.providers == [] and out.fallbacks == {}
+    assert clients[SearchProvider.DUCKDUCKGO].calls == 0
+
+
 def test_mcp_web_search_reports_the_fallback(clients):
     from llm_bawt.mcp_server.search_tools import web_search
 
