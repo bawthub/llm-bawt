@@ -74,13 +74,12 @@ OPS_ADAPTER = {
     "llm_bawt/ops/config_reconcile.py": ({"engine api"}, "worker-side exec for config apply"),
     "llm_bawt/ops/routing_reconcile.py": ({"engine api"}, "worker-side exec for routing apply"),
     "llm_bawt/ops/plan_reconcile.py": ({"engine api"}, "worker-side plan volumes and container inspect"),
-    "llm_bawt/ops/compose_render.py": ({"engine api"}, "worker-side sibling container inspect for checkout-aware render"),
     "llm_bawt/ops/container_remove.py": ({"engine api"}, "worker-side inspect/delete of one stopped orphan"),
     "llm_bawt/ops/gate_runner.py": ({"engine api"}, "fixed-workload socketless gate launcher (reconciler child)"),
     "llm_bawt/ops/gate_custody.py": ({"engine api"}, "GET-only nonce-bound gate recovery observation"),
     "llm_bawt/ops/gate_retire.py": ({"engine api"}, "GET-only list/inspect of nonce-labelled gate containers before slot retirement"),
     "llm_bawt/ops/restart_health.py": ({"engine api"}, "worker-side inspect/exec health probe after a restart"),
-    "llm_bawt/ops/compose_render.py": ({"runs docker"}, "sealed `docker compose config` render"),
+    "llm_bawt/ops/compose_render.py": ({"runs docker", "engine api"}, "sealed `docker compose config` render; worker-side sibling inspect for checkout-aware render"),
     # Catalog data only: the deployed mounts a sealed recreate preserves.
     "llm_bawt/ops/seeds.py": ({"daemon socket"}, "data_mounts strings, no client"),
 }
