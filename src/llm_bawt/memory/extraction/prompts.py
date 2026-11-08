@@ -439,6 +439,42 @@ Return a JSON object with these EXACT keys:
 ```'''
 
 
+PROFILE_CURATION_PROMPT = '''You maintain the profile an AI assistant keeps about a user. The live profile is shown to the assistant every turn, so every entry must be a stable, true, useful fact about the user stated in their own conversations.
+
+## Live profile entries:
+{live}
+
+## New candidate facts (extracted from conversations, not yet trusted):
+{candidates}
+
+## Task:
+Decide what each candidate changes. Return ONLY a JSON object:
+```json
+{{"ops": [
+  {{"op": "add", "candidate_id": 12, "category": "preference", "key": "short_snake_key", "value": "Concise fact.", "reason": "why"}},
+  {{"op": "update", "id": 3, "candidate_ids": [13], "value": "Corrected or merged fact.", "reason": "why"}},
+  {{"op": "retire", "id": 14, "reason": "why"}},
+  {{"op": "retire", "id": 4, "candidate_ids": [15], "reason": "superseded because ..."}}
+]}}
+```
+
+## Rules:
+1. add promotes a candidate to the live profile. Use a category from: preference, fact, interest, context, communication.
+2. update rewrites a live entry; cite the candidate(s) that justify it. Those candidates are merged and retired.
+3. retire a candidate that is a duplicate, trivial, a one-off, about someone else, speculative, or not clearly stated by the user.
+4. Retire a live entry only when a cited candidate shows it is false or outdated.
+5. Never invent details. Do not add ages, counts, statistics or dates unless the candidate states them as a lasting fact.
+6. Every op needs a reason. Use each id at most once. Every candidate should appear in exactly one op.'''
+
+
+def get_profile_curation_prompt(live: str, candidates: str) -> str:
+    """Get the profile curation prompt with live entries and candidates filled in."""
+    return get_prompt_resolver().render(
+        key="profile.curation",
+        variables={"live": live, "candidates": candidates},
+    )
+
+
 def get_profile_consolidation_prompt(attributes: str) -> str:
     """Get the profile consolidation prompt with attributes filled in."""
     return get_prompt_resolver().render(

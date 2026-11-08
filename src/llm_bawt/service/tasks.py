@@ -156,8 +156,8 @@ def create_maintenance_task(
 
 def create_profile_maintenance_task(
     entity_id: str,
+    bot_id: str,
     entity_type: str = "user",
-    bot_id: str = "nova",
     dry_run: bool = False,
     priority: int = 5,
 ) -> Task:

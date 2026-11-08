@@ -124,17 +124,27 @@ class BackgroundTasksMixin:
         )
 
     def _process_profile_maintenance(self, task: Task) -> dict:
-        """Process profile maintenance - consolidate attributes into summary.
+        """Process profile maintenance - curate candidate facts into a cited diff.
 
-        Uses configured maintenance model resolution and loads that model
-        deterministically when needed.
+        Makes no model call when the entity has no candidate facts.
         """
-        from ..memory.profile_maintenance import ProfileMaintenanceService
+        from ..memory.profile_maintenance import ProfileCurationService
+        from ..profiles import STATUS_CANDIDATE, EntityType
         from ..runtime_settings import resolve_job_model
 
         entity_id = task.payload.get("entity_id", task.user_id)
         entity_type = task.payload.get("entity_type", "user")
         dry_run = task.payload.get("dry_run", False)
+
+        # Reuse the process-wide ProfileManager singleton — see TASK-202.
+        # Each ProfileManager owns its own 5-connection pool, so creating
+        # one per task on the executor leaks connections.
+        from .dependencies import get_profile_manager
+        profile_manager = get_profile_manager(self.config)
+        kind = EntityType.USER if entity_type == "user" else EntityType.BOT
+        if not profile_manager.attributes_with_status(kind, entity_id, (STATUS_CANDIDATE,)):
+            return {"entity_id": entity_id, "candidates": 0, "applied": [], "rejected": [],
+                    "error": None}
 
         requested_model = (
             task.payload.get("model")
@@ -157,24 +167,17 @@ class BackgroundTasksMixin:
             return {"error": f"Profile maintenance model '{requested_model}' is unavailable as a background client"}
         log.info(f"🔧 Profile maintenance: {entity_type}/{entity_id} (model={model_to_use})")
 
-        # Reuse the process-wide ProfileManager singleton — see TASK-202.
-        # Each ProfileManager owns its own 5-connection pool, so creating
-        # one per task on the executor leaks connections.
-        from .dependencies import get_profile_manager
-        profile_manager = get_profile_manager(self.config)
-
-        service = ProfileMaintenanceService(profile_manager, llm_client)
-
         # Remote API call (grok/openai background client). Already on the
         # bounded background pool via process_task, never the default pool
         # interactive turns use (caid stall 2026-06-15, TASK-274/283).
-        result = service.run(entity_id, entity_type, dry_run)
+        result = ProfileCurationService(profile_manager, llm_client).run(
+            entity_id, entity_type, dry_run)
 
         return {
             "entity_id": result.entity_id,
-            "attributes_before": result.attributes_before,
-            "attributes_after": result.attributes_after,
-            "categories_updated": result.categories_updated,
+            "candidates": result.candidates,
+            "applied": result.applied,
+            "rejected": result.rejected,
             "error": result.error,
         }
 

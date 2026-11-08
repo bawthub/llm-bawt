@@ -81,6 +81,7 @@ from .prompt_default_loaders import (
     load_ops_quiesce_resume,
     load_ops_quiesce_resume_blocked,
     load_profile_consolidation,
+    load_profile_curation,
     load_recall_synthesis_system,
     load_refine_default_instruction,
     load_refine_system_guard,
@@ -215,6 +216,14 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
         category="profile",
         required_vars=("attributes",),
         loader=load_profile_consolidation,
+        format="json_instruction",
+    ),
+    "profile.curation": PromptDefinition(
+        key="profile.curation",
+        title="Profile Curation",
+        category="profile",
+        required_vars=("live", "candidates"),
+        loader=load_profile_curation,
         format="json_instruction",
     ),
     "memory.maintenance.intent_with_context": PromptDefinition(

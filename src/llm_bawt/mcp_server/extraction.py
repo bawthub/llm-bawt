@@ -107,10 +107,13 @@ def extract_profile_attributes_from_fact(
         content = fact.get("content", "")
         importance = fact.get("importance", 0.5)
         profile_attr = fact.get("profile_attribute")
+        source_ids = fact.get("source_message_ids") or []
     else:
         content = fact.content
         importance = fact.importance
         profile_attr = getattr(fact, "profile_attribute", None)
+        source_ids = getattr(fact, "source_message_ids", None) or []
+    source_message_id = str(source_ids[0])[:100] if source_ids else None
     
     # Check if profile extraction is enabled
     if not getattr(config, "MEMORY_PROFILE_ATTRIBUTE_ENABLED", True):
@@ -158,7 +161,9 @@ def extract_profile_attributes_from_fact(
         # ProfileManager owns a 5-connection SQLAlchemy pool.
         from llm_bawt.mcp_server.server import _get_profile_manager
         manager = _get_profile_manager()
-        attr = manager.set_attribute(
+        # TASK-1720: an extracted fact is a candidate until profile curation
+        # promotes it; it never overwrites or joins the live profile directly.
+        attr = manager.add_candidate(
             entity_type=EntityType.USER,
             entity_id=user_id,
             category=category,
@@ -166,6 +171,7 @@ def extract_profile_attributes_from_fact(
             value=content,  # Store full content as value
             confidence=importance,  # Map importance to confidence
             source="extracted",
+            source_message_id=source_message_id,
         )
         
         # If this is a name attribute, also set display_name on the profile

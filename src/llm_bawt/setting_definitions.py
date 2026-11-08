@@ -503,6 +503,18 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
         legacy_keys=("EXTRACTION_MODEL",),
         ui_widget="model",
     ),
+    # TASK-1720: per-bot "About the User" source. Off = the legacy stored
+    # summary (unchanged); on = the curated live profile attributes.
+    "user_profile_curated": SettingDefinition(
+        key="user_profile_curated",
+        type="bool",
+        default=False,
+        applies_to=BOT_TYPES_ALL,
+        storage=STORAGE_RUNTIME_SETTING,
+        label="Curated user profile",
+        help="Render \"About the User\" from the curated profile attributes instead "
+             "of the legacy stored summary.",
+    ),
     "profile_maintenance_model": SettingDefinition(
         key="profile_maintenance_model",
         type="str",

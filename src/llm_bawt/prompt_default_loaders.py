@@ -75,6 +75,12 @@ def load_profile_consolidation() -> str:
     return PROFILE_CONSOLIDATION_PROMPT
 
 
+def load_profile_curation() -> str:
+    from .memory.extraction.prompts import PROFILE_CURATION_PROMPT
+
+    return PROFILE_CURATION_PROMPT
+
+
 def load_memory_maintenance_intent_with_context() -> str:
     from .memory.maintenance import INTENT_PROMPT_WITH_CONTEXT
 

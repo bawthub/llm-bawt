@@ -272,7 +272,7 @@ def test_memory_maintenance_errors_hide_driver_text(monkeypatch):
 
 
 def test_profile_maintenance_error_hides_driver_text():
-    from llm_bawt.memory.profile_maintenance import ProfileMaintenanceService
+    from llm_bawt.memory.profile_maintenance import ProfileCurationService
 
     class Failing:
         def __getattr__(self, _name):
@@ -280,9 +280,13 @@ def test_profile_maintenance_error_hides_driver_text():
                 raise _driver_error()
             return call
 
-    attr = SimpleNamespace(category="c", key="k", value="v")
-    profiles = SimpleNamespace(get_all_attributes=lambda *_a: [attr])
-    result = ProfileMaintenanceService(profiles, Failing()).run("u")
+    attr = SimpleNamespace(id=1, status="candidate", category="fact", key="k", value="v",
+                           source="extracted", source_message_id=None, confidence=0.9)
+    profiles = SimpleNamespace(attributes_with_status=lambda *_a: [attr])
+    from unittest.mock import patch
+    with patch("llm_bawt.memory.profile_maintenance.get_profile_curation_prompt",
+               return_value="prompt"):
+        result = ProfileCurationService(profiles, Failing()).run("u")
 
     assert REF_TEXT.search(result.error)
     _assert_clean(result.error)

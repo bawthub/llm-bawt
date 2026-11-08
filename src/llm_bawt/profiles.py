@@ -21,6 +21,11 @@ from .utils.schema import SchemaBootstrapGuard
 logger = logging.getLogger(__name__)
 
 
+STATUS_LIVE = "live"
+STATUS_CANDIDATE = "candidate"
+STATUS_RETIRED = "retired"
+
+
 class EntityType(str, Enum):
     """Type of entity a profile belongs to."""
     USER = "user"
@@ -53,7 +58,13 @@ class ProfileAttribute(SQLModel, table=True):
     confidence: float = Field(default=1.0)  # 0.0-1.0, how confident we are in this attribute
     source: str | None = Field(default=None, max_length=50)  # "explicit", "inferred", "system"
     source_message_id: str | None = Field(default=None, max_length=100)  # Message that led to this
-    
+
+    # TASK-1720: extracted facts land as ``candidate`` and are not rendered
+    # until curation promotes them to ``live``; curation retires the rest.
+    status: str = Field(default=STATUS_LIVE, max_length=16,
+                        sa_column_kwargs={"server_default": STATUS_LIVE})
+    retire_reason: str | None = Field(default=None, sa_column=Column(Text))
+
     # Timestamps
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -173,6 +184,14 @@ class ProfileManager:
                 WHERE email IS NOT NULL
             """))
 
+            conn.execute(text("""
+                ALTER TABLE entity_profile_attributes
+                ADD COLUMN IF NOT EXISTS status VARCHAR(16) NOT NULL DEFAULT 'live'
+            """))
+            conn.execute(text("""
+                ALTER TABLE entity_profile_attributes
+                ADD COLUMN IF NOT EXISTS retire_reason TEXT
+            """))
             # ---- structural indexes ----
             conn.execute(text("""
                 CREATE INDEX IF NOT EXISTS idx_entity_profile_attr_entity 
@@ -378,12 +397,13 @@ class ProfileManager:
         self.get_or_create_profile(entity_type, entity_id)
         
         with Session(self.engine) as session:
-            # Check for existing attribute
+            # Check for existing live attribute (candidates/retired rows are separate)
             statement = select(ProfileAttribute).where(
                 ProfileAttribute.entity_type == entity_type,
                 ProfileAttribute.entity_id == entity_id,
                 ProfileAttribute.category == category,
                 ProfileAttribute.key == key,
+                ProfileAttribute.status == STATUS_LIVE,
             )
             attr = session.exec(statement).first()
             
@@ -413,7 +433,75 @@ class ProfileManager:
             
             logger.info(f"Set attribute {entity_type}/{entity_id}: {category}.{key} = {value} (id={attr.id})")
             return attr
-    
+
+    def add_candidate(
+        self,
+        entity_type: EntityType,
+        entity_id: str,
+        category: str,
+        key: str,
+        value: Any,
+        confidence: float,
+        source: str,
+        source_message_id: str | None = None,
+    ) -> ProfileAttribute:
+        """Record an unreviewed fact; it isn't rendered until curation promotes it."""
+        entity_id = entity_id.lower().strip()
+        self.get_or_create_profile(entity_type, entity_id)
+        with Session(self.engine) as session:
+            attr = ProfileAttribute(
+                entity_type=entity_type, entity_id=entity_id,
+                category=category.lower().strip(), key=key.lower().strip(), value=value,
+                confidence=confidence, source=source, source_message_id=source_message_id,
+                status=STATUS_CANDIDATE,
+            )
+            session.add(attr)
+            session.commit()
+            session.refresh(attr)
+            return attr
+
+    def attributes_with_status(
+        self, entity_type: EntityType, entity_id: str, statuses: tuple[str, ...],
+    ) -> list[ProfileAttribute]:
+        entity_id = entity_id.lower().strip()
+        with Session(self.engine) as session:
+            statement = select(ProfileAttribute).where(
+                ProfileAttribute.entity_type == entity_type,
+                ProfileAttribute.entity_id == entity_id,
+                ProfileAttribute.status.in_(statuses),  # type: ignore[attr-defined]
+            ).order_by(ProfileAttribute.id)
+            return list(session.exec(statement).all())
+
+    def entities_with_candidates(self, entity_type: EntityType) -> list[str]:
+        with Session(self.engine) as session:
+            statement = select(ProfileAttribute.entity_id).where(
+                ProfileAttribute.entity_type == entity_type,
+                ProfileAttribute.status == STATUS_CANDIDATE,
+            ).distinct()
+            return sorted(session.exec(statement).all())
+
+    def apply_curation(self, entity_type: EntityType, entity_id: str,
+                       changes: list[dict[str, Any]]) -> None:
+        """Apply validated curation changes in one transaction.
+
+        Each change: ``{"id", "status", "value"?, "category"?, "key"?,
+        "source_message_id"?, "retire_reason"?}`` for an existing row of this entity.
+        """
+        entity_id = entity_id.lower().strip()
+        now = datetime.now(timezone.utc)
+        with Session(self.engine) as session:
+            for change in changes:
+                attr = session.get(ProfileAttribute, change["id"])
+                if attr is None or attr.entity_type != entity_type or attr.entity_id != entity_id:
+                    raise ValueError(f"attribute {change['id']} is not part of {entity_id}")
+                for field in ("status", "value", "category", "key", "source_message_id",
+                              "retire_reason"):
+                    if field in change:
+                        setattr(attr, field, change[field])
+                attr.updated_at = now
+                session.add(attr)
+            session.commit()
+
     def get_attribute(
         self,
         entity_type: EntityType,
@@ -432,6 +520,7 @@ class ProfileManager:
                 ProfileAttribute.entity_id == entity_id,
                 ProfileAttribute.category == category,
                 ProfileAttribute.key == key,
+                ProfileAttribute.status == STATUS_LIVE,
             )
             return session.exec(statement).first()
     
@@ -450,21 +539,23 @@ class ProfileManager:
                 ProfileAttribute.entity_type == entity_type,
                 ProfileAttribute.entity_id == entity_id,
                 ProfileAttribute.category == category,
+                ProfileAttribute.status == STATUS_LIVE,
             )
             return list(session.exec(statement).all())
-    
+
     def get_all_attributes(
         self,
         entity_type: EntityType,
         entity_id: str,
     ) -> list[ProfileAttribute]:
-        """Get all attributes for an entity."""
+        """Get all live attributes for an entity."""
         entity_id = entity_id.lower().strip()
-        
+
         with Session(self.engine) as session:
             statement = select(ProfileAttribute).where(
                 ProfileAttribute.entity_type == entity_type,
                 ProfileAttribute.entity_id == entity_id,
+                ProfileAttribute.status == STATUS_LIVE,
             ).order_by(ProfileAttribute.category, ProfileAttribute.key)
             return list(session.exec(statement).all())
     
@@ -684,6 +775,7 @@ class ProfileManager:
         entity_id: str,
         include_categories: list[str] | None = None,
         min_confidence: float = 0.5,
+        use_summary: bool = True,
     ) -> str:
         """Generate a summary of an entity's profile for system prompt injection.
         
@@ -706,8 +798,8 @@ class ProfileManager:
             )
             profile = session.exec(profile_stmt).first()
             
-            # If profile has a pre-computed summary, use it (from maintenance job)
-            if profile and profile.summary:
+            # Legacy: a pre-computed summary wins (the retired maintenance job wrote it).
+            if use_summary and profile and profile.summary:
                 lines = []
                 # Always start with name
                 if profile.display_name:
@@ -721,6 +813,7 @@ class ProfileManager:
                 ProfileAttribute.entity_type == entity_type,
                 ProfileAttribute.entity_id == entity_id,
                 ProfileAttribute.confidence >= min_confidence,
+                ProfileAttribute.status == STATUS_LIVE,
             )
             if include_categories:
                 # Filter by categories in Python since SQLModel typing is tricky
@@ -809,9 +902,13 @@ class ProfileManager:
     # Convenience methods
     # =========================================================================
     
-    def get_user_profile_summary(self, user_id: str) -> str:
-        """Get profile summary for a user."""
-        return self.get_profile_summary(EntityType.USER, user_id)
+    def get_user_profile_summary(self, user_id: str, *, curated: bool = False) -> str:
+        """Profile text for a user's prompt section.
+
+        ``curated`` renders the live (curated) attributes directly; otherwise the
+        legacy stored summary wins when present (TASK-1720 render mode).
+        """
+        return self.get_profile_summary(EntityType.USER, user_id, use_summary=not curated)
     
     def get_bot_profile_summary(self, bot_id: str) -> str:
         """Get profile summary for a bot (personality traits, preferences)."""

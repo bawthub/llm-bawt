@@ -26,7 +26,9 @@ class PromptSectionsMixin:
         """Section 1: User profile context."""
         if self._db_available and self.profile_manager:
             try:
-                user_context = self.profile_manager.get_user_profile_summary(self.user_id)
+                curated = bool(self._resolve_setting("user_profile_curated", False))
+                user_context = self.profile_manager.get_user_profile_summary(
+                    self.user_id, curated=curated)
                 if user_context:
                     builder.add_section(
                         "user_context",
