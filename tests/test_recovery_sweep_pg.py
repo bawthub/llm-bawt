@@ -858,3 +858,48 @@ def test_an_open_rearmed_run_keeps_the_startup_follow_up_probing(delivery_store)
                      {"id": delivery.turn_id})
     result = asyncio.run(check.follow_up())
     assert result["rearmed_runs"] == 0
+
+
+def test_a_non_json_turn_row_does_not_stop_the_sweep_or_its_report(delivery_store):  # noqa: F811
+    """TASK-1260: a turn_logs row whose request_json isn't JSON is skipped, not fatal."""
+    from llm_bawt.service.recovery.audit import rows_for_run
+
+    store, _, target = delivery_store
+    bad = _reserved_for(store, target, "owner")
+    with store.engine.begin() as conn:
+        conn.execute(sa_text("UPDATE turn_logs SET request_json='not json' WHERE id=:id"), {"id": bad})
+    orphan = _old_turn(store, f"{target}-orphan")
+    report = asyncio.run(RecoverySweep(store.engine, probe=Probe(NOT_FOUND)).run(
+        dry_run=False, bots=[target, f"{target}-orphan"]))
+    assert all(step.get("error") is None for step in report["steps"]), report
+    assert _ids(_step(report, "orphan_turns")["done"]) == [orphan]
+    assert _ids(rows_for_run(store.engine, report["sweep_run_id"])["turns"], "id") == [orphan]
+    with store.engine.begin() as conn:
+        conn.execute(sa_text("DELETE FROM turn_logs WHERE id=:id"), {"id": bad})
+
+
+def test_two_runs_releasing_one_deliverys_reservations_each_find_it(delivery_store):  # noqa: F811
+    """TASK-1260: a later release keeps the earlier run's stamp."""
+    from llm_bawt.service.recovery.audit import rows_for_run
+
+    store, sender, target = delivery_store
+    delivery, _ = _enqueue(store, sender, target, "cancelled twice over")
+    assert store.claim_next(target, claim_owner="owner", steer_capable=False)
+    with store.engine.begin() as conn:
+        conn.execute(sa_text("UPDATE inter_bot_deliveries SET status='CANCELLED', claim_token=NULL WHERE id=:id"),
+                     {"id": delivery.id})
+    sweep = RecoverySweep(store.engine)
+    first = asyncio.run(sweep.run(dry_run=False, bots=[target], steps=["reservations"]))
+    assert _ids(_step(first, "reservations")["done"]) == [delivery.turn_id]
+    again = f"turn-{uuid.uuid4().hex}"
+    with store.engine.begin() as conn:
+        conn.execute(sa_text("""
+            INSERT INTO turn_logs (id, created_at, path, stream, bot_id, user_id, status, user_prompt,
+                                   request_json, response_text, ended_at)
+            VALUES (:id, now(), '/v1/chat/completions', false, :bot, 'nick', 'reserved', '', :j, '', NULL)
+        """), {"id": again, "bot": target, "j": json.dumps({"inter_bot_delivery_id": delivery.id})})
+    second = asyncio.run(sweep.run(dry_run=False, bots=[target], steps=["reservations"]))
+    assert _ids(_step(second, "reservations")["done"]) == [again]
+    for run, turn in ((first, delivery.turn_id), (second, again)):
+        [row] = rows_for_run(store.engine, run["sweep_run_id"])["deliveries"]
+        assert (row["id"], row["recovery"]["released_reservation"]) == (delivery.id, turn)

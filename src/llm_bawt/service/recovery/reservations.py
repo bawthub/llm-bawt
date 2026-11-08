@@ -41,14 +41,20 @@ from ...inter_bot_delivery_recovery import DeliveryLeaseRecovery
 from ..turn_admission import lock_target, release_reservation, requeue_stale_reservation
 from .base import Plan, RecoveryStep, SweepScope
 
+# Release stamps kept per delivery (TASK-1260); older ones drop off.
+RELEASE_STAMP_LIMIT = 20
+
 _RESERVED = """
     SELECT t.id AS turn_id, t.bot_id, t.trigger_message_id, t.created_at,
-           CAST(t.request_json AS jsonb)->>'reservation_owner' AS owner,
-           COALESCE(CAST(t.request_json AS jsonb)->>'inter_bot_delivery_id',
+           t.rj->>'reservation_owner' AS owner,
+           COALESCE(t.rj->>'inter_bot_delivery_id',
                     (SELECT d.id FROM inter_bot_deliveries d
                      WHERE d.turn_id = t.id AND d.delivery_mode <> 'steer'
                      ORDER BY d.ordinal DESC LIMIT 1)) AS delivery_id
-    FROM turn_logs t WHERE t.status = 'reserved' AND t.ended_at IS NULL
+    FROM (SELECT *, CASE WHEN pg_input_is_valid(request_json, 'jsonb')
+                         THEN CAST(request_json AS jsonb) END AS rj
+          FROM turn_logs) t
+    WHERE t.status = 'reserved' AND t.ended_at IS NULL
     ORDER BY t.created_at
 """
 
@@ -166,9 +172,22 @@ class OrphanedReservationsStep(RecoveryStep):
                 if released:
                     conn.execute(sa_text("""
                         UPDATE inter_bot_deliveries
-                        SET metadata_json = metadata_json || jsonb_build_object('recovery', CAST(:stamp AS jsonb))
-                        WHERE id=:id
-                    """), {"id": candidate["delivery_id"],
+                        SET metadata_json = metadata_json || jsonb_build_object(
+                            'recovery', CAST(:stamp AS jsonb),
+                            'recovery_releases', (
+                                SELECT COALESCE(jsonb_agg(e ORDER BY i), '[]'::jsonb)
+                                FROM jsonb_array_elements(prior.list || jsonb_build_array(CAST(:stamp AS jsonb)))
+                                     WITH ORDINALITY x(e, i)
+                                WHERE i > jsonb_array_length(prior.list) + 1 - :limit))
+                        FROM (SELECT CASE
+                                WHEN jsonb_typeof(metadata_json->'recovery_releases') = 'array'
+                                    THEN metadata_json->'recovery_releases'
+                                WHEN metadata_json ? 'recovery'
+                                    THEN jsonb_build_array(metadata_json->'recovery')
+                                ELSE '[]'::jsonb END AS list
+                              FROM inter_bot_deliveries WHERE id=:id) prior
+                        WHERE inter_bot_deliveries.id=:id
+                    """), {"id": candidate["delivery_id"], "limit": RELEASE_STAMP_LIMIT,
                            "stamp": json.dumps({**scope.stamp.as_dict(), "released_reservation": turn_id})})
             if not released:
                 return None
