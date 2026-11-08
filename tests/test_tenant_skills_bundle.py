@@ -59,7 +59,7 @@ def test_bundle_has_no_private_references():
 
 
 def test_both_tenant_images_bake_the_bundle_at_one_path():
-    for dockerfile in ("Dockerfile.app", "Dockerfile.agent-bridge"):
+    for dockerfile in ("Dockerfile.app-cpu", "Dockerfile.agent-bridge"):
         text = (ROOT / dockerfile).read_text()
         assert f"COPY tenant-skills/ {SKILLS_PATH}/" in text, dockerfile
 

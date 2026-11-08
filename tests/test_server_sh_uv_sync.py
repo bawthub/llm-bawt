@@ -94,4 +94,4 @@ def test_app_image_leaves_sync_policy_to_server_sh():
     # An image ENV would be merged into the ops source plan, where UV_NO_SYNC
     # is unclassified (and the UV_ prefix is reserved), refusing the bind. The
     # container marker already makes server.sh pass --no-sync.
-    assert "UV_NO_SYNC" not in (REPO / "Dockerfile.app").read_text()
+    assert "UV_NO_SYNC" not in (REPO / "Dockerfile.app-cpu").read_text()

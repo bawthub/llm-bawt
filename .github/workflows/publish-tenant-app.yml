@@ -38,7 +38,7 @@ jobs:
         image: [app, agent-bridge, ops-worker]
         include:
           - image: app
-            dockerfile: Dockerfile.app
+            dockerfile: Dockerfile.app-cpu
             build-args: ""
           - image: agent-bridge
             dockerfile: Dockerfile.agent-bridge

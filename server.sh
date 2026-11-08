@@ -21,7 +21,7 @@ VERBOSE_FLAG=""
 DEBUG_FLAG=""
 DEV_MODE=false
 
-# A container's dependencies belong to its image (Dockerfile.app runs `uv sync`
+# A container's dependencies belong to its image (Dockerfile.app-cpu runs `uv sync`
 # at build time). A sync at start would rebuild the editable install and write
 # src/llm_bawt.egg-info into the bind-mounted source tree as root on every
 # start, which the ops source guards rightly refuse (TASK-1476). So `uv run`
