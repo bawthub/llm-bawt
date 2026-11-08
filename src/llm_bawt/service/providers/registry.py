@@ -41,6 +41,9 @@ from .x import XAdapter
 
 logger = logging.getLogger(__name__)
 
+#: Caller-visible detail when an adapter's health probe raises (TASK-1566).
+HEALTH_PROBE_FAILED_DETAIL = "Health check failed; see service logs"
+
 # Adapter classes keyed by provider id. Extend here as providers are added.
 # TASK-635: the single `claude` adapter supersedes the old claude-sub +
 # claude-usage dual flow (ClaudeSubAdapter remains as its unregistered base).
@@ -135,8 +138,10 @@ def access_path_connections(config: Config, access_path_keys: Iterable[str]) -> 
             try:
                 health_by_provider[cls.id] = cls(config).health()
             except Exception as exc:  # noqa: BLE001 — one bad adapter must not hide the rest
-                logger.warning("health probe failed for %s: %s", cls.id, exc)
-                health_by_provider[cls.id] = {"state": HEALTH_UNKNOWN, "detail": str(exc)[:200]}
+                # The raw exception can carry hosts, paths or credential
+                # fragments: keep it in the log, show callers a fixed message.
+                logger.warning("health probe failed for %s: %s", cls.id, exc, exc_info=True)
+                health_by_provider[cls.id] = {"state": HEALTH_UNKNOWN, "detail": HEALTH_PROBE_FAILED_DETAIL}
         health = health_by_provider[cls.id]
         state = str(health.get("state") or HEALTH_UNKNOWN)
         result[key] = {

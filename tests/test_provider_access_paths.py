@@ -142,11 +142,14 @@ def test_connections_report_state_once_per_adapter_and_none_for_unowned():
 
 
 def test_one_failing_health_probe_does_not_hide_the_rest():
-    broken, _ = _owner("broken", RuntimeError("boom"))
+    secret = "connect to db.internal:5432 failed for key sk-live-abc123"
+    broken, _ = _owner("broken", RuntimeError(secret))
     fine, _ = _owner("fine", {"state": "ok"})
     with patch.object(registry, "_ACCESS_PATH_OWNERS", {"b": broken, "f": fine}):
         result = registry.access_path_connections(MagicMock(), ["b", "f"])
 
+    # The raw exception stays in logs; callers get a fixed message (TASK-1566).
     assert result["b"] == {"provider_id": "broken", "label": "BROKEN", "state": "unknown",
-                           "detail": "boom", "connected": False}
+                           "detail": registry.HEALTH_PROBE_FAILED_DETAIL, "connected": False}
+    assert secret not in repr(result)
     assert result["f"]["connected"] is True
