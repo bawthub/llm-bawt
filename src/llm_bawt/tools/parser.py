@@ -24,6 +24,18 @@ _TOOL_RESULT_RE = re.compile(
 )
 
 
+_TOOL_RESULT_ERROR_RE = re.compile(r'^<tool_result\b[^>]*\bstatus="error"')
+
+
+def tool_result_is_error(text: Any) -> bool:
+    """Whether an executor result is a ``format_tool_result`` error envelope.
+
+    The status lives only in the wrapper tag, so check before any caller
+    strips it with :func:`strip_tool_result_tags`.
+    """
+    return isinstance(text, str) and _TOOL_RESULT_ERROR_RE.match(text) is not None
+
+
 def strip_tool_result_tags(text: str) -> str:
     """Remove ``<tool_result>`` wrapper tags, returning the inner content.
 

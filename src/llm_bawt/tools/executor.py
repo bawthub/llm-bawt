@@ -1671,7 +1671,7 @@ class ToolExecutor:
     def _execute_ha_native_tool(self, tool_call: ToolCall) -> str:
         """Execute an HA native MCP tool call (passthrough to HA)."""
         if not self.ha_native_client:
-            return format_tool_result(tool_call.name, "HA native MCP client not available")
+            return format_tool_result(tool_call.name, None, error="HA native MCP client not available")
 
         tool_name = tool_call.name
         arguments = tool_call.arguments or {}
@@ -1687,7 +1687,7 @@ class ToolExecutor:
             return format_tool_result(tool_name, result or "Done")
         except Exception as e:
             logger.error(f"HA native tool call failed: {tool_name}: {e}")
-            return format_tool_result(tool_name, f"Error: {e}")
+            return format_tool_result(tool_name, None, error=str(e))
 
     @staticmethod
     def _home_needs_resolution(text: str) -> bool:

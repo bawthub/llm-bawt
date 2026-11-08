@@ -159,4 +159,10 @@ class ToolEventCoordinator:
                 "ts": time.time(),
             }
             self.start({**base, "event": "tool_start"})
-            self.end({**base, "event": "tool_end", "result": detail.get("result") or ""})
+            is_error = detail.get("is_error")
+            self.end({
+                **base,
+                "event": "tool_end",
+                "result": detail.get("result") or "",
+                "is_error": is_error if isinstance(is_error, bool) else None,
+            })

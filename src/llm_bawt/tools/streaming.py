@@ -278,8 +278,8 @@ def stream_with_tools(
         tc = tool_calls[0]  # Process one tool at a time
         log.info(f"🔧 Calling tool: {tc.name} with args: {tc.arguments}")
 
-        from .parser import ToolCall
-        tool_call = ToolCall(name=tc.name, arguments=tc.arguments, raw_text=tc.raw_text or "")
+        from .parser import ToolCall, tool_result_is_error
+        tool_call =ToolCall(name=tc.name, arguments=tc.arguments, raw_text=tc.raw_text or "")
         tool_result = executor.execute(tool_call)
         has_executed_tools = True  # Mark that we've executed tools
         log.debug(f"Tool result: {len(tool_result)} chars")
@@ -289,6 +289,7 @@ def stream_with_tools(
                     "tool": tc.name,
                     "parameters": tc.arguments if isinstance(tc.arguments, dict) else {"raw": tc.arguments},
                     "result": tool_result,
+                    "is_error": tool_result_is_error(tool_result),
                     "iteration": iteration,
                 }
             )

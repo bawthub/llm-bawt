@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 
 from .executor import ToolExecutor
 from .formats import ToolFormat, get_format_handler, ToolCallRequest
-from .parser import ToolCall, format_tool_result
+from .parser import ToolCall, format_tool_result, tool_result_is_error
 
 if TYPE_CHECKING:
     from ..models.message import Message
@@ -209,6 +209,7 @@ class ToolLoop:
                             "tool": tc_req.name,
                             "parameters": tc_req.arguments,
                             "result": result_text,
+                            "is_error": tool_result_is_error(result_text),
                             "iteration": iteration,
                         })
                     
@@ -267,6 +268,7 @@ class ToolLoop:
                     "tool": tc_req.name,
                     "parameters": tc_req.arguments,
                     "result": result_text,
+                    "is_error": tool_result_is_error(result_text),
                     "iteration": iteration,
                 })
             

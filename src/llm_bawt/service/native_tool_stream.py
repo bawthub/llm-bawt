@@ -67,7 +67,7 @@ class NativeToolStream:
         def native_stream_with_tool_loop():
             """Stream with native tool support, handling tool calls inline."""
             import json as _json
-            from ..tools.parser import ToolCall, strip_tool_result_tags
+            from ..tools.parser import ToolCall, strip_tool_result_tags, tool_result_is_error
 
             current_msgs = list(messages)
             max_iterations = 3 if llm_bawt._ha_mode else 5
@@ -187,6 +187,8 @@ class NativeToolStream:
 
                             tool_call_obj = ToolCall(name=name, arguments=args, raw_text="")
                             raw_result = executor.execute(tool_call_obj)
+                            # Read the status before stripping its wrapper tag.
+                            is_error = tool_result_is_error(raw_result)
                             # Strip <tool_result> XML tags — native tool path
                             # sends results as structured function_call_output
                             # items, not inline text.
@@ -207,6 +209,7 @@ class NativeToolStream:
                                 "arguments": args,
                                 "call_id": call_id,
                                 "result": result or "",
+                                "is_error": is_error,
                                 "iteration": iteration + 1,
                                 "ts": time.time(),
                             })
@@ -217,6 +220,7 @@ class NativeToolStream:
                                 "arguments": args,
                                 "call_id": call_id,
                                 "result": result or "",
+                                "is_error": is_error,
                                 "iteration": iteration + 1,
                             })
 
