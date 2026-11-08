@@ -286,3 +286,42 @@ def test_profile_maintenance_error_hides_driver_text():
 
     assert REF_TEXT.search(result.error)
     _assert_clean(result.error)
+
+
+# --- Round 3 (Loopy review cmw7r0x7c02000mojjjvjx01s) -------------------------
+
+
+def test_summarize_thread_load_failure_hides_driver_text():
+    from llm_bawt.memory.summarization import HistorySummarizer
+
+    class Engine:
+        def connect(self):
+            raise _driver_error()
+
+    summarizer = object.__new__(HistorySummarizer)
+    summarizer._backend = SimpleNamespace(engine=Engine(), _messages_table_name="messages")
+    result = summarizer.summarize_thread("session-1")
+
+    assert result["success"] is False
+    [error] = result["errors"]
+    assert REF_TEXT.search(error)
+    _assert_clean(error)
+
+
+def test_sanitizer_imports_without_the_web_stack():
+    """core.status and the memory jobs are used by the base install (no FastAPI)."""
+    import subprocess
+    import sys
+
+    code = (
+        "import sys\n"
+        "class Block:\n"
+        "    def find_spec(self, name, path=None, target=None):\n"
+        "        if name.split('.')[0] in ('fastapi', 'starlette'):\n"
+        "            raise ModuleNotFoundError(name)\n"
+        "sys.meta_path.insert(0, Block())\n"
+        "import llm_bawt.utils.error_text, llm_bawt.core.status, llm_bawt.memory.maintenance\n"
+        "import llm_bawt.memory.profile_maintenance\n"
+    )
+    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, cwd=Path.cwd(), check=False)
+    assert done.returncode == 0, done.stderr[-2000:]

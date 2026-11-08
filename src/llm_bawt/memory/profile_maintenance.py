@@ -11,7 +11,7 @@ from llm_bawt.clients.base import LLMClient
 from llm_bawt.models.message import Message
 from llm_bawt.memory.extraction.prompts import get_profile_consolidation_prompt
 
-from llm_bawt.service.http_errors import safe_error_text
+from llm_bawt.utils.error_text import safe_error_text
 
 logger = logging.getLogger(__name__)
 

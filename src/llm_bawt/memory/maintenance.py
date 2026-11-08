@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from llm_bawt.service.http_errors import safe_error_text
+from llm_bawt.utils.error_text import safe_error_text
 
 from ..prompt_registry import get_prompt_resolver
 

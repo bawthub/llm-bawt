@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from llm_bawt.utils.config import Config
 
-from llm_bawt.service.http_errors import safe_error_text
+from llm_bawt.utils.error_text import safe_error_text
 
 logger = logging.getLogger(__name__)
 

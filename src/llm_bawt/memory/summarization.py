@@ -28,7 +28,7 @@ from .summarization_limits import SUMMARY_MAX_OUTPUT_TOKENS
 if TYPE_CHECKING:
     from .summarization import Session
 
-from llm_bawt.service.http_errors import safe_error_text
+from llm_bawt.utils.error_text import safe_error_text
 
 logger = logging.getLogger(__name__)
 
@@ -1358,7 +1358,7 @@ class HistorySummarizer:
         except Exception as e:
             logger.error(f"summarize_thread: failed to load thread {session_id}: {e}")
             return {"success": False, "summaries_created": 0,
-                    "messages_summarized": 0, "results": [], "errors": [str(e)]}
+                    "messages_summarized": 0, "results": [], "errors": [safe_error_text(e)]}
 
         msgs = [
             {"id": r.id, "role": r.role, "content": r.content,
@@ -1737,10 +1737,10 @@ class HistorySummarizer:
                                 logger.error(f"Failed to summarize{chunk_label}: {error_msg}")
                         except Exception as e:
                             logger.error(f"Error summarizing session{chunk_label}: {e}")
-                            errors.append(f"Session{chunk_label}: {str(e)}")
+                            errors.append(f"Session{chunk_label}: {safe_error_text(e)}")
                 except Exception as e:
                     logger.error(f"Error processing session: {e}")
-                    errors.append(str(e))
+                    errors.append(safe_error_text(e))
 
         return {
             "sessions_summarized": created_count,
@@ -1860,7 +1860,7 @@ class HistorySummarizer:
                         f"{result.get('error') or result.get('method')}"
                     )
             except Exception as e:  # noqa: BLE001
-                errors.append(f"{(session.session_id or '?')[:8]}: {e}")
+                errors.append(f"{(session.session_id or '?')[:8]}: {safe_error_text(e)}")
 
         logger.info(
             "Re-summarized %s/%s heuristic summaries for %s",
@@ -1982,7 +1982,7 @@ class HistorySummarizer:
                             logger.error(f"Failed to rebuild{chunk_label}: {error_msg}")
                 except Exception as e:
                     logger.error(f"Error rebuilding session: {e}")
-                    errors.append(str(e))
+                    errors.append(safe_error_text(e))
 
         return {
             "sessions_targeted": len(eligible),
