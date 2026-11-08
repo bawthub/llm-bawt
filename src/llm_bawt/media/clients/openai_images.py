@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import base64
 import logging
-import os
 from dataclasses import dataclass
 from urllib.parse import unquote_to_bytes
 
 import httpx
 
-from .base import GenerationResult, MediaClient
+from .base import GenerationResult, MediaClient, resolve_media_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -28,11 +27,12 @@ class _SourceImage:
 class OpenAIImageClient(MediaClient):
     """OpenAI image generation/edit client using the official HTTP API."""
 
-    def __init__(self, api_key: str | None = None, base_url: str = OPENAI_BASE_URL):
-        self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
+    def __init__(self, api_key: str | None = None, base_url: str = OPENAI_BASE_URL, config=None):
+        # The stored OpenAI API connection first, then OPENAI_API_KEY (TASK-1612).
+        self.api_key = resolve_media_api_key(config, "openai-api", ("OPENAI_API_KEY",), explicit=api_key)
         self.base_url = base_url.rstrip("/")
         if not self.api_key:
-            logger.warning("OpenAIImageClient: OPENAI_API_KEY is not configured")
+            logger.warning("OpenAIImageClient: no OpenAI API key; connect OpenAI in Settings → Providers.")
         self._client = httpx.AsyncClient(
             base_url=self.base_url,
             headers={"Authorization": f"Bearer {self.api_key}"},
@@ -57,7 +57,7 @@ class OpenAIImageClient(MediaClient):
         if media_type != "image":
             raise ValueError("OpenAIImageClient supports image generation only")
         if not self.api_key:
-            raise RuntimeError("OPENAI_API_KEY is required for the openai image provider")
+            raise RuntimeError("An OpenAI API key is required for the openai image provider (connect OpenAI in Settings → Providers)")
 
         size = self._image_size(aspect_ratio, resolution)
         common = {

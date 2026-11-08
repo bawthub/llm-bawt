@@ -12,11 +12,10 @@ API flow for video generation:
 from __future__ import annotations
 
 import logging
-import os
 
 import httpx
 
-from .base import GenerationResult, MediaClient
+from .base import GenerationResult, MediaClient, resolve_media_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -27,15 +26,15 @@ DEFAULT_TIMEOUT = 60.0
 class GrokMediaClient(MediaClient):
     """xAI media generation client using httpx."""
 
-    def __init__(self, api_key: str | None = None, base_url: str = XAI_BASE_URL):
-        self.api_key = api_key or os.environ.get("XAI_API_KEY") or os.environ.get("LLM_BAWT_XAI_API_KEY", "")
+    def __init__(self, api_key: str | None = None, base_url: str = XAI_BASE_URL, config=None):
+        # The stored xAI connection first, then the legacy env vars (TASK-1612).
+        self.api_key = resolve_media_api_key(
+            config, "xai", ("XAI_API_KEY", "LLM_BAWT_XAI_API_KEY"), explicit=api_key, config_attr="XAI_API_KEY",
+        )
         self.base_url = base_url.rstrip("/")
 
         if not self.api_key:
-            logger.warning(
-                "GrokMediaClient: No xAI API key found. "
-                "Set XAI_API_KEY or LLM_BAWT_XAI_API_KEY environment variable."
-            )
+            logger.warning("GrokMediaClient: no xAI API key; connect xAI in Settings → Providers.")
 
         self._client = httpx.AsyncClient(
             base_url=self.base_url,

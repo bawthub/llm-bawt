@@ -376,15 +376,15 @@ class ModelManager:
 
     def _fetch_api_models(self, provider_type: str) -> Tuple[bool, List[Dict[str, Any]]]:
         if provider_type == PROVIDER_OPENAI:
-            return fetch_openai_api_models()
+            return fetch_openai_api_models(
+                _resolve_discovery_key(self.config, "openai-api", ("OPENAI_API_KEY",))
+            )
         if provider_type == PROVIDER_GROK:
-            api_key = (
-                getattr(self.config, 'XAI_API_KEY', '')
-                or os.getenv('XAI_API_KEY', '')
-                or os.getenv('LLM_BAWT_XAI_API_KEY', '')
+            api_key = _resolve_discovery_key(
+                self.config, "xai", ("XAI_API_KEY", "LLM_BAWT_XAI_API_KEY"), config_attr="XAI_API_KEY",
             )
             if not api_key:
-                console.print("[bold red]Error:[/bold red] XAI_API_KEY not set. Set LLM_BAWT_XAI_API_KEY in .env or XAI_API_KEY env var.")
+                console.print("[bold red]Error:[/bold red] No xAI API key. Connect xAI in Settings → Providers.")
                 return False, []
             return fetch_grok_api_models(api_key)
         if provider_type == PROVIDER_OLLAMA:
@@ -720,6 +720,22 @@ def fetch_ollama_api_models(ollama_url: str) -> Tuple[bool, List[Dict[str, Any]]
         console.print(f"[bold red]Ollama API error:[/bold red] {e}")
         return False, []
 
+
+def _resolve_discovery_key(
+    config: Any, provider_id: str, env_vars: tuple[str, ...], config_attr: str | None = None,
+) -> str | None:
+    """A provider API key for model discovery: the stored connection, then env.
+
+    Same record-first order as the LLM clients (TASK-1612); the env vars stay
+    a deprecated fallback for setups without a stored connection.
+    """
+    from .service.providers.api_key import resolve_api_key  # noqa: PLC0415 — keep CLI imports light
+
+    return resolve_api_key(
+        config if config is not None else Config(), provider_id, env_vars=env_vars, config_attr=config_attr,
+    )
+
+
 def fetch_openai_api_models(api_key: str | None = None) -> Tuple[bool, List[Dict[str, Any]]]:
     """Fetches model list from OpenAI API."""
     from openai import OpenAI  # Import lazily
@@ -813,13 +829,11 @@ def fetch_anthropic_api_models(
     IDs to choose from. Requires ``ANTHROPIC_API_KEY`` (the Claude Code
     subscription OAuth token does NOT authenticate /v1/models).
     """
-    api_key = api_key or (
-        os.getenv("LLM_BAWT_ANTHROPIC_API_KEY")
-        or os.getenv("ANTHROPIC_API_KEY")
-        or ""
+    api_key = api_key or _resolve_discovery_key(
+        None, "anthropic-api", ("LLM_BAWT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"),
     )
     if not api_key:
-        console.print("[yellow]Anthropic discovery skipped: no ANTHROPIC_API_KEY[/yellow]")
+        console.print("[yellow]Anthropic discovery skipped: no Anthropic API key connected[/yellow]")
         return False, []
 
     try:

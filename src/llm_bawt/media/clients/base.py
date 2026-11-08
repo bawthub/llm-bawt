@@ -3,8 +3,44 @@
 from __future__ import annotations
 
 import abc
+import logging
+import os
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+
+def resolve_media_api_key(
+    config,
+    provider_id: str,
+    env_vars: Sequence[str],
+    *,
+    explicit: str | None = None,
+    config_attr: str | None = None,
+) -> str:
+    """A media provider's API key: explicit, then the stored connection, then env.
+
+    Same order as the LLM clients (``resolve_api_key``): the CredentialStore
+    record wins and the env vars stay a deprecated fallback (TASK-1612).
+    Returns ``""`` when no key is found.
+    """
+    if explicit:
+        return explicit
+    try:
+        from ...service.providers.api_key import resolve_api_key  # noqa: PLC0415 — keep media imports light
+        from ...utils.config import Config  # noqa: PLC0415
+
+        return resolve_api_key(
+            config if config is not None else Config(),
+            provider_id,
+            env_vars=env_vars,
+            config_attr=config_attr,
+        ) or ""
+    except Exception as error:  # noqa: BLE001 — a broken resolver must not hide the env key
+        logger.debug("Media key lookup for %s failed: %s", provider_id, type(error).__name__)
+        return next((os.environ[name] for name in env_vars if os.environ.get(name)), "")
 
 
 @dataclass
