@@ -23,7 +23,8 @@ from typing import Any
 
 from .dependencies import get_ops_service, get_service
 from .approval_continuation_session import approval_delivery_session, approval_origin_session
-from .approval_continuation_steer import request_steer, steer_landed
+from . import approval_continuation_steer as steer_lanes
+from .approval_continuation_steer import request_steer, steer_lane
 from .ops_blocked_notification import OpsBlockedNotifier
 from .schemas import ChatCompletionRequest, ChatMessage, McpToolResultContinuation
 from .tool_call_store import ToolCallStore
@@ -268,9 +269,16 @@ async def dispatch_mcp_result_continuation(
             raise RuntimeError("Previous continuation turn failed; manual reconciliation required")
         # A bare reservation wrote no messages; only a started turn pins identity.
         started = prior is not None and prior.status != RESERVED
-        if not started and await asyncio.to_thread(steer_landed, service, row):
-            # TASK-1357: a busy target already received this result by steer.
-            return
+        if not started:
+            # TASK-1357: once a steer exists, it owns the result until it ends
+            # in an absorbing state that proves it never reached the bridge.
+            lane = await asyncio.to_thread(steer_lane, service, row)
+            if lane == steer_lanes.UNCERTAIN:
+                log.warning("Approval continuation id=%s: steer outcome uncertain; not resending", row.id)
+            if lane in (steer_lanes.LANDED, steer_lanes.UNCERTAIN):
+                return
+            if lane == steer_lanes.PENDING:
+                raise TargetBusy(f"steer for '{row.bot_id}' not settled")
         if not started:
             # Waiting behind a running turn is the common case; skip the
             # session-lineage reads (MCP round trips) until the target looks

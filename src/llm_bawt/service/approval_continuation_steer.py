@@ -15,12 +15,13 @@ one-shot grant must accompany the turn that retries the tool.
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 
 from sqlalchemy import text as sa_text
 
 from ..approval_policies import KIND_MCP
 from ..bot_identities import SYSTEM_BOT_ID
-from ..inter_bot_delivery_steer_fence import steer_started
+from ..inter_bot_delivery_steer_fence import steer_started, steer_uncertain
 from ..inter_bot_steer_only import STEER_ONLY_KEY
 
 log = logging.getLogger(__name__)
@@ -43,19 +44,45 @@ def _dispatcher(service):
     return dispatcher
 
 
-def steer_landed(service, row) -> bool:
-    """Whether this continuation's steer row exists and its turn received it."""
+NONE = "none"          # no steer was ever requested: normal path
+LANDED = "landed"      # the target turn received it: delivered
+UNCERTAIN = "uncertain"  # accepted, outcome unknown: never resend
+PENDING = "pending"    # not settled yet: wait, never race an idle turn
+FALLBACK = "fallback"  # settled without ever reaching the bridge: idle path
+
+
+def steer_lane(service, row) -> str:
+    """Which lane owns this continuation's result, from its steer row.
+
+    Only absorbing states decide. CANCELLED/FAILED are never re-queued, so a
+    steer that ended there before transport acceptance can no longer inject
+    the result, and the idle turn cannot duplicate it. Anything still live
+    (QUEUED, STEERING, DISPATCHING, or DELIVERED awaiting its started frame)
+    is PENDING. A steer accepted by the bridge that never proved started is
+    UNCERTAIN and, like the delivery fence itself, is not replayed.
+    """
     if not steerable(row):
-        return False
+        return NONE
     dispatcher = _dispatcher(service)
     if dispatcher is None:
-        return False
+        return NONE
     with dispatcher.store.engine.connect() as conn:
         found = conn.execute(sa_text(
-            "SELECT delivery_mode, metadata_json FROM inter_bot_deliveries"
+            "SELECT status, delivery_mode, metadata_json, transport_accepted_at"
+            " FROM inter_bot_deliveries"
             " WHERE sender_bot_id=:sender AND target_bot_id=:target AND idempotency_key=:key"
         ), {"sender": SYSTEM_BOT_ID, "target": row.bot_id, "key": steer_key(row)}).mappings().first()
-    return bool(found and steer_started(found))
+    if found is None:
+        return NONE
+    if steer_started(found):
+        return LANDED
+    if steer_uncertain(SimpleNamespace(
+        delivery_mode=found.get("delivery_mode"), metadata=found.get("metadata_json") or {},
+    )):
+        return UNCERTAIN
+    if found.get("status") in ("CANCELLED", "FAILED"):
+        return UNCERTAIN if found.get("transport_accepted_at") is not None else FALLBACK
+    return PENDING
 
 
 def request_steer(service, row, prompt: str) -> None:
@@ -92,4 +119,4 @@ def request_steer(service, row, prompt: str) -> None:
         log.exception("Approval steer announce failed for continuation id=%s", row.id)
 
 
-__all__ = ["request_steer", "steer_key", "steer_landed", "steerable"]
+__all__ = ["FALLBACK", "LANDED", "NONE", "PENDING", "UNCERTAIN", "request_steer", "steer_key", "steer_lane", "steerable"]

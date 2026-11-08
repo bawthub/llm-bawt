@@ -63,11 +63,12 @@ def _service(store, *, busy=None):
     return service
 
 
-def _started_row(generation=1, started=True):
+def _started_row(generation=1, started=True, status="DELIVERED", accepted=True):
     metadata = {"steer_generation": generation}
     if started:
         metadata["steer_started"] = {"generation": generation}
-    return {"delivery_mode": "steer", "metadata_json": metadata}
+    return {"status": status, "delivery_mode": "steer", "metadata_json": metadata,
+            "transport_accepted_at": "t" if accepted else None}
 
 
 def test_busy_target_gets_one_steer_only_delivery_and_no_turn():
@@ -104,9 +105,13 @@ def test_started_steer_marks_delivered_without_a_second_turn():
     assert store.get_request(row.id).continuation_state == CONT_DELIVERED
 
 
-def test_unstarted_or_skipped_steer_falls_back_to_the_idle_turn():
-    for found in (None, _started_row(started=False),
-                  {"delivery_mode": "skipped", "metadata_json": {}}):
+def _never_reached(status):
+    return {"status": status, "delivery_mode": "skipped", "metadata_json": {},
+            "transport_accepted_at": None}
+
+
+def test_only_a_steer_proven_never_sent_falls_back_to_the_idle_turn():
+    for found in (None, _never_reached("CANCELLED"), _never_reached("FAILED")):
         store = _store()
         row = _ready_row(store)
         service = _service(FakeDeliveryStore(row=found))
@@ -117,12 +122,48 @@ def test_unstarted_or_skipped_steer_falls_back_to_the_idle_turn():
         assert store.get_request(row.id).continuation_state == CONT_DELIVERED
 
 
+def test_live_steer_blocks_the_idle_turn_even_when_target_is_idle():
+    live = [
+        {"status": "QUEUED", "delivery_mode": None, "metadata_json": {}, "transport_accepted_at": None},
+        {"status": "STEERING", "delivery_mode": "steer", "metadata_json": {}, "transport_accepted_at": None},
+        _started_row(started=False),  # DELIVERED, awaiting its started frame
+        {"status": "QUEUED", "delivery_mode": "steer_rejected", "metadata_json": {},
+         "transport_accepted_at": None},
+    ]
+    for found in live:
+        store = _store()
+        row = _ready_row(store)
+        service = _service(FakeDeliveryStore(row=found))
+
+        asyncio.run(dispatch_mcp_result_continuation(service, store, row))
+
+        assert service.requests == [] and service._turn_log_store.reservations == []
+        persisted = store.get_request(row.id)
+        assert persisted.continuation_state == CONT_PENDING
+        assert "not settled" in persisted.continuation_last_error
+
+
+def test_uncertain_or_accepted_then_ended_steer_is_never_resent():
+    uncertain = _started_row(started=False)
+    uncertain["metadata_json"]["steer_uncertain"] = {"generation": 1, "reason": "teardown"}
+    for found in (uncertain, _started_row(started=False, status="FAILED"),
+                  _started_row(started=False, status="CANCELLED")):
+        store = _store()
+        row = _ready_row(store)
+        service = _service(FakeDeliveryStore(row=found))
+
+        asyncio.run(dispatch_mcp_result_continuation(service, store, row))
+
+        assert service.requests == []
+        assert store.get_request(row.id).continuation_state == CONT_DELIVERED
+
+
 def test_stale_generation_start_does_not_count():
     row = SimpleNamespace(id="r", bot_id="b", request_kind="mcp")
-    stale = {"delivery_mode": "steer",
+    stale = {"status": "QUEUED", "delivery_mode": "steer", "transport_accepted_at": None,
              "metadata_json": {"steer_generation": 2, "steer_started": {"generation": 1}}}
     service = SimpleNamespace(_inter_bot_dispatcher=FakeDispatcher(FakeDeliveryStore(row=stale)))
-    assert steer.steer_landed(service, row) is False
+    assert steer.steer_lane(service, row) == steer.PENDING
 
 
 def test_steer_enqueue_failure_keeps_the_idle_path():
@@ -143,9 +184,9 @@ def test_harness_and_missing_dispatcher_are_never_steered():
     service = SimpleNamespace(_inter_bot_dispatcher=FakeDispatcher(deliveries))
     steer.request_steer(service, harness, "x")
     assert deliveries.enqueued == []
-    assert steer.steer_landed(service, harness) is False
+    assert steer.steer_lane(service, harness) == steer.NONE
     mcp = SimpleNamespace(id="r", bot_id="b", request_kind="mcp", user_id="u")
-    assert steer.steer_landed(SimpleNamespace(), mcp) is False
+    assert steer.steer_lane(SimpleNamespace(), mcp) == steer.NONE
     steer.request_steer(SimpleNamespace(), mcp, "x")  # no dispatcher: silent no-op
 
 
