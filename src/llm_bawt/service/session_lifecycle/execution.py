@@ -53,6 +53,9 @@ class PreparedNewSession:
     # The one scope this configured /new summarized and seeded with; None when
     # no configured /new ran or the bot setting could not be resolved.
     history_scope: str | None = None
+    # TASK-851: False when this reset deliberately carries no history (clean
+    # reset or a prompt-owned seed), so an empty seed is not a starved one.
+    report_empty_seed: bool = True
 
 
 @dataclass(frozen=True)
@@ -438,7 +441,9 @@ class NewSessionExecution:
                 delivery_id=getattr(request, "inter_bot_delivery_id", None) or delivery_id,
             )
         return PreparedNewSession(seed, thread_binding, rotated, bridge_action, typed_task,
-                                  reset_scope)
+                                  reset_scope,
+                                  report_empty_seed=not (prompt_record or (
+                                      plan and plan.continuity is Continuity.CLEAN)))
 
     @staticmethod
     def record_seed(service: Any, delivery_id: str | None, seed: list | None) -> None:

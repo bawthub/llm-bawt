@@ -553,7 +553,8 @@ class ChatNonStreamMixin:
                 if _is_agent:
                     record_session_continuity(llm_bawt, thread_binding, inject_seed_messages,
                                               bot_id=bot_id, user_id=user_id,
-                                              history_scope=prepared_reset.history_scope)
+                                              history_scope=prepared_reset.history_scope,
+                                              report_empty=prepared_reset.report_empty_seed)
                 task_turn_capability = None
                 if _is_agent:
                     from ..task_turn_context import mint_for_agent_turn

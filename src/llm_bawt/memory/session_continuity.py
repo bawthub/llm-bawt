@@ -5,6 +5,55 @@ import json
 import time
 from sqlalchemy import bindparam, text
 from agent_bridge.continuity import continuity_digest
+from agent_bridge.maintenance import is_new_command
+
+
+def carries_prior_context(messages: list[dict]) -> bool:
+    """True when the seed holds a summary or a turn other than a /new exchange.
+
+    A /new command and the receipt answering it are reset bookkeeping, not
+    conversation: a seed of only those rows restores nothing (TASK-851).
+    """
+    after_new = False
+    for m in messages:
+        role = m.get("role")
+        if role == "summary":
+            return True
+        if role == "user":
+            after_new = is_new_command(m.get("content"))
+            if not after_new:
+                return True
+        elif role == "assistant":
+            if not after_new:
+                return True
+            after_new = False
+    return False
+
+
+def seed_empty_reason(messages: list[dict], settings: dict) -> str | None:
+    """Why a seed restored nothing while continuity was on, else None (TASK-851).
+
+    ``settings`` holds the effective ``history_scope`` and
+    ``history_max_age_hours`` the seed was built with. Scope ``none`` is an
+    explicit choice to carry nothing, so it has no reason to report.
+    """
+    if carries_prior_context(messages):
+        return None
+    scope = str(settings.get("history_scope") or "")
+    if scope not in ("inline", "summaries", "inline+summaries"):
+        return None
+    parts = []
+    if "inline" in scope:
+        try:
+            max_age = int(settings.get("history_max_age_hours") or 0)
+        except (TypeError, ValueError):
+            max_age = 0
+        parts.append(f"no messages from the last {max_age}h (history_max_age_hours)"
+                     if max_age > 0 else "no earlier messages")
+    else:
+        parts.append("history is off")
+    parts.append("no summaries yet" if "summaries" in scope else "summaries are off")
+    return "; ".join(parts)
 
 
 class SessionContinuity:
@@ -12,7 +61,8 @@ class SessionContinuity:
         self.engine = engine
 
     @staticmethod
-    def manifest(messages: list[dict], *, settings: dict, model: str | None) -> dict:
+    def manifest(messages: list[dict], *, settings: dict, model: str | None,
+                 report_empty: bool = True) -> dict:
         timestamps = [m["timestamp"] for m in messages if m.get("timestamp")]
         return {
             "version": 1,
@@ -29,6 +79,7 @@ class SessionContinuity:
             "approx_tokens": sum(len(m.get("content") or "") for m in messages) // 4,
             "oldest_timestamp": min(timestamps) if timestamps else None,
             "newest_timestamp": max(timestamps) if timestamps else None,
+            "empty_reason": seed_empty_reason(messages, settings) if report_empty else None,
         }
 
     def record(self, session_id: str, bot_id: str, user_id: str, manifest: dict) -> bool:

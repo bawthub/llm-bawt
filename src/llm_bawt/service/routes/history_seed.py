@@ -173,6 +173,25 @@ def build_context_seed(
         except Exception:
             return {"value": fallback, "source": "code_default"}
 
+    sizing = {
+        "history_scope": (
+            {"value": scope, "source": "reset"} if history_scope is not None
+            else _eff("history_scope", "inline+summaries")
+        ),
+        "history_tokens": _eff("history_tokens", 12000),
+        "history_max_age_hours": _eff("history_max_age_hours", 0),
+        "summary_count": _eff("summary_count", 5),
+        "seed_message_max_chars": _eff("seed_message_max_chars", 3000),
+    }
+    # TASK-851: the same reason a /new receipt and the app log report.
+    from ...memory.session_continuity import seed_empty_reason
+
+    empty_reason = seed_empty_reason(
+        [{"role": m.role, "content": m.content or ""} for m in seed_msgs],
+        {"history_scope": scope,
+         "history_max_age_hours": sizing["history_max_age_hours"]["value"]},
+    )
+
     return {
         "bot_id": effective_bot_id,
         "model": model_alias,
@@ -184,16 +203,7 @@ def build_context_seed(
             "prompt_budget": budget,
         },
         # The sizing knobs that bound each ladder bucket, with provenance.
-        "sizing": {
-            "history_scope": (
-                {"value": scope, "source": "reset"} if history_scope is not None
-                else _eff("history_scope", "inline+summaries")
-            ),
-            "history_tokens": _eff("history_tokens", 12000),
-            "history_max_age_hours": _eff("history_max_age_hours", 0),
-            "summary_count": _eff("summary_count", 5),
-            "seed_message_max_chars": _eff("seed_message_max_chars", 3000),
-        },
+        "sizing": sizing,
         "messages": [
             {
                 "role": m.role,
@@ -212,6 +222,7 @@ def build_context_seed(
             "approx_tokens": approx_tokens,
             "oldest_timestamp": oldest,
             "newest_timestamp": newest,
+            "empty_reason": empty_reason,
         },
     }
 

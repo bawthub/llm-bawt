@@ -31,10 +31,14 @@ def reset_confirmation(session_metadata) -> str:
     metadata = session_metadata if isinstance(session_metadata, dict) else {}
     continuity = metadata.get("continuity")
     restored = isinstance(continuity, dict) and continuity.get("status") == "restored"
+    # TASK-851: an app-selected seed with no prior context restores nothing
+    # whatever the bridge acknowledged, so its recorded reason is citable.
+    empty_reason = continuity.get("empty_reason") if isinstance(continuity, dict) else None
+    seed = ({"empty_reason": empty_reason} if empty_reason
+            else continuity if restored else None)
     # TASK-1750: skills the reset turn's own render carried, recorded on this
     # session by the pin step; absent (unknown backend, failed resolve) says nothing.
-    return format_reset_receipt(continuity if restored else None,
-                                metadata.get(RESET_SKILLS_KEY))
+    return format_reset_receipt(seed, metadata.get(RESET_SKILLS_KEY))
 
 
 def receipt_content(receipt: dict) -> str:

@@ -569,7 +569,7 @@ class HistoryManager:
             cutoff = time.time() - max_age_hours * 3600
             kept = [m for m in raw_stream if not m.timestamp or m.timestamp >= cutoff]
             if len(kept) != len(raw_stream):
-                logger.debug(
+                logger.info(
                     "history_max_age_hours=%s: dropped %s/%s raw messages older "
                     "than the cutoff.",
                     max_age_hours, len(raw_stream) - len(kept), len(raw_stream),

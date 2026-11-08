@@ -413,7 +413,8 @@ class ChatStreamingMixin(BridgeSessionResetMixin):
                 from .session_continuity import record_session_continuity
                 record_session_continuity(llm_bawt, thread_binding, inject_seed_messages,
                                           bot_id=bot_id, user_id=user_id,
-                                          history_scope=prepared_reset.history_scope)
+                                          history_scope=prepared_reset.history_scope,
+                                          report_empty=prepared_reset.report_empty_seed)
                 from ..task_turn_context import mint_for_agent_turn
 
                 task_turn_capability = mint_for_agent_turn(

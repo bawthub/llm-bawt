@@ -165,9 +165,16 @@ def format_reset_receipt(seed: dict | None, skills: dict | None = None) -> str:
     confirmation. Zero buckets are omitted. ``skills`` (TASK-1750) is
     ``{"refs": [...], "tokens": N}`` for the skill bodies the session's
     prompt render carried; None, malformed or empty adds nothing.
+    A string ``empty_reason`` (TASK-851) means continuity was on but the seed
+    held no prior context (at most a /new exchange); the receipt says so
+    instead of claiming a restore.
     """
     seed = seed if isinstance(seed, dict) else {}
     clause = _skills_clause(skills)
+    empty_reason = seed.get("empty_reason")
+    if isinstance(empty_reason, str) and empty_reason.strip():
+        return (f"Session reset.{clause} Nothing carried over: {empty_reason.strip()}. "
+                "Fresh start.")
     summaries = _count(seed.get("summary_count"))
     messages = _count(seed.get("message_count"))
     buckets = [*([_plural(summaries, "summary record")] if summaries else []),
