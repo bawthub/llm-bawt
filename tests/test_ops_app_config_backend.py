@@ -547,3 +547,16 @@ def test_seed_classifies_every_app_mount_the_compose_files_declare():
     assert {"/app/src", "/run/bawthub-service-token"} <= set(destinations)  # parser reads the real files
     missing = {d: f for d, f in destinations.items() if d not in classified}
     assert not missing, f"app mounts missing from the reconcile-app-config seed: {missing}"
+
+
+# BawtHub's docker-compose.yml backend service mounts (that file lives in the
+# bawthub repo, so the destinations are pinned here). TASK-1709: /voice-library
+# (BawtHub TASK-2133) was unclassified, so every backend reconcile refused.
+BAWTHUB_BACKEND_MOUNTS = {"/app/bawthub", "/app/services/moshi-server/configs",
+                          "/run/bawthub-service-token", "/voice-library"}
+
+
+def test_backend_seed_classifies_every_bawthub_backend_mount():
+    classified = set(SPEC["source_mounts"]) | set(SPEC["data_mounts"])
+    assert not BAWTHUB_BACKEND_MOUNTS - classified
+    assert SPEC["source_mounts"] == ["/app/bawthub"]  # the library is data, never source

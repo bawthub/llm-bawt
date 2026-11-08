@@ -606,7 +606,9 @@ _CONFIG_SEEDS: list[dict[str, Any]] = [{
         # Destinations are the product's own Compose file's container paths.
         source_repository="bawthub/bawthub", source_branch="main",
         source_mounts=["/app/bawthub"],
-        data_mounts=["/app/services/moshi-server/configs", "/run/bawthub-service-token"],
+        # TASK-1709: /voice-library is the read-only local voice library
+        # (BawtHub TASK-2133); voice files, never code.
+        data_mounts=["/app/services/moshi-server/configs", "/run/bawthub-service-token", "/voice-library"],
         # The backend's own Compose environment names (never values): data it
         # reads (URLs, keys, ids, voice names); none is executed.
         env_names=["AZURE_SPEECH_ENDPOINT", "AZURE_SPEECH_KEY", "AZURE_SPEECH_REGION", "AZURE_VOICE_FILTER",
