@@ -89,10 +89,19 @@ def lean_task(task: dict) -> dict:
     return lean
 
 
+def _first_list(task: dict, *keys: str) -> list:
+    for key in keys:
+        value = task.get(key)
+        if isinstance(value, list):
+            return value
+    return []
+
+
 def compact_task(task: dict) -> dict:
     steps = task.get("steps") if isinstance(task.get("steps"), list) else []
-    dependencies = task.get("dependencies") if isinstance(task.get("dependencies"), list) else []
-    dependents = task.get("dependents") if isinstance(task.get("dependents"), list) else []
+    # BawtHub's task payload names these dependsOn / dependedOnBy.
+    dependencies = _first_list(task, "dependsOn", "dependencies")
+    dependents = _first_list(task, "dependedOnBy", "dependents")
     description = task.get("description") or ""
     response = task.get("response") or ""
     compact = {

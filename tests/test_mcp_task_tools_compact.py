@@ -42,8 +42,9 @@ def _full_task() -> dict[str, Any]:
             {"id": "step-2", "title": "Patch MCP", "status": "RUNNING"},
             {"id": "step-3", "title": "Verify", "status": "COMPLETED"},
         ],
-        "dependencies": [{"id": "dep-1"}],
-        "dependents": [{"id": "child-1"}, {"id": "child-2"}],
+        # BawtHub's real field names (TASK-1240).
+        "dependsOn": [{"id": "dep-1"}],
+        "dependedOnBy": [{"id": "child-1"}, {"id": "child-2"}],
     }
 
 
@@ -596,3 +597,14 @@ def test_create_tool_schema_exposes_agent_bot_id() -> None:
 
     tools = {tool.name: tool for tool in asyncio.run(mcp.list_tools())}
     assert "agent_bot_id" in tools["tasks_create"].inputSchema["properties"]
+
+
+def test_compact_task_counts_dependencies_by_real_and_legacy_names() -> None:
+    # TASK-1240: BawtHub sends dependsOn/dependedOnBy; older shapes still count.
+    from llm_bawt.mcp_server.task_api import compact_task
+
+    real = compact_task({"dependsOn": [{"id": "a"}] * 5, "dependedOnBy": [{"id": "b"}]})
+    assert (real["dependencyCount"], real["dependentCount"]) == (5, 1)
+
+    legacy = compact_task({"dependencies": [{"id": "a"}], "dependents": [{"id": "b"}] * 2})
+    assert (legacy["dependencyCount"], legacy["dependentCount"]) == (1, 2)
