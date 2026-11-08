@@ -12,6 +12,7 @@ from sqlmodel import Session, select
 
 from .approval_events import append_approval_transition
 from .approval_mcp_store import McpApprovalStoreMixin
+from .approval_ops_revision import invalidate_request
 from .service.commit_wake import OPS_WAKE_CHANNEL, notify_in_transaction
 from .approval_orchestration_store import OrchestrationApprovalStoreMixin
 from .approval_models import (
@@ -175,6 +176,20 @@ class ApprovalRequestStoreMixin(OrchestrationApprovalStoreMixin, McpApprovalStor
         if resolved_via not in (RESOLVED_VIA_USER, RESOLVED_VIA_BOT_GRANT):
             raise ValueError("Invalid approval resolver kind")
         with Session(self.engine) as session:
+            if status == REQ_APPROVED:
+                row = session.get(ToolApprovalRequest, request_id)
+                if row is not None and row.status == REQ_PENDING and row.tool_name == "ops_run":
+                    from .ops.models import OpsOperation
+
+                    try:
+                        slug = json.loads(row.operations_snapshot_json or "null")["operation"]["slug"]
+                    except (TypeError, ValueError, KeyError):
+                        pass  # malformed snapshots are refused by admission
+                    else:
+                        operation = session.exec(select(OpsOperation).where(
+                            OpsOperation.slug == slug,
+                        ).with_for_update()).first()
+                        invalidate_request(session, row, operation, getattr(self, "events", None))
             values = dict(
                 status=status,
                 resolved_at=_utcnow(),

@@ -32,6 +32,7 @@ from .models import (EXECUTOR_DOCKER, EXECUTOR_RELEASE, JOB_ACCEPTED, JOB_DISPAT
                      JOB_QUIESCING, JOB_RUNNING, JOB_TERMINAL_STATES, OpsJob, OpsOperation,
                      OpsOperationRevision)
 from .quiesce_settings import validate_quiesce_settings
+from .operation_revision import OperationChanged, changed_reason
 from .worker_slots import UNRETIRED_GATE_SLOT
 from .gate_history import gate_plan_key, migrate_gate_history
 from .validation import canonical_json, validate_catalog
@@ -371,6 +372,9 @@ class OpsStore:
             row.updated_by = actor
             session.add(row)
             self._record_revision(session, row)
+            from ..approval_ops_revision import invalidate_pending_ops
+
+            invalidate_pending_ops(session, row, getattr(self, "events", None))
             self._notify_catalog(session, row.slug)
             session.commit()
             session.refresh(row)
@@ -435,6 +439,10 @@ class OpsStore:
         with Session(self.engine) as session:
             if fence is not None:
                 fence(session)
+            current = self._lock_operation(session, operation.slug)
+            reason = changed_reason(operation.to_api(), current.to_api() if current else None)
+            if reason:
+                raise OperationChanged(reason)
             session.add(row)
             try:
                 session.flush()
@@ -532,6 +540,8 @@ class OpsStore:
             op = self._lock_operation(session, job.operation_slug)
             if op is None or not op.enabled or op.soft_deleted_at is not None:
                 return False
+            if op.version != job.operation_version or op.script_hash != job.operation_script_hash:
+                return False  # the driver records operation_changed on its next pass
             conn = session.connection()
             if slot_cap_reached(slot_holders(conn, job.operation_slug), max_concurrent):
                 return False

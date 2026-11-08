@@ -353,7 +353,8 @@ class QuiesceDriver:
             if slug is None:
                 return StepResult("missing")
             op = conn.execute(text(
-                "SELECT enabled, soft_deleted_at FROM ops_operations WHERE slug=:slug FOR UPDATE"
+                "SELECT id, slug, version, script_hash, enabled, soft_deleted_at "
+                "FROM ops_operations WHERE slug=:slug FOR UPDATE"
             ), {"slug": slug}).mappings().first()
             job = self._claim(conn, job_id)
             if job is None:
@@ -361,6 +362,10 @@ class QuiesceDriver:
             snapshot = json.loads(job["invocation_snapshot_json"])
             if op is None or not op["enabled"] or op["soft_deleted_at"] is not None:
                 return self._fail(conn, job, "operation disabled before dispatch; no action submitted")
+            from .operation_revision import changed_reason
+
+            if reason := changed_reason(snapshot["operation"], op):
+                return self._fail(conn, job, reason)
             if job["quiesce_gate_id"] is None:
                 return self._open(conn, job, snapshot)
             return self._hold(conn, job, snapshot)

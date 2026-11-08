@@ -130,8 +130,8 @@ def test_an_approval_is_refused_once_the_row_moved_to_another_mode():
     store.update_operation(SLUG, {"execution_mode": "process"})
     with pytest.raises(OpsDispatchError) as exc:
         service.dispatch_job(operation_slug=SLUG, args=ARGS, approved_snapshot=snapshot)
-    assert exc.value.code == "snapshot_invalid"
-    assert "execution_mode mismatch" in str(exc.value)
+    assert exc.value.code == "operation_changed"
+    assert "Settings changed" in str(exc.value)
     assert not store.list_jobs()
 
 
@@ -162,8 +162,8 @@ def test_a_legacy_approval_is_refused_once_the_row_moved_to_process():
     store.update_operation(SLUG, {"execution_mode": "process"})
     with pytest.raises(OpsDispatchError) as exc:
         service.dispatch_job(operation_slug=SLUG, args=ARGS, approved_snapshot=legacy)
-    assert exc.value.code == "snapshot_invalid"
-    assert "execution_mode mismatch" in str(exc.value)
+    assert exc.value.code == "operation_changed"
+    assert "Settings changed" in str(exc.value)
 
 
 @pytest.mark.parametrize("damage", ["execution_only", "operation_only", "disagree", "unknown"])

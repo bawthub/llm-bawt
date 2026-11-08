@@ -67,19 +67,23 @@ def test_new_invocations_have_fresh_keys_and_explicit_replay_conflicts(system):
     assert len(executor.calls) == 2
 
 
-def test_approval_exact_revision_defaults_execution_and_current_disable_interlock(system):
+def test_approval_refuses_changed_revision_and_existing_replay_remains_a_read(system):
     store, service, executor, op = system
     snapshot = service.prepare_invocation(op.slug, {})
     encoded = json.dumps(snapshot)
+    result = service.dispatch_job(operation_slug=op.slug, args={}, approved_snapshot=snapshot)
     store.update_operation(op.slug, {"args_defaults_json": {"name": "edited"}, "timeout_seconds": 71,
                                    "command_script": '{"action":"stop","container_name_from_arg":"name"}'}, actor="editor")
-    result = service.dispatch_job(operation_slug=op.slug, args={}, approved_snapshot=json.loads(encoded))
+    with pytest.raises(OpsDispatchError) as error:
+        service.dispatch_job(operation_slug=op.slug, args={}, approved_snapshot=json.loads(encoded))
+    assert error.value.code == "operation_changed"
     submitted = executor.calls[0]["snapshot"]
     assert submitted["resolved_args"] == {"name": "original"}
     assert submitted["execution"]["timeout_seconds"] == 300
     assert submitted["spec"]["action"] == "restart"
     assert result["operation_version"] == 1
     assert json.loads(store.get_job(result["id"]).invocation_snapshot_json) == snapshot
+    assert len(executor.calls) == 1 and store.count_jobs() == 1
     store.update_operation(op.slug, {"enabled": False})
     with pytest.raises(OpsDispatchError, match="disabled"):
         service.dispatch_job(operation_slug=op.slug, args={}, approved_snapshot=snapshot)
@@ -131,19 +135,19 @@ def test_concurrent_same_key_insert_has_single_job(system):
     assert len(executor.calls) == 1
 
 
-def test_max_concurrent_and_queued_snapshot_survive_catalog_edits(system):
+def test_catalog_edit_fails_queued_job_without_substituting_new_settings(system):
     store, service, executor, op = system
     store.update_operation(op.slug, {"max_concurrent": 1})
     a = service.dispatch_job(operation_slug=op.slug, args={})
     b = service.dispatch_job(operation_slug=op.slug, args={})
     assert b["state"] == "queued"
     store.update_operation(op.slug, {"args_defaults_json": {"name": "new"}, "max_concurrent": 8})
-    assert service.get_job_status(b["id"])["state"] == "queued"
+    assert service.get_job_status(b["id"])["state"] == "failed"
+    assert "operation_changed" in store.get_job(b["id"]).error_text
     store.mark_terminal(a["id"], state="succeeded", exit_code=0)
     service.get_job_status(b["id"])
-    assert len(executor.calls) == 2
-    assert executor.calls[1]["env_args"] == {"name": "original"}
-    assert executor.calls[1]["snapshot"]["execution"]["max_concurrent"] == 1
+    assert len(executor.calls) == 1
+    assert json.loads(store.get_job(b["id"]).invocation_snapshot_json)["resolved_args"] == {"name": "original"}
 
 
 def test_concurrent_terminal_and_running_cas_never_regresses(system):
@@ -403,8 +407,6 @@ def test_real_interception_approval_ops_execution_preserves_snapshot(system, app
 
     store, service, executor, op = system
     approvals, row = approved_ops
-    store.update_operation(op.slug, {"args_defaults_json": {"name": "edited"},
-        "command_script": '{"action":"stop","container_name_from_arg":"name"}', "timeout_seconds": 71})
     data = _approve_via_route(approvals, row.id, monkeypatch)
     assert data["ok"] is True and data["execution_state"] == EXEC_PENDING
     assert data["awaiting_admission"] is True and "result" not in data
@@ -433,6 +435,113 @@ def test_real_interception_approval_ops_execution_preserves_snapshot(system, app
     assert "awaiting_admission" not in stored
     executor.result = ReconcileResult("succeeded", 0)
     assert service.get_job_status(job.id)["terminal"] is True
+
+
+@pytest.mark.parametrize("edit", [
+    {"timeout_seconds": 71},
+    {"start_delay_seconds": 9},
+    {"max_output_bytes": 2048},
+    {"args_defaults_json": {"name": "edited"}},
+    {"quiesce_enabled": True},
+    {"description": "metadata edit also needs a new approval"},
+])
+def test_edit_supersedes_pending_card_and_enqueues_typed_refusal(system, approved_ops, monkeypatch, edit):
+    store, service, executor, op = system
+    approvals, row = approved_ops
+    store.update_operation(op.slug, edit)
+    final = approvals.get_request(row.id)
+    assert final.status == "superseded" and final.execution_state == "failed"
+    assert final.continuation_state == "pending"
+    assert "[operation_changed]" in final.execution_error
+    data = _approve_via_route(approvals, row.id, monkeypatch)
+    assert not data["ok"] and data["status"] == "superseded"
+    assert "[operation_changed]" in data["result"]["error"]
+    assert _admit(approvals, service) == 0
+    assert not executor.calls and store.count_jobs() == 0
+
+
+def test_edit_after_decision_is_refused_during_durable_admission(system, approved_ops, monkeypatch):
+    store, service, executor, op = system
+    approvals, row = approved_ops
+    _approve_via_route(approvals, row.id, monkeypatch)
+    store.update_operation(op.slug, {"timeout_seconds": 71})
+    assert _admit(approvals, service) == 1
+    final = approvals.get_request(row.id)
+    assert final.status == "approved" and final.execution_state == "failed"
+    assert "[operation_changed]" in final.execution_error
+    assert not executor.calls and store.count_jobs() == 0
+
+
+def test_stale_snapshot_recorded_after_edit_is_refused_at_approval(system, ops_gate, monkeypatch):
+    store, service, executor, op = system
+    approvals, call = ops_gate
+    snapshot = service.prepare_invocation(op.slug, {})
+    store.update_operation(op.slug, {"timeout_seconds": 71})
+    monkeypatch.setattr(service, "prepare_invocation", lambda *args: snapshot)
+    pending = call({"operation": op.slug, "args": {}})
+    row = approvals.get_request(pending["approval_request_id"])
+    assert row.status == "pending"
+    data = _approve_via_route(approvals, row.id, monkeypatch)
+    assert not data["ok"] and data["status"] == "superseded"
+    assert "[operation_changed]" in data["result"]["error"]
+    assert not executor.calls and store.count_jobs() == 0
+
+
+def test_edit_between_admission_check_and_insert_is_refused(system, monkeypatch):
+    store, service, executor, op = system
+    snapshot = service.prepare_invocation(op.slug, {})
+    create = store.create_job
+
+    def changed(**kwargs):
+        store.update_operation(op.slug, {"timeout_seconds": 71})
+        return create(**kwargs)
+
+    monkeypatch.setattr(store, "create_job", changed)
+    with pytest.raises(OpsDispatchError) as error:
+        service.dispatch_job(operation_slug=op.slug, args={}, approved_snapshot=snapshot)
+    assert error.value.code == "operation_changed"
+    assert not executor.calls and store.count_jobs() == 0
+
+
+def test_edit_during_preflight_cannot_claim_old_job(system, monkeypatch):
+    store, service, executor, op = system
+    monkeypatch.setattr(executor, "preflight", lambda snapshot: store.update_operation(
+        op.slug, {"timeout_seconds": 71}))
+    result = service.dispatch_job(operation_slug=op.slug, args={})
+    assert result["state"] == "queued" and not executor.calls
+    assert service.get_job_status(result["id"])["state"] == "failed"
+    assert "operation_changed" in store.get_job(result["id"]).error_text
+    assert not executor.calls
+
+
+def test_ops_card_names_frozen_revision_and_safety_settings(approved_ops):
+    _, row = approved_ops
+    assert "Operation version: v1" in row.prompt
+    assert "Quiesce: off" in row.prompt
+    assert "Execution timeout: 300s" in row.prompt
+
+
+def test_invalid_catalog_edit_does_not_invalidate_pending_card(system, approved_ops):
+    store, _, _, op = system
+    approvals, row = approved_ops
+    with pytest.raises(ValueError):
+        store.update_operation(op.slug, {"timeout_seconds": 0})
+    assert approvals.get_request(row.id).status == "pending"
+    assert store.get_operation_by_slug(op.slug).version == 1
+
+
+def test_catalog_edit_leaves_unrelated_pending_card_untouched(system, ops_gate):
+    store, _, _, op = system
+    approvals, call = ops_gate
+    other = store.create_operation({
+        "slug": "another-operation", "enabled": True,
+        "command_script": '{"action":"restart","container_name":"other"}',
+    })
+    original = call({"operation": op.slug, "args": {}}, "first")
+    unrelated = call({"operation": other.slug, "args": {}}, "second")
+    store.update_operation(op.slug, {"timeout_seconds": 71})
+    assert approvals.get_request(original["approval_request_id"]).status == "superseded"
+    assert approvals.get_request(unrelated["approval_request_id"]).status == "pending"
 
 
 def _approve_via_route(approvals, request_id, monkeypatch, decision="approve"):

@@ -53,6 +53,21 @@ the configured image cannot rewrite queued jobs: historical image IDs and volume
 mounts must remain available for their lifetime. `max_concurrent` counts claimed,
 accepted, and running jobs; the smallest limit among overlapping snapshots wins.
 
+### Catalog revision changes (TASK-1411)
+
+An approval binds the operation ID, version and script hash. Editing that row
+supersedes its pending ops cards in the same transaction, storing a typed
+`operation_changed` failure and enqueuing the original caller's continuation.
+Cards show their frozen version, execution timeout, quiesce on/off, scope and
+quiesce timeout. A card recorded just after an edit is checked again when approved.
+
+Admission checks the catalog revision under the operation-row lock in the
+job-insert transaction; queued dispatch checks it again at the claim, including
+quiesce opening/draining. A mismatch submits no worker/action and requires a new
+approval. Already-dispatched jobs remain bound to their original snapshot;
+idempotent reads of those jobs still work after edits. This does not cancel
+actions already submitted to Docker or replace their approved settings.
+
 ## Tested runtime fence for source restarts (TASK-1410 / TASK-1496)
 
 A restart spec may declare `runtime_source` with:

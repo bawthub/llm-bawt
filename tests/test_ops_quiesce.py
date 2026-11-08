@@ -95,6 +95,19 @@ def test_scope_resolution():
         resolve_scope(FROM_ARG, {"bridge": "other"})
 
 
+def test_approval_safety_lines_show_resolved_scope_and_both_timeouts():
+    from llm_bawt.ops.operation_revision import with_safety_lines
+
+    prompt = with_safety_lines("Restart?", {
+        "operation": {"version": 7},
+        "execution": {"timeout_seconds": 300},
+        "quiesce": {"scope": {"backends": ["claude-code"]}, "timeout_seconds": 600},
+    })
+    assert "Operation version: v7" in prompt and "Quiesce: on" in prompt
+    assert 'Quiesce scope: {"backends": ["claude-code"]}' in prompt
+    assert "Execution timeout: 300s" in prompt and "Quiesce timeout: 600s" in prompt
+
+
 def test_restart_bridge_seed_scopes_the_named_bridge_and_starts_disabled():
     seed = next(row for row in SEEDS if row["slug"] == "llm-bawt.restart-bridge")
     assert seed["quiesce_enabled"] is False

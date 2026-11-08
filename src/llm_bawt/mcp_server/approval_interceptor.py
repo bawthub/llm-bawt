@@ -391,8 +391,10 @@ class ApprovalAwareFastMCP(FastMCP):
                 approval_prompt = plan_approval.approval_text(operations_snapshot, decision.prompt)
             if name == "ops_run" and operations_snapshot:
                 from ..ops import execution_mode  # TASK-1169 S4
+                from ..ops.operation_revision import with_safety_lines
 
                 approval_prompt = execution_mode.with_card_lines(approval_prompt, operations_snapshot)
+                approval_prompt = with_safety_lines(approval_prompt, operations_snapshot)
             row, created = store.record_mcp_request(
                 request_id=request_id,
                 tool_use_id=call_context.tool_use_id,

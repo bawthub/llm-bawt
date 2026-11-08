@@ -20,6 +20,7 @@ from .runtime_source import valid_runtime_binding
 from .executor import (ConfigCheckError, DockerExecutor, Executor, ExecutorError, QuiesceFenceUnsupported,
                        validate_spec)
 from .execution_mode import snapshot_execution_mode
+from .operation_revision import OperationChanged, changed_reason
 from .gpu_guard import GPU_VOICE_SERVICES, GpuGuardUnverifiable, gpu_voice_target
 from .house_guard import HouseOccupancyUnverifiable, house_targets, occupancy_reader, override_requested
 from .self_target import SelfTargetError
@@ -237,8 +238,8 @@ class OpsService:
         """Trusted approval integration: persist this JSON BEFORE asking approval.
 
         Detached JSON snapshot; callers must never accept it from tool arguments.
-        dispatch_job verifies the snapshot and original input, then executes this
-        exact revision even if defaults/spec/config have subsequently changed.
+        dispatch_job verifies the snapshot, original input and current catalog
+        revision. Catalog edits require a fresh approval, never substituted settings.
         Current enabled/deleted state remains an emergency execution interlock.
         An admission-only service asks the ops service to build it (TASK-1169 S3a).
         """
@@ -519,8 +520,8 @@ class OpsService:
         current = self.store.get_operation_by_slug(operation_slug)
         if current is None or not current.enabled or current.soft_deleted_at is not None:
             raise OpsDispatchError("operation_disabled", "operation is currently disabled or deleted")
-        if current.id != snapshot["operation"]["id"]:
-            raise OpsDispatchError("snapshot_invalid", "operation identity changed")
+        if reason := changed_reason(snapshot["operation"], current.to_api()):
+            raise OpsDispatchError("operation_changed", reason)
         if current.execution_mode != snapshot_execution_mode(snapshot):
             # An approval runs where it was approved (a pre-S4 Docker one
             # isolated), but only while the row still says so: an admin move
@@ -548,6 +549,8 @@ class OpsService:
                 caller_turn_id=caller_turn_id, caller_session_key=caller_session_key, caller_backend=caller_backend,
                 approval_request_id=approval_request_id, fence=create_fence,
                 state=JOB_QUIESCING if quiesce else JOB_QUEUED, receipt_callback_json=callback)
+        except OperationChanged as exc:
+            raise OpsDispatchError("operation_changed", str(exc)) from exc
         except IdempotencyConflict as exc:
             raise OpsDispatchError("idempotency_conflict", str(exc)) from exc
         # A quiescing job returns at once; the reconciler's driver holds,
@@ -660,6 +663,9 @@ class OpsService:
         current = self.store.get_operation_by_slug(job.operation_slug)
         if current is None or not current.enabled or current.soft_deleted_at is not None:
             self.store.mark_terminal(job.id, state=JOB_FAILED, error_text="operation disabled before claim; no action submitted")
+            return
+        if reason := changed_reason(snapshot["operation"], current.to_api()):
+            self.store.mark_terminal(job.id, state=JOB_FAILED, error_text=reason)
             return
         executor = self._resolve_executor(snapshot["execution"]["executor_kind"])
         # One preflight outcome at a time per job: the latest pass's result is

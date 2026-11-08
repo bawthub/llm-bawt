@@ -138,6 +138,21 @@ def test_job_is_created_quiescing_and_never_claimed(rig):
     assert rig.gates_of(job_id) == [] and rig.executor.dispatch_calls == []
 
 
+@pytest.mark.parametrize("opened", [False, True])
+def test_catalog_edit_refuses_before_open_or_during_drain_and_releases_hold(rig, opened):
+    rig.turn()
+    job_id = rig.job()
+    if opened:
+        assert rig.service.get_job_status(job_id)["state"] == JOB_QUIESCING
+        assert rig.held()
+    rig.store.update_operation(rig.slug, {"quiesce_timeout_seconds": 450})
+    status = rig.service.get_job_status(job_id)
+    assert status["state"] == JOB_FAILED
+    assert "[operation_changed]" in status["error_text"]
+    assert not rig.executor.dispatch_calls and not rig.held()
+    assert all(gate["released_at"] is not None for gate in rig.gates_of(job_id))
+
+
 def test_holds_until_drained_then_dispatches_inside_the_fence(rig):
     turn_id = rig.turn()
     job_id = rig.job()
