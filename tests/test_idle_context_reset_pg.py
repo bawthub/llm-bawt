@@ -285,3 +285,44 @@ def test_real_scheduler_never_confirms_transport_only_delivery(rig, real_lifecyc
         assert run.status is JobStatus.FAILED
         assert result["ambiguous"] == 1 and result["reset"] == 0
         assert result["bots"][rig.bot]["delivery_id"]
+
+
+@pytest.mark.parametrize("change", [None, "pointer", "usage", "new_work"])
+def test_manual_retry_of_failed_scheduled_reset_is_fenced_at_claim(rig, real_lifecycle, change):
+    """TASK-1217: a manual retry copies the scheduler's intent; its stale fences still hold."""
+    from llm_bawt.inter_bot_delivery_retry import retry_failed_delivery
+
+    store = real_lifecycle.store
+    original = store.get(asyncio.run(real_lifecycle.submit(
+        scheduled_intent(rig), timeout_seconds=0)).delivery_id)
+    store.mark_failed(original.id, "transport failed")
+    child = retry_failed_delivery(store, original.id)
+    assert child is not None and child.id != original.id
+    assert child.metadata["manual_retry_of"] == original.id
+    assert child.metadata["new_session_intent"] == original.metadata["new_session_intent"]
+    assert child.transport_accepted_at is None
+    with rig.engine.begin() as conn:
+        if change == "pointer":
+            conn.execute(text("UPDATE bot_profiles SET last_session_id=NULL WHERE slug=:bot"), {"bot": rig.bot})
+        elif change == "usage":
+            conn.execute(text("UPDATE turn_logs SET token_usage_json=:usage WHERE id=:id"),
+                         {"id": rig.turn_id, "usage": '{"resident_tokens":1000}'})
+        elif change == "new_work":
+            conn.execute(text("""
+                INSERT INTO turn_logs (id, created_at, path, stream, bot_id, user_id,
+                    status, user_prompt, response_text)
+                VALUES (:id, now(), '/test', true, :bot, :user, 'reserved', '', '')
+            """), {"id": f"new-{uuid.uuid4().hex}", "bot": rig.bot, "user": rig.user})
+    claim = store.claim_next(rig.bot, claim_owner="retry", steer_capable=False)
+    if change is None:
+        # Control: an unchanged world admits the retry; the fence excludes its own row.
+        assert claim is not None and claim.id == child.id
+        return
+    assert claim is None
+    skipped = store.get(child.id)
+    assert skipped.status == "FAILED" and skipped.metadata["new_session_skip_reason"]
+    with rig.engine.connect() as conn:
+        assert conn.execute(text("SELECT COUNT(*) FROM sessions WHERE bot_id=:bot"),
+                            {"bot": rig.bot}).scalar_one() == 1
+        assert conn.execute(text("SELECT COUNT(*) FROM turn_logs WHERE id=:id"),
+                            {"id": child.turn_id}).scalar_one() == 0
