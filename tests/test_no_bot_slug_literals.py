@@ -55,7 +55,7 @@ KNOWN_DEBT: dict[tuple[str, str], int] = {
     ("llm_bawt/service/background_service.py", "nova"): 1,
     ("llm_bawt/service/client.py", "nova"): 1,
     ("llm_bawt/service/core.py", "nova"): 1,
-    ("llm_bawt/service/tasks.py", "nova"): 7,
+    ("llm_bawt/service/tasks.py", "nova"): 6,
     ("llm_bawt/tools/executor.py", "nova"): 1,
     ("llm_bawt/tools/loop.py", "nova"): 2,
     ("llm_bawt/tools/streaming.py", "nova"): 1,
