@@ -29,7 +29,7 @@ from .release_spec import is_release_spec
 from .execution_mode import (DEFAULT_EXECUTION_MODE, EXECUTION_ISOLATED, legacy_execution_mode,
                              snapshot_execution_mode, validate_execution_mode)
 from .models import (EXECUTOR_DOCKER, EXECUTOR_RELEASE, JOB_ACCEPTED, JOB_DISPATCHING, JOB_FAILED, JOB_QUEUED,
-                     JOB_QUIESCING, JOB_RUNNING, JOB_TERMINAL_STATES, OpsJob, OpsOperation,
+                     JOB_QUIESCING, JOB_RUNNING, JOB_SUCCEEDED, JOB_TERMINAL_STATES, OpsJob, OpsOperation,
                      OpsOperationRevision)
 from .quiesce_settings import validate_quiesce_settings
 from .operation_revision import OperationChanged, changed_reason
@@ -121,6 +121,73 @@ def slot_cap_reached(holders, own_cap):
     return bool(limits) and len(holders) >= min(limits)
 
 
+def is_sequence_snapshot(snapshot):
+    return (snapshot.get("spec") or {}).get("action") == "operation_sequence"
+
+
+def snapshot_operations(snapshot):
+    """Approved catalog identities, including every sequence step (not child jobs)."""
+    operations = [snapshot["operation"]] if snapshot.get("operation") else []
+    if is_sequence_snapshot(snapshot):
+        operations.extend(step["snapshot"]["operation"] for step in snapshot["sequence"]["steps"])
+    return operations
+
+
+def lock_snapshot_operations(conn, snapshot, *, operation_slug):
+    """Lock the parent and all step rows in one stable, shared claim order.
+
+    The no-op UPDATE is a write lock on both PostgreSQL and SQLite, just like
+    ``OpsStore._lock_operation``. Take these locks before worker/job/gate locks.
+    Snapshots are immutable after insertion, so callers may read them first.
+    """
+    slugs = {operation_slug, *(op["slug"] for op in snapshot_operations(snapshot))}
+    operations = {}
+    for slug in sorted(slugs):
+        conn.execute(text("UPDATE ops_operations SET version=version WHERE slug=:slug"), {"slug": slug})
+        operations[slug] = conn.execute(text(
+            "SELECT id, slug, version, script_hash, enabled, soft_deleted_at"
+            " FROM ops_operations WHERE slug=:slug"
+        ), {"slug": slug}).mappings().first()
+    return operations
+
+
+def snapshot_changed_reason(snapshot, operations, *, require_enabled=True):
+    """Validate every pinned identity while its catalog row remains locked."""
+    for approved in snapshot_operations(snapshot):
+        current = operations.get(approved["slug"])
+        if require_enabled and (current is None or not current["enabled"] or current["soft_deleted_at"] is not None):
+            return "operation disabled before dispatch; no action submitted"
+        if reason := changed_reason(approved, current):
+            return reason
+    return None
+
+
+def sequence_conflict(conn, snapshot, *, operation_slug, exclude_job_id=None):
+    """Sequences exclusively use all their operations for active execution only.
+
+    An ordinary job still uses the existing max_concurrent policy against other
+    ordinary jobs. Queued/quiescing reservations are deliberately not sequence
+    conflicts: reserving shared step operations before dispatch can deadlock.
+    Call only with all this invocation's operation rows locked.
+    """
+    own_sequence = is_sequence_snapshot(snapshot)
+    own_slugs = {operation_slug, *(op["slug"] for op in snapshot_operations(snapshot))}
+    rows = conn.execute(text(
+        "SELECT id, operation_slug, invocation_snapshot_json FROM ops_jobs"
+        " WHERE state IN (:dispatching, :accepted, :running)"
+    ), {"dispatching": JOB_DISPATCHING, "accepted": JOB_ACCEPTED, "running": JOB_RUNNING}).all()
+    for job_id, slug, raw in rows:
+        if job_id == exclude_job_id:
+            continue
+        other = json.loads(raw) if raw else {}
+        if not own_sequence and not is_sequence_snapshot(other):
+            continue
+        other_slugs = {slug, *(op["slug"] for op in snapshot_operations(other))}
+        if own_slugs & other_slugs:
+            return True
+    return False
+
+
 def is_quiesce_snapshot(raw):
     """Does this persisted invocation snapshot require a quiesce (TASK-1233)?"""
     return bool(raw) and bool((json.loads(raw).get("quiesce") or {}).get("enabled"))
@@ -186,7 +253,7 @@ class OpsStore:
         for table, columns in (
             ("ops_jobs", (("invocation_snapshot_json", "TEXT"), ("request_payload_json", "TEXT"),
                           ("caller_actor", "VARCHAR(128)"), *_JOB_QUIESCE_COLUMNS,
-                          *_JOB_WORKER_SLOT_COLUMNS)),
+                          *_JOB_WORKER_SLOT_COLUMNS, ("sequence_json", "TEXT"))),
             ("ops_operations", (*_OP_QUIESCE_COLUMNS, ("execution_tag", "VARCHAR(64)"))),
         ):
             existing = {c["name"] for c in inspect(conn).get_columns(table)}
@@ -439,8 +506,15 @@ class OpsStore:
         with Session(self.engine) as session:
             if fence is not None:
                 fence(session)
-            current = self._lock_operation(session, operation.slug)
-            reason = changed_reason(operation.to_api(), current.to_api() if current else None)
+            snapshot = json.loads(invocation_snapshot_json) if invocation_snapshot_json else {}
+            if is_sequence_snapshot(snapshot):
+                from .sequence import initial_ledger, read_ledger
+
+                row.sequence_json = canonical_json(read_ledger(initial_ledger(snapshot)))
+            operations = lock_snapshot_operations(session.connection(), snapshot, operation_slug=operation.slug)
+            reason = changed_reason(operation.to_api(), operations[operation.slug])
+            reason = reason or snapshot_changed_reason(snapshot, operations,
+                                                       require_enabled=is_sequence_snapshot(snapshot))
             if reason:
                 raise OperationChanged(reason)
             session.add(row)
@@ -537,16 +611,20 @@ class OpsStore:
         if job.invocation_snapshot_json and "gate_claim_schema" in json.loads(job.invocation_snapshot_json):
             return False  # No generic claim bypass of the dormant gate boundary.
         with Session(self.engine) as session:
-            op = self._lock_operation(session, job.operation_slug)
-            if op is None or not op.enabled or op.soft_deleted_at is not None:
-                return False
-            if op.version != job.operation_version or op.script_hash != job.operation_script_hash:
-                return False  # the driver records operation_changed on its next pass
+            snapshot = json.loads(job.invocation_snapshot_json) if job.invocation_snapshot_json else {}
             conn = session.connection()
+            operations = lock_snapshot_operations(conn, snapshot, operation_slug=job.operation_slug)
+            op = operations[job.operation_slug]
+            if op is None or not op["enabled"] or op["soft_deleted_at"] is not None:
+                return False
+            if (op["version"] != job.operation_version or op["script_hash"] != job.operation_script_hash
+                    or snapshot_changed_reason(snapshot, operations)):
+                return False  # the driver records operation_changed on its next pass
+            if sequence_conflict(conn, snapshot, operation_slug=job.operation_slug, exclude_job_id=job_id):
+                return False
             if slot_cap_reached(slot_holders(conn, job.operation_slug), max_concurrent):
                 return False
             values = dict(state=JOB_DISPATCHING, dispatched_at=_utcnow(), host_unit_name=f"llm-bawt-ops-{job_id}", error_text=None)
-            snapshot = json.loads(job.invocation_snapshot_json) if job.invocation_snapshot_json else {}
             if hold_process_spawns:
                 kind = (snapshot.get("execution") or {}).get("executor_kind")
                 if (kind != EXECUTOR_DOCKER
@@ -612,13 +690,33 @@ class OpsStore:
     def mark_running(self, job_id, *, started_at=None):
         return self._transition(job_id, (JOB_DISPATCHING, JOB_ACCEPTED), {"state": JOB_RUNNING, "started_at": started_at or _utcnow()})
 
-    def mark_terminal(self, job_id, *, state, exit_code=None, output_tail=None, error_text=None, started_at=None, finished_at=None):
+    def mark_sequence(self, job_id, ledger):
+        from .sequence import read_ledger
+
+        return self._transition(job_id, _OPEN_STATES, {"sequence_json": canonical_json(read_ledger(ledger))})
+
+    def mark_terminal(self, job_id, *, state, exit_code=None, output_tail=None, error_text=None, started_at=None,
+                      finished_at=None, sequence=None):
         if state not in JOB_TERMINAL_STATES:
             raise ValueError(f"not a terminal state: {state!r}")
         values = dict(state=state, exit_code=exit_code, output_tail=output_tail,
                       error_text=error_text, finished_at=finished_at or _utcnow())
         if started_at is not None:
             values["started_at"] = started_at
+        if sequence is not None:
+            from .sequence import read_ledger
+
+            values["sequence_json"] = canonical_json(read_ledger(sequence))
+        elif state != JOB_SUCCEEDED:
+            # Admission/quiesce/preflight can end a parent before a worker exists.
+            # Those callbacks still carry every step, all explicitly unsubmitted.
+            job = self.get_job(job_id)
+            if job and job.sequence_json:
+                from .sequence import interrupted, read_ledger
+
+                ledger = read_ledger(json.loads(job.sequence_json))
+                values["sequence_json"] = canonical_json(interrupted(
+                    ledger, error_text or state, unknown=state in ("lost", "timed_out")))
         return self._transition(job_id, _OPEN_STATES, values)
 
     def note_queued_error(self, job_id, error):

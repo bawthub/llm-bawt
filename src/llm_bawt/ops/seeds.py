@@ -967,6 +967,63 @@ _PLAN_SEEDS: list[dict[str, Any]] = [{
 }]
 
 
+# TASK-1263: one approval and worker for a bounded, caller-ordered sequence.
+# These existing rows all accept no arguments. Each child must independently
+# be enabled and pass its normal admission checks; this seed enables nothing.
+_SEQUENCE_OPERATIONS = [
+    "llm-bawt.restart-app",
+    "bawthub.restart-frontend",
+    "llm-bawt.reconcile-app-config",
+    "bawthub.reconcile-backend-config",
+    "llm-bawt.reconcile-crawl4ai-config",
+    "llm-bawt.reconcile-claude-code-bridge-config",
+]
+
+_SEQUENCE_SEEDS: list[dict[str, Any]] = [{
+    "slug": "llm-bawt.operation-sequence",
+    "title": "Run an ordered service operation sequence",
+    "description": (
+        "Run one to six allowlisted service operations in the requested order, each only after "
+        "the previous target is healthy. One approval and terminal callback; all-agent quiesce "
+        "is held for the entire window. Stops on the first failure without undoing earlier "
+        "successful steps. An interrupted mutation requires inspection, never automatic retry. "
+        "Every child must already be enabled; duplicate containers, nested plans, executor/GPU "
+        "targets and houses are refused. May kill agent sessions and cut in-flight chat turns."
+    ),
+    "enabled": False,
+    "executor_kind": EXECUTOR_DOCKER,
+    "target_host": "",
+    "working_directory": None,
+    "command_script": _spec(action="operation_sequence", operations=_SEQUENCE_OPERATIONS),
+    "args_schema_json": _schema({
+        "steps": {
+            "type": "array", "minItems": 1, "maxItems": 6,
+            "items": {
+                "type": "object", "additionalProperties": False,
+                "required": ["operation", "args"],
+                "properties": {
+                    "operation": {"type": "string", "enum": _SEQUENCE_OPERATIONS},
+                    "args": {"type": "object", "additionalProperties": False, "properties": {}},
+                },
+            },
+        },
+    }, required=["steps"]),
+    "args_defaults_json": _defaults(),
+    # Covers all six seeded children's delay + execution + health budgets.
+    "timeout_seconds": 5400,
+    "start_delay_seconds": 5,
+    "max_output_bytes": 65536,
+    "max_concurrent": 1,
+    "risk_level": RISK_CRITICAL,
+    "category": "sequence",
+    "approval_prompt_prefix": "Run ordered service operations (KILLS ACTIVE AGENTS, cuts chat turns)",
+    # Mandatory whenever this disabled row is explicitly enabled by an operator.
+    "quiesce_enabled": True,
+    "quiesce_timeout_seconds": 600,
+    "quiesce_scope_json": json.dumps({"all_agents": True}),
+}]
+
+
 # ---------------------------------------------------------------------------
 # One-command release: a durable coordinator, never a shell or local clone.
 # A release approval delegates deploy only after build and target verification.
@@ -1069,6 +1126,7 @@ SEEDS: list[dict[str, Any]] = [
     *_CONFIG_SEEDS,
     *_POCKET_SEEDS,
     *_PLAN_SEEDS,
+    *_SEQUENCE_SEEDS,
     *_RELEASE_SEEDS,
 ]
 

@@ -405,6 +405,10 @@ class ApprovalAwareFastMCP(FastMCP):
                 from ..ops import plan_approval  # TASK-1476
 
                 approval_prompt = plan_approval.approval_text(operations_snapshot, decision.prompt)
+            if name == "ops_run" and operations_snapshot and operations_snapshot.get("sequence"):
+                from ..ops import sequence_approval
+
+                approval_prompt = sequence_approval.approval_text(operations_snapshot, decision.prompt)
             if name == "ops_run" and operations_snapshot:
                 from ..ops import execution_mode  # TASK-1169 S4
                 from ..ops.operation_revision import with_safety_lines

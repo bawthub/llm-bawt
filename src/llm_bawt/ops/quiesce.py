@@ -60,7 +60,8 @@ from ..service.turn_gates import (GateScope, GateSpec, ensure_gate_schema, exten
 from .events import append_job_transition_by_id
 from .models import (JOB_CANCELLED, JOB_DISPATCHING, JOB_FAILED, JOB_QUIESCING, JOB_TERMINAL_STATES)
 from .quiesce_prompts import END_TURN_NEW_TURN_KEY, END_TURN_NO_RECEIPT_KEY, resolve
-from .store import slot_cap_reached, slot_holders
+from .store import (lock_snapshot_operations, sequence_conflict, slot_cap_reached, slot_holders,
+                    snapshot_changed_reason)
 from .worker_slots import WAITING_WORKER_SLOT, worker_slot_free
 
 logger = logging.getLogger(__name__)
@@ -303,9 +304,21 @@ def cancel_quiesce_job(engine, job_id: str, *, actor: str, reason: str | None = 
                   deadline=row["quiesce_deadline_at"], detail=f"claimed actor: {actor}")
         conn.execute(text("UPDATE ops_jobs SET quiesce_json=:q WHERE id=:id"),
                      {"q": json.dumps(receipt), "id": job_id})
+        _finish_unsubmitted_sequence(conn, job_id, error)
         release_job_gates(conn, job_id)
         append_job_transition_by_id(events, conn, job_id)
     return "cancelled", JOB_CANCELLED
+
+
+def _finish_unsubmitted_sequence(conn, job_id, reason):
+    """The whole-window hold refused before dispatch: every step was skipped."""
+    from .sequence import interrupted, read_ledger
+
+    raw = conn.execute(text("SELECT sequence_json FROM ops_jobs WHERE id=:id"), {"id": job_id}).scalar()
+    if raw:
+        ledger = interrupted(read_ledger(json.loads(raw)), reason, unknown=False)
+        conn.execute(text("UPDATE ops_jobs SET sequence_json=:ledger WHERE id=:id"),
+                     {"ledger": json.dumps(ledger), "id": job_id})
 
 
 def _status_row(status: Any, escalation: Any = None) -> dict[str, Any]:
@@ -348,23 +361,18 @@ class QuiesceDriver:
 
     def step(self, job_id: str) -> StepResult:
         with self.engine.begin() as conn:
-            slug = conn.execute(text("SELECT operation_slug FROM ops_jobs WHERE id=:id"),
-                                {"id": job_id}).scalar()
-            if slug is None:
+            initial = conn.execute(text(
+                "SELECT operation_slug, invocation_snapshot_json FROM ops_jobs WHERE id=:id"
+            ), {"id": job_id}).first()
+            if initial is None:
                 return StepResult("missing")
-            op = conn.execute(text(
-                "SELECT id, slug, version, script_hash, enabled, soft_deleted_at "
-                "FROM ops_operations WHERE slug=:slug FOR UPDATE"
-            ), {"slug": slug}).mappings().first()
+            snapshot = json.loads(initial.invocation_snapshot_json)
+            operations = lock_snapshot_operations(conn, snapshot, operation_slug=initial.operation_slug)
             job = self._claim(conn, job_id)
             if job is None:
                 return StepResult("not_owner")  # wrote nothing
             snapshot = json.loads(job["invocation_snapshot_json"])
-            if op is None or not op["enabled"] or op["soft_deleted_at"] is not None:
-                return self._fail(conn, job, "operation disabled before dispatch; no action submitted")
-            from .operation_revision import changed_reason
-
-            if reason := changed_reason(snapshot["operation"], op):
+            if reason := snapshot_changed_reason(snapshot, operations):
                 return self._fail(conn, job, reason)
             if job["quiesce_gate_id"] is None:
                 return self._open(conn, job, snapshot)
@@ -416,6 +424,8 @@ class QuiesceDriver:
         result = conn.execute(text(f"UPDATE ops_jobs SET {', '.join(sets)} WHERE id=:id"),
                               {**values, "id": job_id, "timeout": deadline_from})
         if result.rowcount == 1 and "state" in values:
+            if values["state"] in (JOB_FAILED, JOB_CANCELLED):
+                _finish_unsubmitted_sequence(conn, job_id, values.get("error_text") or values["state"])
             append_job_transition_by_id(self.events, conn, job_id)
 
     @staticmethod
@@ -464,7 +474,8 @@ class QuiesceDriver:
         if self._open_expired(conn, job, snapshot):
             return self._fail_unopened(conn, job, job["error_text"])
         holders = slot_holders(conn, job["operation_slug"], exclude_job_id=job["id"])
-        if slot_cap_reached(holders, snapshot["execution"].get("max_concurrent")):
+        if (sequence_conflict(conn, snapshot, operation_slug=job["operation_slug"], exclude_job_id=job["id"])
+                or slot_cap_reached(holders, snapshot["execution"].get("max_concurrent"))):
             receipt = self._receipt(job)
             self._phase(job, receipt, "waiting_slot")
             self._write(conn, job["id"], {"error_text": "waiting for a concurrency slot before quiescing",
@@ -531,6 +542,21 @@ class QuiesceDriver:
         return StepResult("holding")
 
     def _dispatch(self, conn, job, snapshot, gate_id: int, receipt) -> StepResult:
+        # The same catalog/conflict fence as a normal claim, inside the fenced
+        # dispatch transaction. step() already holds these sorted operation
+        # locks before the job/gate locks, including throughout drain checks.
+        operations = lock_snapshot_operations(conn, snapshot, operation_slug=job["operation_slug"])
+        if reason := snapshot_changed_reason(snapshot, operations):
+            return self._fail(conn, job, reason, receipt=receipt)
+        if sequence_conflict(conn, snapshot, operation_slug=job["operation_slug"], exclude_job_id=job["id"]):
+            job = self._observe(conn, job)
+            if job["past_deadline"]:
+                return self._fail(conn, job, "quiesce_timeout: waiting for an operation sequence slot",
+                                  receipt=receipt)
+            self._phase(job, receipt, "waiting_slot")
+            self._write(conn, job["id"], {"error_text": "waiting for an operation sequence slot",
+                                          "quiesce_json": json.dumps(receipt)})
+            return StepResult("waiting_slot")
         execution = snapshot["execution"]
         timeout = int(execution["timeout_seconds"])
         cover = int(execution["start_delay_seconds"]) + timeout + 2 * self.margin_seconds

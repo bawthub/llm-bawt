@@ -55,3 +55,4 @@ class ReconcileResult:
     error: str | None = None
     started_at: str | None = None
     finished_at: str | None = None
+    sequence: dict | None = None

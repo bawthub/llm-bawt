@@ -16,6 +16,7 @@ import signal
 import socket
 import sys
 import time
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
 from urllib.parse import quote, urlencode
 
@@ -31,6 +32,7 @@ if __package__:
     from .plan_reconcile import ACTION as PLAN_ACTION, PlanReconciler
     from .restart_health import has_health, wait_healthy
     from .runtime_source import verify_runtime_source
+    from . import sequence
     from .routing_reconcile import ACTION as ROUTING_ACTION, RoutingReconciler
     from .tagged_config_reconcile import ACTION as TAGGED_CONFIG_ACTION, TaggedConfigReconciler
 else:  # pragma: no cover - standalone worker image
@@ -45,6 +47,7 @@ else:  # pragma: no cover - standalone worker image
     from plan_reconcile import ACTION as PLAN_ACTION, PlanReconciler
     from restart_health import has_health, wait_healthy
     from runtime_source import verify_runtime_source
+    import sequence
     from routing_reconcile import ACTION as ROUTING_ACTION, RoutingReconciler
     from tagged_config_reconcile import ACTION as TAGGED_CONFIG_ACTION, TaggedConfigReconciler
 
@@ -175,8 +178,7 @@ class DockerAPI:
             raise
         return _AttachStream(conn, response)
 
-    def execute(self, spec: dict, args: dict, *, runtime_snapshot=None, receipt=None, tag=None,
-                before_submit=None) -> str:
+    def resolve_target(self, spec: dict, args: dict) -> dict:
         name, filters = target_selector(spec, args)
         if name is not None:
             container = self.request("GET", f"/containers/{quote(name, safe='')}/json")
@@ -186,6 +188,15 @@ class DockerAPI:
             if len(matches) != 1:
                 raise RuntimeError(f"selector matched {len(matches)} containers, expected one")
             container = self.request("GET", f"/containers/{matches[0]['Id']}/json")
+        return container
+
+    def execute(self, spec: dict, args: dict, *, runtime_snapshot=None, receipt=None, tag=None,
+                before_submit=None, expected_target=None) -> str:
+        container = self.resolve_target(spec, args)
+        if expected_target is not None and (
+                container["Id"] != expected_target["id"]
+                or container["Name"].lstrip("/") != expected_target["name"]):
+            raise RuntimeError("sequence target changed since approval")
         action = spec["action"]
         container_id = quote(container["Id"], safe="")
         grace = spec.get("stop_grace_seconds", 10)
@@ -251,6 +262,93 @@ def fence_expired(request: dict, now: datetime) -> bool:
     return now > limit
 
 
+@contextmanager
+def target_lock(root: Path, name: str):
+    """Same lock namespace as config reconciliation, also held by plain restarts."""
+    root.mkdir(mode=0o700, exist_ok=True)
+    with (root / f"{name}.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
+
+
+def action_handler(action):
+    return {
+        CONFIG_ACTION: ConfigReconciler, APP_CONFIG_ACTION: AppConfigReconciler,
+        TAGGED_CONFIG_ACTION: TaggedConfigReconciler, DEV_CONFIG_ACTION: DevConfigReconciler,
+        PLAN_ACTION: PlanReconciler, ROUTING_ACTION: RoutingReconciler,
+        REMOVE_ACTION: ContainerRemover,
+    }.get(action) or (ImageDeployer if action in IMAGE_ACTIONS else None)
+
+
+def execute_action(api, snapshot, job_id, *, lock_root, receipt, before_submit=None,
+                   expected_target=None, prelocked=False):
+    """The single source of execution semantics for singles and sequence steps."""
+    action = snapshot["spec"]["action"]
+    cls = action_handler(action)
+    if cls is not None:
+        handler = cls(api, snapshot, job_id, lock_root=lock_root)
+        handler.prelocked = prelocked
+        return handler.run()
+    kwargs = {}
+    if "runtime_source" in snapshot["spec"]:
+        kwargs.update(runtime_snapshot=snapshot, receipt=receipt,
+                      tag="rt" + hashlib.sha256(job_id.encode()).hexdigest()[:20],
+                      before_submit=before_submit)
+    if expected_target is not None:
+        kwargs["expected_target"] = expected_target
+    if action in ("restart", "start") and not prelocked:
+        container = api.resolve_target(snapshot["spec"], snapshot["resolved_args"])
+        name = container["Name"].lstrip("/")
+        kwargs["expected_target"] = {"id": container["Id"], "name": name}
+        with target_lock(lock_root, name):
+            return api.execute(snapshot["spec"], snapshot["resolved_args"], **kwargs)
+    return api.execute(snapshot["spec"], snapshot["resolved_args"], **kwargs)
+
+
+def execute_sequence(api, snapshot, job_id, *, lock_root, receipt, checkpoint, sleep):
+    def preflight(item):
+        child, target = item["snapshot"], item["target"]
+        action = child["spec"]["action"]
+        if action in ("restart", "start"):
+            container = api.resolve_target(child["spec"], child["resolved_args"])
+            if container["Id"] != target["id"] or container["Name"].lstrip("/") != target["name"]:
+                raise RuntimeError("sequence target changed since approval")
+            if "runtime_source" in child["spec"]:
+                verify_runtime_source(api, child, container,
+                                      tag="sq" + hashlib.sha256((job_id + target["id"]).encode()).hexdigest()[:20])
+        else:
+            handler = action_handler(action)(api, child, job_id, lock_root=lock_root)
+            old, _image = handler._prepare()
+            if old["Id"] != target["id"]:
+                raise RuntimeError("sequence target changed since approval")
+            handler._before_swap()
+
+    def execute(item):
+        child = item["snapshot"]
+        # Preserve a standalone child's hard execution deadline as well as the
+        # parent's aggregate deadline. Restore the parent's remaining budget,
+        # never a fresh full budget, after each child.
+        remaining, interval = signal.getitimer(signal.ITIMER_REAL)
+        started = time.monotonic()
+        previous_timeout = api.timeout
+        api.timeout = child["execution"]["timeout_seconds"]
+        if remaining > 0:
+            signal.setitimer(signal.ITIMER_REAL, min(remaining, api.timeout))
+        try:
+            return execute_action(api, child, job_id, lock_root=lock_root,
+                                  receipt=receipt, expected_target=item["target"], prelocked=True)
+        finally:
+            api.timeout = previous_timeout
+            if remaining > 0:
+                signal.setitimer(signal.ITIMER_REAL, max(0.000001, remaining - (time.monotonic() - started)), interval)
+
+    with ExitStack() as locks:
+        for name in sorted(item["target"]["name"] for item in snapshot["sequence"]["steps"]):
+            locks.enter_context(target_lock(lock_root, name))
+        return sequence.run(snapshot, api=api, preflight=preflight, execute=execute,
+                            checkpoint=checkpoint, sleep=sleep)
+
+
 def run(request_path: Path, expected_hash: str, *, api_factory=DockerAPI, sleep=time.sleep,
         clock=lambda: datetime.now(timezone.utc)) -> int:
     raw = request_path.read_bytes()
@@ -271,6 +369,9 @@ def run(request_path: Path, expected_hash: str, *, api_factory=DockerAPI, sleep=
             if previous.get("state") in ("succeeded", "failed", "timed_out", "lost"):
                 return 0
             if previous.get("started_at"):
+                if previous.get("sequence"):
+                    previous["sequence"] = sequence.interrupted(
+                        sequence.read_ledger(previous["sequence"]), "worker interrupted; no step replayed")
                 atomic_json(status_path, {**previous, "state": "lost", "finished_at": utcnow(),
                                           "error": "worker interrupted after execution began; side effect unknown"})
                 return 1
@@ -278,6 +379,8 @@ def run(request_path: Path, expected_hash: str, *, api_factory=DockerAPI, sleep=
         execution = snapshot["execution"]
         receipt = {"job_id": job_id, "request_hash": expected_hash, "state": "accepted",
                    "accepted_at": utcnow(), "started_at": None, "finished_at": None}
+        if snapshot["spec"]["action"] == sequence.ACTION:
+            receipt["sequence"] = sequence.initial_ledger(snapshot)
         atomic_json(status_path, receipt)
         # Delay is owned by this container, not by an app daemon thread.
         sleep(execution["start_delay_seconds"])
@@ -286,6 +389,8 @@ def run(request_path: Path, expected_hash: str, *, api_factory=DockerAPI, sleep=
             receipt.update(state="failed", exit_code=None, side_effect_unknown=False,
                            error="protected interval expired before start; no action submitted",
                            finished_at=utcnow())
+            if receipt.get("sequence"):
+                receipt["sequence"] = sequence.interrupted(receipt["sequence"], receipt["error"], unknown=False)
             atomic_json(status_path, receipt)
             return 1
         receipt.update(state="running", started_at=utcnow())
@@ -296,45 +401,28 @@ def run(request_path: Path, expected_hash: str, *, api_factory=DockerAPI, sleep=
         old_handler = signal.signal(signal.SIGALRM, deadline)
         signal.setitimer(signal.ITIMER_REAL, execution["timeout_seconds"])
         try:
-            if snapshot["spec"]["action"] == CONFIG_ACTION:
-                output = ConfigReconciler(api, snapshot, job_id,
-                                          lock_root=request_path.parent.parent / ".target-locks").run()
-            elif snapshot["spec"]["action"] == APP_CONFIG_ACTION:
-                output = AppConfigReconciler(api, snapshot, job_id,
-                                             lock_root=request_path.parent.parent / ".target-locks").run()
-            elif snapshot["spec"]["action"] == TAGGED_CONFIG_ACTION:
-                output = TaggedConfigReconciler(api, snapshot, job_id,
-                                                lock_root=request_path.parent.parent / ".target-locks").run()
-            elif snapshot["spec"]["action"] == DEV_CONFIG_ACTION:
-                output = DevConfigReconciler(api, snapshot, job_id,
-                                             lock_root=request_path.parent.parent / ".target-locks").run()
-            elif snapshot["spec"]["action"] == PLAN_ACTION:
-                output = PlanReconciler(api, snapshot, job_id,
-                                        lock_root=request_path.parent.parent / ".target-locks").run()
-            elif snapshot["spec"]["action"] == ROUTING_ACTION:
-                output = RoutingReconciler(api, snapshot, job_id,
-                                           lock_root=request_path.parent.parent / ".target-locks").run()
-            elif snapshot["spec"]["action"] == REMOVE_ACTION:
-                output = ContainerRemover(api, snapshot, job_id,
-                                          lock_root=request_path.parent.parent / ".target-locks").run()
-            elif snapshot["spec"]["action"] in IMAGE_ACTIONS:
-                output = ImageDeployer(api, snapshot, job_id,
-                                           lock_root=request_path.parent.parent / ".target-locks").run()
-            elif "runtime_source" in snapshot["spec"]:
+            lock_root = request_path.parent.parent / ".target-locks"
+            if snapshot["spec"]["action"] == sequence.ACTION:
+                def checkpoint(ledger):
+                    receipt["sequence"] = sequence.read_ledger(ledger)
+                    atomic_json(status_path, receipt)
+
+                ledger = execute_sequence(api, snapshot, job_id, lock_root=lock_root,
+                                          receipt=receipt, checkpoint=checkpoint, sleep=sleep)
+                receipt.update(state="lost" if ledger["state"] == "lost_requires_inspection" else ledger["state"],
+                               exit_code=(None if ledger["state"] == "lost_requires_inspection"
+                                          else 0 if ledger["state"] == "succeeded" else 1),
+                               side_effect_unknown=ledger["state"] == "lost_requires_inspection",
+                               error=None if ledger["state"] == "succeeded" else ledger["state"])
+            else:
                 def before_runtime_submit():
-                    # Sealed source verification takes time. Do not let it
-                    # carry the target restart past the quiesce start fence.
                     if fence_expired(request, clock()):
                         raise RuntimeError("protected interval expired during runtime check; no action submitted")
                     atomic_json(status_path, receipt)
 
-                output = api.execute(snapshot["spec"], snapshot["resolved_args"],
-                                     runtime_snapshot=snapshot, receipt=receipt,
-                                     tag="rt" + hashlib.sha256(job_id.encode()).hexdigest()[:20],
-                                     before_submit=before_runtime_submit)
-            else:
-                output = api.execute(snapshot["spec"], snapshot["resolved_args"])
-            receipt.update(state="succeeded", exit_code=0, output_tail=output)
+                output = execute_action(api, snapshot, job_id, lock_root=lock_root,
+                                        receipt=receipt, before_submit=before_runtime_submit)
+                receipt.update(state="succeeded", exit_code=0, output_tail=output)
         except TimeoutError as exc:
             receipt.update(state="timed_out", exit_code=None, error=str(exc),
                            side_effect_unknown=api.side_effect_started)
@@ -349,6 +437,10 @@ def run(request_path: Path, expected_hash: str, *, api_factory=DockerAPI, sleep=
         finally:
             signal.setitimer(signal.ITIMER_REAL, 0)
             signal.signal(signal.SIGALRM, old_handler)
+        if receipt.get("sequence") and receipt["sequence"]["state"] not in (
+                "succeeded", "failed", "lost_requires_inspection"):
+            receipt["sequence"] = sequence.interrupted(
+                receipt["sequence"], "worker stopped; no step replayed", unknown=api.side_effect_started)
         receipt["finished_at"] = utcnow()
         limit = execution["max_output_bytes"]
         for field in ("output_tail", "error"):

@@ -89,6 +89,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_ops_gate_receipt_pg.py::",
     "test_ops_preflight_deadline_pg.py::",
     "test_ops_competing_dispatch_pg.py::",
+    "test_ops_sequence_claim_pg.py::",
     "test_ops_gate_claim_pg.py::",
     "test_ops_gate_admission_pg.py::",
     "test_ops_gate_trust_pg.py::",

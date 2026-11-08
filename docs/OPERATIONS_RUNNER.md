@@ -95,6 +95,58 @@ pending-only resolution CAS, records `resolved_via=requester`, stays silent,
 and refuses already-approved/running work. It cannot withdraw coordinator-owned
 deployment-orchestration cards.
 
+## Ordered service operations (TASK-1263)
+
+The disabled seed `llm-bawt.operation-sequence` uses
+`{"action":"operation_sequence","operations":["allowed.catalog-slug", ...]}`.
+Its invocation is `{"steps":[{"operation":"allowed.catalog-slug","args":{}}, ...]}`,
+with one to six ordered steps. The catalog owns both the allowed operations
+and the closed argument schema; extend that schema alongside an allowlist
+change when admitting argument-bearing children. Existing rows are never
+silently changed by seeding.
+
+The initial action requires critical risk and all-agent quiesce for the
+entire window. It permits health-configured restart/start and app/tagged
+config reconciliation only. It rejects nested plans/sequences, release/deploy,
+stop/remove/routing/gates, Redis, houses, GPU handoffs, the ops executor itself,
+disabled rows, and duplicate concrete targets. Children retain their ordinary
+schema/defaults, source, capability, target and approval binding checks.
+The card shows every ordered child, redacted arguments, exact target identity
+and config-reconcile subcard. One parent job uses the existing worker and
+action handlers; there are no child jobs, approvals or callbacks.
+
+Admission freezes every child snapshot and exact target. Creation and claim
+lock all affected catalog rows in sorted slug order, checking versions,
+hashes and enabled state. An executing sequence and a standalone invocation
+of a shared child serialize. The worker takes every concrete target lock in
+sorted name order (the same locks standalone restarts and config swaps use),
+preflights all children before any mutation, then rechecks each child before
+submission. The parent budget must cover the sum of child delays, execution
+and health budgets; each child's original hard execution deadline still applies.
+
+The parent `sequence` field is a bounded structured ledger, independent of
+`output_tail` and its truncation. Each step records its number, operation,
+redacted args, target, state, exit, health, rollback, timestamps and a short
+output/reason tail. The worker fsyncs intent before submitting each action and
+the result before advancing. Reconciliation projects that ledger into the
+parent column while running and atomically with its terminal status. The
+existing approval continuation delivers the entire list once, including
+after the app or calling bridge restarts.
+
+Stop on the first failure. Successful earlier restarts are not rolled back;
+config steps retain their own existing rollback behavior. If a worker dies
+or disappears, retain completed results, mark an in-flight mutation `lost`,
+and skip the remainder. Report `lost_requires_inspection`; never resume or
+automatically rerun remaining steps. A known pre-submit refusal, expired
+fence or failed quiesce reports skipped steps without claiming a mutation.
+
+**Activation:** publish and configure a worker carrying
+`llm-bawt.ops.operation-sequence="1"` before enabling the catalog row.
+Children need their own enabled, health-configured live rows. Capability
+checks fail closed before dispatch. Do not manufacture a multi-service
+restart as a smoke test: dry-run/admission plus fake-worker/private-DB
+tests precede the first genuine authorized use, which is live acceptance.
+
 ## Tested runtime fence for source restarts (TASK-1410 / TASK-1496)
 
 A restart spec may declare `runtime_source` with:

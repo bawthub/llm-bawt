@@ -49,6 +49,7 @@ from .runtime_source import (WORKER_CAPABILITY_LABEL as RUNTIME_SOURCE_LABEL, bi
 from .tagged_config_reconcile import (ACTION as TAGGED_CONFIG_ACTION, TAGGED_GUARD_LABEL, needs_tagged_guard_worker,
                                       source_guarded, tagged_config_binding, validate_tagged_spec)
 from .validation import canonical_json
+from . import sequence
 from .execution_mode import EXECUTION_ISOLATED, EXECUTION_PROCESS, EXECUTOR_MODES, snapshot_execution_mode
 from .process_launch import ProcessLauncher
 from .self_target import (SELF_IDENTITY_UNKNOWN, SELF_TARGET_UNVERIFIABLE, ContainerIdentity, SelfTargetError,
@@ -84,6 +85,8 @@ def spec_capability_labels(spec: dict) -> tuple[str, ...]:
     built before them would refuse the spec mid-job (or, for a probe, verify
     the wrong port), so every action carrying them is refused before dispatch."""
     labels = []
+    if spec.get("action") == sequence.ACTION:
+        labels.append(sequence.WORKER_CAPABILITY_LABEL)
     if "runtime_source" in spec:
         labels.append(RUNTIME_SOURCE_LABEL)
     if "health_probe" in spec:
@@ -285,6 +288,8 @@ def validate_spec(command_script: str) -> dict:
         return validate_dev_spec(spec)
     if isinstance(spec, dict) and spec.get("action") == PLAN_ACTION:
         return validate_plan_spec(spec)
+    if isinstance(spec, dict) and spec.get("action") == sequence.ACTION:
+        return sequence.validate_spec(spec)
     if isinstance(spec, dict) and spec.get("action") in IMAGE_ACTIONS:
         return validate_image_spec(spec)
     if isinstance(spec, dict) and spec.get("action") == REMOVE_ACTION:
@@ -686,6 +691,30 @@ class DockerExecutor(Executor):
     def self_target(self, snapshot):
         return classify_self_target(snapshot, own=self._own_identity, inspect=self._container_identity)
 
+    def sequence_target(self, snapshot):
+        """Resolve every arg-bearing selector to the exact approved container."""
+        spec, args = snapshot["spec"], snapshot["resolved_args"]
+        try:
+            if spec["action"] in ("restart", "start"):
+                name, filters = target_selector(spec, args)
+                rows = ([self.client.containers.get(name)] if name else
+                        [row for row in self.client.containers.list(all=True, filters=filters)
+                         if not is_ops_worker(row.labels)])
+                if len(rows) != 1:
+                    raise ValueError("sequence selector must match exactly one target")
+                target = rows[0]
+            else:
+                target = self.client.containers.get(spec["container_name"])
+            target.reload()
+            labels = target.labels or {}
+            service = labels.get("com.docker.compose.service", "")
+            if (is_ops_worker(labels) or not labels.get("com.docker.compose.project") or not service
+                    or service == "redis" or service.startswith("house-")):
+                raise ValueError("sequence target is protected or lacks a complete Compose identity")
+            return {"id": target.id, "name": target.name.lstrip("/")}
+        except Exception as exc:
+            raise ExecutorError(f"cannot bind sequence target ({type(exc).__name__})") from exc
+
     def _own_identity(self):
         """The ops service's own container, read once: its full ID cannot
         change while this process lives. A failed read is not cached."""
@@ -748,6 +777,10 @@ class DockerExecutor(Executor):
             self._check_config_worker(snapshot["execution"], action)
         # TASK-1801: every action, rollback and routing included.
         self._check_spec_capabilities(snapshot["execution"], snapshot["spec"])
+        if action == sequence.ACTION:
+            sequence.validate_binding(snapshot)
+            for child in sequence.snapshots(snapshot):
+                self.preflight(child)
         if has_restart_health(snapshot["spec"]):
             # TASK-1697: an older worker would reject the health fields mid-job
             # or, worse, skip the probe; refuse before dispatch instead.
@@ -987,22 +1020,46 @@ class DockerExecutor(Executor):
                         raise ExecutorError("terminal worker receipt has no finish timestamp")
                     if state == "succeeded" and receipt.get("exit_code") != 0:
                         raise ExecutorError("invalid success receipt")
+                    ledger = sequence.read_ledger(
+                        receipt.get("sequence"), snapshot if snapshot["spec"]["action"] == sequence.ACTION else None)
+                    if snapshot["spec"]["action"] == sequence.ACTION:
+                        if state == "succeeded" and (
+                                not ledger or ledger["state"] != "succeeded"
+                                or any(step["state"] != "succeeded" for step in ledger["steps"])):
+                            raise ExecutorError("sequence success requires every durable step result")
+                        if not ledger or ledger["state"] in ("pending", "running"):
+                            ledger = sequence.interrupted(
+                                ledger or sequence.initial_ledger(snapshot), receipt.get("error") or state,
+                                unknown=state in ("lost", "timed_out"))
                     return ReconcileResult(state, receipt.get("exit_code"),
                         (receipt.get("output_tail") or "").encode()[-max(1, output_tail_bytes):].decode(errors="replace"),
-                        receipt.get("error"), receipt.get("started_at"), receipt.get("finished_at"))
+                        receipt.get("error"), receipt.get("started_at"), receipt.get("finished_at"),
+                        sequence=ledger)
+            def lost(message, output=None):
+                ledger = None
+                if snapshot["spec"]["action"] == sequence.ACTION:
+                    ledger = sequence.interrupted(
+                        sequence.read_ledger((receipt or {}).get("sequence"), snapshot) or sequence.initial_ledger(snapshot),
+                        message)
+                return ReconcileResult("lost", output_tail=output, error=message, sequence=ledger)
             try:
                 # A recovery start is a dispatch: re-run the self-target check first.
                 liveness = self._launcher_for(snapshot).probe(
                     job_id=job_id, directory=directory, digest=digest, settings=snapshot["execution"],
                     revalidate=lambda: self.self_target(snapshot))
             except RecoveryRefused as exc:
-                return self._refuse_recovery_start(path, job_id, digest, exc)
+                result = self._refuse_recovery_start(path, job_id, digest, exc)
+                if snapshot["spec"]["action"] == sequence.ACTION:
+                    result.sequence = sequence.interrupted(
+                        sequence.read_ledger((receipt or {}).get("sequence"), snapshot) or sequence.initial_ledger(snapshot),
+                        result.error, unknown=result.state == "lost")
+                return result
             if liveness is Liveness.MISSING:
                 atomic_json(directory / ABANDONED, {"reason": "worker missing during reconciliation"})
-                return ReconcileResult("lost", error="worker missing; side effects unknown, not replayed")
+                return lost("worker missing; side effects unknown, not replayed")
             if liveness is Liveness.START_UNCONFIRMED:
-                return ReconcileResult("lost", output_tail=self._diagnostics(snapshot, directory, output_tail_bytes),
-                                       error="worker start previously attempted without confirmation; not replayed")
+                return lost("worker start previously attempted without confirmation; not replayed",
+                            self._diagnostics(snapshot, directory, output_tail_bytes))
             if liveness is Liveness.DEFERRED:
                 return ReconcileResult(None)  # No attempt/receipt: leave the ledger nonterminal.
             if liveness is Liveness.STARTED:
@@ -1017,10 +1074,13 @@ class DockerExecutor(Executor):
                     if final.get("state") in {"succeeded", "failed", "lost", "timed_out"}:
                         return self._reconcile_locked(job_id=job_id, snapshot=snapshot,
                                                       output_tail_bytes=output_tail_bytes, fence=fence)
-                return ReconcileResult("lost", output_tail=self._diagnostics(snapshot, directory, output_tail_bytes),
-                                       error="worker exited without terminal receipt; side effects unknown")
+                    receipt = final  # preserve a checkpoint published after the first read
+                return lost("worker exited without terminal receipt; side effects unknown",
+                            self._diagnostics(snapshot, directory, output_tail_bytes))
             if receipt and receipt.get("state") == "running":
-                return ReconcileResult("running", started_at=receipt.get("started_at"))
+                return ReconcileResult("running", started_at=receipt.get("started_at"),
+                                       sequence=sequence.read_ledger(
+                                           receipt.get("sequence"), snapshot if snapshot["spec"]["action"] == sequence.ACTION else None))
             return ReconcileResult("accepted")
         except ExecutorError:
             raise

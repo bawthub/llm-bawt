@@ -13,8 +13,8 @@ from __future__ import annotations
 
 from .container_remove import ACTION as REMOVE_ACTION
 from .executor import ExecutorError
-from .image_deploy import IMAGE_ACTIONS
 from .plan_reconcile import ACTION as PLAN_ACTION
+from .sequence import ACTION as SEQUENCE_ACTION
 from .release_spec import RELEASE_ACTION
 from .worker import target_selector
 
@@ -75,11 +75,11 @@ def gpu_voice_target(spec: dict, resolved_args: dict, executor, *, live: bool = 
     action = spec.get("action")
     if action in UNGATED_ACTIONS:
         return None
-    if action == PLAN_ACTION:
+    if action in (PLAN_ACTION, SEQUENCE_ACTION):
         if not plan_targets:
             raise GpuGuardUnverifiable("a service plan's targets are not bound")
         for target in plan_targets:
-            if target.get("action") == PLAN_ACTION:
+            if target.get("action") in (PLAN_ACTION, SEQUENCE_ACTION):
                 raise GpuGuardUnverifiable("a service plan cannot target another plan")
             service = gpu_voice_target(target, {}, executor, live=live)
             if service is not None:

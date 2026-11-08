@@ -411,6 +411,8 @@ class OpsJob(SQLModel, table=True):
     output_tail: str | None = Field(
         default=None, sa_column=Column(Text, nullable=True)
     )
+    # Structured parent-only sequence progress, never subject to text-tail truncation.
+    sequence_json: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
     error_text: str | None = Field(
         default=None, sa_column=Column(Text, nullable=True)
     )
@@ -550,6 +552,10 @@ class OpsJob(SQLModel, table=True):
         # TASK-997: structured deploy/rollback record (None for ordinary ops),
         # so the UI never has to parse raw output for release state.
         row["deployment"] = parse_deployment(self.output_tail)
+        if self.sequence_json is not None:
+            from .sequence import read_ledger
+
+            row["sequence"] = read_ledger(json.loads(self.sequence_json))
         if include_output:
             row["output_tail"] = self.output_tail
             row["status_file_path"] = self.status_file_path

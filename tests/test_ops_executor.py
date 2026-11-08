@@ -150,7 +150,9 @@ class FakeAPI:
     side_effect_started = False
     def __init__(self, timeout):
         self.timeout = timeout
-    def execute(self, spec, args):
+    def resolve_target(self, spec, args):
+        return {"Id": "c" * 64, "Name": "/app"}
+    def execute(self, spec, args, **kwargs):
         type(self).calls += 1
         self.side_effect_started = True
         return "completed"
@@ -202,7 +204,7 @@ def test_real_execution_deadline_not_stop_grace(tmp_path, monkeypatch):
     digest = hashlib.sha256(request.read_bytes()).hexdigest()
     release, finished = Event(), Event()
     class SlowAPI(FakeAPI):
-        def execute(self, spec, args):
+        def execute(self, spec, args, **kwargs):
             self.side_effect_started = True
             # timing-ok: deliberate stall; it outlives the 0.02s deadline until the test lets go
             release.wait(30)

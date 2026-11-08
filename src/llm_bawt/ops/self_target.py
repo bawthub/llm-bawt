@@ -38,6 +38,7 @@ from .container_remove import ACTION as REMOVE_ACTION
 from .execution_mode import EXECUTION_PROCESS, snapshot_execution_mode
 from .executor_types import ExecutorError
 from .plan_reconcile import ACTION as PLAN_ACTION
+from . import sequence
 from .worker import target_selector
 
 COMPOSE_PROJECT_LABEL = "com.docker.compose.project"
@@ -148,6 +149,11 @@ def self_target(snapshot: Mapping, *, own: Callable[[], ContainerIdentity],
     (``self_target_unverifiable``) when it cannot be read. A bound service
     plan (TASK-1476) is checked through each of its targets.
     """
+    if snapshot.get("spec", {}).get("action") == sequence.ACTION:
+        for child in sequence.snapshots(snapshot):
+            if target := self_target(child, own=own, inspect=inspect):
+                return target
+        return None
     identity = own()
     spec, args = snapshot["spec"], snapshot.get("resolved_args") or {}
     if spec.get("action") in NO_CONTAINER_ACTIONS:

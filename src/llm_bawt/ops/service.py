@@ -17,6 +17,7 @@ from .tagged_config_reconcile import ACTION as TAGGED_CONFIG_ACTION, valid_tagge
 from .plan_reconcile import ACTION as PLAN_ACTION, valid_plan_snapshot
 from .container_remove import ACTION as REMOVE_ACTION, valid_remove_binding  # TASK-1439 T2c
 from .runtime_source import valid_runtime_binding
+from . import sequence
 from .executor import (ConfigCheckError, DockerExecutor, Executor, ExecutorError, QuiesceFenceUnsupported,
                        validate_spec)
 from .execution_mode import snapshot_execution_mode
@@ -50,7 +51,7 @@ APPROVAL_REQUIRED = ("this operation runs only through an approval card: ask an 
                      "and approve the card. The Run button and direct dispatch cannot start it")
 # TASK-1476: a service plan recreates the app too, so the same rule holds.
 # TASK-1649: the dev kind runs no source check, so it never runs uncarded.
-APPROVAL_ONLY_ACTIONS = frozenset({APP_CONFIG_ACTION, PLAN_ACTION, DEV_CONFIG_ACTION})
+APPROVAL_ONLY_ACTIONS = frozenset({APP_CONFIG_ACTION, PLAN_ACTION, DEV_CONFIG_ACTION, sequence.ACTION})
 
 
 from .gate_driver import GATE_ACTION, is_gate_snapshot  # noqa: E402
@@ -130,6 +131,18 @@ def _timestamp(raw):
 
 def _plan_target_specs(snapshot) -> list[dict] | None:
     """A bound service plan's target specs, for the GPU voice guard (TASK-1476)."""
+    if snapshot.get("spec", {}).get("action") == sequence.ACTION:
+        # Resolve selector args once in this projection; never discard the step's
+        # real args when the shared guard walks the targets.
+        targets = []
+        for item in snapshot["sequence"]["steps"]:
+            child = item["snapshot"]
+            spec = dict(child["spec"])
+            spec.pop("container_name_from_arg", None)
+            spec.pop("compose_service_from_arg", None)
+            spec["container_name"] = item["target"]["name"]
+            targets.append(spec)
+        return targets
     plan = snapshot.get("plan")
     if not isinstance(plan, dict):
         return None
@@ -295,7 +308,15 @@ class OpsService:
         snapshot = {"snapshot_version": 1, "operation": op.to_api(), "spec": spec,
                     "schema": json.loads(op.args_schema_json), "defaults": json.loads(op.args_defaults_json),
                     "input_args": {} if args is None else args, "resolved_args": merged, "execution": execution}
-        if spec["action"] == ROUTING_ACTION:
+        if spec["action"] == sequence.ACTION:
+            from .sequence_approval import bind
+
+            try:
+                executor.check_spec_capabilities(spec)
+                snapshot["sequence"] = bind(self, snapshot, display_args)
+            except (ValueError, ExecutorError) as exc:
+                raise OpsDispatchError("sequence_invalid", str(exc)) from exc
+        elif spec["action"] == ROUTING_ACTION:
             if merged:
                 raise OpsDispatchError("args_invalid", "routing reconciliation accepts no arguments")
             try:
@@ -388,6 +409,12 @@ class OpsService:
             snapshot["quiesce"] = binding
             # Never put a quiesce action before an approver that cannot run fenced.
             self._require_quiesce_fence(executor, execution)
+        if spec["action"] == sequence.ACTION:
+            try:
+                sequence.validate_binding(snapshot)
+                sequence.read_ledger(sequence.initial_ledger(snapshot))
+            except ValueError as exc:
+                raise OpsDispatchError("sequence_invalid", str(exc)) from exc
         # TASK-1169 S3b: the GPU voice guard's creation check reads this, so the
         # process that creates the job needs no Docker read of its own.
         try:
@@ -438,6 +465,15 @@ class OpsService:
             snapshot_execution_mode(detached)  # legacy, or coherent in both copies
             if detached.get("quiesce") != quiesce_binding(op, detached["resolved_args"]):
                 raise ValueError("snapshot quiesce binding mismatch")
+            if detached["spec"]["action"] == sequence.ACTION:
+                sequence.validate_binding(detached)
+                for item in detached["sequence"]["steps"]:
+                    child = item["snapshot"]
+                    self._verify_snapshot(child, child["operation"]["slug"], child["input_args"])
+                    if item["display_args"] != display_args(child["resolved_args"], child["operation"]["args_schema_json"]):
+                        raise ValueError("sequence display arguments do not match redacted child arguments")
+            elif "sequence" in detached:
+                raise ValueError("sequence binding on a non-sequence operation")
             if not valid_routing_binding(detached):
                 raise ValueError("snapshot routing binding mismatch")
             if not valid_remove_binding(detached):
@@ -563,9 +599,14 @@ class OpsService:
         callback = (self._receipt_callback(snapshot, bot_id=caller_bot_id, user_id=caller_user_id,
                                            session_id=caller_session_id)
                     if quiesce and not approval_request_id else None)
+        shown_args = display_args(snapshot["resolved_args"], op.args_schema_json)
+        if snapshot["spec"]["action"] == sequence.ACTION:
+            shown_args = {"steps": [{"operation": item["snapshot"]["operation"]["slug"],
+                                     "args": item["display_args"]}
+                                    for item in snapshot["sequence"]["steps"]]}
         try:
             job = self.store.create_job(operation=op, args_json=canonical_json(snapshot["resolved_args"]),
-                display_args_json=canonical_json(display_args(snapshot["resolved_args"], op.args_schema_json)),
+                display_args_json=canonical_json(shown_args),
                 idempotency_key=key, invocation_snapshot_json=canonical_json(snapshot), request_payload_json=payload,
                 caller_actor=caller_actor, caller_bot_id=caller_bot_id, caller_user_id=caller_user_id,
                 caller_turn_id=caller_turn_id, caller_session_key=caller_session_key, caller_backend=caller_backend,
@@ -857,6 +898,8 @@ class OpsService:
                             target_host=snapshot["execution"].get("target_host", ""),
                             status_file_path=job.status_file_path or "", log_file_path=job.log_file_path or "",
                             output_tail_bytes=snapshot["execution"]["max_output_bytes"])
+                        if rec.sequence is not None and rec.state not in JOB_TERMINAL_STATES:
+                            self.store.mark_sequence(job.id, rec.sequence)
                         if rec.state == JOB_ACCEPTED:
                             self.store.mark_accepted(job.id)
                         elif rec.state == JOB_RUNNING:
@@ -864,7 +907,8 @@ class OpsService:
                         elif rec.state in JOB_TERMINAL_STATES:
                             self.store.mark_terminal(job.id, state=rec.state, exit_code=rec.exit_code,
                                 output_tail=rec.output_tail, error_text=rec.error,
-                                started_at=_timestamp(rec.started_at), finished_at=_timestamp(rec.finished_at))
+                                started_at=_timestamp(rec.started_at), finished_at=_timestamp(rec.finished_at),
+                                sequence=rec.sequence)
                     except (ExecutorError, ValueError) as exc:
                         logger.warning("ops reconcile unavailable for %s: %s", job.id, exc)
                     self.store.touch_reconcile(job.id)

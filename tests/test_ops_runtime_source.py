@@ -35,7 +35,7 @@ def spec_for(repo):
 
 
 def container_for(repo):
-    return {"Id": "a" * 64, "Image": "sha256:" + "b" * 64,
+    return {"Id": "a" * 64, "Name": "/app", "Image": "sha256:" + "b" * 64,
             "Mounts": [{"Type": "bind", "Source": str(repo / p), "Destination": dest}
                        for dest, p in (("/app/src", "src"), ("/app/server.sh", "server.sh"))],
             "Config": {"Env": ["PYTHONPYCACHEPREFIX=/tmp/bytecode"]}}
@@ -145,6 +145,7 @@ def test_spec_validation_and_capability(repo):
 
 class RuntimeDocker(GitDocker):
     execute = DockerAPI.execute
+    resolve_target = DockerAPI.resolve_target
 
     def __init__(self, scratch, container, *, on_restart=lambda: None):
         super().__init__(scratch)

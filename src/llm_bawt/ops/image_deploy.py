@@ -125,6 +125,7 @@ class ImageDeployer:
     def __init__(self, api, snapshot: dict, job_id: str, *, lock_root: Path,
                  sleep=time.sleep, clock=time.monotonic, renderer=None):
         self.api = api
+        self.prelocked = False
         self._renderer_override = renderer
         self._config_hash = None
         self._declared = None
@@ -171,6 +172,9 @@ class ImageDeployer:
         """Hold this target's lock, non-blocking: a busy lock fails known with
         nothing changed. A multi-target plan (TASK-1476) takes each target's
         lock in plan order through this same method."""
+        if getattr(self, "prelocked", False):
+            yield
+            return
         self.lock_root.mkdir(mode=0o700, exist_ok=True)
         with (self.lock_root / f"{self.name}.lock").open("a") as lock:
             try:
