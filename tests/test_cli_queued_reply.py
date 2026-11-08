@@ -240,12 +240,28 @@ def test_cli_stream_reads_admission_comment(monkeypatch):
     assert items == [{"admitted": ACK}, {"model": "m"}, "done"]
 
 
+def _tool_api(monkeypatch, client, events_by_message):
+    seen = []
+
+    def request(method, path, **kwargs):
+        assert (method, path) == ("GET", "/v1/tool-calls")
+        seen.append(kwargs["params"]["message_id"])
+        return {"events": events_by_message.get(kwargs["params"]["message_id"], [])}
+
+    monkeypatch.setattr(client, "_request", request)
+    return seen
+
+
+def _calls(turn_id, name):
+    return {"turn_id": turn_id, "tool_calls": [
+        {"name": name, "arguments": {"command": name.lower()}, "result": f"{name} ran"}]}
+
+
 def test_admitted_stream_renders_tool_calls_before_text(monkeypatch, capsys):
     client = ServiceClient(http_url="http://example.invalid")
-    monkeypatch.setattr(client, "_request", lambda *_a, **_k: {"events": [
-        {"turn_id": "turn-delivery-1", "tool_calls": [
-            {"name": "Bash", "arguments": {"command": "echo hi"}, "result": "hi"}]},
-    ]})
+    _tool_api(monkeypatch, client, {"user-message-1": [_calls("turn-delivery-1", "Bash")]})
+    monkeypatch.setattr(client, "wait_for_queued_reply", lambda *_a, **_k: {
+        **DELIVERED, "user_message_id": "user-message-1"})
     monkeypatch.setattr(client, "chat_completion", lambda **_kwargs: iter(
         [{"admitted": dict(ACK)}, {"model": "m"}, "It printed hi."]))
     display_cmd, config, output = _queued_cli(monkeypatch, client)
@@ -253,8 +269,45 @@ def test_admitted_stream_renders_tool_calls_before_text(monkeypatch, capsys):
                                          user_id="selected-user", plaintext_output=True,
                                          stream=True, config=config) is True
     text = output.getvalue()
-    assert "-> Bash: Bash(command=echo hi)" in text
+    assert "-> Bash: Bash(command=bash)" in text
     assert "It printed hi." in capsys.readouterr().out + text
+
+
+CHILD_REPLY = {"delivery_id": "delivery-1", "retry_delivery_id": "delivery-child",
+               "status": "DELIVERED", "turn_id": "turn-child",
+               "user_message_id": "child-message", "response_text": "Child answer."}
+RETRY_EVENTS = {"user-message-1": [_calls("turn-delivery-1", "OldAttempt")],
+                "child-message": [_calls("turn-child", "ChildTool")]}
+
+
+@pytest.mark.parametrize("path", ["admitted-stream", "legacy-receipt"])
+def test_retried_turn_shows_the_answering_childs_tools(monkeypatch, capsys, path):
+    """Codex TASK-1394 blocker: a restart retry answers from a child turn with
+    its own trigger message; never show the aborted original's tools."""
+    client = ServiceClient(http_url="http://example.invalid")
+    seen = _tool_api(monkeypatch, client, RETRY_EVENTS)
+    monkeypatch.setattr(client, "wait_for_queued_reply", lambda *_a, **_k: dict(CHILD_REPLY))
+    frames = ([{"admitted": dict(ACK)}, {"model": "m"}, "Child answer."]
+              if path == "admitted-stream" else [dict(ACK)])
+    monkeypatch.setattr(client, "chat_completion", lambda **_kwargs: iter(frames))
+    display_cmd, config, output = _queued_cli(monkeypatch, client)
+    assert display_cmd.query_via_service("go", model=None, bot_id="selected-bot",
+                                         user_id="selected-user", plaintext_output=True,
+                                         stream=True, config=config) is True
+    text = output.getvalue()
+    assert "ChildTool" in text and "OldAttempt" not in text
+    assert seen == ["child-message"]
+    assert "Child answer." in capsys.readouterr().out + text
+
+
+def test_admission_then_eof_reports_accepted_pending(monkeypatch):
+    client = ServiceClient(http_url="http://example.invalid")
+    monkeypatch.setattr(client, "chat_completion", lambda **_kwargs: iter([{"admitted": dict(ACK)}]))
+    display_cmd, config, output = _queued_cli(monkeypatch, client)
+    assert display_cmd.query_via_service("go", model=None, bot_id="selected-bot",
+                                         user_id="selected-user", plaintext_output=True,
+                                         stream=True, config=config) is True
+    assert "delivery-1 was accepted" in output.getvalue()
 
 
 def test_turn_tool_calls_without_turn_id_skips_lookup(monkeypatch):

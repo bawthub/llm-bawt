@@ -86,11 +86,26 @@ def query_via_service(
         render_recorded_tools(reply, receipt)
         return answer
 
+    def render_admitted_tools(receipt: dict) -> None:
+        """Show tools of the reply actually streamed for an admitted turn.
+
+        The service may have followed a restart retry, so the exact terminal
+        reply (not the admission) names the turn and message that answered.
+        """
+        try:
+            reply = client.wait_for_queued_reply(receipt, bot_id=bot_id, user_id=user_id,
+                                                 timeout_seconds=5)
+        except Exception as exc:
+            console.print(f"[dim]Tool calls for this turn could not be loaded: {escape(str(exc))}[/dim]")
+            return
+        if reply is not None and reply.get("status") == "DELIVERED":
+            render_recorded_tools(reply, receipt)
+
     def render_recorded_tools(reply: dict, receipt: dict) -> None:
         """A queued turn never streams its tool events; show the recorded ones."""
         try:
             calls = client.turn_tool_calls(
-                reply, user_message_id=receipt["user_message_id"],
+                reply, user_message_id=reply.get("user_message_id") or receipt["user_message_id"],
                 bot_id=receipt.get("bot_id") or bot_id,
                 user_id=receipt.get("user_id") or user_id,
             )
@@ -131,17 +146,18 @@ def query_via_service(
             actual_model = model  # Default to requested model
             got_metadata = False  # Track if service responded with model info
             accepted_receipt = False
+            admitted: dict | None = None
 
             def content_iterator() -> Iterator[str]:
-                nonlocal actual_model, got_metadata, accepted_receipt
-                admitted: dict | None = None
+                nonlocal actual_model, got_metadata, accepted_receipt, admitted
                 for item in raw_iterator:
                     if isinstance(item, dict) and "admitted" in item:
                         # The service waits on this queued turn and streams its
                         # text only once it ends, so its tool calls are recorded.
                         admitted = item["admitted"]
+                        accepted_receipt = True
                     elif isinstance(item, str) and admitted is not None:
-                        render_recorded_tools({"turn_id": admitted.get("turn_id")}, admitted)
+                        render_admitted_tools(admitted)
                         admitted = None
                         yield item
                     elif is_accepted_receipt(item):
@@ -150,6 +166,7 @@ def query_via_service(
                         if answer:
                             yield answer
                     elif isinstance(item, dict) and "stream_error" in item:
+                        admitted = None
                         # The service admitted the turn and then reported its
                         # failure; falling back would run the prompt twice.
                         accepted_receipt = True
@@ -202,6 +219,10 @@ def query_via_service(
                 if accepted_receipt:
                     # Accepted (or admitted-then-failed) work is never an
                     # unavailable-service fallback.
+                    if admitted is not None:
+                        reference = admitted.get("delivery_id") or admitted.get("turn_id") or "unknown"
+                        console.print(f"[yellow]Request {escape(str(reference))} was accepted, but the "
+                                      "connection ended before its reply; check its result in chat.[/yellow]")
                     return True
                 if got_metadata:
                     # Service responded (we got the model) but produced no content.
