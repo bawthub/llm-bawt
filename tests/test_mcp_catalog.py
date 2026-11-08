@@ -197,7 +197,8 @@ async def test_catalog_token_budgets():
     # definition (he required it in the description): 4,878 (+272).
     # TASK-2115: WAITING joins the status enum on tasks_list (+1).
     # TASK-1343: steps_set says an empty list needs clear=true (+2).
-    assert sum(descriptions) <= 4881, f"Descriptions grew to {sum(descriptions)} tokens"
+    # TASK-1581: bots_profile_patch names agent backend+config (+5): 4,886.
+    assert sum(descriptions) <= 4886, f"Descriptions grew to {sum(descriptions)} tokens"
     definitions = [{"name": f"mcp__bawthub__{t.name}", "description": t.description or "", "input_schema": t.inputSchema} for t in tools]
     total = len(encoder.encode(json.dumps(definitions, ensure_ascii=False, separators=(",", ":"))))
     # TASK-900: explicit X search adds ~160 tokens; measured catalog 11,239.
@@ -307,7 +308,8 @@ async def test_catalog_token_budgets():
     # waiting= (typed WAITING kind enum): 18,043 (+145).
     # TASK-1343: steps_set clear flag, so steps=[] can't wipe a checklist by
     # accident: 18,056 (+13).
-    assert total <= 18056, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-1581: bots_profile_patch names agent backend+config: 18,061 (+5).
+    assert total <= 18061, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 
