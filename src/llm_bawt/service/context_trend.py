@@ -86,19 +86,47 @@ def load_context_trend(engine, *, user_id: str, bot_id: str, days: int, limit: i
             WHERE {eligible}
             ORDER BY created_at DESC, id DESC LIMIT :candidate_limit
         """), params).mappings().all()
+        # Earliest marker for this user on any bot: when the metric began to exist.
+        tracking_since = session.execute(text("""
+            SELECT MIN(created_at) FROM turn_logs
+            WHERE user_id = :user_id AND bot_id IS NOT NULL AND token_usage_json LIKE :marker
+        """), params).scalar()
+        # Completed turns of this bot inside the window that predate any marker.
+        untracked = None if tracking_since is None else session.execute(text("""
+            SELECT COUNT(*) FROM turn_logs
+            WHERE user_id = :user_id AND bot_id = :bot_id AND ended_at IS NOT NULL
+              AND created_at >= :since AND created_at < :tracked
+        """), {**params, "tracked": tracking_since}).scalar() or 0
     truncated = len(rows) > MAX_CANDIDATES
     latest_by_bot: dict[str, dict] = {}
     newest_series: list[dict] = []
+    eligible_for_bot = 0
     for row in rows[:MAX_CANDIDATES]:
         item = _snapshot(row)
         if item is None:
             continue
         latest_by_bot.setdefault(item["bot_id"], item)
-        if item["bot_id"] == bot_id and len(newest_series) < limit:
-            newest_series.append(item)
+        if item["bot_id"] == bot_id:
+            eligible_for_bot += 1
+            if len(newest_series) < limit:
+                newest_series.append(item)
     latest = [latest_by_bot[bot] for bot in sorted(latest_by_bot)[:MAX_LATEST_BOTS]]
+    if isinstance(tracking_since, datetime):
+        tracking_iso = tracking_since.isoformat()
+    else:
+        tracking_iso = str(tracking_since) if tracking_since else None
     return {
         "latest": latest, "series": list(reversed(newest_series)),
         "days": days, "bot_id": bot_id,
         "truncated": truncated or len(latest_by_bot) > MAX_LATEST_BOTS,
+        "coverage": {
+            # None means no marker exists yet for this user: nothing is measurable.
+            "tracking_since": tracking_iso,
+            "window_start": params["since"].isoformat(),
+            # Lower bound when the candidate scan was truncated.
+            "eligible": eligible_for_bot,
+            "shown": len(newest_series),
+            "untracked_turns": None if untracked is None else int(untracked),
+            "eligible_is_lower_bound": truncated,
+        },
     }

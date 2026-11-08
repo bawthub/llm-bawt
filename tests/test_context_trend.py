@@ -119,3 +119,59 @@ def test_candidate_cap_reports_truncation_without_claiming_all_bots(monkeypatch)
     result = load_context_trend(engine, user_id="owner", bot_id="alpha", days=90, limit=1)
     assert result["truncated"] is True
     assert [row["turn_id"] for row in result["series"]] == ["turn-0"]
+    assert result["coverage"]["eligible"] == 2
+    assert result["coverage"]["eligible_is_lower_bound"] is True
+
+
+def _add(session, turn_id, when, usage, *, bot="alpha", user="owner", ended=True):
+    session.add(TurnLog(
+        id=turn_id, bot_id=bot, user_id=user, created_at=when,
+        ended_at=when if ended else None, token_usage_json=usage,
+    ))
+
+
+def test_coverage_discloses_tracking_start_untracked_turns_and_limit():
+    """Partial coverage: activity before tracking is counted, never charted."""
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine, tables=[TurnLog.__table__])
+    now = datetime.now(timezone.utc)
+    tracked = now - timedelta(days=10)
+    with Session(engine) as session:
+        # Older activity with no marker (metric did not exist yet).
+        for i in range(4):
+            _add(session, f"pre-{i}", tracked - timedelta(days=i + 1), _usage())
+        _add(session, "pre-open", tracked - timedelta(days=1), _usage(), ended=False)
+        _add(session, "pre-old", now - timedelta(days=200), _usage())
+        _add(session, "pre-other-bot", tracked - timedelta(days=2), _usage(), bot="beta")
+        # Tracking begins on another bot; that is the user's metric start.
+        _add(session, "beta-first", tracked, _usage("clean"), bot="beta")
+        # Same-day multiple starts plus a resumed turn on the charted bot.
+        day = now - timedelta(days=2)
+        for i in range(3):
+            _add(session, f"start-{i}", day + timedelta(hours=i), _usage("seeded"))
+        _add(session, "resumed", day + timedelta(hours=4), _usage())
+        _add(session, "stranger", tracked - timedelta(days=30), _usage("clean"), user="stranger")
+        session.commit()
+
+    result = load_context_trend(engine, user_id="owner", bot_id="alpha", days=90, limit=2)
+    coverage = result["coverage"]
+    assert datetime.fromisoformat(coverage["tracking_since"]).replace(tzinfo=None) == tracked.replace(tzinfo=None)
+    assert coverage["untracked_turns"] == 4
+    assert coverage["eligible"] == 3
+    assert coverage["shown"] == 2
+    assert coverage["eligible_is_lower_bound"] is False
+    assert [row["turn_id"] for row in result["series"]] == ["start-1", "start-2"]
+
+
+def test_coverage_without_any_marker_is_not_measurable():
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine, tables=[TurnLog.__table__])
+    now = datetime.now(timezone.utc)
+    with Session(engine) as session:
+        _add(session, "old", now - timedelta(days=3), _usage())
+        session.commit()
+    result = load_context_trend(engine, user_id="owner", bot_id="alpha", days=90, limit=60)
+    assert result["series"] == []
+    assert result["coverage"]["tracking_since"] is None
+    assert result["coverage"]["untracked_turns"] is None
+    assert result["coverage"]["eligible"] == 0
