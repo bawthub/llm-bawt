@@ -632,8 +632,8 @@ def test_provenance_rows_parse_and_normalize_paths():
     (100, 300, True),     # created before the author began, upserted after
     (100, 150, False),    # finished before the author began
     (250, 260, True),     # wholly inside
-    (100, None, True),    # legacy row: last edit unknown, within one turn bound
-    (200 - snap.LEGACY_TURN_BOUND_S - 1, None, False),  # legacy, older than any turn
+    (100, None, True),    # legacy row: last edit unknown
+    (200 - 86401, None, True),  # legacy and over a day older: still unknown
 ])
 def test_foreign_row_overlap_uses_the_last_upsert(created, updated, overlaps):
     rows = [row("snark", HEAD, NOW, 200),

@@ -51,9 +51,6 @@ RUN_RETENTION_S = 14 * 24 * 3600
 RUNNER_FILES = ("Makefile", "pyproject.toml", "uv.lock", "scripts/test_suite.py",
                 "scripts/test_snapshot.py", "tests/conftest.py", "tests/suite_manifest.py")
 PROVENANCE_WINDOW_DAYS = 14
-# Longest a turn is assumed to keep upserting one row. Only rows without
-# updated_at (written before that column existed) rely on it.
-LEGACY_TURN_BOUND_S = 24 * 3600
 # gate = test-all at exactly REV, recorded as the SHIP receipt (TASK-1457). The
 # repeated stress step is an optional diagnostic (make test-stress), not part of it.
 SUITE_TARGETS = {"offline": "test-all", "target": "test-target", "gate": "test-all",
@@ -209,12 +206,12 @@ class EditRow:
         """Whether this turn may have edited the path at or after ``start``.
 
         A turn row is upserted in place, so a row created before ``start`` can
-        still carry edits made after it. Without ``updated_at`` that is unknown:
-        assume overlap unless the row began more than a whole turn earlier.
+        still carry edits made after it. Without ``updated_at`` that is unknown,
+        and no hard turn-length limit bounds it, so assume overlap.
         """
         if self.last_ts is not None:
             return max(self.ts, self.last_ts) >= start
-        return self.ts >= start - LEGACY_TURN_BOUND_S
+        return True
 
     def before_key(self) -> object:
         if not self.exact:
