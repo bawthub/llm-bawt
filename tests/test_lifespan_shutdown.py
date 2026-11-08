@@ -108,6 +108,28 @@ async def test_a_dispatcher_unlock_failure_still_closes_redis_and_the_service(mo
     assert cleared == [None]
 
 
+@pytest.mark.asyncio
+async def test_a_full_teardown_with_stop_events_raises_in_no_phase(monkeypatch):
+    """Event.set stop phases return None; none may fail the teardown (TASK-2145)."""
+    import threading
+
+    monkeypatch.setattr(
+        "llm_bawt.agent_backends.agent_bridge.set_agent_subscriber", lambda _s: None
+    )
+    events: list[str] = []
+    service, scheduler, redis, home_audio = _wiring(events)
+    service._ollama_reachability_stop = asyncio.Event()
+    service._embedding_repair_stop = threading.Event()
+    phases = api.shutdown_phases(
+        service, scheduler=scheduler, redis_subscriber=redis, home_audio_worker=home_audio,
+    )
+    assert "ollama reachability stop" in [name for name, _ in phases]
+    assert await run_shutdown_phases(phases) == []
+    assert service._ollama_reachability_stop.is_set()
+    assert service._embedding_repair_stop.is_set()
+    assert events == ["home audio", "scheduler", "dispatcher", "redis", "service"]
+
+
 def test_phases_omit_absent_optional_components():
     events: list[str] = []
     service, scheduler, redis, home_audio = _wiring(events, with_optional=False)

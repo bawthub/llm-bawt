@@ -11,13 +11,14 @@ reaches its terminal log line.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from collections.abc import Awaitable, Callable, Iterable
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
-ShutdownPhase = tuple[str, Callable[[], Awaitable[Any]]]
+ShutdownPhase = tuple[str, Callable[[], Awaitable[Any] | Any]]
 
 
 async def run_shutdown_phases(
@@ -27,12 +28,16 @@ async def run_shutdown_phases(
 
     A failing phase is logged with its traceback and never skips a later
     phase. ``CancelledError`` is also contained: a cancelled phase must not
-    abort the teardown of everything after it.
+    abort the teardown of everything after it. A phase may be a plain
+    callable such as ``Event.set``; its result is awaited only when it is
+    awaitable.
     """
     failed: list[str] = []
     for name, phase in phases:
         try:
-            await phase()
+            result = phase()
+            if inspect.isawaitable(result):
+                await result
         except asyncio.CancelledError:
             failed.append(name)
             log.warning("lifespan shutdown: phase %r was cancelled; continuing", name)
