@@ -108,6 +108,60 @@ def test_fresh_session_turn_cost_is_the_whole_total():
     assert usage["total_cost_usd"] == pytest.approx(0.86)
 
 
+class _ProxyHarness(_NativeHarness):
+    @staticmethod
+    def _model_provider_prefix(model):
+        return model.split("/", 1)[0]
+
+
+@pytest.mark.parametrize("model", [
+    "openai_chatgpt/gpt-6.1-sol",
+    "openai/gpt-6.1-sol",
+    "zai/glm-5",
+    "moonshot/kimi-k2",
+])
+@pytest.mark.parametrize("baseline", [0.0, 3.0, None])
+def test_unpriced_proxy_cost_is_unknown_not_claude_cli_delta(model, baseline):
+    usage, _, _ = _ProxyHarness()._compute_result_usage(
+        _result(3.50),
+        actual_model=model,
+        model=model,
+        bot_context_window=None,
+        latest_assistant_usage={"input_tokens": 5, "cache_read_input_tokens": 100,
+                                "output_tokens": 7},
+        latest_stream_usage=None,
+        cost_baseline_usd=baseline,
+    )
+
+    assert usage["total_cost_usd"] is None
+    assert usage["session_cost_usd"] == 3.50  # retained, never a reportable turn cost
+    assert usage["input_tokens"] == 5  # final-request context gauge stays unchanged
+    assert usage["cache_read_tokens"] == 100
+    assert usage["output_tokens"] == 300  # SDK whole-turn output, not final-call 7
+
+
+@pytest.mark.parametrize(("model", "expected"), [
+    ("xai/grok-4.5", 0.03082),
+    ("kimi_coding/kimi-k2", 0.0),
+    ("local/example-model", 0.0),
+])
+def test_known_proxy_pricing_uses_turn_totals_not_last_request(model, expected):
+    usage, _, _ = _ProxyHarness()._compute_result_usage(
+        _result(3.50),
+        actual_model=model,
+        model=model,
+        bot_context_window=None,
+        latest_assistant_usage={"input_tokens": 5, "cache_read_input_tokens": 100,
+                                "output_tokens": 7},
+        latest_stream_usage=None,
+        cost_baseline_usd=3.0,
+    )
+
+    assert usage["total_cost_usd"] == pytest.approx(expected)
+    assert usage["output_tokens"] == 300
+    assert usage["session_cost_usd"] == 3.50
+
+
 _FRAMING = SeedFraming(briefing="briefing", ack="ack")
 
 

@@ -90,7 +90,8 @@ _XAI_DEFAULT_RATES = (2.0, 6.0, 0.5, 2.0)
 def _estimate_proxy_cost_usd(model: str | None, usage: dict | None) -> float | None:
     """Estimate turn cost for proxy-routed models from token counts.
 
-    Returns None when we can't price the model (leave SDK total_cost_usd).
+    Returns None when we can't price the model. The CLI's fallback price is
+    not authoritative for proxy providers, so their turn cost stays unknown.
     """
     if not model or not isinstance(usage, dict):
         return None

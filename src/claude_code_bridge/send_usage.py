@@ -511,7 +511,10 @@ class ClaudeUsageMixin:
                     actual_model or model, usage_for_cost
                 )
                 session_cost = getattr(msg, "total_cost_usd", None)
-                if cost is None:
+                # The CLI's default price for an unrecognized proxy model is
+                # not that provider's cost. Only native Anthropic can use the
+                # CLI ledger delta; unpriced proxy turns remain unknown.
+                if cost is None and not proxy_model:
                     cost = native_turn_cost_usd(session_cost, cost_baseline_usd)
                 token_usage_payload = {
                     "input_tokens": _input_tokens,

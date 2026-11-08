@@ -221,7 +221,8 @@ def test_native_context_usage_overrides_resident_not_cost_accounting():
     assert usage["context_window"] == 100
     assert usage["resident_source"] == "claude_sdk_context"
     assert usage["cache_read_tokens"] == 2000
-    assert usage["total_cost_usd"] is not None
+    assert usage["total_cost_usd"] is None  # unpriced proxy, not CLI fallback pricing
+    assert usage["session_cost_usd"] == 1.25  # raw ledger preserved for audit
     assert usage["auto_compact_enabled"] is True
     # TASK-1961: whole-turn totals ride beside the final-request numbers.
     assert usage["turn_request_totals"]["requests"] == 3
