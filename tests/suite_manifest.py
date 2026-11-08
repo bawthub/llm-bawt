@@ -55,6 +55,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_new_session_typed_follow_up_pg.py::",
     "test_new_session_chat_pg.py::",
     "test_new_session_chat_review_pg.py::",
+    "test_new_session_first_thread_pg.py::",
     "test_new_session_history_review_pg.py::",
     "test_new_session_transport_review.py::test_text_part_follow_up_receipt_uses_same_command_as_admission",
     "test_new_session_policy_review_pg.py::",

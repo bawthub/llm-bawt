@@ -205,6 +205,23 @@ class NewSessionLifecycle:
         """), {"bot": bot_id, "user": user_id}).scalars().all()
         if len(predecessors) > 1:
             raise ValueError("Typed /new has multiple active predecessors")
+        if not predecessors:
+            # A brand-new owner has no thread yet, but its agent turn binds one
+            # (get_or_create_active_session) before the rotation runs, which then
+            # archives it as the predecessor. Create that thread here so the claim
+            # names the thread the rotation will actually close (TASK-2151).
+            # The one-active-(bot,user) index arbitrates a concurrent first write.
+            conn.execute(text("""
+                INSERT INTO sessions (id, bot_id, user_id, started_at, status)
+                VALUES (:id, :bot, :user, CURRENT_TIMESTAMP, 'active')
+                ON CONFLICT DO NOTHING
+            """), {"id": str(uuid.uuid4()), "bot": bot_id, "user": user_id})
+            predecessors = conn.execute(text("""
+                SELECT id FROM sessions WHERE bot_id=:bot AND user_id=:user
+                  AND status='active' AND ended_at IS NULL FOR UPDATE
+            """), {"bot": bot_id, "user": user_id}).scalars().all()
+            if len(predecessors) != 1:
+                raise ValueError("Typed /new could not bind its owner's first thread")
         conn.execute(text("""
             UPDATE inter_bot_deliveries SET metadata_json=jsonb_set(
                 metadata_json, '{new_session_claim_predecessor_id}',
