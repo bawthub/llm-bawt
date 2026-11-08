@@ -11,6 +11,7 @@ import logging
 from fastapi import APIRouter, HTTPException, Query
 
 from ..dependencies import get_service
+from ..http_errors import internal_error
 
 logger = logging.getLogger(__name__)
 
@@ -45,8 +46,10 @@ async def get_effective_config(
     except HTTPException:
         raise
     except Exception as e:
-        logger.exception("effective-config inspection failed for bot=%s user=%s", bot_id, user_id)
-        raise HTTPException(status_code=500, detail=f"inspection failed: {e}")
+        raise internal_error(
+            e, f"effective-config inspection failed for bot={bot_id} user={user_id}",
+            public="Inspection failed",
+        ) from e
 
 
 @router.get("/v1/config/schema", tags=["System"])

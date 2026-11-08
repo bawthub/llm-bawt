@@ -23,6 +23,7 @@ from claude_code_bridge.proxy.transport_policy import (
 from ...memory.model_catalog_migration import _derive_harness
 from ...model_catalog import AccessPath, ProtocolCompatibility
 from ..dependencies import get_model_catalog_engine, get_service
+from ..http_errors import internal_error
 from ..providers.registry import access_path_billing_mode, access_path_connections, route_eligibility
 
 router = APIRouter(prefix="/v1/models/catalog", tags=["Models"])
@@ -297,7 +298,10 @@ def delete_catalog_model(model_key: str):
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=409, detail=f"Model is still in use: {exc}") from exc
+        raise internal_error(
+            exc, f"Catalog model delete failed for {model_key}",
+            status_code=409, public="Model is still in use",
+        ) from exc
     if not row:
         raise HTTPException(status_code=404, detail="Model not found")
     _refresh_catalog()
@@ -363,7 +367,10 @@ def put_access_path(access_key: str, request: AccessPathWrite):
             )
             row = dict(conn.execute(text(sql), params).mappings().one())
     except Exception as exc:
-        raise HTTPException(status_code=409, detail=f"Access path update rejected: {exc}") from exc
+        raise internal_error(
+            exc, f"Access path update failed for {access_key}",
+            status_code=409, public="Access path update rejected",
+        ) from exc
     _refresh_catalog()
     return row
 
@@ -377,7 +384,10 @@ def delete_access_path(access_key: str):
                 {"key": access_key},
             ).first()
     except Exception as exc:
-        raise HTTPException(status_code=409, detail=f"Access path is still in use: {exc}") from exc
+        raise internal_error(
+            exc, f"Access path delete failed for {access_key}",
+            status_code=409, public="Access path is still in use",
+        ) from exc
     if not row:
         raise HTTPException(status_code=404, detail="Access path not found")
     _refresh_catalog()

@@ -82,6 +82,7 @@ from ...media.asset_kinds import (
     normalize_mime,
 )
 from ...media.object_store import BlobBackendUnavailable
+from ..http_errors import internal_error
 
 logger = logging.getLogger(__name__)
 
@@ -186,8 +187,8 @@ def _decode_data_url(data_url: str) -> tuple[bytes, str]:
     payload = re.sub(r"\s+", "", match.group("payload"))
     try:
         raw = base64.b64decode(payload, validate=True)
-    except Exception as e:  # ValueError or binascii.Error
-        raise HTTPException(status_code=400, detail=f"data_url base64 decode failed: {e}")
+    except ValueError as e:  # binascii.Error subclasses ValueError; describes the caller's input
+        raise HTTPException(status_code=400, detail=f"data_url base64 decode failed: {e}") from e
     return raw, declared_mime
 
 
@@ -322,8 +323,12 @@ async def upload_asset(
     if "application/json" in content_type:
         try:
             body = await request.json()
+        except ValueError as e:  # JSON/Unicode decode errors describe the caller's input
+            raise HTTPException(status_code=400, detail=f"Invalid JSON body: {e}") from e
         except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Invalid JSON body: {e}")
+            raise internal_error(
+                e, "Upload JSON body read failed", status_code=400, public="Invalid JSON body",
+            ) from e
         if not isinstance(body, dict):
             raise HTTPException(status_code=400, detail="JSON body must be an object")
         data_url = body.get("data_url")
@@ -580,7 +585,6 @@ async def delete_asset(
             detail="Media storage backend unavailable; try again shortly",
         )
     except Exception as e:
-        logger.exception("MediaStore.delete failed for %s", asset_id)
-        raise HTTPException(status_code=500, detail=f"delete failed: {e}")
+        raise internal_error(e, f"MediaStore.delete failed for {asset_id}", public="Delete failed") from e
 
     return Response(status_code=204)

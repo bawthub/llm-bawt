@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from ..dependencies import get_service
 from ..logging import get_service_logger
+from ..http_errors import internal_error
 from ..schemas import (
     HistoryMessage,
     HistorySearchAllMessage,
@@ -614,8 +615,7 @@ async def search_all_history(
         log.error(f"Cross-bot history search unavailable: {exc.code}")
         raise HTTPException(status_code=503, detail=exc.code) from None
     except Exception as e:
-        log.error(f"Failed cross-bot history search: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(e, "Failed cross-bot history search") from e
 
     try:
         messages = [
@@ -642,5 +642,4 @@ async def search_all_history(
             total_count=unbounded_total,
         )
     except Exception as e:
-        log.error(f"Failed cross-bot history search: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(e, "Failed cross-bot history search") from e

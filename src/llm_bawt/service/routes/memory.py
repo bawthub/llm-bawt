@@ -6,6 +6,7 @@ from llm_bawt.memory.errors import MemoryUpdateConflictError, MemoryUpdateDuplic
 
 from ..dependencies import get_effective_bot_id, get_service, require_memory_client
 from ..logging import get_service_logger
+from ..http_errors import internal_error
 from ..schemas import (
     ConsolidateRequest,
     ConsolidateResponse,
@@ -64,8 +65,7 @@ def get_memory_stats(
             memories=stats.get("memories", {}),
         )
     except Exception as e:
-        log.error(f"Failed to get memory stats: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(e, "Failed to get memory stats") from e
 
 
 @router.post("/v1/memory/search", response_model=MemorySearchResponse, tags=["Memory"])
@@ -121,8 +121,7 @@ def search_memory(request: MemorySearchRequest):
     except HTTPException:
         raise
     except Exception as e:
-        log.error(f"Failed to search memory: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(e, "Failed to search memory") from e
 
 
 @router.get("/v1/memory", response_model=MemorySearchResponse, tags=["Memory"])
@@ -155,8 +154,7 @@ def list_memories(
             total_count=len(results),
         )
     except Exception as e:
-        log.error(f"Failed to list memories: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(e, "Failed to list memories") from e
 
 
 @router.get("/v1/memory/message", tags=["Memory"])
@@ -172,8 +170,7 @@ def get_message_by_id(
             return {"message": message}
         return {"error": f"Message '{message_id}' not found"}
     except Exception as e:
-        log.error(f"Failed to get message for bot '{bot_id}': {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(e, f"Failed to get message for bot '{bot_id}'") from e
 
 
 @router.delete("/v1/memory/{memory_id}", response_model=MemoryDeleteResponse, tags=["Memory"])
@@ -195,8 +192,7 @@ def delete_memory(
     except HTTPException:
         raise
     except Exception as e:
-        log.error(f"Failed to delete memory for bot '{bot_id}': {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(e, f"Failed to delete memory for bot '{bot_id}'") from e
 
 
 @router.patch("/v1/memory/{memory_id}", response_model=MemoryItem, tags=["Memory"])
@@ -235,8 +231,7 @@ def update_memory(
     except (MemoryUpdateDuplicateError, MemoryUpdateConflictError) as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
     except Exception as e:
-        log.error(f"Failed to update memory for bot '{bot_id}': {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(e, f"Failed to update memory for bot '{bot_id}'") from e
 
 
 @router.post("/v1/memory/forget", response_model=MemoryForgetResponse, tags=["Memory"])
@@ -277,8 +272,7 @@ def forget_messages(
     except HTTPException:
         raise
     except Exception as e:
-        log.error(f"Failed to forget messages for bot '{bot_id}': {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(e, f"Failed to forget messages for bot '{bot_id}'") from e
 
 
 @router.post("/v1/memory/restore", response_model=MemoryRestoreResponse, tags=["Memory"])
@@ -295,8 +289,7 @@ def restore_messages(
             message=f"Restored {restored} messages",
         )
     except Exception as e:
-        log.error(f"Failed to restore messages for bot '{bot_id}': {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(e, f"Failed to restore messages for bot '{bot_id}'") from e
 
 
 @router.get("/v1/memory/preview/recent", response_model=MessagesPreviewResponse, tags=["Memory"])
@@ -310,8 +303,7 @@ def preview_recent_messages(
         messages = client.preview_recent_messages(count)
         return _build_preview_response(bot_id, messages)
     except Exception as e:
-        log.error(f"Failed to preview messages for bot '{bot_id}': {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(e, f"Failed to preview messages for bot '{bot_id}'") from e
 
 
 @router.get("/v1/memory/preview/minutes", response_model=MessagesPreviewResponse, tags=["Memory"])
@@ -325,8 +317,7 @@ def preview_messages_since_minutes(
         messages = client.preview_messages_since_minutes(minutes)
         return _build_preview_response(bot_id, messages)
     except Exception as e:
-        log.error(f"Failed to preview messages by minutes for bot '{bot_id}': {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(e, f"Failed to preview messages by minutes for bot '{bot_id}'") from e
 
 
 @router.get("/v1/memory/preview/ignored", response_model=MessagesPreviewResponse, tags=["Memory"])
@@ -339,8 +330,7 @@ def preview_ignored_messages(
         messages = client.preview_ignored_messages()
         return _build_preview_response(bot_id, messages)
     except Exception as e:
-        log.error(f"Failed to preview ignored messages for bot '{bot_id}': {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(e, f"Failed to preview ignored messages for bot '{bot_id}'") from e
 
 
 @router.post("/v1/memory/regenerate-embeddings", response_model=RegenerateEmbeddingsResponse, tags=["Memory"])
@@ -370,8 +360,7 @@ def regenerate_embeddings(
                      "Run again to continue any remaining repairs."),
         )
     except Exception as e:
-        log.error(f"Failed to regenerate embeddings for bot '{bot_id}': {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(e, f"Failed to regenerate embeddings for bot '{bot_id}'") from e
 
 
 @router.post("/v1/memory/consolidate", response_model=ConsolidateResponse, tags=["Memory"])
@@ -401,5 +390,4 @@ def consolidate_memories(
             ),
         )
     except Exception as e:
-        log.error(f"Failed to consolidate memories for bot '{bot_id}': {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(e, f"Failed to consolidate memories for bot '{bot_id}'") from e

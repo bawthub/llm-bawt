@@ -30,6 +30,7 @@ from .history_timeline_store import anchor_rows, timeline_rows
 
 from ..dependencies import get_service
 from ..logging import get_service_logger
+from ..http_errors import internal_error
 from ..schemas_history_timeline import (
     TimelineAnchor,
     TimelineAnchorsRequest,
@@ -340,8 +341,7 @@ def get_history_timeline_prompts(
     except HTTPException:
         raise
     except Exception as e:
-        log.error(f"Failed to load timeline prompts for {bot_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(e, f"Failed to load timeline prompts for {bot_id}") from e
 
     return TimelinePromptsResponse(
         bot_id=bot_id,

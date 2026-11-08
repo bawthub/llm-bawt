@@ -17,6 +17,7 @@ from ..chat_streaming import request_failed_events, stream_stop_events
 from ..delivery_reply import DeliveryReplyMismatch, is_accepted_receipt, wait_for_receipt_reply
 from ..dependencies import get_service
 from ..logging import get_service_logger
+from ..http_errors import internal_error
 from ..schemas import (
     ChatCompletionChoice,
     ChatCompletionRequest,
@@ -146,8 +147,7 @@ async def botchat_completions(bot_id: str, user_id: str, request: ChatCompletion
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        log.exception("botchat completion failed")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(e, "botchat completion failed") from e
     if not is_accepted_receipt(response):
         return response
     reply = await _await_reply(service, request, response)

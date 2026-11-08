@@ -6,6 +6,7 @@ import time
 from fastapi import HTTPException
 
 from .dependencies import get_service
+from .http_errors import internal_error
 from .logging import get_service_logger
 from .schemas import RawCompletionRequest, RawCompletionResponse
 
@@ -135,5 +136,4 @@ def complete_utility(
                 status_code=422,
                 detail="The configured maintenance model could not process the reference image; choose a vision-capable model in settings",
             ) from error
-        log.error("Raw completion failed: %s", error)
-        raise HTTPException(status_code=500, detail=str(error))
+        raise internal_error(error, "Raw completion failed", public="Raw completion failed") from error

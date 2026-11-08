@@ -1,10 +1,11 @@
 """History summarization orchestration and summary-management routes."""
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Query
 
 from ...memory.summarization_limits import resolve_summarization_limits
 from ..dependencies import get_service
 from ..logging import get_service_logger
+from ..http_errors import internal_error
 from ..schemas import (
     DeleteSummaryResponse,
     ListSummariesResponse,
@@ -357,8 +358,7 @@ def preview_summarizable_sessions(
             total_messages=total_messages,
         )
     except Exception as e:
-        log.error(f"Failed to preview summarizable sessions: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(e, "Failed to preview summarizable sessions") from e
 
 @management_router.post("/v1/history/summarize", response_model=SummarizeResponse, tags=["History"])
 def summarize_history(
@@ -409,8 +409,7 @@ def summarize_history(
             errors=result.get("errors", []),
         )
     except Exception as e:
-        log.error(f"Failed to summarize history: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(e, "Failed to summarize history") from e
 
 
 @management_router.post("/v1/history/summarize/rebuild", response_model=SummarizeResponse, tags=["History"])
@@ -467,8 +466,7 @@ def rebuild_history_summaries(
             errors=result.get("errors", []),
         )
     except Exception as e:
-        log.error(f"Failed to rebuild history summaries: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(e, "Failed to rebuild history summaries") from e
 
 @management_router.get("/v1/history/summaries", response_model=ListSummariesResponse, tags=["History"])
 def list_summaries(
@@ -506,8 +504,7 @@ def list_summaries(
             total_count=len(summary_infos),
         )
     except Exception as e:
-        log.error(f"Failed to list summaries: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(e, "Failed to list summaries") from e
 
 @delete_router.delete("/v1/history/summary/{summary_id}", response_model=DeleteSummaryResponse, tags=["History"])
 def delete_summary(
@@ -536,5 +533,4 @@ def delete_summary(
                 detail=result.get("error", "Failed to delete summary"),
             )
     except Exception as e:
-        log.error(f"Failed to delete summary: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(e, "Failed to delete summary") from e

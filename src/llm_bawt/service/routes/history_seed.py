@@ -1,8 +1,9 @@
 """Agent-session history seed assembly and preview route."""
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Query
 
 from ..dependencies import get_service
+from ..http_errors import internal_error
 from ..logging import get_service_logger
 
 # Agent backends whose bridges can open a fresh session on an app-built seed:
@@ -349,5 +350,4 @@ def get_context_seed(
             },
         }
     except Exception as e:
-        log.error(f"Failed to build context seed for {effective_bot_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(e, f"Failed to build context seed for {effective_bot_id}") from e

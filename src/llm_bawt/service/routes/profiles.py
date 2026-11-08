@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from ..dependencies import attribute_to_response, get_profile_manager, get_service
 from ..logging import get_service_logger
+from ..http_errors import internal_error
 from ..schemas import (
     ProfileAttributeUpdateRequest,
     ProfileAttributeListResponse,
@@ -97,8 +98,7 @@ def list_profiles(entity_type: str | None = None):
     except HTTPException:
         raise
     except Exception as e:
-        log.error(f"Failed to list profiles: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(e, "Failed to list profiles") from e
 
 
 @router.get("/v1/profiles/attribute", response_model=ProfileAttributeListResponse, tags=["Profiles"])
@@ -165,8 +165,7 @@ def list_profile_attributes(
     except HTTPException:
         raise
     except Exception as e:
-        log.error(f"Failed to list profile attributes: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(e, "Failed to list profile attributes") from e
 
 
 @router.get("/v1/profiles/lookup", tags=["Profiles"])
@@ -188,8 +187,7 @@ def lookup_profile_by_email(email: str = Query(..., description="Email address t
             "display_name": profile.display_name,
         }
     except Exception as e:
-        log.error(f"Failed to look up profile by email '{email}': {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(e, f"Failed to look up profile by email '{email}'") from e
 
 
 @router.get("/v1/profiles/{entity_id}", response_model=ProfileDetail, tags=["Profiles"])
@@ -214,8 +212,7 @@ def get_profile(entity_id: str):
     except HTTPException:
         raise
     except Exception as e:
-        log.error(f"Failed to get profile '{entity_id}': {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(e, f"Failed to get profile '{entity_id}'") from e
 
 
 @router.get("/v1/profiles/{entity_type}/{entity_id}", response_model=ProfileDetail, tags=["Profiles"])
@@ -236,8 +233,7 @@ def get_typed_profile(entity_type: str, entity_id: str):
     except HTTPException:
         raise
     except Exception as e:
-        log.error(f"Failed to get {entity_type} profile '{entity_id}': {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(e, f"Failed to get {entity_type} profile '{entity_id}'") from e
 
 
 @router.patch("/v1/profiles/attribute/{attribute_id}", response_model=UserProfileAttribute, tags=["Profiles"])
@@ -264,8 +260,7 @@ def update_profile_attribute(attribute_id: int, request: ProfileAttributeUpdateR
     except HTTPException:
         raise
     except Exception as e:
-        log.error(f"Failed to update profile attribute: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(e, "Failed to update profile attribute") from e
 
 
 @router.patch("/v1/profiles/{entity_type}/{entity_id}", response_model=ProfileDetail, tags=["Profiles"])
@@ -321,8 +316,7 @@ def update_typed_profile(entity_type: str, entity_id: str, request: ProfileUpdat
     except HTTPException:
         raise
     except Exception as e:
-        log.error(f"Failed to update {entity_type} profile '{entity_id}': {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(e, f"Failed to update {entity_type} profile '{entity_id}'") from e
 
 
 @router.post("/v1/profiles/attribute", response_model=UserProfileAttribute, tags=["Profiles"])
@@ -346,8 +340,7 @@ def upsert_profile_attribute(request: ProfileAttributeUpsertRequest):
         )
         return attribute_to_response(attr)
     except Exception as e:
-        log.error(f"Failed to upsert profile attribute: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(e, "Failed to upsert profile attribute") from e
 
 
 @router.delete("/v1/profiles/attribute/{attribute_id}", tags=["Profiles"])
@@ -382,5 +375,4 @@ def delete_profile_attribute(attribute_id: int):
     except HTTPException:
         raise
     except Exception as e:
-        log.error(f"Failed to delete profile attribute: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(e, "Failed to delete profile attribute") from e

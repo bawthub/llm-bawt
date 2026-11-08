@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from ..dependencies import get_service
 from ..logging import get_service_logger
+from ..http_errors import internal_error
 from ..schemas import NextcloudProvisionRequest, NextcloudProvisionResponse
 
 router = APIRouter()
@@ -71,8 +72,7 @@ async def provision_nextcloud_talk(request: NextcloudProvisionRequest):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        log.exception("Provisioning failed")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(e, "Provisioning failed") from e
 
 @router.post("/admin/nextcloud-talk/reload", tags=["Admin"])
 def reload_nextcloud_bots():

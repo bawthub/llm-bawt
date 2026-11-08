@@ -21,6 +21,7 @@ from ...request_identity import AdmissionUnavailable, IdentityConflict, InvalidI
 from ..dependencies import get_service
 from ..gate_steer_escalation import SendNow
 from ..logging import get_service_logger
+from ..http_errors import internal_error
 from ..schemas import ChatCompletionRequest
 
 if TYPE_CHECKING:
@@ -1063,8 +1064,7 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         except Exception as e:
-            log.exception("Streaming chat completion failed")
-            raise HTTPException(status_code=500, detail=str(e))
+            raise internal_error(e, "Streaming chat completion failed") from e
     
     # Non-streaming
     try:
@@ -1076,8 +1076,7 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
-        log.exception("Chat completion failed")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(e, "Chat completion failed") from e
 
 # -------------------------------------------------------------------------
 # Task Management Endpoints

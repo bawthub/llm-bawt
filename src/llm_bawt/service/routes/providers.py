@@ -25,6 +25,7 @@ from ...task_turn_context import (
 from .. import bridge_gate
 from ..dependencies import get_service
 from ..health_changes import health_changes, publish
+from ..http_errors import internal_error
 from ..providers.base import AUTH_API_KEY, AUTH_CLI_OAUTH, AUTH_DEVICE_OAUTH
 from ..providers.ollama import AUTH_ENDPOINT
 from ..providers.github import GitHubAdapter, GitHubConfigError, GitHubNotConnectedError, parse_repository
@@ -497,8 +498,13 @@ async def github_select_repos(body: SelectReposRequest):
         record = await run_in_threadpool(
             adapter.select_installation, body.installation_id, body.repos
         )
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:  # "GitHub is not connected": written for the caller
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:  # noqa: BLE001 -- store failures can name the DB
+        raise internal_error(
+            e, "GitHub installation select failed", status_code=400,
+            public="Installation select failed",
+        ) from e
     return {"connection": record.public()}
 
 

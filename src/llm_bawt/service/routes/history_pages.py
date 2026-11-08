@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from ..dependencies import get_media_asset_store, get_service
 from ..logging import get_service_logger
+from ..http_errors import internal_error
 from ..schemas import HistoryClearResponse, HistoryMessage, HistoryResponse
 from .history_scheduler import hydrate_scheduler_for_page
 from .history_approval_notice import hydrate_approver_notices_for_page
@@ -674,8 +675,7 @@ def get_history(
     except HTTPException:
         raise
     except Exception as e:
-        log.error(f"Failed to get history: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(e, "Failed to get history") from e
 
 
 @read_router.get("/v1/history/around", response_model=HistoryResponse, tags=["History"])
@@ -733,8 +733,7 @@ def get_history_around(
     except HTTPException:
         raise
     except Exception as e:
-        log.error(f"Failed to load history window around {message_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(e, f"Failed to load history window around {message_id}") from e
 
 @mutation_router.delete("/v1/history", response_model=HistoryClearResponse, tags=["History"])
 def clear_history(
@@ -768,8 +767,7 @@ def clear_history(
     except HTTPException:
         raise
     except Exception as e:
-        log.error(f"Failed to clear history: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(e, "Failed to clear history") from e
 
 
 def _clear_history_direct(client, bot_id: str) -> bool:
@@ -845,5 +843,4 @@ def delete_message(
     except HTTPException:
         raise
     except Exception as e:
-        log.error(f"Failed to delete message {message_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(e, f"Failed to delete message {message_id}") from e
