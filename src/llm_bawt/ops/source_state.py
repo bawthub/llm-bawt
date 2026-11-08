@@ -83,6 +83,9 @@ _TOKEN = re.compile(r"[A-Za-z0-9._+-]{0,128}")
 _LANG = re.compile(r"[A-Za-z0-9_.@-]{1,64}")
 _TZ = re.compile(r"[A-Za-z0-9_+-]{1,64}(?:/[A-Za-z0-9_+-]{1,64}){0,3}")
 _HOSTNAME = re.compile(r"[A-Za-z0-9.-]{0,253}")
+_NV_LIST = re.compile(r"[a-z0-9-]{1,32}(?:,[a-z0-9-]{1,32}){0,15}")
+_NV_PACKAGE = re.compile(r"[A-Za-z0-9._+=~-]{1,128}")
+_NV_REQUIRE = re.compile(r"[A-Za-z0-9._,<>= -]{1,4096}")
 BRIDGE_NODE_PRELOAD = "/usr/local/libexec/bridge-node-check-preload.cjs"
 BRIDGE_NODE_OPTIONS = f"--require={BRIDGE_NODE_PRELOAD}"
 BRIDGE_UV_CACHE_DIR = "/home/bridge/dev/.uv-cache"
@@ -167,6 +170,20 @@ PRODUCT_ENV = {
     "TZ": lambda v, _m: bool(_TZ.fullmatch(v)),
     **{name: (lambda v, _m: bool(_TOKEN.fullmatch(v)))
        for name in ("DEBIAN_FRONTEND", "GPG_KEY", "PYTHON_VERSION", "PYTHON_SHA256")},
+    # TASK-1844 (the NVIDIA CUDA base image of a GPU service). The loader
+    # path is code-loading: every entry the image's own, outside every mount.
+    "LD_LIBRARY_PATH": lambda v, m: all(_outside(entry, m) for entry in v.split(":")),
+    # Container-toolkit hints, inert under native CDI (runtime runc), and the
+    # image's version/package labels: closed value shapes only.
+    "NVIDIA_VISIBLE_DEVICES": lambda v, _m: bool(_NV_LIST.fullmatch(v)),
+    "NVIDIA_DRIVER_CAPABILITIES": lambda v, _m: bool(_NV_LIST.fullmatch(v)),
+    "NVIDIA_REQUIRE_CUDA": lambda v, _m: bool(_NV_REQUIRE.fullmatch(v)),
+    **{name: (lambda v, _m: bool(_NV_PACKAGE.fullmatch(v)))
+       for name in ("NVARCH", "NVIDIA_PRODUCT_NAME", "CUDA_VERSION", "NCCL_VERSION", "NV_CUDA_CUDART_VERSION",
+                    "NV_CUDA_LIB_VERSION", "NV_NVTX_VERSION", "NV_LIBNPP_VERSION", "NV_LIBNPP_PACKAGE",
+                    "NV_LIBCUSPARSE_VERSION", "NV_LIBCUBLAS_PACKAGE_NAME", "NV_LIBCUBLAS_VERSION",
+                    "NV_LIBCUBLAS_PACKAGE", "NV_LIBNCCL_PACKAGE_NAME", "NV_LIBNCCL_PACKAGE_VERSION",
+                    "NV_LIBNCCL_PACKAGE")},
 }
 
 

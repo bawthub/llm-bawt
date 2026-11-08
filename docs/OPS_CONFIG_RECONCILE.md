@@ -333,5 +333,10 @@ pulls, and it binds the image by ID, never by tag.
   releases it: success, never dispatched, nothing changed, or restored. A
   lost, timed-out or otherwise uncertain job keeps it held, with the reason in
   `last_error`, until an operator verifies the target. A plan or sequence
-  carrying a GPU reconcile refuses (`gpu_reconcile_nested`).
+  carrying a GPU reconcile refuses (`gpu_reconcile_nested`), and so does a
+  quiesce hold (`gpu_reconcile_quiesce_unsupported`).
+- **Source guard:** the CUDA base image's own variables are product env with
+  closed value shapes. `LD_LIBRARY_PATH` must sit entirely outside every mount.
+  Any new `NV_*` name stays unclassified. Compose does not pass `HF_HOME`
+  through, as for the app; the default is already the cache mount.
 - **Worker capability:** `llm-bawt.ops.gpu-profile`; approval refuses without it.

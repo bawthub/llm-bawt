@@ -9,9 +9,12 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from llm_bawt.media.gpu_handoff_store import GpuHandoffFence, GpuHandoffStore, HandoffConflict, _state
-from llm_bawt.ops.compose_config import _gpu, _running_gpu, gpu_preflight, gpu_verify
+from llm_bawt.ops.app_config_reconcile import app_profile
+from llm_bawt.ops.compose_config import _gpu, _running_gpu, gpu_preflight, gpu_verify, translate
 from llm_bawt.ops.compose_render import ComposeError
 from llm_bawt.ops.gpu_reconcile import is_gpu_reconcile, known_outcome, nested_gpu_reconcile, settle
+from llm_bawt.ops.seeds import SEEDS
+from llm_bawt.ops.source_state import SourceStateError, source_plan
 
 DESIRED = {"gpu": {"runtime": "runc", "ipc": "host", "devices": ["nvidia.com/gpu=all"]},
            "security_opt": ["apparmor:unconfined"]}
@@ -203,6 +206,77 @@ def test_settle_releases_known_and_holds_uncertain(store):
     assert store.status().phase == "idle"
 
 
+# ── The seeded target passes the production source guard ────────────────────
+
+SEED_SPEC = json.loads(next(s for s in SEEDS if s["slug"] == "llm-bawt.reconcile-local-model-bridge-config")
+                       ["command_script"])
+PROJECT = "/srv/compose/llm-bawt"
+# The NVIDIA CUDA base image's own Config.Env, as the running target inherits it.
+CUDA_IMAGE_ENV = [
+    "PATH=/app/.venv/bin:/root/.local/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin",
+    "NVARCH=x86_64", "NVIDIA_REQUIRE_CUDA=cuda>=12.9 brand=unknown,driver>=535,driver<536 brand=grid,driver>=535",
+    "NV_CUDA_CUDART_VERSION=12.9.79-1", "CUDA_VERSION=12.9.1", "LD_LIBRARY_PATH=/usr/local/cuda/lib64",
+    "NVIDIA_VISIBLE_DEVICES=all", "NVIDIA_DRIVER_CAPABILITIES=compute,utility", "NV_CUDA_LIB_VERSION=12.9.1-1",
+    "NV_NVTX_VERSION=12.9.79-1", "NV_LIBNPP_VERSION=12.4.1.87-1", "NV_LIBNPP_PACKAGE=libnpp-12-9=12.4.1.87-1",
+    "NV_LIBCUSPARSE_VERSION=12.5.10.65-1", "NV_LIBCUBLAS_PACKAGE_NAME=libcublas-12-9",
+    "NV_LIBCUBLAS_VERSION=12.9.1.4-1", "NV_LIBCUBLAS_PACKAGE=libcublas-12-9=12.9.1.4-1",
+    "NV_LIBNCCL_PACKAGE_NAME=libnccl2", "NV_LIBNCCL_PACKAGE_VERSION=2.27.3-1", "NCCL_VERSION=2.27.3-1",
+    "NV_LIBNCCL_PACKAGE=libnccl2=2.27.3-1+cuda12.9", "NVIDIA_PRODUCT_NAME=CUDA", "DEBIAN_FRONTEND=noninteractive",
+    "TZ=America/New_York", "PYTHONUNBUFFERED=1", "PYTHONDONTWRITEBYTECODE=1",
+    "PYTHONPYCACHEPREFIX=/tmp/llm-bawt-pycache",
+]
+
+
+def local_model_plan(image_env=CUDA_IMAGE_ENV, **extra_env):
+    volumes = [{"type": "bind", "source": f"{PROJECT}/src", "target": "/app/src"}] + [
+        {"type": "bind", "source": f"/data{t}", "target": t} for t in SEED_SPEC["data_mounts"]]
+    service = {"build": {"context": PROJECT, "dockerfile": "Dockerfile"}, "image": "llm-bawt-local-model-bridge",
+               "container_name": SEED_SPEC["container_name"], "command": ["python", "-m", "local_model_bridge"],
+               "entrypoint": None, "environment": {**{n: "v" for n in SEED_SPEC["env_names"]}, **extra_env},
+               "runtime": "runc", "ipc": "host", "security_opt": ["apparmor:unconfined"],
+               "devices": [{"source": "nvidia.com/gpu=all", "target": "nvidia.com/gpu=all", "permissions": "rwm"}],
+               "networks": {"default": None}, "restart": "unless-stopped", "volumes": volumes}
+    rendered = {"name": SEED_SPEC["compose_project"], "services": {SEED_SPEC["compose_service"]: service}}
+    desired = translate(rendered, SEED_SPEC, "llm-bawt-local-model-bridge:latest", app_profile(SEED_SPEC))
+    return desired, source_plan(SEED_SPEC, {"project_dir": PROJECT, "compose_files": [f"{PROJECT}/docker-compose.yml"]},
+                                {}, {"Config": {"Env": image_env}}, desired)
+
+
+def test_seeded_gpu_target_admits_inherited_cuda_env():
+    desired, plan = local_model_plan()
+    assert desired["gpu"] == DESIRED["gpu"] and plan["paths"] == ["src"] and plan["bytecode_ok"]
+    assert plan["classification"]["opaque_env"] == sorted(SEED_SPEC["env_names"])
+
+
+@pytest.mark.parametrize("entry,code", [
+    ("LD_LIBRARY_PATH=/root/.cache/huggingface/lib:/usr/local/cuda/lib64", "source_env_unsafe"),
+    ("LD_LIBRARY_PATH=lib", "source_env_unsafe"),
+    ("NVIDIA_REQUIRE_CUDA=$(id)", "source_env_unsafe"),
+    ("NV_LIBNCCL_PACKAGE=a b", "source_env_unsafe"),
+    ("NV_SOMETHING_NEW=1", "source_env_unclassified"),
+    ("LD_PRELOAD=/usr/lib/x.so", "source_env_unclassified"),
+])
+def test_cuda_env_stays_default_deny(entry, code):
+    with pytest.raises(SourceStateError) as err:
+        local_model_plan([*CUDA_IMAGE_ENV, entry])
+    assert err.value.code == code
+
+
+def test_hf_home_on_the_data_mount_refuses():
+    # The compose file no longer passes the host's HF_HOME through.
+    with pytest.raises(SourceStateError) as err:
+        local_model_plan(HF_HOME="/root/.cache/huggingface")
+    assert err.value.code == "source_env_unsafe"
+
+
+def test_compose_does_not_pass_hf_home_to_the_gpu_service():
+    import yaml
+    from pathlib import Path
+    compose = yaml.safe_load((Path(__file__).parents[1] / "docker-compose.yml").read_text())
+    env = compose["services"]["local-model-bridge"]["environment"]
+    assert not any(str(e).split("=")[0] == "HF_HOME" for e in env)
+
+
 def test_only_standalone_app_reconcile_is_gpu():
     spec = {"action": "reconcile_app_config", "gpu": True}
     assert is_gpu_reconcile(spec)
@@ -211,3 +285,14 @@ def test_only_standalone_app_reconcile_is_gpu():
     assert nested_gpu_reconcile({"plan": {"targets": [{"spec": spec}]}})
     assert nested_gpu_reconcile({"sequence": {"steps": [{"snapshot": {"spec": spec}}]}})
     assert not nested_gpu_reconcile({"spec": spec})
+
+
+def test_gpu_reconcile_refuses_quiesce_and_nesting():
+    from llm_bawt.ops.service import OpsDispatchError, OpsService
+    spec = {"action": "reconcile_app_config", "gpu": True}
+    for snapshot, code in (({"spec": spec, "quiesce": True}, "gpu_reconcile_quiesce_unsupported"),
+                           ({"spec": {"action": "x"}, "plan": {"targets": [{"spec": spec}]}}, "gpu_reconcile_nested")):
+        with pytest.raises(OpsDispatchError) as err:
+            OpsService._gpu_reconcile_fence(snapshot, None, "k1", "slug")
+        assert err.value.code == code
+    assert OpsService._gpu_reconcile_fence({"spec": spec}, None, "k1", "slug").kind == "gpu_reconcile"

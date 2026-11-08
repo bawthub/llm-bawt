@@ -699,6 +699,11 @@ class OpsService:
             raise OpsDispatchError("gpu_reconcile_nested", "a GPU service reconcile runs only as its own job")
         if not is_gpu_reconcile(snapshot.get("spec")):
             return create_fence
+        if snapshot.get("quiesce"):
+            # Quiesce terminal writes bypass mark_terminal's settlement, so a
+            # never-dispatched job would strand the reservation.
+            raise OpsDispatchError("gpu_reconcile_quiesce_unsupported",
+                                   "a GPU service reconcile cannot run behind a quiesce hold")
         reserve = GpuHandoffFence.gpu_reconcile(key, operation_slug)
         if create_fence is None:
             return reserve
