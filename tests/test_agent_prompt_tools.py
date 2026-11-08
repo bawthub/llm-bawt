@@ -28,6 +28,9 @@ class _PromptProbe:
     _sec_working_memory = BaseLLMBawt._sec_working_memory
     _working_memory_section = None
 
+    def _sec_global_instructions(self, builder, prompt) -> None:
+        """Recall guidance is per-turn (TASK-1495); not under test here."""
+
     def __init__(self, *, model_type: str, harness: str):
         self.model_definition = {"type": model_type, "harness": harness}
         self.bot = SimpleNamespace(harness=harness)
