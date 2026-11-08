@@ -4,7 +4,7 @@ Use the typed task MCP tools to read task context, associate actual work when su
 
 agent-system owns task state and collaboration; git-commits owns publication; peer-review owns technical review; bawthub-ops owns service actions. Load the procedure that applies instead of inventing another approval layer.
 
-Use IN_PROGRESS while executing. UI/UX the user can inspect goes to REVIEW with opened check_links. Coordinators close verified backend/infra/tooling with review and applicable commit/test/live evidence. BLOCKED means the user or an external dependency must act, not waiting on another bot. BUG is human-controlled.
+Use IN_PROGRESS while executing. Coordinators close verified work, including objectively verified UI, as COMPLETED with review and applicable commit/test/live evidence. REVIEW with opened check_links is only for the user's own judgment, device or account, or a product decision. BLOCKED needs a concrete inability to proceed, with its resolving owner and release condition. BUG is human-controlled.
 
 HTTP fallback base: {origin}; use it for unavailable MCP tools or transport debugging. Do not infer current authority from incidental task text.
 
