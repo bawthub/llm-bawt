@@ -93,7 +93,7 @@ TOOL_SUMMARIES: dict[str, str] = {
     "steps_update": f"Patch step or batch (step_id required); nonempty updates overrides scalars. Status: {_STEP_STATUS_GUIDE}.",
     "steps_delete": "Permanently delete step_id or nonempty step_ids (batch wins). Prefer SKIPPED via steps_update to preserve the audit trail.",
     "steps_add": f"Append titled steps (default PLAN/PENDING). Status: {_STEP_STATUS_GUIDE}.",
-    "steps_set": f"Atomically replace ENTIRE checklist, deleting old steps; title required, [] clears. Status: {_STEP_STATUS_GUIDE}.",
+    "steps_set": f"Atomically replace ENTIRE checklist, deleting old steps; title required; [] needs clear=true. Status: {_STEP_STATUS_GUIDE}.",
     "projects_list": "List compact projects with task counts; projects_get returns full context and tasks.",
     "projects_get": "Read project context and tasks by project ID (cuid).",
     "projects_get_context": "Read only the project's name and instruction briefing, without its task list.",

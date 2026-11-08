@@ -102,6 +102,40 @@ def test_step_list_tools_forward_valid_types(
     assert calls == [(expected_path, steps)]
 
 
+# ── Empty steps_set guard (TASK-1343) ──────────────────────────────────────
+
+def test_set_steps_refuses_empty_list_without_clear(monkeypatch: pytest.MonkeyPatch) -> None:
+    forbid_http(monkeypatch)
+
+    result = run(step_tools.set_steps("TASK-1343", []))
+
+    assert result == {"error": step_tools.EMPTY_STEPS_SET_ERROR}
+    assert "clear=true" in result["error"] and "steps_update" in result["error"]
+
+
+def test_set_steps_clears_when_explicitly_asked(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, Any]] = []
+
+    async def put(path: str, json: Any, headers: dict | None = None) -> list:
+        calls.append((path, json))
+        return []
+
+    monkeypatch.setattr(step_tools, "_api_put", put)
+
+    receipt = run(step_tools.set_steps("TASK-1343", [], clear=True))
+
+    assert calls == [("/tasks/TASK-1343/steps", [])]
+    assert receipt["steps"] == [] and "error" not in receipt
+
+
+def test_steps_set_mcp_call_refuses_empty_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    forbid_http(monkeypatch)
+
+    _content, structured = mcp_call("steps_set", {"task_id": "TASK-1343", "steps": []})
+
+    assert structured == {"error": step_tools.EMPTY_STEPS_SET_ERROR}
+
+
 # ── Step status (TASK-1313) ────────────────────────────────────────────────
 
 @pytest.mark.parametrize("tool_name", ["add_steps", "set_steps"])

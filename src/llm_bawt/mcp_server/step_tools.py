@@ -31,6 +31,13 @@ from .task_api import (
 
 logger = logging.getLogger(__name__)
 
+# TASK-1343: steps_set([]) used to delete every step silently when a caller
+# meant to edit one. Clearing now needs an explicit clear=true.
+EMPTY_STEPS_SET_ERROR = (
+    "steps_set with an empty list would delete every step; nothing was changed. "
+    "Pass clear=true to clear the checklist, or use steps_update to edit one step."
+)
+
 
 # Step writes answer with a compact receipt (TASK-1494): BawtHub returns whole
 # step rows, outputs included, and the batch/replace routes return every step
@@ -261,6 +268,7 @@ async def add_steps(
 async def set_steps(
     task_id: str,
     steps: list[TaskStepInput],
+    clear: bool = False,
     bot_id: str | None = None,
 ) -> dict[str, Any]:
     """Replace a task's ENTIRE step list in one atomic call.
@@ -269,15 +277,18 @@ async def set_steps(
     from 0. This is the right tool for rewriting a checklist: instead of N
     steps_delete + M steps_add calls (a wall of tool invocations), set the whole
     plan in a single transaction. The task title/description are untouched.
+    To change one step, use steps_update instead.
 
     Args:
         task_id: Task ID (cuid) or shortId (e.g. "TASK-42").
         steps: The full ordered list of step dicts. Each needs "title" (str);
                optional "type" (default "PLAN"), "status" (default "PENDING"),
-               "output", "filePath". Pass [] to clear all steps.
+               "output", "filePath".
                Types: PLAN, READ_FILE, EDIT_FILE, CREATE_FILE, DELETE_FILE,
                RUN_COMMAND, SEARCH, ASK_USER, REVIEW.
                Statuses: PENDING, RUNNING, COMPLETED, FAILED, SKIPPED.
+        clear: Must be true to pass an empty ``steps`` list and delete every
+               step. An empty list without it is refused, nothing changes.
         bot_id: Your bot ID for activity attribution.
 
     Returns:
@@ -286,6 +297,8 @@ async def set_steps(
         error dict. A rejected replace leaves the existing steps untouched.
     """
     logger.debug("MCP tool invoked: tools/set_steps task=%s count=%d", task_id, len(steps))
+    if not steps and not clear:
+        return {"error": EMPTY_STEPS_SET_ERROR}
     validation_error = validate_step_inputs(steps)
     if validation_error:
         return {"error": validation_error}

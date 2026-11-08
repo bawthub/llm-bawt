@@ -196,7 +196,8 @@ async def test_catalog_token_budgets():
     # TASK-2121: ops_quiesce_ack carries Nick's verbatim "finished"/"stopping"
     # definition (he required it in the description): 4,878 (+272).
     # TASK-2115: WAITING joins the status enum on tasks_list (+1).
-    assert sum(descriptions) <= 4879, f"Descriptions grew to {sum(descriptions)} tokens"
+    # TASK-1343: steps_set says an empty list needs clear=true (+2).
+    assert sum(descriptions) <= 4881, f"Descriptions grew to {sum(descriptions)} tokens"
     definitions = [{"name": f"mcp__bawthub__{t.name}", "description": t.description or "", "input_schema": t.inputSchema} for t in tools]
     total = len(encoder.encode(json.dumps(definitions, ensure_ascii=False, separators=(",", ":"))))
     # TASK-900: explicit X search adds ~160 tokens; measured catalog 11,239.
@@ -304,7 +305,9 @@ async def test_catalog_token_budgets():
     # schema only when a quiesce asks them to ack.
     # TASK-2115: waiting_on/waiting_reason on create/update and tasks_board
     # waiting= (typed WAITING kind enum): 18,043 (+145).
-    assert total <= 18043, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-1343: steps_set clear flag, so steps=[] can't wipe a checklist by
+    # accident: 18,056 (+13).
+    assert total <= 18056, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 
