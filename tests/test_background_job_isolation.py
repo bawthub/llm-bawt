@@ -14,7 +14,6 @@ from __future__ import annotations
 import asyncio
 import inspect
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
@@ -37,6 +36,38 @@ def _task(task_type: TaskType, **payload) -> Task:
     return Task(task_type=task_type, payload=payload, bot_id="test", user_id="owner")
 
 
+class _BlockingProbe:
+    """The worker cannot finish until the loop acknowledges its start."""
+
+    def __init__(self):
+        self.loop = asyncio.get_running_loop()
+        self.loop_thread = threading.current_thread()
+        self.thread = None
+        self.started = asyncio.Event()
+        self.release = threading.Event()
+
+    def __call__(self):
+        self.thread = threading.current_thread()
+        self.loop.call_soon_threadsafe(self.started.set)
+        # Fail an inline regression before waiting, rather than deadlocking
+        # the very loop that must release this simulated LLM/DB call.
+        assert self.thread is not self.loop_thread, "blocking call must run off the event loop"
+        self.release.wait()
+
+    async def run(self, awaitable):
+        job = asyncio.create_task(awaitable)
+        try:
+            # Timeouts only bound a broken test; elapsed time/sample count
+            # are never the success criterion.
+            await asyncio.wait_for(self.started.wait(), timeout=5)
+            await asyncio.sleep(0)
+            assert not job.done(), "job finished before the loop released the blocking call"
+        finally:
+            self.release.set()
+            result = await asyncio.wait_for(job, timeout=5)
+        return result
+
+
 def test_every_task_type_except_consolidation_has_a_handler():
     # MEMORY_CONSOLIDATION has never had a handler (it is run through
     # MEMORY_MAINTENANCE); everything else must be routed.
@@ -54,43 +85,40 @@ def test_handlers_are_plain_sync_functions(task_type):
 @pytest.mark.parametrize("task_type", HANDLED, ids=lambda t: t.value)
 def test_a_blocking_job_never_stalls_the_event_loop(task_type):
     service = _service()
-    seen: dict[str, object] = {}
-
-    def slow_handler(task):
-        seen["thread"] = threading.current_thread()
-        time.sleep(0.4)  # stands in for a blocking LLM/DB call
-        return {"ok": True}
-
-    setattr(service, BackgroundTasksMixin.TASK_HANDLERS[task_type], slow_handler)
 
     async def scenario():
-        loop_thread = threading.current_thread()
-        gaps: list[float] = []
-        done = asyncio.Event()
+        probe = _BlockingProbe()
 
-        async def heartbeat():
-            last = time.monotonic()
-            while not done.is_set():
-                await asyncio.sleep(0.01)
-                now = time.monotonic()
-                gaps.append(now - last)
-                last = now
+        def slow_handler(task):
+            probe()
+            return {"ok": True}
 
-        beat = asyncio.create_task(heartbeat())
-        result = await service.process_task(_task(task_type))
-        done.set()
-        await beat
-        return loop_thread, gaps, result
+        setattr(service, BackgroundTasksMixin.TASK_HANDLERS[task_type], slow_handler)
+        result = await probe.run(service.process_task(_task(task_type)))
+        return probe, result
 
     try:
-        loop_thread, gaps, result = asyncio.run(scenario())
+        probe, result = asyncio.run(scenario())
     finally:
         service._bg_executor.shutdown(wait=True)
 
     assert result.status is TaskStatus.COMPLETED and result.result == {"ok": True}
-    assert seen["thread"] is not loop_thread
-    assert seen["thread"].name.startswith("bg-test")
-    assert len(gaps) >= 20 and max(gaps) < 0.15, f"loop stalled: max gap {max(gaps):.3f}s"
+    assert probe.thread is not probe.loop_thread
+    assert probe.thread.name.startswith("bg-test")
+
+
+def test_isolation_probe_refuses_inline_execution_without_deadlocking():
+    async def scenario():
+        probe = _BlockingProbe()
+
+        async def inline():
+            probe()
+
+        with pytest.raises(AssertionError, match="blocking call must run off the event loop"):
+            await probe.run(inline())
+        assert probe.release.is_set()
+
+    asyncio.run(scenario())
 
 
 def test_handler_exception_becomes_a_failed_result():
@@ -126,16 +154,6 @@ def test_scheduler_wildcard_expansion_loads_bots_off_the_loop():
     from llm_bawt.bot_identities import WILDCARD_BOT_ID
     from llm_bawt.service.scheduler import JobScheduler, JobType, ScheduledJob
 
-    seen: dict[str, object] = {}
-
-    class SlowBotManager:
-        def __init__(self, config):
-            seen["thread"] = threading.current_thread()
-            time.sleep(0.4)  # stands in for the DB reload after invalidation
-
-        def list_bots(self):
-            return [SimpleNamespace(slug="nova"), SimpleNamespace(slug="rook")]
-
     scheduler = JobScheduler(engine=None, task_processor=SimpleNamespace(config=object()))
     expanded: list[str] = []
 
@@ -150,30 +168,23 @@ def test_scheduler_wildcard_expansion_loads_bots_off_the_loop():
     job = ScheduledJob(job_type=JobType.HISTORY_SUMMARIZATION, bot_id=WILDCARD_BOT_ID, interval_minutes=60)
 
     async def scenario():
-        loop_thread = threading.current_thread()
-        gaps: list[float] = []
-        done = asyncio.Event()
+        probe = _BlockingProbe()
 
-        async def heartbeat():
-            last = time.monotonic()
-            while not done.is_set():
-                await asyncio.sleep(0.01)
-                now = time.monotonic()
-                gaps.append(now - last)
-                last = now
+        class SlowBotManager:
+            def __init__(self, config):
+                probe()
 
-        beat = asyncio.create_task(heartbeat())
-        await scheduler._execute_job(job)
-        done.set()
-        await beat
-        return loop_thread, gaps
+            def list_bots(self):
+                return [SimpleNamespace(slug="nova"), SimpleNamespace(slug="rook")]
 
-    with patch("llm_bawt.bots.BotManager", SlowBotManager):
-        loop_thread, gaps = asyncio.run(scenario())
+        with patch("llm_bawt.bots.BotManager", SlowBotManager):
+            await probe.run(scheduler._execute_job(job))
+        return probe
+
+    probe = asyncio.run(scenario())
 
     assert expanded == ["nova", "rook"]
-    assert seen["thread"] is not loop_thread
-    assert len(gaps) >= 20 and max(gaps) < 0.15, f"loop stalled: max gap {max(gaps):.3f}s"
+    assert probe.thread is not probe.loop_thread
 
 
 def test_real_handler_completes_on_a_single_worker_pool():
