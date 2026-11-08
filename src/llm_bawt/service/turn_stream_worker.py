@@ -16,6 +16,7 @@ from ..inter_bot_reply_channel import append_request_reply_channel_note
 from ..model_switch_notice import apply_model_switch_notice
 from ..media.serializers import build_agent_image_manifest
 from .chat_stream_worker import consume_stream_chunks, put_queue_item_threadsafe
+from .http_errors import client_error_text
 from .logging import get_service_logger
 from .pending_tool_calls import PendingToolCallCorrelator
 from .system_prompt_pin import SessionPinConfirmer, apply_session_pin, pin_backend_kwargs
@@ -1055,7 +1056,8 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                 put_queue_item_threadsafe(loop, chunk_queue, e)
             elapsed_ms = (time.time() - timing_holder[0]) * 1000 if timing_holder[0] else None
             if not externally_aborted:
-                error_text = str(e)
+                # Feeds the persisted failure marker; driver text stays in the log.
+                error_text = client_error_text(e, f"Turn {turn_log_id} stream failed", "Stream interrupted")
                 if is_agent_backend:
                     # TASK-1385: never claim the run ended while the bridge
                     # keeps running it; stop it first and record the ack.

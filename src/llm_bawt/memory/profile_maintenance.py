@@ -11,6 +11,8 @@ from llm_bawt.clients.base import LLMClient
 from llm_bawt.models.message import Message
 from llm_bawt.memory.extraction.prompts import get_profile_consolidation_prompt
 
+from llm_bawt.service.http_errors import safe_error_text
+
 logger = logging.getLogger(__name__)
 
 
@@ -173,7 +175,7 @@ class ProfileMaintenanceService:
                 attributes_before=attributes_before,
                 attributes_after=attributes_before,
                 categories_updated=[],
-                error=str(e)
+                error=safe_error_text(e),
             )
     
     def _parse_json_response(self, response: str) -> Optional[dict]:

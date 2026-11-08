@@ -24,6 +24,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from llm_bawt.service.http_errors import safe_error_text
+
 from ..prompt_registry import get_prompt_resolver
 
 logger = logging.getLogger(__name__)
@@ -111,7 +113,7 @@ class MemoryMaintenance:
                 result.consolidation_memories_consolidated = cons_result.get("memories_consolidated", 0)
             except Exception as e:
                 logger.exception("Consolidation failed")
-                result.errors.append(f"consolidation: {e}")
+                result.errors.append(f"consolidation: {safe_error_text(e)}")
 
         if run_recurrence_detection:
             try:
@@ -120,7 +122,7 @@ class MemoryMaintenance:
                 result.recurrence_memories_tagged = rec_result.get("memories_tagged", 0)
             except Exception as e:
                 logger.exception("Recurrence detection failed")
-                result.errors.append(f"recurrence: {e}")
+                result.errors.append(f"recurrence: {safe_error_text(e)}")
 
         if run_decay_pruning:
             try:
@@ -128,7 +130,7 @@ class MemoryMaintenance:
                 result.decay_memories_archived = decay_result.get("archived", 0)
             except Exception as e:
                 logger.exception("Decay pruning failed")
-                result.errors.append(f"decay: {e}")
+                result.errors.append(f"decay: {safe_error_text(e)}")
 
         if run_orphan_cleanup:
             try:
@@ -136,7 +138,7 @@ class MemoryMaintenance:
                 result.orphans_cleaned = orphan_result.get("cleaned", 0)
             except Exception as e:
                 logger.exception("Orphan cleanup failed")
-                result.errors.append(f"orphan: {e}")
+                result.errors.append(f"orphan: {safe_error_text(e)}")
 
         return result
 

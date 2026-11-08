@@ -57,6 +57,8 @@ from typing import Any
 
 from sqlalchemy import text
 
+from ..http_errors import safe_error_text
+
 logger = logging.getLogger(__name__)
 
 # Default grace period for unreferenced assets. Overridable per task via
@@ -271,7 +273,7 @@ def run_media_gc(
                 "media_gc: backend unavailable for asset %s (streak=%d): %s",
                 asset_id, consecutive_unavailable, e,
             )
-            errors.append({"asset_id": asset_id, "error": f"backend unavailable: {e}"})
+            errors.append({"asset_id": asset_id, "error": f"backend unavailable: {safe_error_text(e)}"})
             if consecutive_unavailable >= UNAVAILABLE_ABORT_THRESHOLD:
                 aborted_reason = (
                     f"backend unavailable for {consecutive_unavailable} consecutive "
@@ -284,7 +286,7 @@ def run_media_gc(
             logger.warning(
                 "media_gc: failed to delete asset %s: %s", asset_id, e
             )
-            errors.append({"asset_id": asset_id, "error": str(e)})
+            errors.append({"asset_id": asset_id, "error": safe_error_text(e)})
 
     logger.info(
         "media_gc: deleted %d/%d orphan(s), freed %d byte(s), errors=%d, aborted=%s",

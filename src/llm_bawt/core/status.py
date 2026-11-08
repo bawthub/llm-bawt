@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from llm_bawt.utils.config import Config
 
+from llm_bawt.service.http_errors import safe_error_text
+
 logger = logging.getLogger(__name__)
 
 
@@ -240,7 +242,9 @@ def _collect_memory_info(config: Config, default_bot_slug: str) -> MemoryInfo:
         info.memories_count = db_stats.get("memories", {}).get("total_count", 0)
         info.messages_count = db_stats.get("messages", {}).get("total_count", 0)
     except Exception as e:
-        info.postgres_error = str(e)
+        # Served by /status and /v1/status; driver text names the DB host/user.
+        logger.warning("Memory status collection failed: %s", e)
+        info.postgres_error = safe_error_text(e, "Database unreachable")
 
     try:
         from pgvector.psycopg2 import register_vector  # noqa: F401

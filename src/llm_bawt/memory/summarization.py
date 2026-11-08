@@ -28,6 +28,8 @@ from .summarization_limits import SUMMARY_MAX_OUTPUT_TOKENS
 if TYPE_CHECKING:
     from .summarization import Session
 
+from llm_bawt.service.http_errors import safe_error_text
+
 logger = logging.getLogger(__name__)
 
 # Summarization prompt template
@@ -1398,7 +1400,7 @@ class HistorySummarizer:
             try:
                 result = self.summarize_session(chunk, use_heuristic_fallback)
             except Exception as e:
-                errors.append(f"thread {session_id} chunk {i + 1}: {e}")
+                errors.append(f"thread {session_id} chunk {i + 1}: {safe_error_text(e)}")
                 continue
             if result.get("success"):
                 results.append(result)

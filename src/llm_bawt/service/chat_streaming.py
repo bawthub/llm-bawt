@@ -23,7 +23,7 @@ from ..bots import (
 )
 from .inter_bot_claims import continuation_author, turn_admission_claim, validate_inter_bot_claim
 from .session_lifecycle.bridge_reset import BridgeSessionResetMixin
-from .http_errors import client_error_text
+from .http_errors import client_error_text, safe_error_text
 from .logging import RequestContext, generate_request_id, get_service_logger
 from .schemas import ChatCompletionRequest
 from .stream_request_attachments import has_user_turn, prepare_stream_request_attachments
@@ -354,7 +354,7 @@ class ChatStreamingMixin(BridgeSessionResetMixin):
             except Exception as exc:
                 self._update_turn_log(
                     turn_id=turn_log_id, status="error",
-                    error_text=f"Chat reset setup failed: {exc}",
+                    error_text=f"Chat reset setup failed: {safe_error_text(exc)}",
                 )
                 raise
             cancel_event, done_event = await self._start_generation(bot_id)
@@ -430,7 +430,7 @@ class ChatStreamingMixin(BridgeSessionResetMixin):
             except Exception as exc:
                 self._update_turn_log(
                     turn_id=turn_log_id, status="error",
-                    error_text=f"Agent turn setup failed: {exc}",
+                    error_text=f"Agent turn setup failed: {safe_error_text(exc)}",
                 )
                 raise
         elif chat_reset is not None:
@@ -742,7 +742,8 @@ class ChatStreamingMixin(BridgeSessionResetMixin):
 
                     # Stream the same failure marker finalize persists; the UI
                     # drops the warning sidecar whenever partial text exists.
-                    marker = turn_failure_suffix(full_response_holder[0], str(chunk))
+                    marker = turn_failure_suffix(
+                        full_response_holder[0], safe_error_text(chunk, "Stream interrupted"))
                     data = {
                         "id": response_id, "object": "chat.completion.chunk",
                         "created": created, "model": model_alias,

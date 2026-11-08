@@ -15,6 +15,7 @@ from agent_bridge.subscriber import RedisSubscriber
 from ...campus_events import CAMPUS_FRAME_TYPES, redact_for_delivery
 from ...campus_events import visibility as campus_visibility
 from ..dependencies import get_service
+from ..http_errors import safe_error_text
 from ..logging import get_service_logger
 
 router = APIRouter()
@@ -184,6 +185,6 @@ async def _unified_event_stream(
         raise
     except Exception as e:
         log.exception("/v1/ws unified stream error")
-        yield _sse("error", {"error": str(e)})
+        yield _sse("error", {"error": safe_error_text(e, "Event stream failed")})
     finally:
         await sub.close()

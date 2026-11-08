@@ -38,6 +38,8 @@ from typing import Any
 
 from sqlalchemy import bindparam, text
 
+from ..http_errors import safe_error_text
+
 logger = logging.getLogger(__name__)
 
 #: Default retention for overflow tool results. Overridable per task via
@@ -140,7 +142,7 @@ def run_tool_result_gc(
                     deleted.append(key)
                 except Exception as exc:  # pragma: no cover - backend transport
                     logger.warning("tool_result_gc: blob delete failed key=%s: %s", key, exc)
-                    result["errors"].append({"key": key, "error": str(exc)})
+                    result["errors"].append({"key": key, "error": safe_error_text(exc)})
             result["blobs_deleted"] = len(deleted)
         elif to_delete:
             logger.warning(

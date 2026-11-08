@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ast
 import logging
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -140,7 +141,7 @@ def test_internal_error_hides_text_and_logs_it(caplog):
 
     assert isinstance(err, HTTPException)
     assert err.status_code == 409
-    assert err.detail == "Thing rejected (RuntimeError); see the app log"
+    assert re.fullmatch(r"Thing rejected \(RuntimeError, ref [0-9a-f]{8}\); see the app log", err.detail)
     record = caplog.records[-1]
     assert "Failed to do the thing" in record.getMessage() and LEAK in record.getMessage()
     assert record.exc_info and record.exc_info[1] is exc
@@ -158,7 +159,7 @@ def test_history_search_delegated_failure_hides_db_details(route, monkeypatch, c
             route(query="needle", bot_id="example", limit=5, before=None, since=None, until=None)
 
     assert caught.value.status_code == 500
-    assert caught.value.detail == "Internal error (RuntimeError); see the app log"
+    assert re.fullmatch(r"Internal error \(RuntimeError, ref [0-9a-f]{8}\); see the app log", caught.value.detail)
     assert "needle" in caplog.records[-1].getMessage() and LEAK in caplog.records[-1].getMessage()
 
 
@@ -170,5 +171,5 @@ def test_memory_stats_db_failure_keeps_500_without_db_details():
         get_memory_stats(bot_id="example", client=SimpleNamespace(stats=stats))
 
     assert caught.value.status_code == 500
-    assert caught.value.detail == "Internal error (RuntimeError); see the app log"
+    assert re.fullmatch(r"Internal error \(RuntimeError, ref [0-9a-f]{8}\); see the app log", caught.value.detail)
     assert "192.0.2.7" not in str(caught.value.detail)
