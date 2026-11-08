@@ -532,11 +532,23 @@ def test_drift_is_reconciled_and_values_stay_private(tmp_path):
     assert not any("/images/create" in p for _m, p in api.calls) and not api.renderers_left()
 
 
-def test_no_drift_verifies_only(tmp_path):
+@pytest.mark.parametrize("published_head", [HEAD, "cd" * 20])
+def test_config_match_recreates_to_load_approved_source(tmp_path, source, published_head):
     api = AppDocker()
-    result = json.loads(reconciler(api, tmp_path).run())
-    assert result["unchanged"] and result["health"]["status"] == "matched"
-    assert not api.create_bodies and not api.side_effect_started
+    source.answers = [published_head]
+    snap = snapshot(api, checker=source)
+    assert not snap["config"]["drift"]
+    text = card(snap["config"])
+    assert "recreated even when configuration already matches" in text
+    assert "verifies only" not in text
+    result = json.loads(reconciler(api, tmp_path, snap).run())
+    assert result["source_reload_required"] is True and not result.get("unchanged")
+    assert result["health"]["status"] == "matched"
+    assert result["config"]["source_commit"]["head"] == published_head
+    assert result["previous"]["container_id"] != result["deployed"]["container_id"]
+    assert result["previous"]["image_id"] == result["deployed"]["image_id"] == APP_ID
+    assert len(api.create_bodies) == 1 and api.side_effect_started
+    assert api.by_name(APP_NAME)["Id"] != api.old_id
 
 
 @pytest.mark.parametrize("kwargs, text", [
@@ -545,14 +557,16 @@ def test_no_drift_verifies_only(tmp_path):
     ({"health_status": SECRET}, "health status did not match expected 'ok'"),
     ({"health_status": SECRET + " <x>"}, "health status did not match expected 'ok'"),
 ])
-def test_failed_health_restores_the_previous_container(tmp_path, kwargs, text):
-    api = AppDocker(compose=DRIFT, **kwargs)
+@pytest.mark.parametrize("compose", [None, DRIFT], ids=["source-only", "config-drift"])
+def test_failed_health_restores_the_previous_container(tmp_path, kwargs, text, compose):
+    api = AppDocker(compose=compose, **kwargs)
     with pytest.raises(DeployFailed) as caught:
         reconciler(api, tmp_path).run()
     assert caught.value.outcome_known and caught.value.detail["restored"]
     assert text in str(caught.value) and "degraded" not in str(caught.value) and SECRET not in str(caught.value)
     assert SECRET not in json.dumps(caught.value.detail)
     assert api.by_name(APP_NAME)["Id"] == api.old_id
+    assert "Previous container restarted; its earlier in-memory source was not restored." in caught.value.detail["warnings"]
 
 
 def test_returned_health_status_never_reaches_the_durable_receipt(tmp_path):
@@ -590,8 +604,9 @@ def _write_request(root, snap):
 
 @pytest.mark.parametrize("kwargs, state", [({}, "succeeded"), ({"fail_new_start": True}, "failed"),
                                            ({"fail_new_start": True, "restore_fails": True}, "lost")])
-def test_worker_receipt_is_reconciled_by_a_fresh_app_process(tmp_path, kwargs, state):
-    api = AppDocker(compose=DRIFT, **kwargs)
+@pytest.mark.parametrize("compose", [None, DRIFT], ids=["source-only", "config-drift"])
+def test_worker_receipt_is_reconciled_by_a_fresh_app_process(tmp_path, kwargs, state, compose):
+    api = AppDocker(compose=compose, **kwargs)
     root = tmp_path / "receipts"
     snap = {**snapshot(api), "execution": {**EXECUTION, "receipt_root": str(root)}}
     path, digest = _write_request(root, snap)
@@ -604,7 +619,11 @@ def test_worker_receipt_is_reconciled_by_a_fresh_app_process(tmp_path, kwargs, s
     if state == "lost":
         assert "RESTORE FAILED" in result.error
     if state == "succeeded":
-        assert json.loads(result.output_tail)["schema"] == SCHEMA
+        receipt = json.loads(result.output_tail)
+        assert receipt["schema"] == SCHEMA and receipt["source_reload_required"] is True
+        assert not receipt.get("unchanged")
+        assert receipt["previous"]["container_id"] != receipt["deployed"]["container_id"]
+        assert receipt["config"]["source_commit"]["head"] == HEAD
 
 
 def test_worker_image_carries_the_module_and_capability_label():
@@ -1124,12 +1143,13 @@ def test_source_is_rechecked_as_the_last_read_before_the_swap(tmp_path, source, 
     assert api.by_name(APP_NAME)["State"]["Running"]
 
 
-def test_a_reconcile_records_the_commit_and_verify_only_checks_once(tmp_path, source):
+def test_a_reconcile_records_and_rechecks_source_even_without_config_drift(tmp_path, source):
     result = json.loads(reconciler(AppDocker(compose=DRIFT), tmp_path).run())
     assert result["config"]["source_commit"]["head"] == HEAD and len(source.calls) == 2  # bind, pre-swap
     source.calls.clear()
-    reconciler(AppDocker(), tmp_path).run()
-    assert len(source.calls) == 1  # bind only: nothing is swapped
+    result = json.loads(reconciler(AppDocker(), tmp_path).run())
+    assert result["config"]["source_commit"]["head"] == HEAD and result["source_reload_required"]
+    assert len(source.calls) == 2  # bind and pre-swap even when config already matches
 
 
 def test_published_source_is_asked_of_the_forge_for_the_spec_repository():

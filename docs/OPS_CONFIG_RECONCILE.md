@@ -153,6 +153,18 @@ serves.
   For a bridge, the source guard
   binds only the bridge's own source. The agents it hosts run code from the
   mounted workspace by design, so that workspace is not guarded.
+  An app-kind target is always recreated, including when Compose configuration
+  already matches: config and on-disk source checks cannot prove which source
+  its existing process loaded. Standalone reconciles and cutover plans use the
+  same source recheck, same-image swap, health verification and rollback path.
+  Approval text makes the restart explicit; receipts carry
+  `source_reload_required` with the approved `source_commit` and new container
+  identity. This does not claim a startup SHA on `/health` or an immutable mount.
+  Restoring the previous container restarts it against the current bind mount;
+  its earlier in-memory source cannot be recovered by a container rollback.
+  Existing catalog rows are not updated by seeds. Activation must update their
+  descriptions and enable their existing appropriate quiesce scope before use;
+  bridge recreation ends every agent session it hosts, even with no config drift.
 - **Tagged kind** (`reconcile_tagged_config`, `ops/tagged_config_reconcile.py`):
   a service that runs a public image by moving tag (Crawl4AI,
   `llm-bawt.reconcile-crawl4ai-config`). It binds and swaps to the **running
@@ -194,8 +206,9 @@ is forked. Seed order: app, Crawl4AI, codex bridge, claude-code bridge.
   2. Missing project volumes are created with Compose's labels (the first
      write), so a later `compose up` adopts them. A volume that another project
      or volume key owns refuses.
-  3. Each target in order: the last-read recheck, then verify-only (no drift) or
-     swap. The previous container stays stopped as `<name>-prev-<job8>`. A later
+  3. Each target in order: the last-read recheck, then swap for every app-kind
+     target; tagged targets verify-only when there is no drift, or swap otherwise.
+     The previous container stays stopped as `<name>-prev-<job8>`. A later
      target's dependency check ignores those `-prev` containers.
   4. End checks: the new app reports the same records and carries exactly the
      approved credential env names, and every plan probe passes. A probe line

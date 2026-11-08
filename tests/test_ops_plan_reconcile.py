@@ -256,6 +256,32 @@ def test_a_target_without_drift_is_verified_in_place(world):
     assert ("crawl", "swap") not in world.log and ("crawl", "commit") not in world.log
 
 
+def test_source_bound_target_with_matching_config_uses_real_reload_hook(world):
+    from types import MethodType
+
+    from llm_bawt.ops.app_config_reconcile import AppConfigReconciler
+
+    # Keep the plan's deterministic transport, but use the production decision:
+    # a newly approved source commit can leave the Compose config unchanged.
+    for slug in ("app", "bridge"):
+        step = world.steps[slug]
+        step.drift = False
+        step.snapshot["config"]["drift"] = []
+        step._verify_only = MethodType(AppConfigReconciler._verify_only, step)
+    world.steps["crawl"].drift = False
+    receipt = json.loads(_reconciler(world).run())
+    assert _statuses(receipt) == ["swapped", "unchanged", "swapped"]
+    assert receipt["targets"][0]["source_reload_required"] is True
+    assert receipt["targets"][0]["container_id"] == "app-new"
+    assert not receipt["targets"][0].get("unchanged")
+    assert receipt["targets"][2]["source_reload_required"] is True
+    assert receipt["targets"][2]["container_id"] == "bridge-new"
+    assert not receipt["targets"][2].get("unchanged")
+    assert ("app", "swap") in world.log and ("app", "probe:records@app-new") in world.log
+    assert ("bridge", "swap") in world.log and ("bridge", "probe:broker@bridge-new") in world.log
+    assert ("crawl", "swap") not in world.log
+
+
 # ── failure and revert ─────────────────────────────────────────────────────
 
 def test_a_failed_later_target_reverts_every_earlier_one_in_reverse(world):

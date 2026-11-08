@@ -275,7 +275,7 @@ class PlanReconciler:
 
     ACTION_NAME = "reconcile-service-plan"
     _STEP_KEYS = ("phase", "config", "health", "unchanged", "previous", "deployed", "restored", "failed_phase",
-                  "warnings", "error")
+                  "source_reload_required", "warnings", "error")
 
     def __init__(self, api, snapshot: dict, job_id: str, *, lock_root, sleep=time.sleep, clock=time.monotonic,
                  build=None):

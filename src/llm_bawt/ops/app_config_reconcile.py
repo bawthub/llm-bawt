@@ -269,7 +269,7 @@ def trust_text(binding: dict, operation: dict, newly) -> str:
 
 def approval_text(spec: dict, binding: dict, prefix: str | None, *, operation: dict, newly_trusted) -> str:
     """Approval card body: names, ports, mounts and A1 enum values only."""
-    drift = ", ".join(binding["drift"]) or "none (verifies only)"
+    drift = ", ".join(binding["drift"]) or "none (recreates to load the approved source)"
     shown = ", ".join(f"{k}={v}" for k, v in sorted(binding["display"].items())) or "none"
     moved = (f"Note: tag {binding['image_tag']} now names a different local build. This keeps the RUNNING "
              "image; rebuilding and redeploying is separate.\n") if binding["image_tag_moved"] else ""
@@ -289,7 +289,10 @@ def approval_text(spec: dict, binding: dict, prefix: str | None, *, operation: d
             f"Shown values: {shown}\n"
             f"Fingerprints: current {binding['current_config_hash'][:16]}, desired {binding['desired_hash'][:16]}\n"
             "No build or pull. Environment values other than those shown are never displayed. "
-            "Recreating this target cuts its in-flight requests and sessions; the outcome is recorded "
+            "A config match cannot prove which bind-mounted source the process loaded; this target "
+            "is recreated even when configuration already matches. "
+            "Recreating this target cuts its in-flight requests and ALL sessions it hosts "
+            "(including every agent session on a bridge); the outcome is recorded "
             "by the ops reconciler. Restores the previous container if health verification fails. "
             "Any change to the container or the rendered configuration cancels execution.")
 
@@ -414,6 +417,22 @@ class AppConfigReconciler(SourceGuardedReconciler):
                                              source_checker=checker)
         self._hold_source(checker, actual, source_plan(self.spec, actual["source"], old, image, desired))
         return actual, desired
+
+    def _verify_only(self, old) -> bool:
+        """Every app-kind binding has source mounts, not a loaded-code proof.
+
+        Reuse the normal source recheck, swap and health/rollback path rather
+        than treating matching Compose configuration as a successful reload.
+        Both standalone reconciles and cutover plans call this hook.
+        """
+        self.detail["source_reload_required"] = True
+        return False
+
+    def _revert(self, swap):
+        super()._revert(swap)
+        self.detail["warnings"].append(
+            "Previous container restarted; its earlier in-memory source was not restored."
+        )
 
     def _before_swap(self):
         self._check_dependencies()

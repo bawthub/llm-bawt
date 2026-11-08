@@ -531,6 +531,7 @@ _CONFIG_SEEDS: list[dict[str, Any]] = [{
     "title": "Reconcile llm-bawt app configuration",
     "description": (
         "Recreate the llm-bawt app from its declared Compose service using the SAME running image. "
+        "Always recreates to load the approved bind-mounted source, even when configuration matches. "
         "No build or pull; the image is bound by ID, never by tag. Approval shows changed names, "
         "ports and dependencies only, never values. Dependencies must already be running and are "
         "never restarted. Refuses unless the bind-mounted source is exactly the published branch "
@@ -583,6 +584,7 @@ _CONFIG_SEEDS: list[dict[str, Any]] = [{
     "title": "Reconcile BawtHub backend configuration",
     "description": (
         "Recreate the BawtHub backend from its declared Compose service using the SAME running image. "
+        "Always recreates to load the approved bind-mounted source, even when configuration matches. "
         "No build or pull; the image is bound by ID, never by tag. Approval shows changed names, "
         "ports and security options only, never environment values. Refuses unless the bind-mounted "
         "source is exactly the published branch head. Verifies health and restores the previous "
@@ -736,7 +738,8 @@ _CONFIG_SEEDS: list[dict[str, Any]] = [{
         "slug": f"llm-bawt.reconcile-{bridge}-config",
         "title": f"Reconcile {bridge} configuration",
         "description": (
-            f"Recreate {bridge} from its declared Compose service using the SAME running image. No build "
+            f"Recreate {bridge} from its declared Compose service using the SAME running image. "
+            "Always recreates to load the approved bind-mounted source, even when configuration matches. No build "
             "or pull; the image is bound by ID, never by tag. Approval shows changed names, mounts and "
             "dependencies only, never environment values. Refuses unless the bind-mounted source is exactly "
             "the published branch head. Verifies health and restores the previous container on failure. "
@@ -924,7 +927,8 @@ _PLAN_SEEDS: list[dict[str, Any]] = [{
         "Recreate the app, Crawl4AI and the claude-code bridge in that order, each at "
         "its SAME image and each only after the previous one is verified. Approval shows every target's "
         "own card plus how each stored credential is carried over (migrated, kept in env, unconfigured or "
-        "an accepted loss); a credential the app would lose without a stored record refuses unless named "
+        "an accepted loss). Source-mounted app/bridge targets always recreate even when configuration matches; "
+        "a credential the app would lose without a stored record refuses unless named "
         "in accept_loss. Probes run after the last target; any failure reverts every recreated target in "
         "reverse. KILLS every agent session and cuts in-flight chat turns."
     ),

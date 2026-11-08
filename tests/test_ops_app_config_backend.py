@@ -369,8 +369,9 @@ def test_health_passes_on_the_exact_field_value(tmp_path, field, value, body):
     spec = _health_spec(field, value)
     api = BackendDocker(health=body)
     result = json.loads(reconciler(api, tmp_path, snapshot(api, spec)).run())
-    assert result["unchanged"] and result["health"] == {"field": field, "status": "matched",
-                                                       "stat": {f"{TOKEN}/token": "600 0 0"}}
+    assert result["source_reload_required"] and not result.get("unchanged")
+    assert result["health"] == {"field": field, "status": "matched",
+                               "stat": {f"{TOKEN}/token": "600 0 0"}}
 
 
 @pytest.mark.parametrize("body", [
