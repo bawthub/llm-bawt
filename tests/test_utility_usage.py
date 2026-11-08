@@ -38,7 +38,6 @@ def rig(monkeypatch):
     service._get_background_client.return_value = (client, "maintenance-ref")
     monkeypatch.setattr(llm, "get_service", lambda: service)
     monkeypatch.setattr("llm_bawt.runtime_settings.resolve_job_model", lambda *_: "maintenance-ref")
-    monkeypatch.setattr("llm_bawt.service.maintenance_fallback.served_model", lambda c, alias: "served-model")
     rows: list[dict] = []
     monkeypatch.setattr(utility_usage, "record", lambda row, **_: rows.append(row))
     return client, rows
@@ -60,7 +59,7 @@ def test_provider_usage_is_recorded_without_content(rig):
     [row] = rows
     assert {k: row[k] for k in ("caller", "bot_id", "model", "input_tokens", "cache_read_tokens",
                                 "cache_write_tokens", "output_tokens", "estimated", "outcome")} == {
-        "caller": "recall", "bot_id": "caid", "model": "served-model", "input_tokens": 100,
+        "caller": "recall", "bot_id": "caid", "model": "maintenance-ref", "input_tokens": 100,
         "cache_read_tokens": 20, "cache_write_tokens": 0, "output_tokens": 30,
         "estimated": False, "outcome": "ok",
     }
@@ -148,6 +147,63 @@ def test_spend_observer_still_receives_the_response(rig):
     llm.complete_utility(RawCompletionRequest(prompt="p"), timeout_seconds=20, caller="recall")
     observer.assert_called_once()
     assert rows[0]["estimated"] is False
+
+
+@pytest.fixture
+def fallback(rig):
+    """A real served_model over a fallback client that switches during the call."""
+    from llm_bawt.service import maintenance_fallback
+
+    _, rows = rig
+    client = MagicMock(spec=maintenance_fallback.FallbackClient)
+    client.usage_observer = None
+    client.last_served_model = None
+    llm.get_service()._get_background_client.return_value = (client, "primary-ref")
+    return client, rows
+
+
+def _switching(client, result):
+    def call(**_):
+        client.last_served_model = "backup-model"  # set by the wrapper only during the call
+        if isinstance(result, BaseException):
+            raise result
+        return result
+    return call
+
+
+@pytest.mark.parametrize("bounded", [True, False])
+def test_backup_served_call_is_attributed_to_the_backup(fallback, bounded):
+    client, rows = fallback
+    method = client.query_bounded if bounded else client.query
+    method.side_effect = _switching(client, "answer")
+    result = llm.complete_utility(RawCompletionRequest(prompt="p"),
+                                  timeout_seconds=20 if bounded else None, caller="recall")
+    assert result.model == rows[0]["model"] == "backup-model"
+
+
+def test_already_on_backup_and_failed_call_is_attributed_to_the_backup(fallback):
+    client, rows = fallback
+    client.last_served_model = "backup-model"
+    client.query_bounded.side_effect = _switching(client, RuntimeError("down"))
+    with pytest.raises(HTTPException):
+        llm.complete_utility(RawCompletionRequest(prompt="p"), timeout_seconds=20, caller="recall")
+    assert (rows[0]["model"], rows[0]["outcome"]) == ("backup-model", "error")
+
+
+def test_primary_served_call_keeps_the_primary(fallback):
+    client, rows = fallback
+    client.query_bounded.return_value = "answer"
+    result = llm.complete_utility(RawCompletionRequest(prompt="p"), timeout_seconds=20, caller="recall")
+    assert result.model == rows[0]["model"] == "primary-ref"
+
+
+def test_unbounded_timeout_string_is_a_timeout_outcome(rig):
+    client, rows = rig
+    client.query.return_value = f"ERROR: OpenAI API Error - Request timed out. {SECRET}"
+    with pytest.raises(HTTPException):
+        llm.complete_utility(RawCompletionRequest(prompt="p"))
+    assert rows[0]["outcome"] == "timeout"
+    assert SECRET not in repr(rows[0])
 
 
 def test_recall_route_passes_caller_and_usage_bot(monkeypatch):

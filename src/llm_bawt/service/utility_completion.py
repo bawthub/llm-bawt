@@ -83,10 +83,14 @@ def complete_utility(
             return response
         except BaseException as error:
             outcome = error
-            model = box.get("model")
+            if "served" in box:
+                try:
+                    model = box["served"]()
+                except Exception:  # noqa: BLE001
+                    model = None
             raise
         finally:
-            if "model" in box or response is not None:  # a model call was attempted
+            if "served" in box:  # a model call was attempted
                 text_out = response.content if response is not None else ""
                 estimate = {
                     "input_tokens": (len(request.system or "") + len(request.prompt)) // 4,
@@ -137,7 +141,8 @@ def _complete_utility(
                 model=model_alias, provider=None, credential=None)
             raise HTTPException(status_code=503, detail="recall_model_budget_unavailable") from None
 
-    box["model"] = served_model(client, model_alias)
+    # Read after the call: a fallback client names its backup only once it served.
+    box["served"] = lambda: served_model(client, model_alias)
     try:
         start = time.perf_counter()
         from ..models.message import Message
@@ -165,9 +170,13 @@ def _complete_utility(
         if isinstance(response, str) and not response.strip():
             raise EmptyCompletion("Model returned an empty completion")
         if not isinstance(response, str) or response.lstrip().startswith("ERROR:"):
+            # Ordinary clients flatten SDK timeouts ("Request timed out.") into
+            # error strings; keep the class for the usage outcome, not the text.
+            if isinstance(response, str) and "timed out" in response.lower():
+                raise TimeoutError("Model call timed out")
             raise ValueError("Model returned no usable completion")
         return RawCompletionResponse(
-            content=response, model=box["model"],
+            content=response, model=box["served"](),
             tokens=box["usage"]["output_tokens"] if "usage" in box else len(response) // 4,
             elapsed_ms=(time.perf_counter() - start) * 1000,
         )
