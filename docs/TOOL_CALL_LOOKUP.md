@@ -46,8 +46,9 @@ have 48-character fields and a 160-character combined view; detail has
 400-character fields and at most 2,400 combined characters. Nested structures
 also have depth/node/container limits. Truncation is explicit.
 
-Secret-ish nested keys, common token forms, bearer strings and secret
-assignments in text (including shell commands) are scrubbed before clipping.
+Secret-ish nested keys, common token forms, authorization headers, secret
+assignments/flags and URL userinfo in text (including shell commands) are
+scrubbed before clipping.
 Known `ops_run` operations additionally reuse their schema's `x-sensitive`
 masking. Oversized, unparseable ops arguments are omitted rather than skipping
 schema masks. Results receive the same key/string heuristics.

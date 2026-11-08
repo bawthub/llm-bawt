@@ -14,16 +14,32 @@ _TOKENS = re.compile(
     r"|\b(?:sk-[a-z0-9_-]{8,}|ghp_[a-z0-9_]+|github_pat_[a-z0-9_]+|xox[baprs]-[a-z0-9_-]+)"
     r"|\beyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+"
 )
+_AUTH_HEADER = re.compile(
+    r"(?i)(\bauthorization[ \t]*[:=][ \t]*)"
+    r"(?:[a-z][\w-]*[ \t]+)?[^\s'\";,]+"
+)
+_SECRET_FLAG = re.compile(
+    r"""(?ix)
+    (?<![\w-])(--[\w-]{0,80}(?:token|secret|password|passwd|api[_-]?key|credential)[\w-]{0,80})
+    ([ \t]+)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s;,&]+)
+    """
+)
+_URL_USERINFO = re.compile(
+    r"""(?i)(\b[a-z][a-z0-9+.-]{1,30}://)[^\s/@'"<>]+@"""
+)
 _ASSIGNMENT = re.compile(
     r"""(?ix)
     (?<![\w.-])(?P<key>["']?[\w.-]{0,128}(?:token|secret|password|passwd|api[_-]?key|authorization|cookie|credential)[\w.-]{0,128}["']?)
     (?P<sep>\s*(?:=|:)\s*)
-    (?P<value>"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;&}\]]+)
+    (?P<value>\[redacted\]|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;&}\]]+)
     """
 )
 
 
 def scrub_text(value: str) -> str:
+    value = _AUTH_HEADER.sub(lambda m: m[1] + MASK, value)
+    value = _SECRET_FLAG.sub(lambda m: m[1] + m[2] + MASK, value)
+    value = _URL_USERINFO.sub(lambda m: m[1] + MASK + "@", value)
     value = _ASSIGNMENT.sub(lambda m: m["key"] + m["sep"] + MASK, value)
     return _TOKENS.sub(MASK, value)
 

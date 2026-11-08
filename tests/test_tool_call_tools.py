@@ -30,6 +30,32 @@ def test_free_text_patterns(value):
     assert "synthetic" not in scrub_text("run " + value)
 
 
+@pytest.mark.parametrize("value,secret", [
+    ("Authorization: Basic dXNlcjpwYXNz", "dXNlcjpwYXNz"),
+    ("Authorization: token abc123secret", "abc123secret"),
+    ("curl -H 'Authorization: Basic dXNlcjpwYXNz' host", "dXNlcjpwYXNz"),
+    ('curl -H "Authorization: token abc123secret" host', "abc123secret"),
+    ('Authorization="Basic dXNlcjpwYXNz"', "dXNlcjpwYXNz"),
+    ("cmd --token abc123secret --safe keep", "abc123secret"),
+    ('cmd --password "two words" --safe keep', "two words"),
+    ("cmd --api-key 'abc123secret' --safe keep", "abc123secret"),
+    ("postgres://user:hunter2@host/db", "hunter2"),
+    ("https://user:abc123secret@example.test/path", "abc123secret"),
+])
+def test_review_secret_shapes_in_args_and_results(value, secret):
+    assert secret not in scrub_text(value)
+    for raw in (json.dumps({"command": value}), value):
+        # Arguments and result bodies both use this view.
+        view = arguments_view(raw, field_chars=1000, max_chars=2000)
+        assert secret not in json.dumps(view)
+
+
+def test_review_scrubbing_preserves_nonsecret_context():
+    assert scrub_text("Authorization: Basic abc123secret") == "Authorization: " + MASK
+    assert scrub_text("cmd --token abc123secret --safe keep") == f"cmd --token {MASK} --safe keep"
+    assert scrub_text("postgres://user:hunter2@host/db") == f"postgres://{MASK}@host/db"
+
+
 def test_structure_and_per_field_clipping():
     view = arguments_view(json.dumps({"path": "/actual/file", "long": "a" * 200}),
                           field_chars=30, max_chars=300)
