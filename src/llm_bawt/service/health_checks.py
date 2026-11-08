@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -194,14 +195,94 @@ def check_prompt_sync(config: Any, now: datetime | None = None) -> dict:
 MEDIA_PROBE_TIMEOUT_SECONDS = 3.0
 
 
+def _probe_media_root(root: Path) -> tuple[str, str | None]:
+    try:
+        try:
+            os.listdir(root)  # not exists(): it can hide ESTALE as "missing"
+            return OK, None
+        except FileNotFoundError:
+            # FsBlobBackend creates it on first write; the nearest existing
+            # ancestor must still be readable.
+            ancestor = root.parent
+            while True:
+                try:
+                    os.listdir(ancestor)
+                    return OK, f"{root} not created yet"
+                except FileNotFoundError:
+                    if ancestor.parent == ancestor:
+                        raise
+                    ancestor = ancestor.parent
+    except OSError as exc:
+        return DOWN, (f"media directory {root} is unreadable: "
+                      f"{type(exc).__name__}: {exc.strerror or exc}")
+
+
+class _MediaProbe:
+    """At most one filesystem probe in flight per process.
+
+    A hung mount blocks ``listdir`` uncancellably, so each health poll must
+    not start another worker: while the previous one is stuck, polls wait on
+    it (bounded) and report down.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._worker: threading.Thread | None = None
+        self._root: Path | None = None
+        self._started = 0.0
+        self._result: tuple[str, str | None] | None = None
+
+    def _start_locked(self, root: Path) -> threading.Thread:
+        def run() -> None:
+            result = _probe_media_root(root)
+            with self._lock:
+                if self._worker is threading.current_thread():
+                    self._result = result
+
+        self._root, self._result = root, None
+        self._started = time.monotonic()
+        self._worker = threading.Thread(target=run, name="media-root-probe", daemon=True)
+        self._worker.start()
+        return self._worker
+
+    def check(self, root: Path, timeout: float) -> dict:
+        with self._lock:
+            worker = self._worker
+            if worker is None or not worker.is_alive():
+                worker = self._start_locked(root)
+        worker.join(timeout)
+        with self._lock:
+            if worker.is_alive():
+                stuck = time.monotonic() - self._started
+                return _check("media.storage", DOWN,
+                              f"media directory {self._root} has not responded for {stuck:.0f}s")
+            result, probed = self._result, self._root
+        if result is None or probed != root:
+            # A previous hung probe just finished, or it was for another root:
+            # probe the requested root now (still single-flight).
+            with self._lock:
+                worker = self._worker if self._worker.is_alive() else self._start_locked(root)
+            worker.join(timeout)
+            with self._lock:
+                if worker.is_alive() or self._result is None or self._root != root:
+                    return _check("media.storage", DOWN,
+                                  f"media directory {root} did not respond within {timeout:g}s")
+                result = self._result
+        status, reason = result
+        return _check("media.storage", status, reason)
+
+
+_media_probe = _MediaProbe()
+
+
 def check_media_root(root: Path | None = None, *, timeout: float = MEDIA_PROBE_TIMEOUT_SECONDS) -> dict:
     """Whether the FS media blob root is readable (TASK-2149).
 
     A network mount can go stale under a running container ("Stale file
-    handle") while the host path is fine; uploads and image reads then fail
-    until the mount is fixed. Skipped (ok) when blobs live only in S3. The
-    probe runs on a daemon thread so a hung mount reports down instead of
-    stalling the whole health response.
+    handle") while the host path is fine; reads from it then fail until the
+    mount is fixed. Skipped (ok) when blobs live only in S3. The probe runs
+    on a single in-flight worker so a hung mount reports down without
+    stalling the health response or piling up blocked threads.
     """
     from ..media.object_store import _env_backend_kind, _env_bool
     from ..media.store import resolve_media_root
@@ -210,37 +291,7 @@ def check_media_root(root: Path | None = None, *, timeout: float = MEDIA_PROBE_T
         if _env_backend_kind() != "fs" and not _env_bool("LLM_BAWT_S3_FALLBACK_FS"):
             return _check("media.storage", OK, "object storage; no local media directory")
         root = resolve_media_root()
-    outcome: dict[str, Any] = {}
-
-    def probe() -> None:
-        try:
-            try:
-                os.listdir(root)  # not exists(): it can hide ESTALE as "missing"
-                outcome["result"] = (OK, None)
-            except FileNotFoundError:
-                # FsBlobBackend creates it on first write; the nearest
-                # existing ancestor must still be readable.
-                ancestor = root.parent
-                while True:
-                    try:
-                        os.listdir(ancestor)
-                        break
-                    except FileNotFoundError:
-                        if ancestor.parent == ancestor:
-                            raise
-                        ancestor = ancestor.parent
-                outcome["result"] = (OK, f"{root} not created yet")
-        except OSError as exc:
-            outcome["result"] = (DOWN, f"media directory {root} is unreadable: "
-                                       f"{type(exc).__name__}: {exc.strerror or exc}")
-
-    worker = threading.Thread(target=probe, name="media-root-probe", daemon=True)
-    worker.start()
-    worker.join(timeout)
-    if "result" not in outcome:
-        return _check("media.storage", DOWN, f"media directory {root} did not respond within {timeout:g}s")
-    status, reason = outcome["result"]
-    return _check("media.storage", status, reason)
+    return _media_probe.check(Path(root), timeout)
 
 
 def collect(config: Any, ops_store, ops_service, *, service=None) -> dict:

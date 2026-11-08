@@ -62,6 +62,24 @@ def test_transient_db_failure_is_retried_not_cached(isolated_store, monkeypatch)
     assert attempts["n"] == 2
 
 
+def test_backoff_starts_after_a_slow_failure(isolated_store, monkeypatch):
+    clock = isolated_store
+    attempts = {"n": 0}
+
+    def slow_failure():
+        attempts["n"] += 1
+        clock.now += 6  # failing build takes longer than the first delay
+        raise RuntimeError("lock timeout")
+
+    monkeypatch.setattr(media_store, "_build_media_asset_db", slow_failure)
+    media_store.get_media_store()
+    media_store.get_media_store()
+    assert attempts["n"] == 1
+    clock.now += media_store._DB_RETRY_INITIAL_S
+    media_store.get_media_store()
+    assert attempts["n"] == 2
+
+
 def test_retry_backoff_doubles_and_caps(isolated_store, monkeypatch):
     clock = isolated_store
     attempts = []
@@ -103,6 +121,10 @@ def test_concurrent_callers_build_db_once(isolated_store, monkeypatch):
 
 # --- media.storage health ------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def fresh_media_probe(monkeypatch):
+    monkeypatch.setattr(health_checks, "_media_probe", health_checks._MediaProbe())
+
 def test_media_root_readable_is_ok(tmp_path):
     assert check_media_root(tmp_path) == {"name": "media.storage", "status": OK, "reason": None}
 
@@ -127,20 +149,33 @@ def test_stale_mount_reports_down(tmp_path, monkeypatch):
     assert "Stale file handle" in row["reason"]
 
 
-def test_hung_mount_reports_down_within_timeout(tmp_path, monkeypatch):
+def test_hung_mount_reports_down_without_piling_up_workers(tmp_path, monkeypatch):
     release = threading.Event()
+    calls = {"n": 0}
 
     def hang(_path):
+        calls["n"] += 1
         release.wait(5)
         return []
 
     monkeypatch.setattr(health_checks.os, "listdir", hang)
+
+    def probe_threads():
+        return [t for t in threading.enumerate() if t.name == "media-root-probe" and t.is_alive()]
+
     try:
-        row = check_media_root(tmp_path, timeout=0.05)
+        rows = [check_media_root(tmp_path, timeout=0.02) for _ in range(12)]
+        assert all(row["status"] == DOWN for row in rows)
+        assert "has not responded" in rows[-1]["reason"]
+        assert len(probe_threads()) == 1
+        assert calls["n"] == 1
     finally:
         release.set()
-    assert row["status"] == DOWN
-    assert "did not respond" in row["reason"]
+        for t in probe_threads():
+            t.join(2)
+    # Once the mount answers again the next poll reports ok.
+    monkeypatch.setattr(health_checks.os, "listdir", lambda _p: [])
+    assert check_media_root(tmp_path)["status"] == OK
 
 
 def test_object_storage_without_fs_fallback_skips_probe(monkeypatch):

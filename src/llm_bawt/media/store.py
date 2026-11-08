@@ -551,8 +551,7 @@ def _attach_db_if_due(store: MediaStore) -> None:
     mutated in place, so callers that kept a reference recover too.
     """
     global _db_retry_at, _db_retry_delay
-    now = time.monotonic()
-    if now < _db_retry_at:
+    if time.monotonic() < _db_retry_at:
         return
     try:
         db = _build_media_asset_db()
@@ -562,7 +561,8 @@ def _attach_db_if_due(store: MediaStore) -> None:
         logger.warning(
             "MediaStore has no DB (retrying in %.0fs): %s", _db_retry_delay, e
         )
-        _db_retry_at = now + _db_retry_delay
+        # Measured at failure: a slow failing build must not eat its delay.
+        _db_retry_at = time.monotonic() + _db_retry_delay
         _db_retry_delay = min(_db_retry_delay * 2, _DB_RETRY_MAX_S)
         return
     if _db_retry_at:
