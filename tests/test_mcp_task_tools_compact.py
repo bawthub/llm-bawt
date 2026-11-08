@@ -608,3 +608,58 @@ def test_compact_task_counts_dependencies_by_real_and_legacy_names() -> None:
 
     legacy = compact_task({"dependencies": [{"id": "a"}], "dependents": [{"id": "b"}] * 2})
     assert (legacy["dependencyCount"], legacy["dependentCount"]) == (1, 2)
+
+
+def _dependency_task() -> dict[str, Any]:
+    task = _full_task()
+    task["dependsOn"] = [
+        {"id": "dep-1", "shortId": "TASK-1", "title": "Prereq", "status": "QUEUED",
+         "description": GIANT_TEXT},
+    ]
+    return task
+
+
+def test_add_dependency_returns_compact_receipt(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_post(path: str, json: Any = None, headers: Any = None) -> dict:
+        assert path == "/tasks/task-id/dependencies"
+        assert json == {"depId": "dep-1"}
+        return _dependency_task()
+
+    monkeypatch.setattr(task_tools, "_api_post", fake_post)
+    result = _run(task_tools.add_task_dependency("task-id", "dep-1", bot_id="al"))
+    assert result["shortId"] == "TASK-266"
+    assert result["dependsOn"] == [
+        {"id": "dep-1", "shortId": "TASK-1", "title": "Prereq", "status": "QUEUED"}
+    ]
+    assert result["dependentCount"] == 2
+    assert "steps" not in result and "description" not in result
+    assert len(json.dumps(result)) < 2_000
+
+
+def test_remove_dependency_returns_compact_receipt(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeResp:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            task = _dependency_task()
+            task["dependsOn"] = []
+            return task
+
+    class FakeClient:
+        async def request(self, method: str, url: str, **kwargs: Any) -> FakeResp:
+            assert method == "DELETE"
+            return FakeResp()
+
+    monkeypatch.setattr(task_tools, "_get_client", lambda: FakeClient())
+    monkeypatch.setattr(task_tools, "_json_body", lambda resp: resp.json())
+    result = _run(task_tools.remove_task_dependency("task-id", "dep-1", bot_id="al"))
+    assert result["dependsOn"] == []
+    assert result["dependencyCount"] == 0
+    assert len(json.dumps(result)) < 2_000
+
+
+def test_dependency_error_passes_through() -> None:
+    assert task_tools._dependency_receipt({"error": "cycle"}) == {"error": "cycle"}

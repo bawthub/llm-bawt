@@ -709,6 +709,29 @@ async def _dependency_task_id(task_ref: str) -> str:
     return task_id
 
 
+def _dependency_ref(dep: Any) -> Any:
+    """One edge as id/shortId/title/status; BawtHub may nest the task."""
+    if not isinstance(dep, dict):
+        return dep
+    task = dep.get("dependsOn") or dep.get("task") or dep
+    if not isinstance(task, dict):
+        task = dep
+    return {key: task.get(key) for key in ("id", "shortId", "title", "status")}
+
+
+def _dependency_receipt(payload: Any) -> Any:
+    """Compact receipt for a dependency change instead of the full task."""
+    if not isinstance(payload, dict) or "error" in payload:
+        return payload
+    receipt = _compact_task(payload)
+    deps = payload.get("dependsOn")
+    if not isinstance(deps, list):
+        deps = payload.get("dependencies")
+    if isinstance(deps, list):
+        receipt["dependsOn"] = [_dependency_ref(dep) for dep in deps]
+    return receipt
+
+
 @mcp.tool(name="tasks_add_dependency")
 async def add_task_dependency(
     task_id: str,
@@ -726,8 +749,9 @@ async def add_task_dependency(
         bot_id: Your bot ID for activity attribution.
 
     Returns:
-        Updated dependent-task object with refreshed ``dependsOn`` list,
-        or error dict on cycle/missing-target.
+        Compact receipt for the dependent task (compact task fields plus
+        ``dependsOn`` as id/shortId/title/status), or error dict on
+        cycle/missing-target.
     """
     logger.debug(
         "MCP tool invoked: tools/add_task_dependency task=%s deps_on=%s",
@@ -737,11 +761,11 @@ async def add_task_dependency(
     try:
         resolved_task_id = await _dependency_task_id(task_id)
         resolved_dep_id = await _dependency_task_id(depends_on_id)
-        return await _api_post(
+        return _dependency_receipt(await _api_post(
             f"/tasks/{resolved_task_id}/dependencies",
             json={"depId": resolved_dep_id},
             headers=_headers(bot_id),
-        )
+        ))
     except httpx.HTTPStatusError as e:
         return _http_error(e)
     except ValueError as e:
@@ -762,7 +786,8 @@ async def remove_task_dependency(
         bot_id: Your bot ID for activity attribution.
 
     Returns:
-        Updated dependent-task object with refreshed ``dependsOn`` list.
+        Compact receipt for the dependent task (compact task fields plus
+        ``dependsOn`` as id/shortId/title/status), or error dict.
     """
     logger.debug(
         "MCP tool invoked: tools/remove_task_dependency task=%s deps_on=%s",
@@ -783,7 +808,7 @@ async def remove_task_dependency(
             json={"depId": resolved_dep_id},
             headers=_headers(bot_id),
         )
-        return _json_body(resp)
+        return _dependency_receipt(_json_body(resp))
     except httpx.HTTPStatusError as e:
         return _http_error(e)
     except ValueError as e:
