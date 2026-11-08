@@ -199,7 +199,8 @@ async def test_catalog_token_budgets():
     # TASK-1343: steps_set says an empty list needs clear=true (+2).
     # TASK-1581: bots_profile_patch names agent backend+config (+5): 4,886.
     # TASK-1389: requester-only ops_approval_withdraw (+38): 4,924; no approval grant.
-    assert sum(descriptions) <= 4924, f"Descriptions grew to {sum(descriptions)} tokens"
+    # TASK-471: attachment_get loads an uploaded image by reference (+35): 4,959.
+    assert sum(descriptions) <= 4959, f"Descriptions grew to {sum(descriptions)} tokens"
     definitions = [{"name": f"mcp__bawthub__{t.name}", "description": t.description or "", "input_schema": t.inputSchema} for t in tools]
     total = len(encoder.encode(json.dumps(definitions, ensure_ascii=False, separators=(",", ":"))))
     # TASK-900: explicit X search adds ~160 tokens; measured catalog 11,239.
@@ -311,7 +312,8 @@ async def test_catalog_token_budgets():
     # accident: 18,056 (+13).
     # TASK-1581: bots_profile_patch names agent backend+config: 18,061 (+5).
     # TASK-1389: ops_approval_withdraw(request_id, reason): 18,150 (+89).
-    assert total <= 18150, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-471: attachment_get(ref, max_images): 18,234 (+84).
+    assert total <= 18234, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 

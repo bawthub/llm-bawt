@@ -833,6 +833,7 @@ from . import media_tools as _media_tools  # noqa: F401, E402
 # ---------------------------------------------------------------------------
 
 from . import media_generation_tools as _media_generation_tools  # noqa: F401, E402
+from . import attachment_tools as _attachment_tools  # noqa: F401, E402
 from . import home_audio_tools as _home_audio_tools  # noqa: F401, E402
 from . import notify_tools as _notify_tools  # noqa: F401, E402
 
