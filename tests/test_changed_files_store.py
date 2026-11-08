@@ -7,6 +7,8 @@ serializer shape used by both the live event and the read API.
 
 from __future__ import annotations
 
+import time
+
 import pytest
 from sqlalchemy import inspect, text
 from sqlmodel import SQLModel, create_engine
@@ -234,6 +236,26 @@ def test_repeated_file_upsert_keeps_first_before_latest_after(store):
     )
     assert before.text == "v1"
     assert after.text == "v3"
+
+
+def test_repeated_file_upsert_keeps_created_at_and_advances_updated_at(store):
+    def stamps():
+        with store.engine.begin() as conn:
+            return conn.execute(text(
+                "SELECT created_at, updated_at FROM turn_changed_files "
+                "WHERE turn_id = 'turn-stamp'"
+            )).one()
+
+    store.save_turn_files(turn_id="turn-stamp", bot_id="b", user_id="u",
+                          trigger_message_id="m", files=[_mod("a.py", "v1", "v2")])
+    created, first_update = stamps()
+    time.sleep(0.01)
+    store.save_turn_files(turn_id="turn-stamp", bot_id="b", user_id="u",
+                          trigger_message_id="m", files=[_mod("a.py", "v1", "v3")])
+    created_again, second_update = stamps()
+
+    assert first_update is not None and created_again == created
+    assert second_update > first_update
 
 
 def test_summaries_for_triggers_keys_by_message(store):

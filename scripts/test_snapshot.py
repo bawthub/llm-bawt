@@ -51,6 +51,9 @@ RUN_RETENTION_S = 14 * 24 * 3600
 RUNNER_FILES = ("Makefile", "pyproject.toml", "uv.lock", "scripts/test_suite.py",
                 "scripts/test_snapshot.py", "tests/conftest.py", "tests/suite_manifest.py")
 PROVENANCE_WINDOW_DAYS = 14
+# Longest a turn is assumed to keep upserting one row. Only rows without
+# updated_at (written before that column existed) rely on it.
+LEGACY_TURN_BOUND_S = 24 * 3600
 # gate = test-all at exactly REV, recorded as the SHIP receipt (TASK-1457). The
 # repeated stress step is an optional diagnostic (make test-stress), not part of it.
 SUITE_TARGETS = {"offline": "test-all", "target": "test-target", "gate": "test-all",
@@ -197,7 +200,21 @@ class EditRow:
     before_sha256: str | None
     after_sha256: str | None
     exact: bool  # False when binary or truncated: the sha is not of the real bytes
-    ts: float
+    ts: float  # created_at: the turn's FIRST capture of this path
+    # updated_at: the turn's last upsert of this path. None for rows written
+    # before the column existed, whose last edit time is unknown.
+    last_ts: float | None = None
+
+    def touched_since(self, start: float) -> bool:
+        """Whether this turn may have edited the path at or after ``start``.
+
+        A turn row is upserted in place, so a row created before ``start`` can
+        still carry edits made after it. Without ``updated_at`` that is unknown:
+        assume overlap unless the row began more than a whole turn earlier.
+        """
+        if self.last_ts is not None:
+            return max(self.ts, self.last_ts) >= start
+        return self.ts >= start - LEGACY_TURN_BOUND_S
 
     def before_key(self) -> object:
         if not self.exact:
@@ -275,7 +292,8 @@ class OwnershipCheck:
         if not used:
             return False, "unchanged vs HEAD"
         start = min(row.ts for row in used)
-        others = sorted({row.bot_id for row in rows if row.bot_id != self.author and row.ts >= start})
+        others = sorted({row.bot_id for row in rows
+                         if row.bot_id != self.author and row.touched_since(start)})
         if others:
             return False, f"also edited by {', '.join(others)} during {self.author}'s edits"
         suffix = " via committed checkpoint" if checkpoint else ""
@@ -350,7 +368,10 @@ def load_rows(pgq: str | None, repo_name: str) -> list[EditRow] | None:
     if not pgq or not re.fullmatch(r"[A-Za-z0-9._-]+", repo_name):
         return None
     sql = ("SELECT bot_id, path, change_kind, coalesce(before_sha256, ''), coalesce(after_sha256, ''), "
-           "(\"binary\" OR truncated), extract(epoch from created_at) FROM turn_changed_files "
+           "(\"binary\" OR truncated), extract(epoch from created_at), "
+           # to_jsonb keeps this valid before the app has added the column.
+           "extract(epoch from (to_jsonb(t) ->> 'updated_at')::timestamptz) "
+           "FROM turn_changed_files AS t "
            f"WHERE repo_label = '{repo_name}' AND created_at >= now() - interval "
            f"'{PROVENANCE_WINDOW_DAYS} days'")
     try:
@@ -366,13 +387,15 @@ def load_rows(pgq: str | None, repo_name: str) -> list[EditRow] | None:
 def rows_from_csv(text: str, repo_name: str) -> list[EditRow]:
     rows = []
     for raw in csv.reader(io.StringIO(text)):
-        if len(raw) != 7:
+        if len(raw) not in (7, 8):
             continue
-        bot, path, kind, before, after, inexact, ts = raw
+        bot, path, kind, before, after, inexact, ts = raw[:7]
+        last = raw[7] if len(raw) == 8 else ""
         rows.append(EditRow(bot_id=(bot or "unknown").lower(),
                             path=relative_record_path(path, repo_name), change_kind=kind,
                             before_sha256=before or None, after_sha256=after or None,
-                            exact=inexact.lower() not in {"t", "true", "1"}, ts=float(ts)))
+                            exact=inexact.lower() not in {"t", "true", "1"}, ts=float(ts),
+                            last_ts=float(last) if last else None))
     return rows
 
 

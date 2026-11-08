@@ -433,6 +433,41 @@ def test_paths_refuses_another_bots_edit_without_creating_a_snapshot(repo, root,
     assert receipt["patches"] == [] and not (root / "wt").exists()
 
 
+def foreign_row(path: str, created: float, updated: float) -> str:
+    """An al turn row first captured at ``created`` and last upserted at ``updated``."""
+    return f"al,{path},modified,{sha(b'x')},{sha(b'y')},f,{created},{updated}\n"
+
+
+@REAL_GIT
+def test_paths_refuses_a_foreign_turn_updated_during_the_author_edit(repo, root, tmp_path):
+    # al's turn row was created before snark's first edit, then upserted while
+    # snark was editing: created_at alone would hide the interleaved edit.
+    x2(repo)
+    provenance = tmp_path / "provenance.json"
+    provenance.write_text(json.dumps({"rows": foreign_row("app.py", 100, 300)
+                                      + edit_row(repo, "snark", "app.py", ts=200)}))
+
+    code, receipt = run_cli(repo, root, "--path", "app.py", "--author", "snark",
+                            "--provenance-file", str(provenance))
+
+    assert (code, receipt["status"]) == (2, "refused"), receipt
+    assert "also edited by al" in receipt["error"]
+    assert receipt["patches"] == [] and not (root / "wt").exists()
+
+
+@REAL_GIT
+def test_paths_accepts_a_foreign_turn_that_finished_before_the_author_edit(repo, root, tmp_path):
+    x2(repo)
+    provenance = tmp_path / "provenance.json"
+    provenance.write_text(json.dumps({"rows": foreign_row("app.py", 100, 150)
+                                      + edit_row(repo, "snark", "app.py", ts=200)}))
+
+    code, receipt = run_cli(repo, root, "--path", "app.py", "--author", "snark",
+                            "--provenance-file", str(provenance))
+
+    assert (code, receipt["status"]) == (0, "passed"), receipt
+
+
 @REAL_GIT
 def test_a_line_attribution_report_is_never_ownership_proof(repo, root, tmp_path):
     """Loopy r3 B1: recon credited AUTHOR with identical text in a different
@@ -588,6 +623,26 @@ def test_provenance_rows_parse_and_normalize_paths():
     parsed = snap.rows_from_csv(text, "llm-bawt")
     assert parsed[0] == row("al", "aa", "bb", 10.5, path="src/x.py")
     assert parsed[1].path == "~/dev/.byte-1233w/src/x.py" and parsed[1].exact is False
+    assert parsed[0].last_ts is None
+    with_update = snap.rows_from_csv("al,x.py,modified,aa,bb,f,10,20.5\n", "llm-bawt")
+    assert with_update[0].last_ts == 20.5
+
+
+@pytest.mark.parametrize(("created", "updated", "overlaps"), [
+    (100, 300, True),     # created before the author began, upserted after
+    (100, 150, False),    # finished before the author began
+    (250, 260, True),     # wholly inside
+    (100, None, True),    # legacy row: last edit unknown, within one turn bound
+    (200 - snap.LEGACY_TURN_BOUND_S - 1, None, False),  # legacy, older than any turn
+])
+def test_foreign_row_overlap_uses_the_last_upsert(created, updated, overlaps):
+    rows = [row("snark", HEAD, NOW, 200),
+            snap.EditRow(bot_id="al", path="app.py", change_kind="modified",
+                         before_sha256="x" * 64, after_sha256="y" * 64, exact=True,
+                         ts=created, last_ts=updated)]
+    ok, why = snap.OwnershipCheck("snark", rows).chain("app.py", HEAD, NOW)
+    assert ok is not overlaps
+    assert ("also edited by al" in why) is overlaps
 
 
 # ── Interrupt (real process, real signals) ─────────────────────────────────

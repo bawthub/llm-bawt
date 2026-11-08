@@ -113,6 +113,12 @@ class TurnChangedFile(SQLModel, table=True):
         default_factory=lambda: datetime.now(timezone.utc),
         sa_column=Column(DateTime(timezone=True), nullable=False, index=True),
     )
+    # Last upsert of this row. created_at keeps the first capture, so a turn
+    # that edits the path again later is only visible through this column.
+    updated_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
     turn_id: str = Field(sa_column=Column(String(128), nullable=False, index=True))
     bot_id: str | None = Field(default=None, index=True)
     user_id: str | None = Field(default=None, index=True)
@@ -483,6 +489,15 @@ class ChangedFilesStore:
                 conn.execute(sa_text(
                     "ALTER TABLE turn_changed_files ADD COLUMN in_repo BOOLEAN"
                 ))
+            if "updated_at" not in legacy_columns:
+                column_type = (
+                    "TIMESTAMP WITH TIME ZONE"
+                    if conn.dialect.name == "postgresql"
+                    else "DATETIME"
+                )
+                conn.execute(sa_text(
+                    f"ALTER TABLE turn_changed_files ADD COLUMN updated_at {column_type}"
+                ))
             if "commit_requested_at" not in legacy_columns:
                 column_type = (
                     "TIMESTAMP WITH TIME ZONE"
@@ -558,6 +573,7 @@ class ChangedFilesStore:
                     if row is None:
                         row = TurnChangedFile(turn_id=turn_id, repo_key=f.repo_key, path=f.path)
                         session.add(row)
+                    row.updated_at = datetime.now(timezone.utc)
                     row.bot_id = bot_id
                     row.user_id = user_id
                     row.trigger_message_id = trigger_message_id
