@@ -33,6 +33,41 @@ def single_explicit_target(targets: Any, sender_bot_id: str) -> str | None:
     return None if target == sender_bot_id.strip().lower() else target
 
 
+# Per-target fields an agent acts on; everything else (metadata, the batch
+# record repeated per target, failure origin, timestamps) stays in the
+# durable row behind ``bots_delivery_get`` (TASK-1484).
+_TARGET_FIELDS = ("target_bot_id", "delivery_id", "status")
+
+
+def _compact_target(receipt: dict[str, Any], common_note: Any) -> dict[str, Any]:
+    out = {k: receipt[k] for k in _TARGET_FIELDS if receipt.get(k) is not None}
+    if "target_bot_id" in out:
+        out = {"target": out.pop("target_bot_id"), **out}
+    if receipt.get("duplicate"):
+        out["duplicate"] = True
+    if receipt.get("success") is False:
+        out["success"] = False
+        if receipt.get("last_error"):
+            out["last_error"] = receipt["last_error"]
+    if receipt.get("note") and receipt["note"] != common_note:
+        out["note"] = receipt["note"]
+    return out
+
+
+def compact_batch_receipt(result: dict[str, Any]) -> dict[str, Any]:
+    """One line per target plus the batch id; full rows via ``bots_delivery_get``."""
+    deliveries = [d for d in result.get("deliveries") or [] if isinstance(d, dict)]
+    note = next((d.get("note") for d in deliveries if d.get("success") and d.get("note")), None)
+    out = dict(result)
+    if "deliveries" in result:
+        out["deliveries"] = [_compact_target(d, note) for d in deliveries]
+    if note:
+        out["note"] = note
+    if deliveries:
+        out["full_receipt"] = "bots_delivery_get(delivery_id)"
+    return out
+
+
 def selector_error(exc: SelectorError, sender_bot_id: str) -> dict[str, Any]:
     return {"success": False, "dispatched": False, "error": str(exc), "sender": sender_bot_id}
 
@@ -68,8 +103,8 @@ async def send_batch(
         return {"success": False, "dispatched": False, "mode": mode.delivery,
                 "error": str(exc) or exc.__class__.__name__}
     if isinstance(data, dict) and "batch_id" in data:
-        return {**data, "success": bool(data.get("dispatched")),
-                "status_code": response.status_code}
+        return compact_batch_receipt({**data, "success": bool(data.get("dispatched")),
+                                      "status_code": response.status_code})
     detail = data.get("detail") if isinstance(data, dict) else data
     error = detail.get("error") if isinstance(detail, dict) else None
     return {

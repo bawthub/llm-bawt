@@ -9,6 +9,7 @@ per-target batch loop and the MCP ``targets`` routing. The PostgreSQL halves
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 from typing import Any
 
@@ -540,6 +541,51 @@ def test_send_batch_posts_one_body_and_reports_the_receipt(monkeypatch):
         "sender_bot_id": SENDER, "message": "hi", "targets": ["fx-a", "fx-c"],
         "exclude": ["fx-b"], "mode": STEER_ONLY, "reply_mode": "async"}, None)]
     assert result == {"batch_id": "b", "dispatched": True, "success": True, "status_code": 202}
+
+
+def _full_receipt(target, status="QUEUED", **extra):
+    batch = {"selector": {"bots": ["fx-a", "fx-c"]}, "targets": ["fx-a", "fx-c"]}
+    return {"delivery_id": f"d-{target}", "status": status, "sender_bot_id": SENDER,
+            "target_bot_id": target, "author": {"entity_type": "bot", "entity_id": SENDER},
+            "metadata": {"batch_id": "b", "batch": batch, "_failure_origin": {"turn": "t" * 200}},
+            "created_at": "2026-11-08T00:00:00Z", "updated_at": "2026-11-08T00:00:00Z",
+            "success": True, "queued": status == "QUEUED", "delivery": "steer_or_idle",
+            "note": "Delivery is durable.", "duplicate": False, **extra}
+
+
+def test_send_batch_returns_compact_per_target_receipts(monkeypatch):
+    """TASK-1484: no full record, batch metadata or failure origin per target."""
+    result, _ = _post_batch(monkeypatch, 202, {
+        "batch_id": "b", "mode": "steer_or_idle", "dispatched": True,
+        "deliveries": [_full_receipt("fx-a"), _full_receipt("fx-c", "STEERING", duplicate=True)],
+        "refused": [{"target": "fx-z", "error": "private_bot"}],
+    })
+    assert result == {
+        "batch_id": "b", "mode": "steer_or_idle", "dispatched": True, "success": True,
+        "status_code": 202,
+        "deliveries": [
+            {"target": "fx-a", "delivery_id": "d-fx-a", "status": "QUEUED"},
+            {"target": "fx-c", "delivery_id": "d-fx-c", "status": "STEERING", "duplicate": True},
+        ],
+        "refused": [{"target": "fx-z", "error": "private_bot"}],
+        "note": "Delivery is durable.",
+        "full_receipt": "bots_delivery_get(delivery_id)",
+    }
+    assert "_failure_origin" not in json.dumps(result)
+
+
+def test_send_batch_keeps_a_failed_targets_error_and_own_note(monkeypatch):
+    result, _ = _post_batch(monkeypatch, 202, {
+        "batch_id": "b", "dispatched": True,
+        "deliveries": [_full_receipt("fx-a"),
+                       _full_receipt("fx-c", "FAILED", success=False, last_error="boom",
+                                     note="Delivery was recorded but is already FAILED.")],
+        "refused": [],
+    })
+    assert result["deliveries"][1] == {
+        "target": "fx-c", "delivery_id": "d-fx-c", "status": "FAILED", "success": False,
+        "last_error": "boom", "note": "Delivery was recorded but is already FAILED."}
+    assert result["note"] == "Delivery is durable."
 
 
 def test_send_batch_reports_a_refusal_as_not_dispatched(monkeypatch):
