@@ -548,5 +548,5 @@ async def test_api_key_report_follows_the_connected_credential(monkeypatch):
 
     openai = OpenAIApiUsageAdapter()
     monkeypatch.setattr(openai, "_connection", lambda: None)
-    assert (await openai.fetch()).status == "ok"  # the clients' legacy env key still pays
+    assert (await openai.fetch()).status == "unauthorized"  # retired env is not a connection
     assert openai.credential_connected_at() is None

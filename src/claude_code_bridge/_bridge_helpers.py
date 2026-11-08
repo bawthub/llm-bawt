@@ -377,7 +377,6 @@ class AgentSpawnIndex:
 #   2. the legacy self-owned bundle at ~/.claude/.credentials.json (read-only
 #      fallback — the ~/.claude dir mount is harness session state, not a
 #      credential mount; explicitly out of scope for TASK-636)
-#   4. env CLAUDE_CODE_OAUTH_TOKEN (long-lived setup-token)
 
 _LEGACY_CREDENTIALS_PATH = Path.home() / ".claude" / ".credentials.json"
 _REFRESH_BUFFER_MS = 5 * 60 * 1000
@@ -470,11 +469,6 @@ def _get_fresh_oauth_token(*, force_refresh: bool = False) -> str | None:
         if token and not _token_expired_or_stale(bundle.get("expiresAt")):
             return token
         stale_candidate = stale_candidate or token
-
-    # 3. Long-lived setup-token from env.
-    env_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
-    if env_token:
-        return env_token
 
     # Last resort: a stale token beats none (clock skew may save it).
     if stale_candidate:

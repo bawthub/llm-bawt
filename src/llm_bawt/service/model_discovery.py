@@ -114,6 +114,8 @@ class ExistingFetcherProvider(ModelDiscoveryProvider):
         self._pass_key = pass_key
 
     def fetch(self) -> list[dict[str, Any]]:
+        from .providers.api_key import STORE_ONLY_PROVIDERS
+
         key = None
         if self._provider_id and self._config is not None:
             from .providers.api_key import resolve_api_key
@@ -124,7 +126,7 @@ class ExistingFetcherProvider(ModelDiscoveryProvider):
                 env_vars=self._key_envs,
                 config_attr=self._config_attr,
             )
-        if key is None:
+        if key is None and self._provider_id not in STORE_ONLY_PROVIDERS:
             key = next((os.getenv(name) for name in self._key_envs if os.getenv(name)), None)
         if self._key_envs and not key:
             raise ModelDiscoveryError(

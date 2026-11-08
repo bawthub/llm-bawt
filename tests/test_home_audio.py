@@ -28,9 +28,11 @@ _SETTINGS = HomeAudioSettings(
 
 
 @pytest.fixture(autouse=True)
-def no_ha_record(monkeypatch):
-    """No Integrations record: these tests cover the legacy settings path."""
-    monkeypatch.setattr(ha_credentials, "read_connection", lambda *args, **kwargs: None)
+def stored_ha_record(monkeypatch):
+    """Read synthetic stored credentials, never the deployment environment."""
+    monkeypatch.setattr(ha_credentials, "read_connection", lambda *args, **kwargs: SimpleNamespace(
+        meta={"url": "http://ha/api/mcp"}, secret={"token": "test"},
+    ))
 
 
 @pytest.fixture
@@ -115,8 +117,7 @@ def test_wav_validation():
 
 
 def client(http):
-    return HomeAudioClient(SimpleNamespace(HA_NATIVE_MCP_URL="http://ha/api/mcp", HA_NATIVE_MCP_TOKEN="test"),
-                           _SETTINGS, http)
+    return HomeAudioClient(SimpleNamespace(), _SETTINGS, http)
 
 
 @pytest.mark.anyio

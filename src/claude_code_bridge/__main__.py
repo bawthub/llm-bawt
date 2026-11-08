@@ -45,7 +45,7 @@ def main() -> None:
         logger.error("Cannot connect to Redis at %s", redis_url)
         sys.exit(1)
 
-    # Check for OAuth token (broker endpoint, legacy file, or env). The
+    # Check for OAuth token (broker endpoint or legacy file). The
     # Anthropic subscription token is still required for the default
     # (api.anthropic.com) path; the proxy path uses ChatGPT OAuth from
     # ~/.codex/auth.json but the SDK still needs *some* ANTHROPIC_AUTH_TOKEN
@@ -67,8 +67,7 @@ def main() -> None:
             "No OAuth token available yet — starting anyway; turns will fail "
             "until the Claude provider is connected. Ensure the app (llm-bawt) "
             "is running and Claude is connected (the bridge fetches tokens via "
-            "the /v1/providers/claude/token broker endpoint, TASK-636), or set "
-            "CLAUDE_CODE_OAUTH_TOKEN, or mount a legacy "
+            "the /v1/providers/claude/token broker endpoint, TASK-636), or mount a legacy "
             "~/.claude/.credentials.json into the container."
         )
 

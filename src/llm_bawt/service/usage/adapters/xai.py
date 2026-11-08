@@ -26,7 +26,6 @@ class XaiUsageAdapter(ApiKeyBalanceAdapter):
     backend = "claude-code"
     access_path_keys = ("xai-chat", "xai-responses")
     connection_id = "xai"
-    key_env_vars = ("XAI_API_KEY", "LLM_BAWT_XAI_API_KEY", "GROK_API_KEY")
     report_ttl = 10.0  # debounce on-demand refreshes, including turn completions
 
     def _management_connection(self):

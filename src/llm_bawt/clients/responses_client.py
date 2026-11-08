@@ -40,19 +40,17 @@ class ResponsesClient(LLMClient):
         super().__init__(model, config, model_definition=model_definition)
         self.base_url = base_url
         if api_key is None:
-            # DB-first (CredentialStore via the `openai-api` adapter); env is a
-            # deprecated fallback (TASK-825). Subclasses (GrokClient) pass their
-            # own resolved key explicitly.
+            # Stored OpenAI connection only. Subclasses (GrokClient) pass
+            # their own resolved key explicitly.
             from ..service.providers.api_key import resolve_api_key
 
-            api_key = resolve_api_key(config, "openai-api", env_vars=("OPENAI_API_KEY",))
+            api_key = resolve_api_key(config, "openai-api")
         self.api_key = api_key
 
         if not self.api_key and not base_url:
             raise ValueError(
                 "OpenAI API key not found. Connect the OpenAI API provider in "
-                "the UI (Settings → Providers), or set OPENAI_API_KEY as a "
-                "legacy fallback."
+                "the UI (Settings → Providers)."
             )
 
         effective_key = self.api_key or "not-needed"

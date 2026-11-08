@@ -69,14 +69,6 @@ CLIENT_SETTING_GROUPS: List[SettingGroup] = [
         ],
     ),
     SettingGroup(
-        title="API keys",
-        note="Keys needed for cloud LLM providers.",
-        settings=[
-            Setting("OPENAI_API_KEY", "OpenAI / compatible API key", secret=True, env_only=True),
-            Setting("XAI_API_KEY", "xAI (Grok) API key", secret=True),
-        ],
-    ),
-    SettingGroup(
         title="PostgreSQL",
         note="Memory backend — needed for persistent memory / history.",
         settings=[

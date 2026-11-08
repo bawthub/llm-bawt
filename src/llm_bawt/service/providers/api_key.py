@@ -9,9 +9,8 @@ Two pieces live here:
   shape; consolidating it here is a follow-up, not a requirement.
 
 - :func:`resolve_api_key` — the DB-first key resolution used by the LLM
-  clients: explicit key -> encrypted CredentialStore -> env fallback (kept for
-  dev/backward-compat, logs a deprecation note when used). This is what
-  retires env vars as the source of truth for LLM credentials.
+  clients: explicit key -> encrypted CredentialStore. Providers not yet
+  migrated to store-only retain a deprecated env fallback.
 """
 
 from __future__ import annotations
@@ -37,6 +36,8 @@ from .base import (
 logger = logging.getLogger(__name__)
 
 _SECRET_FIELD = "api_key"
+# These providers have completed the env-to-store cutover (TASK-1681).
+STORE_ONLY_PROVIDERS = frozenset({"openai-api", "xai"})
 
 
 class ApiKeyAdapter(ProviderAdapter):
@@ -152,6 +153,9 @@ def resolve_api_key(
 ) -> str | None:
     """Resolve an LLM provider API key, DB-first.
 
+    OpenAI and xAI are store-only after TASK-1681: caller-supplied explicit
+    credentials still win, but neither env nor Config is a fallback.
+
     Order (first hit wins):
     1. ``explicit`` — a key handed in by the caller (model_definition.api_key).
     2. Encrypted :class:`CredentialStore` via the provider adapter (the
@@ -163,6 +167,17 @@ def resolve_api_key(
     """
     if explicit:
         return explicit
+
+    if provider_id in STORE_ONLY_PROVIDERS:
+        from ..connection_secrets import ConnectionUnavailable  # noqa: PLC0415
+
+        try:
+            return resolve_stored_api_key(config, provider_id)
+        except ConnectionUnavailable as error:
+            # No env recovery. Optional-key local endpoints can still use
+            # their dummy key; cloud clients report an unavailable connection.
+            logger.debug("Stored credential unavailable for %s: %s", provider_id, error.code)
+            return None
 
     try:
         from .registry import get_adapter
@@ -207,7 +222,8 @@ def resolve_stored_api_key(config: Config, provider_id: str, env_vars: Sequence[
     """A provider's API key, record-first and fail-closed (TASK-1476).
 
     The ``provider_connection:<id>`` record wins. ``env_vars`` are read only
-    when no record exists, with one warning per provider that names the vars
+    for providers not in STORE_ONLY_PROVIDERS, when no record exists, with
+    one warning per provider that names the vars
     and never a value. A record that exists but can't be used (disconnected,
     undecryptable, store down) raises
     :class:`~llm_bawt.service.connection_secrets.ConnectionUnavailable`; it
@@ -218,6 +234,8 @@ def resolve_stored_api_key(config: Config, provider_id: str, env_vars: Sequence[
     found = read_connection(config, "provider", provider_id, FieldSpec(secret=(_SECRET_FIELD,)))
     if found is not None:
         return found.secret[_SECRET_FIELD]
+    if provider_id in STORE_ONLY_PROVIDERS:
+        return None
     for var in env_vars:
         value = os.getenv(var)
         if value:

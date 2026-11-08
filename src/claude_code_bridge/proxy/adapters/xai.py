@@ -19,10 +19,8 @@ All it supplies is credentials: ``authorize()`` returns
 ``(bearer, base_url)`` and the shared base class does the rest.
 
 Auth: a standard xAI API key, read on every call from the app's API-key
-broker (``/v1/providers/xai/token``, the DB-connected key). Only when the
-broker says no key is connected (503) does the legacy bridge env apply:
-``XAI_API_KEY`` (``LLM_BAWT_XAI_API_KEY``/``GROK_API_KEY`` as aliases), with
-a warning. Models are namespaced ``xai/<model>``
+broker (``/v1/providers/xai/token``, the DB-connected key). There is no
+deployment-environment credential fallback. Models are namespaced ``xai/<model>``
 (e.g. ``xai/grok-4.5``, ``xai/grok-4.3``); the proxy strips the ``xai/``
 prefix before handing the bare upstream model to ``call``.
 """
@@ -46,7 +44,6 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_BASE_URL = "https://api.x.ai/v1"
 BASE_URL_ENV = "XAI_BASE_URL"
-API_KEY_ENVS = ("XAI_API_KEY", "LLM_BAWT_XAI_API_KEY", "GROK_API_KEY")
 
 
 def _env_true(name: str, default: bool) -> bool:
@@ -62,23 +59,10 @@ class XaiAdapter(ProviderAdapter):
     name: ClassVar[str] = "xai"
 
     def _api_key(self) -> str:
-        """The DB-connected key from the app broker (TASK-1295 B1b).
-
-        Only an explicit "nothing connected" answer (503) may fall back to the
-        legacy bridge-environment key; any other broker failure surfaces so a
-        stale env key never masks a broken or rotated connection.
-        """
+        """The DB-connected key from the app broker, never a deployment env key."""
         try:
             return fetch_provider_api_key("xai")
         except BrokerKeyNotInstalled:
-            for env in API_KEY_ENVS:
-                key = os.getenv(env)
-                if key:
-                    logger.warning(
-                        "Using %s from the bridge environment because no "
-                        "DB-connected xAI key is installed (legacy)", env,
-                    )
-                    return key
             raise RuntimeError(
                 "xAI API key required: connect an xAI API key in Settings → "
                 "Providers."

@@ -184,6 +184,8 @@ def test_org_scope_rejected_without_a_balance_read_or_persist(offline, monkeypat
 
 
 def test_connection_http_route_and_inference_broker_separation(offline, monkeypatch):
+    from tests.stored_provider_keys import stub_stored_keys
+
     mock_connect(monkeypatch)
     monkeypatch.setattr(provider_routes, "get_service", lambda: SimpleNamespace(config=None))
     monkeypatch.delenv("BRIDGE_CLAUDE_TOKEN_SECRET", raising=False)
@@ -199,8 +201,10 @@ def test_connection_http_route_and_inference_broker_separation(offline, monkeypa
     assert access_path_adapter(None, "xai-chat").id == "xai"
     assert access_path_adapter(None, "xai-responses").id == "xai"
     assert resolve_api_key(None, CONNECTION_ID) is None
+    stub_stored_keys(monkeypatch, {})
     assert resolve_api_key(None, "xai") is None  # reporting key never supplies inference
     offline.records["xai"] = ConnectionRecord(provider="xai", status="connected", secret={"api_key": "fixture-inference"})
+    stub_stored_keys(monkeypatch, {"xai": offline.records["xai"].secret["api_key"]})
     assert resolve_api_key(None, "xai") == "fixture-inference"
 
 

@@ -1,5 +1,4 @@
-"""TASK-1612: the former env-only credential readers resolve the stored
-connection first and keep env only as a fallback."""
+"""Credential readers use stored connections; OpenAI/xAI no longer fall back to env."""
 
 from __future__ import annotations
 
@@ -11,6 +10,7 @@ import pytest
 from llm_bawt import model_manager
 from llm_bawt.media.clients.grok_media import GrokMediaClient
 from llm_bawt.media.clients.openai_images import OpenAIImageClient
+from llm_bawt.service import connection_secrets
 from llm_bawt.service.providers import registry as provider_registry
 from llm_bawt.service.providers.api_key import ApiKeyAdapter
 
@@ -43,6 +43,15 @@ def stored(monkeypatch):
             return _StoredKey(records.get(provider_id))
 
         monkeypatch.setattr(provider_registry, "get_adapter", get_adapter)
+
+        def read(_config, _kind, provider_id, _spec):
+            calls.append(provider_id)
+            if broken:
+                raise connection_secrets.ConnectionUnavailable("store_unavailable")
+            key = records.get(provider_id)
+            return SimpleNamespace(secret={"api_key": key}) if key else None
+
+        monkeypatch.setattr(connection_secrets, "read_connection", read)
         return calls
 
     return install
@@ -79,12 +88,12 @@ def test_media_client_prefers_stored_key_over_env(stored, monkeypatch, client_cl
     [(GrokMediaClient, "LLM_BAWT_XAI_API_KEY"), (OpenAIImageClient, "OPENAI_API_KEY")],
 )
 @pytest.mark.parametrize("broken", [False, True])
-def test_media_client_falls_back_to_env_without_usable_record(stored, monkeypatch, client_cls, env_name, broken):
+def test_media_client_ignores_env_without_usable_record(stored, monkeypatch, client_cls, env_name, broken):
     stored({}, broken=broken)
     monkeypatch.setenv(env_name, "env-key")
     client = client_cls(config=CONFIG)
     try:
-        assert client.api_key == "env-key"
+        assert client.api_key == ""
     finally:
         _close(client)
 
@@ -152,6 +161,14 @@ def test_cli_openai_discovery_uses_stored_key(stored, monkeypatch):
     monkeypatch.setattr(model_manager, "fetch_openai_api_models", lambda key=None: (seen.append(key), (True, []))[1])
     assert _manager()._fetch_api_models(model_manager.PROVIDER_OPENAI) == (True, [])
     assert seen == ["stored-openai"]
+
+
+def test_openai_discovery_never_lets_sdk_read_env_when_store_has_no_key(stored, monkeypatch):
+    stored({})
+    monkeypatch.setenv("OPENAI_API_KEY", "env-key")
+    monkeypatch.setattr(model_manager, "Config", lambda: CONFIG)
+    monkeypatch.setattr("openai.OpenAI", lambda **_kwargs: pytest.fail("SDK must not read its env fallback"))
+    assert model_manager.fetch_openai_api_models() == (False, [])
 
 
 def test_anthropic_discovery_without_explicit_key_uses_stored_record(stored, monkeypatch):

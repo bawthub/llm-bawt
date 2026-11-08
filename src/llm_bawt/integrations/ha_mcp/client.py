@@ -251,7 +251,6 @@ class HomeAssistantMCPClient:
         self._config = config
         self._base_url = (getattr(config, "HA_MCP_URL", "") or "").rstrip("/")
         self._timeout = float(max(1, int(getattr(config, "HA_MCP_TIMEOUT", 10) or 10)))
-        self._auth_token = (getattr(config, "HA_MCP_AUTH_TOKEN", "") or "").strip()  # Reserved for future authenticated transports.
 
     @property
     def available(self) -> bool:

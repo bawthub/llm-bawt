@@ -71,14 +71,16 @@ class NativeAuthRoute(ABC):
 
 
 class LegacyNativeRoute(NativeAuthRoute):
-    """A command with no ``access_path``: unchanged pre-TASK-1295 behavior."""
+    """A command with no ``access_path`` using broker or legacy-file credentials."""
 
     access_path = None
     oauth_gateway_eligible = True
     claude_subscription = True
 
     def env(self, *, force_refresh: bool, gateway_base_url: str | None) -> dict[str, str]:
-        env: dict[str, str] = {}
+        # The SDK overlays this on the parent env: suppress a retired setup
+        # token even when neither the broker nor a legacy file provides one.
+        env: dict[str, str] = {"CLAUDE_CODE_OAUTH_TOKEN": ""}
         fresh_token = _get_fresh_oauth_token(force_refresh=force_refresh)
         if fresh_token:
             env["CLAUDE_CODE_OAUTH_TOKEN"] = fresh_token

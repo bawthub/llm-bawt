@@ -3,6 +3,23 @@ from __future__ import annotations
 from claude_code_bridge import _bridge_helpers as helpers
 
 
+def test_no_broker_or_legacy_bundle_never_reads_deployment_env_token(monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "retired-env-token")
+    monkeypatch.setattr(helpers, "_fetch_broker_token", lambda **_kwargs: (None, None))
+    monkeypatch.setattr(helpers, "_read_oauth_bundle", lambda _path: None)
+    assert helpers._get_fresh_oauth_token() is None
+
+
+def test_legacy_sdk_route_suppresses_inherited_oauth_env_when_no_token(monkeypatch):
+    from claude_code_bridge import native_auth
+
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "retired-env-token")
+    monkeypatch.setattr(native_auth, "_get_fresh_oauth_token", lambda **_kwargs: None)
+    assert native_auth.LegacyNativeRoute().env(
+        force_refresh=False, gateway_base_url=None,
+    )["CLAUDE_CODE_OAUTH_TOKEN"] == ""
+
+
 def test_direct_turn_reads_broker_each_time_and_observes_rotation(monkeypatch):
     tokens = iter([("token-a", 1000), ("token-b", 2000)])
     calls: list[bool] = []

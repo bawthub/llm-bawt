@@ -190,7 +190,6 @@ def main():
         # Define which settings are important and should be set by the user
         # Format: field_name -> (is_secret, is_required, description)
         important_settings = {
-            'OPENAI_API_KEY': (True, False, "Required for OpenAI/compatible APIs"),
             'DEFAULT_MODEL_ALIAS': (False, False, "Default model to use"),
             'DEFAULT_BOT': (False, False, "Default bot personality"),
             'DEFAULT_USER': (False, False, "Default user profile"),

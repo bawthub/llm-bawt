@@ -1,8 +1,7 @@
 """TASK-1476: Home Assistant credentials come from the encrypted store.
 
-The ``integration_connection:home-assistant`` record wins. The deprecated
-``HA_NATIVE_MCP_URL``/``HA_NATIVE_MCP_TOKEN`` settings are read only when no
-record exists; a record that exists but can't be used never falls back to them.
+The ``integration_connection:home-assistant`` record is the only credential
+source, even when no row exists. Legacy token settings are ignored.
 Every reader resolves per operation, so a rotated token needs no restart.
 """
 
@@ -20,7 +19,6 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel
 
 from llm_bawt.core.initialization import OrchestratorInitializationMixin
-from llm_bawt.integrations import ha_credentials
 from llm_bawt.integrations.connections import IntegrationStore
 from llm_bawt.integrations.credential_integrations import CredentialIntegrations
 from llm_bawt.integrations.ha_credentials import HACredentials, HomeAssistantUnavailable, resolve_ha_credentials
@@ -58,7 +56,6 @@ def store(monkeypatch):
     made = object.__new__(IntegrationStore)
     made._store = runtime
     monkeypatch.setattr(connection_secrets, "_store", lambda config, kind: made)
-    monkeypatch.setattr(ha_credentials, "_env_fallback_warned", False)
     return made
 
 
@@ -80,13 +77,8 @@ def test_record_wins_over_env_and_strips_the_mcp_path(forms):
     assert found.mcp_url == "https://ha.example/api/mcp"
 
 
-def test_no_record_falls_back_to_env_with_one_warning_naming_vars_only(store, caplog):
-    with caplog.at_level(logging.WARNING, logger=ha_credentials.logger.name):
-        assert resolve_ha_credentials(_config()) == HACredentials("http://ha-env.example", ENV_TOKEN)
-        resolve_ha_credentials(_config())
-    warnings = [r.getMessage() for r in caplog.records]
-    assert len(warnings) == 1
-    assert "LLM_BAWT_HA_NATIVE_MCP_URL" in warnings[0] and "LLM_BAWT_HA_NATIVE_MCP_TOKEN" in warnings[0]
+def test_no_record_ignores_complete_legacy_env_credentials(store, caplog):
+    assert resolve_ha_credentials(_config()) is None
     assert ENV_TOKEN not in caplog.text
 
 
@@ -215,6 +207,13 @@ def test_weather_route_uses_the_record(forms, monkeypatch):
     assert result["state"] == "sunny"
     assert str(requests[0].url) == "https://ha.example/api/states/weather.home"
     assert requests[0].headers["authorization"] == f"Bearer {STORED_TOKEN}"
+
+
+def test_weather_without_record_ignores_both_legacy_token_settings(store, monkeypatch):
+    requests: list[httpx.Request] = []
+    config = _config(HA_MCP_URL="http://ha-legacy.example/api/mcp", HA_MCP_AUTH_TOKEN=ENV_TOKEN)
+    assert _weather(monkeypatch, config, requests) == {"error": "Home Assistant not configured"}
+    assert requests == []
 
 
 def test_weather_route_surfaces_an_unusable_record_without_legacy_fallback(forms, monkeypatch):

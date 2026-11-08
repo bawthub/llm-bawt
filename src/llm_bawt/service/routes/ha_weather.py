@@ -18,28 +18,10 @@ _CACHE_TTL = 900  # 15 minutes
 
 
 def _ha_credentials(config: Any) -> tuple[str | None, str | None]:
-    """Derive HA base URL and token from available config.
-
-    Tries HA_NATIVE_MCP_URL first (strips /api/mcp suffix), then falls back
-    to HA_MCP_URL (strips /api/mcp if present, otherwise uses as-is).
-    """
-    # The Integrations record first, then the deprecated native settings
-    # (TASK-1476). A stored record that can't be used raises
-    # HomeAssistantUnavailable and never falls through to env.
+    """Read the authoritative Home Assistant connection, without env fallback."""
     credentials = resolve_ha_credentials(config)
     if credentials is not None:
         return credentials.base_url, credentials.token
-
-    # Fall back to legacy MCP config
-    mcp_url = getattr(config, "HA_MCP_URL", "") or ""
-    mcp_token = getattr(config, "HA_MCP_AUTH_TOKEN", "") or ""
-    native_token = getattr(config, "HA_NATIVE_MCP_TOKEN", "") or ""
-    if mcp_url:
-        base = mcp_url.rsplit("/api/mcp", 1)[0] if "/api/mcp" in mcp_url else mcp_url.rstrip("/")
-        token = mcp_token or native_token
-        if token:
-            return base, token
-
     return None, None
 
 

@@ -177,17 +177,9 @@ class Config(RuntimeTunables, BaseSettings):
         default=10,
         description="Timeout in seconds for Home Assistant MCP calls (Set via LLM_BAWT_HA_MCP_TIMEOUT)",
     )
-    HA_MCP_AUTH_TOKEN: str = Field(
-        default="",
-        description="Optional bearer token for Home Assistant MCP (Set via LLM_BAWT_HA_MCP_AUTH_TOKEN)",
-    )
     HA_NATIVE_MCP_URL: str = Field(
         default="",
         description="Home Assistant native MCP endpoint URL, e.g. http://hass.home:8123/api/mcp (Set via LLM_BAWT_HA_NATIVE_MCP_URL)",
-    )
-    HA_NATIVE_MCP_TOKEN: str = Field(
-        default="",
-        description="Home Assistant long-lived access token for native MCP auth (Set via LLM_BAWT_HA_NATIVE_MCP_TOKEN)",
     )
     HA_MCP_TOOL_EXCLUDE: str = Field(
         default="GetDateTime,HassCancelAllTimers,HassBroadcast",
@@ -257,9 +249,6 @@ class Config(RuntimeTunables, BaseSettings):
             "Set via LLM_BAWT_PUBLIC_ORIGIN."
         ),
     )
-
-    # --- xAI (Grok) Settings --- #
-    XAI_API_KEY: str = Field(default="", description="xAI API key for Grok models (get from x.ai)")
 
     # --- ChatGPT subscription discovery (TASK-1296) --- #
     CODEX_CLIENT_VERSION: str = Field(

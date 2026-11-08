@@ -37,8 +37,7 @@ class GrokClient(ResponsesClient):
         if not effective_key:
             raise ValueError(
                 "xAI API key not found. Connect the xAI provider in the UI "
-                "(Settings → Providers), or set XAI_API_KEY / "
-                "LLM_BAWT_XAI_API_KEY as a legacy fallback."
+                "(Settings → Providers)."
             )
 
         super().__init__(
@@ -58,15 +57,13 @@ class GrokClient(ResponsesClient):
 
     @staticmethod
     def _resolve_api_key(config: Config, explicit: str | None) -> str | None:
-        """DB-first (CredentialStore via the `xai` adapter), env as legacy fallback."""
+        """The encrypted xAI connection, without deployment env fallback."""
         from ..service.providers.api_key import resolve_api_key
 
         return resolve_api_key(
             config,
             "xai",
-            env_vars=("XAI_API_KEY", "LLM_BAWT_XAI_API_KEY"),
             explicit=explicit,
-            config_attr="XAI_API_KEY",
         )
 
     def get_styling(self) -> tuple[str | None, str]:

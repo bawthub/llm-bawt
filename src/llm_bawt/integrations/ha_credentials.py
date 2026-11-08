@@ -1,9 +1,8 @@
-"""Home Assistant URL and token, from the encrypted store first (TASK-1476).
+"""Home Assistant URL and token, only from the encrypted store (TASK-1681).
 
 The ``integration_connection:home-assistant`` record (the Integrations
-credentials form, shared with BawtHub's weather card) wins. Only when no record
-exists are the legacy ``HA_NATIVE_MCP_URL``/``HA_NATIVE_MCP_TOKEN`` settings
-read, with a one-time deprecation warning naming them, never a value.
+credentials form, shared with BawtHub's weather card) is authoritative.
+Legacy URL/token settings are not a credential source, even without a row.
 
 A record that exists but can't be used (disconnected, undecryptable, store
 down) raises :class:`HomeAssistantUnavailable` and never falls back to env: a
@@ -16,16 +15,12 @@ used without a restart.
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 
 from llm_bawt.service.connection_secrets import ConnectionUnavailable, integration_spec, read_connection
 
-logger = logging.getLogger(__name__)
-
 INTEGRATION_ID = "home-assistant"
 _MCP_PATH = "/api/mcp"
-_env_fallback_warned = False
 
 
 class HomeAssistantUnavailable(RuntimeError):
@@ -76,21 +71,10 @@ def check_stored_connection(config) -> bool:
 
 def resolve_ha_credentials(config) -> HACredentials | None:
     """The Home Assistant credentials to use now, or ``None`` when none are set."""
-    global _env_fallback_warned
     found = _stored(config)
     if found is not None:
         return HACredentials(_base_url(found.meta["url"]), found.secret["token"].strip())
-    url = _base_url(getattr(config, "HA_NATIVE_MCP_URL", "") or "")
-    token = (getattr(config, "HA_NATIVE_MCP_TOKEN", "") or "").strip()
-    if not url or not token:
-        return None
-    if not _env_fallback_warned:
-        _env_fallback_warned = True
-        logger.warning(
-            "Home Assistant credentials read from deprecated settings "
-            "LLM_BAWT_HA_NATIVE_MCP_URL/LLM_BAWT_HA_NATIVE_MCP_TOKEN; save them under Integrations instead"
-        )
-    return HACredentials(url, token)
+    return None
 
 
 __all__ = [

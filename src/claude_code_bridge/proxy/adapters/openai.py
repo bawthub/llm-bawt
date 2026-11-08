@@ -50,16 +50,6 @@ class OpenAIAdapter(ProviderAdapter):
         except httpx.HTTPError as exc:
             raise RuntimeError(f"OpenAI API-key broker unreachable: {exc}") from exc
         if response.is_error:
-            # Match llm-bawt's DB-first credential resolver: an explicitly
-            # unconfigured DB connection may use the deployment's legacy env
-            # key. Other broker failures remain visible instead of being masked.
-            env_key = os.getenv("OPENAI_API_KEY") if response.status_code == 503 else None
-            if env_key:
-                logger.warning(
-                    "Using OPENAI_API_KEY from the bridge environment because "
-                    "no DB-connected OpenAI key is installed"
-                )
-                return env_key
             raise RuntimeError(
                 f"OpenAI API-key broker returned {response.status_code}: "
                 f"{(response.text or '')[:200]} — connect an OpenAI API key "

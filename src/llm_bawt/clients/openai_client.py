@@ -66,7 +66,7 @@ class OpenAIClient(LLMClient):
             model: Model name/ID
             config: Application config
             base_url: Optional custom API endpoint for OpenAI-compatible servers
-            api_key: Optional API key (defaults to OPENAI_API_KEY env var)
+            api_key: Optional explicit API key (otherwise the stored OpenAI connection)
             model_definition: Optional model definition dict from models.yaml
         """
         super().__init__(model, config, model_definition=model_definition)
@@ -77,8 +77,7 @@ class OpenAIClient(LLMClient):
         if not self.api_key and not base_url:
             raise ValueError(
                 "OpenAI API key not found. Connect the OpenAI API provider in "
-                "the UI (Settings → Providers), or set OPENAI_API_KEY as a "
-                "legacy fallback."
+                "the UI (Settings → Providers)."
             )
         
         # Use dummy key for local servers if none provided
@@ -92,10 +91,10 @@ class OpenAIClient(LLMClient):
             self.client = OpenAI(api_key=effective_key)
 
     def _get_api_key(self) -> str | None:
-        """DB-first (CredentialStore via the `openai-api` adapter), env as legacy fallback."""
+        """The encrypted OpenAI connection, without deployment env fallback."""
         from ..service.providers.api_key import resolve_api_key
 
-        return resolve_api_key(self.config, "openai-api", env_vars=("OPENAI_API_KEY",))
+        return resolve_api_key(self.config, "openai-api")
 
     def supports_native_tools(self) -> bool:
         return True

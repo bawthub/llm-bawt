@@ -418,7 +418,12 @@ def _collect_dependencies(config: Config) -> DependencyInfo:
     info.torch_available = is_huggingface_available()
 
     # OpenAI
-    info.openai_key_set = bool(os.getenv("OPENAI_API_KEY"))
+    from ..service.providers.api_key import resolve_stored_api_key  # noqa: PLC0415
+
+    try:
+        info.openai_key_set = bool(resolve_stored_api_key(config, "openai-api"))
+    except Exception:  # noqa: BLE001 — status must render without the store
+        info.openai_key_set = False
 
     # NewsAPI
     from ..search.credentials import resolve_key  # noqa: PLC0415

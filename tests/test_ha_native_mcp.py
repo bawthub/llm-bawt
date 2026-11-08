@@ -2,6 +2,7 @@
 
 import pytest
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 from llm_bawt.integrations import ha_credentials
 from llm_bawt.integrations.ha_mcp.client import (
@@ -11,22 +12,26 @@ from llm_bawt.integrations.ha_mcp.client import (
 )
 from llm_bawt.tools.definitions import (
     Tool,
-    ToolParameter,
     ha_tools_to_tool_definitions,
     get_tools_list,
 )
 
 
 @pytest.fixture(autouse=True)
-def no_ha_record(monkeypatch):
-    """No Integrations record: these tests cover the legacy settings path."""
-    monkeypatch.setattr(ha_credentials, "read_connection", lambda *args, **kwargs: None)
+def stored_ha_record(monkeypatch):
+    """Synthetic connection fields; production no longer reads config credentials."""
+    def read(config, *_args, **_kwargs):
+        if not config.stored_url or not config.stored_token:
+            return None
+        return SimpleNamespace(meta={"url": config.stored_url}, secret={"token": config.stored_token})
+
+    monkeypatch.setattr(ha_credentials, "read_connection", read)
 
 
 @dataclass
 class MockConfig:
-    HA_NATIVE_MCP_URL: str = "http://hass.home:8123/api/mcp"
-    HA_NATIVE_MCP_TOKEN: str = "test-token"
+    stored_url: str = "http://hass.home:8123/api/mcp"
+    stored_token: str = "test-token"
     HA_MCP_TIMEOUT: int = 10
     HA_MCP_TOOL_EXCLUDE: str = "GetDateTime,HassCancelAllTimers"
 
@@ -40,12 +45,12 @@ class TestHomeAssistantNativeClient:
         assert client.available is True
 
     def test_not_available_without_url(self):
-        config = MockConfig(HA_NATIVE_MCP_URL="")
+        config = MockConfig(stored_url="")
         client = HomeAssistantNativeClient(config)
         assert client.available is False
 
     def test_not_available_without_token(self):
-        config = MockConfig(HA_NATIVE_MCP_TOKEN="")
+        config = MockConfig(stored_token="")
         client = HomeAssistantNativeClient(config)
         assert client.available is False
 
@@ -82,7 +87,7 @@ class TestHomeAssistantNativeClient:
         assert client.tool_names == set()
 
     def test_call_tool_when_not_available(self):
-        config = MockConfig(HA_NATIVE_MCP_URL="")
+        config = MockConfig(stored_url="")
         client = HomeAssistantNativeClient(config)
         with pytest.raises(HAToolError, match="not configured"):
             client.call_tool("HassTurnOn", {"name": "kitchen lights"})

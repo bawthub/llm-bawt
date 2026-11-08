@@ -601,7 +601,7 @@ def test_openai_platform_broker_errors_are_explicit(monkeypatch) -> None:
         OpenAIAdapter._fetch_broker_key()
 
 
-def test_openai_platform_uses_env_key_only_when_db_connection_is_unconfigured(
+def test_openai_platform_never_uses_env_key_when_db_connection_is_unconfigured(
     monkeypatch,
 ) -> None:
     from types import SimpleNamespace
@@ -619,7 +619,8 @@ def test_openai_platform_uses_env_key_only_when_db_connection_is_unconfigured(
         ),
     )
 
-    assert OpenAIAdapter._fetch_broker_key() == "legacy-env-key"
+    with pytest.raises(RuntimeError, match="OpenAI API-key broker returned 503"):
+        OpenAIAdapter._fetch_broker_key()
 
 
 # ── xAI (Grok) adapter ────────────────────────────────────────────────────────
@@ -668,17 +669,16 @@ def test_xai_authorize_prefers_broker_key_over_env(monkeypatch) -> None:
     assert seen == [("http://app-fixture/v1/providers/xai/token", {"X-Bridge-Token": "bridge-secret"})]
 
 
-def test_xai_falls_back_to_env_only_when_broker_has_no_key(monkeypatch, caplog) -> None:
+def test_xai_never_uses_env_when_broker_has_no_key(monkeypatch, caplog) -> None:
     from claude_code_bridge.proxy.adapters.xai import XaiAdapter
 
     _xai_broker(monkeypatch, 503)
     _xai_env(monkeypatch, LLM_BAWT_XAI_API_KEY="alias-key")
-    with caplog.at_level("WARNING", logger="claude_code_bridge.proxy.adapters.xai"):
-        bearer, _ = __import__("asyncio").run(XaiAdapter().authorize())
-    assert bearer == "alias-key"
-    assert "LLM_BAWT_XAI_API_KEY" in caplog.text and "legacy" in caplog.text
+    with pytest.raises(RuntimeError, match="xAI API key required"):
+        __import__("asyncio").run(XaiAdapter().authorize())
+    assert "alias-key" not in caplog.text
 
-    # 503 and no env key → the connect hint.
+    # 503 without env has the same connect hint.
     _xai_env(monkeypatch)
     with pytest.raises(RuntimeError, match="xAI API key required"):
         __import__("asyncio").run(XaiAdapter().authorize())

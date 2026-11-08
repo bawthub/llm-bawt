@@ -70,5 +70,4 @@ class OpenAIApiUsageAdapter(ApiKeyBalanceAdapter):
     display_name = "OpenAI API"
     access_path_keys = ("openai-api", "openai-responses")
     connection_id = "openai-api"
-    key_env_vars = ("OPENAI_API_KEY",)
 

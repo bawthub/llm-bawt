@@ -2,9 +2,8 @@
 
 Raw ``sk-…`` platform API key, validated against ``GET /v1/models``. Distinct
 from the ``codex`` adapter (ChatGPT-subscription OAuth): this one powers direct
-OpenAI API usage in ``OpenAIClient`` / ``ResponsesClient``, resolved DB-first
-via :func:`.api_key.resolve_api_key` — env ``OPENAI_API_KEY`` remains only as a
-deprecated fallback.
+OpenAI API usage in ``OpenAIClient`` / ``ResponsesClient``, resolved from the
+encrypted connection via :func:`.api_key.resolve_api_key`, never deployment env.
 """
 
 from __future__ import annotations
@@ -25,6 +24,7 @@ class OpenAIKeyAdapter(ApiKeyAdapter):
 
     id = "openai-api"
     label = "OpenAI API"
+    keeps_disconnected_record = True
     access_path_keys = ("openai-api", "openai-responses")
     billing_mode = "metered"
 

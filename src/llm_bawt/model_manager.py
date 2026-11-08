@@ -724,10 +724,9 @@ def fetch_ollama_api_models(ollama_url: str) -> Tuple[bool, List[Dict[str, Any]]
 def _resolve_discovery_key(
     config: Any, provider_id: str, env_vars: tuple[str, ...], config_attr: str | None = None,
 ) -> str | None:
-    """A provider API key for model discovery: the stored connection, then env.
+    """A provider API key using the LLM clients' credential resolution.
 
-    Same record-first order as the LLM clients (TASK-1612); the env vars stay
-    a deprecated fallback for setups without a stored connection.
+    OpenAI and xAI are store-only; unmigrated providers retain legacy env.
     """
     from .service.providers.api_key import resolve_api_key  # noqa: PLC0415 — keep CLI imports light
 
@@ -738,11 +737,16 @@ def _resolve_discovery_key(
 
 def fetch_openai_api_models(api_key: str | None = None) -> Tuple[bool, List[Dict[str, Any]]]:
     """Fetches model list from OpenAI API."""
+    if not api_key:
+        api_key = _resolve_discovery_key(None, "openai-api", ())
+    if not api_key:
+        console.print("[bold red]Error:[/bold red] No OpenAI API key. Connect OpenAI in Settings → Providers.")
+        return False, []
     from openai import OpenAI  # Import lazily
     details = []
     start = time.time()
     try:
-        client = OpenAI(api_key=api_key) if api_key else OpenAI()
+        client = OpenAI(api_key=api_key)
     except Exception as e:
         console.print(f"[bold red]OpenAI init error:[/bold red] {e}")
         return False, []

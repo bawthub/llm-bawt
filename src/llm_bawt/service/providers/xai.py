@@ -2,9 +2,8 @@
 
 Straight API-key provider: the user pastes an ``xai-…`` key, we validate it
 against ``GET /v1/api-key`` (returns the key's name and ACLs) and persist it
-encrypted in the CredentialStore. Consumed DB-first by ``GrokClient`` /
-``ResponsesClient`` via :func:`.api_key.resolve_api_key` — env ``XAI_API_KEY``
-remains only as a deprecated fallback.
+encrypted in the CredentialStore. Consumed by ``GrokClient`` /
+``ResponsesClient`` via :func:`.api_key.resolve_api_key`, never deployment env.
 """
 
 from __future__ import annotations
@@ -25,6 +24,7 @@ class XaiAdapter(ApiKeyAdapter):
 
     id = "xai"
     label = "xAI"
+    keeps_disconnected_record = True
     access_path_keys = ("xai-chat", "xai-responses")
     billing_mode = "metered"
 
