@@ -279,6 +279,30 @@ def _capture_patch(
     return calls
 
 
+@pytest.mark.parametrize("owner", ["", None, "byte"])
+def test_update_assignment_empty_unassigns_but_none_is_omitted(
+    monkeypatch: pytest.MonkeyPatch, owner: str | None,
+) -> None:
+    calls = _capture_patch(monkeypatch, current_owner="vex")
+
+    _run(task_tools.update_task("TASK-1", title="Renamed", agent_bot_id=owner))
+
+    expected: dict[str, Any] = {"title": "Renamed"}
+    if owner is not None:
+        expected["agentBotId"] = owner or None
+    assert calls[0]["json"] == expected
+
+
+def test_review_explicit_unassignment_does_not_autofill_actor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _capture_patch(monkeypatch)
+
+    _run(task_tools.update_task("TASK-1", status="REVIEW", agent_bot_id="", bot_id="byte"))
+
+    assert calls[0]["json"] == {"status": "REVIEW", "agentBotId": None}
+
+
 def test_review_autofills_owner_from_bot_id(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = _capture_patch(monkeypatch)
 

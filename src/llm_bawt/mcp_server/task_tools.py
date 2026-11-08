@@ -505,9 +505,10 @@ async def update_task(
         priority: URGENT, HIGH, MEDIUM, LOW, or NONE.
         planned: True after writing spec + steps.
         project_id: Move task to a different project (cuid).
-        agent_bot_id: Assign task to a specific bot. Defaults to bot_id when
-                      moving an UNOWNED task to REVIEW; pass explicitly only to
-                      hand the task to a different bot.
+        agent_bot_id: Assign task to a specific bot; "" explicitly unassigns,
+                      while None leaves ownership unchanged. Defaults to bot_id
+                      when moving an UNOWNED task to REVIEW. Explicitly
+                      unassigning while entering REVIEW is rejected.
         bot_id: YOUR bot ID (the actor) for activity attribution. Never pass
                 another bot's id. Fills the owner only for an unowned task
                 moving to REVIEW.
@@ -565,7 +566,7 @@ async def update_task(
     if project_id is not None:
         body["projectId"] = project_id
     if agent_bot_id is not None:
-        body["agentBotId"] = agent_bot_id
+        body["agentBotId"] = agent_bot_id or None
     if blocked_reason is not None:
         body["blockedReason"] = blocked_reason
     if waiting_on is not None:
