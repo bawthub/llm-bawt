@@ -240,7 +240,11 @@ def test_supported_physical_purge_after_admission_denies_real_native_append(
         record_property("direct_sse_final_append_error_surfaced", False)
     else:
         assert response.status_code >= 400, response.text
-        assert "access_denied" in response.text
+        # The HTTP body is sanitized (TASK-1565); the denial detail is only
+        # in the server-side log, asserted via transport_errors below.
+        detail = response.json()["detail"]
+        assert detail.startswith("Internal error") and "see the app log" in detail
+        assert "access_denied" not in response.text
         assert "choices" not in response.json()
     assert len(transport_errors) == 1 and "access_denied" in transport_errors[0]
     assert "INSERT INTO" not in transport_errors[0] and rig.session_id not in transport_errors[0]
