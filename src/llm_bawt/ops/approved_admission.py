@@ -58,6 +58,17 @@ TOOL_ERROR_RESULT = "Tool returned an error result"
 _OPS_RUN_ARGUMENTS = frozenset({"operation", "args", "idempotency_key"})
 
 
+def ops_run_arguments_valid(arguments: dict[str, Any]) -> bool:
+    """The ops_run top-level schema, shared by submit and admission (TASK-1630)."""
+    operation = arguments.get("operation")
+    args = arguments.get("args")
+    key = arguments.get("idempotency_key")
+    return (not (set(arguments) - _OPS_RUN_ARGUMENTS)
+            and isinstance(operation, str) and bool(operation)
+            and (args is None or isinstance(args, dict))
+            and (key is None or isinstance(key, str)))
+
+
 def ops_run_receipt(result: dict[str, Any], idempotency_key: str, *,
                     caller_instruction: dict[str, Any] | None = None) -> dict[str, Any]:
     """The ``ops_run`` result contract, shared by the MCP tool and admission.
@@ -222,13 +233,10 @@ class ApprovedOpsAdmission:
         # executing: run exactly the invocation the human approved.
         if canonical_invocation_hash(row.tool_name, arguments) != (row.invocation_hash or ""):
             raise _Refused("[invocation_mismatch] stored arguments do not match the approved invocation; request a fresh approval")
-        unknown = set(arguments) - _OPS_RUN_ARGUMENTS
         operation = arguments.get("operation")
         args = arguments.get("args")
         key = arguments.get("idempotency_key")
-        if (unknown or not isinstance(operation, str) or not operation
-                or not (args is None or isinstance(args, dict))
-                or not (key is None or isinstance(key, str))):
+        if not ops_run_arguments_valid(arguments):
             raise _Refused("[args_invalid] stored ops_run arguments do not match the ops_run schema")
         try:
             snapshot = json.loads(row.operations_snapshot_json or "null")

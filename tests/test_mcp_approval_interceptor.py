@@ -219,6 +219,37 @@ def test_singleton_projects_committed_superseded_cards_before_publishing_new_car
     assert executed == []
 
 
+@pytest.mark.parametrize("clean", [
+    {"operation": "llm-bawt.restart-app", "args": {}, "reason": "joined restart"},
+    {"operation": "llm-bawt.restart-app", "args": "not-an-object"},
+    {"operation": "llm-bawt.restart-app", "idempotency_key": 7},
+])
+def test_ops_run_schema_violation_files_no_card(capability, clean):
+    """TASK-1630: admission would refuse it after approval, so refuse at submit."""
+    from llm_bawt.ops.approved_admission import ops_run_arguments_valid
+
+    assert not ops_run_arguments_valid(clean)
+    order, executed, prepared = [], [], []
+    store = FakeStore(_policy(PolicyAction.REQUIRE_APPROVAL), order)
+    mcp = _server(store, order, executed)
+    mcp._operations_preparer = lambda operation, args: prepared.append(operation) or {}
+    stamp = mint_mcp_call_context(
+        capability=capability, tool_name="ops_run", tool_input=clean,
+        tool_use_id="toolu_bad", agent_request_id="req_bad",
+        session_key="snark:nick", backend="claude-code")
+    result = _call(mcp, capability, {**clean, MCP_CALL_CONTEXT_KEY: stamp})
+    assert result["status"] == "args_invalid" and result["is_error"] is True
+    assert store.rows == [] and order == [] and executed == [] and prepared == []
+
+
+def test_valid_ops_run_shape_still_files_card(capability):
+    order, executed = [], []
+    store = FakeStore(_policy(PolicyAction.REQUIRE_APPROVAL), order)
+    mcp = _server(store, order, executed)
+    assert _call(mcp, capability, _stamped_args(capability))["status"] == "approval_required"
+    assert len(store.rows) == 1 and executed == []
+
+
 @pytest.mark.parametrize("action", ["stop", "start", "restart"])
 def test_handoff_only_operation_files_no_card(capability, action):
     """TASK-1707: only a GPU handoff can run it, so an approval would be dead on arrival."""

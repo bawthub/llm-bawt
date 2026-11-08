@@ -302,6 +302,23 @@ class ApprovalAwareFastMCP(FastMCP):
                 ),
             )
 
+        if name == "ops_run":
+            from ..ops.approved_admission import ops_run_arguments_valid
+
+            if not ops_run_arguments_valid(received):
+                # TASK-1630: refuse before a card exists, with the same check
+                # admission applies after approval.
+                return {
+                    "status": "args_invalid",
+                    "tool": name,
+                    "is_error": True,
+                    "message": (
+                        "[args_invalid] ops_run accepts only operation, args and "
+                        "idempotency_key; no approval was created. Fix the call "
+                        "(operation arguments belong inside args) and retry."
+                    ),
+                }
+
         request_id = _approval_request_id(call_context)
         invocation_hash = canonical_invocation_hash(name, received)
         caller_context = {
