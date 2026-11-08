@@ -186,8 +186,11 @@ class DeliveryLeaseRecovery:
         ``reserved`` so its next claim reuses it. A QUEUED delivery cancelled
         instead (approval withdrawn, fenced at claim) has no next claim, and an
         open reserved row would wedge the target's queue. Only an open
-        ``reserved`` row is touched; it ends ``aborted`` with the cause in its
-        ``recovery`` audit, like a Stop on a reservation.
+        ``reserved`` row that never started is ended here (``aborted``, the
+        cause in its ``recovery`` audit, like a Stop on a reservation). A row
+        with execution evidence may belong to a bridge run an app-only restart
+        left running: it stays fenced until the recovery sweep's
+        ``orphan_turns`` probe proves the run gone (Loopy r1 B1).
         """
         if not turn_id:
             return False
@@ -201,7 +204,12 @@ class DeliveryLeaseRecovery:
                 TurnLog.id == turn_id, TurnLog.status == "reserved",
                 TurnLog.ended_at.is_(None),  # type: ignore[union-attr]
             ).with_for_update(key_share=True)).first()
-            settled = bool(row is not None and settle_open_turn(
+            if row is None or row.agent_request_id or row.agent_session_key or row.response_text:
+                return False
+            if conn.execute(sa_text("SELECT 1 FROM tool_call_records WHERE turn_id=:id LIMIT 1"),
+                            {"id": turn_id}).first():
+                return False
+            settled = bool(settle_open_turn(
                 session, row, audit_key="recovery", now=datetime.now(timezone.utc),
                 audit={"cause": cause, "by": "delivery_cancelled"},
             ))

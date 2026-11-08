@@ -17,8 +17,9 @@ turn row). A stalled claimant that resumes afterwards then fails its fence
   (Vex S2).
   A row with no delivery id in its payload is matched to its delivery by
   ``turn_id`` (TASK-2142: a re-armed row that already ran carries the chat
-  payload). If the delivery is terminal but the row shows execution evidence,
-  it is ended ``aborted`` rather than deleted.
+  payload). A re-armed row that never started, whose delivery is terminal,
+  is ended ``aborted``; one with execution evidence is left to
+  ``orphan_turns``, which settles it only on run.status proof.
 - An unowned ordinary reservation is reported, never released.
 
 The released row is deleted, so the run's stamp goes on its producer's row
@@ -156,10 +157,10 @@ class OrphanedReservationsStep(RecoveryStep):
                     scope.engine, turn_id, delivery_id=candidate["delivery_id"],
                     bot_id=candidate["bot_id"], trigger_message_id=candidate["trigger_message_id"], connection=conn)
                 if not released and delivery is not None and delivery["status"] in ("FAILED", "CANCELLED"):
-                    # TASK-2142: a row re-armed after its run started carries
-                    # execution evidence, so it can't be deleted as unstarted.
-                    # Its delivery is terminal and will never claim it again:
-                    # end it instead of letting it wedge the target's queue.
+                    # TASK-2142: a re-armed row release_reservation won't delete
+                    # (e.g. no delivery id in its payload). Its delivery is
+                    # terminal: end it if it never started; a row with
+                    # execution evidence is left for orphan_turns' run probe.
                     released = DeliveryLeaseRecovery.settle_withdrawn_turn(
                         conn, turn_id, cause=f"delivery {delivery['status'].lower()}")
                 if released:

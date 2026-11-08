@@ -777,25 +777,84 @@ def test_a_rearmed_row_that_already_ran_is_relinked_to_its_delivery(delivery_sto
     assert step["done"] == [] and step["ambiguous"] == []   # still QUEUED: keeps its place
 
 
-@pytest.mark.parametrize("linked", [True, False], ids=["relinked", "legacy-unlinked"])
-def test_a_ran_and_requeued_row_whose_delivery_was_cancelled_is_ended_not_left_wedging(
-        delivery_store, linked):  # noqa: F811
-    """TASK-2142: the cancel left the re-armed row reserved; nothing released it."""
-    from llm_bawt.service.turn_admission import classify_target
-
-    store, sender, target = delivery_store
-    delivery = _run_then_requeue(store, sender, target, "ran, requeued, withdrawn")
+def _withdraw(store, delivery, *, linked=True):
     with store.engine.begin() as conn:
         if not linked:  # rows re-armed before the fix carry only the chat payload
             conn.execute(sa_text("UPDATE turn_logs SET request_json='{\"messages\": []}' WHERE id=:id"),
                          {"id": delivery.turn_id})
         conn.execute(sa_text("UPDATE inter_bot_deliveries SET status='CANCELLED' WHERE id=:id"),
                      {"id": delivery.id})
-    step = _step(asyncio.run(RecoverySweep(store.engine).run(
-        dry_run=False, bots=[target], steps=["reservations"])), "reservations")
-    assert _ids(step["done"]) == [delivery.turn_id] and step["ambiguous"] == []
+
+
+def _idle(store, target):
+    from llm_bawt.service.turn_admission import classify_target
+
+    with store.engine.connect() as conn:
+        return classify_target(conn, target, exclude_turn_id=None).idle
+
+
+@pytest.mark.parametrize("linked", [True, False], ids=["relinked", "legacy-unlinked"])
+def test_a_withdrawn_rearmed_run_still_live_on_its_bridge_stays_fenced(delivery_store, linked):  # noqa: F811
+    """Loopy r1 B1: an app-only restart leaves the bridge run going; no proof, no settle."""
+    store, sender, target = delivery_store
+    delivery = _run_then_requeue(store, sender, target, "still running on the bridge")
+    _withdraw(store, delivery, linked=linked)
+    probe = Probe(ProbeResult("running", backend_matched=True, backend="claude-code"))
+    report = asyncio.run(RecoverySweep(store.engine, probe=probe).run(
+        dry_run=False, bots=[target], steps=["orphan_turns", "reservations"]))
+    assert probe.calls == [delivery.turn_id]
+    assert _step(report, "orphan_turns")["done"] == [] and _step(report, "reservations")["done"] == []
+    assert TurnLogStore(store.config).get_turn(delivery.turn_id).status == "reserved"
+    assert not _idle(store, target)
+
+
+@pytest.mark.parametrize("linked", [True, False], ids=["relinked", "legacy-unlinked"])
+def test_a_withdrawn_rearmed_run_its_bridge_reports_gone_settles_and_frees_the_queue(
+        delivery_store, linked):  # noqa: F811
+    """TASK-2142 incident: the run finished, the notice was withdrawn, the row wedged the queue."""
+    store, sender, target = delivery_store
+    delivery = _run_then_requeue(store, sender, target, "ran, requeued, withdrawn")
+    _withdraw(store, delivery, linked=linked)
+    probe = Probe(ProbeResult("not_found", backend_matched=True, backend="claude-code"))
+    report = asyncio.run(RecoverySweep(store.engine, probe=probe).run(
+        dry_run=False, bots=[target], steps=["orphan_turns", "reservations"]))
+    assert _ids(_step(report, "orphan_turns")["done"]) == [delivery.turn_id]
     turn = TurnLogStore(store.config).get_turn(delivery.turn_id)
     assert (turn.status, turn.end_reason) == ("aborted", "aborted") and turn.ended_at is not None
-    assert json.loads(turn.request_json)["recovery"]["cause"] == "delivery cancelled"
-    with store.engine.connect() as conn:
-        assert classify_target(conn, target, exclude_turn_id=None).idle
+    assert json.loads(turn.request_json)["recovery"]["cause"] == "orphaned_by_restart"
+    assert _idle(store, target)
+
+
+def test_an_unstarted_legacy_rearmed_reservation_whose_delivery_was_cancelled_is_ended(delivery_store):  # noqa: F811
+    store, sender, target = delivery_store
+    from llm_bawt.service.tool_call_store import ToolCallRecord
+    ToolCallRecord.__table__.create(store.engine, checkfirst=True)
+    delivery, _ = _enqueue(store, sender, target, "claimed, never ran")
+    assert store.claim_next(target, claim_owner="dead-app", steer_capable=False, lease_seconds=60)
+    with store.engine.begin() as conn:
+        conn.execute(sa_text("UPDATE inter_bot_deliveries SET lease_expires_at=now() - interval '1 second'"
+                             " WHERE id=:id"), {"id": delivery.id})
+    store.recover_expired()
+    _withdraw(store, delivery, linked=False)
+    step = _step(asyncio.run(RecoverySweep(store.engine).run(
+        dry_run=False, bots=[target], steps=["reservations"])), "reservations")
+    assert _ids(step["done"]) == [delivery.turn_id]
+    turn = TurnLogStore(store.config).get_turn(delivery.turn_id)
+    assert turn.status == "aborted" and json.loads(turn.request_json)["recovery"]["cause"] == "delivery cancelled"
+    assert _idle(store, target)
+
+
+def test_an_open_rearmed_run_keeps_the_startup_follow_up_probing(delivery_store):  # noqa: F811
+    """The row is re-armed before the startup pass and withdrawn after it: the
+    follow-up must still be running to probe it then."""
+    store, sender, target = delivery_store
+    delivery = _run_then_requeue(store, sender, target, "re-armed at startup")
+    check = StartupRecoveryCheck(RecoverySweep(store.engine, probe=Probe(
+        ProbeResult("running", backend_matched=True, backend="claude-code"))))
+    result = asyncio.run(check.run_at_startup())
+    assert result["rearmed_runs"] >= 1 and check.follow_up_due(result)
+    with store.engine.begin() as conn:  # the requeued delivery runs again and consumes its row
+        conn.execute(sa_text("UPDATE turn_logs SET status='ok', ended_at=now() WHERE id=:id"),
+                     {"id": delivery.turn_id})
+    result = asyncio.run(check.follow_up())
+    assert result["rearmed_runs"] == 0

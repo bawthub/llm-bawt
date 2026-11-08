@@ -60,7 +60,16 @@ logger = logging.getLogger(__name__)
 _OPEN_STARTED = """
     SELECT t.id, t.bot_id, t.status, t.agent_backend, t.agent_session_key, t.agent_request_id, t.created_at
     FROM turn_logs t
-    WHERE t.ended_at IS NULL AND t.status <> 'reserved' AND t.created_at < :started_at
+    WHERE t.ended_at IS NULL AND t.created_at < :started_at
+      AND (t.status <> 'reserved' OR (
+          -- TASK-2142: a run re-armed to reserved by recover_expired whose
+          -- delivery was then withdrawn. Its bridge run may still be live, so
+          -- it settles only on the same run.status proof as any orphan.
+          t.agent_request_id IS NOT NULL
+          AND EXISTS (SELECT 1 FROM inter_bot_deliveries w
+                      WHERE w.turn_id = t.id AND w.status IN ('FAILED', 'CANCELLED'))
+          AND NOT EXISTS (SELECT 1 FROM inter_bot_deliveries q
+                          WHERE q.turn_id = t.id AND q.status NOT IN ('FAILED', 'CANCELLED', 'DELIVERED'))))
       AND NOT EXISTS (
           SELECT 1 FROM inter_bot_deliveries d
           WHERE d.turn_id = t.id AND d.claim_token IS NOT NULL)

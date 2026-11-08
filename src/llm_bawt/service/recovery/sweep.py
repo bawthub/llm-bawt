@@ -149,6 +149,17 @@ class RecoverySweep:
 _NOT_FOLLOWED = frozenset({"unaddressed"})
 
 
+# TASK-2142: runs recover_expired re-armed as reserved after this process
+# started. While one is open its delivery may yet be withdrawn, leaving the
+# run for ``orphan_turns`` to prove gone, so the follow-up keeps probing.
+_REARMED_RUNS = """
+    SELECT count(*) FROM turn_logs t
+    WHERE t.status = 'reserved' AND t.ended_at IS NULL AND t.agent_request_id IS NOT NULL
+      AND t.created_at < :started_at
+      AND EXISTS (SELECT 1 FROM inter_bot_deliveries d WHERE d.turn_id = t.id)
+"""
+
+
 def _awaits_its_run(entry: dict[str, Any]) -> bool:
     probe = entry.get("probe")
     return isinstance(probe, dict) and probe.get("state") not in _NOT_FOLLOWED
@@ -171,7 +182,7 @@ class StartupRecoveryCheck:
         self._full_pass_owed = False
 
     async def run_at_startup(self) -> dict[str, Any]:
-        result = await self.sweep.run(dry_run=False, actor=self.ACTOR)
+        result = await self._with_rearmed(await self.sweep.run(dry_run=False, actor=self.ACTOR))
         self._full_pass_owed = bool(result.get("busy"))
         if result.get("busy"):
             logger.info("startup recovery check skipped: another pass holds the sweep")
@@ -185,6 +196,22 @@ class StartupRecoveryCheck:
                 for entry in step["ambiguous"]:
                     logger.info("startup recovery left open turn %s (%s): %s",
                                 entry["turn_id"], entry["bot_id"], entry["why"])
+        return result
+
+    async def _with_rearmed(self, result: dict[str, Any]) -> dict[str, Any]:
+        """Stamp how many re-armed runs remain open (``follow_up_due``, TASK-2142)."""
+        if result.get("busy"):
+            return result
+
+        def count() -> int:
+            with self.sweep.engine.connect() as conn:
+                return int(conn.execute(sa_text(_REARMED_RUNS),
+                                        {"started_at": self.sweep.started_at}).scalar() or 0)
+
+        try:
+            result["rearmed_runs"] = await asyncio.to_thread(count)
+        except Exception:
+            logger.exception("recovery: counting re-armed runs failed; follow-up not extended")
         return result
 
     async def wait_for_runs(self, result: dict[str, Any], timeout: float) -> None:
@@ -214,7 +241,7 @@ class StartupRecoveryCheck:
         A busy or failed ``orphan_turns`` pass decided nothing: it is due again,
         and so is a skipped full pass, whatever this result says.
         """
-        if self._full_pass_owed or result.get("busy"):
+        if self._full_pass_owed or result.get("busy") or result.get("rearmed_runs"):
             return True
         for step in result.get("steps", ()):
             if step.get("step") == "orphan_turns":
@@ -231,7 +258,8 @@ class StartupRecoveryCheck:
         if self._full_pass_owed:
             logger.info("recovery follow-up runs the full pass skipped as busy")
             return await self.run_at_startup()
-        result = await self.sweep.run(dry_run=False, steps=["orphan_turns"], actor=self.FOLLOW_UP_ACTOR)
+        result = await self._with_rearmed(
+            await self.sweep.run(dry_run=False, steps=["orphan_turns"], actor=self.FOLLOW_UP_ACTOR))
         for step in result.get("steps", ()):
             for entry in step.get("done", ()):
                 logger.info("recovery follow-up settled turn %s (%s)", entry.get("turn_id"), entry.get("bot_id"))

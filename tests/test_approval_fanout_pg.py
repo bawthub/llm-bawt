@@ -255,17 +255,18 @@ def test_history_never_carries_the_resolver_reason(fan, monkeypatch):
     assert "holder reason" not in str(card)
 
 
-def _ran_then_requeued(ctx, bot):
-    """TASK-2142: the notice ran on the bridge, then an app restart requeued it."""
+def _requeued(ctx, bot, *, ran):
+    """TASK-2142: an app restart requeued the notice, after its run started or before."""
     from llm_bawt.service.tool_call_store import ToolCallRecord
-    ToolCallRecord.__table__.create(ctx.deliveries.engine, checkfirst=True)  # settling a turn closes its tool rows
+    ToolCallRecord.__table__.create(ctx.deliveries.engine, checkfirst=True)  # the settle checks tool rows
     claimed = _claim(ctx, bot)
     assert claimed is not None
     with ctx.deliveries.engine.begin() as conn:
-        conn.execute(sa_text("""
-            UPDATE turn_logs SET status='streaming', request_json='{"messages": []}',
-                agent_request_id='req-ran' WHERE id=:id
-        """), {"id": claimed.turn_id})
+        if ran:
+            conn.execute(sa_text("""
+                UPDATE turn_logs SET status='streaming', request_json='{"messages": []}',
+                    agent_request_id='req-ran' WHERE id=:id
+            """), {"id": claimed.turn_id})
         conn.execute(sa_text("UPDATE inter_bot_deliveries SET lease_expires_at=now() - interval '1 second'"
                              " WHERE id=:id"), {"id": claimed.id})
     ctx.deliveries.recover_expired()
@@ -278,14 +279,17 @@ def _turn(ctx, turn_id):
                             {"id": turn_id}).one()
 
 
+@pytest.mark.parametrize("ran", [False, True], ids=["unstarted", "ran"])
 @pytest.mark.parametrize("withdrawn_by", ["claim_fence", "pump"])
-def test_a_requeued_notice_withdrawn_after_it_ran_ends_its_turn(fan, withdrawn_by, monkeypatch):
+def test_a_requeued_notice_withdrawn_ends_only_an_unstarted_turn(fan, withdrawn_by, ran, monkeypatch):
+    """An unstarted reservation ends at once; a run that started may still be
+    live on its bridge (Loopy r1 B1), so it stays fenced for orphan_turns' probe."""
     from llm_bawt.service import turn_terminal_effects
     # The rig has no sessions/messages tables; context-stat side effects are not under test.
     monkeypatch.setattr(turn_terminal_effects, "record_terminal_effects", lambda session, row: None)
     request_id = fan.card()
     fan.pump.run_pass()
-    claimed = _ran_then_requeued(fan, HOLDER)
+    claimed = _requeued(fan, HOLDER, ran=ran)
     assert _turn(fan, claimed.turn_id).status == "reserved"
     fan.store.resolve_request(request_id, status=REQ_DENIED, resolved_by="fixture-person",
                               message="person reason", continuation_owner="server")
@@ -297,4 +301,4 @@ def test_a_requeued_notice_withdrawn_after_it_ran_ends_its_turn(fan, withdrawn_b
 
     assert tuple(_status(fan, claimed.id)) == ("CANCELLED", fanout.WITHDRAWN)
     status, ended_at = _turn(fan, claimed.turn_id)
-    assert status == "aborted" and ended_at is not None   # the target's queue is free again
+    assert (status, ended_at is None) == (("reserved", True) if ran else ("aborted", False))
