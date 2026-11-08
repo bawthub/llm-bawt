@@ -163,6 +163,43 @@ def test_coverage_discloses_tracking_start_untracked_turns_and_limit():
     assert [row["turn_id"] for row in result["series"]] == ["start-1", "start-2"]
 
 
+@pytest.mark.parametrize("bogus", [
+    json.dumps({"unrelated": "session_start"}),
+    '{"session_start": "clean"',
+    _usage("unknown"),
+])
+def test_false_positive_marker_text_cannot_backdate_tracking(bogus):
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine, tables=[TurnLog.__table__])
+    now = datetime.now(timezone.utc)
+    with Session(engine) as session:
+        _add(session, "bogus", now - timedelta(days=100), bogus)
+        _add(session, "untracked", now - timedelta(days=20), _usage())
+        _add(session, "first-real", now - timedelta(days=10), _usage("clean"))
+        session.commit()
+    coverage = load_context_trend(engine, user_id="owner", bot_id="alpha", days=90, limit=60)["coverage"]
+    tracked = datetime.fromisoformat(coverage["tracking_since"]).replace(tzinfo=None)
+    assert tracked == (now - timedelta(days=10)).replace(tzinfo=None)
+    assert coverage["untracked_turns"] == 1
+
+
+def test_tracking_scan_cap_falls_back_to_oldest_loaded_valid_marker(monkeypatch):
+    from llm_bawt.service import context_trend
+
+    monkeypatch.setattr(context_trend, "MAX_CANDIDATES", 2)
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine, tables=[TurnLog.__table__])
+    now = datetime.now(timezone.utc)
+    with Session(engine) as session:
+        for i in range(3):
+            _add(session, f"bogus-{i}", now - timedelta(days=50 + i), json.dumps({"x": "session_start"}))
+        _add(session, "real", now - timedelta(days=5), _usage("clean"))
+        session.commit()
+    coverage = load_context_trend(engine, user_id="owner", bot_id="alpha", days=90, limit=60)["coverage"]
+    tracked = datetime.fromisoformat(coverage["tracking_since"]).replace(tzinfo=None)
+    assert tracked == (now - timedelta(days=5)).replace(tzinfo=None)
+
+
 def test_coverage_without_any_marker_is_not_measurable():
     engine = create_engine("sqlite://")
     SQLModel.metadata.create_all(engine, tables=[TurnLog.__table__])

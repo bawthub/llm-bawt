@@ -17,9 +17,10 @@ def _count(value: Any) -> int | None:
     return value if type(value) is int and value >= 0 else None
 
 
-def _snapshot(row: Mapping[str, Any]) -> dict | None:
+def _marker(raw: Any) -> tuple[dict, dict, str] | None:
+    """Parse an explicit clean/seeded ``context_breakdown.session_start`` marker."""
     try:
-        usage = json.loads(row["token_usage_json"])
+        usage = json.loads(raw)
     except (TypeError, ValueError):
         return None
     if not isinstance(usage, dict):
@@ -30,6 +31,45 @@ def _snapshot(row: Mapping[str, Any]) -> dict | None:
     start = breakdown.get("session_start")
     if not isinstance(start, str) or start not in {"clean", "seeded"}:
         return None
+    return usage, breakdown, start
+
+
+def _earliest_marker(session: Session, params: dict) -> datetime | None:
+    """Oldest structurally valid marker for the user, scanned oldest-first.
+
+    The LIKE prefilter only narrows candidates; each is validated so stray
+    text can't backdate the tracking boundary. Bounded by MAX_CANDIDATES.
+    """
+    cursor: tuple[Any, str] | None = None
+    scanned = 0
+    while scanned < MAX_CANDIDATES:
+        after = "" if cursor is None else (
+            "AND (created_at > :after_at OR (created_at = :after_at AND id > :after_id))"
+        )
+        batch = session.execute(text(f"""
+            SELECT id, created_at, token_usage_json FROM turn_logs
+            WHERE user_id = :user_id AND bot_id IS NOT NULL AND token_usage_json LIKE :marker
+            {after}
+            ORDER BY created_at ASC, id ASC LIMIT :batch
+        """), {
+            **params, "batch": min(500, MAX_CANDIDATES - scanned),
+            **({} if cursor is None else {"after_at": cursor[0], "after_id": cursor[1]}),
+        }).mappings().all()
+        if not batch:
+            return None
+        for row in batch:
+            if _marker(row["token_usage_json"]) is not None:
+                return row["created_at"]
+        scanned += len(batch)
+        cursor = (batch[-1]["created_at"], batch[-1]["id"])
+    return None
+
+
+def _snapshot(row: Mapping[str, Any]) -> dict | None:
+    parsed = _marker(row["token_usage_json"])
+    if parsed is None:
+        return None
+    usage, breakdown, start = parsed
     categories = []
     raw_categories = breakdown.get("categories")
     if not isinstance(raw_categories, list):
@@ -87,10 +127,12 @@ def load_context_trend(engine, *, user_id: str, bot_id: str, days: int, limit: i
             ORDER BY created_at DESC, id DESC LIMIT :candidate_limit
         """), params).mappings().all()
         # Earliest marker for this user on any bot: when the metric began to exist.
-        tracking_since = session.execute(text("""
-            SELECT MIN(created_at) FROM turn_logs
-            WHERE user_id = :user_id AND bot_id IS NOT NULL AND token_usage_json LIKE :marker
-        """), params).scalar()
+        tracking_since = _earliest_marker(session, params)
+        if tracking_since is None:
+            # Scan cap hit before a valid marker: fall back to the oldest valid
+            # one already loaded. Later than the truth, so it over-discloses.
+            valid = [r["created_at"] for r in rows[:MAX_CANDIDATES] if _marker(r["token_usage_json"])]
+            tracking_since = min(valid) if valid else None
         # Completed turns of this bot inside the window that predate any marker.
         untracked = None if tracking_since is None else session.execute(text("""
             SELECT COUNT(*) FROM turn_logs
