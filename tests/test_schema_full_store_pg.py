@@ -41,9 +41,10 @@ def test_pristine_full_store_catalog(full_store_db, tmp_path):
     # + TASK-1918's accepted-session display receipts (TurnLogStore bootstrap).
     # + TASK-1900's bot_slug_aliases (BotProfileStore bootstraps it).
     # + TASK-2110's llm_response_records (LlmResponseStore bootstraps it).
-    assert len(relations) == 63, sorted(relations)
+    # + TASK-1538's utility_usage (TurnLogStore bootstraps it).
+    assert len(relations) == 64, sorted(relations)
     assert {"system_events", "system_gates", "gate_members", "gate_escalations", "bot_tag_catalog", "bot_profile_tags",
-            "api_balance_ledger", "api_balances", "llm_response_records",
+            "api_balance_ledger", "api_balances", "llm_response_records", "utility_usage",
             "bot_profile_changes", "bot_slug_aliases", "approval_approver_fanout", "session_resumption_receipts"} <= {key.split(".")[-1] for key in relations}
     assert not any("schema_full_fixture" in key for _, key in catalog)
     assert catalog_tool["compare"](catalog, catalog) == []
@@ -51,6 +52,7 @@ def test_pristine_full_store_catalog(full_store_db, tmp_path):
     output_dir = Path(os.environ.get("TASK1149_EVIDENCE_DIR", str(tmp_path)))
     output_dir.mkdir(parents=True, exist_ok=True)
     catalog_tool["write_snapshot"](output_dir / "pristine-full-store.jsonl", lines, metadata)
+    # utility_usage is nested in the existing TurnLogStore step, not a new step.
     assert len(json.loads((output_dir / "pristine-full-store.jsonl.meta.json").read_text())["bootstrap_manifest"]) == 21
 
 
