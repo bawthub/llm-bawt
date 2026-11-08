@@ -12,6 +12,8 @@ from typing import Any
 
 from sqlalchemy import bindparam, text
 
+from .bot_identities import SYSTEM_BOT_ID
+
 DELIVERY_STATUSES = frozenset({
     "QUEUED", "STEERING", "DISPATCHING", "DELIVERED", "FAILED", "CANCELLED",
 })
@@ -76,8 +78,12 @@ class DeliveryListFilter:
                 names.append(f":{name}")
                 params[name] = bot
             allowed = ", ".join(names)
+            # The system principal sends notices (approval fanout, ops wakes)
+            # to a bot; whoever may read that bot may read them (TASK-1674).
+            params["system_sender"] = SYSTEM_BOT_ID
             clauses.append(
-                f"sender_bot_id IN ({allowed}) AND target_bot_id IN ({allowed})"
+                f"(sender_bot_id IN ({allowed}) OR sender_bot_id = :system_sender)"
+                f" AND target_bot_id IN ({allowed})"
                 if names else "1=0"
             )
 

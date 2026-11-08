@@ -260,11 +260,15 @@ def test_delivery_participant_predicate_precedes_limit_and_receipt_materializati
         for ordinal, sender, target in [
             (1, 'public-fixture', 'peer'), (2, 'private_fixture', 'peer'),
             (3, 'peer', 'private_fixture'), (4, 'unknown', 'peer'),
+            # System notices (approval fanout, ops wakes) are readable by
+            # whoever may read their target, never by the target alone.
+            (0, 'system', 'peer'), (0, 'system', 'private_fixture'), (0, 'peer', 'system'),
         ]:
             conn.execute(text("""INSERT INTO inter_bot_deliveries
                 (id, sender_bot_id, target_bot_id, ordinal, message, user_message_id, turn_id, status)
                 VALUES (:id, :sender, :target, :ordinal, 'fixture', 'u', 't', 'QUEUED')"""),
-                {"id": str(ordinal), "sender": sender, "target": target, "ordinal": ordinal})
+                {"id": str(ordinal) if ordinal else f"{sender}>{target}",
+                 "sender": sender, "target": target, "ordinal": ordinal})
     store = object.__new__(InterBotDeliveryStore)
     store.engine = rig.engine
     public = frozenset({'public-fixture', 'peer'})
@@ -275,3 +279,8 @@ def test_delivery_participant_predicate_precedes_limit_and_receipt_materializati
     assert [r.id for r in store.list(allowed_bot_ids=own, limit=1)] == ['3']
     assert store.list(allowed_bot_ids=frozenset()) == []
     assert store.get('1', allowed_bot_ids=frozenset()) is None
+    assert store.get('system>peer', allowed_bot_ids=public) is not None
+    for id in ['system>private_fixture', 'peer>system']:
+        assert store.get(id, allowed_bot_ids=public) is None
+    assert store.get('system>private_fixture', allowed_bot_ids=own) is not None
+    assert store.get('system>peer', allowed_bot_ids=frozenset()) is None
