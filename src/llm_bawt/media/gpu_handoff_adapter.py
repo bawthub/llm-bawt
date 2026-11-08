@@ -185,10 +185,14 @@ class LocalHandoffAdapter(HandoffAdapter):
 
     async def dispatch(self, snapshot, *, user, generation):
         slug = snapshot["operation"]["slug"]
-        # A Moshi start is created only under the handoff's own fence; the
-        # ops guard refuses it otherwise (TASK-1171).
-        fence = (GpuHandoffFence.voice_start(generation=generation, operation_slug=slug)
-                 if slug in START_OPERATIONS else None)
+        # A Moshi start or stop is created only under the handoff's own fence;
+        # the ops guard refuses it otherwise (TASK-1171, TASK-1707).
+        if slug in START_OPERATIONS:
+            fence = GpuHandoffFence.voice_start(generation=generation, operation_slug=slug)
+        elif slug in STOP_OPERATIONS:
+            fence = GpuHandoffFence.voice_stop(generation=generation, operation_slug=slug)
+        else:
+            fence = None
         return await asyncio.to_thread(
             self.ops.dispatch_job, operation_slug=slug, args={},
             approved_snapshot=snapshot,

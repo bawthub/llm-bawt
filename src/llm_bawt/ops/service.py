@@ -21,7 +21,8 @@ from .executor import (ConfigCheckError, DockerExecutor, Executor, ExecutorError
                        validate_spec)
 from .execution_mode import snapshot_execution_mode
 from .operation_revision import OperationChanged, changed_reason
-from .gpu_guard import GPU_VOICE_SERVICES, GpuGuardUnverifiable, gpu_voice_target
+from .gpu_guard import (GPU_VOICE_SERVICES, STOP_ACTION, GpuGuardUnverifiable, gpu_voice_stop_target,
+                        gpu_voice_target, handoff_only_service)
 from .house_guard import HouseOccupancyUnverifiable, house_targets, occupancy_reader, override_requested
 from .self_target import SelfTargetError
 from .image_deploy import DEPLOY_ACTION, IMAGE_ACTIONS
@@ -61,6 +62,17 @@ def _spec_action(operation) -> str | None:
     except (TypeError, ValueError):
         return None
     return spec.get("action") if isinstance(spec, dict) else None
+
+
+def _handoff_only(operation) -> bool:
+    try:
+        spec = json.loads(operation.command_script)
+        defaults = json.loads(operation.args_defaults_json or "{}")
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(spec, dict) or not isinstance(defaults, dict):
+        return False
+    return handoff_only_service(spec, defaults) is not None
 
 
 def _valid_config_snapshot(snapshot: dict) -> bool:
@@ -205,7 +217,9 @@ class OpsService:
             raise OpsDispatchError("quiesce_unavailable", str(exc)) from exc
 
     def list_operations_for_agent(self, *, include_disabled=False):
-        return [row.to_agent_summary() for row in self.store.list_operations(include_disabled=include_disabled)]
+        # TASK-1707: never offer what only a GPU handoff can run.
+        return [row.to_agent_summary() for row in self.store.list_operations(include_disabled=include_disabled)
+                if not _handoff_only(row)]
 
     def get_operation(self, slug):
         return self.store.get_operation_by_slug(slug)
@@ -603,12 +617,33 @@ class OpsService:
 
         try:
             service = self._creation_gpu_target(snapshot)
+            stopped = self._gpu_stop_target(snapshot, reads=not self.admission_only)
         except GpuGuardUnverifiable as exc:
             raise OpsDispatchError("gpu_guard_unverifiable", str(exc)) from exc
         if service is not None and not isinstance(create_fence, GpuHandoffFence):
             raise OpsDispatchError("gpu_handoff_required", (
                 f"this operation starts or recreates the GPU voice service {service!r}; "
                 "only a GPU handoff can run it"))
+        if stopped is not None and not (isinstance(create_fence, GpuHandoffFence)
+                                        and create_fence.kind == "voice_stop"):
+            # TASK-1707: only a handoff can start it again, so only a handoff stops it.
+            raise OpsDispatchError("gpu_handoff_required", (
+                f"this operation stops the GPU voice service {stopped!r}; only a GPU handoff "
+                "can run it, because only a handoff can start it again"))
+
+    def _gpu_stop_target(self, snapshot, *, reads):
+        """The GPU voice service a job would stop (TASK-1707). A target that
+        needs a Docker read refuses where ``reads`` is false."""
+        spec = snapshot["spec"]
+        if spec.get("action") != STOP_ACTION:
+            return None
+        try:
+            return gpu_voice_stop_target(spec, snapshot["resolved_args"], _NoTargetReads())
+        except GpuGuardUnverifiable:
+            if not reads:
+                raise
+        executor = self._resolve_executor(snapshot["execution"]["executor_kind"])
+        return gpu_voice_stop_target(spec, snapshot["resolved_args"], executor)
 
     def _check_gpu_handoff(self, job, snapshot):
         """Dispatch point: re-run the guard against the live container and
@@ -617,7 +652,8 @@ class OpsService:
         from ..media.gpu_handoff_store import GpuHandoffStore
 
         try:
-            service = self._gpu_voice_target(snapshot, live=True)
+            service = (self._gpu_voice_target(snapshot, live=True)
+                       or self._gpu_stop_target(snapshot, reads=True))
         except GpuGuardUnverifiable as exc:
             raise ExecutorError(f"gpu_guard_unverifiable: {exc}") from exc
         if service is not None and not GpuHandoffStore(self.store.engine).admits(

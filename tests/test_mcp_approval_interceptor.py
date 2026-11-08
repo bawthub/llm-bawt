@@ -219,6 +219,20 @@ def test_singleton_projects_committed_superseded_cards_before_publishing_new_car
     assert executed == []
 
 
+@pytest.mark.parametrize("action", ["stop", "start", "restart"])
+def test_handoff_only_operation_files_no_card(capability, action):
+    """TASK-1707: only a GPU handoff can run it, so an approval would be dead on arrival."""
+    order, executed = [], []
+    store = FakeStore(_policy(PolicyAction.REQUIRE_APPROVAL), order)
+    mcp = _server(store, order, executed)
+    mcp._operations_preparer = lambda operation, args: {
+        "spec": {"action": action, "compose_project": "bawthub", "compose_service": "tts"},
+        "resolved_args": {}}
+    result = _call(mcp, capability, _stamped_args(capability))
+    assert result["status"] == "gpu_handoff_required" and result["is_error"] is True
+    assert store.rows == [] and order == [] and executed == []
+
+
 def test_routing_approval_displays_exact_target_image_and_delta(capability):
     from tests.test_ops_routing_reconcile import RoutingDocker, snapshot
 

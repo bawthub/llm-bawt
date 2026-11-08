@@ -11,6 +11,7 @@ import hashlib
 import json
 
 from ..approval_models import KIND_ORCHESTRATION, REQ_APPROVED, RESOLVED_VIA_USER
+from .gpu_guard import handoff_only_service
 from .service import APPROVAL_ONLY_ACTIONS, APPROVAL_REQUIRED, OpsDispatchError, _spec_action
 from .validation import canonical_json
 
@@ -46,7 +47,12 @@ def dispatch_operator_run(ops, approvals, *, user_id: str, operation: str,
         if _spec_action(ops.store.get_operation_by_slug(operation)) in APPROVAL_ONLY_ACTIONS:
             raise OpsDispatchError("approval_required", APPROVAL_REQUIRED)
         snapshot = ops.prepare_invocation(operation, args)
-        row, _ = approvals.record_orchestration_request(
+        if (service := handoff_only_service(snapshot["spec"], snapshot["resolved_args"])) is not None:
+            # TASK-1707: only a GPU handoff can run it; record no doomed Run.
+            raise OpsDispatchError("gpu_handoff_required", (
+                f"this operation starts, restarts or stops the GPU voice service {service!r}; "
+                "only a GPU handoff can run it"))
+        row, _ =approvals.record_orchestration_request(
             request_id=request_id, bot_id="ops", user_id=user_id, turn_id=key,
             backend=OPERATOR_BACKEND, tool_name=OPERATOR_TOOL,
             tool_arguments={"operation": operation, "args": args},

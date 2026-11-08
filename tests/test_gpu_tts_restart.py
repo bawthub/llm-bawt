@@ -17,14 +17,16 @@ from sqlalchemy import select
 from llm_bawt.media.gpu_handoff import GpuHandoff
 from llm_bawt.media.gpu_handoff_adapter import LocalHandoffAdapter
 from llm_bawt.media.gpu_handoff_store import (
-    START_OPERATIONS, TTS_RESTART_OPERATION, GpuHandoffFence, GpuHandoffStore, HandoffConflict, _state,
+    START_OPERATIONS, STOP_OPERATIONS, TTS_RESTART_OPERATION, GpuHandoffFence, GpuHandoffStore, HandoffConflict, _state,
 )
 from llm_bawt.ops import JOB_QUEUED, OpsDispatchError, OpsService, OpsStore
 from llm_bawt.ops.executor import (
     CONFIG_CHECKED_ACTIONS, ROUTING_ACTION, SUPPORTED_ACTIONS, DispatchResult, Executor, ExecutorError,
     ReconcileResult,
 )
-from llm_bawt.ops.gpu_guard import UNGATED_ACTIONS, GpuGuardUnverifiable, gpu_voice_target
+from llm_bawt.ops.gpu_guard import (
+    UNGATED_ACTIONS, GpuGuardUnverifiable, gpu_voice_stop_target, gpu_voice_target, handoff_only_service,
+)
 from llm_bawt.ops.image_deploy import IMAGE_ACTIONS
 from llm_bawt.ops.models import OpsJob
 from llm_bawt.ops.plan_reconcile import ACTION as PLAN_ACTION
@@ -390,6 +392,98 @@ def test_restore_start_is_admitted_while_pending(world):
     snapshot = world.ops.prepare_invocation(START_OPERATIONS[1], {})
     run(world.adapter.dispatch(snapshot, user="u", generation=4))
     assert len(world.executor.dispatches) == 1
+
+
+# ── TASK-1707: a Moshi stop is fenced like the start that restores it ──────
+
+STOP_TTS = STOP_OPERATIONS[1]
+
+
+def add_stop_operation(world):
+    world.ops_store.create_operation({"slug": STOP_TTS, "enabled": True,
+                                      "command_script": json.dumps({**TTS_SPEC, "action": "stop"}),
+                                      "args_schema_json": {"type": "object", "properties": {},
+                                                           "additionalProperties": False}}, actor="t")
+
+
+@pytest.mark.parametrize("service", ["stt", "tts"])
+def test_stop_of_a_voice_service_is_a_handoff_stop(service):
+    spec = {"action": "stop", "compose_project": "bawthub", "compose_service": service}
+    assert gpu_voice_stop_target(spec, {}, Inspector(error="no docker")) == service
+    assert gpu_voice_stop_target({**spec, "compose_service": "frontend"}, {}, Inspector()) is None
+    assert gpu_voice_stop_target({**spec, "action": "start"}, {}, Inspector()) is None
+    named = {"action": "stop", "container_name": "renamed"}
+    assert gpu_voice_stop_target(named, {}, Inspector(("bawthub", service))) == service
+    with pytest.raises(GpuGuardUnverifiable):
+        gpu_voice_stop_target(named, {}, Inspector(error="gone"))
+
+
+@pytest.mark.parametrize(("action", "expected"), [
+    ("start", "tts"), ("restart", "tts"), ("stop", "tts"), ("pull", None)])
+def test_handoff_only_is_proven_from_the_spec(action, expected):
+    spec = {"action": action, "compose_project": "bawthub", "compose_service": "tts"}
+    assert handoff_only_service(spec, {}) == expected
+    assert handoff_only_service({**spec, "compose_service": "frontend"}, {}) is None
+    # Unprovable without a Docker read: not hidden here; the creation guard decides.
+    assert handoff_only_service({"action": action, "container_name": "x"}, {}) is None
+
+
+def test_no_path_stops_a_voice_service_without_the_handoff_fence(world):
+    add_stop_operation(world)
+    snapshot = world.ops.prepare_invocation(STOP_TTS, {})
+    wrong_fence = GpuHandoffFence.voice_start(generation=0, operation_slug=STOP_TTS)
+    for kwargs in ({}, {"approved_snapshot": snapshot, "approval_request_id": "apr",
+                        "create_fence": lambda session: None},
+                   {"approved_snapshot": snapshot, "create_fence": wrong_fence}):
+        with pytest.raises(OpsDispatchError) as exc:
+            world.ops.dispatch_job(operation_slug=STOP_TTS, args={}, idempotency_key="k", **kwargs)
+        assert exc.value.code == "gpu_handoff_required"
+        assert "start it again" in str(exc.value)
+    assert job_count(world.engine) == 0 and world.executor.dispatches == []
+
+
+def test_switch_stop_is_admitted_while_pending(world):
+    add_stop_operation(world)
+    set_state(world.engine, owner="voice", phase="transitioning", offer_target="video_calibration",
+              pending_action="stop_moshi_tts", generation=4)
+    snapshot = world.ops.prepare_invocation(STOP_TTS, {})
+    run(world.adapter.dispatch(snapshot, user="u", generation=4))
+    assert len(world.executor.dispatches) == 1
+    assert world.handoff.admits(f"gpu-handoff:4:{STOP_TTS}", STOP_TTS)
+
+
+@pytest.mark.parametrize("state", [
+    {"phase": "idle"},
+    {"phase": "transitioning", "offer_target": "video_calibration", "pending_action": "stop_moshi_stt"},
+    {"phase": "transitioning", "offer_target": "voice", "pending_action": "stop_moshi_tts"},
+])
+def test_stale_moshi_stop_is_refused_at_creation(world, state):
+    add_stop_operation(world)
+    set_state(world.engine, generation=4, **state)
+    snapshot = world.ops.prepare_invocation(STOP_TTS, {})
+    with pytest.raises(HandoffConflict) as exc:
+        run(world.adapter.dispatch(snapshot, user="u", generation=4))
+    assert exc.value.code == "gpu_handoff_stale" and job_count(world.engine) == 0
+
+
+def test_stop_fence_lost_before_dispatch_keeps_the_job_unsubmitted(world):
+    add_stop_operation(world)
+    set_state(world.engine, owner="voice", phase="transitioning", offer_target="video_calibration",
+              pending_action="stop_moshi_tts", generation=4)
+    world.executor.on_preflight = lambda: set_state(world.engine, pending_action=None)
+    snapshot = world.ops.prepare_invocation(STOP_TTS, {})
+    run(world.adapter.dispatch(snapshot, user="u", generation=4))
+    job = world.ops_store.get_job_by_key(f"gpu-handoff:4:{STOP_TTS}")
+    assert job.state == JOB_QUEUED and world.executor.dispatches == []
+
+
+def test_agents_are_not_offered_handoff_only_operations(world):
+    add_stop_operation(world)
+    world.ops_store.create_operation({"slug": "bawthub.restart-frontend", "enabled": True,
+        "command_script": json.dumps({**TTS_SPEC, "compose_service": "frontend"}),
+        "args_schema_json": {"type": "object", "properties": {}}}, actor="t")
+    listed = {row["slug"] for row in world.ops.list_operations_for_agent(include_disabled=True)}
+    assert listed == {"bawthub.restart-frontend"}
 
 
 def test_policy_deny_refuses_before_any_job(world):

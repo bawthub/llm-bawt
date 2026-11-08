@@ -228,6 +228,17 @@ def test_manual_run_preserves_approval_card_only_preparation_fence(rig, monkeypa
     assert rig.approvals.list_requests() == [] and rig.github.dispatches == []
 
 
+@pytest.mark.parametrize("slug", ["bawthub.stop-moshi-tts", "bawthub.start-moshi-stt", "bawthub.restart-tts"])
+def test_manual_run_records_no_doomed_gpu_handoff_run(rig, slug):
+    """TASK-1707: only a GPU handoff can run it; refuse before any audited Run."""
+    rig.jobs.create_operation({**next(row for row in SEEDS if row["slug"] == slug), "enabled": True})
+    with pytest.raises(OpsDispatchError) as error:
+        dispatch_operator_run(rig.ops, rig.approvals, user_id=USER, operation=slug, args={},
+                              idempotency_key="fixture-moshi")
+    assert error.value.code == "gpu_handoff_required"
+    assert rig.approvals.list_requests() == [] and rig.jobs.list_jobs() == []
+
+
 def test_legacy_http_cannot_assert_new_operator_authority(client, rig):
     response = client.post("/v1/ops/jobs", json=_body())
     assert response.status_code == 422 and rig.github.dispatches == []

@@ -21,11 +21,13 @@ from .worker import target_selector
 #: The product's own GPU voice services, by Compose identity.
 GPU_VOICE_PROJECT = "bawthub"
 GPU_VOICE_SERVICES = frozenset({"stt", "tts"})
-#: ``stop`` frees VRAM and ``pull`` touches no container. A release spec runs
+STOP_ACTION = "stop"
+#: ``stop`` frees VRAM (its own handoff guard is :func:`gpu_voice_stop_target`)
+#: and ``pull`` touches no container. A release spec runs
 #: on the release executor, which dispatches a workflow and no container; its
 #: image deploy is a separate ``deploy_image`` job, gated on its own.
 #: ``remove`` (TASK-1439 T2c) deletes one stopped container and starts nothing.
-UNGATED_ACTIONS = frozenset({"stop", "pull", RELEASE_ACTION, REMOVE_ACTION})
+UNGATED_ACTIONS = frozenset({STOP_ACTION, "pull", RELEASE_ACTION, REMOVE_ACTION})
 #: Actions the worker resolves with :func:`target_selector`; every other
 #: action names its target by literal Compose identity plus container_name.
 SELECTOR_ACTIONS = frozenset({"start", "restart"})
@@ -84,19 +86,7 @@ def gpu_voice_target(spec: dict, resolved_args: dict, executor, *, live: bool = 
                 return service
         return None
     if action in SELECTOR_ACTIONS:
-        try:
-            name, filters = target_selector(spec, resolved_args)
-        except (KeyError, TypeError) as exc:
-            raise GpuGuardUnverifiable(f"cannot resolve the target: {exc}") from exc
-        if name is None:
-            # The worker selects exactly the containers carrying these labels.
-            labels = dict(item.split("=", 1) for item in filters["label"])
-            identity = (labels.get("com.docker.compose.project"), labels.get("com.docker.compose.service"))
-            if not _complete(identity):
-                raise GpuGuardUnverifiable(f"the target selector names no complete Compose identity: {identity!r}")
-            identities = [identity]
-        else:
-            identities = [_inspect(executor, spec, resolved_args)]
+        identities = _selector_identities(spec, resolved_args, executor)
     else:
         literal = (spec.get("compose_project"), spec.get("compose_service"))
         if _complete(literal):
@@ -108,6 +98,56 @@ def gpu_voice_target(spec: dict, resolved_args: dict, executor, *, live: bool = 
             identities = [_inspect(executor, spec, resolved_args)]
         else:
             raise GpuGuardUnverifiable(f"{action!r} names no Compose identity or container")
+    return _gated_service(identities)
+
+
+def gpu_voice_stop_target(spec: dict, resolved_args: dict, executor) -> str | None:
+    """The gated voice service this spec would stop, else None (TASK-1707).
+
+    A stop frees VRAM, so :func:`gpu_voice_target` leaves it ungated, but only
+    a GPU handoff can start the service again. A stop outside one strands the
+    service down, so it is admitted under the same fence as the start that
+    restores it. The worker resolves a stop's container like a start's.
+    """
+    if spec.get("action") != STOP_ACTION:
+        return None
+    return _gated_service(_selector_identities(spec, resolved_args, executor))
+
+
+class _NoReads:
+    @staticmethod
+    def target_compose_identity(spec, args):
+        raise ExecutorError("no Docker read is available here")
+
+
+def handoff_only_service(spec: dict, resolved_args: dict) -> str | None:
+    """The GPU voice service an operation starts, recreates or stops, proven
+    from its spec alone, else None (TASK-1707). Only a GPU handoff can run such
+    an operation, so an agent's ``ops_run`` or approval card never can. A target
+    the spec cannot prove returns None; the creation guard still decides it."""
+    try:
+        return (gpu_voice_target(spec, resolved_args, _NoReads())
+                or gpu_voice_stop_target(spec, resolved_args, _NoReads()))
+    except GpuGuardUnverifiable:
+        return None
+
+
+def _selector_identities(spec: dict, resolved_args: dict, executor) -> list[tuple[str, str]]:
+    try:
+        name, filters = target_selector(spec, resolved_args)
+    except (KeyError, TypeError) as exc:
+        raise GpuGuardUnverifiable(f"cannot resolve the target: {exc}") from exc
+    if name is not None:
+        return [_inspect(executor, spec, resolved_args)]
+    # The worker selects exactly the containers carrying these labels.
+    labels = dict(item.split("=", 1) for item in filters["label"])
+    identity = (labels.get("com.docker.compose.project"), labels.get("com.docker.compose.service"))
+    if not _complete(identity):
+        raise GpuGuardUnverifiable(f"the target selector names no complete Compose identity: {identity!r}")
+    return [identity]
+
+
+def _gated_service(identities) -> str | None:
     for identity in identities:
         if _gated(*identity):
             return identity[1]

@@ -40,6 +40,7 @@ START_OPERATIONS = ("bawthub.start-moshi-stt", "bawthub.start-moshi-tts")
 TTS_RESTART_OPERATION = "bawthub.restart-tts"
 TTS_RESTART_KEY_PREFIX = "tts-restart:"
 _START_ACTIONS = dict(zip(START_OPERATIONS, ("start_moshi_stt", "start_moshi_tts"), strict=True))
+_STOP_ACTIONS = dict(zip(STOP_OPERATIONS, ("stop_moshi_stt", "stop_moshi_tts"), strict=True))
 _video_jobs = Table(
     "gpu_handoff_video_jobs", _metadata,
     Column("id", String(32), primary_key=True),
@@ -144,13 +145,23 @@ def _start_admitted(row, key: str, operation_slug: str) -> bool:
             and row["pending_action"] == action)
 
 
+def _stop_admitted(row, key: str, operation_slug: str) -> bool:
+    """A switch's own Moshi stop (TASK-1707), admitted like a restore's start:
+    only while that transition is running with exactly that stop pending, so
+    the handoff that stopped the service records how to start it again."""
+    action = _STOP_ACTIONS.get(operation_slug)
+    return (action is not None and key == f"gpu-handoff:{row['generation']}:{operation_slug}"
+            and row["phase"] == "transitioning" and row["offer_target"] != "voice"
+            and row["pending_action"] == action)
+
+
 def _restart_admitted(row, key: str, operation_slug: str) -> bool:
     return (operation_slug == TTS_RESTART_OPERATION and row["phase"] == "tts_restarting"
             and row["tts_restart_key"] == key)
 
 
 class GpuHandoffFence:
-    """Creation fence for an ops job that starts or restarts a GPU voice service.
+    """Creation fence for an ops job that starts, restarts or stops a GPU voice service.
 
     ``OpsStore.create_job`` runs it inside the job-insert transaction, so the
     handoff row and the job commit together or not at all. Only the handoff
@@ -158,7 +169,7 @@ class GpuHandoffFence:
     """
 
     def __init__(self, kind: str, *, key: str, operation_slug: str):
-        if kind not in ("tts_restart", "voice_start"):
+        if kind not in ("tts_restart", "voice_start", "voice_stop"):
             raise ValueError(f"unknown GPU handoff fence {kind!r}")
         self.kind, self.key, self.operation_slug = kind, key, operation_slug
 
@@ -171,6 +182,11 @@ class GpuHandoffFence:
         return cls("voice_start", key=f"gpu-handoff:{generation}:{operation_slug}",
                    operation_slug=operation_slug)
 
+    @classmethod
+    def voice_stop(cls, *, generation: int, operation_slug: str) -> GpuHandoffFence:
+        return cls("voice_stop", key=f"gpu-handoff:{generation}:{operation_slug}",
+                   operation_slug=operation_slug)
+
     def __call__(self, session) -> None:
         conn = session.connection()
         row = _lock_state(conn)
@@ -178,6 +194,12 @@ class GpuHandoffFence:
             # Check-only: the restore already recorded this start as pending.
             if not _start_admitted(row, self.key, self.operation_slug):
                 raise HandoffConflict("Moshi start is no longer this restore's pending action",
+                                      code="gpu_handoff_stale")
+            return
+        if self.kind == "voice_stop":
+            # Check-only: the switch already recorded this stop as pending.
+            if not _stop_admitted(row, self.key, self.operation_slug):
+                raise HandoffConflict("Moshi stop is no longer this switch's pending action",
                                       code="gpu_handoff_stale")
             return
         if row["phase"] == "tts_restarting":
@@ -229,7 +251,8 @@ class GpuHandoffStore:
         """Dispatch-time re-check: the handoff row still names this gated job."""
         with self.engine.begin() as conn:
             row = _lock_state(conn)
-            return _start_admitted(row, key, operation_slug) or _restart_admitted(row, key, operation_slug)
+            return (_start_admitted(row, key, operation_slug) or _stop_admitted(row, key, operation_slug)
+                    or _restart_admitted(row, key, operation_slug))
 
     def release_tts_restart(self, key: str) -> HandoffState:
         """CAS the TTS restart fence back to idle voice. The caller proves the

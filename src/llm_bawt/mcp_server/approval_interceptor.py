@@ -329,6 +329,23 @@ class ApprovalAwareFastMCP(FastMCP):
                 )
                 if not isinstance(operations_snapshot, dict):
                     raise ValueError("Operation preparer must return a snapshot object")
+                from ..ops.gpu_guard import handoff_only_service
+
+                service = handoff_only_service(operations_snapshot.get("spec") or {},
+                                               operations_snapshot.get("resolved_args") or {})
+                if service is not None:
+                    # TASK-1707: an approval could never run it, so file no card.
+                    return {
+                        "status": "gpu_handoff_required",
+                        "tool": name,
+                        "is_error": True,
+                        "message": (
+                            f"This operation starts, restarts or stops the GPU voice service "
+                            f"{service!r}. Only a GPU handoff can run it, so no approval was "
+                            "created. Do not retry; ask the user to use the voice/video switch "
+                            "or the TTS page's Restart button."
+                        ),
+                    }
             approval_prompt = decision.prompt
             if name == "ops_run" and operations_snapshot and operations_snapshot.get("release_source"):
                 source = operations_snapshot["release_source"]
