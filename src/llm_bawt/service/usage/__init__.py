@@ -98,11 +98,12 @@ register(XaiUsageAdapter())
 # Pay-per-token API keys counted down from a manual anchor (TASK-1461).
 register(OpenAIApiUsageAdapter())
 register(OpenRouterUsageAdapter())
-# Moonshot OpenPlatform and Kimi For Coding are separate products. Do not
-# surface an unauthorized Moonshot card when only the Kimi subscription is
-# configured; register OpenPlatform usage once its own key exists.
-if os.getenv("MOONSHOT_API_KEY") or os.getenv("LLM_BAWT_MOONSHOT_API_KEY"):
-    register(MoonshotUsageAdapter())
+# Moonshot OpenPlatform and Kimi For Coding are separate products on separate
+# access paths. Both register unconditionally (TASK-1552): the key may live
+# only in the credential store, so it is resolved when the card is fetched,
+# and the all-cards view lists only providers with a catalog model on their
+# path, so a Kimi-only install shows no Moonshot card.
+register(MoonshotUsageAdapter())
 register(KimiCodingUsageAdapter())
 
 

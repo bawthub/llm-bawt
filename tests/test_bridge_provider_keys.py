@@ -375,6 +375,21 @@ def test_zai_failure_messages_never_echo_a_non_numeric_code(monkeypatch, code, d
     assert snap.error == f"z.ai usage endpoint failed with {described}."
 
 
+def test_moonshot_usage_registers_without_an_env_key_and_shows_only_with_a_model():
+    # TASK-1552: a store-only key must still get a card, so registration can't
+    # depend on import-time env; the catalog decides which cards are listed.
+    from llm_bawt.service import usage
+
+    assert usage.has_provider("moonshot")
+
+    def catalog(*paths):
+        endpoints = [SimpleNamespace(access_path=SimpleNamespace(key=p)) for p in paths]
+        return SimpleNamespace(endpoints=lambda: endpoints)
+
+    assert "moonshot" not in usage.providers_with_models(catalog("kimi-coding-chat"))
+    assert "moonshot" in usage.providers_with_models(catalog("moonshot-anthropic"))
+
+
 @pytest.mark.parametrize(
     ("adapter_cls", "provider_id", "env"),
     [
