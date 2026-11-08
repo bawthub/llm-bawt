@@ -95,3 +95,9 @@ def test_descriptor_exposes_setup_help_without_secret(monkeypatch):
     descriptor = adapter.descriptor()
     assert descriptor["auth_methods"] == ["api_key"] and descriptor["category"] == "deploy"
     assert "read:packages" in descriptor["setup_url"] and "ghp_x" not in repr(descriptor)
+
+
+def test_only_release_deploy_providers_are_operator_only():
+    operator_only = {pid for pid, cls in _ADAPTER_CLASSES.items() if cls.operator_only}
+    assert operator_only == {cls.id for cls in (GitHubReleaseAdapter, GitHubReleaseDispatchAdapter, GhcrPullAdapter)}
+    assert _adapter(GhcrPullAdapter).descriptor()["operator_only"] is True

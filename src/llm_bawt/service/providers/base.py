@@ -371,6 +371,9 @@ class ProviderAdapter:
     #: Static billing semantics of this provider's routes, independent of auth
     #: kind or connection state. Unclassified providers must remain unknown.
     billing_mode: BillingMode = "unknown"
+    #: Credentials only the installation operator uses (e.g. release/deploy
+    #: tooling). Tenant-facing surfaces such as the setup wizard hide them.
+    operator_only: bool = False
 
     def __init__(self, config: Config):
         self.config = config
@@ -386,6 +389,7 @@ class ProviderAdapter:
             "id": self.id,
             "label": self.label,
             "auth_methods": list(self.auth_methods),
+            "operator_only": self.operator_only,
             "connection": (rec or ConnectionRecord(provider=self.id)).public(),
             "health": self.health(),
         }

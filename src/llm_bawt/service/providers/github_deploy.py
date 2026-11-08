@@ -28,6 +28,7 @@ class _GitHubTokenAdapter(ApiKeyAdapter):
     """Validates a GitHub token against ``GET /user``; account = GitHub login."""
 
     category = "deploy"
+    operator_only = True
     description = ""
     credential_help = ""
     setup_url = ""
