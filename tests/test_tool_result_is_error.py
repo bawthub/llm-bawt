@@ -117,6 +117,49 @@ def test_native_stream_flags_failed_tool_end(monkeypatch):
     assert ctx.tool_call_details_holder[0]["is_error"] is True
 
 
+def _real_ha_executor(monkeypatch, *, credentials=True, run=None):
+    from llm_bawt.integrations.ha_mcp.client import HomeAssistantNativeClient
+
+    client = HomeAssistantNativeClient.__new__(HomeAssistantNativeClient)
+    client._initialized, client._tool_names = True, {"HassTurnOn"}
+    monkeypatch.setattr(client, "_credentials", lambda: object() if credentials else None)
+    monkeypatch.setattr(client, "_call_tool_async", lambda *_a: None)
+    if run is not None:
+        monkeypatch.setattr(client, "_run_async", run)
+    executor = ToolExecutor.__new__(ToolExecutor)
+    executor.ha_native_client = client
+    return executor
+
+
+def _ha_call(executor):
+    return executor._execute_ha_native_tool(ToolCall(name="HassTurnOn", arguments={}, raw_text=""))
+
+
+def _content(text, *, is_error):
+    return SimpleNamespace(content=[SimpleNamespace(text=text)], isError=is_error)
+
+
+def test_real_ha_client_failures_are_error_results(monkeypatch):
+    # Missing credentials: the client's own early return, not an escaping exception.
+    assert tool_result_is_error(_ha_call(_real_ha_executor(monkeypatch, credentials=False)))
+
+    def transport_failure(_coro):
+        raise RuntimeError("connection refused")
+    result = _ha_call(_real_ha_executor(monkeypatch, run=transport_failure))
+    assert tool_result_is_error(result) and "connection refused" in result
+
+    # HA answered, but its MCP result says the tool failed.
+    result = _ha_call(_real_ha_executor(
+        monkeypatch, run=lambda _c: _content("No device named kitchen", is_error=True)))
+    assert tool_result_is_error(result) and "No device named kitchen" in result
+
+
+def test_real_ha_client_success_stays_success(monkeypatch):
+    result = _ha_call(_real_ha_executor(
+        monkeypatch, run=lambda _c: _content("Turned on kitchen", is_error=False)))
+    assert not tool_result_is_error(result) and "Turned on kitchen" in result
+
+
 def test_ha_native_failure_is_an_error_result():
     executor = ToolExecutor.__new__(ToolExecutor)
     executor.ha_native_client = SimpleNamespace(call_tool=Mock(side_effect=RuntimeError("HA down")))

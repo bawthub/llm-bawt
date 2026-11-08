@@ -26,6 +26,10 @@ from ..ha_credentials import (
 logger = logging.getLogger(__name__)
 
 
+class HAToolError(RuntimeError):
+    """A native HA tool call failed; the message is safe to show the model."""
+
+
 @dataclass
 class HAToolDefinition:
     """A tool discovered from HA's native MCP server."""
@@ -134,21 +138,28 @@ class HomeAssistantNativeClient:
             return []
 
     def call_tool(self, name: str, arguments: dict[str, Any]) -> str:
-        """Call an HA tool by name and return the text result."""
+        """Call an HA tool by name and return the text result.
+
+        Raises:
+            HAToolError: the call could not run or HA reported it failed.
+        """
         credentials = self._credentials()
         if credentials is None:
-            return "Error: HA native MCP not configured"
+            raise HAToolError("HA native MCP not configured")
         if not self._initialized:
-            return "Error: HA native MCP tools not discovered yet"
+            raise HAToolError("HA native MCP tools not discovered yet")
         if name not in self._tool_names:
-            return f"Error: Unknown HA tool '{name}'"
+            raise HAToolError(f"Unknown HA tool '{name}'")
 
         try:
             result = self._run_async(self._call_tool_async(credentials, name, arguments))
-            return self._extract_text(result)
         except Exception as e:
             logger.error(f"HA tool call failed: {name}({arguments}): {e}")
-            return f"Error calling HA tool {name}: {e}"
+            raise HAToolError(f"Error calling HA tool {name}: {e}") from e
+        text = self._extract_text(result)
+        if getattr(result, "isError", False) is True:
+            raise HAToolError(text or f"HA tool {name} reported an error")
+        return text
 
     # --- Async internals ---
 

@@ -7,6 +7,7 @@ from llm_bawt.integrations import ha_credentials
 from llm_bawt.integrations.ha_mcp.client import (
     HomeAssistantNativeClient,
     HAToolDefinition,
+    HAToolError,
 )
 from llm_bawt.tools.definitions import (
     Tool,
@@ -83,25 +84,22 @@ class TestHomeAssistantNativeClient:
     def test_call_tool_when_not_available(self):
         config = MockConfig(HA_NATIVE_MCP_URL="")
         client = HomeAssistantNativeClient(config)
-        result = client.call_tool("HassTurnOn", {"name": "kitchen lights"})
-        assert "Error" in result
-        assert "not configured" in result
+        with pytest.raises(HAToolError, match="not configured"):
+            client.call_tool("HassTurnOn", {"name": "kitchen lights"})
 
     def test_call_tool_when_not_initialized(self):
         config = MockConfig()
         client = HomeAssistantNativeClient(config)
-        result = client.call_tool("HassTurnOn", {"name": "kitchen lights"})
-        assert "Error" in result
-        assert "not discovered" in result
+        with pytest.raises(HAToolError, match="not discovered"):
+            client.call_tool("HassTurnOn", {"name": "kitchen lights"})
 
     def test_call_tool_unknown_tool(self):
         config = MockConfig()
         client = HomeAssistantNativeClient(config)
         client._initialized = True
         client._tool_names = {"HassTurnOn"}
-        result = client.call_tool("UnknownTool", {})
-        assert "Error" in result
-        assert "Unknown HA tool" in result
+        with pytest.raises(HAToolError, match="Unknown HA tool"):
+            client.call_tool("UnknownTool", {})
 
 
 class TestHAToolConversion:

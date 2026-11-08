@@ -1685,7 +1685,7 @@ class ToolExecutor:
             result_len = len(result) if isinstance(result, str) else 0
             logger.debug(f"HA native tool result length: {result_len} chars")
             return format_tool_result(tool_name, result or "Done")
-        except Exception as e:
+        except Exception as e:  # HAToolError, or anything unexpected
             logger.error(f"HA native tool call failed: {tool_name}: {e}")
             return format_tool_result(tool_name, None, error=str(e))
 
