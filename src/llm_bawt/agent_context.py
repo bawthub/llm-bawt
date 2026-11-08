@@ -351,7 +351,15 @@ class AgentContextStore:
         ceiling_source = "provider" if observed_ceiling else ("catalog" if configured_ceiling else "unknown")
         resident = None
         resident_source = None
-        if usage:
+        from .context_usage import is_estimated_context
+
+        estimated = is_estimated_context(usage)
+        if estimated:
+            # A reset ack estimates only restored history/known skills, not the
+            # complete provider prompt. Do not call that healthy or critical,
+            # nor fall back to its equally estimated input_tokens.
+            resident_source = str(usage.get("resident_source") or "estimate")
+        elif usage:
             native_resident = int(usage.get("resident_tokens") or 0)
             if native_resident:
                 resident = native_resident
@@ -410,6 +418,7 @@ class AgentContextStore:
             "state": state,
             "resident_prompt_tokens": resident,
             "resident_source": resident_source,
+            "usage_status": usage.get("usage_status") or ("estimated" if estimated else None),
             "effective_ceiling_tokens": ceiling,
             "ceiling_source": ceiling_source,
             "configured_ceiling_tokens": configured_ceiling,

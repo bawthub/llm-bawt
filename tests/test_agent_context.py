@@ -185,6 +185,60 @@ def test_health_fallback_ignores_cumulative_cached_token_accounting(context_stor
     assert health["usage_turn_id"] is not None
 
 
+@pytest.mark.parametrize("provenance", [
+    {"usage_status": "estimated"},
+    {"usage_status": "reset"},
+    {"resident_source": "session_seed_char_estimate"},
+    {"resident_source": "session_seed_and_skills_estimate"},
+    {"resident_source": "session_skills_estimate"},
+    {"resident_source": "clean_session_reset"},
+])
+@pytest.mark.parametrize("native_count", [0, 200_000])
+def test_health_keeps_reset_estimates_unknown_until_provider_usage(context_store, provenance, native_count):
+    store, bot, user, _table = context_store
+    session_id = str(uuid.uuid4())
+    snapshot = {
+        "turn_id": f"turn-{uuid.uuid4().hex}",
+        "created_at": "2026-11-08T19:00:00+00:00",
+        "ended_at": "2026-11-08T19:00:01+00:00",
+        "usage": {
+            "resident_tokens": native_count, "input_tokens": 200_000,
+            "context_window": 250_000, **provenance,
+        },
+    }
+    with store.engine.begin() as conn:
+        conn.execute(sa_text("""
+            INSERT INTO sessions (id, bot_id, user_id, status, started_at, session_metadata)
+            VALUES (:id, :bot, :user, 'active', now(), CAST(:metadata AS jsonb))
+        """), {"id": session_id, "bot": bot, "user": user,
+               "metadata": json.dumps({"context_stats": snapshot})})
+
+    health = store.health(bot_id=bot, user_id=user, backend="claude-code", configured_ceiling=250_000)
+    assert health["state"] == "unknown"
+    assert health["resident_prompt_tokens"] is None
+    assert health["usage_ratio"] is None
+    assert health["remaining_tokens"] is None
+    assert health["usage_status"] in ("estimated", "reset")
+    assert health["resident_source"] == provenance.get("resident_source", "estimate")
+
+    # Replacing the reset ack with a real final-iteration observation restores
+    # a measured gauge. The estimated input count must not survive or be added.
+    snapshot["usage"] = {
+        "resident_tokens": 175_045, "input_tokens": 837,
+        "context_window": 250_000, "usage_status": "final",
+        "resident_source": "final_iteration_total_input",
+    }
+    with store.engine.begin() as conn:
+        conn.execute(sa_text("""
+            UPDATE sessions SET session_metadata=CAST(:metadata AS jsonb) WHERE id=:id
+        """), {"id": session_id, "metadata": json.dumps({"context_stats": snapshot})})
+    measured = store.health(bot_id=bot, user_id=user, backend="claude-code", configured_ceiling=250_000)
+    assert measured["resident_prompt_tokens"] == 175_045
+    assert measured["resident_source"] == "final_iteration_total_input"
+    assert measured["usage_status"] == "final"
+    assert measured["state"] == "healthy"
+
+
 def test_manual_reset_refuses_active_turn(context_store):
     store, bot, user, _table = context_store
     with store.engine.begin() as conn:

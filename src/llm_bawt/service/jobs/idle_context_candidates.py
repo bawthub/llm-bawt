@@ -135,6 +135,10 @@ class IdleContextCandidates:
             usage = json.loads(candidate["token_usage_json"] or "null")
             if not isinstance(usage, dict):
                 return "resident context unknown"
+            from ...context_usage import is_estimated_context
+
+            if is_estimated_context(usage):
+                return "resident context estimate is not a provider measurement"
             resident = int(usage.get("resident_tokens") or 0) or int(usage.get("input_tokens") or 0)
         except (TypeError, ValueError, OverflowError):
             return "resident context unknown"

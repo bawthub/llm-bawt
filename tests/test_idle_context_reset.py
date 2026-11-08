@@ -58,6 +58,38 @@ def test_candidate_thresholds_and_missing_evidence(changes, expected):
     assert IdleContextCandidates.skip_reason(candidate(**changes), now=NOW) == expected
 
 
+@pytest.mark.parametrize("provenance", [
+    {"usage_status": "estimated"},
+    {"usage_status": "reset"},
+    {"resident_source": "session_seed_char_estimate"},
+    {"resident_source": "session_seed_and_skills_estimate"},
+    {"resident_source": "session_skills_estimate"},
+    {"resident_source": "clean_session_reset"},
+])
+@pytest.mark.parametrize("count", [50_000, 200_000])
+def test_size_policy_never_decides_from_reset_estimates(provenance, count):
+    row = candidate(token_usage_json=json.dumps({
+        "resident_tokens": count, "input_tokens": count, **provenance,
+    }))
+    assert IdleContextCandidates.skip_reason(row, now=NOW) == \
+        "resident context estimate is not a provider measurement"
+
+
+@pytest.mark.parametrize("trigger", ["stale", "house"])
+def test_non_size_idle_triggers_remain_available_after_a_reset_estimate(trigger):
+    from llm_bawt.service.job_parameters import IdleContextResetParameters
+
+    stamp = (NOW - timedelta(minutes=30)).isoformat()
+    row = candidate(
+        token_usage_json=json.dumps({"usage_status": "estimated", "resident_tokens": 200_000}),
+        session_metadata={"system_prompt_stale": {"since": stamp, "changed_at": stamp}},
+    )
+    if trigger == "house":
+        row.update(house="fixture-house", house_pinned=False)
+    parameters = IdleContextResetParameters(reset_when_prompt_stale=trigger == "stale")
+    assert IdleContextCandidates.skip_reason(row, now=NOW, parameters=parameters) is None
+
+
 def completed():
     return NewSessionResult(
         outcome=Outcome.COMPLETED, stage=Stage.RECEIPT,

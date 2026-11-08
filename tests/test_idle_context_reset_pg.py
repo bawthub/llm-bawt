@@ -236,7 +236,7 @@ def test_real_submission_is_literal_system_command_and_keyed_retry(rig, real_lif
                             {"bot": rig.bot}).scalar_one() == 1
 
 
-@pytest.mark.parametrize("change", ["pointer", "usage", "new_work", "queued_work"])
+@pytest.mark.parametrize("change", ["pointer", "usage", "estimate", "new_work", "queued_work"])
 @pytest.mark.parametrize("lifecycle_backend", ["claude-code", "codex"], indirect=True)
 def test_real_claim_skips_stale_scheduled_intent_without_reset(rig, real_lifecycle, change):
     intent = scheduled_intent(rig)
@@ -248,6 +248,12 @@ def test_real_claim_skips_stale_scheduled_intent_without_reset(rig, real_lifecyc
         elif change == "usage":
             conn.execute(text("UPDATE turn_logs SET token_usage_json=:usage WHERE id=:id"),
                          {"id": rig.turn_id, "usage": '{"resident_tokens":1000}'})
+        elif change == "estimate":
+            conn.execute(text("UPDATE turn_logs SET token_usage_json=:usage WHERE id=:id"),
+                         {"id": rig.turn_id, "usage": json.dumps({
+                             "resident_tokens": 200_000, "input_tokens": 200_000,
+                             "context_window": 250_000, "usage_status": "estimated",
+                         })})
         elif change == "new_work":
             conn.execute(text("""
                 INSERT INTO turn_logs (id, created_at, path, stream, bot_id, user_id,
@@ -345,6 +351,24 @@ def _set(rig, *, usage=None, stale=None):
                          {"u": json.dumps(usage), "id": rig.turn_id})
         conn.execute(text("UPDATE sessions SET session_metadata=CAST(:m AS jsonb) WHERE id=:id"),
                      {"m": json.dumps({STALE_KEY: stale} if stale else {}), "id": rig.session_id})
+
+
+def test_lifecycle_estimate_is_not_size_evidence_but_stale_remains_independent(rig, real_lifecycle):
+    from llm_bawt.service.job_parameters import IdleContextResetParameters
+
+    _set(rig, usage={
+        "resident_tokens": 200_000, "input_tokens": 200_000,
+        "context_window": 250_000, "resident_source": "session_seed_and_skills_estimate",
+    })
+    result = asyncio.run(real_lifecycle.submit(scheduled_intent(rig), timeout_seconds=0))
+    assert result.outcome is Outcome.SKIPPED
+    assert result.detail == "resident context estimate is not a provider measurement"
+    assert result.delivery_id is None
+    stamp = (rig.now - timedelta(minutes=30)).isoformat()
+    _set(rig, stale={"since": stamp, "changed_at": stamp, "sections": ["Rules"]})
+    parameters = IdleContextResetParameters(reset_when_prompt_stale=True)
+    with rig.engine.begin() as conn:
+        assert NewSessionLifecycle.scheduled_skip_reason(conn, _stale_intent(rig, parameters)) is None
 
 
 def test_lifecycle_recheck_lets_a_settled_stale_session_skip_only_the_size_check(rig):
