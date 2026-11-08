@@ -552,6 +552,21 @@ def test_a_different_config_file_list_in_the_same_checkout_is_not_drift():
     assert not [n for n in _evaluate(api)["drift"] if n.startswith("compose_source")]
 
 
+def test_a_non_compose_container_with_the_project_label_is_not_a_sibling():
+    """An ops worker run from an image built with the project label inherits
+    the label but has no working_dir; it neither votes nor counts as a sibling."""
+    api = FakeDocker()
+    rows = api._project_rows
+
+    def with_worker(query):
+        return [*rows(query), {"Id": "7" * 64, "Labels": {"com.docker.compose.project": "bawthub"}}]
+    api._project_rows = with_worker
+    assert not [n for n in _evaluate(api)["drift"] if n.startswith("compose_source")]
+    api.sibling_dirs = []
+    with pytest.raises(ComposeError, match="no other running container"):
+        _evaluate(api)
+
+
 def test_a_moved_target_still_refuses_a_bind_that_does_not_move_with_its_checkout():
     api = FakeDocker()
     target = api.by_name(NAME)
