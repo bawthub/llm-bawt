@@ -173,6 +173,11 @@ class ToolResultBlob:
     partial: bool       # True => serve HTTP 206 with Content-Range
 
 
+def _pg_text(value: str) -> str:
+    """Postgres TEXT rejects NUL; substitute U+FFFD without changing length."""
+    return value.replace("\x00", "�") if "\x00" in value else value
+
+
 class ToolCallStore:
     _schema_guard = SchemaBootstrapGuard()
 
@@ -466,7 +471,10 @@ class ToolCallStore:
                 row.call_id = call_id or row.call_id
                 if tool_name and tool_name != "unknown":
                     row.tool_name = tool_name
-                row.result_text = payload.preview
+                # TASK-1443: Postgres TEXT cannot hold NUL. The preview column gets
+                # a same-length U+FFFD copy; the exact bytes go to the overflow path.
+                has_nul = "\x00" in payload.content
+                row.result_text = _pg_text(payload.preview)
                 row.result_total_chars = payload.total_chars
                 row.result_total_bytes = payload.total_bytes
                 row.result_total_tokens = payload.total_tokens
@@ -494,7 +502,7 @@ class ToolCallStore:
                 # full preview. Only persist a SECOND copy when the result exceeds
                 # what the preview captured. Small results (the ~95% case) stop
                 # here — no blob, no payload row, no duplication.
-                if payload.total_chars <= len(payload.preview):
+                if payload.total_chars <= len(payload.preview) and not has_nul:
                     row.result_blob_key = None
                     row.result_payload_available = False
                     session.add(row)
@@ -527,7 +535,9 @@ class ToolCallStore:
                 stored = session.get(ToolCallResultPayloadRecord, row.id)
                 if stored is None:
                     stored = ToolCallResultPayloadRecord(tool_call_record_id=row.id, content_text="", content_type="text/plain", total_chars=0, total_bytes=0, sha256="", complete=False)
-                stored.content_text = payload.content
+                # Without an object store the NUL-bearing text is kept lossy
+                # (U+FFFD); sha256 still names the original bytes.
+                stored.content_text = _pg_text(payload.content)
                 stored.content_type = payload.content_type
                 stored.total_chars = payload.total_chars
                 stored.total_bytes = payload.total_bytes

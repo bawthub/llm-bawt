@@ -135,6 +135,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_thread_agent_keys.py::TestAgentKeyEndpointLiveDB::",
     "test_db_session_policy_pg.py::",
     "test_tool_execution_tracking_pg.py::",
+    "test_tool_result_nul_pg.py::",
     "test_scheduled_run_notice_pg.py::",
     "test_commit_wake_pg.py::",
     "test_state_events_pg.py::",
