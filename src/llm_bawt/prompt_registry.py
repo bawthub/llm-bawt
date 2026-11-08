@@ -108,6 +108,7 @@ class ResolvedPrompt:
     scope_id: str
     source: str
     updated_at: datetime | None = None
+    updated_by: str | None = None
 
 
 
@@ -585,6 +586,18 @@ class PromptTemplateStore:
         with Session(self.engine) as session:
             return list(session.exec(statement).all())
 
+    def list_bot_overrides(self, key: str) -> list[PromptTemplate]:
+        """Exact bot rows for one key, not inherited/global resolutions."""
+        if self.engine is None:
+            return []
+        with Session(self.engine) as session:
+            return list(session.exec(
+                select(PromptTemplate).where(
+                    PromptTemplate.key == key,
+                    PromptTemplate.scope_type == "bot",
+                ).order_by(PromptTemplate.scope_id)
+            ).all())
+
     def upsert(
         self,
         *,
@@ -762,6 +775,7 @@ class PromptResolver:
                     scope_id=row.scope_id,
                     source="db_override",
                     updated_at=row.updated_at,
+                    updated_by=row.updated_by,
                 )
 
         definition = self.definition_for(key)

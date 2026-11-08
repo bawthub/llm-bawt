@@ -103,6 +103,8 @@ def _build_summary_callable(service, bot_id: str, user_id: str = "system", model
         prompt = prompt_resolver.render(
             key="history.summarization.single",
             variables={"messages": conversation_text},
+            scope_type="bot",
+            scope_id=bot_id,
         )
         estimated_tokens = len(prompt) // 4
         log.debug(
@@ -122,7 +124,10 @@ def _build_summary_callable(service, bot_id: str, user_id: str = "system", model
             messages = [
                 Message(
                     role="system",
-                    content="You are a helpful assistant that summarizes conversations concisely.",
+                    content=prompt_resolver.render(
+                        key="history.summarization.system", variables={},
+                        scope_type="bot", scope_id=bot_id,
+                    ),
                 ),
                 Message(role="user", content=prompt),
             ]
@@ -152,7 +157,10 @@ def _build_summary_callable(service, bot_id: str, user_id: str = "system", model
                     messages=[
                         Message(
                             role="system",
-                            content="You are a precise summarizer. Avoid generic phrasing and preserve concrete facts.",
+                            content=prompt_resolver.render(
+                                key="history.summarization.revision.system", variables={},
+                                scope_type="bot", scope_id=bot_id,
+                            ),
                         ),
                         Message(role="user", content=revision_prompt),
                     ],
@@ -192,6 +200,8 @@ def _build_summary_callable(service, bot_id: str, user_id: str = "system", model
             prompt = prompt_resolver.render(
                 key="history.summarization.batch",
                 variables={"sessions_blob": sessions_blob},
+                scope_type="bot",
+                scope_id=bot_id,
             )
             estimated_tokens = len(prompt) // 4
             log.info(
@@ -217,7 +227,10 @@ def _build_summary_callable(service, bot_id: str, user_id: str = "system", model
             messages = [
                 Message(
                     role="system",
-                    content="You are a helpful assistant that summarizes conversations with strict JSON output.",
+                    content=prompt_resolver.render(
+                        key="history.summarization.batch.system", variables={},
+                        scope_type="bot", scope_id=bot_id,
+                    ),
                 ),
                 Message(role="user", content=prompt),
             ]

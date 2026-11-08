@@ -414,6 +414,7 @@ class BridgeSessionResetMixin:
             def _bounded_llm(session):
                 return summarize_session_with_client(
                     session, bg_client, self.config,
+                    bot_id=bot_id,
                     max_prompt_tokens=seed_max_prompt_tokens,
                 )
 

@@ -55,6 +55,8 @@ from .prompt_default_loaders import (
     load_inter_bot_reply_channel_waited,
     load_inter_bot_reply_channel_waited_no_return,
     load_history_summarization_batch,
+    load_history_summarization_batch_system,
+    load_history_summarization_revision_system,
     load_history_summarization_single,
     load_history_summarization_system,
     load_injected_skills_entry,
@@ -176,6 +178,18 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
         title="History Summarization System",
         category="summarization",
         loader=load_history_summarization_system,
+    ),
+    "history.summarization.batch.system": PromptDefinition(
+        key="history.summarization.batch.system",
+        title="History Summarization Batch System",
+        category="summarization",
+        loader=load_history_summarization_batch_system,
+    ),
+    "history.summarization.revision.system": PromptDefinition(
+        key="history.summarization.revision.system",
+        title="History Summarization Revision System",
+        category="summarization",
+        loader=load_history_summarization_revision_system,
     ),
     "memory.extraction.fact.system": PromptDefinition(
         key="memory.extraction.fact.system",

@@ -443,6 +443,7 @@ class BackgroundTasksMixin:
             # TASK-857: the shared unit — same function the /new pre-seed uses.
             return summarize_session_with_client(
                 session, client, self.config,
+                bot_id=bot_id,
                 max_prompt_tokens=job_max_prompt_tokens,
             )
 

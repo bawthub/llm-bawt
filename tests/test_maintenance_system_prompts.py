@@ -37,7 +37,7 @@ def test_summarize_with_client_resolves_system_at_call_time(monkeypatch):
     from llm_bawt.memory.summarization import Session, summarize_session_with_client
 
     resolver = MagicMock()
-    resolver.render.side_effect = lambda key, variables: f"<{key}>"
+    resolver.render.side_effect = lambda key, variables, **scope: f"<{key}>"
     monkeypatch.setattr("llm_bawt.prompt_registry.PromptResolver", lambda cfg: resolver)
     client = MagicMock()
     client.query.return_value = "Summary: ok"

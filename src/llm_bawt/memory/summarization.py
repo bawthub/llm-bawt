@@ -713,6 +713,8 @@ def summarize_session_with_llm(
     service_url: str = "http://127.0.0.1:8642",
     timeout: float = 120.0,  # Increased from 30s - small models need more time
     config: Any | None = None,
+    *,
+    bot_id: str | None = None,
 ) -> str | None:
     """Summarize a session using the LLM service.
 
@@ -732,6 +734,8 @@ def summarize_session_with_llm(
     prompt = PromptResolver(config).render(
         key="history.summarization.single",
         variables={"messages": conversation_text},
+        scope_type="bot" if bot_id else "global",
+        scope_id=bot_id,
     )
     
     # Log the prompt size for debugging
@@ -742,7 +746,7 @@ def summarize_session_with_llm(
             f"{service_url}/v1/llm/complete",
             json={
                 "prompt": prompt,
-                "system": summary_system_prompt(config),
+                "system": summary_system_prompt(config, bot_id=bot_id),
                 "max_tokens": SUMMARY_MAX_OUTPUT_TOKENS,
                 "temperature": 0.3,
             },
@@ -786,11 +790,14 @@ def summarize_session_with_llm(
 SUMMARY_SYSTEM_PROMPT = "You are a helpful assistant that summarizes conversations concisely."
 
 
-def summary_system_prompt(config: Any | None = None) -> str:
+def summary_system_prompt(config: Any | None = None, *, bot_id: str | None = None) -> str:
     """System instruction for a summarization call, resolved from the registry."""
     from ..prompt_registry import PromptResolver
 
-    return PromptResolver(config).render(key="history.summarization.system", variables={})
+    return PromptResolver(config).render(
+        key="history.summarization.system", variables={},
+        scope_type="bot" if bot_id else "global", scope_id=bot_id,
+    )
 
 # Substrings that mean the "summary" is really an error message that leaked
 # into the completion body — never persist those as a summary.
@@ -809,6 +816,7 @@ def summarize_session_with_client(
     client: Any,
     config: Any | None = None,
     *,
+    bot_id: str | None = None,
     max_tokens: int = SUMMARY_MAX_OUTPUT_TOKENS,
     temperature: float = 0.3,
     max_prompt_tokens: int = 6000,
@@ -832,6 +840,8 @@ def summarize_session_with_client(
     prompt = PromptResolver(config).render(
         key="history.summarization.single",
         variables={"messages": conversation_text},
+        scope_type="bot" if bot_id else "global",
+        scope_id=bot_id,
     )
     # Conservative budget to reduce context overflows on smaller models.
     if len(prompt) // 4 > max_prompt_tokens:
@@ -843,7 +853,7 @@ def summarize_session_with_client(
     try:
         response = client.query(
             messages=[
-                Message(role="system", content=summary_system_prompt(config)),
+                Message(role="system", content=summary_system_prompt(config, bot_id=bot_id)),
                 Message(role="user", content=prompt),
             ],
             max_tokens=max_tokens,
@@ -1190,7 +1200,9 @@ class HistorySummarizer:
                 summary_text = self._summarize_fn(session)
             else:
                 # Use HTTP endpoint (for CLI usage)
-                summary_text = summarize_session_with_llm(session, self.service_url, config=self.config)
+                summary_text = summarize_session_with_llm(
+                    session, self.service_url, config=self.config, bot_id=self.bot_id,
+                )
             method = method_override or "llm"
 
         if not summary_text and use_heuristic_fallback:

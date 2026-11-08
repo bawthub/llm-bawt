@@ -43,6 +43,14 @@ def load_history_summarization_system() -> str:
     return SUMMARY_SYSTEM_PROMPT
 
 
+def load_history_summarization_batch_system() -> str:
+    return "You are a helpful assistant that summarizes conversations with strict JSON output."
+
+
+def load_history_summarization_revision_system() -> str:
+    return "You are a precise summarizer. Avoid generic phrasing and preserve concrete facts."
+
+
 def load_memory_extraction_fact_system() -> str:
     from .memory.extraction.prompts import FACT_EXTRACTION_SYSTEM_PROMPT
 

@@ -70,6 +70,7 @@ def _row_to_response(row: PromptTemplate) -> PromptTemplateResponse:
         placeholders=extract_placeholders(row.body),
         metadata=_parse_json_dict(row.metadata_json),
         updated_at=row.updated_at,
+        updated_by=row.updated_by,
     )
 
 
@@ -88,6 +89,7 @@ def _resolved_to_response(resolved) -> PromptTemplateResponse:
         placeholders=extract_placeholders(resolved.body),
         metadata=dict(resolved.metadata),
         updated_at=resolved.updated_at,
+        updated_by=resolved.updated_by,
     )
 
 
@@ -103,6 +105,7 @@ def _response_to_summary(item: PromptTemplateResponse) -> PromptTemplateSummary:
         source=item.source,
         body_length=len(item.body or ""),
         updated_at=item.updated_at,
+        updated_by=item.updated_by,
         deprecated=item.deprecated,
         replaced_by=item.replaced_by,
     )
@@ -239,6 +242,17 @@ def list_prompts_index(
         prompts=summaries,
         total_count=len(summaries),
         filters=filters,
+    )
+
+
+@router.get("/v1/prompts/{key}/overrides", response_model=PromptTemplateIndexResponse, tags=["Admin"])
+def list_prompt_overrides(key: str):
+    """Name the actual bot overrides of one global prompt, without their bodies."""
+    resolver = PromptResolver(get_service().config)
+    rows = resolver.store.list_bot_overrides(key)
+    prompts = [_response_to_summary(_row_to_response(row)) for row in rows]
+    return PromptTemplateIndexResponse(
+        prompts=prompts, total_count=len(prompts), filters={"key": key, "scope_type": "bot"},
     )
 
 

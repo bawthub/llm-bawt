@@ -391,16 +391,27 @@ class HistoryManager:
         prefix_lines: list[str] = []
         sections = extract_summary_sections(compress_structured_summary_text(text))
         section_summary = (sections.get("summary") or "").strip()
-        section_key_details = (sections.get("key_details") or "").strip()
-        section_intent = (sections.get("intent") or "").strip()
-        section_open_loops = (sections.get("open_loops") or "").strip()
+        # Only exact empty-section markers are absent, never factual sentences
+        # containing words such as "none". Stored summaries stay untouched.
+        absent = {"n/a", "na", "none", "none stated", "not applicable", "not stated", "nothing", "-"}
+
+        def optional_section(key: str) -> str:
+            value = (sections.get(key) or "").strip()
+            marker = value.strip("-*• \t").rstrip(".").strip().casefold()
+            return "" if marker in absent else value
+
+        section_key_details = optional_section("key_details")
+        section_intent = optional_section("intent")
+        section_open_loops = optional_section("open_loops")
 
         for line in lines:
             lowered = line.lower()
             if lowered.startswith("[historical summary]"):
                 continue
             if lowered.startswith("summary:") or lowered.startswith("key details:") or lowered.startswith("intent:") or lowered.startswith("tone:") or lowered.startswith("open loops:"):
-                continue
+                # Only metadata preceding the first section is a prefix.
+                # Multiline section text (including an N/A marker) is not.
+                break
             # Keep non-section metadata prefix lines (legacy lines like "On YYYY-MM-DD...").
             # Exclude bullet lines — they belong to a section (e.g. Key Details) and would
             # otherwise be hoisted to the top AND duplicated inside their section body.
