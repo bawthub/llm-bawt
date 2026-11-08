@@ -6,7 +6,8 @@ are not assigned to a viewer by guesswork; they remain in legacy history until
 an explicit ownership migration. Never use message author as session ownership.
 """
 
-from datetime import date, datetime, timedelta, timezone
+import re
+from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException
@@ -34,3 +35,40 @@ def local_day_bounds(from_date: date, to_date: date, tz: str) -> tuple[float, fl
     start = datetime.combine(from_date, datetime.min.time(), zone)
     end = datetime.combine(to_date + timedelta(days=1), datetime.min.time(), zone)
     return start.astimezone(timezone.utc).timestamp(), end.astimezone(timezone.utc).timestamp()
+
+
+def local_clock_bounds(
+    from_date: date, to_date: date, tz: str,
+    from_time: str | None = None, to_time: str | None = None,
+) -> tuple[float, float]:
+    """Inclusive dates with optional HH:MM endpoints -> UTC [start, end).
+
+    Omitted clocks preserve whole-day bounds. An explicit end clock is on
+    to_date, not the following day. Nonexistent DST wall times are rejected;
+    repeated hours use the earlier occurrence for start and later for end.
+    """
+    start, end = local_day_bounds(from_date, to_date, tz)
+    zone = ZoneInfo(tz)
+
+    def clock_epoch(day: date, clock: str, *, is_end: bool) -> float:
+        if not re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", clock):
+            raise HTTPException(status_code=400, detail="Timeline clocks must use HH:MM (00:00 to 23:59)")
+        wall = datetime.combine(day, time.fromisoformat(clock))
+        # ZoneInfo permits imaginary times: only accept folds that round-trip.
+        candidates = []
+        for fold in (0, 1):
+            aware = wall.replace(tzinfo=zone, fold=fold)
+            utc = aware.astimezone(timezone.utc)
+            if utc.astimezone(zone).replace(tzinfo=None) == wall:
+                candidates.append(utc.timestamp())
+        if not candidates:
+            raise HTTPException(status_code=400, detail="Timeline clock does not exist in viewer timezone")
+        return max(candidates) if is_end else min(candidates)
+
+    if from_time is not None:
+        start = clock_epoch(from_date, from_time, is_end=False)
+    if to_time is not None:
+        end = clock_epoch(to_date, to_time, is_end=True)
+    if end <= start:
+        raise HTTPException(status_code=400, detail="Timeline end must be after start")
+    return start, end

@@ -19,13 +19,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from datetime import date as date_cls, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, HTTPException, Query
 
-from .history_scope import local_day_bounds, owned_message_scope
+from .history_scope import local_clock_bounds, local_day_bounds, owned_message_scope
 from .history_timeline_store import anchor_rows, timeline_rows
 
 from ..dependencies import get_service
@@ -228,10 +229,18 @@ def get_history_timeline(
     to_date: date_cls | None = Query(None),
     mode: str = Query("recent", pattern="^(recent|custom|all)$"),
     overview_before: date_cls | None = Query(None, description="Older-month cursor for all-history overview"),
+    from_time: str | None = Query(None, description="Custom-only HH:MM on from_date in tz; repeated hour uses earlier occurrence"),
+    to_time: str | None = Query(None, description="Custom-only exclusive HH:MM on to_date in tz; repeated hour uses later occurrence"),
 ):
-    """Owned, bounded segments; `all` returns coarse months until explicit zoom."""
+    """Owned [start, end) segments; custom clocks default to whole local days.
+
+    Nonexistent DST clocks are invalid. Repeated-hour starts use the earlier
+    occurrence, ends the later. `all` returns coarse months until explicit zoom.
+    """
     validate_tz(tz)
     today = datetime.now(ZoneInfo(tz)).date()
+    if mode != "custom" and (from_time is not None or to_time is not None):
+        raise HTTPException(status_code=400, detail="Timeline clocks require custom mode")
     if mode == "custom" and (from_date is None or to_date is None):
         raise HTTPException(status_code=400, detail="Custom range needs both dates")
     if overview_before and (mode != "all" or overview_before.day != 1):
@@ -240,7 +249,7 @@ def get_history_timeline(
         raise HTTPException(status_code=400, detail="Timeline cannot end in the future")
     start_date = from_date or today - timedelta(days=6)
     end_date = to_date or today
-    start, end = local_day_bounds(start_date, end_date, tz)
+    start, end = local_clock_bounds(start_date, end_date, tz, from_time, to_time)
     try:
         groups, session_meta, first_prompts, months, start = _load_timeline_rows(
             bot_id, user_id, session_id, tz, start, end,
@@ -304,16 +313,26 @@ def get_history_timeline_prompts(
     session_id: str | None = Query(None, description="Thread to list prompts for"),
     tz: str = Query(DEFAULT_TZ, description="Viewer IANA timezone"),
     limit: int = Query(200, ge=1, le=1000),
+    from_utc: float | None = Query(None, description="Inclusive selected-index epoch; requires to_utc"),
+    to_utc: float | None = Query(None, description="Exclusive selected-index epoch; requires from_utc"),
 ):
-    """Lazy user-prompt tier: prompts for one day and/or one session."""
+    """Owned day/thread prompts, intersected with optional UTC [from_utc, to_utc).
+
+    UTC bounds must be a finite ordered pair, and never replace day/thread scope.
+    """
     from sqlalchemy import text
 
     if not date and not session_id:
         raise HTTPException(status_code=400, detail="Provide `date` and/or `session_id`")
     validate_tz(tz)
+    if from_utc is not None or to_utc is not None:
+        if (from_utc is None or to_utc is None
+                or not math.isfinite(from_utc) or not math.isfinite(to_utc)
+                or to_utc <= from_utc):
+            raise HTTPException(status_code=400, detail="Provide finite UTC bounds with to_utc > from_utc")
     if date:
         try:
-            date_cls.fromisoformat(date)
+            day = date_cls.fromisoformat(date)
         except ValueError:
             raise HTTPException(status_code=400, detail=f"Invalid date {date!r}")
 
@@ -323,9 +342,11 @@ def get_history_timeline_prompts(
         clauses.append("m.session_id = :session_id")
         params["session_id"] = session_id
     if date:
-        clauses.append(f"m.timestamp >= {LOCAL_DAY_START_SQL}")
-        clauses.append(f"m.timestamp < {LOCAL_DAY_END_SQL}")
-        params["day"] = date
+        clauses.extend(["m.timestamp >= :day_start", "m.timestamp < :day_end"])
+        params["day_start"], params["day_end"] = local_day_bounds(day, day, tz)
+    if from_utc is not None:
+        clauses.extend(["m.timestamp >= :from_utc", "m.timestamp < :to_utc"])
+        params.update(from_utc=from_utc, to_utc=to_utc)
 
     try:
         engine, table = _engine_and_table(bot_id)

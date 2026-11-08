@@ -329,6 +329,9 @@ def test_timeline_repository_constant_sql_and_owner_predicates():
         assert "s.user_id IS NOT DISTINCT FROM k.user_id" in first_sql
         assert first_params["ids"] == ["own"] and first_params["users"] == ["nick"]
         assert first_params["bots"] == ["snark"]
+        group_sql, group_params = engine.conn.calls[0]
+        assert "m.timestamp >= :start AND m.timestamp < :end" in group_sql
+        assert (group_params["start"], group_params["end"]) == (1., 100.)
 
 
 def test_timeline_anchors_reject_oversize_without_sql():
@@ -336,6 +339,199 @@ def test_timeline_anchors_reject_oversize_without_sql():
     with pytest.raises(HTTPException) as error:
         anchor_rows(None, "messages_p_test", "bot", "user", None, ["x"] * 2001)
     assert error.value.status_code == 413
+
+
+@pytest.mark.parametrize("from_time,to_time,expected", [
+    (None, None, (0, 24 * 3600)),
+    ("09:15", None, (9 * 3600 + 15 * 60, 24 * 3600)),
+    (None, "17:30", (0, 17 * 3600 + 30 * 60)),
+    ("09:15", "17:30", (9 * 3600 + 15 * 60, 17 * 3600 + 30 * 60)),
+])
+def test_custom_clock_bounds_defaults(from_time, to_time, expected):
+    from llm_bawt.service.routes.history_scope import local_clock_bounds, local_day_bounds
+
+    day = date(2026, 9, 1)
+    midnight, _ = local_day_bounds(day, day, "America/New_York")
+    start, end = local_clock_bounds(day, day, "America/New_York", from_time, to_time)
+    assert (start - midnight, end - midnight) == expected
+
+
+@pytest.mark.parametrize("from_time,to_time", [
+    ("9:00", None), ("24:00", None), ("09:60", None),
+    ("09:00:00", None), (" 09:00", None), ("０９:00", None),
+    ("", None), (None, ""), (None, "noon"),
+    ("12:00", "12:00"), ("18:00", "09:00"), (None, "00:00"),
+])
+def test_custom_clock_bounds_reject_invalid(from_time, to_time):
+    from llm_bawt.service.routes.history_scope import local_clock_bounds
+
+    with pytest.raises(HTTPException) as exc:
+        local_clock_bounds(date(2026, 9, 1), date(2026, 9, 1),
+                           "America/New_York", from_time, to_time)
+    assert exc.value.status_code == 400
+
+
+def test_custom_clock_bounds_dst_and_date_limit():
+    from datetime import timedelta
+    from llm_bawt.service.routes.history_scope import local_clock_bounds
+
+    spring = date(2026, 3, 8)
+    for start, end in [("02:30", None), (None, "02:30")]:
+        with pytest.raises(HTTPException) as exc:
+            local_clock_bounds(spring, spring, "America/New_York", start, end)
+        assert exc.value.status_code == 400
+    assert local_clock_bounds(spring, spring, "America/New_York", "01:30", "03:30") == (
+        _et_epoch(2026, 3, 8, 1, 30), _et_epoch(2026, 3, 8, 3, 30))
+    autumn = date(2026, 11, 1)
+    # Even equal wall clocks delimit one real hour: earlier start, later end.
+    start, end = local_clock_bounds(autumn, autumn, "America/New_York", "01:30", "01:30")
+    assert (start, end) == (_et_epoch(2026, 11, 1, 1, 30, fold=0),
+                            _et_epoch(2026, 11, 1, 1, 30, fold=1))
+    assert end - start == 3600
+    first = date(2026, 1, 1)
+    assert local_clock_bounds(first, first + timedelta(days=89), "UTC", "12:00", "13:00")
+    for last in (first - timedelta(days=1), first + timedelta(days=90)):
+        with pytest.raises(HTTPException):
+            local_clock_bounds(first, last, "UTC", "12:00", "13:00")
+
+
+def test_custom_clocks_route_passes_exact_index_bounds(monkeypatch):
+    from llm_bawt.service.routes.history_scope import local_clock_bounds
+
+    calls = []
+
+    def rows(*args):
+        calls.append(args)
+        return [], {}, {}, [], args[4]
+
+    monkeypatch.setattr(history_timeline, "_load_timeline_rows", rows)
+    app = FastAPI()
+    app.include_router(history_timeline.router)
+    with TestClient(app) as client:
+        response = client.get("/v1/history/timeline", params={
+            "bot_id": "synthetic", "user_id": "viewer", "session_id": "own",
+            "mode": "custom", "tz": "America/New_York",
+            "from_date": "2026-09-01", "to_date": "2026-09-02",
+            "from_time": "09:15", "to_time": "17:30",
+        })
+    assert response.status_code == 200
+    start, end = local_clock_bounds(date(2026, 9, 1), date(2026, 9, 2),
+                                    "America/New_York", "09:15", "17:30")
+    assert calls == [("synthetic", "viewer", "own", "America/New_York",
+                      start, end, False, False, None)]
+    assert (response.json()["from_utc"], response.json()["to_utc"]) == (start, end)
+    assert response.json()["coverage"]["from_date"] == "2026-09-01"
+
+
+@pytest.mark.parametrize("extra", [
+    {"mode": "recent", "from_time": "09:00"},
+    {"mode": "all", "to_time": "17:00"},
+    {"from_time": ""},
+    {"mode": "custom", "from_time": "09:00"},
+    {"mode": "custom", "from_date": "2026-03-08", "to_date": "2026-03-08", "from_time": "02:30"},
+    {"mode": "custom", "from_date": "2026-09-01", "to_date": "2026-09-01", "to_time": "00:00"},
+    {"mode": "custom", "from_date": "2026-01-01", "to_date": "2026-04-01", "from_time": "12:00"},
+])
+def test_timeline_invalid_clocks_never_query(monkeypatch, extra):
+    def unexpected(*args):
+        pytest.fail("Invalid clock range reached SQL")
+
+    monkeypatch.setattr(history_timeline, "_load_timeline_rows", unexpected)
+    app = FastAPI()
+    app.include_router(history_timeline.router)
+    with TestClient(app) as client:
+        response = client.get("/v1/history/timeline", params={
+            "bot_id": "synthetic", "user_id": "viewer", "tz": "America/New_York", **extra})
+    assert response.status_code == 400
+
+
+@pytest.mark.parametrize("bounds,status", [
+    ({"from_utc": "1"}, 400), ({"to_utc": "2"}, 400),
+    ({"from_utc": "1", "to_utc": "1"}, 400),
+    ({"from_utc": "2", "to_utc": "1"}, 400),
+    ({"from_utc": "nan", "to_utc": "2"}, 400),
+    ({"from_utc": "1", "to_utc": "inf"}, 400),
+    ({"from_utc": "-inf", "to_utc": "2"}, 400),
+    ({"from_utc": "1", "to_utc": "1e999"}, 400),
+    ({"from_utc": "bad", "to_utc": "2"}, 422),
+])
+def test_prompt_utc_bounds_validation_never_queries(monkeypatch, bounds, status):
+    def unexpected(*args):
+        pytest.fail("Invalid UTC pair reached SQL")
+
+    monkeypatch.setattr(history_timeline, "_engine_and_table", unexpected)
+    app = FastAPI()
+    app.include_router(history_timeline.router)
+    with TestClient(app) as client:
+        response = client.get("/v1/history/timeline/prompts", params={
+            "bot_id": "synthetic", "user_id": "viewer", "session_id": "own", **bounds})
+        assert response.status_code == status
+        # A pair is not a substitute for owned day/thread selection.
+        assert client.get("/v1/history/timeline/prompts", params={
+            "bot_id": "synthetic", "user_id": "viewer", "from_utc": 1, "to_utc": 2,
+        }).status_code == 400
+
+
+@pytest.fixture
+def prompt_bounds_db(monkeypatch):
+    engine = create_engine(
+        "sqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False})
+    midnight = _et_epoch(2026, 9, 1)
+    rows = [
+        ("before-day", "own", "user", midnight - 1),
+        ("before", "own", "user", midnight + 8 * 3600),
+        ("start", "own", "user", midnight + 9 * 3600),
+        ("inside", "own", "user", midnight + 12 * 3600),
+        ("end", "own", "user", midnight + 17 * 3600),
+        ("after-day", "own", "user", midnight + 25 * 3600),
+        ("assistant", "own", "assistant", midnight + 10 * 3600),
+        ("other-thread", "sibling", "user", midnight + 10 * 3600),
+        ("foreign-user", "foreign-user", "user", midnight + 10 * 3600),
+        ("foreign-bot", "foreign-bot", "user", midnight + 10 * 3600),
+        ("null-owner", "null-owner", "user", midnight + 10 * 3600),
+        ("orphan", "missing", "user", midnight + 10 * 3600),
+    ]
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE sessions (id TEXT, bot_id TEXT, user_id TEXT)"))
+        conn.execute(text("INSERT INTO sessions VALUES "
+                          "('own', 'synthetic', 'viewer'), ('sibling', 'synthetic', 'viewer'), "
+                          "('foreign-user', 'synthetic', 'other'), ('foreign-bot', 'other', 'viewer'), "
+                          "('null-owner', 'synthetic', NULL)"))
+        conn.execute(text("CREATE TABLE messages_test "
+                          "(id TEXT, session_id TEXT, role TEXT, timestamp REAL, content TEXT)"))
+        conn.execute(text("INSERT INTO messages_test VALUES (:id, :session, :role, :ts, :id)"),
+                     [{"id": id_, "session": sid, "role": role, "ts": ts} for id_, sid, role, ts in rows])
+    monkeypatch.setattr(history_timeline, "_engine_and_table", lambda _bot: (engine, "messages_test"))
+    app = FastAPI()
+    app.include_router(history_timeline.router)
+    with TestClient(app) as client:
+        yield client, midnight
+    engine.dispose()
+
+
+def test_prompt_utc_pair_intersects_day_thread_and_ownership(prompt_bounds_db):
+    client, midnight = prompt_bounds_db
+    params = {"bot_id": "synthetic", "user_id": "viewer", "tz": "America/New_York",
+              "date": "2026-09-01", "session_id": "own"}
+
+    def ids(**extra):
+        response = client.get("/v1/history/timeline/prompts", params={**params, **extra})
+        assert response.status_code == 200
+        return [p["id"] for p in response.json()["prompts"]]
+
+    assert ids() == ["before", "start", "inside", "end"]  # old whole-day behavior
+    assert ids(from_utc=midnight + 9 * 3600, to_utc=midnight + 17 * 3600) == ["start", "inside"]
+    assert ids(from_utc=midnight - 10, to_utc=midnight + 26 * 3600) == ["before", "start", "inside", "end"]
+    assert ids(from_utc=midnight - 10, to_utc=midnight) == []  # valid disjoint intersection
+    assert ids(date=None, from_utc=midnight + 9 * 3600,
+               to_utc=midnight + 17 * 3600) == ["start", "inside"]
+    assert ids(session_id=None, from_utc=midnight + 9 * 3600,
+               to_utc=midnight + 17 * 3600) == ["start", "other-thread", "inside"]
+    response = client.get("/v1/history/timeline/prompts", params={
+        **params, "from_utc": midnight + 9 * 3600, "to_utc": midnight + 17 * 3600, "limit": 1})
+    assert response.status_code == 200
+    assert [p["id"] for p in response.json()["prompts"]] == ["start"]
+    assert response.json()["truncated"] is True
 
 
 # ── integration: live PostgreSQL, read-only ───────────────────────────────
