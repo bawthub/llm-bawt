@@ -140,6 +140,17 @@ class FakeDocker:
             "NetworkSettings": {"Networks": {"bawthub_default": {"Aliases": [NAME, "frontend-prod", old_id[:12]]}}},
             "State": {"Running": True, "Status": "running", "Health": {"Status": "healthy"}}}}
         self.old_id = old_id
+        # TASK-1995: checkouts the project's other running containers were
+        # created from; by default one sibling in the target's own checkout.
+        self.sibling_dirs = [PROJECT_DIR]
+
+    def _project_rows(self, query):
+        labels = json.loads(query["filters"])["label"]
+        project = next(v.partition("=")[2] for v in labels if v.startswith("com.docker.compose.project="))
+        return [{"Id": "5" * 62 + f"{i:02x}",
+                 "Labels": {"com.docker.compose.project": project,
+                            "com.docker.compose.project.working_dir": d}}
+                for i, d in enumerate(self.sibling_dirs)]
 
     # ── helpers ─────────────────────────────────────────────────────────
     def _find_container(self, key):
@@ -190,6 +201,8 @@ class FakeDocker:
         url = urlsplit(path)
         parts = [unquote(p) for p in url.path.strip("/").split("/")]
         query = {k: v[0] for k, v in parse_qs(url.query).items()}
+        if parts == ["containers", "json"] and method == "GET":
+            return self._project_rows(query)
         if parts[0] == "images" and method == "GET":
             return copy.deepcopy(self._find_image(parts[1]))
         if parts[0] == "images" and parts[1] == "create":

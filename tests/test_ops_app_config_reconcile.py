@@ -147,9 +147,11 @@ class AppDocker(FakeDocker):
             "State": {"Running": True, "Status": "running", "Health": {"Status": "healthy"}}},
             REDIS: {"Id": REDIS, "Name": "/llm-bawt-redis-1", "Image": "sha256:" + "6" * 64,
                     "Config": {"Labels": {"com.docker.compose.project": "llm-bawt",
-                                          "com.docker.compose.service": "redis"}},
+                                          "com.docker.compose.service": "redis",
+                                          "com.docker.compose.project.working_dir": APP_DIR}},
                     "State": {"Running": True, "Status": "running", "Health": {"Status": "healthy"}}}}
         self.old_id = old_id
+        self.sibling_dirs = []  # the Redis container above is the app's sibling
 
     def attach_stream(self, container_id):
         argv = self.containers[container_id]["Config"]["Cmd"]
@@ -162,9 +164,13 @@ class AppDocker(FakeDocker):
         url = urlsplit(path)
         if url.path == "/containers/json":
             self.calls.append((method, path))
-            wanted = dict(item.split("=", 1) for item in json.loads(parse_qs(url.query)["filters"][0])["label"])
-            return [{"Id": c["Id"], "Labels": c["Config"]["Labels"]} for c in self.containers.values()
+            filters = json.loads(parse_qs(url.query)["filters"][0])
+            wanted = dict(item.split("=", 1) for item in filters["label"])
+            rows = [{"Id": c["Id"], "Labels": c["Config"]["Labels"]} for c in self.containers.values()
                     if all((c["Config"].get("Labels") or {}).get(k) == v for k, v in wanted.items())]
+            if "status" in filters:  # TASK-1995 sibling lookup: plus any synthetic siblings
+                rows += self._project_rows({"filters": json.dumps(filters)})
+            return rows
         parts = path.split("/")
         if method == "POST" and path.endswith("/exec") and body["Cmd"][0] in ("curl", "stat"):
             self.calls.append((method, path))
