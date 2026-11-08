@@ -41,7 +41,7 @@ from typing import Any, Callable
 
 from .logging import get_service_logger
 from .maintenance_health import (
-    SPENDING_LIMIT, TIMEOUT, MaintenanceHealth, MonitoredClient, _status_of, classify_failure,
+    SPENDING_LIMIT, MaintenanceHealth, MonitoredClient, _status_of, classify_failure,
     maintenance_health,
 )
 
@@ -54,8 +54,15 @@ STATE_UNAVAILABLE = "fallback_state_unavailable"
 STATE_JOB = "maintenance_fallback_state"
 UNREACHABLE = "unreachable"
 _CAUSE_TEXT = {SPENDING_LIMIT: "spending limit", UNREACHABLE: "unreachable"}
-_CONNECT_TEXT = ("connection error", "connection refused", "connecterror",
-                 "name or service not known", "failed to establish")
+_TRANSPORT_TYPES = ("connecterror", "apiconnectionerror", "connectionrefusederror",
+                    "connectionerror", "gaierror")
+# OpenAIClient's string forms: an SDK error (status dropped; only the SDK's own
+# no-reply messages count) vs a non-SDK exception (transport only, no HTTP body).
+_SDK_ERROR = "ERROR: OpenAI API Error -"
+_SDK_NO_REPLY = ("Connection error.", "Request timed out.")
+_UNEXPECTED_ERROR = "ERROR: Unexpected error -"
+_CONNECT_TEXT = ("connection refused", "connecterror", "name or service not known",
+                 "failed to establish", "timed out")
 
 _KEY = "maintenance:fallback:{provider}"
 _PROBE = "maintenance:fallback:{provider}:probe"
@@ -77,27 +84,40 @@ class StateUnavailable(RuntimeError):
     """The shared exhaustion state can't be read or written (Redis down)."""
 
 
+def _transport_type(error: BaseException) -> bool:
+    """The exception (or its cause chain) is a transport failure: no HTTP reply."""
+    seen: set[int] = set()
+    current: Any = error
+    while isinstance(current, BaseException) and id(current) not in seen:
+        seen.add(id(current))
+        if _status_of(current) is not None:
+            return False
+        name = type(current).__name__.lower()
+        if name in _TRANSPORT_TYPES or "timeout" in name:
+            return True
+        current = current.__cause__
+    return False
+
+
 def is_unreachable(error: Any) -> bool:
     """No HTTP reply at all: connect refused/failed, DNS failure, or a timeout.
 
-    An HTTP status (5xx included) means the server answered, so it never counts.
+    An HTTP reply (5xx included) means the server answered, so it never counts.
+    Exceptions are judged by type, never by message text, since a gateway body
+    can say "connection refused". Clients that return ``ERROR:`` strings drop the
+    status, so a string counts only as the SDK's own no-reply messages or a
+    non-HTTP transport error.
     """
-    if _status_of(error) is not None:
+    if isinstance(error, BaseException):
+        return _transport_type(error)
+    text = str(error).strip()
+    if _status_of(text) is not None:
         return False
-    if classify_failure(error) == TIMEOUT:
-        return True
-    seen: set[int] = set()
-    current: Any = error
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        name = type(current).__name__.lower()
-        if name in ("connecterror", "connecttimeout", "apiconnectionerror",
-                    "connectionrefusederror", "connectionerror"):
-            return True
-        text = str(current).lower()
-        if any(marker in text for marker in _CONNECT_TEXT):
-            return True
-        current = getattr(current, "__cause__", None) if isinstance(current, BaseException) else None
+    if text.startswith(_SDK_ERROR):
+        return text[len(_SDK_ERROR):].strip() in _SDK_NO_REPLY
+    if text.startswith(_UNEXPECTED_ERROR):
+        lowered = text.lower()
+        return any(marker in lowered for marker in _CONNECT_TEXT)
     return False
 
 
@@ -158,8 +178,9 @@ class ExhaustionStore(ABC):
         """Token for the single probe holder; the claim expires if the probe crashes."""
 
     @abstractmethod
-    def rearm(self, provider: str, since: float, token: str, until: float) -> bool:
-        """Failed probe: move ``until`` and release the probe, if still the holder."""
+    def rearm(self, provider: str, since: float, token: str, until: float,
+              cause: str = SPENDING_LIMIT) -> bool:
+        """Failed probe: move ``until``, record the probe's ``cause``, release the probe, if still the holder."""
 
     @abstractmethod
     def clear(self, provider: str, since: float, token: str) -> bool:
@@ -207,6 +228,7 @@ local rec = cjson.decode(raw)
 if string.format('%d', rec['since']) ~= ARGV[1] then return 0 end
 if redis.call('GET', KEYS[2]) ~= ARGV[2] then return 0 end
 rec['until'] = tonumber(ARGV[3])
+rec['cause'] = ARGV[4]
 redis.call('SET', KEYS[1], cjson.encode(rec))
 redis.call('DEL', KEYS[2])
 return 1
@@ -292,10 +314,11 @@ class RedisExhaustionStore(ExhaustionStore):
             _PROBE.format(provider=provider), token, nx=True, ex=max(1, int(ttl_seconds))))
         return token if won else None
 
-    def rearm(self, provider: str, since: float, token: str, until: float) -> bool:
+    def rearm(self, provider: str, since: float, token: str, until: float,
+              cause: str = SPENDING_LIMIT) -> bool:
         return bool(self._run(lambda: self._rearm(
             keys=[_KEY.format(provider=provider), _PROBE.format(provider=provider)],
-            args=[_ms(since), token, until])))
+            args=[_ms(since), token, until, cause])))
 
     def clear(self, provider: str, since: float, token: str) -> bool:
         return bool(self._run(lambda: self._clear(
@@ -389,13 +412,15 @@ class MemoryExhaustionStore(ExhaustionStore):
             self._probes[provider] = (token, now + max(1, int(ttl_seconds)))
             return token
 
-    def rearm(self, provider: str, since: float, token: str, until: float) -> bool:
+    def rearm(self, provider: str, since: float, token: str, until: float,
+              cause: str = SPENDING_LIMIT) -> bool:
         self._check()
         with self._lock:
             record = self._holder(provider, since, token)
             if record is None:
                 return False
             record.until = until
+            record.cause = cause
             del self._probes[provider]
             return True
 
@@ -598,7 +623,7 @@ class FallbackClient:
         until, source = self._until(error)
         if probing is not None:
             self._state_op(lambda: self._store.rearm(
-                self._provider, probing[0].since, probing[1], until), False)
+                self._provider, probing[0].since, probing[1], until, cause), False)
         elif stateful:
             record = Exhaustion(provider=self._provider, since=self._clock(), until=until,
                                 hint_source=source, cause=cause)

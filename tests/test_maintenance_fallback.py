@@ -495,3 +495,67 @@ def test_announce_never_touches_a_spending_limit_record():
     until = rig.store.get(PRIMARY_PROVIDER).until
     assert mf.announce_available(rig.store, now=rig.clock.now) == []
     assert rig.store.get(PRIMARY_PROVIDER).until == until
+
+
+def _sdk_error(status: int | None, body: str = "") -> Exception:
+    """The real OpenAI SDK's error for a gateway reply (or a refused connect)."""
+    import httpx
+    import openai
+
+    def handler(request):
+        if status is None:
+            raise httpx.ConnectError("[Errno 111] Connection refused", request=request)
+        return httpx.Response(status, text=body, headers={"content-type": "text/plain"})
+
+    sdk = openai.OpenAI(api_key="x", base_url="http://model.invalid/v1", max_retries=0,
+                        http_client=httpx.Client(transport=httpx.MockTransport(handler)))
+    try:
+        sdk.chat.completions.create(model="m", messages=[{"role": "user", "content": "hi"}])
+    except openai.OpenAIError as error:
+        return error
+    raise AssertionError("no error")
+
+
+@pytest.mark.parametrize("status, body", [(503, "upstream connection refused"),
+                                          (504, "upstream timed out"),
+                                          (502, "Connection error.")])
+def test_gateway_5xx_never_unreachable_as_exception_or_client_string(status, body):
+    error = _sdk_error(status, body)
+    assert mf.switch_cause(error) is None
+    # OpenAIClient's real serialization keeps the status in the string.
+    from llm_bawt.clients.openai_client import _api_error_text
+    reply = f"ERROR: OpenAI API Error - {_api_error_text(error)}"
+    assert mf.switch_cause(reply) is None
+    rig = Rig()
+    rig.primary_inner.query.return_value = reply
+    rig.client().query(messages=[])
+    rig.backup_inner.query.assert_not_called()
+    assert rig.store.get(PRIMARY_PROVIDER) is None
+
+
+def test_real_sdk_refused_connect_is_unreachable_both_forms():
+    error = _sdk_error(None)
+    assert mf.switch_cause(error) == mf.UNREACHABLE
+    from llm_bawt.clients.openai_client import _api_error_text
+    assert mf.switch_cause(f"ERROR: OpenAI API Error - {_api_error_text(error)}") == mf.UNREACHABLE
+
+
+def _probe_fails_with(rig, client, error):
+    rig.clock.now = rig.store.get(PRIMARY_PROVIDER).until + 1
+    rig.primary_inner.query.side_effect = error
+    client.query(messages=[])
+    return rig.store.get(PRIMARY_PROVIDER)
+
+
+def test_failed_probe_records_its_own_cause_both_directions():
+    rig = Rig()
+    rig.backup_inner.query.return_value = "b"
+    client = rig.client()
+    rig.primary_inner.query.side_effect = ConnectError("refused")
+    client.query(messages=[])
+    record = _probe_fails_with(rig, client, _spend())
+    assert record.cause == mf.SPENDING_LIMIT
+    assert mf.announce_available(rig.store, now=rig.clock.now) == []
+    record = _probe_fails_with(rig, client, ConnectError("refused"))
+    assert record.cause == mf.UNREACHABLE
+    assert mf.announce_available(rig.store, now=rig.clock.now) == [PRIMARY_PROVIDER]

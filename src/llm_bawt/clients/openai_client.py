@@ -42,6 +42,16 @@ class _ConnectReportingTransport(httpx.HTTPTransport):
             raise
 
 
+def _api_error_text(error: Exception) -> str:
+    """SDK error text that keeps the HTTP status: a non-JSON gateway reply's
+    message is just its body, and callers classify the ERROR string later."""
+    text = str(error)
+    status = getattr(error, "status_code", None)
+    if isinstance(status, int) and not text.startswith("Error code:"):
+        return f"Error code: {status} - {text}"
+    return text
+
+
 def _reporting_http_client(base_url: str) -> httpx.Client:
     from openai import DefaultHttpxClient
 
@@ -576,7 +586,7 @@ class OpenAIClient(LLMClient):
             )
         except OpenAIError as e:
             logger.error(f"Error during OpenAI API request: {e}")
-            return f"ERROR: OpenAI API Error - {e}"
+            return f"ERROR: OpenAI API Error - {_api_error_text(e)}"
         except Exception as e:
             logger.error(f"Unexpected error during OpenAI streaming: {e}")
             return f"ERROR: Unexpected error - {e}"
@@ -590,7 +600,7 @@ class OpenAIClient(LLMClient):
                     yield content
         except OpenAIError as e:
             logger.error(f"\nError during OpenAI stream processing: {e}")
-            yield f"\nERROR: OpenAI API Error - {e}"
+            yield f"\nERROR: OpenAI API Error - {_api_error_text(e)}"
         except Exception as e:
             if self._is_stream_disconnect_error(e):
                 logger.warning("Streaming disconnected for model '%s': %s", self.model, e)
@@ -624,7 +634,7 @@ class OpenAIClient(LLMClient):
 
         except OpenAIError as e:
             logger.error(f"Error making OpenAI API request: {e}")
-            return f"ERROR: OpenAI API Error - {e}"
+            return f"ERROR: OpenAI API Error - {_api_error_text(e)}"
         except Exception as e:
             logger.error(f"Unexpected error during OpenAI request: {e}")
             return f"ERROR: Unexpected error - {e}"
