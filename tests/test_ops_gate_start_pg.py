@@ -157,8 +157,8 @@ def test_admitted_cap_cannot_be_relaxed_by_later_operation_edit(configured, tmp_
     c = SimpleNamespace(rig=rig, job=rig.store.get_job(job.id), root=root)
     with helpers.reserve(c):
         pass
-    rig.store.update_operation(rig.op.id, {"max_concurrent": None})
-    peer = rig.job()
+    rig.op = rig.store.update_operation(rig.op.id, {"max_concurrent": None})
+    peer = rig.job(op=rig.op)
     rig.sql("UPDATE ops_jobs SET state='dispatching',dispatched_at=now() WHERE id=:id", id=peer.id)
     monkeypatch.setenv(WORKER_CONCURRENCY_ENV, "2")
     with pytest.raises(start.GateStartError, match="capacity_unavailable"):

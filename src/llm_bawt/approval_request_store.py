@@ -7,7 +7,7 @@ import logging
 from hashlib import sha256
 from typing import Any
 
-from sqlalchemy import func, update
+from sqlalchemy import func, inspect, update
 from sqlmodel import Session, select
 
 from .approval_events import append_approval_transition
@@ -178,7 +178,10 @@ class ApprovalRequestStoreMixin(OrchestrationApprovalStoreMixin, McpApprovalStor
         with Session(self.engine) as session:
             if status == REQ_APPROVED:
                 row = session.get(ToolApprovalRequest, request_id)
-                if row is not None and row.status == REQ_PENDING and row.tool_name == "ops_run":
+                # A standalone approval store need not contain an ops catalog.
+                # Admission still validates the snapshot before any job is created.
+                if (row is not None and row.status == REQ_PENDING and row.tool_name == "ops_run"
+                        and inspect(session.connection()).has_table("ops_operations")):
                     from .ops.models import OpsOperation
 
                     try:

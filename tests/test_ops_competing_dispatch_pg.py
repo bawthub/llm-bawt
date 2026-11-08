@@ -433,18 +433,19 @@ def test_a_submitted_worker_whose_dispatcher_died_is_adopted_not_resubmitted(rig
 
 # ── 5. Catalog drift between admission and claim ────────────────────────────
 
-def test_a_catalog_edit_after_admission_runs_the_admitted_snapshot(rig):
-    """The code's rule (OpsService.prepare_invocation): the job executes the
-    exact revision it was admitted with, whatever the catalog says by claim
-    time. Only disable/delete is a claim-time interlock (next test)."""
+def test_a_catalog_edit_after_admission_refuses_before_submission(rig):
+    """A queued job cannot submit its admitted snapshot after a catalog edit."""
     slug = rig.operation()
     job_id = rig.admit(slug)
     admitted = json.loads(rig.job(job_id).invocation_snapshot_json)
     rig.stores[0].update_operation(slug, {"command_script": '{"action":"restart","container_name":"other"}'})
     rig.services[1]._dispatch_queued(rig.job(job_id))
-    assert rig.job(job_id).state == JOB_ACCEPTED
-    request = json.loads((rig.root / job_id / "request.json").read_text())
-    assert request["snapshot"] == admitted and request["snapshot"]["spec"]["container_name"] == TARGET
+    job = rig.job(job_id)
+    assert job.state == JOB_FAILED and "[operation_changed]" in job.error_text
+    assert "no action submitted" in job.error_text
+    assert json.loads(job.invocation_snapshot_json) == admitted
+    assert job.dispatched_at is None and rig.creates() == 0
+    assert not (rig.root / job_id / "request.json").exists()
 
 
 @pytest.mark.parametrize("change", ["disable", "delete"])
