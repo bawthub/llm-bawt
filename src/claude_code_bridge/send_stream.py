@@ -27,7 +27,7 @@ from collections.abc import AsyncIterable
 
 from agent_bridge.events import AgentEventKind
 from agent_bridge.mcp_call_context import MCP_TASK_TURN_CONTEXT_ENV
-from claude_agent_sdk import ClaudeAgentOptions
+from claude_agent_sdk import ClaudeAgentOptions, StreamEvent
 from claude_agent_sdk.types import (
     HookMatcher,
     TaskNotificationMessage,
@@ -449,7 +449,13 @@ class ClaudeStreamMixin:
         usage_ledger: SubagentUsage,
     ) -> int:
         """Publish changed provider usage on the response that reports it."""
-        for parent, task_id, description, usage in usage_ledger.live_updates(msg):
+        if isinstance(msg, StreamEvent):
+            # TASK-2169: Responses-backed proxies report real usage only in
+            # the subagent's message_delta, never on its AssistantMessages.
+            updates = usage_ledger.live_stream_updates(msg.event, msg.parent_tool_use_id)
+        else:
+            updates = usage_ledger.live_updates(msg)
+        for parent, task_id, description, usage in updates:
             seq += 1
             self._publish_event(
                 request_id, session_key, seq,

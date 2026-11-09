@@ -26,7 +26,10 @@ class SubagentUsage:
         self._single_agent_spawns: set[str] = set()  # Agent spawns found in the transcript
         self._responses: dict[str, dict[str, dict[str, int]]] = {}
         self._tasks: dict[str, dict[str, str]] = {}
-        self._last_live_total: dict[str, int] = {}
+        self._last_live_total: dict[str, tuple[int, bool]] = {}
+        # TASK-2169: stream-event accounting (see observe_stream_event).
+        self._open_responses: dict[str, list[str]] = {}
+        self._partial: set[str] = set()
         # TASK-1095: the SDK stamps a resumed sub-agent's messages with the
         # tool_use_id of its ORIGINAL spawn (Agent call), even when a later
         # SendMessage call is what is now running it. Track spawn → current
@@ -67,13 +70,61 @@ class SubagentUsage:
         """Report a measured change immediately, without waiting for TaskProgress."""
         changed = self.observe(message)
         parent = self.host_parent(getattr(message, "parent_tool_use_id", None))
+        return self._changed_updates(parent, changed)
+
+    def live_stream_updates(
+        self, event: Any, parent_tool_use_id: str | None,
+    ) -> list[tuple[str, str, str, dict]]:
+        """Same as ``live_updates`` for a subagent's raw stream event."""
+        changed = self.observe_stream_event(event, parent_tool_use_id)
+        return self._changed_updates(self.host_parent(parent_tool_use_id), changed)
+
+    def observe_stream_event(self, event: Any, parent_tool_use_id: str | None) -> bool:
+        """Account a subagent's message_start/message_delta usage (TASK-2169).
+
+        Responses-backed proxies only know usage at completion: message_start
+        carries zeros and the real counts arrive in message_delta, after the SDK
+        has already yielded the per-block AssistantMessages (which keep the
+        zeros). Deltas name no response ID, so they are attributed to the one
+        open response under this parent; concurrent Workflow siblings share a
+        parent, and an ambiguous delta marks the aggregate partial instead of
+        being guessed onto a sibling's response.
+        """
+        parent = self.host_parent(parent_tool_use_id)
+        if not parent or not isinstance(event, dict):
+            return False
+        kind = event.get("type")
+        open_ids = self._open_responses.setdefault(parent, [])
+        if kind == "message_start":
+            message = event.get("message")
+            response_id = message.get("id") if isinstance(message, dict) else None
+            if not isinstance(response_id, str) or not response_id:
+                return False
+            if response_id not in open_ids:
+                open_ids.append(response_id)
+            return self._record(parent, response_id, message.get("usage"))
+        if kind == "message_delta":
+            if len(open_ids) != 1:
+                if open_ids and parent not in self._partial:
+                    self._partial.add(parent)
+                    return True
+                return False
+            return self._record(parent, open_ids[0], event.get("usage"))
+        if kind == "message_stop" and len(open_ids) == 1:
+            open_ids.clear()
+        return False
+
+    def _changed_updates(
+        self, parent: str | None, changed: bool,
+    ) -> list[tuple[str, str, str, dict]]:
         if not changed or not parent or parent not in self._tasks:
             return []
         usage = self.for_event(parent, None)
         total = usage.get("cumulative_tokens") if usage else None
-        if total is None or total == self._last_live_total.get(parent):
+        key = (total, parent in self._partial)
+        if total is None or key == self._last_live_total.get(parent):
             return []
-        self._last_live_total[parent] = total
+        self._last_live_total[parent] = key
         return [
             (parent, task_id, description, usage)
             for task_id, description in self._tasks[parent].items()
@@ -87,7 +138,12 @@ class SubagentUsage:
         parent = self.host_parent(getattr(message, "parent_tool_use_id", None))
         response_id = getattr(message, "message_id", None)
         usage = getattr(message, "usage", None)
-        if not parent or not response_id or not isinstance(usage, dict):
+        if not parent or not response_id:
+            return False
+        return self._record(parent, response_id, usage)
+
+    def _record(self, parent: str, response_id: str, usage: Any) -> bool:
+        if not isinstance(usage, dict):
             return False
         counters = {
             key: value for key in self.TOKEN_FIELDS
@@ -119,4 +175,8 @@ class SubagentUsage:
             # SAME aggregate. Consumers take it once per spawning tool, not once
             # per task. Cached input is included, not added twice to input_tokens.
             result["cumulative_tokens"] = sum(sum(u.values()) for u in complete)
+            if parent in self._partial:
+                # Some sibling response's counts could not be attributed:
+                # the total is a measured lower bound, not the full amount.
+                result["cumulative_partial"] = True
         return result or None

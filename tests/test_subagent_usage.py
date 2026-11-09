@@ -180,3 +180,66 @@ def test_agent_spawn_index_scans_the_transcript_once_per_request(tmp_path, monke
     session[0] = None  # fresh-session retry: nothing earlier, no scan
     assert index("agent_a") is None and reads == ["sess"]
     assert AgentSpawnIndex(lambda: "missing")("agent_a") is None
+
+
+# TASK-2169: Responses-backed proxies send zero usage at message_start and the
+# real counts only in message_delta, after the SDK yielded zero-usage blocks.
+ZERO = dict(input_tokens=0, output_tokens=0, cache_creation_input_tokens=0,
+            cache_read_input_tokens=0)
+
+
+def start(message_id):
+    return {"type": "message_start", "message": {"id": message_id, "usage": dict(ZERO)}}
+
+
+def delta(**usage):
+    return {"type": "message_delta", "usage": usage}
+
+
+def test_stream_delta_measures_proxy_usage_once_despite_zero_echoes():
+    ledger = SubagentUsage()
+    ledger.register_task("agent1", "task1", "work")
+    ledger.observe_stream_event(start("m1"), "agent1")
+    ledger.observe(response(**ZERO))  # per-block echo keeps the start zeros
+    assert ledger.for_event("agent1", None) == {"cumulative_tokens": 0}
+    assert ledger.live_stream_updates(
+        delta(input_tokens=100, output_tokens=20, cache_read_input_tokens=900,
+              cache_creation_input_tokens=0), "agent1",
+    )[0][3] == {"cumulative_tokens": 1020}
+    ledger.observe(response(**ZERO))  # late echo/replay cannot regress or add
+    ledger.observe_stream_event({"type": "message_stop"}, "agent1")
+    ledger.observe_stream_event(start("m2"), "agent1")
+    ledger.observe_stream_event(delta(input_tokens=10, output_tokens=5), "agent1")
+    assert ledger.for_event("agent1", None) == {"cumulative_tokens": 1035}
+    assert ledger.live_stream_updates(delta(input_tokens=10, output_tokens=5), "agent1") == []
+
+
+def test_interleaved_sibling_deltas_are_not_guessed_and_mark_partial():
+    ledger = SubagentUsage()
+    for task in ("task1", "task2"):
+        ledger.register_task("wf", task, task)
+    ledger.observe_stream_event(start("a"), "wf")
+    ledger.observe_stream_event(start("b"), "wf")
+    updates = ledger.live_stream_updates(delta(input_tokens=50, output_tokens=5), "wf")
+    assert {u[1] for u in updates} == {"task1", "task2"}
+    assert updates[0][3] == {"cumulative_tokens": 0, "cumulative_partial": True}
+    # A response with its own ID (AssistantMessage) still counts exactly once.
+    ledger.observe(response("a", parent="wf", input_tokens=50, output_tokens=5))
+    assert ledger.for_event("wf", None) == {"cumulative_tokens": 55, "cumulative_partial": True}
+
+
+def test_main_thread_and_unknown_events_are_ignored():
+    ledger = SubagentUsage()
+    assert ledger.observe_stream_event(start("m"), None) is False
+    assert ledger.observe_stream_event(delta(input_tokens=1, output_tokens=1), "x") is False
+    assert ledger.observe_stream_event({"type": "message_start", "message": {}}, "x") is False
+    assert ledger.for_event("x", None) is None
+
+
+def test_stream_usage_follows_resumed_spawn_to_its_live_host():
+    ledger = SubagentUsage(spawn_lookup=lambda task: "spawn1")
+    ledger.register_task("send2", "task1", "resume")
+    ledger.observe_stream_event(start("m1"), "spawn1")
+    ledger.observe_stream_event(delta(input_tokens=7, output_tokens=3), "spawn1")
+    assert ledger.for_event("send2", None) == {"cumulative_tokens": 10}
+    assert ledger.for_event("spawn1", None) is None

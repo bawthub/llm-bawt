@@ -667,6 +667,12 @@ class ClaudeSendMixin(
                                 event = msg.event
                                 phase_tracker.on_stream_event(event)
                                 live_usage.observe_stream_event(event, msg.parent_tool_use_id)
+                                if msg.parent_tool_use_id:
+                                    seq = self._publish_subagent_live_usage(
+                                        msg, request_id=request_id,
+                                        session_key=session_key, seq=seq,
+                                        usage_ledger=subagent_usage,
+                                    )
                                 seq = self._publish_llm_response(
                                     response_tracker.on_stream_event(
                                         event, source=msg.parent_tool_use_id, seq=seq + 1,
