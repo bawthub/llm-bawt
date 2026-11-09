@@ -40,6 +40,7 @@ modelled. An undeclared healthcheck or entrypoint means the image's own.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import re
 from dataclasses import dataclass
@@ -124,7 +125,7 @@ PINNED_PROFILE = ServiceProfile("pinned", SERVICE_KEYS, built=False, models_proc
 BUILT_PROFILE = ServiceProfile("built", frozenset({
     "build", "command", "container_name", "depends_on", "entrypoint", "environment", "extra_hosts", "healthcheck",
     "image", "init", "labels", "networks", "ports", "pull_policy", "restart", "security_opt", "stdin_open", "tmpfs",
-    "tty", "volumes", "cgroup_parent", *MEMORY_KEYS}), built=True, models_process=True, pull_policies=BUILT_PULL_POLICIES)
+    "tty", "volumes", "cgroup_parent", "dns", *MEMORY_KEYS}), built=True, models_process=True, pull_policies=BUILT_PULL_POLICIES)
 # TASK-1844: a Compose-built GPU service (local-model-bridge), selected only by
 # ``gpu: true`` on its reconcile spec; every other profile still refuses these
 # keys. Native CDI only: ``runtime`` is the literal ``runc`` (never the legacy
@@ -178,12 +179,41 @@ INIT_MEMORY_PROFILE_LABEL = "llm-bawt.ops.init-memory-profile"
 # TASK-2076: worker image label proving it models ``cgroup_parent`` (an
 # optional host slice, e.g. agents.slice) on the built and mutable-tag kinds.
 CGROUP_PARENT_PROFILE_LABEL = "llm-bawt.ops.cgroup-parent-profile"
+# TASK-2171: worker image label proving it models ``dns`` (ordered upstream
+# resolvers for Docker's embedded DNS) on the built kind.
+DNS_PROFILE_LABEL = "llm-bawt.ops.dns-profile"
+# resolv.conf honours at most three nameservers.
+_MAX_DNS = 3
 
 
 def needs_cgroup_parent_worker(desired: dict, drift_names=()) -> bool:
     """Would a worker built before TASK-2076 refuse this desired configuration
     or miss this drift (it never computes ``cgroup_parent:~``)?"""
     return "cgroup_parent" in desired or "cgroup_parent:~" in drift_names
+
+
+def needs_dns_worker(desired: dict, drift_names=()) -> bool:
+    """Would a worker built before TASK-2171 refuse this desired configuration
+    or miss this drift (it never computes ``dns:~``)?"""
+    return "dns" in desired or "dns:~" in drift_names
+
+
+def _dns(value) -> list:
+    """Ordered IP-literal upstreams. Compose drops empty list entries, so an
+    unset ``${VAR:-}`` contributes nothing; an empty list is Docker's default."""
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list) or len(value) > _MAX_DNS:
+        raise ComposeError("unsupported_compose_key", ["dns"])
+    out = []
+    for entry in value:
+        try:
+            out.append(str(ipaddress.ip_address(entry)) if isinstance(entry, str) else None)
+        except ValueError:
+            out.append(None)
+        if out[-1] is None or out[-1] in out[:-1]:
+            raise ComposeError("unsupported_compose_key", ["dns"])
+    return out
 
 
 def needs_init_memory_worker(desired: dict, profile: ServiceProfile, drift_names=()) -> bool:
@@ -608,6 +638,9 @@ def _process(service: dict, spec: dict, mounts: dict) -> dict:
         if not isinstance(service["cgroup_parent"], str):
             raise ComposeError("unsupported_compose_key", ["cgroup_parent"])
         process["cgroup_parent"] = service["cgroup_parent"]
+    dns = _dns(service["dns"]) if service.get("dns") is not None else []
+    if dns:  # TASK-2171: undeclared/empty is Docker's default
+        process["dns"] = dns
     if "expose" in service:
         process["expose"] = _exposed(service["expose"])
     if "stop_grace_period" in service:
@@ -750,6 +783,7 @@ def running(container: dict) -> dict:
             "expose": sorted((config.get("ExposedPorts") or {}).keys()),
             "stop_timeout": config.get("StopTimeout"), "init": bool(host.get("Init")),
             "cgroup_parent": host.get("CgroupParent") or "",
+            "dns": list(host.get("Dns") or []),
             "memory": {"Memory": int(host.get("Memory") or 0), "MemorySwap": int(host.get("MemorySwap") or 0)},
             "hardening": _running_hardening(host), "gpu": _running_gpu(host)}
 
@@ -824,6 +858,9 @@ def drift(desired: dict, actual: dict) -> list[str]:
         # TASK-2076: likewise an undeclared parent cgroup.
         if desired.get("cgroup_parent", "") != actual.get("cgroup_parent", ""):
             names.append("cgroup_parent:~")
+        # TASK-2171: ordered upstreams; undeclared ones are removed too.
+        if desired.get("dns", []) != actual.get("dns", []):
+            names.append("dns:~")
     # TASK-1649: only a profile that owns the memory cap compares it.
     if "memory" in desired and not _memory_matches(desired["memory"], actual["memory"]):
         names.append("memory:~")
@@ -952,6 +989,7 @@ def apply_desired(body: dict, old: dict, desired: dict, *, container_name: str, 
         host["Tmpfs"] = dict(desired.get("tmpfs", {})) or None
         host["Init"] = desired.get("init")  # undeclared: the daemon's default
         host["CgroupParent"] = desired.get("cgroup_parent", "")  # TASK-2076: "" = Docker's default
+        host["Dns"] = list(desired.get("dns", [])) or None  # TASK-2171: None = Docker's default
     if "memory" in desired:
         host["Memory"], host["MemorySwap"] = desired["memory"]["Memory"], desired["memory"]["MemorySwap"]
     if "hardening" in desired:

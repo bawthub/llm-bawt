@@ -21,7 +21,8 @@ from .app_config_reconcile import (ACTION as APP_CONFIG_ACTION, BUILT_PROFILE_LA
                                    app_config_binding, app_profile, uses_process_profile, validate_app_spec)
 from .compose_config import (GPU_PROFILE_LABEL, DEV_PROFILE, HARDENED_PROFILE, HARDENED_PROFILE_LABEL,
                              CGROUP_PARENT_PROFILE_LABEL, INIT_MEMORY_PROFILE_LABEL, PINNED_PROCESS_PROFILE,
-                             evaluate, needs_cgroup_parent_worker, needs_init_memory_worker,
+                             DNS_PROFILE_LABEL, evaluate, needs_cgroup_parent_worker, needs_dns_worker,
+                             needs_init_memory_worker,
                              selected_profile)
 # TASK-1169 S4: the error/result types live in executor_types; re-exported here.
 from .executor_types import (ConfigCheckError, DispatchResult, ExecutorError,  # noqa: F401
@@ -586,6 +587,9 @@ class DockerExecutor(Executor):
             if needs_cgroup_parent_worker(desired, binding.get("drift") or ()):  # TASK-2076
                 self._check_config_worker(self.execution_settings(spec), spec["action"],
                                           extra=(CGROUP_PARENT_PROFILE_LABEL,))
+            if needs_dns_worker(desired, binding.get("drift") or ()):  # TASK-2171
+                self._check_config_worker(self.execution_settings(spec), spec["action"],
+                                          extra=(DNS_PROFILE_LABEL,))
             return binding, desired, container
         except ComposeError as exc:  # fixed code and names only
             raise ConfigCheckError(exc.code, f"config target cannot be bound: {exc}") from exc
@@ -623,6 +627,9 @@ class DockerExecutor(Executor):
         if needs_cgroup_parent_worker(result["desired"], result["drift"]):  # TASK-2076
             self._check_config_worker(self.execution_settings(spec), spec["action"],
                                       extra=(CGROUP_PARENT_PROFILE_LABEL,))
+        if needs_dns_worker(result["desired"], result["drift"]):  # TASK-2171
+            self._check_config_worker(self.execution_settings(spec), spec["action"],
+                                      extra=(DNS_PROFILE_LABEL,))
         if result["drift"]:
             raise ConfigCheckError("config_drift", (
                 "config_drift: the running target differs from its Compose service ("
