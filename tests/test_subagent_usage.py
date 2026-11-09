@@ -306,3 +306,12 @@ def test_native_interrupted_response_with_start_usage_is_still_partial():
     ledger.observe_stream_event(delta(output_tokens=400), "agent1")
     ledger.observe_stream_event({"type": "message_stop"}, "agent1")
     assert ledger.for_event("agent1", None) == {"cumulative_tokens": 2401, "cumulative_partial": True}
+
+
+def test_unregistered_parent_concurrent_siblings_are_not_retired():
+    # Loopy probe: a Workflow whose TaskStarted predates this request's ledger.
+    ledger = SubagentUsage()
+    ledger.observe_stream_event(start("a"), "wf")
+    ledger.observe_stream_event(start("b"), "wf")  # live sibling, not a's successor
+    ledger.observe_stream_event(delta(input_tokens=500, output_tokens=50), "wf")
+    assert ledger.for_event("wf", None) == {"cumulative_tokens": 0, "cumulative_partial": True}
