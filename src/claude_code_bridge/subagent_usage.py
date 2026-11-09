@@ -101,6 +101,16 @@ class SubagentUsage:
             response_id = message.get("id") if isinstance(message, dict) else None
             if not isinstance(response_id, str) or not response_id:
                 return False
+            if open_ids and response_id not in open_ids and len(self._tasks.get(parent, {})) <= 1:
+                # One worker's requests are sequential, so a new start proves
+                # every open response ended without message_stop (interrupted
+                # or aborted). Retire them; one that never reported usage
+                # leaves a known gap, so the aggregate becomes a lower bound.
+                responses = self._responses.get(parent, {})
+                if any(not sum(responses.get(rid, {}).values()) for rid in open_ids):
+                    self._partial.add(parent)
+                open_ids.clear()
+                self._open_count[parent] = 0
             if response_id not in open_ids:
                 open_ids.append(response_id)
                 self._open_count[parent] = self._open_count.get(parent, 0) + 1

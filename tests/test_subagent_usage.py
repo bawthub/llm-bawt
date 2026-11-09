@@ -257,3 +257,36 @@ def test_overlap_resynchronises_after_every_overlapping_response_stops():
     ledger.observe_stream_event(start("c"), "wf")
     ledger.observe_stream_event(delta(input_tokens=40, output_tokens=2), "wf")
     assert ledger.for_event("wf", None) == {"cumulative_tokens": 42, "cumulative_partial": True}
+
+
+def test_single_worker_interrupted_response_is_retired_by_its_next_start():
+    ledger = SubagentUsage()
+    ledger.register_task("agent1", "task1", "solo")
+    ledger.observe_stream_event(start("a"), "agent1")  # interrupted: no delta, no stop
+    ledger.observe_stream_event(start("b"), "agent1")
+    ledger.observe_stream_event(delta(input_tokens=30, output_tokens=3), "agent1")
+    ledger.observe_stream_event({"type": "message_stop"}, "agent1")
+    ledger.observe_stream_event(start("c"), "agent1")
+    ledger.observe_stream_event(delta(input_tokens=5, output_tokens=2), "agent1")
+    # a's usage is genuinely unknown: measured lower bound, not complete.
+    assert ledger.for_event("agent1", None) == {"cumulative_tokens": 40, "cumulative_partial": True}
+
+
+def test_single_worker_measured_response_missing_stop_stays_complete():
+    ledger = SubagentUsage()
+    ledger.register_task("agent1", "task1", "solo")
+    ledger.observe_stream_event(start("a"), "agent1")
+    ledger.observe_stream_event(delta(input_tokens=10, output_tokens=1), "agent1")
+    ledger.observe_stream_event(start("b"), "agent1")
+    ledger.observe_stream_event(delta(input_tokens=20, output_tokens=2), "agent1")
+    assert ledger.for_event("agent1", None) == {"cumulative_tokens": 33}
+
+
+def test_workflow_interrupted_sibling_is_not_guessed_retired():
+    ledger = SubagentUsage()
+    for task in ("task1", "task2"):
+        ledger.register_task("wf", task, task)
+    ledger.observe_stream_event(start("a"), "wf")
+    ledger.observe_stream_event(start("b"), "wf")  # could be a live sibling
+    ledger.observe_stream_event(delta(input_tokens=9, output_tokens=1), "wf")
+    assert ledger.for_event("wf", None) == {"cumulative_tokens": 0, "cumulative_partial": True}
