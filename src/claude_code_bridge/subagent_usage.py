@@ -31,6 +31,7 @@ class SubagentUsage:
         self._open_responses: dict[str, list[str]] = {}
         self._partial: set[str] = set()
         self._open_count: dict[str, int] = {}
+        self._delta_seen: set[tuple[str, str]] = set()
         # TASK-1095: the SDK stamps a resumed sub-agent's messages with the
         # tool_use_id of its ORIGINAL spawn (Agent call), even when a later
         # SendMessage call is what is now running it. Track spawn → current
@@ -106,8 +107,9 @@ class SubagentUsage:
                 # every open response ended without message_stop (interrupted
                 # or aborted). Retire them; one that never reported usage
                 # leaves a known gap, so the aggregate becomes a lower bound.
-                responses = self._responses.get(parent, {})
-                if any(not sum(responses.get(rid, {}).values()) for rid in open_ids):
+                # Only a message_delta carries final output; message_start can
+                # already hold real (native) input, so a non-zero sum is no proof.
+                if any((parent, rid) not in self._delta_seen for rid in open_ids):
                     self._partial.add(parent)
                 open_ids.clear()
                 self._open_count[parent] = 0
@@ -121,6 +123,7 @@ class SubagentUsage:
                     self._partial.add(parent)
                     return True
                 return False
+            self._delta_seen.add((parent, open_ids[0]))
             return self._record(parent, open_ids[0], event.get("usage"))
         if kind == "message_stop":
             # A stop names no response either. With one open it is that one;

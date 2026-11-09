@@ -290,3 +290,19 @@ def test_workflow_interrupted_sibling_is_not_guessed_retired():
     ledger.observe_stream_event(start("b"), "wf")  # could be a live sibling
     ledger.observe_stream_event(delta(input_tokens=9, output_tokens=1), "wf")
     assert ledger.for_event("wf", None) == {"cumulative_tokens": 0, "cumulative_partial": True}
+
+
+def test_native_interrupted_response_with_start_usage_is_still_partial():
+    # Loopy probe: native message_start already carries input and output=1.
+    ledger = SubagentUsage()
+    ledger.register_task("agent1", "task1", "solo")
+
+    def native(rid):
+        return {"type": "message_start", "message": {
+            "id": rid, "usage": {"input_tokens": 1000, "output_tokens": 1}}}
+
+    ledger.observe_stream_event(native("a"), "agent1")  # aborted: no delta, no stop
+    ledger.observe_stream_event(native("b"), "agent1")
+    ledger.observe_stream_event(delta(output_tokens=400), "agent1")
+    ledger.observe_stream_event({"type": "message_stop"}, "agent1")
+    assert ledger.for_event("agent1", None) == {"cumulative_tokens": 2401, "cumulative_partial": True}
