@@ -5,6 +5,8 @@ Behavior-preserving extraction; the facade owns manager caching and configuratio
 
 from __future__ import annotations
 
+import asyncio
+
 from llm_bawt.bot_access import BotAccessError
 from llm_bawt.bot_access.context import current_bot_access
 from llm_bawt.bot_access.service import SERVICE_SELF_STORAGE_OPS, is_service_self
@@ -91,17 +93,22 @@ class StorageSessionsMixin:
                 if user_id is not None and user_id != scope.user_id:
                     raise BotAccessError("access_denied")
                 user_id = scope.user_id
-        engine_manager = self.get_short_term_manager(manager_bot)
-        return engine_manager.list_sessions(
-            bot_id=bot_id,
-            since=since,
-            status=status,
-            limit=limit,
-            user_id=user_id,
-            include_deleted=include_deleted,
-            query=query,
-            **scoped,
-        )
+        def read_sessions() -> list[dict]:
+            # Both a cold manager and its SQLAlchemy reads are synchronous.
+            # Keep them off the shared API loop; to_thread retains access context.
+            engine_manager = self.get_short_term_manager(manager_bot)
+            return engine_manager.list_sessions(
+                bot_id=bot_id,
+                since=since,
+                status=status,
+                limit=limit,
+                user_id=user_id,
+                include_deleted=include_deleted,
+                query=query,
+                **scoped,
+            )
+
+        return await asyncio.to_thread(read_sessions)
 
     async def get_active_session(
         self,
