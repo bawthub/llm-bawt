@@ -30,6 +30,7 @@ class SubagentUsage:
         # TASK-2169: stream-event accounting (see observe_stream_event).
         self._open_responses: dict[str, list[str]] = {}
         self._partial: set[str] = set()
+        self._open_count: dict[str, int] = {}
         # TASK-1095: the SDK stamps a resumed sub-agent's messages with the
         # tool_use_id of its ORIGINAL spawn (Agent call), even when a later
         # SendMessage call is what is now running it. Track spawn → current
@@ -102,6 +103,7 @@ class SubagentUsage:
                 return False
             if response_id not in open_ids:
                 open_ids.append(response_id)
+                self._open_count[parent] = self._open_count.get(parent, 0) + 1
             return self._record(parent, response_id, message.get("usage"))
         if kind == "message_delta":
             if len(open_ids) != 1:
@@ -110,8 +112,16 @@ class SubagentUsage:
                     return True
                 return False
             return self._record(parent, open_ids[0], event.get("usage"))
-        if kind == "message_stop" and len(open_ids) == 1:
-            open_ids.clear()
+        if kind == "message_stop":
+            # A stop names no response either. With one open it is that one;
+            # during an overlap only the count is known, so resynchronise once
+            # every overlapping response has stopped (later deltas measure
+            # again; the partial flag on the earlier gap stays).
+            remaining = max(0, self._open_count.get(parent, 0) - 1)
+            self._open_count[parent] = remaining
+            if len(open_ids) == 1 or remaining == 0:
+                open_ids.clear()
+                self._open_count[parent] = 0
         return False
 
     def _changed_updates(

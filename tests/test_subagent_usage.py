@@ -243,3 +243,17 @@ def test_stream_usage_follows_resumed_spawn_to_its_live_host():
     ledger.observe_stream_event(delta(input_tokens=7, output_tokens=3), "spawn1")
     assert ledger.for_event("send2", None) == {"cumulative_tokens": 10}
     assert ledger.for_event("spawn1", None) is None
+
+
+def test_overlap_resynchronises_after_every_overlapping_response_stops():
+    ledger = SubagentUsage()
+    ledger.register_task("wf", "task1", "a")
+    stop = {"type": "message_stop"}
+    ledger.observe_stream_event(start("a"), "wf")
+    ledger.observe_stream_event(start("b"), "wf")
+    ledger.observe_stream_event(stop, "wf")
+    ledger.observe_stream_event(delta(input_tokens=9, output_tokens=1), "wf")  # still ambiguous
+    ledger.observe_stream_event(stop, "wf")
+    ledger.observe_stream_event(start("c"), "wf")
+    ledger.observe_stream_event(delta(input_tokens=40, output_tokens=2), "wf")
+    assert ledger.for_event("wf", None) == {"cumulative_tokens": 42, "cumulative_partial": True}
