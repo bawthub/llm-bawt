@@ -258,6 +258,12 @@ services:
     # aggregate MemoryMax). Empty/unset = Docker's default; the slice must
     # exist on the host before you set it.
     cgroup_parent: ${AGENTS_CGROUP_PARENT:-}
+    # TASK-2171: optional upstream resolvers for Docker's embedded DNS, in
+    # order (deployment data, .env). Unset = Docker's default (the host
+    # resolver). Container names still resolve through the embedded resolver.
+    dns:
+      - ${CLAUDE_CODE_BRIDGE_DNS_PRIMARY:-}
+      - ${CLAUDE_CODE_BRIDGE_DNS_SECONDARY:-}
     # TASK-1476: no env_file (see the app). z.ai and Kimi keys come from the
     # app broker (records); their env names are no longer passed.
     environment:
