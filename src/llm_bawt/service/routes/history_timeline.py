@@ -28,6 +28,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from .history_scope import local_clock_bounds, local_day_bounds, owned_message_scope
 from .history_timeline_store import anchor_rows, timeline_rows
+from .history_timeline_summaries import MAX_SUMMARY_EXCERPTS, stored_summary_rows
 
 from ..dependencies import get_service
 from ..logging import get_service_logger
@@ -42,6 +43,7 @@ from ..schemas_history_timeline import (
     TimelineResponse,
     TimelineSegment,
     TimelineSession,
+    TimelineStoredSummary,
 )
 
 router = APIRouter()
@@ -130,12 +132,14 @@ def build_timeline(
 
         d = days.setdefault(
             day,
-            {"first": first, "last_ts": last_ts, "n": 0, "prompts": 0, "sessions": {}},
+            {"first": first, "last_ts": last_ts, "n": 0, "prompts": 0,
+             "summaries": 0, "sessions": {}},
         )
         d["first"] = _earliest(d["first"], first)
         d["last_ts"] = max(d["last_ts"], last_ts)
         d["n"] += n
         d["prompts"] += int(g["prompts"])
+        d["summaries"] += int(g.get("summary_count", 0))
         if sid:
             # One group row per (day, session), so this is that day's segment.
             d["sessions"][sid] = TimelineSegment(
@@ -168,6 +172,7 @@ def build_timeline(
                 user_prompt_count=d["prompts"],
                 session_ids=[seg.session_id for seg in segments],
                 segments=segments,
+                summary_count=d["summaries"],
             )
         )
 
@@ -262,6 +267,8 @@ def get_history_timeline(
             version, [(s.id, s.title, s.status) for s in sessions],
             [(g['first_id'], g['last_ts'], g['continued']) for g in groups],
             [(str(m['month']), m['messages']) for m in months],
+            [(str(g['day']), g['session_id'], g.get('summary_count', 0),
+              g.get('summary_revision', '0')) for g in groups],
         ], sort_keys=True).encode()).hexdigest()[:24]
     except HTTPException:
         raise
@@ -315,6 +322,7 @@ def get_history_timeline_prompts(
     limit: int = Query(200, ge=1, le=1000),
     from_utc: float | None = Query(None, description="Inclusive selected-index epoch; requires to_utc"),
     to_utc: float | None = Query(None, description="Exclusive selected-index epoch; requires from_utc"),
+    include_summaries: bool = Query(False, description="Read bounded, provenance-checked stored excerpts; never generate"),
 ):
     """Owned day/thread prompts, intersected with optional UTC [from_utc, to_utc).
 
@@ -348,6 +356,9 @@ def get_history_timeline_prompts(
         clauses.extend(["m.timestamp >= :from_utc", "m.timestamp < :to_utc"])
         params.update(from_utc=from_utc, to_utc=to_utc)
 
+    summary_start = max([params[k] for k in ("day_start", "from_utc") if k in params], default=None)
+    summary_end = min([params[k] for k in ("day_end", "to_utc") if k in params], default=None)
+    summaries = []
     try:
         engine, table = _engine_and_table(bot_id)
         with engine.connect() as conn:
@@ -359,6 +370,9 @@ def get_history_timeline_prompts(
                 ),
                 params,
             ).mappings().all()
+            if include_summaries:
+                summaries = stored_summary_rows(conn, table, bot_id, user_id, session_id,
+                                                summary_start, summary_end, has_day=bool(date))
     except HTTPException:
         raise
     except Exception as e:
@@ -380,4 +394,6 @@ def get_history_timeline_prompts(
             for r in rows[:limit]
         ],
         truncated=len(rows) > limit,
+        summaries=[TimelineStoredSummary(**r) for r in summaries[:MAX_SUMMARY_EXCERPTS]],
+        summaries_truncated=len(summaries) > MAX_SUMMARY_EXCERPTS,
     )

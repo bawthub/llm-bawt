@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class TimelineSegment(BaseModel):
@@ -28,6 +28,8 @@ class TimelineDay(BaseModel):
     user_prompt_count: int
     session_ids: list[str]  # same order as `segments`
     segments: list[TimelineSegment]  # chronological by first message
+    # Safe stored excerpts for active owned sessions, NOT whole-day coverage.
+    summary_count: int = 0
 
 
 class TimelineSession(BaseModel):
@@ -57,8 +59,8 @@ class TimelineResponse(BaseModel):
     from_utc: float
     to_utc: float
     coverage: dict  # start/end, overview, bounded continuation and exclusions
-    # Opaque revalidation token: changes whenever a visible message is added
-    # or removed. Compare for equality only.
+    # Opaque revalidation token: includes visible-message aggregates and safe
+    # stored-summary revisions. Compare for equality only.
     version: str
     days: list[TimelineDay]
     sessions: list[TimelineSession]
@@ -71,6 +73,18 @@ class TimelinePrompt(BaseModel):
     snippet: str
 
 
+class TimelineStoredSummary(BaseModel):
+    id: str
+    session_id: str
+    excerpt: str = Field(max_length=1200)
+    source_start_utc: float | None = None
+    source_end_utc: float | None = None
+    source_message_count: int | None = None
+    # "day" describes a recorded extent inside the selection, not completeness.
+    coverage: Literal["day", "conversation"]
+    truncated: bool
+
+
 class TimelinePromptsResponse(BaseModel):
     bot_id: str
     user_id: str
@@ -79,6 +93,8 @@ class TimelinePromptsResponse(BaseModel):
     tz: str
     prompts: list[TimelinePrompt]
     truncated: bool
+    summaries: list[TimelineStoredSummary] = Field(default_factory=list)
+    summaries_truncated: bool = False
 
 
 class TimelineAnchorsRequest(BaseModel):

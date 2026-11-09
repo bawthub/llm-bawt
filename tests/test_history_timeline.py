@@ -295,13 +295,17 @@ def test_timeline_repository_constant_sql_and_owner_predicates():
             sql = str(statement)
             self.calls.append((sql, params))
             if "WITH groups" in sql:
-                return Result([{"day": date(2026, 10, 6), "session_id": "own", "first_id": "id",
+                return Result([{"day": date(2026, 10, 6),
+                    "session_id": "own" if i == 0 else f"own-{i}", "first_id": f"id-{i}",
                     "n": 2, "prompts": 1, "first_ts": 20., "last_ts": 30., "title": "Hi",
-                    "status": "active", "continued": False}])
+                    "status": "active", "continued": False} for i in range(count)])
             if "AS month" in sql:
                 return Result([{"month": date(2026, 10, 1), "messages": 2}])
             if "AS k(id, bot_id, user_id)" in sql:
                 return Result([])
+            if "AS summary_count" in sql:
+                return Result([{"day": date(2026, 10, 6), "session_id": "own",
+                                "summary_count": 2, "summary_revision": "revision"}])
             raise AssertionError("Unexpected query")
         def __enter__(self):
             return self
@@ -318,20 +322,65 @@ def test_timeline_repository_constant_sql_and_owner_predicates():
         engine = Engine()
         result = timeline_rows(engine, "messages_p_snark", "snark", "nick", None,
                                "America/New_York", 1., 100.)
-        assert len(result[0]) == 1
-        assert len(engine.conn.calls) == 3
-        owned = [(sql, p) for sql, p in engine.conn.calls if "AS k(id, bot_id, user_id)" not in sql]
+        assert len(result[0]) == count
+        assert len(engine.conn.calls) == 4
+        assert result[0][0]["summary_count"] == 2
+        assert result[0][0]["summary_revision"] == "revision"
+        owned = [(sql, p) for sql, p in engine.conn.calls
+                 if "AS k(id, bot_id, user_id)" not in sql and "AS summary_count" not in sql]
         assert len(owned) == 2
         assert all("owner.user_id = :user_id" in sql for sql, _ in owned)
         assert all(params["user_id"] == "nick" for _, params in owned)
         # TASK-2061: the shared first-message read joins sessions on the owner key.
-        (first_sql, first_params), = [c for c in engine.conn.calls if c not in owned]
+        (first_sql, first_params), = [c for c in engine.conn.calls
+                                    if "AS k(id, bot_id, user_id)" in c[0]]
         assert "s.user_id IS NOT DISTINCT FROM k.user_id" in first_sql
-        assert first_params["ids"] == ["own"] and first_params["users"] == ["nick"]
-        assert first_params["bots"] == ["snark"]
+        assert len(first_params["ids"]) == count and "own" in first_params["ids"]
+        assert first_params["users"] == ["nick"] * count
+        assert first_params["bots"] == ["snark"] * count
         group_sql, group_params = engine.conn.calls[0]
         assert "m.timestamp >= :start AND m.timestamp < :end" in group_sql
         assert (group_params["start"], group_params["end"]) == (1., 100.)
+
+
+def test_timeline_summary_schema_defaults_and_cap():
+    from pydantic import ValidationError
+    from llm_bawt.service.schemas_history_timeline import TimelinePromptsResponse, TimelineStoredSummary
+
+    response = TimelinePromptsResponse(bot_id="b", user_id="u", date=None,
+        session_id="s", tz="UTC", prompts=[], truncated=False)
+    assert response.summaries == [] and response.summaries_truncated is False
+    fields = dict(id="summary", session_id="s", excerpt="x" * 1200,
+                  coverage="conversation", truncated=True)
+    stored = TimelineStoredSummary(**fields)
+    assert stored.source_start_utc is None and stored.source_message_count is None
+    with pytest.raises(ValidationError):
+        TimelineStoredSummary(**{**fields, "excerpt": "x" * 1201})
+
+
+def test_summary_counts_fold_without_prose():
+    groups = [{"day": "2026-09-01", "session_id": sid, "n": 1, "prompts": 0,
+               "first_ts": ts, "last_ts": ts, "first_id": sid, "summary_count": n}
+              for sid, ts, n in [("one", 1., 2), ("two", 2., 3)]]
+    days, _, _ = build_timeline(groups, {}, {})
+    assert days[0].summary_count == 5
+    assert "excerpt" not in days[0].model_dump()
+
+
+def test_index_version_includes_summary_revision(monkeypatch):
+    group = {"day": "2026-09-01", "session_id": "s", "n": 1, "prompts": 0,
+             "first_ts": 1., "last_ts": 1., "first_id": "m", "continued": False,
+             "summary_count": 1, "summary_revision": "first"}
+    monkeypatch.setattr(history_timeline, "_load_timeline_rows",
+                        lambda *a: ([group], {}, {}, [], a[4]))
+    app = FastAPI()
+    app.include_router(history_timeline.router)
+    with TestClient(app) as client:
+        first = client.get("/v1/history/timeline?bot_id=b&user_id=u").json()
+        group["summary_revision"] = "edited"
+        second = client.get("/v1/history/timeline?bot_id=b&user_id=u").json()
+    assert first["version"] != second["version"]
+    assert first["days"][0]["summary_count"] == 1
 
 
 def test_timeline_anchors_reject_oversize_without_sql():

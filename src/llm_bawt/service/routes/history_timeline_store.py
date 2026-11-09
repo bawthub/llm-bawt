@@ -1,8 +1,8 @@
 """Bounded, owned timeline repository. All SQL for TASK-985 lives here.
 
 Normal 30d: grouped segments + one first-message query + monthly
-calendar overview (<=3 statements). Sparse recent ranges add a previous-active-
-day lookup and a second grouped read (<=5). SQL statement count does not grow
+calendar overview + summary availability (<=4 statements). Sparse recent ranges
+add a previous-active-day lookup and a second grouped read (<=6). Count does not grow
 with sessions or links; every message must join an owned session.
 """
 
@@ -13,6 +13,7 @@ from sqlalchemy import text
 
 from ...sessions.first_message import fetch_first_messages, first_message_params, given_title_sql
 from .history_scope import MAX_TIMELINE_ANCHORS, owned_message_scope
+from .history_timeline_summaries import summary_availability
 
 MAX_GROUPS = 2000
 MAX_OVERVIEW_MONTHS = 240
@@ -80,6 +81,11 @@ def timeline_rows(engine, table: str, bot_id: str, user_id: str, session_id: str
             GROUP BY 1 ORDER BY 1 DESC LIMIT :month_limit
         """), {**base, 'month_limit': MAX_OVERVIEW_MONTHS + 1,
                  'overview_before': overview_before}).mappings()]
+        availability = summary_availability(conn, table, bot_id, user_id, groups)
+        for group in groups:
+            summary = availability.get((str(group["day"]), str(group["session_id"])), {})
+            group["summary_count"] = int(summary.get("summary_count", 0))
+            group["summary_revision"] = summary.get("summary_revision", "0")
     meta = {sid: {'title': next((g['title'] for g in groups if str(g['session_id']) == sid), None),
                   'status': next((g['status'] for g in groups if str(g['session_id']) == sid), None)}
             for sid in ids}
