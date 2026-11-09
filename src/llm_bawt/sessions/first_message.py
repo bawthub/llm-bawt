@@ -17,6 +17,8 @@ Every query using these fragments must bind ``:fm_strip`` via
 """
 from __future__ import annotations
 
+import re
+
 # Every character Python's str.strip() removes. PostgreSQL btrim's default
 # trims only ASCII space; eligibility follows the Python rule.
 PYTHON_STRIP_CHARS = "".join(c for c in map(chr, range(0x110000)) if c.isspace())
@@ -143,14 +145,20 @@ def first_message_fields(row) -> dict:
     }
 
 
-def fetch_first_messages(conn, sessions: list[dict]) -> dict[str, dict]:
+def fetch_first_messages(conn, sessions: list[dict], *,
+                         messages_table: str = "messages") -> dict[str, dict]:
     """One batched read: ``{session_id: first_message_fields}`` for given rows.
 
     ``sessions`` are already-authorized rows carrying ``id``, ``bot_id`` and
     ``user_id``; the lookup is keyed by all three and adds no authority.
+    A bot-scoped caller may pass its internally resolved partition identifier
+    to avoid planning every partition of the parent. Never pass request SQL;
+    only simple identifiers are accepted, and the bot/owner checks still apply.
     """
     from sqlalchemy import text
 
+    if not re.fullmatch(r"[a-z_][a-z0-9_]*", messages_table):
+        raise ValueError("Expected an internal messages table identifier")
     keyed = [s for s in sessions if s.get("id") and s.get("bot_id")]
     if not keyed:
         return {}
@@ -162,7 +170,7 @@ def fetch_first_messages(conn, sessions: list[dict]) -> dict[str, dict]:
              AS k(id, bot_id, user_id)
         JOIN sessions s ON s.id = k.id AND s.bot_id = k.bot_id
                        AND s.user_id IS NOT DISTINCT FROM k.user_id
-        {first_message_lateral('messages')}
+        {first_message_lateral(messages_table)}
     """)
     rows = conn.execute(sql, {
         "ids": [str(s["id"]) for s in keyed],

@@ -41,9 +41,10 @@ class TimelineSession(BaseModel):
     # "first_prompt" = snippet of the first eligible user message; "none" =
     # neither exists (frontend picks its own placeholder).
     label_source: Literal["title", "first_prompt", "none"]
-    # TASK-2061: the uncut first eligible user message and who sent it.
+    # Compact in the index; uncut on the explicitly requested lazy detail.
     first_message_text: str | None = None
     initiated_by: dict | None = None
+    label_truncated: bool = False
     first_message_id: str
     first_ts: float
     last_ts: float
@@ -76,6 +77,7 @@ class TimelinePrompt(BaseModel):
 class TimelineStoredSummary(BaseModel):
     id: str
     session_id: str
+    source_first_message_id: str | None = None
     excerpt: str = Field(max_length=1200)
     source_start_utc: float | None = None
     source_end_utc: float | None = None
@@ -95,6 +97,7 @@ class TimelinePromptsResponse(BaseModel):
     truncated: bool
     summaries: list[TimelineStoredSummary] = Field(default_factory=list)
     summaries_truncated: bool = False
+    session: TimelineSession | None = None
 
 
 class TimelineAnchorsRequest(BaseModel):

@@ -27,7 +27,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import APIRouter, HTTPException, Query
 
 from .history_scope import local_clock_bounds, local_day_bounds, owned_message_scope
-from .history_timeline_store import anchor_rows, timeline_rows
+from .history_timeline_store import SEGMENT_LIMIT, anchor_rows, session_detail_row, timeline_rows
 from .history_timeline_summaries import MAX_SUMMARY_EXCERPTS, stored_summary_rows
 
 from ..dependencies import get_service
@@ -51,6 +51,7 @@ log = get_service_logger(__name__)
 
 DEFAULT_TZ = "America/New_York"
 SNIPPET_CHARS = 120
+INDEX_LABEL_CHARS = 160
 VISIBLE_ROLES_SQL = "role NOT IN ('system', 'summary')"
 # Single authority for "which local day does this message belong to".
 LOCAL_DATE_SQL = "(to_timestamp(timestamp) AT TIME ZONE :tz)::date"
@@ -85,7 +86,8 @@ def is_slash_command(content: str | None) -> bool:
 
 
 def resolve_session_label(
-    title: str | None, first_prompt: str | None
+    title: str | None, first_prompt: str | None, *,
+    first_prompt_limit: int = SNIPPET_CHARS,
 ) -> tuple[str | None, str]:
     """Label precedence: given name → first eligible user message → none.
 
@@ -97,7 +99,7 @@ def resolve_session_label(
     if title and title.strip():
         return _WS.sub(" ", title).strip(), "title"
     if first_prompt and first_prompt.strip() and not is_slash_command(first_prompt):
-        return snippet(first_prompt), "first_prompt"
+        return snippet(first_prompt, first_prompt_limit), "first_prompt"
     return None, "none"
 
 
@@ -180,14 +182,20 @@ def build_timeline(
     for sid, s in sorted(sessions.items(), key=lambda kv: kv[1]["first"]):
         meta = session_meta.get(sid) or {}
         first = first_prompts.get(sid) or {}
-        title, source = resolve_session_label(meta.get("title"), first.get("first_message_text"))
+        text = first.get("first_message_text")
+        title, source = resolve_session_label(meta.get("title"), text,
+                                             first_prompt_limit=INDEX_LABEL_CHARS)
+        label_truncated = bool(
+            (title and len(title) > INDEX_LABEL_CHARS)
+            or (text and len(_WS.sub(" ", text).strip()) > INDEX_LABEL_CHARS))
         session_models.append(
             TimelineSession(
                 id=sid,
-                title=title,
+                title=snippet(title, INDEX_LABEL_CHARS) if title else title,
                 label_source=source,
-                first_message_text=first.get("first_message_text"),
+                first_message_text=snippet(text, INDEX_LABEL_CHARS) if text else text,
                 initiated_by=first.get("initiated_by"),
+                label_truncated=label_truncated,
                 first_message_id=s["first"][1],
                 first_ts=s["first"][0],
                 last_ts=s["last_ts"],
@@ -221,6 +229,43 @@ def _load_timeline_rows(bot_id: str, user_id: str, session_id: str | None,
                          overview_before=overview_before)
 
 
+def _load_timeline_session(conn, table: str, bot_id: str, user_id: str,
+                           session_id: str, start: float | None,
+                           end: float | None) -> TimelineSession | None:
+    row = session_detail_row(conn, table, bot_id, user_id, session_id, start, end)
+    if row is None:
+        return None
+    title, source = resolve_session_label(row.get("title"), row.get("first_message_text"),
+                                         first_prompt_limit=INDEX_LABEL_CHARS)
+    return TimelineSession(**{**row, "title": title, "label_source": source})
+
+
+def _exclusive_end_date(end: float, tz: str) -> date_cls:
+    zone = ZoneInfo(tz)
+    day = datetime.fromtimestamp(end, zone).date()
+    # Avoid subtracting a float epsilon which may round back to midnight when
+    # datetime converts epochs to microseconds.
+    midnight = datetime.combine(day, datetime.min.time(), zone).timestamp()
+    return day - timedelta(days=1) if end <= midnight else day
+
+
+def _pinned_timeline_bounds(start: float | None, end: float | None, tz: str,
+                            today: date_cls) -> tuple[float, float]:
+    """Validate pinned selection without rounding clocks or recomputing dates."""
+    if (start is None or end is None or not math.isfinite(start)
+            or not math.isfinite(end) or end <= start):
+        raise HTTPException(status_code=400, detail="Provide finite UTC bounds with to_utc > from_utc")
+    try:
+        zone = ZoneInfo(tz)
+        first = datetime.fromtimestamp(start, zone).date()
+        last = _exclusive_end_date(end, tz)
+    except (OverflowError, OSError, ValueError):
+        raise HTTPException(status_code=400, detail="Timeline UTC bounds are out of range")
+    if (last - first).days >= 90 or last > today:
+        raise HTTPException(status_code=400, detail="Timeline scope must span at most 90 local days and not end in the future")
+    return start, end
+
+
 # ── routes ────────────────────────────────────────────────────────────────
 
 
@@ -236,6 +281,9 @@ def get_history_timeline(
     overview_before: date_cls | None = Query(None, description="Older-month cursor for all-history overview"),
     from_time: str | None = Query(None, description="Custom-only HH:MM on from_date in tz; repeated hour uses earlier occurrence"),
     to_time: str | None = Query(None, description="Custom-only exclusive HH:MM on to_date in tz; repeated hour uses later occurrence"),
+    before_date: date_cls | None = Query(None, description="Exclusive viewer-local whole-day page cursor; requires pinned UTC scope"),
+    from_utc: float | None = Query(None, description="Pinned inclusive selected-scope epoch; requires to_utc"),
+    to_utc: float | None = Query(None, description="Pinned exclusive selected-scope epoch; requires from_utc"),
 ):
     """Owned [start, end) segments; custom clocks default to whole local days.
 
@@ -244,9 +292,14 @@ def get_history_timeline(
     """
     validate_tz(tz)
     today = datetime.now(ZoneInfo(tz)).date()
+    pinned = from_utc is not None or to_utc is not None
+    if before_date and not pinned:
+        raise HTTPException(status_code=400, detail="Older timeline pages require pinned UTC bounds")
+    if mode == "all" and (pinned or before_date):
+        raise HTTPException(status_code=400, detail="All-history overview does not accept segment page cursors")
     if mode != "custom" and (from_time is not None or to_time is not None):
         raise HTTPException(status_code=400, detail="Timeline clocks require custom mode")
-    if mode == "custom" and (from_date is None or to_date is None):
+    if mode == "custom" and not pinned and (from_date is None or to_date is None):
         raise HTTPException(status_code=400, detail="Custom range needs both dates")
     if overview_before and (mode != "all" or overview_before.day != 1):
         raise HTTPException(status_code=400, detail="Older-month cursor requires all mode and a month's first day")
@@ -254,17 +307,32 @@ def get_history_timeline(
         raise HTTPException(status_code=400, detail="Timeline cannot end in the future")
     start_date = from_date or today - timedelta(days=6)
     end_date = to_date or today
-    start, end = local_clock_bounds(start_date, end_date, tz, from_time, to_time)
+    if pinned:
+        start, end = _pinned_timeline_bounds(from_utc, to_utc, tz, today)
+        start_date = datetime.fromtimestamp(start, ZoneInfo(tz)).date()
+        end_date = _exclusive_end_date(end, tz)
+    else:
+        start, end = local_clock_bounds(start_date, end_date, tz, from_time, to_time)
+    page_end = end
+    if before_date:
+        page_end = max(start, min(end, local_day_bounds(before_date, before_date, tz)[0]))
     try:
         groups, session_meta, first_prompts, months, start = _load_timeline_rows(
-            bot_id, user_id, session_id, tz, start, end,
-            mode == "recent" and (end_date - start_date).days >= 7,
+            bot_id, user_id, session_id, tz, start, page_end,
+            not pinned and mode == "recent" and (end_date - start_date).days >= 7,
             mode == "all",
             local_day_bounds(overview_before, overview_before, tz)[0] if overview_before else None,
         )
         days, sessions, version = build_timeline(groups, session_meta, first_prompts)
+        has_more = any(bool(g.get("has_more")) for g in groups)
+        older_before_date = days[0].date if has_more and days else None
+        loaded_start = (max(start, local_day_bounds(
+            date_cls.fromisoformat(days[0].date), date_cls.fromisoformat(days[0].date), tz)[0])
+                        if has_more and days else start)
         revision = hashlib.sha256(json.dumps([
-            version, [(s.id, s.title, s.status) for s in sessions],
+            start, end, loaded_start, page_end, has_more,
+            version, [(s.id, s.title, s.status, s.first_message_text,
+                       s.initiated_by, s.label_truncated) for s in sessions],
             [(g['first_id'], g['last_ts'], g['continued']) for g in groups],
             [(str(m['month']), m['messages']) for m in months],
             [(str(g['day']), g['session_id'], g.get('summary_count', 0),
@@ -282,7 +350,10 @@ def get_history_timeline(
         from_utc=start, to_utc=end, version=revision, days=days, sessions=sessions,
         coverage={
             'from_date': from_day, 'to_date': end_date.isoformat(),
-            'mode': mode, 'segments_complete': mode != 'all',
+            'mode': mode, 'segments_complete': mode != 'all' and not has_more and page_end == end,
+            'loaded_from_utc': loaded_start, 'loaded_to_utc': page_end,
+            'has_more': has_more, 'older_before_date': older_before_date,
+            'segment_limit': SEGMENT_LIMIT,
             'overview': [{'month': str(m['month']), 'messages': int(m['messages'])}
                          for m in months[:240]],
             'overview_has_older': len(months) > 240,
@@ -359,6 +430,7 @@ def get_history_timeline_prompts(
     summary_start = max([params[k] for k in ("day_start", "from_utc") if k in params], default=None)
     summary_end = min([params[k] for k in ("day_end", "to_utc") if k in params], default=None)
     summaries = []
+    session = None
     try:
         engine, table = _engine_and_table(bot_id)
         with engine.connect() as conn:
@@ -373,6 +445,9 @@ def get_history_timeline_prompts(
             if include_summaries:
                 summaries = stored_summary_rows(conn, table, bot_id, user_id, session_id,
                                                 summary_start, summary_end, has_day=bool(date))
+            if session_id:
+                session = _load_timeline_session(conn, table, bot_id, user_id, session_id,
+                                                 summary_start, summary_end)
     except HTTPException:
         raise
     except Exception as e:
@@ -396,4 +471,5 @@ def get_history_timeline_prompts(
         truncated=len(rows) > limit,
         summaries=[TimelineStoredSummary(**r) for r in summaries[:MAX_SUMMARY_EXCERPTS]],
         summaries_truncated=len(summaries) > MAX_SUMMARY_EXCERPTS,
+        session=session,
     )

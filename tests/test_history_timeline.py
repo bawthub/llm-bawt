@@ -215,7 +215,7 @@ def test_build_timeline_folds_groups():
     assert (s1.first_message_id, s1.last_ts, s1.message_count) == ("a", 35.0, 7)
     assert (s1.title, s1.label_source, s1.status) == ("Rail work", "title", "archived")
     assert (s2.title, s2.label_source) == ("why is it slow more detail", "first_prompt")
-    assert s2.first_message_text == "why is it slow\nmore detail"
+    assert s2.first_message_text == "why is it slow more detail"
     assert s2.initiated_by == {"kind": "user", "id": "nick"}
     assert s1.first_message_text is None and s1.initiated_by is None
     assert version == "10:45.0"
@@ -323,12 +323,12 @@ def test_timeline_repository_constant_sql_and_owner_predicates():
         result = timeline_rows(engine, "messages_p_snark", "snark", "nick", None,
                                "America/New_York", 1., 100.)
         assert len(result[0]) == count
-        assert len(engine.conn.calls) == 4
+        assert len(engine.conn.calls) == 3
         assert result[0][0]["summary_count"] == 2
         assert result[0][0]["summary_revision"] == "revision"
         owned = [(sql, p) for sql, p in engine.conn.calls
                  if "AS k(id, bot_id, user_id)" not in sql and "AS summary_count" not in sql]
-        assert len(owned) == 2
+        assert len(owned) == 1
         assert all("owner.user_id = :user_id" in sql for sql, _ in owned)
         assert all(params["user_id"] == "nick" for _, params in owned)
         # TASK-2061: the shared first-message read joins sessions on the owner key.
@@ -338,9 +338,14 @@ def test_timeline_repository_constant_sql_and_owner_predicates():
         assert len(first_params["ids"]) == count and "own" in first_params["ids"]
         assert first_params["users"] == ["nick"] * count
         assert first_params["bots"] == ["snark"] * count
+        assert "FROM messages_p_snark m1" in first_sql
         group_sql, group_params = engine.conn.calls[0]
         assert "m.timestamp >= :start AND m.timestamp < :end" in group_sql
         assert (group_params["start"], group_params["end"]) == (1., 100.)
+        aggregate_sql, _, metadata_sql = group_sql.partition("SELECT groups.*")
+        assert "session_metadata" not in aggregate_sql
+        assert "session_metadata" in metadata_sql
+        assert "s.bot_id = :bot_id AND s.user_id = :user_id" in metadata_sql
 
 
 def test_timeline_summary_schema_defaults_and_cap():
@@ -472,6 +477,107 @@ def test_custom_clocks_route_passes_exact_index_bounds(monkeypatch):
     assert response.json()["coverage"]["from_date"] == "2026-09-01"
 
 
+def test_whole_day_paging_pins_scope_across_midnight_and_dst(monkeypatch):
+    from llm_bawt.service.routes.history_scope import local_clock_bounds
+
+    clock = [datetime(2026, 11, 3, 23, 59, tzinfo=ET)]
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock[0].astimezone(tz)
+
+    monkeypatch.setattr(history_timeline, "datetime", Clock)
+    start, end = local_clock_bounds(date(2026, 11, 1), date(2026, 11, 2),
+                                    "America/New_York", "01:30", "17:00")
+    midnight = _et_epoch(2026, 11, 2)
+    calls = []
+
+    def rows(*args):
+        calls.append(args)
+        older = args[5] == midnight
+        ts = _et_epoch(2026, 11, 1, 1, 45, fold=1) if older else midnight + 3600
+        return [{"day": date(2026, 11, 1 if older else 2), "session_id": "own",
+                 "n": 1, "prompts": 1, "first_ts": ts, "last_ts": ts,
+                 "first_id": "old" if older else "new", "continued": older,
+                 "has_more": not older}], {}, {}, [], args[4]
+
+    monkeypatch.setattr(history_timeline, "_load_timeline_rows", rows)
+    app = FastAPI()
+    app.include_router(history_timeline.router)
+    with TestClient(app) as client:
+        first = client.get("/v1/history/timeline", params={
+            "bot_id": "synthetic", "user_id": "viewer", "mode": "custom",
+            "tz": "America/New_York", "from_date": "2026-11-01", "to_date": "2026-11-02",
+            "from_time": "01:30", "to_time": "17:00"})
+        assert first.status_code == 200, first.text
+        initial = first.json()
+        assert (initial["from_utc"], initial["to_utc"]) == (start, end)
+        assert initial["coverage"]["loaded_from_utc"] == midnight
+        assert initial["coverage"]["loaded_to_utc"] == end
+        assert initial["coverage"]["has_more"]
+        assert initial["coverage"]["older_before_date"] == "2026-11-02"
+        assert initial["coverage"]["segment_limit"] == 64
+        clock[0] = datetime(2026, 11, 4, 0, 1, tzinfo=ET)
+        older = client.get("/v1/history/timeline", params={
+            "bot_id": "synthetic", "user_id": "viewer", "mode": "custom",
+            "tz": "America/New_York", "from_utc": start, "to_utc": end,
+            "before_date": "2026-11-02"})
+    assert older.status_code == 200, older.text
+    body = older.json()
+    assert (body["from_utc"], body["to_utc"]) == (start, end)
+    assert (body["coverage"]["loaded_from_utc"], body["coverage"]["loaded_to_utc"]) == (start, midnight)
+    assert not body["coverage"]["has_more"] and body["coverage"]["older_before_date"] is None
+    assert [d["date"] for d in body["days"]] == ["2026-11-01"]  # page replaces, never appends
+    assert calls[1][4:7] == (start, midnight, False)
+    assert midnight - start == 23.5 * 3600  # exact earlier-fold clock survives the 25-hour day
+
+
+@pytest.mark.parametrize("params", [
+    {"before_date": "2026-09-02"},
+    {"from_utc": 1}, {"to_utc": 2},
+    {"from_utc": "nan", "to_utc": 2},
+    {"from_utc": 1, "to_utc": "inf"},
+    {"from_utc": 2, "to_utc": 1},
+    {"from_utc": -1e100, "to_utc": 2},
+    {"from_utc": datetime(2026, 1, 1, tzinfo=ET).timestamp(),
+     "to_utc": datetime(2026, 4, 2, tzinfo=ET).timestamp()},
+    {"from_utc": datetime(2099, 1, 1, tzinfo=ET).timestamp(),
+     "to_utc": datetime(2099, 1, 2, tzinfo=ET).timestamp()},
+    {"mode": "all", "from_utc": 1, "to_utc": 2},
+])
+def test_index_paging_invalid_scope_never_queries(monkeypatch, params):
+    def forbidden(*_args):
+        pytest.fail("Invalid pinned scope reached SQL")
+
+    monkeypatch.setattr(history_timeline, "_load_timeline_rows", forbidden)
+    app = FastAPI()
+    app.include_router(history_timeline.router)
+    with TestClient(app) as client:
+        response = client.get("/v1/history/timeline", params={
+            "bot_id": "synthetic", "user_id": "viewer", "tz": "America/New_York", **params})
+    assert response.status_code == 400
+
+
+def test_empty_index_and_overview_have_sane_page_coverage(monkeypatch):
+    monkeypatch.setattr(history_timeline, "_load_timeline_rows",
+                        lambda *a: ([], {}, {}, [], a[4]))
+    app = FastAPI()
+    app.include_router(history_timeline.router)
+    with TestClient(app) as client:
+        for mode in ("recent", "all"):
+            response = client.get("/v1/history/timeline", params={
+                "bot_id": "synthetic", "user_id": "viewer", "mode": mode})
+            assert response.status_code == 200
+            body = response.json()
+            coverage = body["coverage"]
+            assert coverage["loaded_from_utc"] == body["from_utc"]
+            assert coverage["loaded_to_utc"] == body["to_utc"]
+            assert not coverage["has_more"] and coverage["older_before_date"] is None
+            assert coverage["segment_limit"] == 64
+            assert body["days"] == body["sessions"] == []
+
+
 @pytest.mark.parametrize("extra", [
     {"mode": "recent", "from_time": "09:00"},
     {"mode": "all", "to_time": "17:00"},
@@ -551,6 +657,9 @@ def prompt_bounds_db(monkeypatch):
         conn.execute(text("INSERT INTO messages_test VALUES (:id, :session, :role, :ts, :id)"),
                      [{"id": id_, "session": sid, "role": role, "ts": ts} for id_, sid, role, ts in rows])
     monkeypatch.setattr(history_timeline, "_engine_and_table", lambda _bot: (engine, "messages_test"))
+    # This SQLite fixture isolates portable prompt-bound predicates, not the
+    # PostgreSQL-only full conversation metadata lateral.
+    monkeypatch.setattr(history_timeline, "_load_timeline_session", lambda *_a: None)
     app = FastAPI()
     app.include_router(history_timeline.router)
     with TestClient(app) as client:

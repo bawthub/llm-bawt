@@ -46,6 +46,9 @@ def db(engine, monkeypatch):
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM messages"))
         conn.execute(text("DELETE FROM sessions"))
+        conn.execute(text("DELETE FROM inter_bot_deliveries"))
+        conn.execute(text("DELETE FROM prompt_occurrences"))
+        conn.execute(text("DELETE FROM prompt_schedules"))
         conn.execute(text("INSERT INTO sessions (id,bot_id,user_id) VALUES "
                           "('own','synthetic','viewer'), ('sibling','synthetic','viewer'), "
                           "('foreign','synthetic','other'), ('null','synthetic',NULL), "
@@ -286,8 +289,8 @@ def test_excerpt_and_result_truncation_deterministic_and_sql_bounded(db):
     assert [s["id"] for s in body["summaries"]] == [f"s{i:02d}" for i in range(8)]
     assert body["summaries_truncated"]
     assert all(len(s["excerpt"]) == 1200 and s["truncated"] for s in body["summaries"])
-    assert len(calls) == 2
-    assert calls[-1][1]["summary_limit"] == 9 and calls[-1][1]["excerpt_chars"] == 1200
+    assert len(calls) == 4
+    assert calls[1][1]["summary_limit"] == 9 and calls[1][1]["excerpt_chars"] == 1200
 
 
 def test_index_counts_revision_and_constant_batch_query_count(db):
@@ -296,7 +299,7 @@ def test_index_counts_revision_and_constant_batch_query_count(db):
     with captured(db) as calls:
         groups, _, _, _, _ = timeline_rows(db, "messages_test", "synthetic", "viewer",
                                           None, "America/New_York", START, END)
-    assert len(calls) == 4
+    assert len(calls) == 3
     assert groups[0]["summary_count"] == 1
     first_revision = groups[0]["summary_revision"]
     assert "excerpt" not in groups[0] and "content" not in groups[0]
@@ -316,7 +319,202 @@ def test_index_counts_revision_and_constant_batch_query_count(db):
     with captured(db) as calls:
         timeline_rows(db, "messages_test", "synthetic", "viewer", None,
                       "America/New_York", START, END, recent=True)
-    assert len(calls) == 6
+    assert len(calls) == 5
+
+
+def test_group_metadata_after_aggregation_preserves_owned_segments(db):
+    source(db, "b", ts=START + 7200, role="user")
+    source(db, "a", ts=START + 7200)
+    source(db, "next-day", ts=END + 1)
+    source(db, "hidden-earlier", ts=START + 1, role="system")
+    source(db, "sibling-message", "sibling", START + 7300, role="user")
+    for session in ("foreign", "null", "wrong-bot", "missing-session", None):
+        source(db, f"excluded-{session}", session, START + 7400)
+    with db.begin() as conn:
+        conn.execute(text("UPDATE sessions SET status='completed', "
+                          "session_metadata=CAST(:meta AS jsonb) WHERE id='own'"),
+                     {"meta": json.dumps({"title": "  Given name  ", "title_source": "user",
+                                          "unrelated": "x" * 20000})})
+        conn.execute(text("UPDATE sessions SET session_metadata=CAST(:meta AS jsonb) "
+                          "WHERE id='sibling'"),
+                     {"meta": json.dumps({"title": "Ignore auto copy", "title_source": "auto"})})
+    with captured(db) as calls:
+        groups, meta, prompts, _, _ = timeline_rows(
+            db, "messages_test", "synthetic", "viewer", None,
+            "America/New_York", START, END + 86400)
+    assert len(calls) == 3
+    assert [(g["session_id"], g["n"], g["prompts"], g["first_id"], g["continued"])
+            for g in groups] == [
+                ("own", 2, 1, "a", False),
+                ("sibling", 1, 1, "sibling-message", False),
+                ("own", 1, 0, "next-day", True),
+            ]
+    assert meta["own"] == {"title": "Given name", "status": "completed"}
+    assert meta["sibling"]["title"] == ""
+    assert set(prompts) == {"own", "sibling"}
+
+
+def test_first_message_partition_option_preserves_full_owner_key_and_origin(db):
+    from llm_bawt.sessions.first_message import fetch_first_messages
+
+    source(db, "command", ts=START, role="user")
+    source(db, "first", ts=START + 1, role="user")
+    source(db, "later", ts=START + 2, role="user")
+    source(db, "sibling-first", "sibling", START + 3, role="user")
+    with db.begin() as conn:
+        conn.execute(text("UPDATE messages SET content='/new' WHERE id='command'"))
+        conn.execute(text("UPDATE messages SET content=:content, author_entity_type='bot', "
+                          "author_entity_id='reviewer' WHERE id='first'"),
+                     {"content": "Uncut first request " * 100})
+        conn.execute(text("INSERT INTO inter_bot_deliveries VALUES "
+                          "('delivery','first','synthetic','bot','reviewer')"))
+        conn.execute(text("INSERT INTO prompt_occurrences VALUES ('schedule','delivery','own')"))
+        conn.execute(text("INSERT INTO prompt_schedules VALUES ('schedule','viewer','reviewer')"))
+    keyed = [{"id": "own", "bot_id": "synthetic", "user_id": "viewer"},
+             {"id": "sibling", "bot_id": "synthetic", "user_id": "other"},
+             {"id": "own", "bot_id": "other", "user_id": "viewer"}]
+    with db.connect() as conn:
+        parent = fetch_first_messages(conn, keyed)
+        scoped = fetch_first_messages(conn, keyed, messages_table="messages_test")
+    assert scoped == parent
+    assert scoped == {"own": {"first_message_text": "Uncut first request " * 100,
+                              "initiated_by": {"kind": "schedule", "id": "schedule"}}}
+
+
+@pytest.mark.parametrize("table", ["messages; SELECT 1", "public.messages",
+                                  '"messages"', "messages --", ""])
+def test_first_message_partition_option_rejects_sql_without_query(db, table):
+    from llm_bawt.sessions.first_message import fetch_first_messages
+
+    with db.connect() as conn, captured(db) as calls:
+        with pytest.raises(ValueError, match="internal messages table identifier"):
+            fetch_first_messages(conn, [{"id": "own", "bot_id": "synthetic",
+                                         "user_id": "viewer"}], messages_table=table)
+    assert calls == []
+
+
+def page_activity(db, day, count):
+    """Generate independent owned segments only inside this private fixture DB."""
+    from llm_bawt.service.routes.history_scope import local_day_bounds
+
+    start, _ = local_day_bounds(day, day, "America/New_York")
+    keys = [f"{day}-{i:04d}" for i in range(count)]
+    with db.begin() as conn:
+        conn.execute(text("INSERT INTO sessions (id,bot_id,user_id) "
+                          "VALUES (:id,'synthetic','viewer')"),
+                     [{"id": key} for key in keys])
+        conn.execute(text("INSERT INTO messages (id,bot_id,session_id,role,content,timestamp) "
+                          "VALUES (:id,'synthetic',:id,'assistant','activity',:ts)"),
+                     [{"id": key, "ts": start + 3600 + i} for i, key in enumerate(keys)])
+    return keys
+
+
+def test_whole_day_page_defers_entire_day_that_would_cross_64(db):
+    old_day, new_day = date(2026, 11, 1), date(2026, 11, 2)
+    old_ids = page_activity(db, old_day, 33)
+    new_ids = page_activity(db, new_day, 32)
+    _, end = local_day_bounds(new_day, new_day, "America/New_York")
+    with captured(db) as calls:
+        groups, meta, first, months, _ = timeline_rows(
+            db, "messages_test", "synthetic", "viewer", None,
+            "America/New_York", START, end)
+    assert len(groups) == 32 and {g["day"] for g in groups} == {new_day}
+    assert all(g["has_more"] for g in groups)
+    assert set(meta) == set(new_ids) and set(first) == set(new_ids)
+    assert months == [] and len(calls) == 3
+    assert set(calls[1][1]["ids"]) == set(new_ids)
+    assert {k["session_id"] for k in json.loads(calls[2][1]["summary_keys"])} == set(new_ids)
+    assert not set(old_ids) & set(meta)
+    # A cursor is a local day boundary, never a session's mutable first_ts.
+    groups, _, _, _, _ = timeline_rows(
+        db, "messages_test", "synthetic", "viewer", None,
+        "America/New_York", START, END)
+    assert len(groups) == 33 and all(not g["has_more"] for g in groups)
+    assert {g["first_id"] for g in groups} == set(old_ids)
+
+
+def test_newest_day_above_budget_is_whole_not_split(db):
+    old_day, new_day = date(2026, 11, 1), date(2026, 11, 2)
+    page_activity(db, old_day, 1)
+    newest = page_activity(db, new_day, 65)
+    _, end = local_day_bounds(new_day, new_day, "America/New_York")
+    groups, _, _, _, _ = timeline_rows(
+        db, "messages_test", "synthetic", "viewer", None,
+        "America/New_York", START, end)
+    assert len(groups) == 65 and {g["first_id"] for g in groups} == set(newest)
+    assert all(g["has_more"] for g in groups)
+
+
+def test_newest_day_still_rejects_above_2000_without_enrichment(db):
+    from fastapi import HTTPException
+
+    page_activity(db, date(2026, 11, 1), 2001)
+    with captured(db) as calls, pytest.raises(HTTPException) as exc:
+        timeline_rows(db, "messages_test", "synthetic", "viewer", None,
+                      "America/New_York", START, END)
+    assert exc.value.status_code == 413 and len(calls) == 1
+
+
+def test_index_labels_bounded_but_requested_session_detail_is_full(db):
+    first_text = "Canonical first request\n" + "full context " * 100
+    given_title = "Given conversation name " * 30
+    source(db, "first", role="user")
+    with db.begin() as conn:
+        conn.execute(text("UPDATE messages SET content=:content, author_entity_type='user', "
+                          "author_entity_id='viewer' WHERE id='first'"),
+                     {"content": first_text})
+        conn.execute(text("UPDATE sessions SET session_metadata=CAST(:meta AS jsonb) "
+                          "WHERE id='own'"),
+                     {"meta": json.dumps({"title": given_title, "title_source": "user"})})
+    with client() as http:
+        index = http.get("/v1/history/timeline", params={
+            "bot_id": "synthetic", "user_id": "viewer", "mode": "custom",
+            "from_date": "2026-11-01", "to_date": "2026-11-01"}).json()
+        indexed = index["sessions"][0]
+        assert 0 < len(indexed["title"]) <= 160
+        assert 0 < len(indexed["first_message_text"]) <= 160
+        assert indexed["label_truncated"]
+        response = http.get("/v1/history/timeline/prompts", params={
+            "bot_id": "synthetic", "user_id": "viewer", "session_id": "own",
+            "from_utc": START, "to_utc": END})
+        assert response.status_code == 200, response.text
+        detail = response.json()["session"]
+        assert detail["title"] == given_title.strip()
+        assert detail["first_message_text"] == first_text
+        assert detail["initiated_by"] == {"kind": "user", "id": "viewer"}
+        assert not detail["label_truncated"]
+        assert http.get("/v1/history/timeline/prompts", params={
+            "bot_id": "synthetic", "user_id": "viewer", "date": "2026-11-01"
+        }).json()["session"] is None
+        for sid in ("foreign", "null", "wrong-bot", "missing-session"):
+            source(db, f"hidden-{sid}", sid, role="user")
+            body = http.get("/v1/history/timeline/prompts", params={
+                "bot_id": "synthetic", "user_id": "viewer", "session_id": sid,
+                "from_utc": START, "to_utc": END}).json()
+            assert body["session"] is None and body["prompts"] == []
+        # Owned but inactive in the exact selection is also no metadata grant.
+        body = http.get("/v1/history/timeline/prompts", params={
+            "bot_id": "synthetic", "user_id": "viewer", "session_id": "own",
+            "from_utc": END, "to_utc": END + 3600}).json()
+        assert body["session"] is None
+
+
+def test_day_summary_anchor_is_owned_in_range_and_independent_of_index_page(db):
+    source(db, "outside", ts=START - 1)
+    source(db, "first-in-range", ts=START + 100)
+    source(db, "last-in-range", ts=START + 200)
+    source(db, "hidden-system", ts=START + 1, role="system")
+    source(db, "foreign-anchor", "foreign", START + 2)
+    summary(db, meta=metadata(message_ids=["first-in-range"]))
+    with client() as http:
+        response = http.get("/v1/history/timeline/prompts", params={
+            "bot_id": "synthetic", "user_id": "viewer", "date": "2026-11-01",
+            "from_utc": START + 150, "to_utc": END, "include_summaries": True})
+    assert response.status_code == 200, response.text
+    row, = response.json()["summaries"]
+    assert row["source_first_message_id"] == "last-in-range"
+    assert row["session_id"] == "own"
+    assert response.json()["session"] is None
 
 
 def test_summary_fetch_error_is_not_empty_success(db, monkeypatch):

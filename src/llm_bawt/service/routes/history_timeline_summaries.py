@@ -28,7 +28,7 @@ def _safe_summaries_sql(table: str, selection: str) -> str:
     """
     return f"""
         selected AS ({selection}),
-        candidates AS (
+        candidates AS MATERIALIZED (
             SELECT s.*, CASE
                 WHEN jsonb_typeof(s.summary_metadata->'message_ids') = 'array'
                 THEN CASE WHEN jsonb_array_length(s.summary_metadata->'message_ids')
@@ -92,13 +92,17 @@ def summary_availability(conn, table: str, bot_id: str, user_id: str,
         AS k(day text, session_id text)
     """
     query = text(f"""
-        WITH {_safe_summaries_sql(table, selection)}
-        SELECT k.day, k.session_id, count(s.id) AS summary_count,
+        WITH {_safe_summaries_sql(table, selection)},
+        per_session AS (
+            SELECT s.session_id, count(s.id) AS summary_count,
                COALESCE(bit_xor(hashtextextended(
                    concat_ws('|', s.id, s.content, s.summary_metadata::text), 0))
                    FILTER (WHERE s.id IS NOT NULL), 0)::text AS summary_revision
-        FROM selected k LEFT JOIN safe s ON s.session_id = k.session_id
-        GROUP BY k.day, k.session_id
+            FROM safe s GROUP BY s.session_id
+        )
+        SELECT k.day, k.session_id, COALESCE(p.summary_count, 0) AS summary_count,
+               COALESCE(p.summary_revision, '0') AS summary_revision
+        FROM selected k LEFT JOIN per_session p ON p.session_id = k.session_id
     """)
     return {(str(row["day"]), str(row["session_id"])): dict(row)
             for row in conn.execute(query, {"bot_id": bot_id, "user_id": user_id,
@@ -122,8 +126,14 @@ def stored_summary_rows(conn, table: str, bot_id: str, user_id: str,
     if end is not None:
         clauses.append("m.timestamp < :summary_end")
     selection = f"SELECT DISTINCT m.session_id FROM {table} m WHERE {' AND '.join(clauses)}"
+    anchor_bounds = ""
+    if start is not None:
+        anchor_bounds += " AND m.timestamp >= :summary_start"
+    if end is not None:
+        anchor_bounds += " AND m.timestamp < :summary_end"
     query = text(f"""
-        WITH {_safe_summaries_sql(table, selection)}
+        WITH {_safe_summaries_sql(table, selection)},
+        excerpts AS (
         SELECT id, session_id, left(content, :excerpt_chars) AS excerpt,
                length(content) > :excerpt_chars AS truncated,
                source_start_utc, source_end_utc, source_message_count,
@@ -134,6 +144,18 @@ def stored_summary_rows(conn, table: str, bot_id: str, user_id: str,
         FROM safe
         ORDER BY source_end_utc DESC NULLS LAST, source_start_utc DESC NULLS LAST, id
         LIMIT :summary_limit
+        )
+        SELECT excerpts.*, anchor.source_first_message_id
+        FROM excerpts
+        JOIN LATERAL (
+            SELECT m.id AS source_first_message_id
+            FROM {table} m
+            WHERE m.session_id = excerpts.session_id
+              AND m.role NOT IN ('system', 'summary') AND {owned_message_scope()}
+              {anchor_bounds}
+            ORDER BY m.timestamp, m.id LIMIT 1
+        ) anchor ON TRUE
+        ORDER BY source_end_utc DESC NULLS LAST, source_start_utc DESC NULLS LAST, excerpts.id
     """)
     return [dict(row) for row in conn.execute(query, {
         "bot_id": bot_id, "user_id": user_id, "session_id": session_id,
