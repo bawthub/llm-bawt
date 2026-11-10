@@ -89,6 +89,8 @@ class EntityProfile(SQLModel, table=True):
     entity_type: EntityType = Field(index=True)
     entity_id: str = Field(max_length=100, index=True)  # user_id or bot_id
     email: str | None = Field(default=None, max_length=255, index=True)  # optional email for user lookup
+    # Service authors retain their user identity/history, but are not people.
+    is_service: bool = Field(default=False, nullable=False, sa_column_kwargs={"server_default": text("false")})
 
     # Basic identity
     display_name: str | None = Field(default=None, max_length=100)
@@ -182,6 +184,10 @@ class ProfileManager:
             conn.execute(text("""
                 ALTER TABLE entity_profiles
                 ADD COLUMN IF NOT EXISTS avatar_render TEXT
+            """))
+            conn.execute(text("""
+                ALTER TABLE entity_profiles
+                ADD COLUMN IF NOT EXISTS is_service BOOLEAN NOT NULL DEFAULT false
             """))
             conn.execute(text("""
                 CREATE INDEX IF NOT EXISTS idx_entity_profiles_email
@@ -310,6 +316,7 @@ class ProfileManager:
         color: str | None = None,
         avatar: str | None = None,
         avatar_render: str | None = None,
+        is_service: bool | None = None,
     ) -> EntityProfile | None:
         """Update basic profile info."""
         entity_id = entity_id.lower().strip()
@@ -339,6 +346,8 @@ class ProfileManager:
                 profile.avatar = avatar.strip() or None
             if avatar_render is not None:
                 profile.avatar_render = avatar_render or None
+            if is_service is not None:
+                profile.is_service = is_service
             profile.updated_at = datetime.now(timezone.utc)
 
             session.add(profile)

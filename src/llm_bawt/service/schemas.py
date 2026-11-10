@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, PrivateAttr
+from pydantic import BaseModel, Field, PrivateAttr, StrictBool
 
 SERVICE_VERSION = "0.1.0"
 
@@ -592,6 +592,7 @@ class ProfileDetail(BaseModel):
     entity_type: str  # "user" or "bot"
     entity_id: str
     email: str | None = None
+    is_service: bool = False
     display_name: str | None = None
     description: str | None = None
     color: str | None = None
@@ -605,6 +606,7 @@ class ProfileDetail(BaseModel):
 
 class ProfileUpdateRequest(BaseModel):
     """Request payload for updating core profile fields."""
+    is_service: StrictBool | None = None
     display_name: str | None = None
     description: str | None = None
     summary: str | None = None

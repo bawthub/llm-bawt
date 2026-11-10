@@ -32,6 +32,7 @@ def _get_profile_detail(manager, entity_type_enum, entity_type: str, entity_id: 
         entity_type=entity_type,
         entity_id=entity_id,
         email=profile.email,
+        is_service=profile.is_service,
         display_name=profile.display_name,
         description=profile.description,
         color=profile.color,
@@ -293,6 +294,7 @@ def update_typed_profile(entity_type: str, entity_id: str, request: ProfileUpdat
             color=request.color,
             avatar=request.avatar,
             avatar_render=avatar_render,
+            is_service=request.is_service,
         )
 
         if not profile:
@@ -307,6 +309,7 @@ def update_typed_profile(entity_type: str, entity_id: str, request: ProfileUpdat
                 color=request.color,
                 avatar=request.avatar,
                 avatar_render=avatar_render,
+                is_service=request.is_service,
             )
 
         if not profile:
