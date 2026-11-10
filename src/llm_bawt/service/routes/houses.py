@@ -88,10 +88,49 @@ def _after_move(slug: str, result: house_tenancy.MoveResult) -> None:
         house_lease.request_recycle(service.config, result.vacated)
 
 
+def _previews(houses: list[str]) -> dict[str, dict[str, Any]]:
+    """Each house's preview URL and what it serves now (TASK-2175).
+
+    ``preview_host`` comes from the pool file (house ids and preview hosts need
+    not share a number); ``preview`` is the published value (branch, commit,
+    up), null when none runs, ``"unknown"`` when Redis can't be read.
+    """
+    import redis
+
+    from ...house_pool_config import configured_pool
+    from ...house_watcher import parse_preview
+
+    hosts = {h["id"]: h["preview_host"] for h in configured_pool() or []}
+    out = {house: {"preview_host": hosts.get(house), "preview": "unknown"} for house in houses}
+    try:
+        client = redis.Redis.from_url(get_service().config.REDIS_URL, decode_responses=True,
+                                      socket_timeout=2.0, socket_connect_timeout=2.0)
+        try:
+            for house in houses:
+                out[house]["preview"] = parse_preview(client.get(f"agent:house:{house}:preview"))
+        finally:
+            client.close()
+    except Exception:
+        logger.warning("house preview read failed", exc_info=True)
+    return out
+
+
+async def _with_previews(houses: list[str]) -> dict[str, dict[str, Any]]:
+    try:
+        return await asyncio.to_thread(_previews, houses)
+    except Exception:
+        logger.warning("house preview hosts unavailable", exc_info=True)
+        return {}
+
+
 @router.get("/v1/houses/self")
 async def list_houses(request: Request):
     slug = _caller(request)
-    return await _run(house_tenancy.list_houses, _store(), slug, _state)
+    listing = await _run(house_tenancy.list_houses, _store(), slug, _state)
+    previews = await _with_previews([row["house"] for row in listing["houses"]])
+    for row in listing["houses"]:
+        row.update(previews.get(row["house"], {}))
+    return listing
 
 
 @router.post("/v1/houses/self/move-in")
@@ -101,7 +140,10 @@ async def move_in(request: Request):
     result = await _run(house_tenancy.move_in, _store(), slug, body.house, _state)
     if result.changed:
         await asyncio.to_thread(_after_move, slug, result)
-    return result.as_dict()
+    out = result.as_dict()
+    if result.house:
+        out.update((await _with_previews([result.house])).get(result.house, {}))
+    return out
 
 
 @router.post("/v1/houses/self/move-out")

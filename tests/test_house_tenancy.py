@@ -409,3 +409,27 @@ def test_route_refuses_when_redis_is_unreadable(api, monkeypatch):
     response = api.call("POST", "/move-in", "alpha", json={})
     assert response.status_code == 503 and response.json()["detail"]["code"] == "unavailable"
     assert api.store.writes == []
+
+
+def test_list_and_move_in_carry_each_houses_preview_url_and_branch(api, monkeypatch):
+    previews = {"h1": {"preview_host": "https://fixture-one.example", "preview": None},
+                "h2": {"preview_host": "https://fixture-three.example",
+                       "preview": {"up": True, "branch": "fixture/TASK-1", "commit": "abc"}}}
+    monkeypatch.setattr(api.routes, "_previews",
+                        lambda houses: {h: previews[h] for h in houses if h in previews})
+
+    listed = {row["house"]: row for row in api.call("GET", "", "alpha").json()["houses"]}
+    assert listed["h2"]["preview_host"] == "https://fixture-three.example"
+    assert listed["h2"]["preview"]["branch"] == "fixture/TASK-1"
+    assert listed["h1"]["preview"] is None
+    moved = api.call("POST", "/move-in", "alpha", json={}).json()
+    assert moved["house"] == "h2" and moved["preview_host"] == "https://fixture-three.example"
+
+
+def test_an_unreadable_preview_still_lists_houses(api, monkeypatch):
+    def down(_houses):
+        raise RuntimeError("pool unreadable")
+
+    monkeypatch.setattr(api.routes, "_previews", down)
+    response = api.call("GET", "", "alpha")
+    assert response.status_code == 200 and response.json()["houses"]

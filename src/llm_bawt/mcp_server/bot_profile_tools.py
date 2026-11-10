@@ -23,6 +23,10 @@ the bot lock. What this tool adds:
   clears). A caller may change its own runtime like its own model: the route
   reloads the profile and rotates threads on a runtime switch, so the change
   applies from the bot's next turn; the turn that made it finishes as is.
+- House tenancy (TASK-2175): ``house`` and ``house_pinned`` of another bot
+  need a role with the ``bots_house_assign_capability`` capability (unset:
+  ``coordinate``). The app route's house lock and validation apply as for any
+  profile write. A bot never edits its own house here; it uses ``self_house``.
 - Every write is a compare-and-set. The tool sends ``expected_tags`` (the tag
   set it read) and ``expected_fields`` (the caller's ``expected`` or the values
   it read) for each changed field, so a concurrent write makes this one 409
@@ -73,9 +77,17 @@ ALLOWED_FIELDS = frozenset({
     TAGS, "name", "description", "color", "cli_color", "avatar", "default_voice", "system_prompt",
     "prompt_override_id", "requires_memory", "voice_optimized", "tts_mode", "uses_tools",
     "uses_search", "uses_home_assistant", *MODEL_FIELDS, BACKEND, BACKEND_CONFIG,
+    "house", "house_pinned",
 })
+#: Another bot's house tenancy: coordinators only (TASK-2175). A bot moves
+#: itself with ``self_house``, never through this tool.
+HOUSE_FIELDS = frozenset({"house", "house_pinned"})
 #: Global runtime setting naming the role capability whose holders switch models.
 MODEL_SWITCH_CAPABILITY_SETTING = "bots_model_switch_capability"
+#: Global runtime setting naming the role capability whose holders assign or
+#: pin another bot's house (TASK-2175); unset falls back to coordinators.
+HOUSE_ASSIGN_CAPABILITY_SETTING = "bots_house_assign_capability"
+DEFAULT_HOUSE_ASSIGN_CAPABILITY = "coordinate"
 #: Agent backends whose picker scope is the chat harness (endpointScopeFor in BawtHub).
 _CHAT_BACKENDS = frozenset({"", "default", "chat"})
 CHAT_HARNESS = "chat"
@@ -141,6 +153,18 @@ def _protected_roles() -> frozenset[str]:
         return frozenset()
     with get_shared_engine(Config()).connect() as conn:
         return frozenset().union(*(grants.manager_roles(conn, cap) for cap in capabilities))
+
+
+def _may_assign_houses(bot_slug: str) -> bool:
+    """Whether ``bot_slug`` holds a role carrying the house-assign capability."""
+    from llm_bawt.bot_tags import grants
+    from llm_bawt.utils.config import Config
+    from llm_bawt.utils.db import get_shared_engine
+
+    capability = (_setting(_global_settings(), HOUSE_ASSIGN_CAPABILITY_SETTING)
+                  or DEFAULT_HOUSE_ASSIGN_CAPABILITY)
+    with get_shared_engine(Config()).connect() as conn:
+        return grants.holds_capability(conn, bot_slug, capability)
 
 
 def _may_switch_models(bot_slug: str) -> bool:
@@ -277,6 +301,7 @@ async def bots_profile_patch(
             ``agent_backend`` switches the runtime and must come with an
             ``endpoint_id`` from that runtime's catalog.
             ``agent_backend_config`` replaces the runtime settings object.
+            ``house``/``house_pinned``: coordinators only.
         reason: Why; stored on the audit row.
         expected: Optional field -> value you read. Fields you change but leave
             out here are pinned to the value read just before the write.
@@ -302,6 +327,17 @@ async def bots_profile_patch(
     slug = bot_id.strip().lower() if isinstance(bot_id, str) else ""
     if TAGS in changes and slug == turn.bot_id.strip().lower():
         return _error("self_tag_edit_refused", "a bot can't change its own tags")
+    if HOUSE_FIELDS & set(changes):
+        if slug == turn.bot_id.strip().lower():
+            return _error("self_house_refused", "move yourself with self_house, not this tool")
+        try:
+            allowed = await asyncio.to_thread(_may_assign_houses, turn.bot_id.strip().lower())
+        except Exception:
+            logger.exception("bots_profile_patch: house-assign capability unreadable")
+            return _error("unavailable", "bot tag policy unavailable")
+        if not allowed:
+            return _error("capability_required",
+                          "assigning or pinning another bot's house needs a coordinator role")
     if MODEL_FIELDS & set(changes):
         try:
             allowed = await asyncio.to_thread(_may_switch_models, turn.bot_id.strip().lower())

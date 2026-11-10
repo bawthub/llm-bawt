@@ -571,3 +571,71 @@ class _Engine:
 
     def __exit__(self, *_exc):
         return False
+
+
+# ------------------------------------------------------------ house (TASK-2175)
+
+
+@pytest.fixture
+def coordinators(rig, monkeypatch):
+    held = {CALLER}
+    monkeypatch.setattr(tools, "_may_assign_houses", lambda slug: slug in held)
+    return held
+
+
+def test_a_coordinator_assigns_and_pins_another_bots_house_as_a_pinned_write(rig, coordinators):
+    rig.app.profile = _profile(house=None, house_pinned=False)
+
+    result = _call(changes={"house": "h2", "house_pinned": True}, reason="menu preview")
+
+    [write] = rig.app.writes
+    assert write["house"] == "h2" and write["house_pinned"] is True
+    assert write["expected_fields"] == {"house": None, "house_pinned": False}
+    assert write["updated_by"] == f"bot:{CALLER}"
+    assert result["changed"]["house"] == {"before": None, "after": "h2"}
+    assert result["rollback"]["changes"] == {"house": None, "house_pinned": False}
+
+
+def test_a_bot_without_the_coordinator_role_cannot_touch_a_house(rig, coordinators):
+    coordinators.clear()
+    for changes in ({"house": "h1"}, {"house_pinned": False}, {"house": None}):
+        result = _call(changes=changes)
+        assert result["error"] == "capability_required"
+    assert rig.app.calls == []
+
+
+def test_a_coordinator_moves_itself_only_with_self_house(rig, coordinators):
+    result = _call(bot_id=CALLER, changes={"house": "h1"})
+
+    assert result["error"] == "self_house_refused"
+    assert rig.app.calls == []
+
+
+def test_an_unreadable_house_capability_fails_closed(rig, monkeypatch):
+    def down(_slug):
+        raise RuntimeError("tags down")
+
+    monkeypatch.setattr(tools, "_may_assign_houses", down)
+    assert _call(changes={"house": "h1"})["error"] == "unavailable"
+    assert rig.app.calls == []
+
+
+def test_the_house_capability_defaults_to_coordinate_and_follows_the_setting(monkeypatch):
+    from llm_bawt.bot_tags import grants
+
+    asked = []
+    monkeypatch.setattr(grants, "holds_capability",
+                        lambda conn, slug, cap: asked.append(cap) or True)
+
+    class _Engine:
+        def connect(self):
+            from contextlib import nullcontext
+            return nullcontext(None)
+
+    monkeypatch.setattr("llm_bawt.utils.db.get_shared_engine", lambda _cfg: _Engine())
+    monkeypatch.setattr(tools, "_global_settings", lambda: {})
+    assert tools._may_assign_houses(CALLER) is True
+    monkeypatch.setattr(tools, "_global_settings",
+                        lambda: {tools.HOUSE_ASSIGN_CAPABILITY_SETTING: "fixture-cap"})
+    tools._may_assign_houses(CALLER)
+    assert asked == ["coordinate", "fixture-cap"]
