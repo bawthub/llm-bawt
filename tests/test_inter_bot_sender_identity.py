@@ -347,3 +347,49 @@ def test_route_keeps_user_authored_workspace_delivery(delivery_route) -> None:
     kwargs = delivery_route.enqueue.call_args.kwargs
     assert kwargs["sender_bot_id"] == "unknown"
     assert kwargs["author"].entity_type == "user"
+
+
+def test_service_notice_uses_system_author_and_real_owner_without_a_user_profile(delivery_route) -> None:
+    _create(sender_bot_id="system", author_entity_type="bot", author_entity_id="system")
+    kwargs = delivery_route.enqueue.call_args.kwargs
+    assert kwargs["sender_bot_id"] == "system"
+    assert kwargs["author"].entity_type == "bot"
+    assert kwargs["author"].entity_id == "system"
+    assert kwargs["payload"]["user"] == "nick"
+
+
+@pytest.mark.parametrize("fields", [
+    {"sender_bot_id": "unregistered-job"},
+    {"reply_mode": "waited", "prefer_steer": False},
+    {"from_selector": True},
+    {"session_id": "fixture-session"},
+    {"user_message_id": "fixture-message"},
+    {"raw_message": True},
+    {"augment_memory": False},
+    {"steer_only": True},
+    {"session_policy": "reset_retain_history"},
+])
+def test_system_author_is_not_a_general_bot_identity(delivery_route, fields) -> None:
+    body = route.DeliveryCreate(**{
+        "target_bot_id": "snark", "message": "notice", "session_policy": "continue",
+        "sender_bot_id": "system", "author_entity_type": "bot", "author_entity_id": "system",
+        **fields,
+    })
+    with pytest.raises(HTTPException, match="plain service notices") as error:
+        asyncio.run(route.create_delivery(body))
+    assert error.value.status_code == 422
+    delivery_route.enqueue.assert_not_called()
+
+
+def test_signed_bot_request_cannot_claim_system_author(delivery_route) -> None:
+    from llm_bawt.task_turn_context import TASK_TURN_CONTEXT_HEADER
+
+    body = route.DeliveryCreate(
+        target_bot_id="snark", message="notice", sender_bot_id="system",
+        author_entity_type="bot", author_entity_id="system",
+    )
+    request = SimpleNamespace(headers={TASK_TURN_CONTEXT_HEADER: "even-an-invalid-capability"})
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(route.create_delivery(body, request=request))
+    assert error.value.status_code == 403
+    delivery_route.enqueue.assert_not_called()

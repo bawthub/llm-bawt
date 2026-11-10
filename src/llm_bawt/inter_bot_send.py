@@ -24,6 +24,7 @@ from .agent_context import (
     validate_session_policy,
 )
 from .bot_types import durable_agent_backend
+from .bot_identities import SYSTEM_BOT_ID
 from .bots import BotManager
 from .inter_bot_delivery import CANCELLED, submission_result
 from .inter_bot_delivery_user import resolve_delivery_user
@@ -373,6 +374,15 @@ class DeliverySender:
         except ValueError as exc:
             raise DeliveryRefused(status_code=422, detail=str(exc)) from exc
         author = explicit_author or AuthorReference.bot(sender)
+        system_notice = author.entity_type == "bot" and author.entity_id == SYSTEM_BOT_ID
+        if system_notice:
+            # System is an app-owned presentation identity, not a runnable bot.
+            # Only plain service notices use it; signed bot tools cannot claim it.
+            _refuse_bot_privileged(request, ["author_entity_id"])
+            if (sender != SYSTEM_BOT_ID or body.reply_mode != "async"
+                    or body.from_selector or privileged or body.user_message_id is not None
+                    or body.reset_requested or body.steer_only):
+                raise DeliveryRefused(status_code=422, detail="System authors are only for plain service notices")
         if body.reply_mode == "waited" and (body.prefer_steer or author.entity_type != "bot" or sender == "unknown"):
             raise DeliveryRefused(status_code=422, detail="Waited replies require a bot-authored when-idle delivery")
         if not target:
@@ -380,7 +390,7 @@ class DeliverySender:
         if not body.message.strip():
             raise DeliveryRefused(status_code=422, detail="message is required")
         bots = BotManager(self.service.config)
-        if author.entity_type == "bot" and not _is_real_bot(bots, author.entity_id):
+        if author.entity_type == "bot" and not system_notice and not _is_real_bot(bots, author.entity_id):
             # A bot-authored row renders as that bot; "unknown" is not one (TASK-1241).
             raise DeliveryRefused(
                 status_code=422,
