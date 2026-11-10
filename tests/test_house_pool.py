@@ -111,8 +111,10 @@ def test_tenant_scratch_is_capped_tmpfs_under_the_house_limit(config):
     shared = {v.split(":")[1] for v in base["services"]["claude-code-bridge"]["volumes"]}
     for service in render_compose(config, ROOT / "docker-compose.yml")["services"].values():
         mounts = {entry.split(":", 1)[0]: dict(
-            opt.split("=", 1) for opt in entry.split(":", 1)[1].split(","))
+            (opt.split("=", 1) + [True])[:2] for opt in entry.split(":", 1)[1].split(","))
             for entry in service["tmpfs"]}
+        # Cached tool executables (pre-commit hooks) must run from ~/.cache.
+        assert mounts["/home/bridge/.cache"].get("exec") is True
         assert set(mounts) == {"/tmp", "/home/bridge/.cache", "/home/bridge/.config",
                                "/home/bridge/.codex", "/home/bridge/.npm"}
         # The restart-surviving container layer is read-only: a tenant write

@@ -29,7 +29,9 @@ _BRIDGE_OWNED = "uid=1001,gid=1001"
 # is read-only. Pages count against the house memory limit; caps total 1.3 GiB.
 HOUSE_TMPFS = (
     "/tmp:size=512m,mode=1777",
-    f"/home/bridge/.cache:size=512m,{_BRIDGE_OWNED},mode=0755",
+    # exec: tools run executables they cache here (pre-commit hook envs, uv);
+    # Docker's tmpfs default is noexec (TASK-2175).
+    f"/home/bridge/.cache:size=512m,{_BRIDGE_OWNED},mode=0755,exec",
     f"/home/bridge/.config:size=16m,{_BRIDGE_OWNED},mode=0700",
     f"/home/bridge/.codex:size=64m,{_BRIDGE_OWNED},mode=0755",
     f"/home/bridge/.npm:size=256m,{_BRIDGE_OWNED},mode=0755",
