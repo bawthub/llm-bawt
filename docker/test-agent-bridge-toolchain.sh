@@ -24,6 +24,9 @@ assert.equal((await import("node:crypto")).createHash("sha256").update("bridge")
 console.log("Node " + process.version + ": ESM, fetch, WebSocket, crypto OK");
 '
 uv --version
+# TASK-2180: BawtHub's make gate refuses a uv that differs from CI's pin.
+test "$(uv --version | cut -d' ' -f2)" = 0.10.8
+test "$(command -v uv)" = /usr/local/bin/uv
 python - <<'PY'
 import importlib
 import importlib.metadata

@@ -35,7 +35,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Install uv to a shared prefix (not /root/.local, which the bridge user
 # can't traverse) so both the build (root) and runtime (bridge) can use it.
-RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
+# TASK-2180: pin uv to BawtHub CI's setup-uv version (.github/workflows/ci.yml)
+# and docker/Dockerfile.gate-runner; BawtHub's make gate refuses any other uv.
+# Bump all three, plus docker/test-agent-bridge-toolchain.sh, together.
+ARG UV_VERSION=0.10.8
+RUN curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | env UV_INSTALL_DIR=/usr/local/bin sh
 ENV PATH="/usr/local/bin:$PATH"
 
 # TASK-1061: install one supported Node toolchain, not distro Node plus an
