@@ -93,6 +93,12 @@ def test_effective_dev_account_mount_preserved(config):
         assert account in service["volumes"]
 
 
+def test_repos_viewer_gets_read_only_dev_tree(config):
+    for service in render_compose(config, ROOT / "docker-compose.yml")["services"].values():
+        assert "${HOME}/dev:/repos:ro" in service["volumes"]
+        assert service["environment"]["REPOS_HOST_ROOT"] == "${HOME}/dev"
+
+
 def test_parent_limits_and_per_house_override(config):
     config["cgroup_parent"] = "tenant-agents.slice"
     config["houses"][1]["memory"] = "6144m"

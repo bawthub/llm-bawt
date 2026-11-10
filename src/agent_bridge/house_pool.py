@@ -188,6 +188,9 @@ def render_compose(config: object, base_compose: Path) -> dict:
                 "npm_config_store_dir": "/home/bridge/dev/.pnpm-store",
                 "BAWTHUB_SERVICE_TOKEN_FILE": "/run/bawthub-service-token/token",
                 "BAWTHUB_LLM_URL": "http://app:8642",
+                # TASK-2184: the preview's Repos page reads the dev tree from
+                # /repos (read-only below) and shows host paths from here.
+                "REPOS_HOST_ROOT": "${HOME}/dev",
             },
             # Claude state comes from the mansion parent. Add Codex state in
             # the identical locations, regardless of the selected start command.
@@ -197,6 +200,10 @@ def render_compose(config: object, base_compose: Path) -> dict:
                 "${HOME}/.codex/config.toml:/home/bridge/.codex/config.toml",
                 "${HOME}/.codex/sessions:/home/bridge/.codex/sessions",
                 "house-service-token:/run/bawthub-service-token:ro",
+                # Same dev tree as the mansion frontend, read-only so the
+                # Repos viewer can't modify it. The host-identical path that
+                # linked worktrees need is already inherited from the mansion.
+                "${HOME}/dev:/repos:ro",
             ],
             # TASK-2080: a restart keeps the container layer, so the root is
             # read-only. A tenant writes only to the shared mounts or to the
