@@ -1,5 +1,11 @@
 # Exact-commit batch gate: inert contracts and claim (TASK-1865)
 
+> **Retired (TASK-2188).** The self-serve `llm-bawt.batch-gate` operation is
+> disabled in the ops catalog and the `batch_gate` tag is deleted. Its exact-SHA
+> environment setting was never written for new commits, so every request
+> refused. All gates go to the integrator (`make gate`). The code below is kept
+> dormant; re-enabling needs a decision on how environment evidence is produced.
+
 ## Implemented in this slice
 
 `ops/gate_plan.py` defines a closed `llm-bawt.ops.gate-plan/v1` value:
