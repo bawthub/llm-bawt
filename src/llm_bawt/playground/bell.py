@@ -14,7 +14,7 @@ from ..integrations import notify_bell
 logger = logging.getLogger(__name__)
 
 BELL_PATH = "/internal/notifications/playground"
-LINK = "/chat/playground"  # BawtHub pins the bell link to this page regardless
+LINK = "/bots/playground"  # BawtHub pins the bell link to this page regardless
 
 
 async def record_artifact_bell(http: httpx.AsyncClient, *, artifact_id: str, bot_id: str,
