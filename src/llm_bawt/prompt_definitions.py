@@ -26,6 +26,7 @@ from .chat_prompt_defaults import (
     SESSION_SEED_BRIEFING,
     SYSTEM_PROMPT_REFINE_INSTRUCTION,
     TURN_CUTOFF_NOTICE,
+    ROOM_FREEZE_NOTICE,
     MODEL_SWITCH_NOTICE,
     SCHEDULED_RUN_NOTICE,
     TTS_OUTPUT_INSTRUCTIONS,
@@ -494,6 +495,21 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
                 "new system prompt on resume, so the pinned <runtime-context> "
                 "model is stale until the next session boundary. {model} is the "
                 "current model id. Resolved per bot at dispatch. TASK-1956."
+            ),
+        },
+    ),
+    "agents.room_freeze_notice": PromptDefinition(
+        key="agents.room_freeze_notice",
+        title="Agent In-the-Room Freeze Notice",
+        category="agent_execution",
+        loader=lambda: ROOM_FREEZE_NOTICE,
+        metadata={
+            "notes": (
+                "Prefixed to every agent turn while an operator freeze with "
+                "admit_user (\"in the room\") covers the bot: only the user's own "
+                "chat reaches bots, other work queues until thaw. Per turn, not "
+                "in the system prompt, because agent prompts are pinned per "
+                "session. A blank body falls back to this default. TASK-1692."
             ),
         },
     ),

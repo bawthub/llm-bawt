@@ -34,11 +34,13 @@ def gate(monkeypatch):
     """Set the live gate the edges see; records each actor asked about."""
     state = SimpleNamespace(block=None, actors=[])
 
-    def gate_blocks(conn, bot_id, actor):
+    def gate_blocks(conn, bot_id, actor, **_exclusions):
         state.actors.append((bot_id, actor))
         return state.block
 
     monkeypatch.setattr(gates, "gate_blocks", gate_blocks)
+    # No "in the room" freeze (TASK-1692; covered by test_room_freeze_pg).
+    monkeypatch.setattr(gates, "room_gate_ids", lambda _conn, _bot: frozenset())
     return state
 
 

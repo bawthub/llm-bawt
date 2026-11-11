@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING, Any, Mapping
 from fastapi import HTTPException
 
 from .turn_admission import SystemGateRefused, lock_target
-from .turn_gates import DENY, GateActor, GateBlock, gate_blocks
+from .turn_gates import DENY, GateActor, GateBlock, gate_blocks, room_gate_ids
 
 if TYPE_CHECKING:
     from ..inter_bot_control_lane import DeliveryControlGrant
@@ -47,7 +47,10 @@ def admit_enqueue(conn, bot_id: str, *, on_gate: str) -> None:
         raise ValueError(f"on_gate must be one of {sorted(GATE_DISPOSITIONS)}")
     if on_gate == ON_GATE_HOLD:
         return
-    block = gate_blocks(conn, bot_id, GateActor("enqueue"))
+    # TASK-1692: an "in the room" freeze never refuses at enqueue. Bot work
+    # waits at the claim until thaw; the user's own chat is let through there
+    # by a Send now stamp scoped to these gates (ordinary_turn_queue).
+    block = gate_blocks(conn, bot_id, GateActor("enqueue"), exclude_gate_ids=room_gate_ids(conn, bot_id))
     if block is not None and block.mode == DENY:
         raise SystemGateRefused(block)
 

@@ -7,6 +7,7 @@ between its turn-log insert and bridge publication.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict, dataclass
 from typing import Any
 from uuid import uuid4
@@ -21,6 +22,8 @@ from ..request_identity import AdmissionUnavailable, canonical_uuid
 from .delivery_reply import IN_FLIGHT_RECEIPT, QUEUED_RECEIPT
 from .delivery_wait_reason import wait_reason as read_wait_reason
 from .turn_admission import lock_target
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -223,9 +226,33 @@ class OrdinaryTurnQueue:
                     and voice_steer_target_ready(conn, state.executing, bot_id=bot_id,
                                                user_id=user_id, session_id=payload.get("session_id"))
                 )
-            return OrdinaryTurnDecision(
+            # TASK-1692: the user's own chat (never a bot-authored ordinary
+            # start) passes an "in the room" freeze. Read under this lock.
+            rooms = frozenset()
+            if sender is None and record.status == "QUEUED":
+                from .turn_gates import room_gate_ids
+
+                rooms = room_gate_ids(conn, bot_id)
+            decision = OrdinaryTurnDecision(
                 "queued", record.turn_id, record.user_message_id,
                 record.assistant_message_id, record.id, record.status,
                 bot_id=bot_id, user_id=user_id, wait_reason=reason,
                 steer_capable=capable, busy=busy,
             )
+        if rooms:
+            self._send_through_room(decision, rooms)
+        return decision
+
+    def _send_through_room(self, decision: OrdinaryTurnDecision, rooms: frozenset[int]) -> None:
+        """Stamp the row past only the room gates; any other gate still holds it.
+
+        After commit, so the caller's dispatcher wake sees the stamp. A row
+        already claimed or one the gates no longer hold is left as it is.
+        """
+        from .gate_steer_escalation import SendNowRefused, stamp_send_now
+
+        try:
+            stamp_send_now(self.turns.engine, decision.delivery_id, decision.user_id or "",
+                           only_gate_ids=rooms)
+        except SendNowRefused as refused:
+            logger.info("room freeze pass not stamped for %s: %s", decision.delivery_id, refused)

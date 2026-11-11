@@ -64,6 +64,7 @@ _OWNER_LOCK = "SELECT pg_advisory_xact_lock(hashtext('operator_freeze'), hashtex
 
 _FREEZE_SQL = """
     SELECT id, owner_id, scope, reason, created_at, expires_at, released_at,
+           COALESCE(admit_user, false) AS admit_user,
            (released_at IS NULL AND expires_at > now()) AS live
     FROM system_gates
     WHERE owner_kind = :kind AND mode = :mode AND starts_with(owner_id, :prefix)
@@ -104,6 +105,8 @@ class Freeze:
     scope: dict[str, Any]
     created_at: datetime
     expires_at: datetime
+    # TASK-1692 "in the room": the user's own chat still reaches bots.
+    admit_user: bool = False
 
     @classmethod
     def from_row(cls, row) -> "Freeze":
@@ -112,13 +115,14 @@ class Freeze:
             gate_id=int(row["id"]), actor=row["owner_id"].removeprefix(OWNER_PREFIX),
             reason=row["reason"], scope=scope,
             created_at=row["created_at"], expires_at=row["expires_at"],
+            admit_user=bool(row.get("admit_user")),
         )
 
     def to_api(self) -> dict[str, Any]:
         return {
             "gate_id": self.gate_id, "actor": self.actor, "reason": self.reason,
             "scope": self.scope, "created_at": self.created_at.isoformat(),
-            "expires_at": self.expires_at.isoformat(),
+            "expires_at": self.expires_at.isoformat(), "admit_user": self.admit_user,
         }
 
 
@@ -143,14 +147,19 @@ def _one(conn, gate_id: int):
     return conn.execute(sa_text(_FREEZE_SQL + " AND id = :id"), _params(id=gate_id)).mappings().first()
 
 
-def freeze(engine, *, actor: str, reason: str, scope: GateScope, ttl_seconds: int) -> Freeze:
-    """Open ``actor``'s freeze; ``FreezeConflict`` when one is already live."""
+def freeze(engine, *, actor: str, reason: str, scope: GateScope, ttl_seconds: int,
+           admit_user: bool = False) -> Freeze:
+    """Open ``actor``'s freeze; ``FreezeConflict`` when one is already live.
+
+    ``admit_user`` (TASK-1692 "in the room"): the user's own chat still starts
+    or steers turns, and bot work queues until thaw instead of being refused.
+    """
     if not MIN_FREEZE_TTL_SECONDS <= ttl_seconds <= MAX_FREEZE_TTL_SECONDS:
         raise ValueError(f"ttl_seconds must be {MIN_FREEZE_TTL_SECONDS}..{MAX_FREEZE_TTL_SECONDS}")
     owner = freeze_owner(actor)
     _require_postgres(engine)
     spec = GateSpec(owner_kind=OWNER_OPERATOR, owner_id=owner, mode=DENY, scope=scope,
-                    ttl_seconds=ttl_seconds, reason=reason)
+                    ttl_seconds=ttl_seconds, reason=reason, admit_user=admit_user)
     with engine.begin() as conn:
         # Lock order: this owner lock, then the sorted target locks
         # (activate_hold). No other path takes the owner lock.

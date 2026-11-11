@@ -90,6 +90,8 @@ class FreezeRequest(BaseModel):
     reason: str = Field(max_length=MAX_REASON_CHARS)
     ttl_seconds: int = Field(ge=MIN_FREEZE_TTL_SECONDS, le=MAX_FREEZE_TTL_SECONDS)
     scope: FreezeScope = Field(default_factory=lambda: FreezeScope(all_agents=True))
+    # TASK-1692 "in the room": the user's own chat still reaches bots.
+    admit_user: bool = False
 
     @field_validator("reason")
     @classmethod
@@ -139,7 +141,8 @@ async def post_freeze(request: Request, engine=Depends(get_gate_engine)):
     try:
         frozen = await run_in_threadpool(
             lambda: freeze(engine, actor=body.actor, reason=body.reason,
-                           scope=body.scope.gate_scope(), ttl_seconds=body.ttl_seconds))
+                           scope=body.scope.gate_scope(), ttl_seconds=body.ttl_seconds,
+                           admit_user=body.admit_user))
     except FreezeUnavailable:
         raise _unavailable() from None
     except FreezeConflict as conflict:

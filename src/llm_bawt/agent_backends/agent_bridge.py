@@ -25,6 +25,7 @@ from typing import Any, Iterator
 
 from .base import AgentBackend
 from ..seed_framing import resolve_seed_framing
+from ..room_freeze_notice import with_room_freeze_notice
 from ..turn_cutoff_notice import with_cutoff_notice
 from ..service.upstream_status import upstream_status_queue_item
 from ..utils.config import Config
@@ -234,6 +235,12 @@ class AgentBridgeBackend(AgentBackend):
             prompt, engine=_turn_log_engine(),
             bot_id=str(config.get("bot_id") or "").strip() or None,
             session_key=session_key, request_id=request_id,
+            reset_action=config.get("bridge_reset_action"),
+        )
+        # TASK-1692: while the user is "in the room", say so on every turn.
+        prompt = with_room_freeze_notice(
+            prompt, engine=_turn_log_engine(),
+            bot_id=str(config.get("bot_id") or "").strip() or None,
             reset_action=config.get("bridge_reset_action"),
         )
 

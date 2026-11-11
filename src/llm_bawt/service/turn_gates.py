@@ -164,8 +164,14 @@ class GateSpec:
     ttl_seconds: float
     reason: str | None = None
     allow_actors: frozenset[str] = field(default_factory=frozenset)
+    # TASK-1692 "in the room": an operator deny gate that still lets the user's
+    # own chat through (as a gate-scoped Send now) and holds, rather than
+    # refuses, every other producer at enqueue.
+    admit_user: bool = False
 
     def __post_init__(self) -> None:
+        if self.admit_user and (self.owner_kind != OWNER_OPERATOR or self.mode != DENY):
+            raise GateScopeError("admit_user is only for an operator deny gate")
         if self.owner_kind not in OWNER_KINDS:
             raise GateScopeError(f"unknown gate owner kind {self.owner_kind!r}")
         if not (self.owner_id or "").strip():
@@ -190,6 +196,7 @@ def ensure_gate_schema(engine) -> None:
 
 def _bootstrap(conn) -> None:
     ensure_relations(conn, _GATE_RELATIONS)
+    ensure_columns(conn, "system_gates", _GATE_ADDED_COLUMNS)
     ensure_columns(conn, "gate_members", _MEMBER_ADDED_COLUMNS)
     ensure_relations(conn, _MEMBER_ADDED_RELATIONS)
     drop_columns(conn, "gate_members", _MEMBER_RETIRED_COLUMNS)
@@ -282,6 +289,12 @@ _GATE_RELATIONS = {
 
 # Every gate_members column added after the table shipped; ``ensure_columns``
 # alters only what the catalog lacks, so a migrated schema takes no lock.
+_GATE_ADDED_COLUMNS = {
+    # TASK-1692: "in the room" freeze (``GateSpec.admit_user``). NULL on rows
+    # from before the column reads as false.
+    "admit_user": ("BOOLEAN", "false"),
+}
+
 _MEMBER_ADDED_COLUMNS = {
     # (f): when control_state last changed. Every UPDATE that changes it sets
     # it in the same statement (no trigger). NULL on pre-existing rows, never
@@ -353,9 +366,29 @@ _GATE_COLUMNS = "id, mode, owner_kind, owner_id, reason, expires_at"
 
 def _live_gates(conn) -> list[Mapping[str, Any]]:
     return conn.execute(sa_text(
-        f"SELECT {_GATE_COLUMNS}, scope, allow_actors"
+        f"SELECT {_GATE_COLUMNS}, scope, allow_actors, COALESCE(admit_user, false) AS admit_user"
         f" FROM system_gates WHERE {_LIVE}"
     )).mappings().all()
+
+
+def room_gate_ids(conn, bot_id: str) -> frozenset[int]:
+    """Live "in the room" gates (``admit_user``) covering ``bot_id`` (TASK-1692).
+
+    Call after ``lock_target(conn, bot_id)``. Empty off PostgreSQL or for a
+    bot that is not an agent.
+    """
+    if not _is_postgres(conn):
+        return frozenset()
+    rooms = [row for row in _live_gates(conn) if row["admit_user"] and row["mode"] == DENY]
+    if not rooms:
+        return frozenset()
+    profile = _bot_profile(conn, bot_id)
+    if profile is None:
+        return frozenset()
+    return frozenset(
+        int(row["id"]) for row in rooms
+        if GateScope.from_json(row["scope"]).covers(
+            bot_id, bot_type=profile["bot_type"], agent_backend=profile["agent_backend"]))
 
 
 def _bot_profile(conn, bot_id: str) -> Mapping[str, Any] | None:
@@ -740,13 +773,14 @@ def insert_gate(conn, spec: GateSpec, *, fresh: bool = False) -> GateBlock:
     ``fresh`` starts the lease on the wall clock rather than the transaction start.
     """
     row = conn.execute(sa_text(f"""
-        INSERT INTO system_gates (owner_kind, owner_id, mode, scope, reason, allow_actors, expires_at)
+        INSERT INTO system_gates (owner_kind, owner_id, mode, scope, reason, allow_actors,
+                                  admit_user, expires_at)
         VALUES (:owner_kind, :owner_id, :mode, CAST(:scope AS jsonb), :reason,
-                CAST(:allow AS jsonb), {_clock(fresh)} + (:ttl * interval '1 second'))
+                CAST(:allow AS jsonb), :admit_user, {_clock(fresh)} + (:ttl * interval '1 second'))
         RETURNING {_GATE_COLUMNS}
     """), {
         "owner_kind": spec.owner_kind, "owner_id": spec.owner_id, "mode": spec.mode,
-        "scope": spec.scope.to_json(), "reason": spec.reason,
+        "scope": spec.scope.to_json(), "reason": spec.reason, "admit_user": spec.admit_user,
         "allow": json.dumps(sorted(spec.allow_actors)), "ttl": float(spec.ttl_seconds),
     }).mappings().one()
     notify_gate_change(conn, int(row["id"]))
@@ -881,6 +915,7 @@ def _carry_control_links(conn, *, predecessor: int, gate_id: int) -> None:
 __all__ = [
     "ACCEPTED",
     "ACTOR_KINDS",
+    "room_gate_ids",
     "DENY",
     "DISPOSITIONS",
     "DrainStatus",

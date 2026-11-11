@@ -46,6 +46,17 @@ TURN_CUTOFF_NOTICE = (
     "side effects, then handle the message below.]"
 )
 
+# Prefixed to every agent turn while an "in the room" freeze covers the bot
+# (TASK-1692): the user is iterating live and the autonomous pipeline is paused.
+ROOM_FREEZE_NOTICE = (
+    "[System notice: the user is in the room. The system is frozen except for "
+    "the user's own messages, so other bots' messages and task dispatch are "
+    "queued until the user thaws it. Iterate with the user and edit files in "
+    "place. Do not commit, push, run a gate, request a review, message other "
+    "bots, run ops actions or create or close task cards unless the user's "
+    "message below explicitly asks for it. Uncommitted work is expected.]"
+)
+
 # Appended to the first agent turn after the bot's model changed while its
 # SDK session (and so its pinned <runtime-context> block) was kept (TASK-1956).
 # {model} is the model now serving the bot.

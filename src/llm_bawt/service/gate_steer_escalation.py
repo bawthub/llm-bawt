@@ -146,13 +146,17 @@ def _user_chat_row(row: Mapping[str, Any], user_id: str) -> bool:
     )
 
 
-def stamp_send_now(engine, delivery_id: str, user_id: str) -> dict[str, Any]:
+def stamp_send_now(engine, delivery_id: str, user_id: str, *,
+                   only_gate_ids: frozenset[int] | None = None) -> dict[str, Any]:
     """Force the user's own held chat row past the gates holding it now.
 
     One transaction under ``lock_target``: the row must be QUEUED, the user's
     own ordinary chat, and held by at least one live gate. The stamp names
     those generations, and each gets a ``user_send_now`` record. Idempotent:
     a second click adds only gates that started holding since.
+
+    ``only_gate_ids`` (TASK-1692 automatic stamp under an "in the room"
+    freeze) stamps just those generations; any other gate still holds the row.
     """
     from .turn_admission import lock_target
     from .turn_gates import GateActor
@@ -175,6 +179,8 @@ def stamp_send_now(engine, delivery_id: str, user_id: str) -> dict[str, Any]:
         if not _user_chat_row(row, user_id):
             raise SendNowRefused(403, "Send now is only for your own chat message")
         blocks = blocking_gates(conn, bot, GateActor("delivery_claim", row["turn_id"]))
+        if only_gate_ids is not None:
+            blocks = [block for block in blocks if block.id in only_gate_ids]
         if not blocks:
             raise SendNowRefused(409, "not_held")
         prior = SendNow.of(row)
