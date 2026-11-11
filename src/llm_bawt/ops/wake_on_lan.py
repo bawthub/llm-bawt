@@ -201,6 +201,8 @@ def reap_orphans(api, job_id: str, *, now=None) -> dict:
                 continue
             api.request("DELETE", f"/containers/{quote(info['Id'], safe='')}?v=1")
             report["removed"].append({"container_id": info["Id"], "job_id": owner})
+    except TimeoutError:
+        raise  # the worker's execution deadline (SIGALRM), never a cleanup failure
     except (OSError, RuntimeError, ValueError, TypeError, KeyError, AttributeError) as exc:
         report["error"] = type(exc).__name__
     return report

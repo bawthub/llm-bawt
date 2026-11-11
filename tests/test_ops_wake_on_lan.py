@@ -435,6 +435,42 @@ def test_reap_failure_never_blocks_the_wake():
     assert wol.reap_orphans(api, JOB, now=lambda: NOW) == {"removed": [], "skipped": 0, "error": "OSError"}
 
 
+def test_execution_deadline_during_reap_stops_before_any_helper(tmp_path):
+    api = HelperDocker({"ready": True, "packet_sent": True})
+    original = api.request
+
+    def request(method, path, *, body=None):
+        if path.startswith("/containers/json?"):
+            raise TimeoutError("ops execution deadline")
+        return original(method, path, body=body)
+
+    api.request = request
+    with pytest.raises(TimeoutError):
+        wol.run_worker(api, snapshot(), JOB, {})
+    assert not any("create" in c[1] or c[1].endswith("/start") for c in api.calls)
+
+
+def test_real_worker_alarm_during_reap_times_out_without_starting_wol(tmp_path):
+    # Codex's control: fire the handler worker.run() actually installed.
+    import signal
+    api = HelperDocker({"ready": True, "packet_sent": True})
+    original = api.request
+
+    def request(method, path, *, body=None):
+        if path.startswith("/containers/json?"):
+            signal.getsignal(signal.SIGALRM)(signal.SIGALRM, None)
+        return original(method, path, body=body)
+
+    api.request = request
+    request_file = tmp_path / "request.json"
+    raw = json.dumps({"job_id": JOB, "snapshot": snapshot()}).encode()
+    request_file.write_bytes(raw)
+    run(request_file, hashlib.sha256(raw).hexdigest(), api_factory=lambda _t: api, sleep=lambda _: None)
+    receipt = json.loads(request_file.with_name("receipt.json").read_text())
+    assert receipt["state"] == "timed_out"
+    assert not any(c[1].endswith("/start") or "create" in c[1] for c in api.calls)
+
+
 def test_worker_reaps_orphan_before_its_own_helper_and_records_it(monkeypatch):
     api = HelperDocker({"ready": True, "packet_sent": True})
     orphans = OrphanDocker([helper("dead-job")])
