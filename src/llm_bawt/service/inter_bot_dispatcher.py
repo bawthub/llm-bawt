@@ -33,6 +33,18 @@ from .turn_logs import DeliveryTargetBusy
 
 logger = logging.getLogger(__name__)
 
+# TASK-2191: once the app has durably settled a delivery, its run streams no
+# longer back any reattach or recovery, so they keep one day instead of the
+# bridge's seven (which filled Redis and evicted live keys).
+SETTLED_DELIVERY_STATUSES = frozenset({"DELIVERED", "FAILED", "CANCELLED"})
+SETTLED_RUN_STREAM_TTL_S = 86400
+
+
+def delivery_run_request_ids(delivery_id: str) -> list[str]:
+    """The deterministic bridge run ids a delivery can use (first run and recovery)."""
+    base = f"req_delivery_{delivery_id.removeprefix('delivery-')}"
+    return [base, f"{base}_recovery_1"]
+
 
 class InterBotDeliveryDispatcher:
     """Drain one FIFO callback per target through the normal chat path.
@@ -987,6 +999,13 @@ class InterBotDeliveryDispatcher:
         subscriber = getattr(self.service, "_redis_subscriber", None)
         if subscriber is None:
             return
+        if record.status in SETTLED_DELIVERY_STATUSES:
+            try:
+                await subscriber.shorten_run_streams(
+                    delivery_run_request_ids(record.id), SETTLED_RUN_STREAM_TTL_S,
+                )
+            except Exception:
+                logger.warning("could not shorten settled delivery run streams", exc_info=True)
         from .inter_bot_delivery_events import lifecycle_event, maintenance_steer_event
 
         engine = getattr(self.store, "engine", None)  # TASK-1676: the wait-reason gate read

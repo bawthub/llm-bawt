@@ -161,7 +161,7 @@ def _publisher(provider="codex"):
     return publisher, ops
 
 
-@pytest.mark.parametrize("request_id,stream_ttl", [("r1", 300), ("req_delivery_x", 86400)])
+@pytest.mark.parametrize("request_id,stream_ttl", [("r1", 300), ("req_delivery_x", 604800)])
 def test_done_writes_the_record_then_the_sentinel(request_id, stream_ttl):
     publisher, ops = _publisher()
     publisher.publish_run_done(request_id, teardown=REAPED)

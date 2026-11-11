@@ -71,11 +71,6 @@ RUN_STREAM_MAXLEN = 100_000
 # Sliding TTL refreshed on every run event so an abandoned/crashed run stream
 # self-cleans even if run_done never fires.
 RUN_STREAM_TTL_SECONDS = 900
-# A durable delivery run stream after its ``done`` (TASK-2191). The dispatcher
-# settles a finished turn from the DB turn log, so the stream only serves a
-# reattach shortly after an app restart. Seven days of settled streams filled
-# Redis and evicted live keys; one day is ample for any reattach.
-DELIVERY_RUN_DONE_TTL_S = 86400
 # Steer RPCs whose caller retries under the same request id: the subscriber's
 # dedupe key lives 7 days, so the result must too, or a retry after 60s can
 # neither re-send nor read the first answer (TASK-1251 deliveries, TASK-1233
@@ -212,8 +207,7 @@ class RedisPublisher:
 
         Durable inter-bot callbacks may need to reattach after an app restart,
         so their deterministic ``req_delivery_*`` run streams are retained for
-        one day after done (they slide on 7 days while live). Ordinary
-        interactive runs keep the existing five-minute TTL.
+        seven days. Ordinary interactive runs keep the existing five-minute TTL.
         """
         if not self._connected:
             return
@@ -223,7 +217,7 @@ class RedisPublisher:
             if self._default_provider else None
         )
         fields = terminal.to_fields() if terminal else {DONE_FIELD: "1"}
-        ttl = DELIVERY_RUN_DONE_TTL_S if request_id.startswith("req_delivery_") else 300
+        ttl = 604800 if request_id.startswith("req_delivery_") else 300
         try:
             if terminal is not None:
                 # The compact record first: a reader that sees the stream's

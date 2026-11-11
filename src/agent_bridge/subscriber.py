@@ -353,6 +353,17 @@ class RedisSubscriber(CommandPublisherMixin):
         logger.info("Published approval:policies:reload recipients=%s", recipients)
         return recipients
 
+    async def shorten_run_streams(self, request_ids: list[str], ttl_s: int) -> None:
+        """Cap settled run streams at ``ttl_s`` (TASK-2191).
+
+        ``EXPIRE ... LT`` only ever shortens, never extends, and is a no-op
+        for a missing key.
+        """
+        pipe = self._pub_redis.pipeline(transaction=False)
+        for rid in request_ids:
+            pipe.expire(f"{RUN_STREAM_PREFIX}{rid}", ttl_s, lt=True)
+        await pipe.execute()
+
     async def read_run_terminal(self, request_id: str) -> RunTerminal | None:
         """The run's compact terminal record, or None (TASK-1233 B1(c)).
 
