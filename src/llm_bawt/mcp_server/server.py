@@ -203,7 +203,7 @@ async def search_memory_source(
     sources.
 
     Args:
-        source: The bot_id whose memories to search (e.g. "nova").
+        source: The bot_id whose memories to search (e.g. "helper").
         query: Natural language search query.
         n_results: Maximum results to return.
         min_relevance: Minimum similarity threshold 0-1.
@@ -258,7 +258,7 @@ async def search_all_messages(
               Same formats as ``since``.
         sort_by: "relevance" (default; rank then recency) or "recent"
                  (recency only, ignores rank).
-        bot_id: Restrict search to a single bot's history (e.g. "snark").
+        bot_id: Restrict search to a single bot's history (e.g. "helper").
                 Omit to search all bots.
 
     Returns:
@@ -298,7 +298,7 @@ async def search_all_memories(
         min_relevance: Minimum similarity threshold 0-1.
         since: Only include memories created at or after this Unix timestamp.
         until: Only include memories created at or before this Unix timestamp.
-        bot_id: Restrict search to a single bot's memory store (e.g. "snark").
+        bot_id: Restrict search to a single bot's memory store (e.g. "helper").
                 Omit to search all bots.
 
     Returns:

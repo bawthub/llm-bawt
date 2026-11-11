@@ -59,7 +59,7 @@ BLOCKED_DEFINITION = (
     "(restart, deploy/ship, credentials, hardware, an external party); (3) a "
     "change that would go against the user's stated intent, beyond what reasoning "
     "can settle. Never for mandate technicalities, small process deviations, "
-    "reviewer nits, bot-vs-bot disagreements (Gavel mediates) or work waiting "
+    "reviewer nits, bot-vs-bot disagreements (the arbiter mediates) or work waiting "
     "its turn; misusing BLOCKED is a process failure. Entering BLOCKED requires "
     "blocked_reason: what the user must do or decide. Leaving BLOCKED clears it."
 )

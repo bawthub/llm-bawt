@@ -456,7 +456,7 @@ async def test_blocked_definition_reaches_task_write_tools():
         assert "{blocked_definition}" not in function.__doc__
         assert "blocked_reason" in tools[name].inputSchema["properties"]
     for clause in ("only the user can make", "restart, deploy/ship, credentials", "against the user's stated intent",
-                   "bot-vs-bot disagreements (Gavel mediates)", "misusing BLOCKED is a process failure"):
+                   "bot-vs-bot disagreements (the arbiter mediates)", "misusing BLOCKED is a process failure"):
         assert clause in BLOCKED_DEFINITION
 
 

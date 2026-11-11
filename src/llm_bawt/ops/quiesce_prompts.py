@@ -60,7 +60,7 @@ FINISHED_DEFINITION = (
 )
 FINISHED_NOTE_RULE = (
     "\"finished\" requires a non-empty note naming what wakes you next for your task "
-    "(e.g. \"gate receipt\", \"Caid's reply\", \"none: task closed\")."
+    "(e.g. \"gate receipt\", \"a reviewer's reply\", \"none: task closed\")."
 )
 
 # The control steer (B3) the app's quiesce control pump sends into each held

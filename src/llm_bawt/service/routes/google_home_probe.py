@@ -115,14 +115,14 @@ async def google_home_authorize(request: Request, auth: ProbeAuthenticator = Dep
             return_url = auth.settings.public_origin + BASE + "/authorize?" + urlencode(params)
             signin = auth.settings.sso_signin_url + "?" + urlencode({"rd": return_url})
             return HTMLResponse(
-                '<!doctype html><title>Loopy Test — sign in</title><h1>Loopy Test</h1>'
+                '<!doctype html><title>BawtHub Google Home probe — sign in</title><h1>BawtHub Google Home probe</h1>'
                 '<p>Sign in with your BawtHub owner account to review linking with Google.</p>'
                 f'<a href="{escape(signin, quote=True)}">Sign in to BawtHub</a>', headers=SAFE_HEADERS,
             )
         consent = await run_in_threadpool(auth.store.consent, params)
         response = HTMLResponse(
-            '<!doctype html><title>Link Loopy Test</title><h1>Link Loopy Test with Google</h1>'
-            '<p>By linking, you authorize Google to control your Loopy Text Probe test device. '
+            '<!doctype html><title>Link BawtHub Google Home probe</title><h1>Link BawtHub Google Home probe with Google</h1>'
+            '<p>By linking, you authorize Google to control your BawtHub TV test device. '
             'This experiment only records commands sent by Google; it never executes bot actions. '
             'Command payloads may contain spoken text and are retained for up to 24 hours of readable history.</p>'
             '<p><a href="https://policies.google.com/privacy">Google Privacy Policy</a> · '

@@ -107,7 +107,7 @@ multi-user production authorization service.
 
 ## Capture behavior
 
-SYNC advertises one virtual TV, **Loopy Text Probe**, with AppSelector and a known
+SYNC advertises one virtual TV, **BawtHub TV**, with AppSelector and a known
 application **Probe Baseline**. QUERY reports static test state. EXECUTE captures
 fields but returns `functionNotSupported`: audible Google errors can coexist
 with successful capture. Unknown devices return `deviceNotFound`.
@@ -183,7 +183,7 @@ At authorized activation:
 | Field | Value |
 |---|---|
 | Project | `bawthub-00a0bf` |
-| Integration | `Loopy Test` |
+| Integration | Operator-chosen display name |
 | Flow | OAuth authorization code |
 | Authorization URL | `https://app.bawthub.com/integrations/google-home/authorize` |
 | Token URL | `https://app.bawthub.com/integrations/google-home/token` |
@@ -200,17 +200,17 @@ allowlists; do not add it to this web-only project-bound experiment unnecessaril
 
 ## Device acceptance — owner must perform
 
-Link Loopy Test in the **Google Home app**, not Google Assistant settings. Use the
+Link the integration in the **Google Home app**, not Google Assistant settings. Use the
 account controlling the Nest speakers; developer/tester access must be available
 to that account. No access to the owner's developer console is established here.
 
 1. Verify authenticated SYNC exposes only the probe.
-2. Known baseline: "Open Probe Baseline on Loopy Text Probe."
+2. Known baseline: "Open Probe Baseline on BawtHub TV."
 3. Try app search/select with several unfamiliar multiword names; compare actual
    captures against exact utterances. AppSelector documents en-US support.
 4. A hand-built HTTP EXECUTE is NOT evidence of speech forwarding. If Google
    rejects unfamiliar names before webhook, record that outcome. Arbitrary
-   "ask Loopy to ..." routing remains unproven, not a promised feature.
+   "ask <bot> to ..." routing remains unproven, not a promised feature.
 5. Unlink in Google Home and verify revocation.
 
 ## Verification

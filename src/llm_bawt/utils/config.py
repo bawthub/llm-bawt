@@ -12,7 +12,7 @@ from rich.console import Console
 from agent_bridge.chatgpt_models import CHATGPT_MODELS_CLIENT_VERSION
 
 # Default system message fallback - only used if bot config fails to load
-DEFAULT_SYSTEM_MESSAGE = """You are Nova, a personal AI assistant running locally via llm-bawt.
+DEFAULT_SYSTEM_MESSAGE = """You are a personal AI assistant running locally via llm-bawt.
 You have persistent memory across sessions. Keep responses concise and helpful."""
 
 PROVIDER_OPENAI = "openai"

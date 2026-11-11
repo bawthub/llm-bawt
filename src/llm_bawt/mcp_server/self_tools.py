@@ -150,7 +150,7 @@ async def self_fwd(
 
     IMPORTANT: pass YOUR OWN slug as ``sender_bot_id`` — it is the bot whose tail
     is forwarded and cannot be inferred. The literal "default" is rejected. So
-    "self fwd vex 10" means: sender_bot_id=<your slug>, target_bot_id="vex",
+    "self fwd reviewer 10" means: sender_bot_id=<your slug>, target_bot_id="reviewer",
     count=10.
 
     Args:
@@ -288,7 +288,7 @@ async def self_system_prompt(
 
     Args:
         bot_id: The bot whose system prompt to act on. Pass YOUR OWN slug
-            (e.g. "caid"). The literal "default" is rejected for edits to avoid
+            (e.g. "helper"). The literal "default" is rejected for edits to avoid
             accidentally rewriting the wrong bot.
         action: "view" (default) to read the current prompt, or "edit" to
             replace it wholesale with ``new_prompt``.
