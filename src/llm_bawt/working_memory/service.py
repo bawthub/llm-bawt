@@ -51,7 +51,8 @@ class WorkingMemoryService:
         """Bounded lazy task refresh; failure leaves the last verified snapshot unchanged."""
         if not self.policy.describe(bot_id).tools_allowed:
             return
-        gate = lambda conn: self.policy.require_tools(bot_id, conn)
+        def gate(conn):
+            return self.policy.require_tools(bot_id, conn)
         try:
             self.store.prepare_links(bot_id, user_id, self.catalog.get, authorize=gate)
             snapshot = self.store.render_snapshot(bot_id, user_id)

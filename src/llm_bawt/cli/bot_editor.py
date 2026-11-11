@@ -18,9 +18,9 @@ def _str_representer(dumper: yaml.Dumper, data: str) -> yaml.ScalarNode:
 
 _BlockDumper = type("_BlockDumper", (yaml.SafeDumper,), {})
 _BlockDumper.add_representer(str, _str_representer)
-from rich.prompt import Prompt
+from rich.prompt import Prompt  # noqa: E402
 
-from llm_bawt.utils.config import Config, RuntimeTunables
+from llm_bawt.utils.config import Config, RuntimeTunables  # noqa: E402
 
 console = Console()
 

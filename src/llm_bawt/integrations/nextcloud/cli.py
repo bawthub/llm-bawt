@@ -111,7 +111,7 @@ def provision(llm_bawt_bot, room_name, bot_name, owner):
         )
 
         # Save to config
-        bot = manager.add_bot(
+        manager.add_bot(
             llm_bawt_bot=llm_bawt_bot,
             nextcloud_bot_id=result.bot_id,
             secret=result.bot_secret,

@@ -164,7 +164,7 @@ def _to_canonical(adapter: "ClaudeUsageAdapter", data: dict) -> ProviderUsage:
     elif isinstance(data, dict):
         limits = _from_toplevel(data)
     order = {"session_5h": 0, "weekly_all": 1, "weekly_sonnet": 2, "weekly_opus": 3}
-    limits.sort(key=lambda l: order.get(l.id, 99))
+    limits.sort(key=lambda lim: order.get(lim.id, 99))
     return adapter._base(
         available=True,
         status=STATUS_OK,

@@ -45,15 +45,6 @@ class MemoryClientTransportMixin:
             "id": call_id,
         }
 
-        # If we're running inside llm-service, propagate its per-request id into logs.
-        request_id = None
-        try:
-            from llm_bawt.service.logging import get_request_id  # type: ignore
-
-            request_id = get_request_id()
-        except Exception:
-            request_id = None
-
         # Use ServiceLogger for human-friendly output if available, otherwise standard logging
         try:
             from llm_bawt.service.logging import get_service_logger

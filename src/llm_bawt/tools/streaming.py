@@ -50,7 +50,7 @@ def _looks_like_tool_call_start(text: str) -> bool:
                 from ..service.logging import ServiceLogger
                 log = ServiceLogger(__name__)
                 log.debug(f"_looks_like_tool_call_start: '{stripped[:20]}' matches '{prefix}' -> True")
-            except:
+            except Exception:
                 pass
             return True
     
@@ -182,7 +182,6 @@ def stream_with_tools(
     stop_sequences = list(set(handler_stops + adapter_stops))
 
     # Log stop sequences compactly (repr escapes newlines, join keeps it single-line)
-    stops_repr = ", ".join(repr(s) for s in stop_sequences)
     log.info(f"🛑 Tool streaming with {len(stop_sequences)} stop sequences")
 
     executor = ToolExecutor(

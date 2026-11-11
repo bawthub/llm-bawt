@@ -553,7 +553,6 @@ class BackgroundTasksMixin:
         # a backend here is cheap and we MUST NOT call engine.dispose() —
         # that would tear down the pool used by every other bot.
         from ..memory.postgresql import PostgreSQLMemoryBackend
-        from ..memory.extraction.service import MemoryExtractionService, MemoryAction
 
         try:
             backend = PostgreSQLMemoryBackend(self.config, bot_id=bot_id)

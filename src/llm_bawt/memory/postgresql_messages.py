@@ -61,7 +61,7 @@ class PostgreSQLMessageMixin:
         with Session(self.engine) as session:
             stmt = (
                 select(self.messages_table)
-                .where(self.messages_table.c.processed == False)
+                .where(self.messages_table.c.processed == False)  # noqa: E712 - SQL comparison
                 .order_by(self.messages_table.c.timestamp.asc())
                 .limit(limit)
             )

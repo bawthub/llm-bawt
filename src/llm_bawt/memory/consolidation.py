@@ -8,6 +8,7 @@ This module provides functionality to:
 IMPORTANT: Only uses local LLMs (gguf, ollama) to avoid sending personal data externally.
 """
 
+import json
 import logging
 import os
 import uuid
@@ -185,7 +186,6 @@ class MemoryConsolidator:
     
     def compute_similarity_matrix(self, memories: list[dict]) -> np.ndarray:
         """Compute pairwise cosine similarity matrix."""
-        n = len(memories)
         embeddings = np.array([m["embedding"] for m in memories])
         
         # Normalize embeddings for cosine similarity

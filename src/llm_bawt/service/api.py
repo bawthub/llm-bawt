@@ -159,7 +159,6 @@ async def lifespan(app):
     # Start the shared Redis agent transport for every bridge harness. Claude
     # Code, Codex and the local-model bridge all depend on this subscriber.
     redis_subscriber = None
-    history_drain_task = None
     if config.REDIS_URL:
         try:
             from agent_bridge.subscriber import RedisSubscriber

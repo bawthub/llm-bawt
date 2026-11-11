@@ -212,7 +212,7 @@ class ZaiUsageAdapter(UsageAdapter):
 
         # 5h first, then weekly, then monthly MCP, then anything else.
         order = {"session_5h": 0, "weekly_all": 1, "monthly_mcp": 2}
-        limits.sort(key=lambda l: order.get(l.id, 99))
+        limits.sort(key=lambda lim: order.get(lim.id, 99))
 
         raw = payload if isinstance(payload, dict) else {"value": payload}
 

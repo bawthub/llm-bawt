@@ -168,7 +168,7 @@ class ToolResultPayload:
         content = data.get("content")
         if not isinstance(content, str):
             raise ValueError("tool-result payload content must be text")
-        payload = cls.from_value(content, complete=bool(data.get("complete", False)))
+        cls.from_value(content, complete=bool(data.get("complete", False)))
         content_type = str(data.get("content_type") or "text/plain")
         accounting = _provenance_int(data.get("accounting"))
         if accounting != TOOL_RESULT_ACCOUNTING_VERSION:

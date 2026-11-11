@@ -367,8 +367,6 @@ class PostgreSQLMemoryBackend(
         # Get PostgreSQL connection settings from config
         host = getattr(config, 'POSTGRES_HOST', 'localhost')
         port = int(getattr(config, 'POSTGRES_PORT', 5432))
-        user = getattr(config, 'POSTGRES_USER', 'llm_bawt')
-        password = getattr(config, 'POSTGRES_PASSWORD', '')
         database = getattr(config, 'POSTGRES_DATABASE', 'llm_bawt')
         
         self.database = database
@@ -538,4 +536,4 @@ class PostgreSQLMemoryBackend(
 
 
 # Compatibility export: existing callers import this class from postgresql.py.
-from .postgresql_short_term import PostgreSQLShortTermManager
+from .postgresql_short_term import PostgreSQLShortTermManager  # noqa: E402

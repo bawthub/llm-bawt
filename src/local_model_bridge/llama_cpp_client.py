@@ -281,7 +281,8 @@ class LlamaCppClient(LLMClient):
             logger.exception("Error during llama.cpp generation")
             response_text_final = f"Error: An exception occurred during generation: {e}"
         finally:
-            if self.config.VERBOSE: self.console.print(Rule(style="yellow"))
+            if self.config.VERBOSE:
+                self.console.print(Rule(style="yellow"))
 
         return response_text_final.strip()
 

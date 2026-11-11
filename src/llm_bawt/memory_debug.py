@@ -766,7 +766,7 @@ def handle_msg_get(bot_id: str, message_id: str):
             import json
             try:
                 meta = json.loads(meta)
-            except:
+            except Exception:
                 pass
         if isinstance(meta, dict):
             console.print(f"[bold]Summary of:[/bold] {meta.get('message_count', '?')} messages")

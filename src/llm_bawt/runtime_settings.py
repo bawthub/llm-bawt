@@ -14,7 +14,6 @@ from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from typing import Any, Protocol
-from urllib.parse import quote_plus
 
 from sqlalchemy import BigInteger, Boolean, Column, DateTime, Integer, String, Text, text
 from sqlalchemy.dialects.postgresql import JSONB
@@ -669,18 +668,6 @@ def purge_orphaned_shared_rows(config: Config, dry_run: bool = False) -> dict[st
         # No partition or legacy-shard DDL belongs in shared-row purge.
         # Partition cleanup has its own bounds-based planner and executor.
         # --- Shared tables ---
-        # bot_id column tables
-        bot_id_tables = [
-            "runtime_settings",  # scope_type='bot', scope_id
-            "turn_logs",
-            "tool_call_records",
-            "scheduled_jobs",
-            "entity_profiles",
-            "entity_profile_attributes",
-            "prompt_templates",
-            "prompt_template_versions",
-        ]
-
         def _find_orphan_ids(table: str, id_col: str, extra_where: str = "") -> set[str]:
             where = f"WHERE {extra_where}" if extra_where else ""
             q = f"SELECT DISTINCT {id_col} FROM {table} {where}"
@@ -787,12 +774,6 @@ class RuntimeSettingsStore:
             return
 
         try:
-            host = getattr(config, "POSTGRES_HOST", "localhost")
-            port = int(getattr(config, "POSTGRES_PORT", 5432))
-            user = getattr(config, "POSTGRES_USER", "llm_bawt")
-            password = getattr(config, "POSTGRES_PASSWORD", "")
-            database = getattr(config, "POSTGRES_DATABASE", "llm_bawt")
-            encoded_password = quote_plus(password)
             from .utils.db import get_shared_engine
             self.engine = get_shared_engine(config)  # TASK-202: shared pool
             if self.engine is None:
