@@ -129,6 +129,15 @@ def test_deploy_without_a_valid_probe_refuses_before_the_lock_or_any_docker_call
 def test_http_exec_probe_requests_the_declared_port_and_path(tmp_path):
     api = ProbeDocker()
     _run(api, tmp_path, _spec(health_probe={"type": "http_exec", "port": 8091, "path": "/ready"}))
+    # The prod seed uses the overlap cutover, which probes before and again after the alias handover.
+    assert [b["Cmd"] for b in api.exec_bodies] == [
+        ["curl", "-fsS", "--max-time", "10", "http://127.0.0.1:8091/ready"]] * 2
+
+
+def test_stop_first_http_exec_probe_runs_once(tmp_path):
+    api = ProbeDocker()
+    _run(api, tmp_path, _spec(cutover="stop_first",
+                              health_probe={"type": "http_exec", "port": 8091, "path": "/ready"}))
     assert [b["Cmd"] for b in api.exec_bodies] == [
         ["curl", "-fsS", "--max-time", "10", "http://127.0.0.1:8091/ready"]]
 
