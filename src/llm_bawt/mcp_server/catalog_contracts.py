@@ -101,7 +101,7 @@ TOOL_SUMMARIES: dict[str, str] = {
     "projects_create": "Create a project; context_prompt carries shared instructions and agent_bot_id is its assigned bot.",
     "projects_update": "Patch provided project fields by project ID (cuid); omitted fields remain unchanged.",
     "projects_delete": "Permanently delete a project; its tasks remain but become unassigned.",
-    "activity_get": "Read recent task/project activity; limit is capped at 100.",
+    "activity_get": "Read task/project change history; next_cursor pages, limit ≤100.",
     "bots_list_available": "List inter-bot message targets with tags and live state (busy/idle turn, queue, gate, approvals, session); tag filters. Private and inactive bots are hidden.",
     "bots_profile_patch": "Edit a bot's profile/tags (full set)/model/backend/house with a reason; compare-and-set, 409 writes nothing. Private bots and own tags refused. Returns diff + rollback.",
     "bots_grant_set": "Grant or revoke a grant tag (approve_ops) on another bot with a reason; grant managers only. Own and private bots refused. Audited, idempotent.",

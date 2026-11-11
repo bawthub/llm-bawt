@@ -232,37 +232,61 @@ async def delete_project(
 # ---------------------------------------------------------------------------
 
 
+def _compact_activity(row: dict[str, Any]) -> dict[str, Any]:
+    """One event without its nested task/project objects (TASK-1534)."""
+    out = {k: row.get(k) for k in ("id", "type", "actorType", "actorId", "meta", "createdAt")}
+    task = row.get("task")
+    if isinstance(task, dict) and task.get("shortId"):
+        out["task"] = task["shortId"]
+    project = row.get("project")
+    if isinstance(project, dict) and project.get("name"):
+        out["project"] = project["name"]
+    return out
+
+
 @mcp.tool(name="activity_get")
 async def get_activity(
     task_id: str | None = None,
     project_id: str | None = None,
     limit: int = 20,
+    cursor: str | None = None,
 ) -> dict:
-    """Get recent activity log entries.
+    """Get task/project change history, newest first.
 
-    Shows what has happened on tasks/projects — status changes,
-    dispatches, assignments, step updates, etc.
+    Status changes, assignments, field edits (task.updated meta.changes:
+    small values as from/to, free text only as "changed"), dependencies,
+    reviews, steps and dispatches.
 
     Args:
-        task_id: Filter to a specific task ID (cuid; not shortId).
+        task_id: Filter to one task, by TASK-N or cuid.
         project_id: Filter to a specific project ID (cuid).
         limit: Maximum entries to return (default 20, max 100).
+        cursor: next_cursor from a previous call, for the next older page.
+            Stable while new events arrive.
 
     Returns:
-        Dict with "activities" list and "total" count.
-        Each entry has type, actorType, actorId, meta, createdAt,
-        and related task/project summaries.
+        Dict with "activities", "total" and "next_cursor" (null on the last page).
     """
     logger.debug("MCP tool invoked: tools/get_activity task=%s project=%s", task_id, project_id)
-    params: dict[str, str] = {"limit": str(min(limit, 100))}
+    params: dict[str, str] = {"limit": str(max(1, min(limit, 100)))}
     if task_id:
         params["taskId"] = task_id
     if project_id:
         params["projectId"] = project_id
+    if cursor:
+        params["cursor"] = cursor
     try:
-        return await _api_get("/activity", params=params)
+        payload = await _api_get("/activity", params=params)
     except httpx.HTTPStatusError as e:
         return _http_error(e)
+    rows = payload.get("activities") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        return payload
+    return {
+        "activities": [_compact_activity(r) for r in rows if isinstance(r, dict)],
+        "total": payload.get("total"),
+        "next_cursor": payload.get("nextCursor"),
+    }
 
 
 # ---------------------------------------------------------------------------
