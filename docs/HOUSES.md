@@ -118,8 +118,8 @@ answers:
 To serve a different checkout, the occupant runs either of:
 
 ```sh
-house-preview /home/bridge/dev/.worktrees/<task>/frontend
-python -m agent_bridge.house_preview_supervisor use /home/bridge/dev/.worktrees/<task>/frontend
+house-preview "${FRONTEND_CHECKOUT:?set the absolute task frontend checkout}"
+python -m agent_bridge.house_preview_supervisor use "${FRONTEND_CHECKOUT:?}"
 ```
 
 `python -m agent_bridge.house_preview_supervisor clear` goes back to the latest

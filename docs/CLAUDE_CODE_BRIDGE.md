@@ -104,10 +104,11 @@ The main compose stack mounts:
 
 - `${HOME}/dev` at `/home/bridge/dev`
 - `${HOME}/.config/claude-code-bridge` at `/home/bridge/.claude`
-- `${HOME}/dev/agent-skills` at `/home/bridge/.claude/skills`
-- `${HOME}/.codex/auth.json` at `/home/bridge/.codex/auth.json`
 
-That is the layout the bridge code expects in production.
+Bootstrap links the Claude skills directory to `CLAUDE_CODE_SKILLS_PATH` in the
+shared dev tree; it is not a separate skills bind. The old Codex auth-file bind
+was removed: the proxy adapter resolves those tokens through the app broker.
+The workspace and Claude state mounts above remain runtime layout contracts.
 
 ## Trusted task-turn capability header (TASK-701)
 

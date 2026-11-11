@@ -36,7 +36,9 @@ the conversation query; all visible turn cards share its evidence.
 
 - App setting: `BAWTHUB_COMMIT_EVIDENCE_URL`, default `http://frontend-prod:3002`.
 - BawtHub setting: `CHANGED_FILES_CAPTURE_ROOTS`, colon-separated mount roots;
-  defaults to `/home/bridge/dev:/home/nick/dev:~/dev`, matching this deployment.
+  defaults to `/home/bridge/dev:~/dev` in
+  `frontend/server/routes/changed-file-evidence.ts`. Additional host roots belong
+  in that deployment setting, not a personal-home source default.
 - Dev evidence route is available through Hono watch at `http://frontend:3002`.
 - The app must reload the Python changes and reach a Hono instance containing the
   new internal route before live API reconciliation works. A missing route yields

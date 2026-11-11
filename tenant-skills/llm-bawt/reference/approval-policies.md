@@ -98,7 +98,7 @@ coordinated deployment before the live bridge gains that behavior.
 
 Approval replay arguments must remain byte-exact. Do not shorten home paths or
 normalize commands in stored authority/replay payloads; formatting belongs only
-in display data. A 2026-09-08 regression saved `/home/bridge/...` as `~/...`, causing
+in display data. A 2026-09-08 regression saved an absolute home path as `~/...`, causing
 the continuation to re-gate despite an approved original invocation.
 
 **Historical deployed rules (2026-06; not a current inventory):** two

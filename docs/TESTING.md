@@ -101,8 +101,8 @@ The shared checkout carries other bots' uncommitted work, so `make test-all`
 there tests a mix. `make test-snapshot` runs the same suite on a detached git
 worktree outside `~/dev` (`~/.cache/llm-bawt-test-snapshot/wt/`) holding only
 BASE plus the given patches, then removes it on every exit path, including
-failure and interrupt. Run it on echo
-(`ssh bawthub@172.18.0.1 'cd ~/dev/llm-bawt && make test-snapshot …'`); it refuses
+failure and interrupt. Run it on the configured host
+(`ssh "${TEST_HOST:?}" 'cd ~/dev/llm-bawt && make test-snapshot …'`); it refuses
 inside a container.
 
 | Variable | Meaning |

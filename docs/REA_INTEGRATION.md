@@ -25,7 +25,8 @@ runtime execution or all 170 advertised capabilities.
 Skill commit `030306f` was pushed and synchronized to echo and the Ubuntu sibling.
 Only `mcpServers.rea` was added; all other settings compared equal before/after.
 Mode-0600 backup:
-`/home/bridge/.claude/tools/rea/backups/settings-before-rea-20261013T002043940808Z.json`.
+`settings-before-rea-20261013T002043940808Z.json` under the persistent REA root's
+`backups/` directory.
 Settings remain mode 0600 and `ENABLE_TOOL_SEARCH=true`. Al and Loopy confirmed
 safe boundaries; Gavel approved the TASK-1060-only commit split. Their unrelated
 TASK-1066/1067 changes remain untouched and uncommitted by this task.
@@ -47,17 +48,17 @@ npm **11.19.0** at `/usr/local/bin/{node,npm}`. Do not install a private runtime
   script. Installation always disables lifecycle scripts anyway. This is not
   a complete security audit of REA or its dependency graph.
 - Persistent root: `/home/bridge/.claude/tools/rea` maps beneath echo's
-  `/home/nick/.config/claude-code-bridge/tools/rea`.
+  `${HOME}/.config/claude-code-bridge/tools/rea` (the Compose host's configured home).
 - Selected release:
   `releases/6.4.0-7bd2a2eaa0b02994125c0f9faf6d22285b3f9b5b6045dbe32eb6fd568dd17843`.
   The suffix hashes manifest + NUL + lockfile. `receipt.json` also records the
   lock-only digest, package integrity, Node/npm versions and install timestamp.
 
-Run inside the Claude bridge:
+Run inside the Claude bridge, with `CHECKOUT` set to the absolute llm-bawt checkout:
 
 ```sh
-/home/bridge/dev/llm-bawt/scripts/rea/install.sh
-/home/bridge/dev/llm-bawt/scripts/rea/rea --help
+"${CHECKOUT:?}/scripts/rea/install.sh"
+"${CHECKOUT:?}/scripts/rea/rea" --help
 ```
 
 The shell installer delegates filesystem/locking operations to a small Python
@@ -140,10 +141,11 @@ repository architecture analysis uses repository tools, not REA.
 - Fixture files were hashed before/after: unchanged, no `EXECUTED` sentinel.
 - Second install selected the same release without reinstalling dependencies.
 
-Repeat the opt-in live smoke with the bridge's existing MCP Python environment:
+Repeat the opt-in live smoke with the bridge's existing MCP Python environment
+and the same absolute llm-bawt `CHECKOUT`:
 
 ```sh
-/app/.venv/bin/python /home/bridge/dev/llm-bawt/scripts/rea/smoke.py
+/app/.venv/bin/python "${CHECKOUT:?}/scripts/rea/smoke.py"
 ```
 
 Normal pytest never downloads packages, starts live MCP services, or mutates

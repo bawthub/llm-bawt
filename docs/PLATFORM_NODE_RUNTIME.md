@@ -64,7 +64,7 @@ its bridge were retired on 2026-10-28 (TASK-1439).
 Before any future rollback, recheck full image IDs and exact target configuration.
 Use ops where supported, obtain exact authorization, recreate only the affected
 service and verify health. Never restart the whole stack as a shortcut.
-Tenant host files `/home/nick/tenant-e2e/docker-compose.prod.yml` and `.env` have
+Tenant host files `docker-compose.prod.yml` and `.env` in the tenant checkout have
 mode-0600 `.task-1062-backup` copies. The compose frontend accepts `FRONTEND_IMAGE`
 and `.env` selects `bawthub-tenant-frontend:task-1062-node24`; application version and
 DB schema were not upgraded. These two host-file edits were made through SSH,
@@ -89,7 +89,7 @@ not tracked Edit calls.
 
 At activation, the NVIDIA prestart hook failed before Playwright could start:
 loaded kernel module **595.91.07**, installed NVML and on-disk module **595.99.02**.
-Nick separately authorized one echo reboot AFTER production verification. That
+The operator separately authorized one echo reboot AFTER production verification. That
 reboot loaded **595.99.02**; host `nvidia-smi` now succeeds. Boot identity changed
 from `7940e1d4-9cd4-45c2-b123-7cf48c06893a` to
 `a443066f-68ed-4593-9e50-baef4489217e`. No driver package change, module unloading,
@@ -119,7 +119,7 @@ failed connection until the next connection attempt/session.
   were rechecked at **24.21.0**; the Ubuntu gateway remains active on its explicit
   `/opt/node-v24.21.0/bin/node` executable.
 - The powered-off tenant VM stayed off. Rollback images remain available.
-- The queued self-verification delivery did not start after reboot; Nick's resume
+- The queued self-verification delivery did not start after reboot; the operator's resume
   message began verification instead. It was cancelled while still QUEUED to avoid
   duplicate work. No claim of automatic callback completion is made.
 - TASK-1062 is submitted for review after recovery, not before it.

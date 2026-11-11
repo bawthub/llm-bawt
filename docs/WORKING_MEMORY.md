@@ -1,12 +1,12 @@
 # Working Memory: design r12
 
-Task: TASK-1281. Status: design approved by Loopy at r12 (cmvld893800580mpz7wcnjmzx, sha256 57fd8e40); Nick's N1-N3 and OI-R8 rulings were recorded afterwards, with no design change. Slice 1 (store, trusted MCP tools, owner REST) is implemented at llm-bawt `d87528c` and is off by default (`working_memory_enabled` is false for every bot). Slices 2 and later are not implemented.
+Task: TASK-1281. Status: design approved by Loopy at r12 (cmvld893800580mpz7wcnjmzx, sha256 57fd8e40); the owner's N1-N3 and OI-R8 rulings were recorded afterwards, with no design change. Slice 1 (store, trusted MCP tools, owner REST) is implemented at llm-bawt `d87528c` and is off by default (`working_memory_enabled` is false for every bot). Slices 2 and later are not implemented.
 
 Base: llm-bawt `9e874dc` (master), which commits Byte's TASK-1318 pin. `src/llm_bawt/service/system_prompt_pin.py` there is byte-identical to the r11 dependency (sha256 prefix `c100554a06b0`). Files cited from r11 that the commit didn't touch are unchanged since `4883515`. Appendix C lists the citations.
 
-Scope: Nick ruled B+notice (TASK-1281 step 23). Working memory renders into the agent system prompt. The prompt is pinned per session by TASK-1318. Working-memory edits reach a live session at its next boundary. Until then, the bot gets a one-line notice on the next ordinary turn that starts after an edit (section 9.1 says which messages count).
+Scope: the owner ruled B+notice (TASK-1281 step 23). Working memory renders into the agent system prompt. The prompt is pinned per session by TASK-1318. Working-memory edits reach a live session at its next boundary. Until then, the bot gets a one-line notice on the next ordinary turn that starts after an edit (section 9.1 says which messages count).
 
-r10 replaces r9's delivery design (snapshot table, delta, receipts, bindings, stall counter, sweep, coldness predicate, bridge provenance). The store, tools, REST path, trust rules and Nick's rulings carry over. Rules that are new in r10 are tagged [r10]; rules changed in answer to Loopy's r10 review (cmvlcc925003y0mpz7n763i6e) are tagged [r11], and rules changed in answer to Loopy's r11 review (cmvlcwe8z004z0mpzd483gogq) are tagged [r12], so the reviewer can attack them. Appendix A.00 answers each r11 finding and Appendix A.0 each r10 finding. Rules that Loopy accepted in the r9 review (cmvl6znx8002a0mpz0sawfyrd) are tagged [L9 OI-n].
+r10 replaces r9's delivery design (snapshot table, delta, receipts, bindings, stall counter, sweep, coldness predicate, bridge provenance). The store, tools, REST path, trust rules and the owner's rulings carry over. Rules that are new in r10 are tagged [r10]; rules changed in answer to Loopy's r10 review (cmvlcc925003y0mpz7n763i6e) are tagged [r11], and rules changed in answer to Loopy's r11 review (cmvlcwe8z004z0mpzd483gogq) are tagged [r12], so the reviewer can attack them. Appendix A.00 answers each r11 finding and Appendix A.0 each r10 finding. Rules that Loopy accepted in the r9 review (cmvl6znx8002a0mpz0sawfyrd) are tagged [L9 OI-n].
 
 Reviewer: Loopy.
 
@@ -14,7 +14,7 @@ Reviewer: Loopy.
 
 ## 1. Problem
 
-Nick's goal (2026-10-20): "A new system for a memory type that lets bots manage their own list of todo items… added to every continuity system prompt so u can plan things out and be able to reset context and retain direction." On 2026-10-22 he prioritized it because it keeps bots prioritized across resets.
+The owner's goal (2026-10-20): "A new system for a memory type that lets bots manage their own list of todo items… added to every continuity system prompt so u can plan things out and be able to reset context and retain direction." On 2026-10-22 the owner prioritized it because it keeps bots prioritized across resets.
 
 What the code does today:
 
@@ -33,30 +33,30 @@ Goals:
 - G1. Each (bot, user) keeps a structured list of working-memory items that survives `/new`, resets, compaction and model switches.
 - G2. After a boundary, the bot's system prompt shows its open items: up to 8 in full (including the next action), the rest as titles, then an omitted count (section 8.1). Items beyond the full-render cap are reachable only through the tool.
 - G3. Working memory adds no cache creation on a warm turn. The section changes only at boundaries the pin already has. A notice is a short append to the user message.
-- G4. A change the session didn't make (Nick's UI edit, a write from another session of the same bot) produces a notice on the session's next eligible started turn. Messages steered into a running turn don't carry it (section 9.1). The content reaches the prompt at the next boundary. The notice prompts a tool read; it does not deliver content, and the design does not check that the bot reads.
+- G4. A change the session didn't make (the owner's UI edit, a write from another session of the same bot) produces a notice on the session's next eligible started turn. Messages steered into a running turn don't carry it (section 9.1). The content reaches the prompt at the next boundary. The notice prompts a tool read; it does not deliver content, and the design does not check that the bot reads.
 - G5. Writes are bound to a trusted identity. The model can't set a bot or user parameter.
 - G6. Opt-in per bot, off by default. A bot that hasn't opted in, and every protected (`private`-tagged) bot, gets a byte-identical prompt.
-- G7. Nick can list, edit, cancel, soft delete and hard delete any opted-in or previously opted-in bot's items.
+- G7. The owner can list, edit, cancel, soft delete and hard delete any opted-in or previously opted-in bot's items.
 
 Non-goals:
 
-- NG1. Guaranteed delivery of item content mid-session. Nick chose B+notice over C (step 23).
-- NG2. Changing a live pin mid-session, including on delete (Nick B3, section 11).
-- NG3. Scrubbing turn logs or SDK transcripts (Nick D4, section 11).
+- NG1. Guaranteed delivery of item content mid-session. The owner chose B+notice over C (step 23).
+- NG2. Changing a live pin mid-session, including on delete (owner B3, section 11).
+- NG3. Scrubbing turn logs or SDK transcripts (owner D4, section 11).
 - NG4. Codex and chat-bot delivery. Enabling is refused there (section 8.3).
 - NG5. Replacing initiative state or the harness's in-turn todo list (section 4).
 - NG6. Semantic memories tagged "todo".
 
 ## 3. Alternatives
 
-Nick, verbatim (task step 15): "Alternative hasn't been discussed since every prompt technically would generate live state from db".
+The owner, verbatim (task step 15): "Alternative hasn't been discussed since every prompt technically would generate live state from db".
 
 | | What | Cost | Status |
 |---|---|---|---|
 | (A) Tool-only | Store plus tools; nothing in the prompt | After a reset the bot has no cue the list exists. Fails G2. | This is slice 1 on its own. |
 | (B) Boundary pin | Section in the system prompt, frozen per session by TASK-1318 | External edits wait for the next boundary; a long-lived session can go hours or days. | Kept. |
-| (B+notice) | (B), plus a one-line notice on the next ordinary message after an external edit | The notice depends on the bot calling the tool. Repeats are bounded (section 9). | **Chosen by Nick (step 23).** |
-| (C) Pin + delta + receipt | r9 | 7 tables, a bridge execution record, a strict ack rule, a sweep and a coldness predicate. r9 review: 5 blockers. | Rejected by Nick (step 23). |
+| (B+notice) | (B), plus a one-line notice on the next ordinary message after an external edit | The notice depends on the bot calling the tool. Repeats are bounded (section 9). | **Chosen by the owner (step 23).** |
+| (C) Pin + delta + receipt | r9 | 7 tables, a bridge execution record, a strict ack rule, a sweep and a coldness predicate. r9 review: 5 blockers. | Rejected by the owner (step 23). |
 | (D) Live render each turn | Render from the DB into every prompt | The claude-code CLI ignores mid-session prompt changes, so it does nothing there (step 20). On codex it grows the transcript every turn (TASK-1318 step 5). | Dead. |
 
 ## 4. Initiative-state boundary
@@ -87,7 +87,7 @@ Storage is the llm-bawt askllm database, in a new package `src/llm_bawt/working_
 | `refs` jsonb | Flat list of `{kind, id, label, excerpt}`. ≤ 20 entries, ≤ 4KB serialized; kind, id and label ≤ 160 characters each, excerpt ≤ 200 characters. Label and excerpt are stored at write time; rendering never calls BawtHub [L9 OI-6, K3']. |
 | `revision` int | CAS. |
 | `created_at`, `updated_at`, `archived_at` | |
-| `removed_at` | Soft delete. Distinct from `archived_at`. Whether it's terminal is Nick's call: N2. |
+| `removed_at` | Soft delete. Distinct from `archived_at`. Whether it's terminal is the owner's call: N2. |
 
 The create idempotency record is not on the item row; it lives on the item's `create` change row (5.2) so it survives a hard delete [r11].
 
@@ -141,7 +141,7 @@ Rules:
 - A storage failure returns "working memory unavailable", distinct from an empty list.
 - The tools join `catalog_contracts.py` TOOL_SUMMARIES/REFERENCE_GROUPS and must fit the `tests/test_mcp_catalog.py` caps. The budget change is logged in `docs/MCP_TOOL_DESIGN.md`.
 
-### 6.2 REST owner path (Nick)
+### 6.2 REST owner path
 
 - `GET /v1/working-memory/{bot}/{user}`: items, archived and removed included (removed shown content-free if hard-deleted).
 - `PATCH /v1/working-memory/{bot}/{user}/{item}`: edit or cancel; `actor_kind=user`; requires `expected_revision`; a conflict returns the current item and writes nothing [L9 OI-10].
@@ -156,7 +156,7 @@ Rules:
 |---|---|---|
 | MCP tools | refused | refused |
 | Prompt section and notice | absent | absent |
-| REST GET, PATCH, DELETE | refused | allowed, so Nick can clean up after disabling |
+| REST GET, PATCH, DELETE | refused | allowed, so the owner can clean up after disabling |
 | REST create | not offered | — |
 | `/health` | excluded | reported as disabled |
 
@@ -208,7 +208,7 @@ From TASK-1318 step 6 and `system_prompt_pin.py`:
 
 ### 9.1 Eligibility [r10, L9 S3]
 
-A notice is considered only on a turn that starts through the stream path (`turn_stream_worker`), where `apply_session_pin` returned a decision and `is_boundary` is False [r11, Loopy r10 S1]. Messages steered into a running turn are excluded: composer steers and active-turn bot deliveries go through `steer_active_turn` (`service/routes/chat.py:158`; `inter_bot_dispatcher.py:533-565`), which frames and sends without preparing a pin. They leave the notice pending; the bot is already mid-turn, and the next started turn carries it. Idle-fallback bot deliveries start a turn through `chat_completion_stream` (`inter_bot_dispatcher.py:682-705`) and are eligible. Nick's "next user message" wording is therefore narrowed to "next started turn" and is flagged to the coordinator (OI-R8). It is never added to:
+A notice is considered only on a turn that starts through the stream path (`turn_stream_worker`), where `apply_session_pin` returned a decision and `is_boundary` is False [r11, Loopy r10 S1]. Messages steered into a running turn are excluded: composer steers and active-turn bot deliveries go through `steer_active_turn` (`service/routes/chat.py:158`; `inter_bot_dispatcher.py:533-565`), which frames and sends without preparing a pin. They leave the notice pending; the bot is already mid-turn, and the next started turn carries it. Idle-fallback bot deliveries start a turn through `chat_completion_stream` (`inter_bot_dispatcher.py:682-705`) and are eligible. The owner's "next user message" wording is therefore narrowed to "next started turn" and is flagged to the coordinator (OI-R8). It is never added to:
 
 - a turn that is a maintenance command: `/compact`, `/new` or `/clear` as the leading token, with or without arguments (`src/agent_bridge/maintenance.py` leading-token classifiers `is_compact_command`, `is_new_command`; an `is_clear_command` is added there);
 - a scheduler turn: the validated delivery's sender is `scheduler:<hash>` (`prompt_delivery.py:85`). Identity comes from the claimed delivery record, never from an author display label or `message_kind`;
@@ -281,7 +281,7 @@ The notice is one short line, appended to the user message, so the cached prefix
   - `service/runtime_switch_rotation.py:85`;
   - `service/session_lifecycle/lifecycle.py:74` (delivery claims).
 - One test per entry point.
-- Which origins suppress is Nick's call (N1). The default in this design until he rules: automated rotations pin; human `/new` pins; suppression only on an explicit request (`include_working_memory=false` on the session or context API, or a bot delivery with `session_policy=reset_without_history`).
+- Which origins suppress is the owner's call (N1). The default in this design until the owner rules: automated rotations pin; human `/new` pins; suppression only on an explicit request (`include_working_memory=false` on the session or context API, or a bot delivery with `session_policy=reset_without_history`).
 - A born-archived task session (`create_inactive_session`) is not a rotation; it starts with mode absent, i.e. `pinned`.
 - Suppression lasts for the session. A scheduled turn never changes a session's mode [L9 OI-13].
 
@@ -293,11 +293,11 @@ The notice is one short line, appended to the user message, so the cached prefix
 
 ## 11. Deletion and privacy
 
-The B3 and D4 rulings are Nick's decisions and not up for review.
+The B3 and D4 rulings are the owner's decisions and not up for review.
 
 ### 11.1 B3 ruling (task step 5, 2026-10-23 ~01:00 UTC)
 
-Nick, verbatim: "the answer is no. delete should not alter it. that messes up the cache doesnt it?"
+The owner, verbatim: "the answer is no. delete should not alter it. that messes up the cache doesnt it?"
 
 - A delete, soft or hard, never changes a live pin or an in-flight prompt. The pinned bytes keep the item until the session's next boundary, whose render excludes it.
 - A delete writes a `removed` change (content-free). It is an external change, so it produces a notice on the session's next eligible turn (section 9). A re-read through the tool shows the item gone.
@@ -305,7 +305,7 @@ Nick, verbatim: "the answer is no. delete should not alter it. that messes up th
 
 ### 11.2 D4 ruling (task steps 13-14, 2026-10-23 16:01Z)
 
-Nick, verbatim: "I did answer actually. I called out that removing it during a session would break session caching and should be forbidden. Alternative hasn't been discussed since every prompt technically would generate live state from db".
+The owner, verbatim: "I did answer actually. I called out that removing it during a session would break session caching and should be forbidden. Alternative hasn't been discussed since every prompt technically would generate live state from db".
 
 - Turn logs are a record of prompts as sent. The working-memory DB is the only source of truth. Deletes don't scrub `turn_logs.request_json`.
 - Under TASK-1318 the pinned prompt text lives in the pin turn's `turn_logs.request_json.system_prompt_pin.text`. That falls under this ruling: it is a turn log, and it isn't scrubbed.
@@ -367,7 +367,7 @@ Test: concurrent writers in one namespace get consecutive `ns_version`s in commi
 
 *Implementation:* delivered in two commits, 2a (section, notice, compaction-generation bump, health, registry prompts) and 2b (the required `working_memory_mode` on `SessionResetLineage.rotate` and its callers, section 10.1). Until 2b lands every successor is `pinned`, so `include_working_memory=false` has no effect yet.
 
-- Requires TASK-1318 deployed with the `sections` extension (OI-R1) and its B2 stamp fix live (bridge restart, Nick).
+- Requires TASK-1318 deployed with the `sections` extension (OI-R1) and its B2 stamp fix live (bridge restart, owner approval).
 - App only. Working memory itself needs no bridge change, so no bridge restart of its own and no mixed app/bridge version problem (Loopy r9 S2 does not apply).
 - Disable for a bot: tools and notices stop at once; the section leaves a live session at its next boundary.
 - Code rollback of slice 2: pinned bytes already include the section and TASK-1318 keeps sending them until the next boundary. The next boundary renders without it. Session metadata keys become inert.
@@ -375,9 +375,9 @@ Test: concurrent writers in one namespace get consecutive `ns_version`s in commi
 
 **Slice 3: BawtHub UI** (active, blocked, archived and removed views; edit; delete with the D4 confirmation).
 
-Production deploys and restarts happen only when Nick asks, through `ops_run`.
+Production deploys and restarts happen only when the owner asks, through `ops_run`.
 
-## 16. Nick-owned decisions
+## 16. Owner decisions
 
 Decided, not up for review:
 
@@ -386,12 +386,12 @@ Decided, not up for review:
 | B3 | A delete never alters a live pin or an in-flight prompt (11.1). |
 | D4 | No turn-log scrub; truthful wording (11.2). |
 | Scope | B+notice on the TASK-1318 pin (step 23). |
-| N1 | Nick, 2026-10-23: keep unless asked. Suppression only on an explicit request; human `/new` pins. A suppressed session gets neither section nor notice. |
-| N2 | Nick, 2026-10-23: a soft delete is final (no restore). `removed_at` is final; only hard delete purges. |
-| N3 | Nick, 2026-10-23: the full copy. "Removed from working memory. The bot's current session may still show it until its next /new, or the turn after its next manual /compact. Earlier prompts recorded in turn logs, and transcripts already on disk, still contain it." Automatic compaction doesn't refresh the prompt, so it isn't named [r11, Loopy r10 S3]. |
-| OI-R8 | Nick, 2026-10-23: the next started turn. Steered messages don't carry the notice (9.1). |
+| N1 | Owner, 2026-10-23: keep unless asked. Suppression only on an explicit request; human `/new` pins. A suppressed session gets neither section nor notice. |
+| N2 | Owner, 2026-10-23: a soft delete is final (no restore). `removed_at` is final; only hard delete purges. |
+| N3 | Owner, 2026-10-23: the full copy. "Removed from working memory. The bot's current session may still show it until its next /new, or the turn after its next manual /compact. Earlier prompts recorded in turn logs, and transcripts already on disk, still contain it." Automatic compaction doesn't refresh the prompt, so it isn't named [r11, Loopy r10 S3]. |
+| OI-R8 | Owner, 2026-10-23: the next started turn. Steered messages don't carry the notice (9.1). |
 
-Also Nick's: which bots opt in (none by default), the 20-item cap, and when each slice deploys.
+Also the owner's: which bots opt in (none by default), the 20-item cap, and when each slice deploys.
 
 ## 17. Acceptance tests
 
@@ -447,9 +447,9 @@ Cache:
 - warm turns with no edits: no `cache_creation` change vs the same bot with the feature off (Claude: token_usage; gpt on the proxy: the bridge's "Responses usage" cache-hit log);
 - a notice turn: no prefix rewrite.
 
-### 17.1 Live test plan (Nick, task step 21; Snark checks receipts)
+### 17.1 Live test plan (owner, task step 21; Snark checks receipts)
 
-On an idle Claude Code bot Nick picks (never Mira), then repeated on a gpt bot on the claude-code bridge:
+On an idle Claude Code bot the owner picks (never Mira), then repeated on a gpt bot on the claude-code bridge:
 
 1. Enable. `/new`. Create two items through the tool. `/new` again: the pin turn's `request_json.system_prompt_pin.text` contains the section, and the pointer's `sections.working_memory.version` matches the namespace.
 2. Edit one item over REST. Send an ordinary message: its `request_json` user message ends with the notice line. Send another: no notice.
@@ -496,8 +496,8 @@ Recommendation: as stated.
 Byte's gate is `make test-snapshot` run `20261023T191033Z-byte-239d87`. Codex is reviewing his staging/confirm delta separately under TASK-1318. This design depends on the contract fields, not on the confirm-trigger details.
 Recommendation: closed unless the reviewer objects. The pointer's known limit (two fallbacks in a row) is in 8.2; working memory's own floor covers it (9.2), with no contract change.
 
-**OI-R2. Notice marked at prepare vs repeated until read.** Nick said "a one-line notice on its next user message". Marking at prepare matches that, but a turn that fails before the model sees it loses the notice. The alternative repeats the notice on each eligible turn until the bot calls `working_memory_list` or `working_memory_update` in this session (identity from the capability).
-Recommendation: until read. It closes the lost-notice gap with no receipts. Needs Nick's OK since it can show the line more than once. If adopted [r11, Loopy r10 claim 3]: only a successful full `working_memory_list` in this session acknowledges, and only up to the namespace version that list read (returned by the same `REPEATABLE READ` snapshot). A single-item update acknowledges nothing else. Until Nick rules, marking at prepare is the design, and Loopy accepts it as an explicit best-effort tradeoff.
+**OI-R2. Notice marked at prepare vs repeated until read.** The owner said "a one-line notice on its next user message". Marking at prepare matches that, but a turn that fails before the model sees it loses the notice. The alternative repeats the notice on each eligible turn until the bot calls `working_memory_list` or `working_memory_update` in this session (identity from the capability).
+Recommendation: until read. It closes the lost-notice gap with no receipts. Needs the owner's OK since it can show the line more than once. If adopted [r11, Loopy r10 claim 3]: only a successful full `working_memory_list` in this session acknowledges, and only up to the namespace version that list read (returned by the same `REPEATABLE READ` snapshot). A single-item update acknowledges nothing else. Until the owner rules, marking at prepare is the design, and Loopy accepts it as an explicit best-effort tradeoff.
 
 **OI-R3. Re-arm after auto-compaction** (section 9.4). New in r10; ordered by `ended_at` in r11, which Loopy r11 B1 showed is not a completion time; ordered by the session's `compaction_gen` in r12.
 Recommendation: as stated.
@@ -511,15 +511,15 @@ Recommendation: keep it. Scheduler turns get the note in the user suffix, never 
 **OI-R6. Content-free changes** (section 5.2). This drops r9's `diff` and changes OI-11's purge rules.
 Recommendation: as stated. The UI shows item history only as events. `create_fingerprint` is the only value derived from item text, and a hard delete removes it. What survives is listed in 11.3 [r12].
 
-**OI-R7. Compaction stamp without metadata** (Loopy r9 B2). `send_result.py:120-154` stamps `context_action` only with `postTokens`. Byte took it in TASK-1318: success with no metadata now stamps `context_action=compact`, `outcome=success` only (no tokens, no resident override), with a regression test in `test_claude_context_usage.py`. Live only after a claude-code-bridge restart Nick must approve. Byte also fixed `_manual_compaction_succeeded` to use `is_compact_command` (rejects `/compactness`).
+**OI-R7. Compaction stamp without metadata** (Loopy r9 B2). `send_result.py:120-154` stamps `context_action` only with `postTokens`. Byte took it in TASK-1318: success with no metadata now stamps `context_action=compact`, `outcome=success` only (no tokens, no resident override), with a regression test in `test_claude_context_usage.py`. Live only after a claude-code-bridge restart the owner must approve. Byte also fixed `_manual_compaction_succeeded` to use `is_compact_command` (rejects `/compactness`).
 Recommendation: closed in design; slice 2 rollout waits on that bridge restart.
 
-**OI-R8. Which messages carry the notice** [r11, Loopy r10 S1]. Started turns only: ordinary user messages, and inter-bot deliveries that start a turn (idle fallback). Steered messages (composer steers, active-turn bot deliveries) don't; the notice waits for the next started turn. Nick said "next user message". This narrows it to "next started turn", flagged to Snark to reconcile with Nick. Covering steers would mean a notice hook inside `steer_active_turn`, with trusted target-session resolution and retry-safe marking keyed to the steer request id.
-Recommendation: started turns only. A steer lands in a turn that is already running, and the next started turn is usually minutes away. **Decided by Nick 2026-10-23: started turns only (16).**
+**OI-R8. Which messages carry the notice** [r11, Loopy r10 S1]. Started turns only: ordinary user messages, and inter-bot deliveries that start a turn (idle fallback). Steered messages (composer steers, active-turn bot deliveries) don't; the notice waits for the next started turn. The owner said "next user message". This narrows it to "next started turn", flagged to Snark to reconcile with the owner. Covering steers would mean a notice hook inside `steer_active_turn`, with trusted target-session resolution and retry-safe marking keyed to the steer request id.
+Recommendation: started turns only. A steer lands in a turn that is already running, and the next started turn is usually minutes away. **Decided by the owner 2026-10-23: started turns only (16).**
 
-### Nick items
+### Owner items
 
-N1, N2 and N3 are decided (section 16). Still Nick's: which bots opt in, the 20-item cap, and when each slice deploys.
+N1, N2 and N3 are decided (section 16). Still the owner's: which bots opt in, the 20-item cap, and when each slice deploys.
 
 ## Appendix A.00 r11 review disposition (Loopy cmvlcwe8z004z0mpzd483gogq)
 
@@ -529,7 +529,7 @@ N1, N2 and N3 are decided (section 16). Still Nick's: which bots opt in, the 20-
 | B2 a free-text idempotency key can equal the objective and survives hard delete | **Fixed.** The key must be a canonical UUID; anything else is refused before writing. The hard-delete promise now lists exactly what survives, and says it is not item text and not computed from it, without claiming a UUID can't be abused deliberately. Not hashed. | 5.2, 6.1, 11.3, 12, 17, claim 10 |
 | S1 double fallback breaks the version bound when S has no version | **Fixed** with Loopy's bounded representation, kept on the working-memory side: `unverified_floor = {min_version, may_be_missing}`, folded across unverified re-pins and cleared on a kept turn under a verified pin. The 8.2 wording is corrected. Byte's pin contract is unchanged. | 5.4, 8.2, 9.2, 17, claim 8 |
 | Claim 4 note: bootstrap insert on a refused request | **Fixed.** Same transaction; it rolls back on every outcome that isn't a real write. Tested. | 5.3, 17 |
-| r10 S1 acceptance is technical only, not authorization to narrow Nick's wording | **Agreed.** OI-R8 stays with the coordinator; Snark has put it to Nick. r12 stays started-turn-only until he rules. | OI-R8 |
+| r10 S1 acceptance is technical only, not authorization to narrow the owner's wording | **Agreed.** OI-R8 stays with the coordinator; Snark has put it to the owner. r12 stays started-turn-only until the owner rules. | OI-R8 |
 | Base moved during review | **Rebased** to `9e874dc`, which commits the pin byte-identical to `c100554a06b0`. The other cited files are unchanged since `4883515`. `confirm_session_pin` was the wrong name; it is `SessionPinConfirmer`. | Header, 8.2, C |
 
 ## Appendix A.0 r10 review disposition (Loopy cmvlcc925003y0mpz7n763i6e)
@@ -538,7 +538,7 @@ N1, N2 and N3 are decided (section 16). Still Nick's: which bots opt in, the 20-
 |---|---|---|
 | B1 fallback outranks a proven compaction; carried sections go stale after fallback + auto-compaction | **Fixed.** Byte's precedence change makes COMPACTION over a damaged pin a verified move that stores this render's sections. `candidate_sections` records the fallback render, and working memory reads both conservatively. Byte's tests are listed in OI-R1. Combined-path working-memory tests are in 17. The one residual (two fallbacks in a row) is stated. | 8.2, 9.2, 10.2, 17, OI-R1 |
 | B2 content-free schema can't tell H1 from H2 | **Fixed.** An immutable `create_fingerprint` on the `create` change row (no new table). Replay compares only against it. Behavior after update, archive, soft delete and hard delete is specified, and the H1/H2 and at-cap tests are listed. | 5.2, 6.1, 11.3, 17 |
-| S1 steer path bypasses the notice | **Fixed by qualification.** Started turns only; steers are explicitly excluded and the notice stays pending. Narrowing Nick's wording is flagged to the coordinator. | 2 (G4), 9.1, OI-R8 |
+| S1 steer path bypasses the notice | **Fixed by qualification.** Started turns only; steers are explicitly excluded and the notice stays pending. Narrowing the owner's wording is flagged to the coordinator. | 2 (G4), 9.1, OI-R8 |
 | S2 enable marker outlives its pin episode | **Fixed.** Notice state carries `pin_turn_id`; a different confirmed pin resets `N`. Loopy's sequence is a test. | 5.4, 9.2, 9.3, 17 |
 | S3 compaction ordering and N3 wording | **Fixed.** Re-arm is ordered by the compaction turn's `ended_at`, with tests for the same-turn and later-turn cases. N3's default copy now says "the turn after its next manual /compact". The `ended_at` ordering was itself wrong (Loopy r11 B1); r12 replaces it with `compaction_gen`. | 9.4, 16, 17 |
 | Claim 3: until-read acknowledgement | **Adopted** as the OI-R2 rule: only a full list acknowledges, up to the version it read. | OI-R2 |
@@ -562,9 +562,9 @@ N1, N2 and N3 are decided (section 16). Still Nick's: which bots opt in, the 20-
 | S5 citations | Fixed (Appendix C). |
 | OI-1 | Revised (19). |
 | OI-2, 3, 4, 6, 7, 8, 9, 10 | Accepted by Loopy; stated in 4-7. |
-| OI-5 | Nick (N2). |
+| OI-5 | Owner (N2). |
 | OI-11 | Revised by OI-R6 (6.2, 11.3). |
-| OI-12 | Nick (N3), wording updated for TASK-1318's boundaries. |
+| OI-12 | Owner (N3), wording updated for TASK-1318's boundaries. |
 | OI-13 | 10.1; note in OI-R5. |
 | OI-14, 15, 16 | Gone with the pin table; 15 settled by TASK-1318's success check (10.2); 16 superseded by scope. |
 | OI-17 | Leading-token classifiers in `src/agent_bridge/maintenance.py` (9.1). The bare-only classifier isn't needed. |
@@ -582,7 +582,7 @@ N1, N2 and N3 are decided (section 16). Still Nick's: which bots opt in, the 20-
 | Caid r1 B4 (resets) | 10.1. |
 | Loopy r2 B1 (ack on queue) | No ack. |
 | Loopy r2 B2 (high-water mark) | Commit-ordered `ns_version` (5.3). |
-| Loopy r2 B3; Loopy r3 B3 (delete vs render) | Nick's B3 ruling (11.1). |
+| Loopy r2 B3; Loopy r3 B3 (delete vs render) | The owner's B3 ruling (11.1). |
 | Caid r2 R1, R2 | 10.1, 7; implementation claim 5. |
 | Caid r2 R3 (re-pin on session or model change) | TASK-1318 cold start (8.2). |
 | Caid r2 S1-S5 | S1: 10.2. S2: OI-R5. S3: notice appended after the suffix (9.3). S4, S5: cache tests (17). |

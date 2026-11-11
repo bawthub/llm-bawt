@@ -462,7 +462,7 @@ def install_repo_local_plugins(
 
     # Home-local layout: a marketplace.json symlink + per-plugin scaffold
     # under ``~/plugins/<name>``. This is the path Codex CLI tools (e.g.
-    # ``codex plugin marketplace add /home/bridge``) walk when validating
+    # ``codex plugin marketplace add "$HOME"``) walk when validating
     # the marketplace `source`. Keep it intact so out-of-band ops still
     # see a coherent marketplace layout.
     agents_plugins_dir = home / ".agents" / "plugins"

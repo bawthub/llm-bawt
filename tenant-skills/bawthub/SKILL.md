@@ -5,7 +5,7 @@ description: Work in BawtHub, the chat, voice and task dashboard. Routes to fron
 
 # BawtHub
 
-User-facing chat, voice and task dashboard. Repo `~/dev/bawthub` on the host, `/home/bridge/dev/bawthub` in bridges. Vite/React + Hono + Prisma; Python voice backend. Canonical branch `main`.
+User-facing chat, voice and task dashboard. Repo `bawthub` under the configured shared dev root on the host and in bridges. Vite/React + Hono + Prisma; Python voice backend. Canonical branch `main`.
 
 Use [git-commits](../git-commits/SKILL.md) for isolated worktrees and publication, [agent-system](../agent-system/SKILL.md) for tasks, and [bawthub-ops](../bawthub-ops/SKILL.md) for service changes. These are their authoritative homes; do not add parallel workflow rules here.
 

@@ -157,7 +157,7 @@ attestation, or claim of complete Codex runtime parity.
 - Raw local smoke logs: `/tmp/task864-smoke.log` and
   `/tmp/task864-adapter-smoke.log`. Durable summary lives in TASK-864.
 
-Nick activated the client by restarting the Claude bridge at
+The operator activated the client by restarting the Claude bridge at
 2026-09-08T00:54:52Z. Normal Loopy chat confirmed WebSocket transport, connection
 reuse on the next tool hop, and 98.5% prompt-cache hits on that follow-up.
 
@@ -185,7 +185,7 @@ The exact command receipts live in TASK-872.
 No services were restarted while implementing TASK-872. The source-mounted
 Claude bridge must reload to activate the backend supervisor for normal chat.
 Only restart
-`claude-code-bridge` with Nick's explicit approval for that run; do not restart
+`claude-code-bridge` with the operator's explicit approval for that run; do not restart
 other services. The frontend changes are compatible with older event producers
 and unknown event consumers ignore the additive event kind. No dependency/image
 rebuild is required. Rollback is a source revert of the TASK-872 changes plus the

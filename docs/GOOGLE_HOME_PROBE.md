@@ -12,8 +12,8 @@ issuer because the installed OAuth2-Proxy authenticates browsers but does not
 issue downstream OAuth credentials. Existing browser login is reused; no new
 password system or OAuth2-Proxy configuration changes are needed.
 
-**Active (Nick explicitly authorized):** runtime settings enabled
-for `nick@ferreri.us`; encrypted app client credential provisioned and backed by
+**Active (owner explicitly authorized):** runtime settings enabled
+for the owner's exact sign-in email; encrypted app client credential provisioned and backed by
 agent-vault item `integrations/google-home-probe`
 (`63cb42e2-254c-47c2-be85-cb88c72f7b2d`). PostgreSQL linking schema created and
 app-container imports/config verified. NPM host 37 exact-path rules applied via
@@ -24,7 +24,7 @@ and `/v1/admin/` retain 302 SSO gating. App reload job
 No Google console setup, actual browser/Nest acceptance or commit yet.
 
 Backups: Unraid `http_top.conf.bak-TASK-902-20260923` beside HTTP config; original
-NPM host JSON `/home/bridge/.local/state/google-home-probe/npm-host-37-before.json`.
+NPM host JSON `npm-host-37-before.json` in the deployment's probe backup directory.
 Initial proxy apply rejected a new log file on permissions; corrected to reuse
 `/config/log/proxy-host-37_access.log` with the query-free probe format; API
 readback confirms successful configuration. No permissions loosened.
@@ -43,21 +43,25 @@ event and make only a narrow approved endpoint exception, never disable site-wid
 protection. NPM full configuration passes syntax validation (two unrelated
 pre-existing CIDR warnings); test authorization state absent from proxy access log.
 
-Next: Nick completes Google console linking fields and signs in through Google
+Next: the owner completes Google console linking fields and signs in through Google
 Home; client secret is in the agent vault, never chat.
 
 ### Actual identity/ingress discovery (read-only)
 
-- OAuth2-Proxy-Bawthub on Unraid, `10.0.2.37:4180`, Google provider.
-- Config `/mnt/user/appdata/oauth2-bawthub/oauth2_proxy.cfg`.
+Deployment addresses, identity values and installation paths are intentionally
+omitted; discover the current values from the authorized deployment configuration.
+The configuration example below is illustrative, not a live readback.
+
+- OAuth2-Proxy-Bawthub on Unraid, configured internal address/port, Google provider.
+- Config `oauth2_proxy.cfg` in the deployment's OAuth2-Proxy configuration directory.
 - Cookie domain `.bawthub.com`, secure cookies, `set_xauthrequest=true`.
 - Login: `https://auth.bawthub.com/oauth2/start`.
-- Internal cookie check: `http://10.0.2.37:4180/oauth2/auth`; anonymous returns 401.
-- Its allowed domain is `ferreri.us`. That is NOT an owner identity allowlist.
-  **Nick confirmed `nick@ferreri.us` as the sole allowed sign-in email.**
-  Nick explicitly authorized activation and required app/proxy reloads.
+- Internal cookie check: configured OAuth2-Proxy origin plus `/oauth2/auth`; anonymous returns 401.
+- Its configured allowed domain is NOT an owner identity allowlist.
+  **The owner confirmed one exact email as the sole allowed sign-in email.**
+  The owner explicitly authorized activation and required app/proxy reloads.
 - NPM app host ID 37, certificate ID 17, `app.bawthub.com`, existing upstream
-  `10.0.0.101:80`. Keep it unchanged; add only the three exact path exceptions.
+  address/port from the host configuration. Keep it unchanged; add only the three exact path exceptions.
 - Authelia docs are stale for BawtHub. No fake Authelia issuer is used.
 
 ## Implemented contract
@@ -72,7 +76,7 @@ Home; client secret is in the agent vault, never chat.
 All routes return 503 while disabled/unconfigured. Authorization presents a
 BawtHub login link if needed, then an explicit Agree and link / Cancel screen.
 Browser-supplied identity headers are never trusted. Only the configured exact
-email may link, mapped to the explicit local subject `nick`.
+email may link, mapped to the explicitly configured local subject.
 
 Only project-bound HTTPS Google production/sandbox redirect URIs are allowed:
 
@@ -116,27 +120,28 @@ first capture; max body 32 KiB, max 1,000 rows. Older-than-24h captures are hidd
 from reads and pruned on the next capture write, NOT deleted on a timer while idle.
 Internal inspection: `ProbeCaptureStore.recent()`; do not expose a reader publicly.
 
-## Installed runtime configuration
+## Runtime configuration example (illustrative)
 
-Global setting `google_home_probe`:
+Global setting `google_home_probe`; substitute deployment-owned values before use.
+The reserved example email and service hostname below are not installed settings:
 
 ```json
 {
   "enabled": true,
   "project_id": "bawthub-00a0bf",
   "client_id": "bawthub",
-  "allowed_subject": "nick",
-  "allowed_email": "nick@ferreri.us",
+  "allowed_subject": "example-owner",
+  "allowed_email": "owner@example.com",
   "required_scope": "bawthub.home",
   "public_origin": "https://app.bawthub.com",
-  "sso_auth_url": "http://10.0.2.37:4180/oauth2/auth",
+  "sso_auth_url": "http://oauth2-proxy.example:4180/oauth2/auth",
   "sso_signin_url": "https://auth.bawthub.com/oauth2/start"
 }
 ```
 
 Generate a 32+ byte random client secret only at provisioning time, put it in
 `CredentialStore` provider `google-home-probe`, `secret.client_secret`, status
-`connected`, and deliver to Nick through the established secret store for console
+`connected`, and deliver to the owner through the established secret store for console
 entry. Never put it in source, docs, shell arguments, tool output or chat.
 
 ## Public activation runbook — applied; browser acceptance pending
@@ -193,11 +198,11 @@ Google's September 2026 linking migration leaves this core web OAuth contract
 unchanged. Its iOS `/a/com.google.Chromecast` redirect is documented for App Flip
 allowlists; do not add it to this web-only project-bound experiment unnecessarily.
 
-## Device acceptance — Nick must perform
+## Device acceptance — owner must perform
 
 Link Loopy Test in the **Google Home app**, not Google Assistant settings. Use the
 account controlling the Nest speakers; developer/tester access must be available
-to that account. No access to Nick's developer console is established here.
+to that account. No access to the owner's developer console is established here.
 
 1. Verify authenticated SYNC exposes only the probe.
 2. Known baseline: "Open Probe Baseline on Loopy Text Probe."

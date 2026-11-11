@@ -26,8 +26,7 @@ feeds EVERYTHING — usage AND claude-code bridge inference.**
   even when idle.
 - **Everything else is a read-only consumer.** The usage adapter reads
   in-process. The claude-code bridge resolves tokens (per turn, no restart
-  needed after a re-login): ro-mounted bundle at
-  `/home/bridge/.claude-broker/.credentials.json` → broker endpoint
+  needed after a re-login): broker endpoint
   `GET /v1/providers/claude/token` (`?force=true` after a 401; optional
   `BRIDGE_CLAUDE_TOKEN_SECRET`/`X-Bridge-Token` guard) → legacy
   `~/.claude/.credentials.json` (read-only) → env `CLAUDE_CODE_OAUTH_TOKEN`

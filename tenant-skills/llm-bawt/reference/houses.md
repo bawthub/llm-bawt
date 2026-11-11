@@ -7,7 +7,7 @@ pool, preview launcher) and `docs/HEAVY_QUEUE.md` (queue containment).
 ## What a house is
 
 A house is a capped bridge container for one harness (`claude-code` or
-`codex`) on the shared `/home/bridge/dev` filesystem. Worktrees, sessions and
+`codex`) on the configured shared dev filesystem. Worktrees, sessions and
 skills are the same files the mansion sees; nothing persistent lives in the
 container. The mansion is the shared Claude bridge, which runs Anthropic and
 proxy-routed GPT bots. The separate native Codex mansion service is retired;

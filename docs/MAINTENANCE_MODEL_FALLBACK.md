@@ -220,8 +220,8 @@ product code.
 
 ## Out of scope
 
-Credential chains, OAuth/sign-in (dropped by Nick). Bot conversation failover.
+Credential chains, OAuth/sign-in (dropped by the operator). Bot conversation failover.
 
-## Open (Nick)
+## Open (operator)
 
 Which model is the backup — configuration only, not a code dependency.

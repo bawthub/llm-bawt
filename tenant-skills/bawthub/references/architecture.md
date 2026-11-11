@@ -63,7 +63,7 @@ Frontend proxies `/api/chat/*` → llm-bawt `/v1/*`: `POST /api/chat` → `/v1/c
 
 ## Environment
 
-Check where you are first (`whoami`/`pwd`). The host has node/npm/gh/docker/git locally. Agent bridges = `bridge` (`/home/bridge/dev`): Node 24.21.0, npm/npx 11.19.0, Corepack 0.36.0, pnpm 10.32.1, make and gh are installed (TASK-1061/1062). Run focused checks (named test files, lint on changed files) in the worktree; project-wide `tsc`, full suites and Python suites follow [houses and test placement](../../llm-bawt/reference/houses.md).
+Check where you are first (`whoami`/`pwd`). The host has node/npm/gh/docker/git locally. Agent bridges use the `bridge` account and their configured shared dev root: Node 24.21.0, npm/npx 11.19.0, Corepack 0.36.0, pnpm 10.32.1, make and gh are installed (TASK-1061/1062). Run focused checks (named test files, lint on changed files) in the worktree; project-wide `tsc`, full suites and Python suites follow [houses and test placement](../../llm-bawt/reference/houses.md).
 
 
 ## When a rebuild is needed beyond a code edit (moved from SKILL.md, TASK-1640)

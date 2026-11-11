@@ -1,6 +1,6 @@
 # Scheduled prompts — end-to-end design and implementation plan
 
-Status: **Application implementation ready for review; live activation and PostgreSQL/live-inference verification outstanding.** Researched 2026-09-15 for Nick. Reuses TASK-166, TASK-167, TASK-168 and TASK-169 (the latter reopened at Nick's request). This supersedes their April one-shot-first specs. One-time, interval and cron schedules are all release scope.
+Status: **Application implementation ready for review; live activation and PostgreSQL/live-inference verification outstanding.** Researched 2026-09-15 for the operator. Reuses TASK-166, TASK-167, TASK-168 and TASK-169 (the latter reopened at the operator's request). This supersedes their April one-shot-first specs. One-time, interval and cron schedules are all release scope.
 
 ## 1. Product contract
 
@@ -19,7 +19,7 @@ Required/editable fields:
 | One-time date | Offset-aware execution instant; selected IANA timezone shown alongside local date/time. Must be in the future on create/reschedule. |
 | Interval | Positive whole minutes (minimum 1), anchored to an explicit first-run instant. UI supports minutes/hours/days. Elapsed duration, not calendar time; every 24 hours is not the same as daily at 09:00 across DST. |
 | Cron | Five-field Unix expression; timezone required. Friendly editor plus advanced text. Daily/weekly/monthly presets are cron, not special server scheduling logic. |
-| Timezone | IANA identifier, initially browser timezone (`America/New_York` for Nick where applicable), never a fixed ET/EST offset. Persist timezone on every schedule. Store execution instants in UTC. |
+| Timezone | IANA identifier, initially browser timezone (for example, `America/New_York`), never a fixed ET/EST offset. Persist timezone on every schedule. Store execution instants in UTC. |
 | Clear context | Default **on**: a fresh, non-active thread for each occurrence. Off: reuse this schedule's own thread across runs. Neither choice resets the user's active chat or deletes anything. Label: “Start each run with fresh conversation context.” |
 | Memory | Separate advanced `augment_memory` and `extract_memory` booleans; default to ordinary-chat behavior. Clear conversation context is not memory deletion and does not promise removal of personality/profile information. |
 | Enabled | Save enabled by default, with a prominent **Save paused** option. |
@@ -199,7 +199,7 @@ Primary deep-linkable page: `/tools/schedules`, discoverable from the Tools laun
 2. Owner-scoped API client/hooks, list/editor/details/actions/preview; use existing bot/model selection.
 3. Tools launcher route and composer shortcut in both UI variants; avoid unrelated chat viewport changes already in flight.
 4. SSE invalidation/history badge + reconnect fallback; deep links, errors, draft preservation and accessibility.
-5. Client `tsc --noEmit`, server `pnpm run build:server` on echo, relevant UI tests, dev checks at 375px and desktop. End-to-end: one-time delivery; recurring interval twice; cron preview; pause/resume; manual-run cadence unchanged; edit/cancel conflicts; wrong user; refresh/restart recovery; context isolation and model override. Use only an authorized disposable test bot, never Mira. No production release/rebuild unless Nick asks.
+5. Client `tsc --noEmit`, server `pnpm run build:server` on echo, relevant UI tests, dev checks at 375px and desktop. End-to-end: one-time delivery; recurring interval twice; cron preview; pause/resume; manual-run cadence unchanged; edit/cancel conflicts; wrong user; refresh/restart recovery; context isolation and model override. Use only an authorized disposable test bot, never Mira. No production release/rebuild unless the operator asks.
 
 Dependency order: 167 and 168 depend on 166; 169 depends on both 167 and 168. API and delivery slices can be developed independently after the common schema/contract is fixed.
 
@@ -224,7 +224,7 @@ All four implementation slices are present in the shared working trees:
 
 Final parent-run evidence: **157 backend tests passed** across timing/store/API/delivery/review fixes/retention/history/scheduler/streaming; **31 focused frontend/proxy/provenance tests passed**; echo client tsc and server build:server passed; focused Ruff and both diff checks passed. Subagent browser harness verified desktop/mobile and editor interactions against intercepted APIs, not live inference.
 
-**Not live-complete:** read-only live `/v1/prompt-schedules?user=snark` returns 404 because app has not been reloaded with the new API/dependency. Dev container dependencies are separate from host pnpm installation; cron editor dependency availability requires the authorized dev dependency workflow. No production rebuild, service restart, bridge/Redis restart, live migration, schedule creation or real bot execution was performed. PostgreSQL advisory/row-lock concurrency and live SDK execution remain verification gaps, not claimed successes. All code is uncommitted. Production release requires Nick's explicit request.
+**Not live-complete:** read-only live `/v1/prompt-schedules?user=snark` returns 404 because app has not been reloaded with the new API/dependency. Dev container dependencies are separate from host pnpm installation; cron editor dependency availability requires the authorized dev dependency workflow. No production rebuild, service restart, bridge/Redis restart, live migration, schedule creation or real bot execution was performed. PostgreSQL advisory/row-lock concurrency and live SDK execution remain verification gaps, not claimed successes. All code is uncommitted. Production release requires the operator's explicit request.
 
 ## 9. Definition of done / current evidence
 

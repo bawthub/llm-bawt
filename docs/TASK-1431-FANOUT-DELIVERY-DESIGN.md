@@ -37,7 +37,7 @@ module `llm_bawt/inter_bot_send.py`. Every producer calls it:
 | Caller | Surface | Principal |
 |---|---|---|
 | Bots | `bots_send_message` (MCP) → `POST /v1/inter-bot-deliveries[/batch]` | `bot` (signed turn capability) |
-| Nick | BawtHub "Message bots" → same HTTP routes | `user` (BawtHub-authored) |
+| User | BawtHub "Message bots" → same HTTP routes | `user` (BawtHub-authored) |
 | System (quiesce, future ops) | in-process call, no HTTP | `system` |
 
 `create_delivery`'s current per-target body (validation, privileged-field refusal, author checks, durable
@@ -161,7 +161,7 @@ carries no gate/member reference: authority is resolved at claim and at grant (r
 Until TASK-1420 adds service auth, **no HTTP field can carry `lane` or `target_run`**. The pydantic HTTP models
 don't declare them (`extra='forbid'` on the batch model, so they 422). The only system principal is an
 in-process caller. This is the same fence as `ControlGrant` today ("the public steer route has no field that can
-carry one"). Hold-bypass for Nick from the UI therefore waits for TASK-1420's user principal. The UI ships with
+carry one"). Hold-bypass for the user from the UI therefore waits for TASK-1420's user principal. The UI ships with
 target and mode pickers only.
 
 `ControlGrant` is re-keyed from the member's claim token to the delivery's claim:

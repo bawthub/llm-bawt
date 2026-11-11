@@ -214,7 +214,7 @@ services:
       # until the container is recreated. rslave lets the host's remount
       # propagate in. NOTE: the Ubuntu-packaged compose (2.40.3+ds1) silently
       # drops propagation flags — the real guard on echo is the fstab change
-      # that removed x-systemd.idle-timeout from /mnt/user/home, so the NFS
+      # that removed x-systemd.idle-timeout from the host's NFS mount, so the NFS
       # mount never idle-unmounts in the first place (2026-06-12).
       - ${LLM_BAWT_MEDIA_HOST_PATH:-./data/media}:/var/lib/llm-bawt/media:rslave
       # TASK-1309: skill content, read-only (see CLAUDE_CODE_SKILLS_PATH).
