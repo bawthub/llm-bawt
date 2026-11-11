@@ -17,7 +17,12 @@ import redis.asyncio as aioredis
 from agent_bridge.consumer_group import GroupReader, ensure_group
 
 REDIS_URL = os.environ.get("LLM_BAWT_TEST_REDIS_URL")
-pytestmark = pytest.mark.skipif(not REDIS_URL, reason="LLM_BAWT_TEST_REDIS_URL not set")
+# ``external`` keeps every gate lane from collecting this suite (so it never
+# shows up as skipped under --require-no-skips); the skipif covers bare runs.
+pytestmark = [
+    pytest.mark.external,
+    pytest.mark.skipif(not REDIS_URL, reason="LLM_BAWT_TEST_REDIS_URL not set"),
+]
 
 GROUP = "bridge"
 
