@@ -448,14 +448,14 @@ class ImageDeployer:
         if not (current.get("State") or {}).get("Running"):
             # A stopped container keeps its aliases: start it unrouted and
             # give them back only once healthy, so DNS never advertises a
-            # cold backend while the new one still serves.
+            # cold backend while the new one still serves. It stays on every
+            # network (outbound DB access for its readiness), just unaliased.
             endpoints = endpoint_configs(current)
-            for net in endpoints:
-                self.api.request("POST", f"/networks/{quote(net, safe='')}/disconnect",
-                                 body={"Container": old_id, "Force": False})
+            self._reattach(old_id, {net: {**ep, "Aliases": []} for net, ep in endpoints.items()})
             self.api.request("POST", f"/containers/{old_id}/start")
             self._wait_healthy(old_id)
-            self._attach(old_id, endpoints)
+            self._reattach(old_id, endpoints)
+            self._wait_healthy(old_id)  # still ready after the aliases came back
         else:
             self._wait_healthy(old_id)
         try:
@@ -463,6 +463,13 @@ class ImageDeployer:
         except Exception:  # noqa: BLE001 - removed with force below
             pass
         self.api.request("DELETE", f"/containers/{new_id}?force=1&v=0")
+
+    def _reattach(self, container_id, endpoints):
+        """Replace each network endpoint with the given settings."""
+        for net in endpoints:
+            self.api.request("POST", f"/networks/{quote(net, safe='')}/disconnect",
+                             body={"Container": container_id, "Force": False})
+        self._attach(container_id, endpoints)
 
     def _attach(self, container_id, endpoints):
         for net, ep in endpoints.items():

@@ -115,6 +115,7 @@ class FakeDocker:
         self.render_status, self.render_stderr = render_status, render_stderr
         self.old_restart_fails = old_restart_fails
         self.connect_fails = False
+        self.started_networks: dict = {}
         self.images = {OLD_ID: {"Id": OLD_ID, "RepoDigests": [], "_health": "healthy",
                                 "_release": None,
                                 "Config": {"Labels": {"org.opencontainers.image.title": "old"},
@@ -264,6 +265,11 @@ class FakeDocker:
                     p.endswith(f"{self.old_id}/stop?t=20") for _m, p in self.calls):
                 raise RuntimeError("Docker HTTP 500: cannot start")
             health = self.images[container["Image"]]["_health"]
+            # Readiness needs the database: a container on no network never goes healthy.
+            nets = (container.get("NetworkSettings") or {}).get("Networks")
+            if nets is not None and not nets:
+                health = "unhealthy"
+            self.started_networks[container["Id"]] = copy.deepcopy(nets)
             container["State"] = {"Running": True, "Status": "running", "Health": {"Status": health}}
         elif action == "rename":
             if any(c["Name"] == f"/{query['name']}" and c is not container for c in self.containers.values()):
@@ -546,9 +552,11 @@ def test_overlap_revert_of_a_committed_swap_starts_old_before_stopping_new(tmp_p
     swap = deployer._swap(old, old_image, api._find_image(NEW_ID), f"{REPO}@{DIGEST}", None)
     api.calls.clear()
     deployer._revert(swap)
+    # It warms up on its networks (outbound DB access) with no aliases.
+    assert api.started_networks[api.old_id] == {"bawthub_default": {"Aliases": []}}
     disconnect = _index(api, "POST", "bawthub_default/disconnect")
     start_old = _index(api, "POST", f"{api.old_id}/start")
-    reconnect = _index(api, "POST", "bawthub_default/connect")
+    reconnect = max(i for i, (m, p) in enumerate(api.calls) if m == "POST" and p.endswith("bawthub_default/connect"))
     assert disconnect < start_old < reconnect < _index(api, "POST", f"{swap.new_id}/stop?t=5")
     aliases = api.by_name(NAME)["NetworkSettings"]["Networks"]["bawthub_default"]["Aliases"]
     assert aliases == [NAME, "frontend-prod"]
