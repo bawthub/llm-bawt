@@ -35,6 +35,7 @@ from .display_cmd import (
     show_job_status,
     trigger_job,
 )
+from .admin_cmd import ensure_user_profile as ensure_user_profile  # re-export for cli/__init__ and commands.profile
 from .admin_cmd import (
     show_user_profile,
     show_users,

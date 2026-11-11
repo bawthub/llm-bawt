@@ -22,6 +22,7 @@ from agent_bridge.session_queue import SessionQueue
 from .session_ops import ClaudeSessionMixin
 from .approval_ops import ClaudeApprovalMixin
 from .event_ops import ClaudeEventMixin
+from ._bridge_helpers import _get_fresh_oauth_token as _get_fresh_oauth_token  # facade re-export for __main__
 from .command_ops import ClaudeCommandMixin
 from .run_terminal import RunTerminalLatch
 from .send_handler import ClaudeSendMixin
