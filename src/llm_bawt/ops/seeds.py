@@ -36,7 +36,6 @@ from typing import Any
 
 from .models import (
     EXECUTOR_DOCKER,
-    EXECUTOR_RELEASE,
     RISK_CRITICAL,
     RISK_HIGH,
     RISK_LOW,
