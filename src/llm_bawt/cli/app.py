@@ -456,7 +456,16 @@ def main():
     elif args.local:
         target_bot = bot_manager.get_default_bot(local_mode=True)
     else:
-        target_bot = bot_manager.get_bot(config_obj.DEFAULT_BOT) or bot_manager.get_default_bot()
+        target_bot = bot_manager.get_bot(config_obj.DEFAULT_BOT)
+        if not target_bot:
+            default_slug = (config_obj.DEFAULT_BOT or "").lower().strip()
+            if use_service and default_slug:
+                # Remote CLI without a local registry: the service validates
+                # the configured default, as it does for an explicit --bot.
+                from llm_bawt.bots import Bot
+                target_bot = Bot(slug=default_slug, name=config_obj.DEFAULT_BOT, description="", system_prompt="")
+            else:
+                target_bot = bot_manager.get_default_bot()
 
     # For history-only operations, skip model resolution entirely
     if history_only:
