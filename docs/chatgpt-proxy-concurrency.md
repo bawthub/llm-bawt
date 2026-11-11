@@ -62,11 +62,11 @@ known. Do not add a bridge-global lock.
 ## Controlled live smoke
 
 After review, restart only the Claude Code bridge (explicit operator approval
-required) so it imports the changed proxy modules. Then run distinct Snark and
-Al threads plus one `/new` turn and verify:
+required) so it imports the changed proxy modules. Then run two distinct bots'
+threads plus one `/new` turn and verify:
 
 - same-thread logs retain `session_hash` across tool loops/resume;
-- Snark and Al hashes differ;
+- the two bots' hashes differ;
 - `/new` produces a new hash;
 - overlapping streams show `active_provider` above one;
 - `setup_ms`, `upstream_ttfb_ms`, and `stream_ms` are independently populated;

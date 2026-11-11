@@ -1,14 +1,16 @@
 # Working Memory: design r12
 
-Task: TASK-1281. Status: design approved by Loopy at r12 (cmvld893800580mpz7wcnjmzx, sha256 57fd8e40); the owner's N1-N3 and OI-R8 rulings were recorded afterwards, with no design change. Slice 1 (store, trusted MCP tools, owner REST) is implemented at llm-bawt `d87528c` and is off by default (`working_memory_enabled` is false for every bot). Slices 2 and later are not implemented.
+Names: "reviewer A" and "reviewer B" are the two independent design reviewers; "the pin author" implemented TASK-1318; "the coordinator" ran the task. Review IDs identify each round.
 
-Base: llm-bawt `9e874dc` (master), which commits Byte's TASK-1318 pin. `src/llm_bawt/service/system_prompt_pin.py` there is byte-identical to the r11 dependency (sha256 prefix `c100554a06b0`). Files cited from r11 that the commit didn't touch are unchanged since `4883515`. Appendix C lists the citations.
+Task: TASK-1281. Status: design approved by reviewer B at r12 (cmvld893800580mpz7wcnjmzx, sha256 57fd8e40); the owner's N1-N3 and OI-R8 rulings were recorded afterwards, with no design change. Slice 1 (store, trusted MCP tools, owner REST) is implemented at llm-bawt `d87528c` and is off by default (`working_memory_enabled` is false for every bot). Slices 2 and later are not implemented.
+
+Base: llm-bawt `9e874dc` (master), which commits the pin author's TASK-1318 pin. `src/llm_bawt/service/system_prompt_pin.py` there is byte-identical to the r11 dependency (sha256 prefix `c100554a06b0`). Files cited from r11 that the commit didn't touch are unchanged since `4883515`. Appendix C lists the citations.
 
 Scope: the owner ruled B+notice (TASK-1281 step 23). Working memory renders into the agent system prompt. The prompt is pinned per session by TASK-1318. Working-memory edits reach a live session at its next boundary. Until then, the bot gets a one-line notice on the next ordinary turn that starts after an edit (section 9.1 says which messages count).
 
-r10 replaces r9's delivery design (snapshot table, delta, receipts, bindings, stall counter, sweep, coldness predicate, bridge provenance). The store, tools, REST path, trust rules and the owner's rulings carry over. Rules that are new in r10 are tagged [r10]; rules changed in answer to Loopy's r10 review (cmvlcc925003y0mpz7n763i6e) are tagged [r11], and rules changed in answer to Loopy's r11 review (cmvlcwe8z004z0mpzd483gogq) are tagged [r12], so the reviewer can attack them. Appendix A.00 answers each r11 finding and Appendix A.0 each r10 finding. Rules that Loopy accepted in the r9 review (cmvl6znx8002a0mpz0sawfyrd) are tagged [L9 OI-n].
+r10 replaces r9's delivery design (snapshot table, delta, receipts, bindings, stall counter, sweep, coldness predicate, bridge provenance). The store, tools, REST path, trust rules and the owner's rulings carry over. Rules that are new in r10 are tagged [r10]; rules changed in answer to reviewer B's r10 review (cmvlcc925003y0mpz7n763i6e) are tagged [r11], and rules changed in answer to reviewer B's r11 review (cmvlcwe8z004z0mpzd483gogq) are tagged [r12], so the reviewer can attack them. Appendix A.00 answers each r11 finding and Appendix A.0 each r10 finding. Rules that reviewer B accepted in the r9 review (cmvl6znx8002a0mpz0sawfyrd) are tagged [L9 OI-n].
 
-Reviewer: Loopy.
+Reviewer: reviewer B.
 
 ---
 
@@ -61,7 +63,7 @@ The owner, verbatim (task step 15): "Alternative hasn't been discussed since eve
 
 ## 4. Initiative-state boundary
 
-- Working memory is personal, cross-task direction for one (bot, user). An initiative is leased run state for one task [Caid r1 B2].
+- Working memory is personal, cross-task direction for one (bot, user). An initiative is leased run state for one task [reviewer A r1 B2].
 - Field names reuse `AgentInitiativeState`'s vocabulary: `objective`, `next_action`, `blockers` (a JSON array of short strings) [r2 B2, C9].
 - An item has kind `personal` or `initiative_link` [R7]. A link item stores a validated `initiative_task_id` (section 5.1). It can't set `next_action` or `blockers` and doesn't copy initiative fields. The section renders a pointer only, e.g. `-> initiative TASK-123, see initiative_state` [L9 OI-2].
 - The harness's in-turn todo list is scratch space for one turn. The registry framing says so, so bots don't mirror one into the other [r2 §7].
@@ -96,8 +98,8 @@ The create idempotency record is not on the item row; it lives on the item's `cr
 An append-only, content-free event log: `seq` bigserial, `bot_id`, `user_id`, `ns_version` bigint, `item_id`, `revision`, `kind` (`create`, `update`, `archive`, `removed`, `purged`), `actor_kind` (`bot` or `user`), `actor_id`, `session_id` NULL, `turn_id` NULL, `idempotency_key` NULL, `create_fingerprint` NULL, `created_at`.
 
 - Index `(bot_id, user_id, ns_version)`.
-- **Create idempotency record** [r11, Loopy r10 B2]. On `kind='create'` rows only: `idempotency_key` and `create_fingerprint`, the sha256 of the canonical create payload (section 6.1). Unique partial index `(bot_id, user_id, idempotency_key) WHERE kind = 'create'`. Both are written once at create and never change, except that a hard delete sets `create_fingerprint` to NULL (section 11.3). That is the only update a change row ever receives.
-- **The key is an opaque token** [r12, Loopy r11 B2]. `idempotency_key` must be a UUID in canonical 8-4-4-4-12 hex form. The server lower-cases it and stores the normalized form (`uuid` column type). Any other string, free text included, is refused as `invalid_idempotency_key` before the namespace lock, so nothing is written. The server never derives a key from item fields. The tool description tells the bot to generate a fresh UUID per create and reuse it only to retry that create.
+- **Create idempotency record** [r11, reviewer B r10 B2]. On `kind='create'` rows only: `idempotency_key` and `create_fingerprint`, the sha256 of the canonical create payload (section 6.1). Unique partial index `(bot_id, user_id, idempotency_key) WHERE kind = 'create'`. Both are written once at create and never change, except that a hard delete sets `create_fingerprint` to NULL (section 11.3). That is the only update a change row ever receives.
+- **The key is an opaque token** [r12, reviewer B r11 B2]. `idempotency_key` must be a UUID in canonical 8-4-4-4-12 hex form. The server lower-cases it and stores the normalized form (`uuid` column type). Any other string, free text included, is refused as `invalid_idempotency_key` before the namespace lock, so nothing is written. The server never derives a key from item fields. The tool description tells the bot to generate a fresh UUID per create and reuse it only to retry that create.
 - No `diff` column. r9 needed diffs for deltas; r10 has no deltas. Change rows never hold item text. The one value the server derives from item text, `create_fingerprint`, is nulled by a hard delete (section 11.3).
 - `session_id`/`turn_id` come from the capability on tool writes, and are NULL on REST writes.
 
@@ -105,16 +107,16 @@ An append-only, content-free event log: `seq` bigserial, `bot_id`, `user_id`, `n
 
 `(bot_id, user_id)` PK, `version` bigint.
 
-- **Lock, decide, then bump** [r11]. Every write transaction first locks the namespace row (`INSERT … ON CONFLICT (bot_id, user_id) DO NOTHING`, then `SELECT version … FOR UPDATE`). Under that lock it runs the capability, CAS, idempotency and cap checks. Only a real write then runs `UPDATE … SET version = version + 1 RETURNING version`, and the returned value is the write's `ns_version`. A refused, conflicting or idempotent-replay request never bumps the version and writes nothing (Loopy r10 claim 6). That includes the bootstrap `INSERT` of a namespace's first row: it is in the same transaction, which rolls back rather than commits on any outcome that isn't a real write [r12, Loopy r11 claim 4].
+- **Lock, decide, then bump** [r11]. Every write transaction first locks the namespace row (`INSERT … ON CONFLICT (bot_id, user_id) DO NOTHING`, then `SELECT version … FOR UPDATE`). Under that lock it runs the capability, CAS, idempotency and cap checks. Only a real write then runs `UPDATE … SET version = version + 1 RETURNING version`, and the returned value is the write's `ns_version`. A refused, conflicting or idempotent-replay request never bumps the version and writes nothing (reviewer B r10 claim 6). That includes the bootstrap `INSERT` of a namespace's first row: it is in the same transaction, which rolls back rather than commits on any outcome that isn't a real write [r12, reviewer B r11 claim 4].
 - Since writes hold the row lock until commit, a later `ns_version` always commits after an earlier one. This replaces r9's advisory lock and fixes the r2 B2 allocation-order problem by construction.
 
 ### 5.4 Session state outside working-memory tables
 
 - **Mode.** `sessions.session_metadata.working_memory.mode`, `pinned` or `suppressed`. Written by `SessionResetLineage.rotate` on the successor, in the rotate transaction, from a required `working_memory_mode` argument (section 10.1). Absent means `pinned`.
 - **Notice state.** `sessions.session_metadata.working_memory.notice` = `{version, compaction_gen, pin_turn_id, at}` (section 9.3) [r11, r12]. `at` is diagnostic only; no rule reads it.
-- **Compaction generation** [r12, Loopy r11 B1]. `sessions.session_metadata.working_memory.compaction_gen`, an integer, absent meaning 0. Turn finalization bumps it for every successful compaction it records (section 9.4).
-- **Unverified floor** [r12, Loopy r11 S1]. `sessions.session_metadata.working_memory.unverified_floor` = `{min_version, may_be_missing}` while the session's pin is unverified (section 9.2).
-- **The pinned section's version.** Stored on TASK-1318's pin pointer as `sections.working_memory`, plus `candidate_sections.working_memory` while the pin is unverified (section 8.2). Accepted and implemented by Byte: OI-R1.
+- **Compaction generation** [r12, reviewer B r11 B1]. `sessions.session_metadata.working_memory.compaction_gen`, an integer, absent meaning 0. Turn finalization bumps it for every successful compaction it records (section 9.4).
+- **Unverified floor** [r12, reviewer B r11 S1]. `sessions.session_metadata.working_memory.unverified_floor` = `{min_version, may_be_missing}` while the session's pin is unverified (section 9.2).
+- **The pinned section's version.** Stored on TASK-1318's pin pointer as `sections.working_memory`, plus `candidate_sections.working_memory` while the pin is unverified (section 8.2). Accepted and implemented by the pin author: OI-R1.
 - **Runtime settings** (`setting_definitions.py` SETTING_DEFINITIONS): `working_memory_enabled`, bot scope only, default false (section 7).
 - **Prompt registry keys:** `agents.working_memory.section` (header, usage framing, empty and unavailable lines), `agents.working_memory.notice` (the notice line), `agents.working_memory.scheduled_note` (OI-R5). No hardcoded prompt text. None exist at `9e874dc`. *Implementation (slice 2a):* the section key is split three ways, `agents.working_memory.section` (header and framing, with an `{items}` slot), `agents.working_memory.section_empty` and `agents.working_memory.section_unavailable`, so each line is edited on its own and a section override can't drop the empty/unavailable distinction (section 14). Five keys in all, each with a seed in `working_memory/prompts.py` and a registry definition.
 
@@ -131,12 +133,12 @@ Rules:
 - No `bot_id` or `user_id` parameter. Identity comes only from `current_task_turn_context()`. A missing, expired or malformed capability is refused, for reads too [R6].
 - CAS: a stale `expected_revision` returns the current item (scoped by id, bot and user) and writes nothing.
 - Every write records `session_id` and `turn_id` from the capability on its change row.
-- **Idempotent create** [L9 OI-8, r11 Loopy r10 B2]. `idempotency_key` is required and must be a canonical UUID (5.2) [r12]. The payload fingerprint is the sha256 of canonical JSON over the validated, normalized create fields (`kind`, `objective`, `next_action`, `status`, `priority`, `refs`, `initiative_task_id`), with defaults filled, sorted keys and NFC strings. It is compared with the immutable `create_fingerprint` on the key's `create` row, never with the item's current fields. Under the namespace lock and before the cap check:
+- **Idempotent create** [L9 OI-8, r11 reviewer B r10 B2]. `idempotency_key` is required and must be a canonical UUID (5.2) [r12]. The payload fingerprint is the sha256 of canonical JSON over the validated, normalized create fields (`kind`, `objective`, `next_action`, `status`, `priority`, `refs`, `initiative_task_id`), with defaults filled, sorted keys and NFC strings. It is compared with the immutable `create_fingerprint` on the key's `create` row, never with the item's current fields. Under the namespace lock and before the cap check:
   - no `create` row for the key: a normal create, which writes the row with key and fingerprint;
   - fingerprint matches: return the item as it is now (after any later updates or archive) with `replayed: true`, or `removed` if it is soft-deleted. Nothing is written, the version isn't bumped and the cap isn't checked, so a replay succeeds at the open-item cap;
   - fingerprint differs: refused as `idempotency_conflict`; nothing is written;
   - fingerprint NULL (the item was hard-deleted): `removed`. There is nothing left to compare, and the item is never recreated.
-- So in Loopy's histories, H1 (create A with key K, then update to B) followed by retry(K, A) returns the item, now B. H2 (create C with K, then update to B) followed by retry(K, A) is a conflict.
+- So in reviewer B's histories, H1 (create A with key K, then update to B) followed by retry(K, A) returns the item, now B. H2 (create C with K, then update to B) followed by retry(K, A) is a conflict.
 - A write over a cap is refused; the error names the cap.
 - A storage failure returns "working memory unavailable", distinct from an empty list.
 - The tools join `catalog_contracts.py` TOOL_SUMMARIES/REFERENCE_GROUPS and must fit the `tests/test_mcp_catalog.py` caps. The budget change is logged in `docs/MCP_TOOL_DESIGN.md`.
@@ -177,16 +179,16 @@ Rules:
 - **Refs** render compactly: kind, id, label, excerpt ≤ 200 characters. Rendered text is escaped as data [L9 OI-6].
 - **States.** `ok`, `empty` (registry empty line), `unavailable` (registry unavailable line; storage failed), `suppressed` (nothing rendered). Each render produces `{version, state}`, request-local and never model input. `version` is NULL when `unavailable`.
 
-### 8.2 TASK-1318 pin (Byte; not designed here)
+### 8.2 TASK-1318 pin (the pin author; not designed here)
 
 From TASK-1318 step 6 and `system_prompt_pin.py`:
 
 - `apply_session_pin(ctx, client, messages, turn_id=, sections=)` runs in `turn_stream_worker.py` (~:220) after the context suffix is composed. It returns `PinDecision {text, pin_turn_id, sha256, action, reason, is_boundary, rendered_sha256, snapshot_unverified, pinned_sections, candidate_sections, drift}`, or None when the backend doesn't pin, the turn is `reset_only`, there is no session, or the store failed.
-- **Two-phase moves.** `resolve` stages a move under `session_metadata.system_prompt_pin_pending`. `SessionPinConfirmer` (`system_prompt_pin.py:300`, created in `turn_stream_worker.py:376`) promotes it to `system_prompt_pin` on the turn's first real model output (text, reasoning, tool, usage or subagent events; not a cancel, `upstream_status` or aborted-turn bookkeeping). A boundary turn that never reaches the model leaves the confirmed pointer alone, and the next turn decides the boundary again. Kept turns read only the confirmed pointer, so a staged move's sections never surface on a later turn before confirmation (Byte, `test_pending_boundary_sections_surface_only_after_confirm`).
-- **Reasons and precedence** [r11, Loopy r10 B1, accepted by Byte]: COLD_START > LEGACY_ADOPT (no pointer, so compaction can't be checked) > COMPACTION > MISSING_ROW / MISSING_TEXT / SHA_MISMATCH. The compaction check needs only the pointer's `pinned_at`, not the old row or text. So a successful manual `/compact` over a damaged pin is a verified COMPACTION move that stores this render's sections, `unavailable` included. COLD_START and COMPACTION are verified; the other four reasons are `snapshot_unverified`.
+- **Two-phase moves.** `resolve` stages a move under `session_metadata.system_prompt_pin_pending`. `SessionPinConfirmer` (`system_prompt_pin.py:300`, created in `turn_stream_worker.py:376`) promotes it to `system_prompt_pin` on the turn's first real model output (text, reasoning, tool, usage or subagent events; not a cancel, `upstream_status` or aborted-turn bookkeeping). A boundary turn that never reaches the model leaves the confirmed pointer alone, and the next turn decides the boundary again. Kept turns read only the confirmed pointer, so a staged move's sections never surface on a later turn before confirmation (the pin author, `test_pending_boundary_sections_surface_only_after_confirm`).
+- **Reasons and precedence** [r11, reviewer B r10 B1, accepted by the pin author]: COLD_START > LEGACY_ADOPT (no pointer, so compaction can't be checked) > COMPACTION > MISSING_ROW / MISSING_TEXT / SHA_MISMATCH. The compaction check needs only the pointer's `pinned_at`, not the old row or text. So a successful manual `/compact` over a damaged pin is a verified COMPACTION move that stores this render's sections, `unavailable` included. COLD_START and COMPACTION are verified; the other four reasons are `snapshot_unverified`.
 - Archived status is not an input. A born-archived task session that resumes its SDK key keeps its pin (`memory/postgresql_short_term.py:438-452`). This closes r9 B3.
 - **Why working memory doesn't use `drift`.** `drift` is true whenever the fresh render differs from the pin. Profile re-wording alone changed the prompt mid-session on roughly 5-10% of turns per bot in 48h (task step 19). So drift can't tell a working-memory edit from churn.
-- **Section metadata contract, accepted and implemented by Byte** (OI-R1). Working memory passes `sections={"working_memory": {"v": 1, "version", "state"}}`. The pointer stores:
+- **Section metadata contract, accepted and implemented by the pin author** (OI-R1). Working memory passes `sections={"working_memory": {"v": 1, "version", "state"}}`. The pointer stores:
 
 | Move | `sections` | `candidate_sections` |
 |---|---|---|
@@ -195,8 +197,8 @@ From TASK-1318 step 6 and `system_prompt_pin.py`:
 | LEGACY_ADOPT | none | this render's |
 | kept turn | carried | carried while `snapshot_unverified` |
 
-  `PinDecision.pinned_sections` and `.candidate_sections` expose them (JSON-safe copies, `compare=False`). After an unverified re-pin the harness holds either the old snapshot (`sections`) or, once it auto-compacts, the fallback bytes (`candidate_sections`); the pointer can't know which, so working memory reads both conservatively (section 9.2) [r11, Loopy r10 B1].
-- **Known limit of the pointer (Byte), and how working memory closes it** [r12, Loopy r11 S1]. A second unverified re-pin replaces `candidate_sections` with the newer render. If the harness auto-compacted between the two re-pins, it holds the first fallback's bytes, which the pointer no longer describes. r11 claimed the minimum version still bounded what the harness holds. That is false when `S` has no version: S absent, first candidate v3, auto-compaction, second candidate v5 gives `P = 5` while the harness holds v3. A first candidate that was missing (absent, unavailable or suppressed) is lost the same way. Working memory doesn't rely on the pointer for this. It keeps its own bounded `unverified_floor` across unverified re-pins and clears it at a verified boundary (section 9.2). The pin contract is unchanged.
+  `PinDecision.pinned_sections` and `.candidate_sections` expose them (JSON-safe copies, `compare=False`). After an unverified re-pin the harness holds either the old snapshot (`sections`) or, once it auto-compacts, the fallback bytes (`candidate_sections`); the pointer can't know which, so working memory reads both conservatively (section 9.2) [r11, reviewer B r10 B1].
+- **Known limit of the pointer (the pin author), and how working memory closes it** [r12, reviewer B r11 S1]. A second unverified re-pin replaces `candidate_sections` with the newer render. If the harness auto-compacted between the two re-pins, it holds the first fallback's bytes, which the pointer no longer describes. r11 claimed the minimum version still bounded what the harness holds. That is false when `S` has no version: S absent, first candidate v3, auto-compaction, second candidate v5 gives `P = 5` while the harness holds v3. A first candidate that was missing (absent, unavailable or suppressed) is lost the same way. Working memory doesn't rely on the pointer for this. It keeps its own bounded `unverified_floor` across unverified re-pins and clears it at a verified boundary (section 9.2). The pin contract is unchanged.
 
 ### 8.3 Other harnesses
 
@@ -208,7 +210,7 @@ From TASK-1318 step 6 and `system_prompt_pin.py`:
 
 ### 9.1 Eligibility [r10, L9 S3]
 
-A notice is considered only on a turn that starts through the stream path (`turn_stream_worker`), where `apply_session_pin` returned a decision and `is_boundary` is False [r11, Loopy r10 S1]. Messages steered into a running turn are excluded: composer steers and active-turn bot deliveries go through `steer_active_turn` (`service/routes/chat.py:158`; `inter_bot_dispatcher.py:533-565`), which frames and sends without preparing a pin. They leave the notice pending; the bot is already mid-turn, and the next started turn carries it. Idle-fallback bot deliveries start a turn through `chat_completion_stream` (`inter_bot_dispatcher.py:682-705`) and are eligible. The owner's "next user message" wording is therefore narrowed to "next started turn" and is flagged to the coordinator (OI-R8). It is never added to:
+A notice is considered only on a turn that starts through the stream path (`turn_stream_worker`), where `apply_session_pin` returned a decision and `is_boundary` is False [r11, reviewer B r10 S1]. Messages steered into a running turn are excluded: composer steers and active-turn bot deliveries go through `steer_active_turn` (`service/routes/chat.py:158`; `inter_bot_dispatcher.py:533-565`), which frames and sends without preparing a pin. They leave the notice pending; the bot is already mid-turn, and the next started turn carries it. Idle-fallback bot deliveries start a turn through `chat_completion_stream` (`inter_bot_dispatcher.py:682-705`) and are eligible. The owner's "next user message" wording is therefore narrowed to "next started turn" and is flagged to the coordinator (OI-R8). It is never added to:
 
 - a turn that is a maintenance command: `/compact`, `/new` or `/clear` as the leading token, with or without arguments (`src/agent_bridge/maintenance.py` leading-token classifiers `is_compact_command`, `is_new_command`; an `is_clear_command` is added there);
 - a scheduler turn: the validated delivery's sender is `scheduler:<hash>` (`prompt_delivery.py:85`). Identity comes from the claimed delivery record, never from an author display label or `message_kind`;
@@ -220,32 +222,32 @@ An ineligible turn leaves the notice pending for the next eligible one.
 
 ### 9.2 When it fires [r10]
 
-**What the harness holds** [r11, Loopy r10 B1]. Take `S` = `pinned_sections.working_memory` and, if the decision has `candidate_sections`, `C` = `candidate_sections.working_memory`. Each entry is either a section (`state` ok or empty, with a version) or missing (absent, or `state` unavailable or suppressed).
+**What the harness holds** [r11, reviewer B r10 B1]. Take `S` = `pinned_sections.working_memory` and, if the decision has `candidate_sections`, `C` = `candidate_sections.working_memory`. Each entry is either a section (`state` ok or empty, with a version) or missing (absent, or `state` unavailable or suppressed).
 
 - `F` = the session's `unverified_floor`, if any (below).
 - `P` = the lowest version among the present entries of `S`, `C` and `F.min_version`, or −1 if none is present.
 - `missing` = true when `S` is missing, or a candidate exists and `C` is missing, or `F.may_be_missing` is true.
-- [2a, Loopy 2a r1 B1] Every `snapshot_unverified` decision has a candidate, even when the pointer stored no `candidate_sections`. A fallback rendered without the section (working memory disabled or refused for the bot on that turn) stores none, and an auto-compaction can still adopt those bytes. Its `C` is missing.
+- [2a, reviewer B 2a r1 B1] Every `snapshot_unverified` decision has a candidate, even when the pointer stored no `candidate_sections`. A fallback rendered without the section (working memory disabled or refused for the bot on that turn) stores none, and an auto-compaction can still adopt those bytes. Its `C` is missing.
 
 With a verified pin this is just `S`. With an unverified one it is the conservative reading of every snapshot the harness might hold.
 
-**Unverified floor** [r12, Loopy r11 S1]. One fixed-size record, not a history. On every turn with a decision, boundary turns included:
+**Unverified floor** [r12, reviewer B r11 S1]. One fixed-size record, not a history. On every turn with a decision, boundary turns included:
 
 - if the decision has a candidate (above), fold `S` and `C` into `F`: `min_version` = the lowest present version among `F.min_version`, `S` and `C`; `may_be_missing` = `F.may_be_missing`, or `S` missing, or `C` missing;
 - if the decision is a kept turn (`is_boundary` False) and not `snapshot_unverified`, the confirmed pin is verified: delete `F`.
 
 A boundary turn's decision is a staged move that may never be confirmed. Folding it anyway only lowers the floor or sets the flag, so the error is an extra notice, never a lost one. Clearing happens only on a kept turn, which reads the confirmed pointer. `P` and `missing` use `F` after this turn's fold or clear. The fold and the clear are written in the notice-mark session-row transaction (9.3), which runs when the notice fires or `F` changes. If that write fails, the turn logs it and the session falls back to the pointer's own reading, which is the limit stated in 8.2.
 
-Loopy's counterexample: S absent, C1 = v3 gives F = {3, true}; C2 = v5 gives F = {3, true}, so `P = 3` and `missing` is true. A lost missing first candidate keeps `may_be_missing` set.
+Reviewer B's counterexample: S absent, C1 = v3 gives F = {3, true}; C2 = v5 gives F = {3, true}, so `P = 3` and `missing` is true. A lost missing first candidate keeps `may_be_missing` set.
 
-**Notice episode** [r11, Loopy r10 S2]. `N` = the session's notice `version`, but only if its `pin_turn_id` equals the decision's `pin_turn_id` and no compaction re-arm applies (9.4). Otherwise `N` is NULL. Every confirmed pin move, whether a cold start without rotation, a compaction or a fallback, therefore starts a new notice episode.
+**Notice episode** [r11, reviewer B r10 S2]. `N` = the session's notice `version`, but only if its `pin_turn_id` equals the decision's `pin_turn_id` and no compaction re-arm applies (9.4). Otherwise `N` is NULL. Every confirmed pin move, whether a cold start without rotation, a compaction or a fallback, therefore starts a new notice episode.
 
 Threshold `T = max(P, N)`, treating NULL as −1. The notice fires when either holds:
 
 1. a change exists with `ns_version > T` and `session_id IS DISTINCT FROM` this session (an external change; own writes in this session don't count);
-2. `missing` is true, the policy currently allows the section, and `N` is NULL. This covers an enable mid-session, a legacy pin, a boundary render that hit a storage failure, and Loopy's disable → cold boundary → re-enable sequence.
+2. `missing` is true, the policy currently allows the section, and `N` is NULL. This covers an enable mid-session, a legacy pin, a boundary render that hit a storage failure, and reviewer B's disable → cold boundary → re-enable sequence.
 
-The check is one indexed query on `(bot_id, user_id, ns_version)`. A storage failure skips the notice and logs; it never blocks the turn. [2a, Loopy 2a r1 S1] It is one statement returning the external maximum and the namespace version, so both come from one snapshot. Inside the notice mark (9.3) it runs on the mark's own connection and transaction, so a mark that holds its session row never checks out a second pooled connection.
+The check is one indexed query on `(bot_id, user_id, ns_version)`. A storage failure skips the notice and logs; it never blocks the turn. [2a, reviewer B 2a r1 S1] It is one statement returning the external maximum and the namespace version, so both come from one snapshot. Inside the notice mark (9.3) it runs on the mark's own connection and transaction, so a mark that holds its session row never checks out a second pooled connection.
 
 ### 9.3 Recording it [r10]
 
@@ -255,15 +257,15 @@ The check is one indexed query on `(bot_id, user_id, ns_version)`. A storage fai
 
 ### 9.4 After an auto-compaction [r10]
 
-Auto-compaction can summarise a notice or a tool read away, while the pinned section stays at `P`. So the notice threshold resets to `P` after a compaction: if the session's current `compaction_gen` is greater than `notice.compaction_gen`, `N` is treated as NULL. If the store has moved past `P` externally, the next eligible turn notices again [r11 Loopy r10 S3; r12 Loopy r11 B1].
+Auto-compaction can summarise a notice or a tool read away, while the pinned section stays at `P`. So the notice threshold resets to `P` after a compaction: if the session's current `compaction_gen` is greater than `notice.compaction_gen`, `N` is treated as NULL. If the store has moved past `P` externally, the next eligible turn notices again [r11 reviewer B r10 S3; r12 reviewer B r11 B1].
 
-**No clock** [r12]. r11 compared `turn_logs.ended_at` with `notice.at`. At the base `ended_at` is `created_at + latency_ms` (`service/turn_log_schema.py:40-46`, applied at `turn_logs.py:474-486`), and latency is timed from execution start (`turn_stream_worker.py:250` starts the clock after preparation; `turn_stream_finalize.py:112-114`), not from row creation. A turn with slow preparation therefore gets an `ended_at` earlier than its own notice, and Loopy's regression shows the re-arm missed. r12 orders by a durable counter instead.
+**No clock** [r12]. r11 compared `turn_logs.ended_at` with `notice.at`. At the base `ended_at` is `created_at + latency_ms` (`service/turn_log_schema.py:40-46`, applied at `turn_logs.py:474-486`), and latency is timed from execution start (`turn_stream_worker.py:250` starts the clock after preparation; `turn_stream_finalize.py:112-114`), not from row creation. A turn with slow preparation therefore gets an `ended_at` earlier than its own notice, and reviewer B's regression shows the re-arm missed. r12 orders by a durable counter instead.
 
 **The bump.** When turn finalization (`turn_stream_finalize.py`, which already resolves the turn's `thread_session_id` at :397) records final usage with `context_action='compact'` and `context_action_outcome='success'`, it runs one more transaction after the turn row is written: lock that session row, then `jsonb_set` `working_memory.compaction_gen` to its value + 1. Auto-compaction and manual `/compact` both produce the stamp (`claude_code_bridge/send_handler.py:604-612` sets `compact_status` from the SDK status message on either path; `send_result.py:120-176` stamps it). It runs for every non-protected bot whose backend pins, opted in or not, so a compaction while working memory is disabled still re-arms a notice made before the disable. A bump failure is logged and costs only that re-arm.
 
 **Why it is sound.** A compaction can only summarise a notice that the harness has already received. The notice mark, which records `g`, commits before the command is published (9.3). The bridge observes the compaction after that, and finalization bumps after the bridge reports it. So any compaction that can remove a notice moves `compaction_gen` past `g`. Both the read and the bump take the session row lock, so the comparison involves no clocks, preparation delay or turn order. A compaction that finishes after the mark but happened before the notice was delivered (an earlier queued turn) also re-arms. That only costs an extra notice.
 
-The success stamp is missing when compaction metadata is absent (Loopy r9 B2). Byte fixed this in TASK-1318 (`send_result.py:154-163`); it is live after a bridge restart (OI-R7). A turn that compacts and then dies before final usage is persisted has no stamp either. That compaction misses the re-arm until the next external change or boundary. The pin stays consistent; only the re-notice is lost.
+The success stamp is missing when compaction metadata is absent (reviewer B r9 B2). The pin author fixed this in TASK-1318 (`send_result.py:154-163`); it is live after a bridge restart (OI-R7). A turn that compacts and then dies before final usage is persisted has no stamp either. That compaction misses the re-arm until the next external change or boundary. The pin stays consistent; only the re-notice is lost.
 
 ### 9.5 Cost
 
@@ -289,7 +291,7 @@ The notice is one short line, appended to the user message, so the cached prefix
 
 - **Manual `/compact`.** TASK-1318 moves the pin on the first turn after a successful one, as a verified move even if the old pin is damaged (8.2). The new pin carries a fresh render, so the section is current again. A failed `/compact` doesn't move the pin (`_manual_compaction_succeeded` requires `context_action_outcome='success'`). This settles r9 OI-15.
 - **Auto-compaction.** Not a boundary. The CLI re-records the pinned bytes, so the section stays at `P`. Section 9.4 re-arms the notice.
-- **Missing compaction stamp** (Loopy r9 B2). Under B this costs a stale pin or a missed re-notice, never an inconsistent prompt. Byte fixed the stamp in TASK-1318, pending a bridge restart (OI-R7).
+- **Missing compaction stamp** (reviewer B r9 B2). Under B this costs a stale pin or a missed re-notice, never an inconsistent prompt. The pin author fixed the stamp in TASK-1318, pending a bridge restart (OI-R7).
 
 ## 11. Deletion and privacy
 
@@ -301,7 +303,7 @@ The owner, verbatim: "the answer is no. delete should not alter it. that messes 
 
 - A delete, soft or hard, never changes a live pin or an in-flight prompt. The pinned bytes keep the item until the session's next boundary, whose render excludes it.
 - A delete writes a `removed` change (content-free). It is an external change, so it produces a notice on the session's next eligible turn (section 9). A re-read through the tool shows the item gone.
-- An archived session that resumes its SDK key keeps its pin (section 8.2). This replaces r9 §11.1's "resuming an archived session renders from current state", which contradicted B3 (Loopy r9 B3).
+- An archived session that resumes its SDK key keeps its pin (section 8.2). This replaces r9 §11.1's "resuming an archived session renders from current state", which contradicted B3 (reviewer B r9 B3).
 
 ### 11.2 D4 ruling (task steps 13-14, 2026-10-23 16:01Z)
 
@@ -344,7 +346,7 @@ The owner, verbatim: "I did answer actually. I called out that removing it durin
 - **Rotate:** unchanged lock set (target lock, advisory lock, session rows); writes the mode as part of the successor row it already writes. It takes no working-memory lock.
 - **Finalization** (`update_turn`, `turn_logs.py:408` → `record_turn_context`): unchanged. The compaction bump is a separate transaction after it, not a lock added inside it [r12].
 
-No path holds a working-memory lock while taking a session or turn lock, and no session or turn path takes a working-memory lock. So there is no cycle to order. This retires r9 §13 and Loopy r9 B5.
+No path holds a working-memory lock while taking a session or turn lock, and no session or turn path takes a working-memory lock. So there is no cycle to order. This retires r9 §13 and reviewer B r9 B5.
 
 Test: concurrent writers in one namespace get consecutive `ns_version`s in commit order; a render racing a writer sees a matching (version, items) pair; the cap holds under concurrent creates.
 
@@ -368,7 +370,7 @@ Test: concurrent writers in one namespace get consecutive `ns_version`s in commi
 *Implementation:* delivered in two commits, 2a (section, notice, compaction-generation bump, health, registry prompts) and 2b (the required `working_memory_mode` on `SessionResetLineage.rotate` and its callers, section 10.1). Until 2b lands every successor is `pinned`, so `include_working_memory=false` has no effect yet.
 
 - Requires TASK-1318 deployed with the `sections` extension (OI-R1) and its B2 stamp fix live (bridge restart, owner approval).
-- App only. Working memory itself needs no bridge change, so no bridge restart of its own and no mixed app/bridge version problem (Loopy r9 S2 does not apply).
+- App only. Working memory itself needs no bridge change, so no bridge restart of its own and no mixed app/bridge version problem (reviewer B r9 S2 does not apply).
 - Disable for a bot: tools and notices stop at once; the section leaves a live session at its next boundary.
 - Code rollback of slice 2: pinned bytes already include the section and TASK-1318 keeps sending them until the next boundary. The next boundary renders without it. Session metadata keys become inert.
 - Rollback of TASK-1318 under slice 2: the CLI still holds its own snapshot, so the prompt is unchanged mid-session; the notice stops because there is no pin decision.
@@ -388,7 +390,7 @@ Decided, not up for review:
 | Scope | B+notice on the TASK-1318 pin (step 23). |
 | N1 | Owner, 2026-10-23: keep unless asked. Suppression only on an explicit request; human `/new` pins. A suppressed session gets neither section nor notice. |
 | N2 | Owner, 2026-10-23: a soft delete is final (no restore). `removed_at` is final; only hard delete purges. |
-| N3 | Owner, 2026-10-23: the full copy. "Removed from working memory. The bot's current session may still show it until its next /new, or the turn after its next manual /compact. Earlier prompts recorded in turn logs, and transcripts already on disk, still contain it." Automatic compaction doesn't refresh the prompt, so it isn't named [r11, Loopy r10 S3]. |
+| N3 | Owner, 2026-10-23: the full copy. "Removed from working memory. The bot's current session may still show it until its next /new, or the turn after its next manual /compact. Earlier prompts recorded in turn logs, and transcripts already on disk, still contain it." Automatic compaction doesn't refresh the prompt, so it isn't named [r11, reviewer B r10 S3]. |
 | OI-R8 | Owner, 2026-10-23: the next started turn. Steered messages don't carry the notice (9.1). |
 
 Also the owner's: which bots opt in (none by default), the 20-item cap, and when each slice deploys.
@@ -411,7 +413,7 @@ Unit and PG:
   - both at the open-item cap: H1's replay still succeeds; H2 is still a conflict, not a cap error;
   - replay after archive returns the archived item; after a soft delete, `removed`; after a hard delete, `removed`, with the fingerprint gone;
   - refused, conflicting and replayed requests leave the namespace version unchanged, including a namespace's first request, which leaves no namespace row [r12];
-  - [r12, Loopy r11 B2] a key equal to the objective text, or any non-UUID string, is refused as `invalid_idempotency_key` and writes nothing; an upper-case UUID is normalized and replays against its lower-case form;
+  - [r12, reviewer B r11 B2] a key equal to the objective text, or any non-UUID string, is refused as `invalid_idempotency_key` and writes nothing; an upper-case UUID is normalized and replays against its lower-case form;
   - [r12] after a hard delete, every remaining working-memory row for the item holds only the columns listed in 11.3, and none contains the objective, next action, blockers, checkpoint or refs;
 - notice: external REST edit → notice on the next eligible turn and not the one after; own write → no notice; write from another session of the same bot → notice;
 - notice not added to `/compact`, `/compact focus on X`, `/new`, `/clear`, scheduler turns or suppressed sessions; it stays pending to the next eligible turn;
@@ -420,25 +422,25 @@ Unit and PG:
 - enable mid-session → one notice;
 - after a successful auto-compaction with the store ahead of `P` → one more notice;
 - unverified re-pin (pin turn row deleted) keeps the previous `P`, so an edit made before the re-pin still notices;
-- [r11, Loopy r10 B1] successful manual `/compact` on top of a missing row, missing text or sha mismatch: the pointer's sections are this render's (Byte's PG tests). If this render is `unavailable`, the first eligible turn after storage recovers gets a notice;
+- [r11, reviewer B r10 B1] successful manual `/compact` on top of a missing row, missing text or sha mismatch: the pointer's sections are this render's (the pin author's PG tests). If this render is `unavailable`, the first eligible turn after storage recovers gets a notice;
 - [r11] unverified re-pin, where the old sections hold v3 ok and the candidate holds v5 ok: `P = 3`, so a change at v4 notices. Old sections v3 ok and candidate unavailable: `missing` is true, so one notice fires;
 - [r11] LEGACY_ADOPT (candidate only): `missing` is true, so one notice fires;
-- [r12, Loopy r11 S1] unverified floor:
+- [r12, reviewer B r11 S1] unverified floor:
   - S absent, first candidate v3, auto-compaction, second candidate v5: `P = 3`, so a change at v4 notices;
   - first candidate unavailable, second candidate v5 ok: `missing` stays true;
   - a staged unverified boundary that is never confirmed (cancelled before output): the floor may be lower, never higher;
   - a verified boundary, then a kept turn: the floor is gone and `P` is `S`;
   - a failed floor write logs and leaves the turn running;
-- [r11, Loopy r10 S2] enable with no section in the pin → notice at v2 → disable → cold SDK boundary without session rotation, rendered while disabled → re-enable, with no writes: one notice, because the pin turn changed;
-- [r12, Loopy r11 B1] re-arm by `compaction_gen`, with the store past `P` in each case:
-  - delayed preparation: the turn row is created, preparation takes 20 s, the notice is marked, and the same turn auto-compacts. The next eligible turn notices again. (Loopy's `ended_at` regression is the r11 failure this replaces.)
+- [r11, reviewer B r10 S2] enable with no section in the pin → notice at v2 → disable → cold SDK boundary without session rotation, rendered while disabled → re-enable, with no writes: one notice, because the pin turn changed;
+- [r12, reviewer B r11 B1] re-arm by `compaction_gen`, with the store past `P` in each case:
+  - delayed preparation: the turn row is created, preparation takes 20 s, the notice is marked, and the same turn auto-compacts. The next eligible turn notices again. (reviewer B's `ended_at` regression is the r11 failure this replaces.)
   - a later turn auto-compacts: the next eligible turn notices again;
   - a compaction finalized before the mark (gen already counted in `g`): no re-arm;
   - a queued earlier turn whose compaction is finalized after the mark: re-arms (conservative);
   - a compaction while working memory is disabled, then re-enable in the same pin episode: re-arms;
   - a manual `/compact` also bumps the generation (its pin move resets `N` anyway);
-  - a successful compaction with no metadata (Byte's stamp fix) bumps; a failed one doesn't;
-- [r11, Loopy r10 S1] an external edit followed by a composer steer and an active-turn bot delivery: neither steered message carries the notice, and the next started turn does. An idle-fallback bot delivery that starts a turn carries it;
+  - a successful compaction with no metadata (the pin author's stamp fix) bumps; a failed one doesn't;
+- [r11, reviewer B r10 S1] an external edit followed by a composer steer and an active-turn bot delivery: neither steered message carries the notice, and the next started turn does. An idle-fallback bot delivery that starts a turn carries it;
 - delete: pinned bytes and sha unchanged; one notice; the next boundary's render excludes the item;
 - a born-archived task session resuming its key keeps its pin.
 
@@ -447,7 +449,7 @@ Cache:
 - warm turns with no edits: no `cache_creation` change vs the same bot with the feature off (Claude: token_usage; gpt on the proxy: the bridge's "Responses usage" cache-hit log);
 - a notice turn: no prefix rewrite.
 
-### 17.1 Live test plan (owner, task step 21; Snark checks receipts)
+### 17.1 Live test plan (owner, task step 21; the coordinator checks receipts)
 
 On an idle Claude Code bot the owner picks (never Mira), then repeated on a gpt bot on the claude-code bridge:
 
@@ -458,11 +460,11 @@ On an idle Claude Code bot the owner picks (never Mira), then repeated on a gpt 
 5. Soft-delete an item: the pin sha is unchanged; the next ordinary message has the notice; the next `/new` drops the item.
 6. Compare `cache_creation` across warm turns before and after enabling.
 
-On the Codex bot on the codex bridge: enabling is refused; its prompt is byte-identical to before; the tools refuse.
+On a bot on the codex bridge: enabling is refused; its prompt is byte-identical to before; the tools refuse.
 
 ## 18. Implementation-review claims
 
-Retired with (C), because the mechanisms they constrain no longer exist: W1 (binding adoption), W2 (stall counter), Loopy's r8 null-association note (coldness resolver), the L2 route by `access_path.key` (coldness TTL), and Caid r2 R3/S1/S3/S4 as written for deltas and pins.
+Retired with (C), because the mechanisms they constrain no longer exist: W1 (binding adoption), W2 (stall counter), reviewer B's r8 null-association note (coldness resolver), the L2 route by `access_path.key` (coldness TTL), and reviewer A r2 R3/S1/S3/S4 as written for deltas and pins.
 
 Carried, to be attacked at implementation review:
 
@@ -470,7 +472,7 @@ Carried, to be attacked at implementation review:
 2. The notice threshold and eligibility rules (section 9) as stated, including the unverified re-pin case.
 3. Working memory adds no lock to the pin, finalization or rotate paths beyond the mode write in rotate. The compaction bump and the notice mark are their own session-row transactions (section 13) [r12].
 4. Section bytes are a deterministic function of (items, policy, mode, render time bucket), so two renders with no change in between are identical.
-5. Caid r2 R1 (mode at all five rotate callers) and R2 (backend gate at prompt build).
+5. Reviewer A r2 R1 (mode at all five rotate callers) and R2 (backend gate at prompt build).
 6. [r11] Create idempotency decides from the immutable fingerprint only, and refused, conflicting and replayed requests leave the namespace version and all rows unchanged (5.3, 6.1).
 7. [r11] The conservative `P`/`missing` reading of `pinned_sections` + `candidate_sections`, and the pin-episode binding of `N` (9.2).
 8. [r12] The unverified floor only lowers or flags while the pin is unverified and clears only on a kept turn reading a verified pointer (9.2).
@@ -484,7 +486,7 @@ Carried, to be attacked at implementation review:
 **OI-1. Slice-1 tables.** Items, changes (with the create idempotency record, 5.2) and namespaces. The pin is TASK-1318's; there is no other table.
 Recommendation: as stated.
 
-**OI-R1. TASK-1318 section contract.** Accepted and implemented by Byte; committed in `9e874dc` as `system_prompt_pin.py` `c100554a06b0`. It includes the r11 compaction precedence and `candidate_sections` (8.2). Byte's tests:
+**OI-R1. TASK-1318 section contract.** Accepted and implemented by the pin author; committed in `9e874dc` as `system_prompt_pin.py` `c100554a06b0`. It includes the r11 compaction precedence and `candidate_sections` (8.2). The pin author's tests:
 - `test_pointer_sections_record_what_the_harness_holds`;
 - `test_proven_compaction_beats_a_damaged_pin[missing_row|missing_text|sha_mismatch]`;
 - `test_proven_compaction_beats_fallbacks`;
@@ -493,60 +495,60 @@ Recommendation: as stated.
 - `test_candidate_sections_only_on_unverified_repins`;
 - `test_pending_boundary_sections_surface_only_after_confirm`.
 
-Byte's gate is `make test-snapshot` run `20261023T191033Z-byte-239d87`. Codex is reviewing his staging/confirm delta separately under TASK-1318. This design depends on the contract fields, not on the confirm-trigger details.
+The pin author's gate is `make test-snapshot` run `20261023T191033Z-byte-239d87`. A separate review covers the staging/confirm delta separately under TASK-1318. This design depends on the contract fields, not on the confirm-trigger details.
 Recommendation: closed unless the reviewer objects. The pointer's known limit (two fallbacks in a row) is in 8.2; working memory's own floor covers it (9.2), with no contract change.
 
 **OI-R2. Notice marked at prepare vs repeated until read.** The owner said "a one-line notice on its next user message". Marking at prepare matches that, but a turn that fails before the model sees it loses the notice. The alternative repeats the notice on each eligible turn until the bot calls `working_memory_list` or `working_memory_update` in this session (identity from the capability).
-Recommendation: until read. It closes the lost-notice gap with no receipts. Needs the owner's OK since it can show the line more than once. If adopted [r11, Loopy r10 claim 3]: only a successful full `working_memory_list` in this session acknowledges, and only up to the namespace version that list read (returned by the same `REPEATABLE READ` snapshot). A single-item update acknowledges nothing else. Until the owner rules, marking at prepare is the design, and Loopy accepts it as an explicit best-effort tradeoff.
+Recommendation: until read. It closes the lost-notice gap with no receipts. Needs the owner's OK since it can show the line more than once. If adopted [r11, reviewer B r10 claim 3]: only a successful full `working_memory_list` in this session acknowledges, and only up to the namespace version that list read (returned by the same `REPEATABLE READ` snapshot). A single-item update acknowledges nothing else. Until the owner rules, marking at prepare is the design, and reviewer B accepts it as an explicit best-effort tradeoff.
 
-**OI-R3. Re-arm after auto-compaction** (section 9.4). New in r10; ordered by `ended_at` in r11, which Loopy r11 B1 showed is not a completion time; ordered by the session's `compaction_gen` in r12.
+**OI-R3. Re-arm after auto-compaction** (section 9.4). New in r10; ordered by `ended_at` in r11, which reviewer B r11 B1 showed is not a completion time; ordered by the session's `compaction_gen` in r12.
 Recommendation: as stated.
 
 **OI-R4. Notice on enable mid-session** (section 9.2 case 2). Bound to the pin episode in r11.
 Recommendation: as stated. The alternative is silence until the next boundary.
 
-**OI-R5. Scheduled note.** C5 added an `agents.working_memory.scheduled_note` telling scheduled automation not to act on working memory, because a scheduler turn in a shared session would see the pinned section. Loopy r9 asked for its actual text to be restated: "scheduled automation; do not act on working memory".
-Recommendation: keep it. Scheduler turns get the note in the user suffix, never a working-memory notice. The note is an instruction, not an execution ban (Loopy r10 claim 7). Scheduler identity comes from the validated delivery (9.1).
+**OI-R5. Scheduled note.** C5 added an `agents.working_memory.scheduled_note` telling scheduled automation not to act on working memory, because a scheduler turn in a shared session would see the pinned section. Reviewer B r9 asked for its actual text to be restated: "scheduled automation; do not act on working memory".
+Recommendation: keep it. Scheduler turns get the note in the user suffix, never a working-memory notice. The note is an instruction, not an execution ban (reviewer B r10 claim 7). Scheduler identity comes from the validated delivery (9.1).
 
 **OI-R6. Content-free changes** (section 5.2). This drops r9's `diff` and changes OI-11's purge rules.
 Recommendation: as stated. The UI shows item history only as events. `create_fingerprint` is the only value derived from item text, and a hard delete removes it. What survives is listed in 11.3 [r12].
 
-**OI-R7. Compaction stamp without metadata** (Loopy r9 B2). `send_result.py:120-154` stamps `context_action` only with `postTokens`. Byte took it in TASK-1318: success with no metadata now stamps `context_action=compact`, `outcome=success` only (no tokens, no resident override), with a regression test in `test_claude_context_usage.py`. Live only after a claude-code-bridge restart the owner must approve. Byte also fixed `_manual_compaction_succeeded` to use `is_compact_command` (rejects `/compactness`).
+**OI-R7. Compaction stamp without metadata** (reviewer B r9 B2). `send_result.py:120-154` stamps `context_action` only with `postTokens`. The pin author took it in TASK-1318: success with no metadata now stamps `context_action=compact`, `outcome=success` only (no tokens, no resident override), with a regression test in `test_claude_context_usage.py`. Live only after a claude-code-bridge restart the owner must approve. The pin author also fixed `_manual_compaction_succeeded` to use `is_compact_command` (rejects `/compactness`).
 Recommendation: closed in design; slice 2 rollout waits on that bridge restart.
 
-**OI-R8. Which messages carry the notice** [r11, Loopy r10 S1]. Started turns only: ordinary user messages, and inter-bot deliveries that start a turn (idle fallback). Steered messages (composer steers, active-turn bot deliveries) don't; the notice waits for the next started turn. The owner said "next user message". This narrows it to "next started turn", flagged to Snark to reconcile with the owner. Covering steers would mean a notice hook inside `steer_active_turn`, with trusted target-session resolution and retry-safe marking keyed to the steer request id.
+**OI-R8. Which messages carry the notice** [r11, reviewer B r10 S1]. Started turns only: ordinary user messages, and inter-bot deliveries that start a turn (idle fallback). Steered messages (composer steers, active-turn bot deliveries) don't; the notice waits for the next started turn. The owner said "next user message". This narrows it to "next started turn", flagged to the coordinator to reconcile with the owner. Covering steers would mean a notice hook inside `steer_active_turn`, with trusted target-session resolution and retry-safe marking keyed to the steer request id.
 Recommendation: started turns only. A steer lands in a turn that is already running, and the next started turn is usually minutes away. **Decided by the owner 2026-10-23: started turns only (16).**
 
 ### Owner items
 
 N1, N2 and N3 are decided (section 16). Still the owner's: which bots opt in, the 20-item cap, and when each slice deploys.
 
-## Appendix A.00 r11 review disposition (Loopy cmvlcwe8z004z0mpzd483gogq)
+## Appendix A.00 r11 review disposition (reviewer B cmvlcwe8z004z0mpzd483gogq)
 
 | Finding | Answer | Where |
 |---|---|---|
 | B1 `ended_at` is `created_at + latency`, not completion; slow preparation misses the re-arm | **Fixed.** No clock. A durable per-session `compaction_gen` is bumped by finalization for every recorded compaction success, and the notice records the value it saw in a mark that commits before publish. Tests cover delayed preparation, same-turn and later-turn auto-compaction, a queued earlier turn, and a compaction while disabled. | 5.4, 9.3, 9.4, 13, 17, claim 9 |
 | B2 a free-text idempotency key can equal the objective and survives hard delete | **Fixed.** The key must be a canonical UUID; anything else is refused before writing. The hard-delete promise now lists exactly what survives, and says it is not item text and not computed from it, without claiming a UUID can't be abused deliberately. Not hashed. | 5.2, 6.1, 11.3, 12, 17, claim 10 |
-| S1 double fallback breaks the version bound when S has no version | **Fixed** with Loopy's bounded representation, kept on the working-memory side: `unverified_floor = {min_version, may_be_missing}`, folded across unverified re-pins and cleared on a kept turn under a verified pin. The 8.2 wording is corrected. Byte's pin contract is unchanged. | 5.4, 8.2, 9.2, 17, claim 8 |
+| S1 double fallback breaks the version bound when S has no version | **Fixed** with reviewer B's bounded representation, kept on the working-memory side: `unverified_floor = {min_version, may_be_missing}`, folded across unverified re-pins and cleared on a kept turn under a verified pin. The 8.2 wording is corrected. The pin author's pin contract is unchanged. | 5.4, 8.2, 9.2, 17, claim 8 |
 | Claim 4 note: bootstrap insert on a refused request | **Fixed.** Same transaction; it rolls back on every outcome that isn't a real write. Tested. | 5.3, 17 |
-| r10 S1 acceptance is technical only, not authorization to narrow the owner's wording | **Agreed.** OI-R8 stays with the coordinator; Snark has put it to the owner. r12 stays started-turn-only until the owner rules. | OI-R8 |
+| r10 S1 acceptance is technical only, not authorization to narrow the owner's wording | **Agreed.** OI-R8 stays with the coordinator; the coordinator has put it to the owner. r12 stays started-turn-only until the owner rules. | OI-R8 |
 | Base moved during review | **Rebased** to `9e874dc`, which commits the pin byte-identical to `c100554a06b0`. The other cited files are unchanged since `4883515`. `confirm_session_pin` was the wrong name; it is `SessionPinConfirmer`. | Header, 8.2, C |
 
-## Appendix A.0 r10 review disposition (Loopy cmvlcc925003y0mpz7n763i6e)
+## Appendix A.0 r10 review disposition (reviewer B cmvlcc925003y0mpz7n763i6e)
 
 | Finding | Answer | Where |
 |---|---|---|
-| B1 fallback outranks a proven compaction; carried sections go stale after fallback + auto-compaction | **Fixed.** Byte's precedence change makes COMPACTION over a damaged pin a verified move that stores this render's sections. `candidate_sections` records the fallback render, and working memory reads both conservatively. Byte's tests are listed in OI-R1. Combined-path working-memory tests are in 17. The one residual (two fallbacks in a row) is stated. | 8.2, 9.2, 10.2, 17, OI-R1 |
+| B1 fallback outranks a proven compaction; carried sections go stale after fallback + auto-compaction | **Fixed.** The pin author's precedence change makes COMPACTION over a damaged pin a verified move that stores this render's sections. `candidate_sections` records the fallback render, and working memory reads both conservatively. The pin author's tests are listed in OI-R1. Combined-path working-memory tests are in 17. The one residual (two fallbacks in a row) is stated. | 8.2, 9.2, 10.2, 17, OI-R1 |
 | B2 content-free schema can't tell H1 from H2 | **Fixed.** An immutable `create_fingerprint` on the `create` change row (no new table). Replay compares only against it. Behavior after update, archive, soft delete and hard delete is specified, and the H1/H2 and at-cap tests are listed. | 5.2, 6.1, 11.3, 17 |
 | S1 steer path bypasses the notice | **Fixed by qualification.** Started turns only; steers are explicitly excluded and the notice stays pending. Narrowing the owner's wording is flagged to the coordinator. | 2 (G4), 9.1, OI-R8 |
-| S2 enable marker outlives its pin episode | **Fixed.** Notice state carries `pin_turn_id`; a different confirmed pin resets `N`. Loopy's sequence is a test. | 5.4, 9.2, 9.3, 17 |
-| S3 compaction ordering and N3 wording | **Fixed.** Re-arm is ordered by the compaction turn's `ended_at`, with tests for the same-turn and later-turn cases. N3's default copy now says "the turn after its next manual /compact". The `ended_at` ordering was itself wrong (Loopy r11 B1); r12 replaces it with `compaction_gen`. | 9.4, 16, 17 |
+| S2 enable marker outlives its pin episode | **Fixed.** Notice state carries `pin_turn_id`; a different confirmed pin resets `N`. Reviewer B's sequence is a test. | 5.4, 9.2, 9.3, 17 |
+| S3 compaction ordering and N3 wording | **Fixed.** Re-arm is ordered by the compaction turn's `ended_at`, with tests for the same-turn and later-turn cases. N3's default copy now says "the turn after its next manual /compact". The `ended_at` ordering was itself wrong (reviewer B r11 B1); r12 replaces it with `compaction_gen`. | 9.4, 16, 17 |
 | Claim 3: until-read acknowledgement | **Adopted** as the OI-R2 rule: only a full list acknowledges, up to the version it read. | OI-R2 |
 | Claim 6: refused/no-op transactions must not bump the version | **Fixed.** Lock, decide, then bump. | 5.3 |
 | Claim 7: scheduler identity | **Fixed.** Taken from the validated delivery (`prompt_delivery.py:85`). | 9.1, OI-R5 |
-| Pin drift during review (a522b2d9d3a2 → 62f37a9ebe94) | **Repinned** to `c100554a06b0`, after confirming the final contract with Byte. Staging/confirm is described in 8.2; Codex reviews its internals under TASK-1318. | Header, 8.2, C |
+| Pin drift during review (a522b2d9d3a2 → 62f37a9ebe94) | **Repinned** to `c100554a06b0`, after confirming the final contract with the pin author. Staging/confirm is described in 8.2; a separate review covers its internals under TASK-1318. | Header, 8.2, C |
 
-## Appendix A. r9 review disposition (Loopy cmvl6znx8002a0mpz0sawfyrd)
+## Appendix A. r9 review disposition (reviewer B cmvl6znx8002a0mpz0sawfyrd)
 
 | Finding | r10 |
 |---|---|
@@ -561,7 +563,7 @@ N1, N2 and N3 are decided (section 16). Still the owner's: which bots opt in, th
 | S4 fidelity and liveness | G2 and G4 restated with their limits (2). |
 | S5 citations | Fixed (Appendix C). |
 | OI-1 | Revised (19). |
-| OI-2, 3, 4, 6, 7, 8, 9, 10 | Accepted by Loopy; stated in 4-7. |
+| OI-2, 3, 4, 6, 7, 8, 9, 10 | Accepted by reviewer B; stated in 4-7. |
 | OI-5 | Owner (N2). |
 | OI-11 | Revised by OI-R6 (6.2, 11.3). |
 | OI-12 | Owner (N3), wording updated for TASK-1318's boundaries. |
@@ -576,19 +578,19 @@ N1, N2 and N3 are decided (section 16). Still the owner's: which bots opt in, th
 
 | Finding | r10 |
 |---|---|
-| Caid r1 B1 (cache) | The CLI already freezes the prompt; TASK-1318 pins it; the section changes only at boundaries (1, 8.2). |
-| Caid r1 B2 (initiative) | 4. |
-| Caid r1 B3 (trust) | 6.1, 7. |
-| Caid r1 B4 (resets) | 10.1. |
-| Loopy r2 B1 (ack on queue) | No ack. |
-| Loopy r2 B2 (high-water mark) | Commit-ordered `ns_version` (5.3). |
-| Loopy r2 B3; Loopy r3 B3 (delete vs render) | The owner's B3 ruling (11.1). |
-| Caid r2 R1, R2 | 10.1, 7; implementation claim 5. |
-| Caid r2 R3 (re-pin on session or model change) | TASK-1318 cold start (8.2). |
-| Caid r2 S1-S5 | S1: 10.2. S2: OI-R5. S3: notice appended after the suffix (9.3). S4, S5: cache tests (17). |
-| Loopy r3 B1, B2; Loopy r4 B1, B2 | Delta and coldness mechanisms, retired. |
-| Caid r5 K1-K6, S1-S4; r6 K1', S2'; r7 W1, W2 | Delta, binding, receipt and stall mechanisms, retired (18). K3' (labels stored at write) and K4 (one renderer) survive in 5.1 and 8.1. |
-| Loopy r7 L1, S4/L2 | Coldness predicate, retired. |
+| Reviewer A r1 B1 (cache) | The CLI already freezes the prompt; TASK-1318 pins it; the section changes only at boundaries (1, 8.2). |
+| Reviewer A r1 B2 (initiative) | 4. |
+| Reviewer A r1 B3 (trust) | 6.1, 7. |
+| Reviewer A r1 B4 (resets) | 10.1. |
+| Reviewer B r2 B1 (ack on queue) | No ack. |
+| Reviewer B r2 B2 (high-water mark) | Commit-ordered `ns_version` (5.3). |
+| Reviewer B r2 B3; reviewer B r3 B3 (delete vs render) | The owner's B3 ruling (11.1). |
+| Reviewer A r2 R1, R2 | 10.1, 7; implementation claim 5. |
+| Reviewer A r2 R3 (re-pin on session or model change) | TASK-1318 cold start (8.2). |
+| Reviewer A r2 S1-S5 | S1: 10.2. S2: OI-R5. S3: notice appended after the suffix (9.3). S4, S5: cache tests (17). |
+| Reviewer B r3 B1, B2; reviewer B r4 B1, B2 | Delta and coldness mechanisms, retired. |
+| Reviewer A r5 K1-K6, S1-S4; r6 K1', S2'; r7 W1, W2 | Delta, binding, receipt and stall mechanisms, retired (18). K3' (labels stored at write) and K4 (one renderer) survive in 5.1 and 8.1. |
+| Reviewer B r7 L1, S4/L2 | Coldness predicate, retired. |
 
 ## Appendix C. Citations
 
@@ -615,7 +617,7 @@ At llm-bawt `9e874dc` unless noted. Rows marked at `4883515` are for files that 
 | `core/base.py` 948 lines, `_sec_*` sections | re-verified at `9e874dc` |
 | `service/system_prompt_pin.py` sha256 `c100554a06b0`: `sections`, `candidate_sections`, `PENDING_KEY` (:58), `SessionPinConfirmer` (:300), reason precedence | committed in `9e874dc` (TASK-1318) |
 | `service/turn_stream_worker.py` `apply_session_pin` (:220), `SessionPinConfirmer` (:376), execution clock start (:250) | verified at `9e874dc` |
-| `service/turn_log_schema.py:40-46` `_terminal_ended_at`; `service/turn_stream_finalize.py:112-114` latency, `:397` thread session | verified at `9e874dc` (Loopy r11 B1) |
-| `service/routes/chat.py:158` `steer_active_turn`; `service/inter_bot_dispatcher.py:533` `_steer`, `:682-705` `chat_completion_stream` | verified at `4883515` (Loopy r10 S1) |
+| `service/turn_log_schema.py:40-46` `_terminal_ended_at`; `service/turn_stream_finalize.py:112-114` latency, `:397` thread session | verified at `9e874dc` (reviewer B r11 B1) |
+| `service/routes/chat.py:158` `steer_active_turn`; `service/inter_bot_dispatcher.py:533` `_steer`, `:682-705` `chat_completion_stream` | verified at `4883515` (reviewer B r10 S1) |
 | `service/prompt_delivery.py:85` (`scheduler:` + sha256), `:141` `prefer_steer: False` | verified at `4883515` |
 | `service/turn_logs.py` `ended_at` set at finalization (:408-495) | verified at `4883515` |

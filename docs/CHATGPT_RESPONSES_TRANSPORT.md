@@ -113,7 +113,7 @@ returned to the pool. Structured transport and retry logs record the stall
 phase, timings, attempt, selected transport, fallback, decision, and final
 disposition. Cancellation still propagates without retry.
 
-`tests/test_proxy_progress_recovery.py` reproduces Snark's thinking-only stall
+`tests/test_proxy_progress_recovery.py` reproduces a live bot's thinking-only stall
 on ordinary SSE and WS-to-SSE fallback, checks recovery through the real
 Anthropic streaming parser, preserves tool-result history and native reasoning
 scope, and covers exhaustion, cancellation, and every commitment barrier.
@@ -158,10 +158,10 @@ attestation, or claim of complete Codex runtime parity.
   `/tmp/task864-adapter-smoke.log`. Durable summary lives in TASK-864.
 
 The operator activated the client by restarting the Claude bridge at
-2026-09-08T00:54:52Z. Normal Loopy chat confirmed WebSocket transport, connection
+2026-09-08T00:54:52Z. A normal bot chat confirmed WebSocket transport, connection
 reuse on the next tool hop, and 98.5% prompt-cache hits on that follow-up.
 
-A live Snark turn later exposed a missing bound: request
+A live bot turn later exposed a missing bound: request
 `req_f8987b7a0f684e1a9189e0be5c0deae0` completed many WS/Lite tool hops, then a
 reused `response.create` at 2026-09-08T01:34:58Z emitted zero events. The generic
 three-attempt policy could spend 900 seconds on 300-second waits, so the bridge's

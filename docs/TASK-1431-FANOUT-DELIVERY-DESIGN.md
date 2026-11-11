@@ -1,13 +1,13 @@
 # TASK-1431 design r3: one send path (fan-out, modes, control lane), quiesce pump folded in
 
-Author: Rook. Base: llm-bawt master 4df476c (re-checked at 21858b1; no touched files changed). Status: design,
-r2 after Byte DESIGN r1 REQUEST_CHANGES (review cmvn1wbfe00ee0mlfibt7zsy0). No code yet.
+Author: the coordinator. Base: llm-bawt master 4df476c (re-checked at 21858b1; no touched files changed). Status: design,
+r2 after review DESIGN r1 REQUEST_CHANGES (review cmvn1wbfe00ee0mlfibt7zsy0). No code yet.
 
 r2 changes: B1 → §3 rewritten (absorbing vs successor rows, claim-time member resolution, link carry-forward,
 reference-counted release). S1 → §2 settle reasons from turn evidence. S2 → pin immutable in metadata (§2.2).
 S3 → §2.1 item 3. S4 → §4 step 3 user. S5 → §2.2 pinned-row check. S6 → §2.3 grant checks. S7 → §6 rollback.
 S8 → §3 duplicate check. N1 → §2.1 item 4. N2 → §4 step 3.
-r3 (Byte DESIGN r2 APPROVE_WITH_CHANGES, cmvn20k8j00eq0mlf3rdonwzi): R1 → §3 dead-link re-link + FOR SHARE carry,
+r3 (review DESIGN r2 APPROVE_WITH_CHANGES, cmvn20k8j00eq0mlf3rdonwzi): R1 → §3 dead-link re-link + FOR SHARE carry,
 §4 selector, test (j). Final reviewed design; the S3 implementation review checks R1 and (j).
 Design record. When S1–S3 land, fold the contract into `docs/INTER_BOT_COMMUNICATION.md` and remove this file.
 
@@ -50,7 +50,7 @@ call to it, byte-compatible.
 `targets` is a selector, exactly one of:
 
 ```json
-{"bots": ["byte", "nova"]}      // explicit list (a bare list is accepted as shorthand)
+{"bots": ["helper", "reviewer"]}      // explicit list (a bare list is accepted as shorthand)
 {"all_agents": true}
 {"backends": ["claude-code"]}   // agent_backend
 {"tags": ["reviewers"]}         // bot_tags role tags
@@ -104,7 +104,7 @@ Optional `exclude: [slug...]`, `include_self: false` (default).
     rule today: retry until the turn ends, unconfirmed after the cap.
   - non-steerable backend → settle `not_needed:unsupported_backend` at claim.
 - **Terminal state for "nothing to steer":** `CANCELLED` with `delivery_mode='skipped'` and a machine-readable
-  `last_error='not_needed:<reason>'`. No status CHECK change and no BawtHub lifecycle change (Byte r1 §9 agreed).
+  `last_error='not_needed:<reason>'`. No status CHECK change and no BawtHub lifecycle change (review r1 §9 agreed).
 
 ### 2.1 How the control lane bypasses a held FIFO head without reordering normal traffic
 
@@ -148,7 +148,7 @@ dispatcher's steer bookkeeping only. No requeue/settle path writes `metadata_jso
   - A different turn executing doesn't count: the pin is the only address.
 - The RPC address is `ControlTarget` from `control_target(member)` for the member resolved at claim (§3). A pin
   never falls back to "the bot's current turn".
-- Invariant kept from Byte r1 claim 5: no control-lane enqueue, claim or settle writes or locks a `turn_logs`
+- Invariant kept from review r1 claim 5: no control-lane enqueue, claim or settle writes or locks a `turn_logs`
   row. Turn rows are read only.
 
 ### 2.3 Authorization (one check, not a second path)
@@ -207,7 +207,7 @@ member that needs asking:
    is `lane='control'`, its `run_key` and `target_run` equal the member's, and the row is absorbing (r2 S8).
    Otherwise the member goes `unconfirmed` with `control_error='control_key_collision'` and is not linked.
 
-So the G1→G2 rebuild path Byte traced is closed: if D was settled `control_revoked` (dead) before G2's member
+So the G1→G2 rebuild path the reviewer traced is closed: if D was settled `control_revoked` (dead) before G2's member
 linked, G2's member gets successor `:r1` and the run is asked. If D is still live, G2's member links to D (see
 carry-forward below), and D's claim resolves its authority from G2's member.
 
@@ -258,7 +258,7 @@ Per live member with its run pinned and either (`control_state='pending'` and `c
 (`control_state='steering'` and its linked row dead, per §3; r2 R1a), in one
 transaction:
 1. `lock_target(bot)`, then the member `FOR UPDATE SKIP LOCKED`, re-validated by `LIVE_MEMBER_SQL`. Turn rows
-   are read only, never locked, preserving the Caid df30f61 rule against bind deadlock.
+   are read only, never locked, preserving the df30f61 review rule against bind deadlock.
 2. Member-local decisions stay where they are: revoked, turn gone or ended → `not_needed`; caller's own turn →
    `self`; non-steerable pinned backend → `unsupported`; unaddressable → `unconfirmed`; not pinned → skip,
    retried next pass.

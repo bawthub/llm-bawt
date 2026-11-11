@@ -2,7 +2,7 @@
 
 ## State (2026-10-13 UTC)
 
-**Installed, published, activated and verified through Snark's actual BawtHub
+**Installed, published, activated and verified through a bot's actual BawtHub
 turn.** One separately approved Claude bridge restart completed. No production
 frontend release, bot profile change, or session reset was performed.
 
@@ -11,7 +11,7 @@ Activation job `9f468cf8d8dd47b9ae4b5763c41b00cf` succeeded, exit 0, at
 `mcp-appr-622ede840902c121c4cbfb93603419d50ee2a114`.
 Post-restart bridge health returned `{"redis": true}`. REA deferred tools were
 discovered and `mcp__rea__analyze_javascript_application` called directly from
-Snark's resumed chat with the fixture path and `detail: "summary"`. It returned
+That bot's resumed chat with the fixture path and `detail: "summary"`. It returned
 summary Evidence `ev_a61a0a90412a631dd7dfa79696478de0f17cc404bcce0d9c00790a10831a8d4c`
 and the same complete parent Evidence recorded below. Two JavaScript files
 parsed, zero parse failures; fixture bytes still match commit `becfb83`, and no
@@ -27,8 +27,8 @@ Only `mcpServers.rea` was added; all other settings compared equal before/after.
 Mode-0600 backup:
 `settings-before-rea-20261013T002043940808Z.json` under the persistent REA root's
 `backups/` directory.
-Settings remain mode 0600 and `ENABLE_TOOL_SEARCH=true`. Al and Loopy confirmed
-safe boundaries; Gavel approved the TASK-1060-only commit split. Their unrelated
+Settings remain mode 0600 and `ENABLE_TOOL_SEARCH=true`. Two reviewers confirmed
+safe boundaries; The arbiter approved the TASK-1060-only commit split. Their unrelated
 TASK-1066/1067 changes remain untouched and uncommitted by this task.
 
 REA is an MCP extension, not a BawtHub frontend dependency. Official upstream:
@@ -99,7 +99,7 @@ Bridge startup caches MCP registrations. Settings changes require one
 **separately authorized** Claude bridge restart through the enabled ops action.
 No Redis/whole-stack restart, dependency rebuild, or frontend release is needed.
 Save the task handoff before dispatch; verify terminal job state and health after
-reconnection, then discover and invoke REA from Snark's actual BawtHub turn. A
+reconnection, then discover and invoke REA from a bot's actual BawtHub turn. A
 standalone MCP smoke does not prove the bridge is active. This registration is
 bridge-wide, not a per-bot access-control mechanism; no protected bot is used to
 verify it.

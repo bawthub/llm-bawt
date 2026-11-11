@@ -18,7 +18,7 @@ A stopped container preserves its writable layer as the simplest rollback;
 
 Rollback is an operator-controlled maintenance action:
 
-1. Keep the Codex bot on its working proxy route until the native bridge is
+1. Keep existing codex-model bots on their working proxy route until the native bridge is
    healthy. Preserve any in-flight turn; migrate only between turns.
 2. Restore the `codex-bridge` service and dev overlay from the recorded
    pre-retirement revision, leaving unrelated service changes intact. Reuse the
@@ -66,7 +66,7 @@ The bridge is OAuth-only. On startup it:
 
 **The host `~/.codex/auth.json` is NOT the deployed bridge credential source.**
 TASK-636 removed its bind mount. A host CLI can fail with stale credentials
-while native Codex bots and the OpenAI proxy both work normally.
+while native codex-harness bots and the OpenAI proxy both work normally.
 
 Before diagnosing authentication, inspect the actual bridge's CODEX_HOME,
 CODEX_AUTH_PATH, executable and mounts without printing tokens. Test through

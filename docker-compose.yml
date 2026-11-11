@@ -525,7 +525,7 @@ services:
     #     each iteration. Agents can still call browser_snapshot explicitly
     #     when they actually want the tree.
     #   --viewport-size=1280x720 — caps screenshot dimensions (~2,500 image
-    #     tokens vs ~10K for retina-default). Loopy's playwright work was
+    #     tokens vs ~10K for retina-default). One bot's playwright work was
     #     vaporizing budget in 2hr windows before these were set; see 2026-05-13
     #     chat + TASK-218 (lifecycle resilience).
     command: ["--headless", "--no-sandbox", "--isolated", "--port", "8931", "--host", "0.0.0.0", "--allowed-hosts", "*", "--snapshot-mode", "none", "--viewport-size", "1280x720"]

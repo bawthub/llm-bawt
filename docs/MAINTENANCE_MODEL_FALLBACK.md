@@ -27,7 +27,7 @@ Every call that goes through `_get_background_client(job=…)` / `MonitoredClien
 whether the job resolved a job-specific model (e.g. `profile_maintenance_model`) or
 `maintenance_model`. Conversations with bots are out of scope.
 
-**Explicit request models are excluded** (Loopy should-fix): when a caller names a model
+**Explicit request models are excluded** (review should-fix): when a caller names a model
 (`request.model` on `/v1/llm/complete`, or a bot/job override passed by the caller), the
 backup is never used; a `spending_limit` fails visibly with the slice A alert. The backup
 only replaces models resolved from settings (job-specific setting or `maintenance_model`),
@@ -66,17 +66,17 @@ successful probe. Every call reads the record: before `until` it goes to the bac
 after `until` it must win the probe claim (`SET NX` on
 `maintenance:fallback:<provider>:probe`, TTL = probe call timeout + margin, value = token) to touch the
 primary, and every loser still goes to the backup. So no call reaches the primary after
-cooldown except the one probe, however late the first post-cooldown call arrives (Loopy
+cooldown except the one probe, however late the first post-cooldown call arrives (review
 B1). A crashed probe's claim expires and the next call re-claims.
 
 Writes: the first exhaustion creates the record with `SET NX` (switched edge). After
 that, only the current probe holder may change the record, fenced by a **probe token**
-(Codex r1 cmvtitngc00xl0mld0w33cejg): `claim_probe` writes a fresh random token as the
+(review r1 cmvtitngc00xl0mld0w33cejg): `claim_probe` writes a fresh random token as the
 probe key's value (`SET NX EX`) and returns it. Both edge scripts take
 `(exhausted_since, token)` and act only if the record's `exhausted_since` matches **and**
 `GET probe == token`; otherwise they are a no-op:
 - re-arm (probe hit `spending_limit`): set new `until`, delete the probe key. The cooldown
-  always resets (Loopy r2 cmvtiaov600x80mldsivzmelm).
+  always resets (review r2 cmvtiaov600x80mldsivzmelm).
 - clear (probe succeeded): delete record and probe key, write the episode (Notifications).
 A probe whose lease expired has lost its token (expired, or replaced by a newer
 holder's, or deleted by a re-arm), so a late success or late spending_limit can never
@@ -97,7 +97,7 @@ The bell is **pull-based** (slice A): BawtHub polls `/v1/health/maintenance` and
 every row whose status is not `ok` (`systemHealth.ts` maps non-ok children to a degraded
 parent; `ok` rows never reach the bell). The bell identifies an incident by the parent's
 `since`/status plus the sorted non-ok child `name:status` set (`systemHealthView.ts`
-`incidentId`), so each edge must change that set to raise a new notice (Codex r2
+`incidentId`), so each edge must change that set to raise a new notice (review r2
 cmvtiwyhq00xo0mldhhflujii). Nothing is pushed, so there is no send that can fail and no
 outbox. Notices are non-ok rows rendered on every poll from durable Redis state, at most
 one row per provider, under a name that differs per state:
@@ -118,7 +118,7 @@ one row per provider, under a name that differs per state:
 No per-call notifications. A record wins over an episode key for the same provider (one
 row; a re-exhaustion shows as switched, and its later clear merges into the episode).
 
-Why notices can't be lost (Codex r1 cmvtitngc00xm0mldzj0t1909, Loopy B3
+Why notices can't be lost (review r1 cmvtitngc00xm0mldzj0t1909, review B3
 cmvtiaov600x90mld616rhkvl): every switch creates a record with no TTL, and the only way
 a record goes away is the clear script, which atomically writes the episode. So from the
 first switch until 24h after the last recovery, Redis always holds a key that renders a
@@ -130,10 +130,10 @@ Each row carries `episode` = its edge number: a per-provider Redis counter
 recovery (`clear`) each `INCR` inside their atomic script, so it never repeats. If
 Redis drops the counter (allkeys-lru eviction, restart without persistence), the next
 edge re-seeds it from Redis `TIME` in microseconds before incrementing, so it still only moves
-forward and never reuses an id already dismissed (Byte impl r1).
-BawtHub's incident id includes each non-ok child's `name:status:episode` (Loopy impl r1
+forward and never reuses an id already dismissed (review impl r1).
+BawtHub's incident id includes each non-ok child's `name:status:episode` (review impl r1
 cmvtjiant00xs0mld9xzrrfjb: the row name alone made a re-switch equal to the first switch;
-Loopy impl r2 cmvtjw7vl00xw0mldrnlnaq64: a seconds-resolution edge time let switch,
+Review impl r2 cmvtjw7vl00xw0mldrnlnaq64: a seconds-resolution edge time let switch,
 recover and re-switch collide inside one second). A wall-clock time can't separate edges
 that share a tick; the counter can. Every edge gets a new id, even after
 the previous notice was dismissed; unchanged state keeps the same id, so no repeat. Reason
@@ -153,7 +153,7 @@ Each call records which model actually served it: `MaintenanceHealth.record_succ
 record_failure` already take `model`/`provider`; the backup path passes the backup's,
 plus `via_fallback=True`. Turn/usage logs for utility calls record the served model.
 
-The served model is only known after the call (Loopy B2). Today
+The served model is only known after the call (review B2). Today
 `_get_background_client` returns the primary alias up front and the utility and
 summarization consumers report it. Change: `MonitoredClient` exposes
 `last_served_model` / `last_served_provider` / `last_via_fallback`, set per call, and

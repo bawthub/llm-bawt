@@ -429,7 +429,7 @@ Authored regressions cover concurrent reservation, interrupted consumers and
 dead lock holders, rollback-orphan and commit-acknowledgment uncertainty,
 nonterminal/terminal journal loss, fresh-row denial, exact nonce/intent binding,
 unsafe storage, GET-only recovery and no lifecycle writes. Focused execution
-requires Gavel's actual supported test custody; authored tests alone are not a
+requires the arbiter's actual supported test custody; authored tests alone are not a
 passing receipt. Runtime packaging qualification, production dispatch/worker
 capacity, durable retirement/attempt-two fencing, receipt/callback attachment
 and active-attempt trusted host publication remain unfinished. No packaging

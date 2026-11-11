@@ -85,6 +85,6 @@ window. Browser state is not persisted as a competing lifecycle source.
 ## Activation and incident provenance
 
 Backend/bridge processes must reload the source to activate this contract. No
-schema migration is required. The original Caid incident's retained access logs
+schema migration is required. The original incident's retained access logs
 identify a proxy-originated HTTP abort, not a proven human Stop action. Provenance
 added here is prospective; it cannot reconstruct that missing historical actor.

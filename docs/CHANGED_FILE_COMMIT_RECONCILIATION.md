@@ -65,7 +65,7 @@ the conversation query; all visible turn cards share its evidence.
 
 ## Verification receipt
 
-- Real incident: 11 stored Snark snapshots from session
+- Real incident: 11 stored snapshots of one bot from session
   `5ff520ee-d6fb-41d2-ba68-fff13605a29a`, independently checked against mounted Git.
   Five frontend files match `4ded2dae3caaa20f63cdb2867062f7c6e570546f`; six backend
   files match `e507a58a4d4514514cbf7591c2d5320f8a0693a6`. Python reconciliation with
