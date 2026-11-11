@@ -160,6 +160,7 @@ def test_turn_log_orchestration_does_not_repeat_nested_schema(monkeypatch) -> No
         tool_call_store,
         turn_log_schema,
         turn_logs,
+        worker_lifecycle_store,
     )
 
     engine = FakeEngine()
@@ -191,6 +192,7 @@ def test_turn_log_orchestration_does_not_repeat_nested_schema(monkeypatch) -> No
         turn_logs.TurnLogStore,
         tool_call_store.ToolCallStore,
         llm_response_store.LlmResponseStore,
+        worker_lifecycle_store.WorkerLifecycleStore,
         changed_files_store.ChangedFilesStore,
     ):
         store_type._schema_guard.reset_for_tests()
@@ -203,6 +205,7 @@ def test_turn_log_orchestration_does_not_repeat_nested_schema(monkeypatch) -> No
     assert create_calls == [
         ("tool_call_records", "tool_call_result_payloads"),
         ("llm_response_records",),
+        ("worker_lifecycle_records",),
         ("turn_changed_files", "turn_diff_payloads"),
         ("turn_logs",),
         ("session_resumption_receipts",),

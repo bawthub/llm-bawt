@@ -350,6 +350,7 @@ class TurnLogDetail(BaseModel):
     tool_calls: list[dict[str, Any]] = Field(default_factory=list)
     # TASK-2110: per-LLM-response records (ordinal derived per host parent).
     responses: list[dict[str, Any]] = Field(default_factory=list)
+    workers: list[dict[str, Any]] = Field(default_factory=list)  # TASK-2169
     error_text: str | None = None
     animation: str | None = None
     agent_session_key: str | None = None
@@ -415,6 +416,8 @@ class ToolCallEvent(BaseModel):
     tool_calls: list[dict[str, Any]] = Field(default_factory=list)
     # TASK-2110: per-LLM-response records (ordinal derived per host parent).
     responses: list[dict[str, Any]] = Field(default_factory=list)
+    # TASK-2169: actual sub-agent workers (task identity, status, usage).
+    workers: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ToolCallEventsResponse(BaseModel):

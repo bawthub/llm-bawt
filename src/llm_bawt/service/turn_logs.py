@@ -88,6 +88,8 @@ class TurnLogStore:
         ToolCallStore(self.engine).ensure_schema()
         from .llm_response_store import LlmResponseStore
         LlmResponseStore(self.engine).ensure_schema()
+        from .worker_lifecycle_store import WorkerLifecycleStore
+        WorkerLifecycleStore(self.engine).ensure_schema()
         from .changed_files_store import ChangedFilesStore
         ChangedFilesStore(self.engine).ensure_schema()
 

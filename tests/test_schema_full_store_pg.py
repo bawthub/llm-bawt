@@ -42,9 +42,10 @@ def test_pristine_full_store_catalog(full_store_db, tmp_path):
     # + TASK-1900's bot_slug_aliases (BotProfileStore bootstraps it).
     # + TASK-2110's llm_response_records (LlmResponseStore bootstraps it).
     # + TASK-1538's utility_usage (TurnLogStore bootstraps it).
-    assert len(relations) == 64, sorted(relations)
+    # + TASK-2169's worker_lifecycle_records (WorkerLifecycleStore bootstraps it).
+    assert len(relations) == 65, sorted(relations)
     assert {"system_events", "system_gates", "gate_members", "gate_escalations", "bot_tag_catalog", "bot_profile_tags",
-            "api_balance_ledger", "api_balances", "llm_response_records", "utility_usage",
+            "api_balance_ledger", "api_balances", "llm_response_records", "worker_lifecycle_records", "utility_usage",
             "bot_profile_changes", "bot_slug_aliases", "approval_approver_fanout", "session_resumption_receipts"} <= {key.split(".")[-1] for key in relations}
     assert not any("schema_full_fixture" in key for _, key in catalog)
     assert catalog_tool["compare"](catalog, catalog) == []

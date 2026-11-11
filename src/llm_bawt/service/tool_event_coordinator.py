@@ -12,6 +12,7 @@ from agent_bridge.tool_results import payload_from_event
 from ..media.serializers import attachment_refs
 from .llm_response_store import LlmResponseStore
 from .tool_call_store import ToolCallStore
+from .worker_lifecycle_store import WorkerLifecycleStore
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,26 @@ class ToolEventCoordinator:
     def __init__(self, engine) -> None:
         self.store = ToolCallStore(engine)
         self.responses = LlmResponseStore(engine)
+        self.workers = WorkerLifecycleStore(engine)
+
+    def worker(self, event: dict[str, Any]) -> dict[str, Any]:
+        """Persist one sub-agent lifecycle event (TASK-2169).
+
+        Publishes the raw event plus the resolved spawning ``tool_use_id``, so
+        status frames that lack it still reach the right worker live. A
+        persistence failure never drops the live event.
+        """
+        try:
+            record = self.workers.record(event)
+        except Exception:
+            logger.exception("Worker lifecycle upsert failed turn=%s", event.get("turn_id"))
+            return event
+        if record is None:
+            return event
+        public = dict(event)
+        if not public.get("tool_use_id") and record.get("tool_use_id"):
+            public["tool_use_id"] = record["tool_use_id"]
+        return public
 
     def start(self, event: dict[str, Any]) -> dict[str, Any]:
         record_id = self.store.save_start(

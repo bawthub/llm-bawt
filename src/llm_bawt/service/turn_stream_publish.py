@@ -77,6 +77,9 @@ class TurnStreamPublishMixin:
             event_dict = _tool_event_coordinator.response(event_dict)
             if event_dict is None:
                 return None
+        elif event_dict.get("_type") in ("subagent_started", "subagent_progress", "subagent_done"):
+            # TASK-2169: worker lifecycle is durable, not Redis-only.
+            event_dict = _tool_event_coordinator.worker(event_dict)
         if not _redis_sub:
             return None
         try:

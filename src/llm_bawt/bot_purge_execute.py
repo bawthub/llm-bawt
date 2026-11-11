@@ -102,6 +102,8 @@ def delete_scoped_rows(conn, slug: str, prompt_purge) -> dict[str, int]:
     run("tool_call_records", "DELETE FROM tool_call_records WHERE bot_id=:s")
     if "llm_response_records" in prompt_purge.tables:
         run("llm_response_records", "DELETE FROM llm_response_records WHERE bot_id=:s")
+    if "worker_lifecycle_records" in prompt_purge.tables:
+        run("worker_lifecycle_records", "DELETE FROM worker_lifecycle_records WHERE bot_id=:s")
     run("turn_logs", "DELETE FROM turn_logs WHERE bot_id=:s")
     return deleted
 

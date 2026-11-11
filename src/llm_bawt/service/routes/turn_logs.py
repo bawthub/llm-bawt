@@ -22,6 +22,7 @@ from ..schemas import (
 )
 from ..tool_call_events import extract_trigger_message, message_id_matches, parse_message_filters
 from ..llm_response_store import LlmResponseStore, serialize_responses
+from ..worker_lifecycle_store import WorkerLifecycleStore
 from ..tool_call_store import ToolCallRecord, ToolCallStore
 from ..turn_logs import TurnLogStore
 
@@ -139,6 +140,17 @@ def _turn_responses(store: TurnLogStore, turns: list) -> dict[str, list[dict]]:
         turn_id: serialize_responses(records, turn_ended=ended.get(turn_id, False))
         for turn_id, records in rows.items()
     }
+
+
+def _turn_workers(store: TurnLogStore, turns: list) -> dict[str, list[dict]]:
+    """TASK-2169: persisted worker lifecycle for turns, keyed by turn id. Never raises."""
+    turn_ids = [t.id for t in turns if getattr(t, "id", None)]
+    if store.engine is None or not turn_ids:
+        return {}
+    try:
+        return WorkerLifecycleStore(store.engine).for_turns(turn_ids)
+    except Exception:
+        return {}
 
 
 def _enrich_call_attachments(calls: list[dict]) -> None:
@@ -654,6 +666,7 @@ def get_turn_log(turn_id: str):
         reasoning=getattr(row, "reasoning", None),
         tool_calls=parsed_tools,
         responses=_turn_responses(store, [row]).get(row.id, []),
+        workers=_turn_workers(store, [row]).get(row.id, []),
         error_text=row.error_text,
         animation=getattr(row, "animation", None),
         agent_session_key=getattr(row, "agent_session_key", None),
@@ -736,6 +749,7 @@ def get_tool_call_events(
             pass
 
     responses_by_turn = _turn_responses(store, rows)
+    workers_by_turn = _turn_workers(store, rows)
     events: list[ToolCallEvent] = []
     for row in rows:
         # TASK-364: tool cards render straight from the canonical
@@ -778,6 +792,7 @@ def get_tool_call_events(
                 tool_call_count=len(parsed_tools),
                 tool_calls=parsed_tools,
                 responses=responses_by_turn.get(row.id, []),
+                workers=workers_by_turn.get(row.id, []),
             )
         )
         if len(events) >= limit:
