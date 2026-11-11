@@ -53,8 +53,8 @@ returns the original row, and a waited send first looks the key up
 interrupted mid-wait (or timed out: `error="timeout"`, `in_flight=true`) retries
 with the SAME key in either mode and gets `duplicate=true`, never a second
 target turn. Before TASK-1015 the waited path posted a non-durable
-`/v1/chat/completions` that ignored the key; the 2026-10-04 Al → Caid
-`TASK-1013:START` retry created a second Caid turn that way.
+`/v1/chat/completions` that ignored the key; the 2026-10-04 sender → worker
+`TASK-1013:START` retry created a second worker turn that way.
 
 ## Durable steer-or-safe-deliver contract
 
@@ -316,7 +316,7 @@ REST context controls:
 
 The event-driven project workflow is explicit:
 
-1. Manager (for example Snark) delegates work with default asynchronous
+1. Manager delegates work with default asynchronous
    `bots_send_message`; the durable delivery returns immediately and the manager
    does not block waiting for completion.
 2. Worker updates task steps and persists the final READY/BLOCKED receipt in the
@@ -331,12 +331,12 @@ The event-driven project workflow is explicit:
 5. The manager reloads task/dependency state, verifies the worker result, and
    releases the next safe task. Polling is fallback diagnostics, not scheduling.
 
-Example worker callback:
+Example worker callback (substitute configured bot IDs for these illustrative names):
 
 ```python
 bots_send_message(
-    target_bot_id="snark",
-    sender_bot_id="loopy",
+    target_bot_id="example-manager",
+    sender_bot_id="example-worker",
     message="TASK-700 READY. Review the task response and release the next dependency-safe task.",
     task_id="TASK-700",
     project_id="project-id",

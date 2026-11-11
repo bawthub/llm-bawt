@@ -11,7 +11,7 @@ things that were previously conflated:
 
 ## Measured deployment facts (2026-08-02)
 
-- Snark, Al, Loopy, and Codex resolve to `openai_chatgpt/gpt-5.6-sol`.
+- Four observed bot profiles resolved to `openai_chatgpt/gpt-5.6-sol`.
 - Their normalized catalog endpoint resolves to a **372,000-token** context
   window. The deployment does not currently configure one million tokens.
 - The historical failing turn (`turn-3e3129ef3361450e84c9ed98625c8d4b`)
@@ -101,7 +101,7 @@ Manual idle reset:
 
 ```http
 POST /v1/agent-context/reset
-{"bot_id":"snark","session_policy":"reset_retain_history","reason":"large task"}
+{"bot_id":"example-bot","session_policy":"reset_retain_history","reason":"large task"}
 ```
 
 MCP: `agent_context_reset(bot_id, session_policy, reason, user_id?)`.

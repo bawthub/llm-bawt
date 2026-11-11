@@ -1,8 +1,8 @@
 # TASK-1149 — source schema convergence and bounded operational PLAN
 
 **PLAN ONLY: do not paste/run this document as a script.** Nothing here is an
-approval for operational DDL, vector upgrade, deployment or restart. Snark
-owns operational coordination. Use `pgq` for all live SQL; never use inline
+approval for operational DDL, vector upgrade, deployment or restart. The assigned
+coordinator owns operational coordination. Use `pgq` for all live SQL; never use inline
 credentials.
 
 ## Reference and invariant
@@ -15,7 +15,7 @@ bots or protected partitions into the reference. Run the private gate
 `make test-pg-acceptance`; its synthetic `test_schema_convergence_pg.py`
 proves both FKs and their delete paths. The reference must include exactly the
 source-owned shared tables, no test fixture partitions in the final comparison.
-Snark already retired both July backup tables under Nick's exact authorization;
+The coordinator already retired both July backup tables under the operator's exact authorization;
 no further top-level table-drop work remains in this plan.
 
 `scripts/schema_catalog.py capture --mode test --expected-db <name> --out
@@ -34,11 +34,11 @@ never infer a bot from a truncated partition name. This tool is an inventory,
 **not** a dependency/approval oracle for destructive DDL.
 
 The pre-cleanup and post-partition-cleanup catalogs are historical evidence.
-Snark's post-backup-table-retirement catalog
+The coordinator's post-backup-table-retirement catalog
 `TASK-1149-phase1/resume-20261018T1653/post-backup-table-retirement/operational-catalog.jsonl`
 has 1,800 records and **49 live top-level tables**, matching the old reference
 set with zero missing/extra. It is not a fresh reference against this new
-source; regenerate both captures before migration. Snark's current receipts
+source; regenerate both captures before migration. The coordinator's current receipts
 cover 327/327 partition outcomes and the exact guarded retirement of both
 unused backup tables. Do **not** repeat either action for schema drift.
 
@@ -92,7 +92,7 @@ The 49 shared relation names match. Do not misreport 1,386 as all actionable
 DDL, or claim zero live drift from the synthetic result. A fresh operational
 read-only capture and narrow runtime/environment classification remain required.
 
-For operational execution Snark must produce the corresponding reviewed,
+For operational execution the coordinator must produce the corresponding reviewed,
 identity-fenced SQL, validate the current owner/ACL/dependencies and existing
 index definitions against a **fresh** live capture, prove full-table NULL
 preflights, and decide backup/restore/quiet-window and vector gates. The test
@@ -226,8 +226,8 @@ preflight of dependent rows; no implicit startup FK repair.
 
 ## Completed retirement and remaining acceptance
 
-Snark independently verified that the two July backup tables had no
-application references/inheritance/incoming FKs/triggers, and Nick authorized
+The coordinator independently verified that the two July backup tables had no
+application references/inheritance/incoming FKs/triggers, and the operator authorized
 exact guarded retirement. Receipt `cmve31tvf00340mp4wf2r2c55` records an
 atomic `DROP RESTRICT` of **both** and post-catalog proof of only those two
 relations plus their 34 columns disappearing. Neither table is a remaining

@@ -130,7 +130,7 @@ in preflight: an older worker would deploy without the guard.
 
 ## Activation order
 
-Each step needs Nick's authorization; none is a catalog action. **Do not touch
+Each step needs the operator's authorization; none is a catalog action. **Do not touch
 bridges or Redis.**
 
 1. Make sure every variable the Compose files interpolate is set in the project
@@ -238,7 +238,7 @@ is forked. Seed order: app, Crawl4AI, codex bridge, claude-code bridge.
   own card still shows FIRST RUN after a plan has run.
 - The plan ships disabled, critical and with quiesce off. It KILLS every agent
   session (the claude-code bridge hosts the agents) and cuts in-flight chat
-  turns, so it runs only in a window Nick schedules.
+  turns, so it runs only in a window the operator schedules.
 
 ### Worker labels
 
@@ -259,15 +259,15 @@ rows need a rebuilt, repinned worker before they can run.
 
 ### Activation
 
-Each step needs Nick's authorization.
+Each step needs the operator's authorization.
 
 1. Rebuild and repin the ops worker (as in the activation order above), then
    recreate app and ops-reconciler.
 2. Insert the target rows and the plan row disabled (seeds never update existing
    rows), and enable each target row. A disabled target refuses the plan.
 3. Install and preview the plan's `require_approval` policy, then enable the plan.
-4. In Nick's window, run it through `ops_run`, with `accept_loss` only for
-   losses Nick has accepted by name.
+4. In the operator's window, run it through `ops_run`, with `accept_loss` only for
+   losses the operator has accepted by name.
 
 ## Dev frontend kind (TASK-1649)
 
@@ -306,7 +306,7 @@ pulls, and it binds the image by ID, never by tag.
   carries `dev-config-reconcile`, recreate app and ops-reconciler, insert the
   row, enable it, then `ops_run`. The generic `ops_run` approval policy gates
   the run. The target is dev only, so the approver is the coordinating arbiter,
-  not Nick.
+  not the operator.
 
 ## GPU service kind (TASK-1844)
 

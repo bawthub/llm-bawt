@@ -311,7 +311,7 @@ the configured worker image, and a quiesce operation is refused with
 hold opens. Operations without quiesce are unaffected.
 
 **Rollout step, before `quiesce_enabled` is set on any operation.** This needs
-Nick's approval; it is not an ops catalog action:
+the operator's approval; it is not an ops catalog action:
 
 1. Build `docker/Dockerfile.ops-worker` from the commit that has the fence, as
    in the setup checklist below, and record its immutable image ID or digest.

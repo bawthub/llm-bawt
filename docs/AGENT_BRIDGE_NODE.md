@@ -81,7 +81,7 @@ recreates: report that remaining rollout scope rather than claiming every bridge
 is upgraded. No git commit/push is implied by image activation.
 
 After reconnecting, inspect the same target, confirm its image ID, health,
-Node/npm/Corepack/pnpm versions as `bridge`, and run a normal Snark turn. Check
+Node/npm/Corepack/pnpm versions as `bridge`, and run a normal authorized test-bot turn. Check
 for startup/import failures. Compare other bridge container IDs/start times with
 the baseline. TASK-1060 remains gated until the live bridge verification passes.
 
