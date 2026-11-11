@@ -627,7 +627,10 @@ def test_no_source_creates_a_group_on_a_ui_event_stream():
     from pathlib import Path
 
     allowed_streams = {"COMMANDS_STREAM", "HISTORY_STREAM"}
-    guarded_helpers = {("subscriber.py", "ensure_consumer_group")}
+    guarded_helpers = {
+        ("subscriber.py", "ensure_consumer_group"),
+        ("consumer_group.py", "ensure_group"),  # TASK-684 recreation; refuses ui:*
+    }
     unexpected = []
     seen = 0
     for path in sorted(Path(__file__).resolve().parents[1].joinpath("src").rglob("*.py")):

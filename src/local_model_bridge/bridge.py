@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from agent_bridge.abort_rpc import answer_abort, cancel_request_handler
+from agent_bridge.consumer_group import GroupReader
 from agent_bridge.run_status import RUN_STATUS_METHOD, answer_run_status, queue_run_state
 from agent_bridge.run_contract import TeardownReport
 from agent_bridge.send_admission import RunOutcome, admit_send
@@ -141,14 +142,12 @@ class LocalModelBridge:
         await async_redis.ping()
         self._redis = async_redis
 
-        try:
-            # id="$" so a brand-new group skips historical commands (authored
-            # before this bridge existed / targeting other backends).
-            await async_redis.xgroup_create(
-                COMMANDS_STREAM, CONSUMER_GROUP, id="$", mkstream=True,
-            )
-        except Exception:
-            pass
+        # id="$" so a brand-new group skips historical commands (authored
+        # before this bridge existed / targeting other backends).
+        reader = GroupReader(
+            async_redis, CONSUMER_GROUP, CONSUMER_NAME, [COMMANDS_STREAM], initial_id="$",
+        )
+        await reader.ensure()
 
         logger.info(
             "Command listener started on %s (group=%s)",
@@ -157,13 +156,7 @@ class LocalModelBridge:
 
         while True:
             try:
-                results = await async_redis.xreadgroup(
-                    CONSUMER_GROUP,
-                    CONSUMER_NAME,
-                    {COMMANDS_STREAM: ">"},
-                    count=1,
-                    block=5000,
-                )
+                results = await reader.read(count=1, block=5000)
                 if not results:
                     continue
 

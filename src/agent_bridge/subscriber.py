@@ -15,6 +15,7 @@ import redis.asyncio as aioredis
 from redis.asyncio import BlockingConnectionPool
 
 from .command_publisher import CommandPublisherMixin
+from .consumer_group import GroupReader
 from .houses import follow_up_stream
 from .events import AgentEvent, AgentEventKind
 from .run_contract import DONE_FIELD, RunContractError, RunTerminal, run_terminal_key
@@ -856,23 +857,14 @@ class RedisSubscriber(CommandPublisherMixin):
 
         Uses consumer groups so multiple main-app instances can share the load.
         """
-        # Ensure consumer group exists
-        try:
-            await self._redis.xgroup_create(
-                HISTORY_STREAM, consumer_group, id="0", mkstream=True
-            )
-        except Exception:
-            pass  # group already exists
+        reader = GroupReader(
+            self._redis, consumer_group, consumer_name, [HISTORY_STREAM], initial_id="0",
+        )
+        await reader.ensure()
 
         while True:
             try:
-                results = await self._redis.xreadgroup(
-                    consumer_group,
-                    consumer_name,
-                    {HISTORY_STREAM: ">"},
-                    count=10,
-                    block=5000,
-                )
+                results = await reader.read(count=10, block=5000)
                 if not results:
                     continue
 

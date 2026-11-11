@@ -15,6 +15,7 @@ from typing import Any
 
 import httpx
 from agent_bridge.abort_rpc import answer_abort
+from agent_bridge.consumer_group import GroupReader
 from agent_bridge.houses import HouseSlot, gate_send, house_from_env, is_recycle, start_recycle
 from agent_bridge.user_scope import session_user
 from agent_bridge.run_status import RUN_STATUS_METHOD, answer_run_status, queue_run_state
@@ -73,17 +74,15 @@ class CodexCommandMixin(CodexAppServerMixin):
         await async_redis.ping()
         self._redis = async_redis
 
-        try:
-            # id="$" so a brand-new codex-bridge group skips historical
-            # RPCs (which were authored before the codex bridge existed
-            # and target other backends). Once the group is established,
-            # this id is no longer consulted — xreadgroup uses the
-            # group's last delivered id, so restart-on-codex-RPC works.
-            await async_redis.xgroup_create(
-                COMMANDS_STREAM, CONSUMER_GROUP, id="$", mkstream=True,
-            )
-        except Exception:
-            pass
+        # id="$" so a brand-new codex-bridge group skips historical
+        # RPCs (which were authored before the codex bridge existed
+        # and target other backends). Once the group is established,
+        # this id is no longer consulted — xreadgroup uses the
+        # group's last delivered id, so restart-on-codex-RPC works.
+        reader = GroupReader(
+            async_redis, CONSUMER_GROUP, CONSUMER_NAME, [COMMANDS_STREAM], initial_id="$",
+        )
+        await reader.ensure()
 
         logger.info(
             "Command listener started on %s (group=%s)",
@@ -96,13 +95,7 @@ class CodexCommandMixin(CodexAppServerMixin):
 
         while True:
             try:
-                results = await async_redis.xreadgroup(
-                    CONSUMER_GROUP,
-                    CONSUMER_NAME,
-                    {COMMANDS_STREAM: ">"},
-                    count=1,
-                    block=5000,
-                )
+                results = await reader.read(count=1, block=5000)
                 if not results:
                     continue
 

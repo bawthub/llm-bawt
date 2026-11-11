@@ -28,6 +28,7 @@ from typing import Any, AsyncIterator, Iterable
 
 from redis.exceptions import ResponseError
 
+from .consumer_group import is_missing_group
 from .publisher import GLOBAL_CONFIG_STREAM, SYSTEM_EVENTS_PREFIX, UNIFIED_EVENTS_PREFIX
 
 logger = logging.getLogger(__name__)
@@ -197,7 +198,7 @@ class UiStreamReader:
         try:
             groups = await self._redis.xinfo_groups(stream_key)
         except ResponseError as exc:
-            if _is_absent(exc):
+            if is_missing_group(exc):
                 return None
             raise
         for group in groups:
@@ -207,7 +208,7 @@ class UiStreamReader:
                 try:
                     summary = await self._redis.xpending(stream_key, self._legacy_group)
                 except ResponseError as exc:
-                    if _is_absent(exc):
+                    if is_missing_group(exc):
                         return None
                     raise
                 oldest = (summary or {}).get("min")
@@ -305,12 +306,6 @@ def _valid_stream_id(value: object) -> bool:
         return False
     ms, sep, seq = value.partition("-")
     return bool(sep) and ms.isdigit() and seq.isdigit()
-
-
-def _is_absent(exc: ResponseError) -> bool:
-    """Redis proved the stream (``no such key``) or group (``NOGROUP``) absent."""
-    msg = str(exc)
-    return "no such key" in msg.lower() or msg.startswith("NOGROUP")
 
 
 def _pairs(cursors: dict[str, str]) -> list[str]:

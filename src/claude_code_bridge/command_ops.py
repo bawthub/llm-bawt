@@ -34,6 +34,7 @@ from claude_agent_sdk.types import (
 from agent_bridge.abort_contract import ABORT_TEARDOWN_BOUND_S, AbortState
 from agent_bridge.user_scope import session_user
 from agent_bridge.abort_rpc import answer_abort
+from agent_bridge.consumer_group import GroupReader
 from agent_bridge.houses import HouseSlot, gate_send, house_from_env, is_recycle, start_recycle
 from agent_bridge.ping import PING_METHOD, answer_ping
 from agent_bridge.run_status import RUN_STATUS_METHOD, answer_run_status, queue_run_state
@@ -108,12 +109,10 @@ class ClaudeCommandMixin:
         await async_redis.ping()
         self._redis = async_redis
 
-        try:
-            await async_redis.xgroup_create(
-                COMMANDS_STREAM, "claude-code-bridge", id="0", mkstream=True,
-            )
-        except Exception:
-            pass
+        reader = GroupReader(
+            async_redis, "claude-code-bridge", "worker-0", [COMMANDS_STREAM], initial_id="0",
+        )
+        await reader.ensure()
 
         logger.info("Command listener started on %s (group=claude-code-bridge)", COMMANDS_STREAM)
 
@@ -132,13 +131,7 @@ class ClaudeCommandMixin:
 
         while True:
             try:
-                results = await async_redis.xreadgroup(
-                    "claude-code-bridge",
-                    "worker-0",
-                    {COMMANDS_STREAM: ">"},
-                    count=1,
-                    block=5000,
-                )
+                results = await reader.read(count=1, block=5000)
                 if not results:
                     continue
 
