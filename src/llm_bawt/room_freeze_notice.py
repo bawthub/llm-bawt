@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import re
 
-from agent_bridge.room_freeze import ASKED, LOCKED
+from agent_bridge.room_freeze import ASKED, LOCKED, UNKNOWN
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,24 @@ def render_notice(bot_id: str | None) -> str:
     return definition.default_body()
 
 
-_ASKS_TO_COMMIT = re.compile(r"\b(commit|push|ship)\w*\b", re.IGNORECASE)
+# An affirmative ask: a clause that opens (after an optional lead-in) with the
+# verb itself, e.g. "commit it", "ok, go ahead and push", "please ship that".
+# A mention ("the last commit"), question ("why did you push?") or prohibition
+# ("do not commit") never matches, so it stays locked.
+_LEAD_IN = r"(?:(?:ok(?:ay)?|yes|yep|sure|great|good|cool|now|then|and|so|please|go ahead and|you can|feel free to)[\s,]+)*"
+_ASK_CLAUSE = re.compile(rf"^\s*{_LEAD_IN}(commit|push|ship)\b", re.IGNORECASE)
+_CLAUSE_SPLIT = re.compile(r"[.!;\n]+|,\s*(?:then|and)\s+|\s+(?:then|and then)\s+")
+_NEGATION = re.compile(r"\b(?:not|don'?t|do not|never|no|stop|hold off|wait)\b", re.IGNORECASE)
+
+
+def asks_to_commit(prompt: str) -> bool:
+    """Whether ``prompt`` affirmatively asks to commit, push or ship."""
+    for clause in _CLAUSE_SPLIT.split(prompt or ""):
+        if "?" in clause or _NEGATION.search(clause):
+            continue
+        if _ASK_CLAUSE.search(clause):
+            return True
+    return False
 
 
 def room_freeze_state(prompt: str, *, engine, bot_id: str | None) -> str | None:
@@ -55,8 +72,9 @@ def room_freeze_state(prompt: str, *, engine, bot_id: str | None) -> str | None:
     Read before any notice is prefixed, so only the message itself counts.
     An inter-bot delivery never runs under a room freeze (it waits at the
     claim), so a turn running now carries the user's message or a system
-    continuation; a continuation's text names no commit, so it stays locked.
-    A lookup failure answers ``None``: a DB fault never blocks a turn.
+    continuation; a continuation's text asks nothing, so it stays locked.
+    A lookup failure answers :data:`UNKNOWN`: the turn runs without a notice,
+    but the git hook still denies commit/push.
     """
     if engine is None or not bot_id:
         return None
@@ -64,9 +82,9 @@ def room_freeze_state(prompt: str, *, engine, bot_id: str | None) -> str | None:
         if not in_room(engine, bot_id):
             return None
     except Exception as error:
-        logger.warning("room freeze lookup failed for %s: %s", bot_id, error)
-        return None
-    return ASKED if _ASKS_TO_COMMIT.search(prompt or "") else LOCKED
+        logger.warning("room freeze lookup failed for %s, locking git: %s", bot_id, error)
+        return UNKNOWN
+    return ASKED if asks_to_commit(prompt) else LOCKED
 
 
 def with_room_freeze_notice(prompt: str, state: str | None, *, bot_id: str | None,
@@ -78,10 +96,10 @@ def with_room_freeze_notice(prompt: str, state: str | None, *, bot_id: str | Non
     """
     from .turn_cutoff_notice import is_session_command
 
-    if state is None or is_session_command(prompt, reset_action):
+    if state in (None, UNKNOWN) or is_session_command(prompt, reset_action):
         return prompt
     return f"{render_notice(bot_id)}\n\n{prompt}"
 
 
-__all__ = ["ROOM_FREEZE_NOTICE_KEY", "in_room", "render_notice", "room_freeze_state",
+__all__ = ["ROOM_FREEZE_NOTICE_KEY", "asks_to_commit", "in_room", "render_notice", "room_freeze_state",
            "with_room_freeze_notice"]

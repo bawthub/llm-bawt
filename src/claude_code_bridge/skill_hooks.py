@@ -117,12 +117,12 @@ def _deny(reason: str) -> dict:
 
 
 def git_gate(data: Mapping, env: Mapping[str, str]) -> dict | None:
-    from agent_bridge.room_freeze import LOCKED, ROOM_FREEZE_ENV
+    from agent_bridge.room_freeze import GIT_LOCKED_STATES, ROOM_FREEZE_ENV
 
     command = (data.get("tool_input") or {}).get("command")
     if not isinstance(command, str) or not _MUTATING_GIT.search(command):
         return None
-    if env.get(ROOM_FREEZE_ENV) == LOCKED:
+    if env.get(ROOM_FREEZE_ENV) in GIT_LOCKED_STATES:
         return _deny(ROOM_FREEZE_DENY_REASON)
     if GIT_SKILLS & (set(injected_skills(env)) | _loaded(data)):
         return None

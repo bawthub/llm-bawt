@@ -11,6 +11,10 @@ ROOM_FREEZE_FIELD = "room_freeze"
 ROOM_FREEZE_ENV = "LLM_BAWT_ROOM_FREEZE"
 LOCKED = "locked"  # no commit/push this turn
 ASKED = "asked"    # the user's message on this turn asks to commit/push/ship
-ROOM_FREEZE_STATES = frozenset({LOCKED, ASKED})
+UNKNOWN = "unknown"  # the room lookup failed: no notice, but commit/push stays locked
+ROOM_FREEZE_STATES = frozenset({LOCKED, ASKED, UNKNOWN})
+#: States under which the git hook denies mutating git.
+GIT_LOCKED_STATES = frozenset({LOCKED, UNKNOWN})
 
-__all__ = ["ASKED", "LOCKED", "ROOM_FREEZE_ENV", "ROOM_FREEZE_FIELD", "ROOM_FREEZE_STATES"]
+__all__ = ["ASKED", "GIT_LOCKED_STATES", "LOCKED", "ROOM_FREEZE_ENV", "ROOM_FREEZE_FIELD",
+           "ROOM_FREEZE_STATES", "UNKNOWN"]
