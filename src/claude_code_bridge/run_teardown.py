@@ -65,7 +65,7 @@ logger = logging.getLogger(__name__)
 # claude-code-bridge image and uv.lock both pin 0.2.177 (transport/client files are byte-identical to 0.2.160;
 # 0.2.177 query.py only adds the opt-in HookMatcher.on_failure initialize check, TASK-1983);
 # tests/test_bridge_dependency_lock.py keeps them equal (TASK-1269).
-VERIFIED_SDK_VERSIONS = frozenset({"0.2.160", "0.2.176", "0.2.177"})
+VERIFIED_SDK_VERSIONS = frozenset({"0.2.160", "0.2.176", "0.2.177", "0.2.180"})
 
 DISCONNECT_OK = "ok"
 DISCONNECT_TIMEOUT = "timeout"
