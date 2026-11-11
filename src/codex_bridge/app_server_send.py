@@ -44,6 +44,7 @@ from .app_server import (
     AppServerVersionMismatch,
     CodexAppServerRun,
     JsonRpcStdioClient,
+    close_and_reap,
     spawn_app_server,
 )
 from .app_server_events import ABORTED, AppServerEventAdapter, app_server_input
@@ -216,19 +217,23 @@ class CodexAppServerMixin:
             cancelled = True
             raise
         finally:
-            if run is not None:
-                if session_key and self._session_queue.get_active_client(session_key) is run:
-                    self._session_queue.pop_active_client(session_key)
-                seq = await self._settle_steers(run, session_key, seq, wait=not (cancelled or run.stopping))
-            close_task = client.close()
-            if run is not None:
-                run.track_close(close_task)
             try:
-                detail = await asyncio.shield(close_task)
-                logger.info("codex app-server closed: request=%s %s", request_id, detail)
+                if run is not None:
+                    if session_key and self._session_queue.get_active_client(session_key) is run:
+                        self._session_queue.pop_active_client(session_key)
+                    seq = await self._settle_steers(run, session_key, seq, wait=not (cancelled or run.stopping))
             finally:
-                if run is not None and run.tmp_paths:
-                    CodexEventMixin._cleanup_tmp_files(run.tmp_paths)
+                # Settlement can itself be cancelled. Always start teardown,
+                # and hold later cancellations until it finishes reaping.
+                close_task = client.close()
+                if run is not None:
+                    run.track_close(close_task)
+                try:
+                    detail = await close_and_reap(client)
+                    logger.info("codex app-server closed: request=%s %s", request_id, detail)
+                finally:
+                    if run is not None and run.tmp_paths:
+                        CodexEventMixin._cleanup_tmp_files(run.tmp_paths)
         return seq, aborted, session_persisted, final_usage, thread
 
     async def _app_server_event(self, event: Any, **kwargs: Any) -> tuple[int, bool, Any]:

@@ -33,6 +33,7 @@ from codex_bridge.app_server import (
     AppServerError,
     CodexAppServerRun,
     JsonRpcStdioClient,
+    PendingSteer,
 )
 from codex_bridge.app_server_send import ABORT_INTERRUPT_BOUND_S
 from codex_bridge.command_ops import CodexCommandMixin
@@ -422,6 +423,105 @@ def test_the_listener_routes_codex_steers_only(monkeypatch):
     asyncio.run(run())
     assert steered == ["1-0"]
     assert [call.args[-1] for call in redis.xack.call_args_list] == ["2-0"]
+
+
+@REAL
+@pytest.mark.parametrize("cancel_during", ["turn", "steer_settle"])
+def test_double_cancel_during_teardown_holds_send_until_child_is_reaped(
+    tmp_path, monkeypatch, cancel_during,
+):
+    mode = "hold" if cancel_during == "turn" else "complete"
+    bridge = _bridge(tmp_path, _fake_codex(tmp_path, mode=mode))
+    redis = SimpleNamespace(xack=AsyncMock())
+    teardown = JsonRpcStdioClient._teardown
+    returncodes_at_exit = []
+
+    async def scenario():
+        entered, release = asyncio.Event(), asyncio.Event()
+        settling = asyncio.Event()
+        settle_steers = bridge._settle_steers
+
+        async def gated_teardown(client):
+            entered.set()
+            await release.wait()
+            return await teardown(client)
+
+        async def settle_with_pending_steer(active_run, *args, **kwargs):
+            nonlocal run
+            run = active_run
+            assert kwargs["wait"] is True
+            run.pending_steers["m-2"] = PendingSteer("user", "steer-rpc")
+            settling.set()
+            return await settle_steers(run, *args, **kwargs)
+
+        monkeypatch.setattr(JsonRpcStdioClient, "_teardown", gated_teardown)
+        if cancel_during == "steer_settle":
+            monkeypatch.setattr(bridge, "_settle_steers", settle_with_pending_steer)
+        run = None
+
+        async def send_and_record_exit():
+            try:
+                await _send(bridge, redis)
+            finally:
+                if run is not None:
+                    returncodes_at_exit.append(run.client._proc.returncode)
+
+        task = asyncio.create_task(send_and_record_exit())
+        entered_waiter = asyncio.create_task(entered.wait())
+        try:
+            if cancel_during == "turn":
+                await until(lambda: _live_run(bridge) is not None)
+                run = _live_run(bridge)
+            else:
+                await asyncio.wait_for(settling.wait(), HANG_GUARD_S)
+            task.cancel()
+            await asyncio.wait(
+                {task, entered_waiter}, timeout=HANG_GUARD_S,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            assert entered.is_set(), "cancelling steer settlement skipped child teardown"
+            assert run.client._proc.returncode is None
+            assert await run.wait_closed(0) == "teardown:pending"
+
+            task.cancel()
+            # cancel() queues the send's wakeup before this checkpoint. Let it
+            # consume the second cancellation while teardown stays gated.
+            checkpoint = asyncio.get_running_loop().create_future()
+            asyncio.get_running_loop().call_soon(checkpoint.set_result, None)
+            await checkpoint
+            assert not task.done(), "send returned before its child was reaped"
+            assert bridge._session_queue.is_busy(SESSION)
+            bridge._publisher.publish_run_done.assert_not_called()
+            redis.xack.assert_not_awaited()
+
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, HANG_GUARD_S)
+            assert (await run.wait_closed(HANG_GUARD_S)).endswith(";exited=true")
+        finally:
+            # The failing mutation must also release and reap its real child.
+            release.set()
+            if not task.done():
+                task.cancel()
+            entered_waiter.cancel()
+            await asyncio.gather(task, entered_waiter, return_exceptions=True)
+            if run is not None:
+                await run.client.close()
+
+        assert returncodes_at_exit and all(code is not None for code in returncodes_at_exit)
+        assert not bridge._session_queue.is_busy(SESSION)
+        assert bridge._session_queue.request_phase(SESSION, "active") is None
+        assert bridge._session_queue.get_active_client(SESSION) is None
+        # The normal terminal event already arrived before steer settlement;
+        # cancellation must not add a completion to either path.
+        assert len(_published(bridge, AgentEventKind.ASSISTANT_DONE)) == (
+            0 if cancel_during == "turn" else 1
+        )
+        bridge._publisher.publish_run_done.assert_called_once()
+        assert bridge._publisher.publish_run_done.call_args.kwargs["teardown"].exited is True
+        redis.xack.assert_awaited_once()
+
+    asyncio.run(scenario())
 
 
 # ---- abort: a hung app-server is killed in bound (B2(b)) ---------------------
