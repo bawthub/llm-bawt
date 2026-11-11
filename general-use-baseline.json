@@ -1,7 +1,7 @@
 {
   "version": 1,
   "rules": {
-    "bot_slugs": {"reason": "Existing inventory references and public-tool name collisions require configuration cleanup or triage.", "removal_task": "TASK-2194"},
+    "bot_slugs": {"reason": "Triaged collisions only: a public harness/provider name and an ordinary English word that match private slugs. Deployment bot references were removed; new occurrences still fail.", "removal_task": "TASK-2194"},
     "container_literal": {"reason": "Existing Compose container identities await portable parameterization.", "removal_task": "TASK-2194"},
     "container_names": {"reason": "Existing installation container coupling awaits configuration cleanup.", "removal_task": "TASK-2194"},
     "host_path": {"reason": "Retained runtime mount/default/formatting dependencies and their exact-layout documentation await coordinated migration.", "removal_task": "TASK-2194"},
@@ -30,7 +30,6 @@
     "docs/OPENAI_PROXY_REASONING.md":{"bot_slugs":{"c5b4d602ff2c93b5176d075af4890e67":3}},
     "docs/OPERATIONS_RUNNER.md":{"bot_slugs":{"c5b4d602ff2c93b5176d075af4890e67":2}},
     "docs/OPS_CONFIG_RECONCILE.md":{"bot_slugs":{"c5b4d602ff2c93b5176d075af4890e67":1}},
-    "docs/OPS_SERVICE_ARCHITECTURE.md":{"bot_slugs":{"c5b4d602ff2c93b5176d075af4890e67":1}},
     "docs/PLATFORM_NODE_RUNTIME.md":{"bot_slugs":{"c5b4d602ff2c93b5176d075af4890e67":1},"container_names":{"04ac68577a43976b8a7b348fd82fe84b":1}},
     "docs/PROMPT_SCHEDULING.md":{"bot_slugs":{"c5b4d602ff2c93b5176d075af4890e67":1}},
     "docs/REA_INTEGRATION.md":{"host_path":{"ac8d9deef0dde3ecfe056bddcab35d65":3}},

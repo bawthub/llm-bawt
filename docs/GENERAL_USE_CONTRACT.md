@@ -72,7 +72,10 @@ hit therefore has both pieces of accountability without repeating the same
 prose hundreds of times. Initial cleanup belongs to **TASK-2193**, not to the
 guard's implementation task. Public tool names can collide with private bot
 slugs; those existing counts require triage, not a blanket exclusion of the
-tool name. First-party origins are not automatically classified as personal
+tool name. TASK-2194 completed that triage: every remaining `bot_slugs` count
+is a public harness/provider name or an ordinary English word that matches a
+private slug, and no deployment bot reference is left. The counts stay ratcheted, so new
+occurrences still need review. First-party origins are not automatically classified as personal
 domains: any future exclusion needs an explicit reason.
 
 New literals, new files and net count increases fail. Reduced or removed
