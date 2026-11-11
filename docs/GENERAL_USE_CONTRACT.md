@@ -14,7 +14,12 @@ is contacted by the guard.
 ## Private inputs
 
 The built-in rules cover RFC1918 IPv4 literals, literal installation home/data
-paths and literal Compose `container_name` values. Deployment/operator names,
+paths and literal Compose `container_name` values. Product layout is exempt
+by name in the scanner (`SHIPPED_HOMES`, `SHIPPED_CONTAINERS`): the
+agent-bridge image's own home and the container names the shipped Compose
+files declare. Extend those sets only when the image or shipped Compose stack
+changes. Keep shipped names out of the private `container_names` list; an
+installation's own extra containers and literal paths still hit. Deployment/operator names,
 personal domains, container identifiers and allowed live bot slugs come only
 from a **private, untracked** JSON file or environment value. They are not
 hardcoded in the scanner, baseline, fixtures or this document.

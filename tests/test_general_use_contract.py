@@ -84,6 +84,16 @@ class ContractTests(unittest.TestCase):
             "host_path": 2, "container_literal": 1,
         }))
 
+    def test_shipped_image_home_and_compose_names_are_product_layout(self):
+        hits = self.hits(
+            "/home/bridge/dev /home/bridge /home/bridged/x /home/other/dev\n"
+            "container_name: llm-bawt-app\ncontainer_name: \"bawthub-frontend\"\n"
+            "container_name: bawthub-frontend-prod-1\n",
+        )
+        self.assertEqual(Counter(hit.rule for hit in hits), Counter({
+            "host_path": 2, "container_literal": 1,
+        }))
+
     def test_scope_and_untracked_inputs(self):
         for path in ("src/app.py", "docs/run.md", "tenant-skills/tool/SKILL.md",
                      "skills/tool.md", "prompts/system.txt", "seeds/default.txt",

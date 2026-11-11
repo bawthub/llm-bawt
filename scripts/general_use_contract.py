@@ -22,6 +22,16 @@ HOME = re.compile(r"/home/[A-Za-z0-9_.-]+|/mnt/user(?:/[A-Za-z0-9_.-]+)*")
 CONTAINER = re.compile(r"^\s*container_name:\s*[\"']?([A-Za-z0-9][A-Za-z0-9_.-]*)[\"']?\s*(?:#.*)?$")
 PRIVATE_NETWORKS = tuple(ipaddress.ip_network(net) for net in
                          ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
+# Product layout, not an installation's: the agent-bridge image creates this
+# home for its own user (Dockerfile.agent-bridge), and the shipped Compose
+# files name these containers. Any other literal home or container still hits.
+SHIPPED_HOMES = frozenset({"/home/bridge"})
+SHIPPED_CONTAINERS = frozenset({
+    "llm-bawt-app", "llm-bawt-redis", "llm-bawt-claude-code-bridge", "llm-bawt-local-model-bridge",
+    "llm-bawt-playwright-mcp", "llm-bawt-crawl4ai",
+    "bawthub-postgres", "bawthub-db-init", "bawthub-redis", "bawthub-app",
+    "bawthub-claude-code-bridge", "bawthub-frontend",
+})
 TASK = re.compile(r"TASK-[1-9]\d*")
 HASH = re.compile(r"[0-9a-f]{32}")
 RULES = (*PRIVATE_RULES, "rfc1918", "host_path", "container_literal")
@@ -162,8 +172,9 @@ def scan(repo: Path, policy: dict) -> tuple[Counter, dict[Hit, int], int]:
                     continue
                 if any(address in network for network in PRIVATE_NETWORKS):
                     found.append(("rfc1918", digest("rfc1918\0" + match[0])))
-            found.extend(("host_path", digest("host_path\0" + match[0])) for match in HOME.finditer(line))
-            if match := CONTAINER.fullmatch(line):
+            found.extend(("host_path", digest("host_path\0" + match[0])) for match in HOME.finditer(line)
+                         if match[0] not in SHIPPED_HOMES)
+            if (match := CONTAINER.fullmatch(line)) and match[1] not in SHIPPED_CONTAINERS:
                 found.append(("container_literal", digest("container_literal\0" + match[1])))
             for rule, key, pattern in patterns:
                 found.extend((rule, key) for match in pattern.finditer(line))

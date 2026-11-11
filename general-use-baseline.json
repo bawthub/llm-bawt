@@ -1,38 +1,9 @@
 {
   "version": 1,
   "rules": {
-    "bot_slugs": {"reason": "No accepted occurrences remain after triage; any new deployment bot name fails.", "removal_task": "TASK-2194"},
-    "container_literal": {"reason": "Existing Compose container identities await portable parameterization.", "removal_task": "TASK-2194"},
-    "container_names": {"reason": "Existing installation container coupling awaits configuration cleanup.", "removal_task": "TASK-2194"},
-    "host_path": {"reason": "Retained runtime mount/default/formatting dependencies and their exact-layout documentation await coordinated migration.", "removal_task": "TASK-2194"},
     "operator_identities": {"reason": "Existing operator-specific references await neutralization.", "removal_task": "TASK-2193"},
     "personal_domains": {"reason": "Existing private origins and the legacy routing fixture await generic configuration.", "removal_task": "TASK-2193"},
     "rfc1918": {"reason": "Existing private-network literals await configuration or generic examples.", "removal_task": "TASK-2193"}
   },
-  "files": {
-    "docker-compose.dev.yml":{"host_path":{"ac8d9deef0dde3ecfe056bddcab35d65":1}},
-    "docker-compose.prod.yml":{"container_literal":{"132030cfa254c85dfe1a22ddb1a2f16c":1,"162a8f9aad13301d41fa12bf447294b0":1,"274b0acb215373a35243daa9590d9d01":1,"49bc5571d387652105d0bf3f304848d3":1,"606f8cf9867ae293f730df9f26ea04ef":1,"b37eb4bf99a53106aaa7d98005cddef0":1},"container_names":{"04ac68577a43976b8a7b348fd82fe84b":1,"506f633e6ea8084c376afbbb6df77e15":1,"a820a36dcba7e9566aacb43c957f3003":1,"c3b8e0f3fa02efa4caa7b3dc918030b9":1,"c99a1d8234347dd66717f3501a490e93":1,"d6e9394fb4dd0655f6237374c8a5abd3":1},"host_path":{"ac8d9deef0dde3ecfe056bddcab35d65":5}},
-    "docker-compose.yml":{"container_literal":{"18391056a3f8c2658563179707e650df":1,"7b0ce20ffd79f9286af60bcf06ecb3a0":1,"87601e2db0358aaa99ccac32980b6bd6":1,"ad229cdb473245d54b70d4a0765c7dab":1,"f47350a8850a3a464e06150932b4d124":1,"f689130002e943998d3d704317a6015c":1},"container_names":{"10b44535edfb8f477753a2cdecf8c18e":1,"24fd7a31123afb2b65272ccb53aa8297":1,"9f5a76f627773d83741cce19b068fee7":2,"b64876cf7b5fdac909fc35c95ea88934":1,"db8b1579cc69ab2ab52ddc6c4331d2b2":1,"f0ca54b15ec3d501d5b5d7840504951a":1},"host_path":{"ac8d9deef0dde3ecfe056bddcab35d65":9}},
-    "docs/CHANGED_FILE_COMMIT_RECONCILIATION.md":{"host_path":{"ac8d9deef0dde3ecfe056bddcab35d65":1}},
-    "docs/CLAUDE_CODE_BRIDGE.md":{"host_path":{"ac8d9deef0dde3ecfe056bddcab35d65":3}},
-    "docs/CODEX_BRIDGE.md":{"host_path":{"ac8d9deef0dde3ecfe056bddcab35d65":9}},
-    "docs/COMPACTION_MAINTENANCE.md":{"container_names":{"c3b8e0f3fa02efa4caa7b3dc918030b9":1}},
-    "docs/GPU_RESOURCE_HANDOFF_CONTRACT.md":{"container_names":{"9f5a76f627773d83741cce19b068fee7":2}},
-    "docs/HOUSES.md":{"host_path":{"ac8d9deef0dde3ecfe056bddcab35d65":2}},
-    "docs/PLATFORM_NODE_RUNTIME.md":{"container_names":{"04ac68577a43976b8a7b348fd82fe84b":1}},
-    "docs/REA_INTEGRATION.md":{"host_path":{"ac8d9deef0dde3ecfe056bddcab35d65":3}},
-    "tenant-skills/git-commits/reference/github-app-credentials.md":{"container_names":{"506f633e6ea8084c376afbbb6df77e15":1}},
-    "src/agent_bridge/approval.py":{"container_names":{"04ac68577a43976b8a7b348fd82fe84b":1,"10b44535edfb8f477753a2cdecf8c18e":1}},
-    "src/agent_bridge/house_pool.py":{"host_path":{"ac8d9deef0dde3ecfe056bddcab35d65":11}},
-    "src/agent_bridge/house_preview_supervisor.py":{"host_path":{"ac8d9deef0dde3ecfe056bddcab35d65":1}},
-    "src/agent_bridge/workspace.py":{"host_path":{"ac8d9deef0dde3ecfe056bddcab35d65":1}},
-    "src/claude_code_bridge/bootstrap.py":{"host_path":{"ac8d9deef0dde3ecfe056bddcab35d65":1}},
-    "src/claude_code_bridge/event_ops.py":{"host_path":{"ac8d9deef0dde3ecfe056bddcab35d65":2}},
-    "src/codex_bridge/__main__.py":{"host_path":{"ac8d9deef0dde3ecfe056bddcab35d65":6}},
-    "src/codex_bridge/bridge.py":{"host_path":{"ac8d9deef0dde3ecfe056bddcab35d65":3}},
-    "src/codex_bridge/local_plugins.py":{"host_path":{"ac8d9deef0dde3ecfe056bddcab35d65":2}},
-    "src/codex_bridge/transport.py":{"host_path":{"ac8d9deef0dde3ecfe056bddcab35d65":1}},
-    "src/llm_bawt/ops/seeds.py":{"container_names":{"10b44535edfb8f477753a2cdecf8c18e":2,"24fd7a31123afb2b65272ccb53aa8297":1,"9f5a76f627773d83741cce19b068fee7":2,"b64876cf7b5fdac909fc35c95ea88934":1},"host_path":{"ac8d9deef0dde3ecfe056bddcab35d65":5}},
-    "src/llm_bawt/ops/source_state.py":{"host_path":{"ac8d9deef0dde3ecfe056bddcab35d65":1}}
-  }
+  "files": {}
 }
