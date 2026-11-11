@@ -199,23 +199,32 @@ class PlaygroundStore:
             raise OpenRefused("not_found")
         raise OpenRefused("expired")
 
-    def mark_expired(self, artifact_id: str, user_id: str | None = None) -> dict[str, Any] | None:
+    def mark_expired(self, artifact_id: str, user_id: str | None = None, *,
+                     in_trash: bool = False, trashed_before: datetime | None = None,
+                     ) -> tuple[dict[str, Any] | None, bool]:
         """Expire one artifact's content in the database; idempotent.
 
-        Returns the row (with any blob key still to delete), or None when no
-        such artifact exists for this user.
+        ``in_trash``/``trashed_before`` are checked in the same UPDATE, so a
+        concurrent restore can never be overwritten. Returns ``(row, changed)``:
+        the row (None when no such artifact exists for this user) and whether
+        this call performed the transition.
         """
         cond = [artifacts.c.id == artifact_id]
         if user_id is not None:
             cond.append(artifacts.c.user_id == user_id)
+        guard = [artifacts.c.expired_at.is_(None)]
+        if in_trash or trashed_before is not None:
+            guard.append(artifacts.c.trashed_at.is_not(None))
+        if trashed_before is not None:
+            guard.append(artifacts.c.trashed_at < trashed_before)
         with self.engine.begin() as conn:
-            conn.execute(
+            changed = conn.execute(
                 update(artifacts)
-                .where(*cond, artifacts.c.expired_at.is_(None))
+                .where(*cond, *guard)
                 .values(expired_at=_now(), inline_content=None, view_token_hash=None)
-            )
+            ).rowcount > 0
             row = conn.execute(select(*artifacts.c).where(*cond)).mappings().first()
-        return dict(row) if row is not None else None
+        return (dict(row) if row is not None else None), changed
 
     def clear_blob_key(self, artifact_id: str, blob_key: str) -> None:
         with self.engine.begin() as conn:

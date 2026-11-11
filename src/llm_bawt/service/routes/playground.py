@@ -192,6 +192,11 @@ def delete_forever(artifact_id: str, user: str | None = Query(None)):
     user_id = _resolve_user(user)
     playground = _playground()
     row = _row_or_404(playground, artifact_id, user_id)
-    if row["expired_at"] is None and row["trashed_at"] is None:
+    if row["expired_at"] is not None:
+        return public_view(row)
+    expired = playground.expire(artifact_id, user_id, in_trash=True)
+    if expired is None:
+        raise HTTPException(status_code=404, detail="not_found")
+    if expired["expired_at"] is None:  # not (or no longer) in Trash
         raise HTTPException(status_code=409, detail="not_in_trash")
-    return public_view(playground.expire(artifact_id, user_id))
+    return public_view(expired)

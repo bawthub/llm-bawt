@@ -390,3 +390,43 @@ def test_tool_validates_title_and_note_lengths(tool, monkeypatch):
     assert "title" in _run(bot_id="vex", title="t" * 201, content="y", format="text")["error"]
     assert "note" in _run(bot_id="vex", title="t", note="n" * 301, content="y",
                           format="text")["error"]
+
+
+def test_sweep_never_purges_an_item_restored_after_inventory(pg, monkeypatch):
+    """Codex TASK-2195: restore between the work list and the purge wins."""
+    row = _send_png(pg)
+    pg.store.set_state(row["id"], USER, "trash")
+    with pg.store.engine.begin() as conn:
+        conn.execute(update(artifacts).where(artifacts.c.id == row["id"])
+                     .values(trashed_at=datetime.now(timezone.utc) - timedelta(days=40)))
+    real = pg.store.trashed_before
+
+    def inventory_then_restore(cutoff):
+        ids = real(cutoff)
+        pg.store.set_state(row["id"], USER, "restore")
+        return ids
+
+    monkeypatch.setattr(pg.store, "trashed_before", inventory_then_restore)
+    assert pg.sweep(30)["purged"] == 0
+    kept = pg.store.get(row["id"], USER)
+    assert kept["expired_at"] is None and kept["trashed_at"] is None
+    assert _blob_path(pg, kept).read_bytes() == PNG
+
+
+def test_delete_forever_refuses_an_item_restored_after_the_check(client, pg, monkeypatch):
+    row = _send_png(pg)
+    pg.store.set_state(row["id"], USER, "trash")
+    real = pg.store.get
+
+    def get_then_restore(*a, **k):
+        found = real(*a, **k)
+        pg.store.set_state(row["id"], USER, "restore")
+        return found
+
+    monkeypatch.setattr(pg.store, "get", get_then_restore)
+    r = client.post(f"/v1/playground/{row['id']}/delete")
+    monkeypatch.setattr(pg.store, "get", real)
+    assert r.status_code == 409
+    kept = pg.store.get(row["id"], USER)
+    assert kept["expired_at"] is None
+    assert _blob_path(pg, kept).read_bytes() == PNG

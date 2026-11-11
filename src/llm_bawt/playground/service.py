@@ -141,10 +141,17 @@ class Playground:
         except BlobNotFound as exc:
             raise FileNotFoundError(row["id"]) from exc
 
-    def expire(self, artifact_id: str, user_id: str | None = None) -> dict[str, Any] | None:
-        """Delete forever: clear content, delete the blob, keep a tombstone row."""
-        row = self.store.mark_expired(artifact_id, user_id)
-        if row is not None and row.get("blob_key"):
+    def expire(self, artifact_id: str, user_id: str | None = None, *,
+               in_trash: bool = False, trashed_before: datetime | None = None,
+               ) -> dict[str, Any] | None:
+        """Delete forever: clear content, delete the blob, keep a tombstone row.
+
+        Eligibility (``in_trash``/``trashed_before``) is enforced atomically by
+        the store; the blob is deleted only when this call expired the row.
+        """
+        row, changed = self.store.mark_expired(artifact_id, user_id, in_trash=in_trash,
+                                               trashed_before=trashed_before)
+        if changed and row is not None and row.get("blob_key"):
             self._delete_blob(row["id"], row["blob_key"])
             row = {**row, "blob_key": None}
         return row
@@ -152,14 +159,20 @@ class Playground:
     def sweep(self, trash_days: float) -> dict[str, int]:
         """Delete forever what has sat in Trash ``trash_days``; retry blob deletes."""
         cutoff = datetime.now(timezone.utc) - timedelta(days=trash_days)
-        purged = [i for i in self.store.trashed_before(cutoff) if self.expire(i) is not None]
+        purged = 0
+        for artifact_id in self.store.trashed_before(cutoff):
+            row, changed = self.store.mark_expired(artifact_id, trashed_before=cutoff)
+            if changed:
+                purged += 1
+                if row is not None and row.get("blob_key"):
+                    self._delete_blob(row["id"], row["blob_key"])
         deleted = failed = 0
         for item in self.store.pending_blob_deletes():
             if self._delete_blob(item["id"], item["blob_key"]):
                 deleted += 1
             else:
                 failed += 1
-        return {"purged": len(purged), "blobs_deleted": deleted, "blob_delete_failures": failed}
+        return {"purged": purged, "blobs_deleted": deleted, "blob_delete_failures": failed}
 
     def _delete_blob(self, artifact_id: str, blob_key: str) -> bool:
         try:
