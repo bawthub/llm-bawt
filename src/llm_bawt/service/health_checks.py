@@ -163,35 +163,41 @@ def check_system_events(service) -> dict:
     return _check("system.events", OK, f"{count} event(s) awaiting fan-out")
 
 
-#: Product prompt drift is exported by a daily sync; older drift means it stalled.
+#: Age threshold for a managed default that has not picked up its shipped version.
 PROMPT_DRIFT_STALE_SECONDS = 48 * 3600
 
 
 def check_prompt_sync(config: Any, now: datetime | None = None) -> dict:
-    """Live product prompt edits not yet shipped as code defaults (TASK-2127)."""
+    """Managed default lag only; intentional tenant overrides are not failures."""
     from ..prompt_registry import PromptResolver
-    from ..prompt_sync import compute_drift
+    from ..prompt_sync import is_following
 
     resolver = PromptResolver(config)
     if resolver.store.engine is None:
         return _check("prompts.sync", DEGRADED, "prompt template DB unavailable")
-    drift = compute_drift(resolver.store.list_rows(), resolver.definitions())
-    if not drift:
-        return _check("prompts.sync", OK, "product prompts match shipped defaults")
+    definitions = resolver.definitions()
+    rows = resolver.store.list_rows()
+    stale = [
+        row for row in rows if row.key in definitions and is_following(row)
+        and row.body != definitions[row.key].default_body()
+    ]
+    if not stale:
+        return _check("prompts.sync", OK, "managed prompts follow shipped defaults; tenant overrides preserved")
     now = now or datetime.now(timezone.utc)
     ages = [
-        (now - datetime.fromisoformat(item.updated_at)).total_seconds()
-        for item in drift if item.updated_at
+        (now - (item.updated_at if item.updated_at.tzinfo
+                else item.updated_at.replace(tzinfo=timezone.utc))).total_seconds()
+        for item in stale if item.updated_at
     ]
     oldest = max(ages, default=0.0)
-    keys = ", ".join(item.key for item in drift[:5])
-    if len(drift) > 5:
-        keys += f" and {len(drift) - 5} more"
+    keys = ", ".join(item.key for item in stale[:5])
+    if len(stale) > 5:
+        keys += f" and {len(stale) - 5} more"
     days = int(oldest // 86400)
     age = "today" if days == 0 else f"{days} day{'s' if days != 1 else ''}"
-    noun = "prompt" if len(drift) == 1 else "prompts"
-    reason = (f"{len(drift)} edited {noun} not yet synced to the shipped defaults; "
-              f"oldest unsynced edit: {age}. Prompts: {keys}")
+    noun = "prompt" if len(stale) == 1 else "prompts"
+    reason = (f"{len(stale)} managed {noun} behind shipped defaults; "
+              f"oldest default update: {age}. Prompts: {keys}")
     return _check("prompts.sync", DEGRADED if oldest > PROMPT_DRIFT_STALE_SECONDS else OK, reason)
 
 

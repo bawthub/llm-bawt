@@ -1,17 +1,10 @@
-"""Prompt sync: classify live prompt rows, report product drift, export it.
+"""Prompt portability, default provenance and explicit approved fixture export.
 
-A live prompt row is either ``product`` (its body should ship as the default
-for every install) or ``install`` (personal or deployment-specific; stays in
-this database only). The class lives in the row's metadata under
-:data:`SYNC_METADATA_KEY`; rows without one are classified by
-:func:`classify`: personas and non-global scopes are ``install``, everything
-else (including new edits) is ``product``.
-
-*Drift* is a product row whose body differs from the shipped default, or a
-product row with no shipped default at all. ``sync-export`` writes drift into
-``prompt_defaults/synced/`` of a source checkout; that change then goes through
-the normal review, gate and publish path. Tenants follow published defaults
-through :meth:`PromptTemplateStore.seed_defaults`.
+``product`` means eligible for selected export, not an automatic publication or
+permission to revoke a tenant override. Private scopes/personas are excluded
+regardless of classification metadata. Managed-default lag is drift; intentional
+tenant changes are overrides and possible promotion candidates, not failures.
+Export writes only selected public fields to source, never the live database.
 """
 
 from __future__ import annotations
@@ -40,6 +33,9 @@ SYNC_ACTOR = "system:sync"
 FOLLOWING_ACTORS = frozenset({SEED_ACTOR, SYNC_ACTOR})
 #: Metadata key: sha256 of the code default a row was seeded or synced with.
 DEFAULT_SHA_KEY = "default_sha256"
+#: Server-owned intent. Body equality never cancels an explicit tenant save.
+DEFAULT_MODE_KEY = "default_mode"
+OVERRIDE = "override"
 
 
 @dataclass(frozen=True)
@@ -53,6 +49,9 @@ class DriftItem:
     live_sha256: str
     default_sha256: str | None
     updated_by: str | None
+    scope_type: str
+    scope_id: str
+    sync_class: str
     updated_at: str | None = None
     body: str | None = None
 
@@ -69,30 +68,57 @@ def _metadata(row: Any) -> dict[str, Any]:
 
 
 def classify(row: Any) -> str:
-    explicit = _metadata(row).get(SYNC_METADATA_KEY)
-    if explicit in SYNC_CLASSES:
-        return str(explicit)
-    if getattr(row, "scope_type", "global") != "global":
+    # Portability exclusions are not overridable by a client-supplied sync flag.
+    if (getattr(row, "scope_type", "global") != "global"
+            or getattr(row, "scope_id", "*") != "*"):
         return INSTALL
     if (getattr(row, "category", None) or "").strip().lower() in INSTALL_CATEGORIES:
         return INSTALL
+    if str(getattr(row, "key", "")).lower().startswith("persona."):
+        return INSTALL
+    explicit = _metadata(row).get(SYNC_METADATA_KEY)
+    if explicit in SYNC_CLASSES:
+        return str(explicit)
     return PRODUCT
 
 
 def is_following(row: Any) -> bool:
-    """True while a row still holds the code default it was seeded/synced with.
+    """True only with default-writer provenance and no explicit override intent.
 
-    Following rows are moved to new code defaults on upgrade, so they are
-    never product drift even when their body is behind the shipped default.
+    A hash round-tripped through an old editor does not prove tenant intent.
+    Ambiguous or human-edited legacy rows remain overrides, even when their
+    text happens to match a current or historical product default.
     """
-    tracked = _metadata(row).get(DEFAULT_SHA_KEY)
+    if (getattr(row, "scope_type", "global") != "global"
+            or getattr(row, "scope_id", "*") != "*"):
+        return False
+    metadata = _metadata(row)
+    if metadata.get(DEFAULT_MODE_KEY) == OVERRIDE:
+        return False
+    if getattr(row, "updated_by", None) not in FOLLOWING_ACTORS:
+        return False
+    tracked = metadata.get(DEFAULT_SHA_KEY)
     if tracked:
         return tracked == body_sha256(row.body)
-    return getattr(row, "updated_by", None) in FOLLOWING_ACTORS
+    return True
+
+
+def prompt_provenance(row: Any | None, definition: Any | None) -> dict[str, Any]:
+    """Content-addressed product versions, separate from DB edit-history versions."""
+    default = definition.default_body() if definition is not None else None
+    default_version = body_sha256(default) if default is not None else None
+    effective_version = body_sha256(row.body) if row is not None else default_version
+    follows = row is None or (definition is not None and is_following(row))
+    return {
+        "provenance": "product_default" if follows else "tenant_override",
+        "default_version": default_version,
+        "effective_version": effective_version,
+        "default_outdated": follows and effective_version != default_version,
+    }
 
 
 def compute_drift(rows: Iterable[Any], definitions: dict[str, Any]) -> list[DriftItem]:
-    """Product rows whose live body is not the shipped default."""
+    """Portable changed overrides available for explicit promotion, not failures."""
     items: list[DriftItem] = []
     for row in rows:
         if classify(row) != PRODUCT:
@@ -119,6 +145,9 @@ def compute_drift(rows: Iterable[Any], definitions: dict[str, Any]) -> list[Drif
                 live_sha256=body_sha256(row.body),
                 default_sha256=body_sha256(default) if default is not None else None,
                 updated_by=row.updated_by,
+                scope_type=row.scope_type,
+                scope_id=row.scope_id,
+                sync_class=classify(row),
                 updated_at=row.updated_at.isoformat() if getattr(row, "updated_at", None) else None,
                 body=row.body,
             )
@@ -130,15 +159,23 @@ def drift_report(
     rows: Iterable[Any], definitions: dict[str, Any], *, include_body: bool = False
 ) -> dict[str, Any]:
     rows = list(rows)
-    drift = compute_drift(rows, definitions)
+    candidates = compute_drift(rows, definitions)
+    states = [
+        {"key": row.key, "scope_type": row.scope_type, "scope_id": row.scope_id,
+         **prompt_provenance(row, definitions.get(row.key))}
+        for row in rows
+    ]
+    stale = [state for state in states if state["default_outdated"]]
     counts = {PRODUCT: 0, INSTALL: 0}
     for row in rows:
         counts[classify(row)] += 1
     return {
-        "in_sync": not drift,
-        "drift_count": len(drift),
+        "in_sync": not stale,
+        "drift_count": len(stale),
         "classified": counts,
-        "drift": [_item_dict(item, include_body) for item in drift],
+        "drift": stale,
+        "overrides": [state for state in states if state["provenance"] == "tenant_override"],
+        "promotion_candidates": [_item_dict(item, include_body) for item in candidates],
     }
 
 
@@ -157,7 +194,8 @@ def install_terms_in(body: str, terms: Iterable[str]) -> list[str]:
 
 
 def export_report(
-    report: dict[str, Any], root: Path, install_terms: Iterable[str] = ()
+    report: dict[str, Any], root: Path, install_terms: Iterable[str] = (),
+    *, approved_keys: Iterable[str],
 ) -> dict[str, Any]:
     """Write a drift report (with bodies) as synced default files under ``root``.
 
@@ -166,24 +204,43 @@ def export_report(
     ``install_terms`` (bot or user names, hosts) is held, not written: reword
     the live row or mark it ``install`` first.
     """
+    from .prompt_promotion import validate_promotion_item
+
+    approved = set(approved_keys)
+    if not approved:
+        raise ValueError("select at least one approved prompt key")
     terms = [str(t) for t in install_terms if str(t).strip()]
-    root.mkdir(parents=True, exist_ok=True)
     manifest = load_manifest(root)
     written: list[str] = []
     held: dict[str, list[str]] = {}
     manifest_changed = False
-    for item in report.get("drift", []):
+    candidates = report.get("promotion_candidates", report.get("drift", []))
+    selected = [item for item in candidates if item.get("key") in approved]
+    missing = approved - {item["key"] for item in selected}
+    if missing:
+        raise ValueError(f"selected prompts missing from report: {', '.join(sorted(missing))}")
+    if len({item["key"] for item in selected}) != len(selected):
+        raise ValueError("duplicate selected prompt keys")
+    validated: list[dict[str, Any]] = []
+    for item in sorted(selected, key=lambda item: item["key"]):
         body = item.get("body")
         if body is None:
             raise ValueError(f"drift item {item.get('key')!r} has no body; request include_body")
         key = str(item["key"])
-        found = install_terms_in(body, terms)
+        found = validate_promotion_item(item)
+        public_text = "\n".join(str(item.get(field) or "") for field in ("key", "title", "category", "body"))
+        found += ["installation-specific term"] if install_terms_in(public_text, terms) else []
         if found:
             held[key] = found
             continue
+        validated.append(item)
+    if validated:
+        root.mkdir(parents=True, exist_ok=True)
+    for item in validated:
+        key, body = item["key"], item["body"]
         body_path(key, root).write_text(body, encoding="utf-8")
         written.append(key)
-        if item.get("kind") == "new":
+        if item.get("kind") == "new" or key in manifest:
             manifest[key] = {
                 "title": item.get("title") or key,
                 "category": item.get("category") or "custom",
@@ -201,17 +258,33 @@ def _fetch_report(api: str) -> dict[str, Any]:
     # Stdlib only: the exporter runs from a source checkout without app deps.
     from urllib.request import urlopen
 
-    with urlopen(f"{api.rstrip('/')}/v1/prompts/sync/drift?include_body=true", timeout=30) as response:
+    with urlopen(f"{api.rstrip('/')}/v1/prompts/sync/drift?include_body=false", timeout=30) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
-def _fetch_bot_terms(api: str) -> list[str]:
-    """Bot slugs and display names from the live install (always install-specific)."""
+def _fetch_selected(api: str, keys: Iterable[str]) -> dict[str, Any]:
+    """Read exactly the approved global rows; never enumerate bots/private scopes."""
+    from types import SimpleNamespace
+    from urllib.parse import quote
     from urllib.request import urlopen
 
-    with urlopen(f"{api.rstrip('/')}/v1/bots", timeout=30) as response:
-        bots = json.loads(response.read().decode("utf-8")).get("data", [])
-    return [str(v) for bot in bots for v in (bot.get("slug"), bot.get("name")) if v]
+    items = []
+    for key in sorted(set(keys)):
+        body_path(key)  # reject invalid keys before network access
+        url = f"{api.rstrip('/')}/v1/prompts/{quote(key, safe='')}?scope_type=global&exact=true"
+        with urlopen(url, timeout=30) as response:
+            row = json.loads(response.read().decode("utf-8"))
+        if row.get("key") != key:
+            raise ValueError("selected prompt response key does not match request")
+        row["sync_class"] = classify(SimpleNamespace(
+            **{field: row.get(field) for field in ("key", "category", "scope_type", "scope_id")},
+            metadata_json=json.dumps(row.get("metadata") or {}),
+        ))
+        # A manifest registration for a built-in is harmless and makes exported
+        # metadata reviewable too. Existing Python definitions retain precedence.
+        row["kind"] = "new"
+        items.append(row)
+    return {"promotion_candidates": items}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -223,6 +296,10 @@ def main(argv: list[str] | None = None) -> int:
         cmd = sub.add_parser(name)
         cmd.add_argument("--api", default="http://app:8642", help="llm-bawt API base URL")
     sub.choices["export"].add_argument(
+        "--key", action="append", required=True,
+        help="approved portable prompt key to promote; repeat to explicitly allowlist more",
+    )
+    sub.choices["export"].add_argument(
         "--root", required=True, type=Path,
         help="prompt_defaults/synced directory of the source checkout to write",
     )
@@ -232,16 +309,22 @@ def main(argv: list[str] | None = None) -> int:
              " PROMPT_SYNC_INSTALL_TERMS (comma-separated) adds more",
     )
     args = parser.parse_args(argv)
-    report = _fetch_report(args.api)
     if args.command == "check":
-        print(json.dumps({k: v for k, v in report.items() if k != "drift"} | {
-            "keys": [item["key"] for item in report.get("drift", [])]}, indent=2))
+        report = _fetch_report(args.api)
+        print(json.dumps({
+            "in_sync": report["in_sync"],
+            "drift_count": report["drift_count"],
+            "keys": [item["key"] for item in report.get("drift", [])],
+            "override_count": len(report.get("overrides", [])),
+            "promotion_candidates": [item["key"] for item in report.get("promotion_candidates", [])],
+        }, indent=2))
         return 0 if report.get("in_sync") else 1
     import os
 
-    terms = _fetch_bot_terms(args.api) + list(args.install_term) + [
+    terms = list(args.install_term) + [
         t.strip() for t in os.environ.get("PROMPT_SYNC_INSTALL_TERMS", "").split(",")]
-    result = export_report(report, args.root, terms)
+    report = _fetch_selected(args.api, args.key)
+    result = export_report(report, args.root, terms, approved_keys=args.key)
     print(json.dumps(result, indent=2))
     return 4 if result["held"] else 0
 

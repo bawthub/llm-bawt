@@ -1,7 +1,7 @@
 """Run llm_bawt.prompt_sync from a source checkout without app dependencies (TASK-2127).
 
-Loads only ``prompt_sync`` and ``prompt_synced_defaults`` (stdlib-only) under a
-bare ``llm_bawt`` package so the package ``__init__`` and its deps are skipped.
+Loads the stdlib-only sync, promotion and template-text modules under a bare
+``llm_bawt`` package so the package ``__init__`` and its deps are skipped.
 Usage: python3 -I scripts/prompt_sync_export.py <src-dir> check|export [args]
 """
 

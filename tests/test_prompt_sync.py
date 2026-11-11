@@ -12,6 +12,7 @@ from llm_bawt import prompt_synced_defaults
 from llm_bawt.prompt_definitions import PromptDefinition
 from llm_bawt.prompt_registry import PromptTemplate, PromptTemplateStore, PromptTemplateVersion
 from llm_bawt.prompt_sync import (
+    DEFAULT_MODE_KEY,
     DEFAULT_SHA_KEY,
     INSTALL,
     PRODUCT,
@@ -41,7 +42,9 @@ def test_classify_defaults_and_explicit_override() -> None:
     assert classify(_row("persona.x", "x", category="persona")) == INSTALL
     assert classify(_row("a", "x", scope_type="bot")) == INSTALL
     assert classify(_row("a", "x", metadata={"sync": "install"})) == INSTALL
-    assert classify(_row("persona.x", "x", category="persona", metadata={"sync": "product"})) == PRODUCT
+    assert classify(_row("persona.x", "x", category="persona", metadata={"sync": "product"})) == INSTALL
+    assert classify(_row("persona.x", "x", metadata={"sync": "product"})) == INSTALL
+    assert classify(_row("a", "x", scope_type="bot", metadata={"sync": "product"})) == INSTALL
 
 
 def test_drift_covers_changed_and_new_product_rows_only() -> None:
@@ -49,7 +52,7 @@ def test_drift_covers_changed_and_new_product_rows_only() -> None:
     rows = [
         _row("same", "A"),
         _row("edited", "B2"),
-        _row("stale", "old", updated_by="system:seed"),  # untouched seed row: follows, not drift
+        _row("stale", "old", updated_by="system:seed"),
         _row("brand.new", "N"),
         _row("persona.me", "P", category="persona"),
         _row("local", "L", metadata={"sync": "install"}),
@@ -57,23 +60,28 @@ def test_drift_covers_changed_and_new_product_rows_only() -> None:
     drift = {item.key: item.kind for item in compute_drift(rows, defs)}
     assert drift == {"edited": "changed", "brand.new": "new"}
     report = drift_report(rows, defs)
-    assert report["in_sync"] is False and report["drift_count"] == 2
+    assert report["in_sync"] is False and report["drift_count"] == 1
+    assert report["drift"][0]["key"] == "stale"
+    assert {item["key"] for item in report["overrides"]} == {"same", "edited", "brand.new", "persona.me", "local"}
     assert report["classified"] == {PRODUCT: 4, INSTALL: 2}
-    assert "body" not in report["drift"][0]
+    assert "body" not in report["promotion_candidates"][0]
 
 
-def test_is_following_uses_hash_then_seed_actor() -> None:
+def test_is_following_requires_default_writer_and_no_override_intent() -> None:
     assert is_following(_row("k", "x", updated_by="system:seed"))
     assert not is_following(_row("k", "x", updated_by="snark"))
-    assert is_following(_row("k", "x", updated_by="snark", metadata={DEFAULT_SHA_KEY: body_sha256("x")}))
+    assert not is_following(_row("k", "x", updated_by="snark", metadata={DEFAULT_SHA_KEY: body_sha256("x")}))
+    assert is_following(_row("k", "x", updated_by="system:sync", metadata={DEFAULT_SHA_KEY: body_sha256("x")}))
     assert not is_following(_row("k", "y", updated_by="system:seed", metadata={DEFAULT_SHA_KEY: body_sha256("x")}))
+    assert not is_following(_row("k", "x", updated_by="system:seed", metadata={DEFAULT_MODE_KEY: "override"}))
+    assert not is_following(_row("k", "x", updated_by="system:seed", scope_type="bot"))
 
 
 def test_export_writes_bodies_and_manifest(tmp_path: Path) -> None:
     defs = {"edited": _defn("edited", "B")}
     rows = [_row("edited", "B2"), _row("brand.new", "N {thing}", category="repos")]
     rows[1].required_vars_json = json.dumps(["thing"])
-    result = export_report(drift_report(rows, defs, include_body=True), tmp_path)
+    result = export_report(drift_report(rows, defs, include_body=True), tmp_path, approved_keys=["edited", "brand.new"])
     assert result["written"] == ["brand.new", "edited"]
     assert (tmp_path / "edited.txt").read_text() == "B2"
     assert (tmp_path / "brand.new.txt").read_text() == "N {thing}"
@@ -86,9 +94,10 @@ def test_export_writes_bodies_and_manifest(tmp_path: Path) -> None:
 def test_export_holds_bodies_naming_install_terms(tmp_path: Path) -> None:
     rows = [_row("clean", "Ask the user first."), _row("named", "Ask Pat first; never touch Zed."),
             _row("partial", "Patterns and Zedonk are fine.")]
-    result = export_report(drift_report(rows, {}, include_body=True), tmp_path, ["Pat", "Zed", " "])
+    result = export_report(drift_report(rows, {}, include_body=True), tmp_path, ["Pat", "Zed", " "],
+                           approved_keys=["clean", "named", "partial"])
     assert result["written"] == ["clean", "partial"]
-    assert result["held"] == {"named": ["Pat", "Zed"]}
+    assert result["held"] == {"named": ["installation-specific term"]}
     assert not (tmp_path / "named.txt").exists()
     assert "named" not in load_manifest(tmp_path)
 
@@ -103,7 +112,7 @@ def test_install_notes_prompt_is_install_only() -> None:
 
 def test_export_rejects_report_without_bodies(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
-        export_report(drift_report([_row("brand.new", "N")], {}), tmp_path)
+        export_report(drift_report([_row("brand.new", "N")], {}), tmp_path, approved_keys=["brand.new"])
 
 
 def test_body_path_rejects_traversal() -> None:
@@ -176,15 +185,138 @@ def test_followed_row_takes_the_new_required_vars_and_custom_rows_keep_theirs(st
     assert json.loads(rows["k.custom"].required_vars_json) == ["a", "b"]
 
 
-def test_customized_row_matching_new_default_starts_following(store) -> None:
+def test_explicit_override_matching_new_default_stays_overridden_until_reset(store) -> None:
     s, defs = store
     s.seed_defaults()
-    s.upsert(key="k.custom", body="tuned", updated_by="snark")
+    seeded_metadata = json.loads(_bodies(s)["k.custom"].metadata_json)
+    saved = s.upsert(key="k.custom", body="tuned", updated_by="tenant", metadata=seeded_metadata)
+    assert json.loads(saved.metadata_json)[DEFAULT_MODE_KEY] == "override"
+    assert DEFAULT_SHA_KEY not in json.loads(saved.metadata_json)
     defs["k.custom"] = _defn("k.custom", "tuned")  # the sync shipped this edit
-    assert s.seed_defaults()["adopted_keys"] == ["k.custom"]
+    assert s.seed_defaults()["adopted_keys"] == []
     defs["k.custom"] = _defn("k.custom", "tuned v2")
-    assert s.seed_defaults()["followed_keys"] == ["k.custom"]
-    assert _bodies(s)["k.custom"].body == "tuned v2"
+    assert "k.custom" not in s.seed_defaults()["followed_keys"]
+    assert _bodies(s)["k.custom"].body == "tuned"
+
+    # A promotion changes the product, not this tenant's explicit override.
+    # Reset after publication uses the latest fallback immediately.
+    from llm_bawt.prompt_registry import PromptResolver
+
+    resolver = PromptResolver.__new__(PromptResolver)
+    resolver.store = s
+    assert s.reset("k.custom")
+    assert resolver.resolve("k.custom").body == "tuned v2"
+    assert resolver.resolve("k.custom").provenance == "product_default"
+    assert resolver.resolve("k.custom").default_version == body_sha256("tuned v2")
+    s.seed_defaults()
+    for body in ("tuned v3", "tuned v4"):
+        defs["k.custom"] = _defn("k.custom", body)
+        assert "k.custom" in s.seed_defaults()["followed_keys"]
+        assert resolver.resolve("k.custom").body == body
+    assert s.seed_defaults()["followed_keys"] == []
+
+
+def test_noop_save_cannot_forge_following_or_change_stored_portability(store) -> None:
+    s, defs = store
+    s.seed_defaults()
+    s.set_sync_class("k.follow", INSTALL)
+    metadata = json.loads(_bodies(s)["k.follow"].metadata_json)
+    metadata.update({DEFAULT_MODE_KEY: "follow", "sync": PRODUCT})
+    row = s.upsert(key="k.follow", body="v1", metadata=metadata, updated_by="system:seed")
+    saved = json.loads(row.metadata_json)
+    assert saved[DEFAULT_MODE_KEY] == "override"
+    assert DEFAULT_SHA_KEY not in saved
+    assert saved["sync"] == INSTALL
+    defs["k.follow"] = _defn("k.follow", "v2")
+    assert "k.follow" not in s.seed_defaults()["followed_keys"]
+    assert _bodies(s)["k.follow"].body == "v1"
+
+
+@pytest.mark.parametrize("writer", ["tenant", None])
+def test_edited_and_ambiguous_legacy_equality_does_not_enable_following(store, writer) -> None:
+    s, defs = store
+    s.seed_defaults()
+    with Session(s.engine) as session:
+        row = session.exec(select(PromptTemplate).where(PromptTemplate.key == "k.legacy")).one()
+        row.updated_by = writer
+        # Old editors returned tracking metadata unchanged on a tenant save.
+        row.metadata_json = json.dumps({DEFAULT_SHA_KEY: body_sha256("v1")})
+        session.add(row)
+        session.commit()
+    assert s.seed_defaults()["adopted_keys"] == []
+    defs["k.legacy"] = _defn("k.legacy", "v2")
+    assert "k.legacy" not in s.seed_defaults()["followed_keys"]
+    assert _bodies(s)["k.legacy"].body == "v1"
+
+
+def test_scoped_override_survives_global_default_releases_and_reset(store) -> None:
+    from llm_bawt.prompt_registry import PromptResolver
+
+    s, defs = store
+    s.seed_defaults()
+    s.upsert(key="k.follow", body="bot text", scope_type="bot", scope_id="fixture-bot", updated_by="tenant")
+    resolver = PromptResolver.__new__(PromptResolver)
+    resolver.store = s
+    for body in ("v2", "v3"):
+        defs["k.follow"] = _defn("k.follow", body)
+        s.seed_defaults()
+        assert resolver.resolve("k.follow", "bot", "fixture-bot").body == "bot text"
+    assert s.reset("k.follow", "bot", "fixture-bot")
+    assert resolver.resolve("k.follow", "bot", "fixture-bot").body == "v3"
+
+
+def test_synced_fixture_catalog_is_portable_and_matches_definitions() -> None:
+    from llm_bawt.prompt_definitions import DEFAULT_PROMPT_DEFINITIONS
+    from llm_bawt.prompt_promotion import validate_promotion_item
+
+    for path in sorted(prompt_synced_defaults.SYNCED_DIR.glob("*.txt")):
+        key = path.stem
+        assert key in DEFAULT_PROMPT_DEFINITIONS, f"unregistered fixture {key}"
+        definition = DEFAULT_PROMPT_DEFINITIONS[key]
+        errors = validate_promotion_item({
+            "key": key, "title": definition.title, "category": definition.category,
+            "format": definition.format, "required_vars": list(definition.required_vars),
+            "scope_type": "global", "scope_id": "*", "sync_class": PRODUCT,
+            "body": path.read_text(encoding="utf-8"),
+        })
+        assert not errors, f"{key}: {errors}"
+    # Validate the serialized manifest itself too: Python-defined keys may ignore
+    # its metadata at runtime, but that must not hide malformed/private fixtures.
+    for key, entry in load_manifest().items():
+        assert set(entry) <= {"title", "category", "format", "required_vars"}
+        path = prompt_synced_defaults.body_path(key)
+        assert path.is_file(), f"manifest entry without body: {key}"
+        errors = validate_promotion_item({
+            **entry, "key": key, "scope_type": "global", "scope_id": "*",
+            "sync_class": PRODUCT, "body": path.read_text(encoding="utf-8"),
+        })
+        assert not errors, f"manifest {key}: {errors}"
+
+
+def test_fresh_repos_defaults_seed_render_and_fallback_use_one_body(monkeypatch) -> None:
+    import llm_bawt.prompt_registry as registry
+
+    definitions = {key: definition for key, definition in registry.DEFAULT_PROMPT_DEFINITIONS.items()
+                   if key.startswith("repos.workspace.")}
+    assert len(definitions) == 7
+    assert sum(key.startswith("repos.workspace.commit_") for key in definitions) == 5
+    monkeypatch.setattr(registry, "DEFAULT_PROMPT_DEFINITIONS", definitions)
+    s = PromptTemplateStore.__new__(PromptTemplateStore)
+    s.engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(s.engine, tables=[PromptTemplate.__table__, PromptTemplateVersion.__table__])
+    assert s.seed_defaults()["created"] == 7
+    assert s.seed_defaults()["created"] == 0
+    resolver = registry.PromptResolver.__new__(registry.PromptResolver)
+    resolver.store = s
+    for key, definition in definitions.items():
+        resolved = resolver.resolve(key)
+        assert resolved.provenance == "product_default"
+        assert resolved.body == prompt_synced_defaults.synced_body(key)
+        variables = {name: f"fixture {name}" for name in definition.required_vars}
+        assert "fixture scope" in resolver.render(key=key, variables=variables)
+        assert s.reset(key)
+        assert resolver.resolve(key).body == resolved.body
+        assert resolver.resolve(key).default_version == resolved.default_version
 
 
 def test_set_sync_class_changes_metadata_only(store) -> None:
@@ -197,7 +329,7 @@ def test_set_sync_class_changes_metadata_only(store) -> None:
     assert s.set_sync_class("missing", INSTALL) is None
 
 
-def test_health_check_degrades_only_on_stale_drift(monkeypatch) -> None:
+def test_health_check_degrades_only_on_stale_managed_defaults(monkeypatch) -> None:
     from datetime import datetime, timedelta, timezone
     from types import SimpleNamespace
 
@@ -205,7 +337,7 @@ def test_health_check_degrades_only_on_stale_drift(monkeypatch) -> None:
     from llm_bawt.service import health_checks
 
     now = datetime(2026, 11, 7, tzinfo=timezone.utc)
-    rows = [_row("edited", "B2")]
+    rows = [_row("edited", "B2", updated_by="system:seed")]
 
     class FakeResolver:
         def __init__(self, _config):
@@ -219,23 +351,20 @@ def test_health_check_degrades_only_on_stale_drift(monkeypatch) -> None:
     rows[0].updated_at = now - timedelta(hours=2)
     fresh = health_checks.check_prompt_sync(None, now)
     assert fresh["status"] == "ok"
-    assert fresh["reason"] == ("1 edited prompt not yet synced to the shipped defaults; "
-                               "oldest unsynced edit: today. Prompts: edited")
+    assert fresh["reason"] == ("1 managed prompt behind shipped defaults; "
+                               "oldest default update: today. Prompts: edited")
     rows[0].updated_at = now - timedelta(hours=72)
     stale = health_checks.check_prompt_sync(None, now)
     assert stale["status"] == "degraded"
-    assert "oldest unsynced edit: 3 days." in stale["reason"]
+    assert "oldest default update: 3 days." in stale["reason"]
     rows[0].updated_at = now - timedelta(hours=30)
-    assert "oldest unsynced edit: 1 day." in health_checks.check_prompt_sync(None, now)["reason"]
-    rows[:] = [_row(f"k{i}", "x") for i in range(7)]
-    for row in rows:
-        row.updated_at = now - timedelta(hours=1)
-    many = health_checks.check_prompt_sync(None, now)["reason"]
-    assert many.startswith("7 edited prompts") and many.endswith("k4 and 2 more")
+    assert "oldest default update: 1 day." in health_checks.check_prompt_sync(None, now)["reason"]
+    # Old intentional edits never become unhealthy just because they differ.
     rows[:] = [_row("edited", "B2")]
-    rows[0].updated_at = now
+    rows[0].updated_at = now - timedelta(days=90)
+    assert health_checks.check_prompt_sync(None, now)["status"] == "ok"
     rows[0].body = "B"
-    assert health_checks.check_prompt_sync(None, now)["reason"] == "product prompts match shipped defaults"
+    assert "tenant overrides preserved" in health_checks.check_prompt_sync(None, now)["reason"]
 
 
 def test_save_committed_during_seed_pass_is_not_overwritten(store, monkeypatch, tmp_path) -> None:

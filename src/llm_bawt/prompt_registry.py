@@ -6,7 +6,6 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-import re
 from typing import Any
 
 from sqlalchemy import Column, DateTime, String, Text, UniqueConstraint
@@ -23,8 +22,12 @@ from .prompt_definitions import (  # noqa: F401
     DEFAULT_PROMPT_DEFINITIONS,
     PromptDefinition,
 )
-from .prompt_sync import DEFAULT_SHA_KEY, SEED_ACTOR, SYNC_ACTOR, SYNC_METADATA_KEY, is_following
+from .prompt_sync import (
+    DEFAULT_MODE_KEY, DEFAULT_SHA_KEY, OVERRIDE, SEED_ACTOR, SYNC_ACTOR,
+    SYNC_METADATA_KEY, is_following, prompt_provenance,
+)
 from .prompt_synced_defaults import body_sha256
+from .prompt_template_text import extract_placeholders, render_template  # noqa: F401
 from .utils.config import Config, has_database_credentials
 from .utils.schema import SchemaBootstrapGuard
 
@@ -109,6 +112,10 @@ class ResolvedPrompt:
     source: str
     updated_at: datetime | None = None
     updated_by: str | None = None
+    provenance: str | None = None
+    default_version: str | None = None
+    effective_version: str | None = None
+    default_outdated: bool = False
 
 
 
@@ -147,78 +154,6 @@ def _parse_json_dict(raw: str | None) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-# A placeholder is ``{identifier}``. Other brace text (for example a literal JSON
-# example such as ``{"outer": {"inner": 1}}``) is kept verbatim. Legacy escapes
-# still work: ``{{`` renders ``{`` and the ``}}`` that closes it renders ``}``.
-# Braces are tracked by depth so a literal object's own closing ``}}`` is not
-# mistaken for an escape.
-_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-
-
-def _scan_template(body: str):
-    """Yield ``("text", str)`` and ``("var", name)`` tokens for a template."""
-    open_kinds: list[str] = []  # "esc" for {{ ... }}, "lit" for a literal {
-    text: list[str] = []
-    i, n = 0, len(body)
-    while i < n:
-        ch = body[i]
-        if ch == "{":
-            if body.startswith("{{", i):
-                open_kinds.append("esc")
-                text.append("{")
-                i += 2
-                continue
-            close = body.find("}", i + 1)
-            if close != -1 and _IDENT_RE.fullmatch(body, i + 1, close):
-                if text:
-                    yield "text", "".join(text)
-                    text = []
-                yield "var", body[i + 1:close]
-                i = close + 1
-                continue
-            open_kinds.append("lit")
-            text.append("{")
-            i += 1
-            continue
-        if ch == "}":
-            top = open_kinds[-1] if open_kinds else None
-            if top == "lit":
-                open_kinds.pop()
-                text.append("}")
-                i += 1
-                continue
-            if body.startswith("}}", i) and top in ("esc", None):
-                if top == "esc":
-                    open_kinds.pop()
-                text.append("}")
-                i += 2
-                continue
-        text.append(ch)
-        i += 1
-    if text:
-        yield "text", "".join(text)
-
-
-def extract_placeholders(body: str) -> list[str]:
-    """Extract ``{identifier}`` placeholders from a prompt template."""
-    names: list[str] = []
-    for kind, value in _scan_template(body or ""):
-        if kind == "var" and value not in names:
-            names.append(value)
-    return names
-
-
-def render_template(body: str, variables: dict[str, Any]) -> str:
-    """Substitute ``{identifier}`` placeholders; leave other braces literal.
-
-    Raises ``KeyError`` for a placeholder with no supplied variable.
-    """
-    return "".join(
-        str(variables[value]) if kind == "var" else value
-        for kind, value in _scan_template(body or "")
-    )
-
-
 class PromptKeyTaken(Exception):
     """A create-only prompt write found its key already taken."""
 
@@ -250,7 +185,7 @@ def stage_prompt_upsert(
     """
     normalized_type, normalized_id = _normalize_scope(scope_type, scope_id)
     required_vars = [str(item) for item in (required_vars or []) if str(item).strip()]
-    metadata = metadata or {}
+    metadata = dict(metadata or {})
     now = datetime.now(timezone.utc)
     row = session.exec(
         select(PromptTemplate).where(
@@ -261,6 +196,18 @@ def stage_prompt_upsert(
     ).first()
     if create_only and row is not None:
         raise PromptKeyTaken(key)
+    # All ordinary saves express tenant intent, including title-only/no-op saves.
+    # Never trust tracking metadata returned by an older client. Only the seed
+    # path below may write default-management provenance.
+    metadata.pop(DEFAULT_SHA_KEY, None)
+    metadata[DEFAULT_MODE_KEY] = OVERRIDE
+    if row is not None:
+        # Portability is a separate explicit operation, not a side effect of
+        # round-tripping stale editor metadata.
+        stored_metadata = _parse_json_dict(row.metadata_json)
+        metadata.pop(SYNC_METADATA_KEY, None)
+        if SYNC_METADATA_KEY in stored_metadata:
+            metadata[SYNC_METADATA_KEY] = stored_metadata[SYNC_METADATA_KEY]
     version_statement = select(PromptTemplateVersion).where(
         PromptTemplateVersion.key == key,
         PromptTemplateVersion.scope_type == normalized_type,
@@ -367,12 +314,11 @@ class PromptTemplateStore:
     def seed_defaults(self) -> dict[str, Any]:
         """Insert missing built-in defaults; move untouched rows to new defaults.
 
-        A row "follows" its code default while its body still equals the
-        default it was seeded or last synced with (``default_sha256`` in its
-        metadata; rows never written by anyone but ``system:seed`` count as
-        following too). When the shipped default changes, a following row is
-        updated with a version entry. Customized rows are never touched; a
-        customized row whose body equals the current default starts following.
+        Only seed/sync-managed rows without explicit override intent follow.
+        When the shipped default changes, a following row is updated with a
+        version entry. Ordinary saves, edited/ambiguous legacy rows and scoped
+        customizations remain overrides even if a later default has equal text.
+        Reset deletes the override, resuming the current and future defaults.
         """
         if self.engine is None:
             raise RuntimeError("Prompt template DB unavailable")
@@ -474,20 +420,20 @@ class PromptTemplateStore:
         """
         seen_body, seen_meta, seen_by = row.body, row.metadata_json, row.updated_by
         metadata = _parse_json_dict(seen_meta)
+        if not is_following(row):
+            return None
         if body_sha256(seen_body) == sha:
             if metadata.get(DEFAULT_SHA_KEY) == sha:
                 return None
             metadata[DEFAULT_SHA_KEY] = sha
             values: dict[str, Any] = {"metadata_json": json.dumps(metadata)}
             outcome = "adopted"
-        elif is_following(row):
+        else:
             metadata[DEFAULT_SHA_KEY] = sha
             values = {"body": body, "metadata_json": json.dumps(metadata),
                       "required_vars_json": required_vars_json,
                       "updated_by": SYNC_ACTOR, "updated_at": now}
             outcome = "followed"
-        else:
-            return None
         table = PromptTemplate.__table__
         result = session.execute(
             sa_update(table)
@@ -764,6 +710,7 @@ class PromptResolver:
             if row is not None:
                 definition = self.definition_for(key)
                 return ResolvedPrompt(
+                    **prompt_provenance(row, definition),
                     key=key,
                     title=row.title or (definition.title if definition else key),
                     category=row.category or (definition.category if definition else "custom"),
@@ -782,6 +729,7 @@ class PromptResolver:
         if definition is None:
             return None
         return ResolvedPrompt(
+            **prompt_provenance(None, definition),
             key=key,
             title=definition.title,
             category=definition.category,

@@ -55,9 +55,11 @@ def _refuse_deprecated_write(key: str) -> None:
 
 def _row_to_response(row: PromptTemplate) -> PromptTemplateResponse:
     from ...prompt_registry import _parse_json_dict, _parse_json_list
+    from ...prompt_sync import prompt_provenance
 
     return PromptTemplateResponse(
         **_deprecation(row.key),
+        **prompt_provenance(row, DEFAULT_PROMPT_DEFINITIONS.get(row.key)),
         key=row.key,
         title=row.title or row.key,
         category=row.category or "custom",
@@ -85,6 +87,10 @@ def _resolved_to_response(resolved) -> PromptTemplateResponse:
         scope_type=resolved.scope_type,
         scope_id=resolved.scope_id,
         source=resolved.source,
+        provenance=getattr(resolved, "provenance", None),
+        default_version=getattr(resolved, "default_version", None),
+        effective_version=getattr(resolved, "effective_version", None),
+        default_outdated=getattr(resolved, "default_outdated", False),
         required_vars=list(resolved.required_vars),
         placeholders=extract_placeholders(resolved.body),
         metadata=dict(resolved.metadata),
@@ -103,6 +109,10 @@ def _response_to_summary(item: PromptTemplateResponse) -> PromptTemplateSummary:
         scope_type=item.scope_type,
         scope_id=item.scope_id,
         source=item.source,
+        provenance=item.provenance,
+        default_version=item.default_version,
+        effective_version=item.effective_version,
+        default_outdated=item.default_outdated,
         body_length=len(item.body or ""),
         updated_at=item.updated_at,
         updated_by=item.updated_by,

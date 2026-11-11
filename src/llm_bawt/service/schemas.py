@@ -715,6 +715,10 @@ class PromptTemplateResponse(BaseModel):
     scope_type: str
     scope_id: str
     source: str
+    provenance: str | None = None
+    default_version: str | None = None
+    effective_version: str | None = None
+    default_outdated: bool = False
     required_vars: list[str] = Field(default_factory=list)
     placeholders: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -754,6 +758,10 @@ class PromptTemplateSummary(BaseModel):
     scope_type: str
     scope_id: str
     source: str
+    provenance: str | None = None
+    default_version: str | None = None
+    effective_version: str | None = None
+    default_outdated: bool = False
     body_length: int = 0
     updated_at: datetime | None = None
     updated_by: str | None = None

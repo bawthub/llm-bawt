@@ -7,6 +7,7 @@ tenant needs before any bot can exist:
   ``bot_profiles`` endpoint trigger (:func:`migrate_model_catalog`);
 - the ``bot_profiles`` table itself (via :class:`BotProfileStore`);
 - built-in prompt-registry defaults.
+- disabled ops starter specifications and starter approval policies.
 
 It deliberately seeds **no bots and no model rows**: a bot without a provider
 credential is broken on arrival. The setup wizard connects a provider first,
@@ -15,9 +16,9 @@ from that provider, and creates the first bot against the returned endpoint.
 
 Guarantees:
 
-- Insert-if-missing on natural keys (``models.key``,
-  ``(model_id, access_path_id)``); re-running against a populated database
-  is a no-op and NEVER clobbers operator-edited rows.
+- Catalog/policy insert-if-missing on natural keys; re-running preserves
+  operator-edited rows. Prompt defaults additionally advance proven
+  seed/sync-managed rows, while explicit and ambiguous overrides stay intact.
 - Nothing here reads or writes API keys — those live in the encrypted
   CredentialStore behind the provider adapters (TASK-825).
 
@@ -195,7 +196,7 @@ class TenantSeeder:
         return {"created": created, "existing": existing}
 
     def _seed_prompt_defaults(self) -> dict[str, Any]:
-        """Built-in prompt-registry defaults (insert-if-missing by design)."""
+        """Seed missing prompts and advance managed defaults, preserving overrides."""
         from ..prompt_registry import PromptTemplateStore
 
         store = PromptTemplateStore(self.config)
