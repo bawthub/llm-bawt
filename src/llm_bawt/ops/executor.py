@@ -35,7 +35,7 @@ from .container_remove import (ACTION as REMOVE_ACTION, WORKER_CAPABILITY_LABEL 
 from .config_reconcile import (ACTION as CONFIG_ACTION, WORKER_CAPABILITY_LABEL as CONFIG_WORKER_LABEL,
                                config_binding, validate_compose_config, validate_config_spec)
 from .health_probe import WORKER_LABEL as HEALTH_PROBE_LABEL, validate_health_probe
-from .image_deploy import DEPLOY_ACTION, IMAGE_ACTIONS
+from .image_deploy import CUTOVER_STOP_FIRST, CUTOVERS, DEPLOY_ACTION, IMAGE_ACTIONS
 from .plan_reconcile import (ACTION as PLAN_ACTION, WORKER_CAPABILITY_LABEL as PLAN_WORKER_LABEL,
                              validate_plan_spec)
 from .release_spec import is_release_spec, validate_release_spec
@@ -224,7 +224,7 @@ def validate_image_spec(spec: dict) -> dict:
     ``compose_config`` (TASK-1518) is required for deploy and optional for
     rollback, which never checks it: a rollback must stay possible."""
     allowed = {"action", "stop_grace_seconds", "health_timeout_seconds", "compose_config", "health_probe",
-               "binding", "trigger_workflow_path", *_IMAGE_SPEC_PATTERNS}
+               "binding", "cutover", "trigger_workflow_path", *_IMAGE_SPEC_PATTERNS}
     if set(spec) - allowed or set(_IMAGE_SPEC_PATTERNS) - set(spec):
         raise ValueError(f"image spec requires exactly {sorted(allowed)} "
                          "(stop_grace_seconds and binding optional, compose_config required for deploy)")
@@ -251,6 +251,8 @@ def validate_image_spec(spec: dict) -> dict:
     for key, pattern in _IMAGE_SPEC_PATTERNS.items():
         if not isinstance(spec[key], str) or not re.fullmatch(pattern, spec[key]):
             raise ValueError(f"image spec {key} is invalid")
+    if spec.get("cutover", CUTOVER_STOP_FIRST) not in CUTOVERS:
+        raise ValueError("image spec cutover must be one of " + ", ".join(sorted(CUTOVERS)))
     grace = spec.get("stop_grace_seconds", 10)
     if type(grace) is not int or not 0 <= grace <= 300:
         raise ValueError("stop_grace_seconds must be an integer in 0..300")

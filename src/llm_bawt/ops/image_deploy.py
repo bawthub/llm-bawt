@@ -47,6 +47,12 @@ else:  # standalone immutable worker
     from service_identity import ComposeServiceRef
 
 DEPLOY_SCHEMA = "llm-bawt.ops.image-deploy/v1"
+# TASK-1535: how the old container gives way. ``stop_first`` stops it before
+# the new one starts; ``overlap`` starts the new one unrouted and hands over
+# the network aliases once it is healthy (no serving gap).
+CUTOVER_STOP_FIRST = "stop_first"
+CUTOVER_OVERLAP = "overlap"
+CUTOVERS = frozenset({CUTOVER_STOP_FIRST, CUTOVER_OVERLAP})
 DEPLOY_ACTION = "deploy_image"
 ROLLBACK_ACTION = "rollback_image"
 IMAGE_ACTIONS = frozenset({DEPLOY_ACTION, ROLLBACK_ACTION})
@@ -305,6 +311,8 @@ class ImageDeployer:
         Restores the previous container on any failure. On success the old
         container stays stopped as ``<name>-prev-<job8>`` until
         :meth:`_commit_swap` or :meth:`_revert`."""
+        if self._overlap():
+            return self._swap_overlap(old, old_image, new_image, ref, expect_release)
         job8 = self.job_id[:8]
         temp, prev = f"{self.name}-next-{job8}", f"{self.name}-prev-{job8}"
         self._phase("create")
@@ -343,6 +351,124 @@ class ImageDeployer:
             self._restore(Swap(old["Id"], new_id, prev), safe_error(exc))
         return Swap(old["Id"], new_id, prev)
 
+    def _overlap(self) -> bool:
+        return self.spec.get("cutover", CUTOVER_STOP_FIRST) == CUTOVER_OVERLAP
+
+    def _swap_overlap(self, old, old_image, new_image, ref, expect_release) -> "Swap":
+        """TASK-1535 zero-gap cutover for a target reached by its network
+        aliases (Docker DNS), e.g. a file-provider reverse proxy upstream.
+
+        The new container starts with NO network aliases, so nothing routes to
+        it while it starts. Once healthy and verified, it is reconnected with
+        the old container's aliases (both now serve), then the old one stops.
+        A failure before the alias handoff never touched the old container."""
+        job8 = self.job_id[:8]
+        temp, prev = f"{self.name}-next-{job8}", f"{self.name}-prev-{job8}"
+        self._phase("create")
+        self._approved_image_id = new_image["Id"]
+        body = self._create_body(old, old_image, new_image, ref)
+        unsafe = overlap_blockers(body)
+        if unsafe:
+            self._fail("overlap cutover impossible for this target (" + ", ".join(unsafe) + "); nothing changed",
+                       known=True)
+        endpoints = body["NetworkingConfig"]["EndpointsConfig"]
+        handoff = {net: dict(ep) for net, ep in endpoints.items()}
+        for ep in endpoints.values():
+            ep["Aliases"] = []
+        try:
+            new_id = self.api.request("POST", "/containers/create?" + urlencode({"name": temp}), body=body)["Id"]
+        except Exception as exc:  # noqa: BLE001 - production untouched; never echo the body
+            self._fail(f"create failed ({safe_error(exc)}); nothing changed", known=True)
+        self.detail["cutover"] = CUTOVER_OVERLAP
+        self.detail["deployed"] = {"container_id": new_id, "image_id": new_image["Id"], "image_ref": ref,
+                                   "release": release_from_labels(new_image["Config"].get("Labels"))}
+        try:
+            self._phase("verify-created")
+            self._after_create(new_id)
+            self._phase("start")
+            self.api.side_effect_started = True
+            self.api.request("POST", f"/containers/{new_id}/start")
+            self._phase("health")
+            self._wait_healthy(new_id)
+            self._phase("verify-release")
+            self.detail["health"] = self._verify_release(new_id, expect_release)
+        except Exception as exc:  # noqa: BLE001 - the old container was never touched
+            self._discard_unrouted(new_id, temp, old["Id"], safe_error(exc))
+        swap = Swap(old["Id"], new_id, prev)
+        try:
+            self._phase("handoff")
+            for net in handoff:
+                self.api.request("POST", f"/networks/{quote(net, safe='')}/disconnect",
+                                 body={"Container": new_id, "Force": False})
+            self._attach(new_id, handoff)
+            # Reconnecting must not have disturbed it: recheck before the old one goes.
+            self._phase("verify-handoff")
+            self._wait_healthy(new_id)
+            self._verify_release(new_id, expect_release)
+            self._phase("stop-old")
+            self.api.request("POST", f"/containers/{old['Id']}/stop?t={self.spec.get('stop_grace_seconds', 10)}")
+            self._phase("swap")
+            self._rename(old["Id"], prev)
+            self._rename(new_id, self.name)
+            self._phase("health")
+            self._wait_healthy(new_id)
+        except Exception as exc:  # noqa: BLE001 - every failure must attempt restore
+            self._restore(swap, safe_error(exc))
+        return swap
+
+    def _discard_unrouted(self, new_id, temp, old_id, reason):
+        """The new container never got an alias: remove it and confirm the
+        untouched old container still serves. Known either way; a leftover
+        unrouted container is a warning, not a production change."""
+        failed_phase = self.detail["phase"]
+        self.detail["failed_phase"] = failed_phase
+        try:
+            self.api.request("DELETE", f"/containers/{new_id}?force=1&v=0")
+        except Exception:  # noqa: BLE001 - reported by name, never routed
+            self.detail["warnings"].append(f"unrouted container {temp} not removed")
+        state = self.api.request("GET", f"/containers/{old_id}/json").get("State") or {}
+        if not state.get("Running"):
+            self._fail(f"{failed_phase} failed ({reason}); previous container is not running; "
+                       "production state unknown", known=False)
+        self.detail["restored"] = True
+        self._fail(f"{failed_phase} failed ({reason}); previous container kept serving; nothing changed",
+                   known=True)
+
+    def _revert_overlap(self, swap: "Swap"):
+        """Bring the previous container back BEFORE stopping the new one, so
+        a revert (including a plan's revert of a committed swap) has no gap."""
+        old_id, new_id = swap.old_id, swap.new_id
+        try:
+            self._rename(new_id, f"{self.name}-failed-{self.job_id[:8]}")
+        except Exception:  # noqa: BLE001 - best effort; verified below
+            pass
+        current = self.api.request("GET", f"/containers/{old_id}/json")
+        if current["Name"].lstrip("/") != self.name:
+            self._rename(old_id, self.name)
+        if not (current.get("State") or {}).get("Running"):
+            # A stopped container keeps its aliases: start it unrouted and
+            # give them back only once healthy, so DNS never advertises a
+            # cold backend while the new one still serves.
+            endpoints = endpoint_configs(current)
+            for net in endpoints:
+                self.api.request("POST", f"/networks/{quote(net, safe='')}/disconnect",
+                                 body={"Container": old_id, "Force": False})
+            self.api.request("POST", f"/containers/{old_id}/start")
+            self._wait_healthy(old_id)
+            self._attach(old_id, endpoints)
+        else:
+            self._wait_healthy(old_id)
+        try:
+            self.api.request("POST", f"/containers/{new_id}/stop?t=5")
+        except Exception:  # noqa: BLE001 - removed with force below
+            pass
+        self.api.request("DELETE", f"/containers/{new_id}?force=1&v=0")
+
+    def _attach(self, container_id, endpoints):
+        for net, ep in endpoints.items():
+            self.api.request("POST", f"/networks/{quote(net, safe='')}/connect",
+                             body={"Container": container_id, "EndpointConfig": ep})
+
     def _after_create(self, new_id):
         """Read-only check of the created (unstarted) container before the
         old one stops; raising leaves production untouched. TASK-1844."""
@@ -372,6 +498,9 @@ class ImageDeployer:
         ``-failed-<job8>``, rename the previous one to the canonical name,
         start it, wait for health, then delete the new one. Raises if the
         previous container is not back and healthy."""
+        if self._overlap():
+            self._revert_overlap(swap)
+            return
         old_id, new_id = swap.old_id, swap.new_id
         for step in (lambda: self.api.request("POST", f"/containers/{new_id}/stop?t=5"),
                      lambda: self._rename(new_id, f"{self.name}-failed-{self.job_id[:8]}")):
@@ -489,6 +618,33 @@ def clone_create_body(old: dict, old_image: dict, new_image: dict, ref: str, job
               "IPAMConfig": ep.get("IPAMConfig"), "Links": ep.get("Links"), "DriverOpts": ep.get("DriverOpts")}
         for net, ep in (old.get("NetworkSettings", {}).get("Networks") or {}).items()}}
     return body
+
+
+def endpoint_configs(container: dict) -> dict:
+    """Reconnectable endpoint settings of an inspected container, without
+    its own short-ID alias (Docker re-adds it)."""
+    short_id = container["Id"][:12]
+    return {net: {"Aliases": [a for a in (ep.get("Aliases") or []) if a != short_id],
+                  "IPAMConfig": ep.get("IPAMConfig"), "Links": ep.get("Links"), "DriverOpts": ep.get("DriverOpts")}
+            for net, ep in ((container.get("NetworkSettings") or {}).get("Networks") or {}).items()}
+
+
+def overlap_blockers(body: dict) -> list[str]:
+    """Why two instances of this container cannot run side by side: a
+    published host port, a shared network namespace, or a fixed address."""
+    host = body.get("HostConfig") or {}
+    blockers = []
+    if any((host.get("PortBindings") or {}).values()):
+        blockers.append("publishes host ports")
+    mode = str(host.get("NetworkMode") or "")
+    if mode == "host" or mode.startswith("container:"):
+        blockers.append(f"network mode {mode.partition(':')[0]}")
+    for ep in (body.get("NetworkingConfig") or {}).get("EndpointsConfig", {}).values():
+        ipam = ep.get("IPAMConfig") or {}
+        if ipam.get("IPv4Address") or ipam.get("IPv6Address"):
+            blockers.append("fixed network address")
+            break
+    return blockers
 
 
 def demux_stdout(raw: bytes) -> str:

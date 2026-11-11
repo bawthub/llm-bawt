@@ -398,6 +398,9 @@ _PROD_TARGET = dict(
     health_timeout_seconds=180,
     compose_config=_PROD_COMPOSE_CONFIG,
     health_probe=_FRONTEND_PROBE,
+    # TASK-1535: start the new release unrouted, hand over the network
+    # aliases once healthy, then stop the old one; no serving gap.
+    cutover="overlap",
 )
 
 _IMAGE_SEEDS: list[dict[str, Any]] = [

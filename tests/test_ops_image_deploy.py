@@ -42,6 +42,9 @@ JOB_ID = "f" * 32
 NAME = "bawthub-frontend-prod-1"
 SEED = {s["slug"]: s for s in SEEDS}
 SPEC = json.loads(SEED["bawthub.deploy-prod-image"]["command_script"])
+# TASK-1535: the seeded prod target uses the overlap cutover; the classic
+# stop-first path stays covered with this variant.
+STOP_FIRST_SPEC = {**SPEC, "cutover": "stop_first"}
 VERIFY_ARGS = {"workflow_run_id": "123456", "digest": DIGEST, "source_sha": SOURCE, "version": "1.4.2"}
 RELEASE_ID = "e" * 32
 ARGS = {"release_run_id": RELEASE_ID}
@@ -111,6 +114,7 @@ class FakeDocker:
         self.compose = compose_project() if compose is None else compose
         self.render_status, self.render_stderr = render_status, render_stderr
         self.old_restart_fails = old_restart_fails
+        self.connect_fails = False
         self.images = {OLD_ID: {"Id": OLD_ID, "RepoDigests": [], "_health": "healthy",
                                 "_release": None,
                                 "Config": {"Labels": {"org.opencontainers.image.title": "old"},
@@ -215,10 +219,22 @@ class FakeDocker:
             self._seq += 1
             new = {"Id": f"{self._seq:x}" * 64, "Name": f"/{query['name']}", "Image": image["Id"],
                    "Config": {"Image": body["Image"], "Labels": body["Labels"]},
-                   "HostConfig": body["HostConfig"], "NetworkSettings": {"Networks": {}},
+                   "HostConfig": body["HostConfig"], "NetworkSettings": {"Networks": {
+                       net: {"Aliases": list(ep.get("Aliases") or [])}
+                       for net, ep in body["NetworkingConfig"]["EndpointsConfig"].items()}},
                    "State": {"Running": False, "Status": "created"}}
             self.containers[new["Id"]] = new
             return {"Id": new["Id"]}
+        if parts[0] == "networks" and method == "POST":
+            container = self._find_container(body["Container"])
+            nets = container.setdefault("NetworkSettings", {}).setdefault("Networks", {})
+            if parts[2] == "disconnect":
+                nets.pop(parts[1])
+            else:
+                if self.connect_fails:
+                    raise RuntimeError("Docker HTTP 500: connect failed")
+                nets[parts[1]] = {"Aliases": list(body["EndpointConfig"]["Aliases"])}
+            return None
         if parts[0] == "exec":
             if parts[2] == "start":
                 payload = json.dumps({"status": "healthy", "release": self._exec_target["_release"]}).encode()
@@ -373,7 +389,7 @@ def test_deploy_health_failure_restores_previous_container(tmp_path):
 def test_deploy_restore_failure_is_uncertain(tmp_path):
     api = FakeDocker(new_health="unhealthy", old_restart_fails=True)
     with pytest.raises(DeployFailed) as caught:
-        _deployer(api, tmp_path).run()
+        _deployer(api, tmp_path, snapshot={"spec": STOP_FIRST_SPEC, "release": _release()}).run()
     assert caught.value.outcome_known is False
     assert "RESTORE FAILED" in str(caught.value)
 
@@ -463,7 +479,7 @@ def _worker_request(tmp_path, snapshot):
 ])
 def test_worker_maps_deploy_outcomes_to_receipts(tmp_path, api_kwargs, state):
     execution = {"start_delay_seconds": 0, "timeout_seconds": 60, "max_output_bytes": 65536}
-    request, digest = _worker_request(tmp_path, {"spec": SPEC, "release": _release(),
+    request, digest = _worker_request(tmp_path, {"spec": STOP_FIRST_SPEC, "release": _release(),
                                                  "resolved_args": ARGS, "execution": execution})
     api = FakeDocker(**api_kwargs)
     assert worker_run(request, digest, api_factory=lambda _t: api, sleep=lambda _s: None) == 1
@@ -472,6 +488,93 @@ def test_worker_maps_deploy_outcomes_to_receipts(tmp_path, api_kwargs, state):
     assert receipt["side_effect_unknown"] is (state == "lost")
     assert parse_deployment(receipt["output_tail"])["schema"] == DEPLOY_SCHEMA
     assert (tmp_path / "jobs" / ".target-locks").is_dir()
+
+
+# ── overlap cutover (TASK-1535) ────────────────────────────────────────────
+
+def _index(api, method, suffix):
+    return next(i for i, (m, p) in enumerate(api.calls) if m == method and p.endswith(suffix))
+
+
+def test_overlap_starts_new_unrouted_and_hands_over_aliases_before_stopping_old(tmp_path):
+    api = FakeDocker()
+    record = json.loads(_deployer(api, tmp_path).run())
+    assert record["cutover"] == "overlap" and record["phase"] == "done"
+    created = api.create_bodies[0]["NetworkingConfig"]["EndpointsConfig"]["bawthub_default"]
+    assert created["Aliases"] == []  # nothing resolves to it while it starts
+    new_id = record["deployed"]["container_id"]
+    started, healthy_probe = _index(api, "POST", f"{new_id}/start"), _index(api, "POST", f"{new_id}/exec")
+    connect = _index(api, "POST", "bawthub_default/connect")
+    stop_old = _index(api, "POST", f"{api.old_id}/stop?t=20")
+    assert started < healthy_probe < connect < stop_old
+    live = api.by_name(NAME)
+    assert live["Id"] == new_id and live["State"]["Running"]
+    assert live["NetworkSettings"]["Networks"]["bawthub_default"]["Aliases"] == [NAME, "frontend-prod"]
+    assert api.old_id not in api.containers
+
+
+def test_overlap_health_failure_never_touches_the_old_container(tmp_path):
+    api = FakeDocker(new_health="unhealthy")
+    with pytest.raises(DeployFailed) as caught:
+        _deployer(api, tmp_path).run()
+    assert caught.value.outcome_known is True and caught.value.detail["failed_phase"] == "health"
+    assert "kept serving" in str(caught.value)
+    assert not [c for c in api.calls if api.old_id in c[1] and not c[1].endswith("/json")]
+    assert not any("/networks/" in p for _m, p in api.calls)
+    assert [c["Id"] for c in api.containers.values() if not c.get("_render")] == [api.old_id]
+
+
+def test_overlap_failed_handoff_restores_old_then_removes_new(tmp_path):
+    api = FakeDocker()
+    api.connect_fails = True
+    with pytest.raises(DeployFailed) as caught:
+        _deployer(api, tmp_path).run()
+    assert caught.value.outcome_known is True and caught.value.detail["restored"] is True
+    assert caught.value.detail["failed_phase"] == "handoff"
+    live = api.by_name(NAME)
+    assert live["Id"] == api.old_id and live["State"]["Running"]
+    assert not any(p.endswith(f"{api.old_id}/stop?t=20") for _m, p in api.calls)
+    assert [c["Id"] for c in api.containers.values() if not c.get("_render")] == [api.old_id]
+
+
+def test_overlap_revert_of_a_committed_swap_starts_old_before_stopping_new(tmp_path):
+    api = FakeDocker()
+    deployer = _deployer(api, tmp_path)
+    deployer.detail["phase"] = "test"
+    old = api.by_name(NAME)
+    old_image = api._find_image(OLD_ID)
+    swap = deployer._swap(old, old_image, api._find_image(NEW_ID), f"{REPO}@{DIGEST}", None)
+    api.calls.clear()
+    deployer._revert(swap)
+    disconnect = _index(api, "POST", "bawthub_default/disconnect")
+    start_old = _index(api, "POST", f"{api.old_id}/start")
+    reconnect = _index(api, "POST", "bawthub_default/connect")
+    assert disconnect < start_old < reconnect < _index(api, "POST", f"{swap.new_id}/stop?t=5")
+    aliases = api.by_name(NAME)["NetworkSettings"]["Networks"]["bawthub_default"]["Aliases"]
+    assert aliases == [NAME, "frontend-prod"]
+    assert api.by_name(NAME)["Id"] == api.old_id and swap.new_id not in api.containers
+
+
+@pytest.mark.parametrize("host, endpoint, blocker", [
+    ({"PortBindings": {"3000/tcp": [{"HostPort": "3000"}]}}, {}, "publishes host ports"),
+    ({"NetworkMode": "host"}, {}, "network mode host"),
+    ({}, {"IPAMConfig": {"IPv4Address": "172.19.0.9"}}, "fixed network address"),
+])
+def test_overlap_refuses_targets_two_instances_cannot_share(tmp_path, host, endpoint, blocker):
+    api = FakeDocker()
+    old = api.containers[api.old_id]
+    old["HostConfig"].update(host)
+    old["NetworkSettings"]["Networks"]["bawthub_default"].update(endpoint)
+    with pytest.raises(DeployFailed) as caught:
+        _deployer(api, tmp_path).run()
+    assert caught.value.outcome_known is True and blocker in str(caught.value)
+    assert not api.create_bodies
+
+
+def test_image_spec_rejects_an_unknown_cutover():
+    with pytest.raises(ValueError, match="cutover"):
+        validate_spec(json.dumps({**SPEC, "cutover": "rolling"}))
+    assert validate_spec(json.dumps(STOP_FIRST_SPEC))["cutover"] == "stop_first"
 
 
 # ── catalog seeds and spec validation ──────────────────────────────────────
