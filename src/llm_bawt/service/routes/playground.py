@@ -1,9 +1,11 @@
-"""Playground REST (TASK-2190): list, open once, read with the view token, close.
+"""Playground REST (TASK-2190, mailbox model TASK-2195).
 
 LAN trust boundary, like the other owner routes: BawtHub proxies these with
 the signed-in user as ``user``. Every route is scoped to that user. Listing
-returns metadata only; content is reachable only through the token minted by
-the single successful open, and only until the artifact expires.
+returns metadata only. Opening marks an artifact read and mints a view token
+for its content; it can be reopened any time until it is deleted forever.
+Archive, Trash and read state are ``/state`` actions; only ``/delete`` (from
+Trash) and the trash purge remove content.
 
 HTML is returned as plain text (BawtHub renders it in a sandboxed ``srcdoc``
 frame), and every content response except PDF carries ``CSP: sandbox`` and
@@ -14,10 +16,10 @@ from __future__ import annotations
 import logging
 from urllib.parse import quote
 
-from fastapi import APIRouter, Header, HTTPException, Query, Response
+from fastapi import APIRouter, Body, Header, HTTPException, Query, Response
 
 from ...media.object_store import BlobBackendUnavailable
-from ...playground.service import get_playground, view_timeout_minutes
+from ...playground.service import get_playground, trash_days
 from ...playground.store import OpenRefused, public_view
 from ..dependencies import get_service
 from .sessions import _resolve_user
@@ -48,15 +50,19 @@ def list_artifacts(
     user: str | None = Query(None),
     bot: str | None = Query(None, max_length=64),
     status: str | None = Query(None, pattern="^(unopened|expired)$"),
+    view: str | None = Query(None, pattern="^(inbox|archive|trash|all)$"),
+    q: str | None = Query(None, max_length=200),
     limit: int = Query(200, ge=1, le=1000),
 ):
+    """Default view is the Inbox, so unread counts from it follow the Inbox."""
     user_id = _resolve_user(user)
     playground = _playground()
-    rows = playground.store.list(user_id, bot_id=bot, status=status, limit=limit)
+    rows = playground.store.list(user_id, bot_id=bot, status=status, view=view,
+                                 query=(q or "").strip() or None, limit=limit)
     return {
         "items": [public_view(row) for row in rows],
         "senders": playground.store.senders(user_id),
-        "view_timeout_minutes": view_timeout_minutes(get_service().config),
+        "trash_days": trash_days(get_service().config),
     }
 
 
@@ -68,7 +74,7 @@ def get_artifact(artifact_id: str, user: str | None = Query(None)):
 
 @router.post("/{artifact_id}/open")
 def open_artifact(artifact_id: str, user: str | None = Query(None)):
-    """Mark opened and mint the view token. A second open expires the artifact (410)."""
+    """Open or reopen: marks it read and mints a view token. Deleted forever: 410."""
     user_id = _resolve_user(user)
     playground = _playground()
     try:
@@ -125,11 +131,67 @@ def artifact_content(
     return Response(content=content.data, status_code=status, headers=headers, media_type=mime)
 
 
+PREVIEW_TEXT_CHARS = {"text": 1200, "markdown": 1200, "html": 200_000}
+PREVIEW_IMAGE_BYTES = 8 * 1024 * 1024
+
+
+@router.get("/{artifact_id}/preview")
+def artifact_preview(artifact_id: str, user: str | None = Query(None)):
+    """A chat-card preview (TASK-2195); it does not mark the artifact read.
+
+    Images up to ``PREVIEW_IMAGE_BYTES``; html/markdown/text truncated. Other
+    kinds have no preview (415); deleted forever is 410. Same sandbox headers
+    as content.
+    """
+    user_id = _resolve_user(user)
+    playground = _playground()
+    row = _row_or_404(playground, artifact_id, user_id)
+    if row["expired_at"] is not None:
+        raise HTTPException(status_code=410, detail="expired")
+    kind = row["kind"]
+    if kind not in _TEXT_KINDS and not (kind == "image" and row["size_bytes"] <= PREVIEW_IMAGE_BYTES):
+        raise HTTPException(status_code=415, detail="no_preview")
+    headers = {**_NO_STORE, "Content-Security-Policy": "sandbox", "X-Playground-Kind": kind}
+    try:
+        content = playground.read(row, None)
+    except FileNotFoundError:
+        raise HTTPException(status_code=410, detail="expired") from None
+    except BlobBackendUnavailable:
+        raise HTTPException(status_code=503, detail="storage_unavailable") from None
+    if kind in _TEXT_KINDS:
+        text = content if isinstance(content, str) else content.data.decode("utf-8", "replace")
+        return Response(content=text[:PREVIEW_TEXT_CHARS[kind]].encode("utf-8"), headers=headers,
+                        media_type="text/plain; charset=utf-8")
+    return Response(content=content.data, headers=headers, media_type=row["mime"])
+
+
 @router.post("/{artifact_id}/close")
 def close_artifact(artifact_id: str, user: str | None = Query(None)):
-    """Expire now: content and blob deleted, History row kept. Idempotent."""
+    """Closing the viewer keeps the artifact (TASK-2195); kept for old clients."""
     user_id = _resolve_user(user)
-    row = _playground().expire(artifact_id, user_id)
+    return public_view(_row_or_404(_playground(), artifact_id, user_id))
+
+
+@router.post("/{artifact_id}/state")
+def set_state(
+    artifact_id: str,
+    action: str = Body(..., embed=True, pattern="^(read|unread|archive|unarchive|trash|restore)$"),
+    user: str | None = Query(None),
+):
+    """Mailbox actions: read/unread, archive/unarchive, trash/restore."""
+    user_id = _resolve_user(user)
+    row = _playground().store.set_state(artifact_id, user_id, action)
     if row is None:
         raise HTTPException(status_code=404, detail="not_found")
     return public_view(row)
+
+
+@router.post("/{artifact_id}/delete")
+def delete_forever(artifact_id: str, user: str | None = Query(None)):
+    """Delete forever, only from Trash: content and blob go, a tombstone stays."""
+    user_id = _resolve_user(user)
+    playground = _playground()
+    row = _row_or_404(playground, artifact_id, user_id)
+    if row["expired_at"] is None and row["trashed_at"] is None:
+        raise HTTPException(status_code=409, detail="not_in_trash")
+    return public_view(playground.expire(artifact_id, user_id))

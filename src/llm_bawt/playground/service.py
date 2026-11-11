@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from typing import Any
 
@@ -16,17 +17,15 @@ from ..media.asset_kinds import normalize_mime
 from ..media.object_store import BlobBackend, BlobNotFound, BlobRange
 from .store import (
     KINDS,
-    OpenRefused,
     PlaygroundStore,
     blob_key_for,
     new_artifact_id,
-    opened_cutoff,
 )
 
 logger = logging.getLogger(__name__)
 
-TIMEOUT_SETTING = "playground_view_timeout_minutes"
-DEFAULT_TIMEOUT_MINUTES = 30
+TRASH_SETTING = "playground_trash_days"
+DEFAULT_TRASH_DAYS = 30
 #: Inline HTML/Markdown/text cap; anything bigger should be a file asset.
 MAX_INLINE_BYTES = 1024 * 1024
 INLINE_FORMATS = {
@@ -128,13 +127,8 @@ class Playground:
             raise
 
     def open(self, artifact_id: str, user_id: str):
-        """``(row, token)``; a refused second open expires the artifact first."""
-        try:
-            return self.store.open(artifact_id, user_id)
-        except OpenRefused as refused:
-            if refused.code == "expired":
-                self.expire(artifact_id, user_id)
-            raise
+        """``(row, token)``: open or reopen; marks it read and keeps it."""
+        return self.store.open(artifact_id, user_id)
 
     def read(self, row: dict[str, Any], range_header: str | None) -> BlobRange | str:
         """The live content: inline text, or a (ranged) blob read."""
@@ -148,23 +142,24 @@ class Playground:
             raise FileNotFoundError(row["id"]) from exc
 
     def expire(self, artifact_id: str, user_id: str | None = None) -> dict[str, Any] | None:
-        """Expire now: clear content, delete the blob, keep the History row."""
+        """Delete forever: clear content, delete the blob, keep a tombstone row."""
         row = self.store.mark_expired(artifact_id, user_id)
         if row is not None and row.get("blob_key"):
             self._delete_blob(row["id"], row["blob_key"])
             row = {**row, "blob_key": None}
         return row
 
-    def sweep(self, timeout_minutes: float) -> dict[str, int]:
-        """Expire artifacts opened longer ago than the timeout; retry blob deletes."""
-        expired = self.store.expire_overdue(opened_cutoff(timeout_minutes))
+    def sweep(self, trash_days: float) -> dict[str, int]:
+        """Delete forever what has sat in Trash ``trash_days``; retry blob deletes."""
+        cutoff = datetime.now(timezone.utc) - timedelta(days=trash_days)
+        purged = [i for i in self.store.trashed_before(cutoff) if self.expire(i) is not None]
         deleted = failed = 0
         for item in self.store.pending_blob_deletes():
             if self._delete_blob(item["id"], item["blob_key"]):
                 deleted += 1
             else:
                 failed += 1
-        return {"expired": len(expired), "blobs_deleted": deleted, "blob_delete_failures": failed}
+        return {"purged": len(purged), "blobs_deleted": deleted, "blob_delete_failures": failed}
 
     def _delete_blob(self, artifact_id: str, blob_key: str) -> bool:
         try:
@@ -206,12 +201,12 @@ def get_playground(config=None) -> Playground:
     return _instance
 
 
-def view_timeout_minutes(config) -> float:
+def trash_days(config) -> float:
+    """Days an artifact stays in Trash before it is deleted forever."""
     from ..runtime_setting_resolution import resolve_global_runtime_setting
 
     try:
-        value = float(resolve_global_runtime_setting(config, TIMEOUT_SETTING,
-                                                     DEFAULT_TIMEOUT_MINUTES))
+        value = float(resolve_global_runtime_setting(config, TRASH_SETTING, DEFAULT_TRASH_DAYS))
     except (TypeError, ValueError):
-        value = DEFAULT_TIMEOUT_MINUTES
-    return value if value > 0 else DEFAULT_TIMEOUT_MINUTES
+        value = DEFAULT_TRASH_DAYS
+    return value if value > 0 else DEFAULT_TRASH_DAYS

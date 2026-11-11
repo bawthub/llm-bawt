@@ -1,4 +1,4 @@
-"""``playground_send``: hand the user one one-time-view artifact (TASK-2190).
+"""``playground_send``: send the user an artifact for their Playground inbox (TASK-2190).
 
 The sender is the signed caller, never the ``bot_id`` argument alone: an
 unverified caller or one for another bot is refused. The artifact goes to the
@@ -78,7 +78,11 @@ async def playground_send(
     content: str | None = None,
     format: Literal["html", "markdown", "text"] | None = None,
 ) -> dict:
-    """Send the user one artifact to view once in the Playground."""
+    """Send the user an artifact; it shows as a card in this chat and in their Playground.
+
+    Don't open, fetch or screenshot an artifact you sent. The chat card is the
+    delivery, and opening it marks it read for the user.
+    """
     # The signed caller check binds the call exactly as made, before cleanup.
     arguments = {"bot_id": bot_id, "title": title, "note": note, "asset_id": asset_id,
                  "content": content, "format": format}
@@ -107,4 +111,7 @@ async def playground_send(
         return {"error": str(error)}
     await _bell(row)
     return {"id": row["id"], "kind": row["kind"], "size_bytes": row["size_bytes"],
-            "status": "unopened", "link": playground_bell.LINK}
+            "status": "unopened", "link": playground_bell.LINK,
+            "title": row["title"], "note": row["note"], "sender_bot_id": row["sender_bot_id"],
+            "notice": "Don't open, fetch or screenshot an artifact you sent. The chat card "
+                      "is the delivery, and opening it marks it read for the user."}

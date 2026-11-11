@@ -55,33 +55,57 @@ def test_send_writes_its_own_blob_and_lists_metadata_only(pg):
     assert pg.store.list("someone-else") == []
 
 
-def test_open_once_then_close_deletes_bytes_and_keeps_history(pg):
+def test_open_marks_read_and_keeps_the_artifact_for_reopening(pg):
+    """TASK-2195: opening never deletes; it can be reopened any number of times."""
     row = _send_png(pg)
     path = _blob_path(pg, row)
     opened, token = pg.open(row["id"], USER)
-    assert opened["opened_at"] is not None
-    live = pg.store.viewable(row["id"], USER, token)
-    assert pg.read(live, None).data == PNG
+    first_read = opened["opened_at"]
+    assert first_read is not None and public_view(opened)["status"] == "opened"
+    assert pg.read(pg.store.viewable(row["id"], USER, token), None).data == PNG
     assert pg.store.viewable(row["id"], USER, "wrong") is None
 
-    closed = pg.expire(row["id"], USER)
-    assert closed["expired_at"] is not None and not path.exists()
-    stored = pg.store.get(row["id"], USER)
-    assert stored["blob_key"] is None and stored["view_token_hash"] is None
-    assert pg.store.viewable(row["id"], USER, token) is None
-    with pytest.raises(OpenRefused) as refused:
-        pg.open(row["id"], USER)
-    assert refused.value.code == "expired"
-    assert public_view(stored)["status"] == "expired"
+    again, token2 = pg.open(row["id"], USER)
+    assert again["opened_at"] == first_read and path.exists()
+    assert pg.store.viewable(row["id"], USER, token2) is not None
 
 
-def test_second_open_expires_the_artifact(pg):
+def test_mailbox_actions_move_between_views(pg):
     row = _send_png(pg)
-    pg.open(row["id"], USER)
-    with pytest.raises(OpenRefused):
-        pg.open(row["id"], USER)
-    assert pg.store.get(row["id"], USER)["expired_at"] is not None
-    assert not _blob_path(pg, row).exists()
+    def ids(view):
+        return [r["id"] for r in pg.store.list(USER, view=view)]
+
+    assert ids(None) == ids("inbox") == [row["id"]] and ids("archive") == ids("trash") == []
+
+    pg.store.set_state(row["id"], USER, "read")
+    assert public_view(pg.store.get(row["id"], USER))["status"] == "opened"
+    pg.store.set_state(row["id"], USER, "unread")
+    assert pg.store.list(USER, status="unopened")[0]["id"] == row["id"]
+
+    view = public_view(pg.store.set_state(row["id"], USER, "archive"))
+    assert view["folder"] == "archive" and ids("inbox") == [] and ids("archive") == [row["id"]]
+    pg.store.set_state(row["id"], USER, "unarchive")
+    assert ids("inbox") == [row["id"]]
+
+    view = public_view(pg.store.set_state(row["id"], USER, "trash"))
+    assert view["folder"] == "trash" and ids("inbox") == [] and ids("trash") == [row["id"]]
+    assert _blob_path(pg, row).exists()
+    pg.store.set_state(row["id"], USER, "restore")
+    assert ids("inbox") == [row["id"]] and ids("all") == [row["id"]]
+    assert pg.store.set_state(row["id"], "intruder", "trash") is None
+
+
+def test_search_matches_title_note_and_sender_literally(pg):
+    a = pg.send(user_id=USER, bot_id="nyx", title="Sunset photo", note="from the deck",
+                source=source_from_inline("x", "text"))
+    b = pg.send(user_id=USER, bot_id="vex", title="100% done", note=None,
+                source=source_from_inline("x", "text"))
+    def find(q):
+        return {r["id"] for r in pg.store.list(USER, query=q)}
+
+    assert find("SUNSET") == {a["id"]} and find("deck") == {a["id"]}
+    assert find("vex") == {b["id"]} and find("100%") == {b["id"]} and find("%") == {b["id"]}
+    assert find("nothing") == set()
 
 
 def test_open_is_scoped_to_the_user(pg):
@@ -93,27 +117,38 @@ def test_open_is_scoped_to_the_user(pg):
     assert _blob_path(pg, row).exists()
 
 
-def test_inline_content_is_cleared_on_expiry(pg):
+def test_delete_forever_clears_content_and_keeps_a_tombstone(pg):
     row = pg.send(user_id=USER, bot_id="vex", title="Page", note="hi",
                   source=source_from_inline("<h1>hi</h1>", "html"))
-    assert row["blob_key"] is None and row["kind"] == "html"
+    png = _send_png(pg)
     _, token = pg.open(row["id"], USER)
-    assert pg.read(pg.store.viewable(row["id"], USER, token), None) == "<h1>hi</h1>"
     pg.expire(row["id"], USER)
-    assert pg.store.get(row["id"], USER)["inline_content"] is None
+    pg.expire(png["id"], USER)
+    stored = pg.store.get(row["id"], USER)
+    assert stored["inline_content"] is None and stored["view_token_hash"] is None
+    assert pg.store.viewable(row["id"], USER, token) is None
+    assert not _blob_path(pg, png).exists()
+    assert public_view(stored)["folder"] == "deleted"
+    with pytest.raises(OpenRefused) as refused:
+        pg.open(row["id"], USER)
+    assert refused.value.code == "expired"
+    assert pg.store.set_state(row["id"], USER, "restore")["expired_at"] is not None
 
 
-def test_sweep_expires_only_overdue_opened_artifacts(pg):
-    stale, fresh, unopened = _send_png(pg), _send_png(pg), _send_png(pg)
-    pg.open(stale["id"], USER)
-    pg.open(fresh["id"], USER)
+def test_sweep_purges_only_old_trash(pg):
+    old, recent, read = _send_png(pg), _send_png(pg), _send_png(pg)
+    pg.store.set_state(old["id"], USER, "trash")
+    pg.store.set_state(recent["id"], USER, "trash")
+    pg.open(read["id"], USER)
     with pg.store.engine.begin() as conn:
-        conn.execute(update(artifacts).where(artifacts.c.id == stale["id"]).values(
-            opened_at=datetime.now(timezone.utc) - timedelta(minutes=45)))
-    assert pg.sweep(30) == {"expired": 1, "blobs_deleted": 1, "blob_delete_failures": 0}
-    assert not _blob_path(pg, stale).exists()
-    assert _blob_path(pg, fresh).exists() and _blob_path(pg, unopened).exists()
-    assert pg.store.get(unopened["id"], USER)["expired_at"] is None
+        conn.execute(update(artifacts).where(artifacts.c.id.in_([old["id"], read["id"]])).values(
+            trashed_at=None, opened_at=datetime.now(timezone.utc) - timedelta(days=90)))
+        conn.execute(update(artifacts).where(artifacts.c.id == old["id"]).values(
+            trashed_at=datetime.now(timezone.utc) - timedelta(days=31)))
+    assert pg.sweep(30) == {"purged": 1, "blobs_deleted": 0, "blob_delete_failures": 0}
+    assert not _blob_path(pg, old).exists()
+    assert _blob_path(pg, recent).exists() and _blob_path(pg, read).exists()
+    assert pg.store.get(read["id"], USER)["expired_at"] is None
 
 
 def test_failed_blob_delete_is_retried_by_the_sweep(pg, monkeypatch):
@@ -197,7 +232,7 @@ def test_inline_validation():
 def client(pg, monkeypatch):
     monkeypatch.setattr(routes, "_playground", lambda: pg)
     monkeypatch.setattr(routes, "_resolve_user", lambda user: user or USER)
-    monkeypatch.setattr(routes, "view_timeout_minutes", lambda config: 30)
+    monkeypatch.setattr(routes, "trash_days", lambda config: 30)
     monkeypatch.setattr(routes, "get_service", lambda: SimpleNamespace(config=None))
     app = FastAPI()
     app.include_router(routes.router)
@@ -208,6 +243,7 @@ def test_rest_open_read_close_flow(client, pg):
     row = _send_png(pg)
     listed = client.get("/v1/playground").json()
     assert [i["id"] for i in listed["items"]] == [row["id"]] and listed["senders"] == ["vex"]
+    assert listed["trash_days"] == 30
 
     opened = client.post(f"/v1/playground/{row['id']}/open").json()
     content = client.get(opened["content_path"])
@@ -220,10 +256,30 @@ def test_rest_open_read_close_flow(client, pg):
     assert client.get(f"/v1/playground/{row['id']}/content?token=nope").status_code == 403
 
     closed = client.post(f"/v1/playground/{row['id']}/close").json()
-    assert closed["status"] == "expired"
-    assert client.get(opened["content_path"]).status_code == 410
+    assert closed["status"] == "opened" and closed["folder"] == "inbox"
+    reopened = client.post(f"/v1/playground/{row['id']}/open").json()
+    assert client.get(reopened["content_path"]).content == PNG
+
+
+def test_rest_mailbox_search_and_delete_forever(client, pg):
+    row = _send_png(pg, title="Sunset")
+    def state(action):
+        return client.post(f"/v1/playground/{row['id']}/state", json={"action": action})
+
+    assert state("bogus").status_code == 422
+    assert client.post(f"/v1/playground/{row['id']}/delete").status_code == 409
+    assert state("archive").json()["folder"] == "archive"
+    assert client.get("/v1/playground").json()["items"] == []
+    assert [i["id"] for i in client.get("/v1/playground?view=archive").json()["items"]] == [row["id"]]
+    assert [i["id"] for i in client.get("/v1/playground?view=all&q=suns").json()["items"]] == [row["id"]]
+    assert client.get("/v1/playground?view=all&q=nope").json()["items"] == []
+    assert state("trash").json()["folder"] == "trash"
+    deleted = client.post(f"/v1/playground/{row['id']}/delete").json()
+    assert deleted["status"] == "expired" and deleted["folder"] == "deleted"
+    assert not _blob_path(pg, row).exists()
     assert client.post(f"/v1/playground/{row['id']}/open").status_code == 410
-    assert client.get(f"/v1/playground/{row['id']}").json()["opened_at"]
+    assert client.get(f"/v1/playground/{row['id']}/preview").status_code == 410
+    assert client.post("/v1/playground/pg_nope/state", json={"action": "read"}).status_code == 404
 
 
 def test_rest_html_is_served_as_text_and_unknown_is_404(client, pg):
@@ -235,6 +291,36 @@ def test_rest_html_is_served_as_text_and_unknown_is_404(client, pg):
     assert content.headers["x-playground-kind"] == "html"
     assert client.post("/v1/playground/pg_nope/open").status_code == 404
     assert client.post(f"/v1/playground/{row['id']}/open?user=other").status_code == 404
+
+
+def test_preview_never_marks_read_and_ends_with_delete(client, pg):
+    """TASK-2195: the chat card's preview leaves the artifact unread."""
+    row = _send_png(pg)
+    for _ in range(2):
+        preview = client.get(f"/v1/playground/{row['id']}/preview")
+        assert preview.status_code == 200 and preview.content == PNG
+        assert preview.headers["content-security-policy"] == "sandbox"
+        assert preview.headers["cache-control"] == "no-store"
+    assert client.get(f"/v1/playground/{row['id']}").json()["status"] == "unopened"
+    assert client.get(f"/v1/playground/{row['id']}/preview?user=other").status_code == 404
+
+    client.post(f"/v1/playground/{row['id']}/open")
+    assert client.get(f"/v1/playground/{row['id']}/preview").status_code == 200
+    pg.expire(row["id"], USER)
+    assert client.get(f"/v1/playground/{row['id']}/preview").status_code == 410
+
+
+def test_preview_truncates_text_and_skips_other_kinds(client, pg):
+    text = pg.send(user_id=USER, bot_id="vex", title="Notes", note=None,
+                   source=source_from_inline("line\n" * 1000, "markdown"))
+    preview = client.get(f"/v1/playground/{text['id']}/preview")
+    assert preview.headers["content-type"].startswith("text/plain")
+    assert preview.headers["x-playground-kind"] == "markdown"
+    assert len(preview.text) == routes.PREVIEW_TEXT_CHARS["markdown"]
+    pdf = pg.send(user_id=USER, bot_id="vex", title="Doc", note=None,
+                  source=Source(kind="pdf", mime="application/pdf", filename="a.pdf", data=b"%PDF"))
+    assert client.get(f"/v1/playground/{pdf['id']}/preview").status_code == 415
+    assert client.get(f"/v1/playground/{pdf['id']}").json()["status"] == "unopened"
 
 
 # -- MCP tool -----------------------------------------------------------------
@@ -271,6 +357,9 @@ def test_tool_sends_inline_for_the_signed_caller(tool, pg, monkeypatch):
     _caller(monkeypatch, SimpleNamespace(bot_id="vex", user_id=USER))
     result = _run(bot_id="Vex", title="Notes", content="# Hi", format="markdown")
     assert result["status"] == "unopened" and result["kind"] == "markdown"
+    assert result["title"] == "Notes" and result["sender_bot_id"] == "vex"
+    assert "Don't open, fetch or screenshot" in result["notice"]
+    assert "Don't open, fetch or screenshot" in playground_tools.playground_send.__doc__
     assert tool == [result["id"]]
     assert pg.store.get(result["id"], USER)["sender_bot_id"] == "vex"
 

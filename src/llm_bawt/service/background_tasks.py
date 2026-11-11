@@ -751,10 +751,10 @@ class BackgroundTasksMixin:
         return run_tool_result_gc(self.config, retention_days=retention_days, dry_run=dry_run)
 
     def _process_playground_expiry(self, task: Task) -> dict:
-        """Expire Playground artifacts opened past the view timeout (TASK-2190)."""
-        from ..playground.service import get_playground, view_timeout_minutes
+        """Purge Playground Trash past its retention; retry blob deletes (TASK-2195)."""
+        from ..playground.service import get_playground, trash_days
 
-        return get_playground(self.config).sweep(view_timeout_minutes(self.config))
+        return get_playground(self.config).sweep(trash_days(self.config))
 
     def _process_harness_version_check(self, task: Task) -> dict:
         """Compare pinned agent-harness packages with PyPI (TASK-1975)."""

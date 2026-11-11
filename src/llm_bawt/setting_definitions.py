@@ -727,15 +727,15 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
             "summarization_model",
         ),
     ),
-    # TASK-2190: global only; read by the playground expiry sweep.
-    "playground_view_timeout_minutes": SettingDefinition(
-        key="playground_view_timeout_minutes",
+    # TASK-2195: global only; read by the playground trash purge.
+    "playground_trash_days": SettingDefinition(
+        key="playground_trash_days",
         type="int",
         default=30,
         applies_to=(),
         storage=STORAGE_RUNTIME_SETTING,
-        label="Playground view timeout (minutes)",
-        help="An opened Playground artifact that was never closed is deleted this many minutes after it was opened. Unopened artifacts never expire.",
+        label="Playground trash retention (days)",
+        help="A Playground artifact in Trash is deleted forever this many days after it was trashed.",
     ),
 }
 

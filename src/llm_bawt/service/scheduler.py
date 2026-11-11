@@ -1044,9 +1044,9 @@ def init_default_jobs(engine, config) -> None:
                 next_run.isoformat(),
             )
 
-        # TASK-2190: Playground expiry sweep. Deletes artifacts opened longer
-        # ago than playground_view_timeout_minutes (a crashed tab never closed
-        # them) and retries failed blob deletes. Cheap indexed scan; every 5 min.
+        # TASK-2190/2195: Playground sweep. Deletes forever what has sat in
+        # Trash longer than playground_trash_days and retries failed blob
+        # deletes. Cheap indexed scan; every 5 min.
         existing_playground_expiry = session.exec(
             select(ScheduledJob).where(ScheduledJob.job_type == JobType.PLAYGROUND_EXPIRY)
         ).first()

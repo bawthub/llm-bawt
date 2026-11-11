@@ -147,7 +147,7 @@ TOOL_SUMMARIES: dict[str, str] = {
     "schedule_wakeup": "Durable future message to a bot (default you); survives restart, /new, compaction. Use instead of CronCreate. at|in_minutes|cron; task_id tags it. list/cancel your wake-ups.",
     "notifications_list": "Read-only bell history (replies, pushes, approvals, tasks, alerts). Filter kind, since, limit.",
     "notify_user": "Push to the user's phone. Only for: an approval waiting on the user, a release/deploy finished or failed, or a decision blocking work. Never routine progress. high passes quiet hours. Rate limited; dedupe_key collapses repeats. link: app path.",
-    "playground_send": "Send the user one artifact to view once; deleted after viewing. One source: asset_id (any file, copied) or content+format.",
+    "playground_send": "Send the user an artifact (chat card + Playground). Never open/fetch/screenshot your own. Source: asset_id or content+format.",
     "attachment_get": "See an uploaded image: ma_ id, upload URL/path, or TASK-N for its card images.",
     "generate_image":"Generate or edit an image; provider: grok (default)|openai. reference_asset_id reuses an image. Returns inline image and asset_id/URLs for iteration.",
     "web_search": "Search current web sources; provider: brave|reddit|tavily|duckduckgo, or omit for configured fan-out. max_results is per provider. Use crawl4ai for page content.",

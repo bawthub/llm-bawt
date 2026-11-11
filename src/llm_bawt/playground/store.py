@@ -1,16 +1,17 @@
-"""The ``playground_artifacts`` table: one-time-view artifacts bots send the user.
+"""The ``playground_artifacts`` table: artifacts bots send the user (TASK-2190).
 
-A row is the artifact's metadata plus, until it expires, its content: either
-inline text (``inline_content``) or a blob in the media object store under
+A row is the artifact's metadata plus its content: either inline text
+(``inline_content``) or a blob in the media object store under
 ``playground/<id>``. Playground owns that blob outright. It is never keyed by
-content hash, so expiring it can't touch a chat attachment that happens to
-hold the same bytes.
+content hash, so deleting it can't touch a chat attachment holding the same
+bytes.
 
-Lifecycle: ``unopened`` → ``opened`` (``opened_at`` set, a view token minted)
-→ ``expired`` (``expired_at`` set, content and token cleared). A second open
-is refused and expires the artifact, so each one is seen once. Expiry keeps
-the row for History; the blob key stays set until the blob is really gone, so
-a failed delete is retried by the sweep.
+Mail-style lifecycle (TASK-2195). ``opened_at`` is the read flag: opening
+sets it and keeps the artifact; mark-unread clears it. ``archived_at`` hides
+a row from the Inbox; ``trashed_at`` moves it to Trash, where it can be
+restored. Only "delete forever" or the trash purge removes the content, which
+sets ``expired_at`` and leaves a content-gone tombstone row. The blob key
+stays set until the blob is really gone, so a failed delete is retried.
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ import hmac
 import logging
 import os
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import (
@@ -35,7 +36,10 @@ from sqlalchemy import (
     and_,
     func,
     insert,
+    inspect,
+    or_,
     select,
+    text,
     update,
 )
 from sqlalchemy.engine import Engine
@@ -68,6 +72,8 @@ artifacts = Table(
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("opened_at", DateTime(timezone=True)),
     Column("expired_at", DateTime(timezone=True)),
+    Column("archived_at", DateTime(timezone=True)),
+    Column("trashed_at", DateTime(timezone=True)),
     Index(f"idx_{TABLE_NAME}_user_created", "user_id", "created_at"),
     Index(f"idx_{TABLE_NAME}_opened_live", "opened_at"),
 )
@@ -75,8 +81,14 @@ artifacts = Table(
 #: Columns safe to return to any reader: never content or the token hash.
 PUBLIC_COLUMNS = (
     "id", "user_id", "sender_bot_id", "title", "note", "kind", "mime", "filename",
-    "size_bytes", "created_at", "opened_at", "expired_at",
+    "size_bytes", "created_at", "opened_at", "expired_at", "archived_at", "trashed_at",
 )
+
+#: Inbox views. ``None`` (the default list) is the Inbox, so unread counts
+#: built from the default list follow the Inbox.
+VIEWS = ("inbox", "archive", "trash", "all")
+_DATE_COLUMNS = ("created_at", "opened_at", "expired_at", "archived_at", "trashed_at")
+_ADDED_COLUMNS = ("archived_at", "trashed_at")
 
 
 def new_artifact_id() -> str:
@@ -95,22 +107,47 @@ def hash_token(token: str) -> str:
 
 
 def status_of(row: dict[str, Any]) -> str:
+    """Read state: ``unopened`` (unread), ``opened`` (read) or ``expired`` (content gone)."""
     if row.get("expired_at") is not None:
         return "expired"
     return "opened" if row.get("opened_at") is not None else "unopened"
 
 
+def folder_of(row: dict[str, Any]) -> str:
+    if row.get("expired_at") is not None:
+        return "deleted"
+    if row.get("trashed_at") is not None:
+        return "trash"
+    return "archive" if row.get("archived_at") is not None else "inbox"
+
+
 def public_view(row: dict[str, Any]) -> dict[str, Any]:
     """The metadata a list or History entry shows; no content."""
     out = {name: row.get(name) for name in PUBLIC_COLUMNS}
-    for name in ("created_at", "opened_at", "expired_at"):
+    for name in _DATE_COLUMNS:
         value = out[name]
         if isinstance(value, datetime):
             if value.tzinfo is None:  # SQLite drops the zone
                 value = value.replace(tzinfo=timezone.utc)
             out[name] = value.isoformat()
     out["status"] = status_of(row)
+    out["folder"] = folder_of(row)
     return out
+
+
+def _add_columns(conn) -> None:
+    """Add the TASK-2195 columns to a table created before them; data untouched."""
+    present = {c["name"] for c in inspect(conn).get_columns(TABLE_NAME)}
+    for name in _ADDED_COLUMNS:
+        if name not in present:
+            conn.execute(text(f"ALTER TABLE {TABLE_NAME} ADD COLUMN {name} TIMESTAMP WITH TIME ZONE"
+                              if conn.dialect.name == "postgresql"
+                              else f"ALTER TABLE {TABLE_NAME} ADD COLUMN {name} TIMESTAMP"))
+
+
+def _bootstrap(conn) -> None:
+    metadata.create_all(conn, checkfirst=True)
+    _add_columns(conn)
 
 
 def _now() -> datetime:
@@ -130,8 +167,7 @@ class PlaygroundStore:
 
     def __init__(self, engine: Engine):
         self.engine = engine
-        self._schema_guard.run(engine, "playground-artifacts-v1",
-                               lambda conn: metadata.create_all(conn, checkfirst=True))
+        self._schema_guard.run(engine, "playground-artifacts-v2", _bootstrap)
 
     # -- write ---------------------------------------------------------------
 
@@ -142,19 +178,19 @@ class PlaygroundStore:
         return values
 
     def open(self, artifact_id: str, user_id: str) -> tuple[dict[str, Any], str]:
-        """Mark the artifact opened and mint its view token, once.
+        """Open (or reopen) a live artifact and mint a view token (TASK-2195).
 
-        Opening an already-opened artifact expires it (the caller then
-        deletes the blob) and raises ``OpenRefused("expired")``.
+        The first open sets ``opened_at`` (new -> seen); later opens keep it.
+        A deleted artifact raises ``OpenRefused("expired")``.
         """
         token = secrets.token_urlsafe(32)
-        now = _now()
         mine = and_(artifacts.c.id == artifact_id, artifacts.c.user_id == user_id)
         with self.engine.begin() as conn:
             row = conn.execute(
                 update(artifacts)
-                .where(mine, artifacts.c.opened_at.is_(None), artifacts.c.expired_at.is_(None))
-                .values(opened_at=now, view_token_hash=hash_token(token))
+                .where(mine, artifacts.c.expired_at.is_(None))
+                .values(opened_at=func.coalesce(artifacts.c.opened_at, _now()),
+                        view_token_hash=hash_token(token))
                 .returning(*artifacts.c)
             ).mappings().first()
         if row is not None:
@@ -187,15 +223,34 @@ class PlaygroundStore:
                          .where(artifacts.c.id == artifact_id, artifacts.c.blob_key == blob_key)
                          .values(blob_key=None))
 
-    def expire_overdue(self, opened_before: datetime) -> list[str]:
-        """Expire every artifact opened before ``opened_before``; returns their ids."""
+    def set_state(self, artifact_id: str, user_id: str, action: str) -> dict[str, Any] | None:
+        """Apply a mailbox action to a live artifact; None when not found.
+
+        ``read``/``unread``, ``archive``/``unarchive``, ``trash``/``restore``.
+        Idempotent; a content-gone row is returned unchanged.
+        """
+        now = _now()
+        values = {
+            "read": {"opened_at": func.coalesce(artifacts.c.opened_at, now)},
+            "unread": {"opened_at": None},
+            "archive": {"archived_at": func.coalesce(artifacts.c.archived_at, now)},
+            "unarchive": {"archived_at": None},
+            "trash": {"trashed_at": func.coalesce(artifacts.c.trashed_at, now)},
+            "restore": {"trashed_at": None},
+        }[action]
+        mine = [artifacts.c.id == artifact_id, artifacts.c.user_id == user_id]
         with self.engine.begin() as conn:
+            conn.execute(update(artifacts).where(*mine, artifacts.c.expired_at.is_(None)).values(**values))
+            row = conn.execute(select(*artifacts.c).where(*mine)).mappings().first()
+        return dict(row) if row is not None else None
+
+    def trashed_before(self, cutoff: datetime) -> list[str]:
+        """Live artifacts trashed before ``cutoff`` (the purge's work list)."""
+        with self.engine.connect() as conn:
             rows = conn.execute(
-                update(artifacts)
-                .where(artifacts.c.opened_at.is_not(None), artifacts.c.opened_at < opened_before,
+                select(artifacts.c.id)
+                .where(artifacts.c.trashed_at.is_not(None), artifacts.c.trashed_at < cutoff,
                        artifacts.c.expired_at.is_(None))
-                .values(expired_at=_now(), inline_content=None, view_token_hash=None)
-                .returning(artifacts.c.id)
             ).all()
         return [r[0] for r in rows]
 
@@ -226,18 +281,33 @@ class PlaygroundStore:
         return row
 
     def list(self, user_id: str, *, bot_id: str | None = None, status: str | None = None,
+             view: str | None = None, query: str | None = None,
              limit: int = 200) -> list[dict[str, Any]]:
-        cols = [artifacts.c[name] for name in PUBLIC_COLUMNS]
-        query = select(*cols).where(artifacts.c.user_id == user_id)
+        """Newest first. ``view`` defaults to the Inbox; ``query`` matches
+        title, note and sender, case-insensitively."""
+        c = artifacts.c
+        q = select(*[c[name] for name in PUBLIC_COLUMNS]).where(c.user_id == user_id)
+        view = view or "inbox"
+        if view == "inbox":
+            q = q.where(c.archived_at.is_(None), c.trashed_at.is_(None), c.expired_at.is_(None))
+        elif view == "archive":
+            q = q.where(c.archived_at.is_not(None), c.trashed_at.is_(None), c.expired_at.is_(None))
+        elif view == "trash":
+            q = q.where(c.trashed_at.is_not(None), c.expired_at.is_(None))
         if bot_id:
-            query = query.where(artifacts.c.sender_bot_id == bot_id)
+            q = q.where(c.sender_bot_id == bot_id)
         if status == "unopened":
-            query = query.where(artifacts.c.opened_at.is_(None), artifacts.c.expired_at.is_(None))
+            q = q.where(c.opened_at.is_(None), c.expired_at.is_(None))
         elif status == "expired":
-            query = query.where(artifacts.c.expired_at.is_not(None))
-        query = query.order_by(artifacts.c.created_at.desc(), artifacts.c.id.desc()).limit(limit)
+            q = q.where(c.expired_at.is_not(None))
+        if query:
+            like = "%" + query.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            q = q.where(or_(func.lower(c.title).like(like, escape="\\"),
+                            func.lower(func.coalesce(c.note, "")).like(like, escape="\\"),
+                            func.lower(c.sender_bot_id).like(like, escape="\\")))
+        q = q.order_by(c.created_at.desc(), c.id.desc()).limit(limit)
         with self.engine.connect() as conn:
-            return [dict(r) for r in conn.execute(query).mappings().all()]
+            return [dict(r) for r in conn.execute(q).mappings().all()]
 
     def senders(self, user_id: str) -> list[str]:
         with self.engine.connect() as conn:
@@ -248,7 +318,3 @@ class PlaygroundStore:
                 .order_by(func.max(artifacts.c.created_at).desc())
             ).all()
         return [r[0] for r in rows]
-
-
-def opened_cutoff(timeout_minutes: float, now: datetime | None = None) -> datetime:
-    return (now or _now()) - timedelta(minutes=max(1.0, float(timeout_minutes)))
