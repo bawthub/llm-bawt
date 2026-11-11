@@ -16,6 +16,7 @@ from queue import PriorityQueue
 from typing import Any
 from urllib.parse import urlparse
 
+from ..utils.bot_identity import configured_default_bot_id
 from ..utils.config import Config
 from .background_tasks import BackgroundTasksMixin
 from .chat_nonstream import ChatNonStreamMixin
@@ -172,7 +173,7 @@ class BackgroundService(
         # Model configuration
         self._available_models: list[str] = []
         self._default_model: str | None = None
-        self._default_bot: str = config.DEFAULT_BOT or "nova"
+        self._default_bot: str = configured_default_bot_id(config)
         self._load_available_models()
 
         # Register callback for model unload - clears caches when model changes

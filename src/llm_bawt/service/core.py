@@ -40,7 +40,7 @@ class ServiceLLMBawt(BaseLLMBawt):
         resolved_model_alias: str,
         config: Config,
         local_mode: bool = False,
-        bot_id: str = "nova",
+        bot_id: str = "",
         user_id: str = "",  # Required - must be passed explicitly
         verbose: bool = False,
         debug: bool = False,

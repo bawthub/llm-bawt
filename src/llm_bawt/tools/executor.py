@@ -140,7 +140,7 @@ class ToolExecutor:
         model_lifecycle: "ModelLifecycleManager | None" = None,
         config: "Config | None" = None,
         user_id: str = "",  # Required - must be passed explicitly
-        bot_id: str = "nova",
+        bot_id: str = "",
         history_manager: "HistoryManager | None" = None,
     ):
         """Initialize the executor.

@@ -94,7 +94,7 @@ def main():
             "all",
         ],
     )
-    parser.add_argument("--bot", default="nova", help="Bot ID to migrate")
+    parser.add_argument("--bot", required=True, help="Bot ID to migrate")
     parser.add_argument("--dry-run", action="store_true", help="Only report what would be done")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
     args = parser.parse_args()

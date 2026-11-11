@@ -2,6 +2,7 @@
 Task definitions for the background service.
 """
 
+from ..utils.bot_identity import require_bot_id
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -39,13 +40,14 @@ class Task:
     payload: dict[str, Any]
     task_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    bot_id: str = "nova"
+    bot_id: str = ""
     user_id: str = ""  # Required - caller must set this
     priority: int = 0  # Higher = more urgent
     
     def __post_init__(self):
         if not self.user_id:
             raise ValueError("user_id is required for Task")
+        self.bot_id = require_bot_id(self.bot_id, "Task")
     
     def to_dict(self) -> dict:
         return {
@@ -68,7 +70,7 @@ class Task:
             task_type=TaskType(data["task_type"]),
             payload=data["payload"],
             created_at=datetime.fromisoformat(data["created_at"]),
-            bot_id=data.get("bot_id", "nova"),
+            bot_id=data.get("bot_id", ""),
             user_id=user_id,
             priority=data.get("priority", 0),
         )
@@ -105,7 +107,7 @@ def create_meaning_update_task(
     recurrence_keywords: list[str] | None = None,
     updated_tags: list[str] | None = None,
     reason: str = "",
-    bot_id: str = "nova",
+    bot_id: str = "",
 ) -> Task:
     """Create a task to update meaning metadata on an existing memory."""
     return Task(
@@ -124,7 +126,7 @@ def create_meaning_update_task(
 
 
 def create_maintenance_task(
-    bot_id: str = "nova",
+    bot_id: str = "",
     user_id: str = "system",
     run_consolidation: bool = True,
     run_recurrence_detection: bool = True,
@@ -179,7 +181,7 @@ def create_profile_maintenance_task(
 
 
 def create_history_summarization_task(
-    bot_id: str = "nova",
+    bot_id: str = "",
     user_id: str = "system",
     use_heuristic_fallback: bool = True,
     max_tokens_per_chunk: int = 4000,
@@ -271,7 +273,7 @@ def create_harness_version_check_task(
 
 
 def create_memory_extraction_task(
-    bot_id: str = "nova",
+    bot_id: str = "",
     user_id: str = "system",
     batch_size: int = 50,
     model: str | None = None,

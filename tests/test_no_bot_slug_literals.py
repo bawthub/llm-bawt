@@ -39,29 +39,9 @@ ROSTER = frozenset(
 )
 CHECKED_SLUGS = ROSTER - DURABLE_AGENT_HARNESSES
 
-# (path under src/, slug) -> count. Retiring these is TASK-1373: the "nova"
-# defaults should resolve the configured default bot instead of naming one.
-KNOWN_DEBT: dict[tuple[str, str], int] = {
-    ("llm_bawt/bots.py", "nova"): 3,
-    ("llm_bawt/cli/display_cmd.py", "nova"): 1,
-    ("llm_bawt/core/client.py", "nova"): 1,
-    ("llm_bawt/core/initialization.py", "nova"): 1,
-    ("llm_bawt/mcp_server/extraction.py", "nova"): 1,
-    ("llm_bawt/memory/base.py", "nova"): 1,
-    ("llm_bawt/memory/migrations.py", "nova"): 1,
-    ("llm_bawt/memory/postgresql.py", "nova"): 2,
-    ("llm_bawt/memory/postgresql_short_term.py", "nova"): 1,
-    ("llm_bawt/memory/summarization.py", "nova"): 1,
-    ("llm_bawt/service/background_service.py", "nova"): 1,
-    ("llm_bawt/service/client.py", "nova"): 1,
-    ("llm_bawt/service/core.py", "nova"): 1,
-    ("llm_bawt/service/tasks.py", "nova"): 6,
-    ("llm_bawt/tools/executor.py", "nova"): 1,
-    ("llm_bawt/tools/loop.py", "nova"): 2,
-    ("llm_bawt/tools/streaming.py", "nova"): 1,
-    ("llm_bawt/utils/config.py", "nova"): 1,
-    ("llm_bawt/utils/history.py", "nova"): 1,
-}
+# (path under src/, slug) -> count. Empty since TASK-1373 retired the "nova"
+# defaults; keep it that way.
+KNOWN_DEBT: dict[tuple[str, str], int] = {}
 
 
 def _docstring_ids(tree: ast.AST) -> set[int]:

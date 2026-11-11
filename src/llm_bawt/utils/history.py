@@ -1,3 +1,4 @@
+from .bot_identity import require_bot_id
 import os
 import hashlib
 import json
@@ -160,13 +161,13 @@ class HistoryManager:
         client: LLMClient,
         config: Config,
         db_backend: "ShortTermMemoryManager | None" = None,
-        bot_id: str = "nova",
+        bot_id: str = "",
         settings_getter: Callable[[str, Any], Any] | None = None,
         user_id: str | None = None,
     ):
         self.client = client
         self.config = config
-        self.bot_id = bot_id
+        self.bot_id = require_bot_id(bot_id, "HistoryManager")
         # TASK-1774: a bot's message partition holds every user's history;
         # DB reads are limited to this user's sessions (see load_history).
         self.user_id = user_id

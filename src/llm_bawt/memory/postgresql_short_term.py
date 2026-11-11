@@ -6,6 +6,7 @@ semantic-memory backend. ``postgresql.py`` re-exports the class for compatibilit
 
 from __future__ import annotations
 
+from ..utils.bot_identity import require_bot_id
 import json
 import logging
 import uuid
@@ -32,13 +33,13 @@ class PostgreSQLShortTermManager(ShortTermMessageReadsMixin, ShortTermMessageMut
     def __init__(
         self,
         config: Any,
-        bot_id: str = "nova",
+        bot_id: str = "",
         user_id: str | None = None,
         *,
         provision_schema: bool = True,
     ):
         self.config = config
-        self.bot_id = bot_id
+        self.bot_id = require_bot_id(bot_id, "PostgreSQLShortTermManager")
         # TASK-284: sessions are namespaced (bot_id, user_id). May be None for
         # legacy/back-compat callers that don't carry a user.
         self.user_id = user_id

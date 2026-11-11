@@ -640,7 +640,7 @@ def show_bots(config: Config, service_mode: bool = False):
 
 def _show_bots_from_service(config: Config, bots_data: list[dict]):
     """Render bot list from service API response."""
-    default_slug = config.DEFAULT_BOT or "nova"
+    default_slug = (config.DEFAULT_BOT or "").strip().lower()
 
     console.print(Panel.fit("[bold cyan]Available Bots[/bold cyan] [dim](service)[/dim]", border_style="cyan"))
     console.print()

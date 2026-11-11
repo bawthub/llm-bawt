@@ -352,7 +352,7 @@ class PostgreSQLMemoryBackend(
     def __init__(
         self,
         config: Any,
-        bot_id: str = "nova",
+        bot_id: str = "",
         embedding_dim: int | None = None,
         *,
         provision_schema: bool = True,
@@ -532,7 +532,7 @@ class PostgreSQLMemoryBackend(
         )
 
     @classmethod
-    def get_short_term_manager(cls, config: Any, bot_id: str = "nova") -> "PostgreSQLShortTermManager":
+    def get_short_term_manager(cls, config: Any, bot_id: str = "") -> "PostgreSQLShortTermManager":
         """Factory method to get a short-term memory manager."""
         return PostgreSQLShortTermManager(config, bot_id)
 

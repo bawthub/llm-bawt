@@ -51,7 +51,7 @@ class ToolLoop:
         model_lifecycle: "ModelLifecycleManager | None" = None,
         config: "Config | None" = None,
         user_id: str = "",  # Required - must be passed explicitly
-        bot_id: str = "nova",
+        bot_id: str = "",
         max_iterations: int | None = None,
         tool_format: ToolFormat | str = ToolFormat.REACT,
         tools: list | None = None,
@@ -474,7 +474,7 @@ def query_with_tools(
     model_lifecycle: "ModelLifecycleManager | None" = None,
     config: "Config | None" = None,
     user_id: str = "",  # Required - must be passed explicitly
-    bot_id: str = "nova",
+    bot_id: str = "",
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
     stream: bool = True,
     tool_format: ToolFormat | str = ToolFormat.REACT,

@@ -271,12 +271,14 @@ def _get_extraction_client(config: Config) -> Any:
     # Initialize the client
     try:
         from llm_bawt.core import LLMBawt
+        from llm_bawt.utils.bot_identity import configured_default_bot_id
         
         # Create a minimal LLMBawt instance for extraction
         # This will load the model if needed
         llm_bawt = LLMBawt(
             resolved_model_alias=extraction_model,
-            bot_id="nova",  # Use nova for extraction context
+            # Botless utility work runs under the configured default bot (TASK-1373).
+            bot_id=configured_default_bot_id(config),
             config=config,
         )
         _llm_client = llm_bawt.client

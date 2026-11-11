@@ -636,7 +636,7 @@ class ServiceClient:
     def search_memories(
         self,
         query: str,
-        bot_id: str = "nova",
+        bot_id: str = "",
         n_results: int = 5,
         min_relevance: float = 0.0,
     ) -> list[dict] | None:

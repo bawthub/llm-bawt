@@ -1,6 +1,7 @@
 """Orchestrator initialization and optional integration wiring."""
 from __future__ import annotations
 
+from ..utils.bot_identity import require_bot_id
 import logging
 from typing import TYPE_CHECKING
 
@@ -31,7 +32,7 @@ class OrchestratorInitializationMixin:
         resolved_model_alias: str,
         config: Config,
         local_mode: bool = False,
-        bot_id: str = "nova",
+        bot_id: str = "",
         user_id: str = "",  # Required - must be passed explicitly
         verbose: bool = False,
         debug: bool = False,
@@ -64,7 +65,7 @@ class OrchestratorInitializationMixin:
         )
         self.tool_format = self.config.get_tool_format(model_alias=resolved_model_alias, model_def=self.model_definition)
         self.local_mode = local_mode
-        self.bot_id = bot_id
+        self.bot_id = require_bot_id(bot_id, "LLMBawt")
         self.user_id = user_id
         self.verbose = verbose
         self.debug = debug

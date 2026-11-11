@@ -10,6 +10,7 @@ Sessions are detected by timestamp gaps (default 1 hour).
 Summaries are non-destructive: raw messages remain in the messages table.
 """
 
+from ..utils.bot_identity import require_bot_id
 import json
 import logging
 import re
@@ -963,7 +964,7 @@ class HistorySummarizer:
     def __init__(
         self,
         config: Any,
-        bot_id: str = "nova",
+        bot_id: str = "",
         service_url: str | None = None,
         summarize_fn: "Callable[[Session], str | None] | None" = None,
         summarize_batch_fn: "Callable[[list[Session]], dict[int, str] | None] | None" = None,
@@ -971,7 +972,7 @@ class HistorySummarizer:
         max_context_tokens: int = 0,
     ):
         self.config = config
-        self.bot_id = bot_id
+        self.bot_id = require_bot_id(bot_id, "HistorySummarizer")
         self._settings_getter = settings_getter
 
         # Get service URL from config or use default

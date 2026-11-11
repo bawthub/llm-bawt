@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .bot_types import normalize_bot_type
+from .utils.bot_identity import MissingBotIdentity, configured_default_bot_id
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +67,6 @@ class ModelSelection:
 
 # Global bot registry — populated from DB on first access
 BUILTIN_BOTS: dict[str, Bot] = {}
-_DEFAULTS: dict[str, str] = {"standard": "nova"}
 _SYSTEM_PROMPTS: dict[str, str] = {}
 _RAW_BOT_DATA: dict[str, dict] = {}
 _FORCE_RELOAD: bool = False
@@ -272,7 +272,7 @@ def _load_bots_config() -> None:
 
     This is the sole source of bot data — no YAML fallback.
     """
-    global BUILTIN_BOTS, _DEFAULTS, _SYSTEM_PROMPTS, _RAW_BOT_DATA, _LOADED
+    global BUILTIN_BOTS, _SYSTEM_PROMPTS, _RAW_BOT_DATA, _LOADED
     global _LOAD_ERROR, _RETRY_AFTER, _FORCE_RELOAD
 
     # Named prompts are code constants and never depend on the DB read.
@@ -535,26 +535,12 @@ class BotManager:
         Returns:
             The default Bot instance
         """
-        # Check config for default bot override
-        if self.config and hasattr(self.config, "DEFAULT_BOT"):
-            config_default = getattr(self.config, "DEFAULT_BOT", None)
-            if config_default and config_default in self._bots:
-                return self._bots[config_default]
-        default_slug = _DEFAULTS.get("standard", "nova")
-
+        # TASK-1373: the configured DEFAULT_BOT is the only default; a missing
+        # or unknown one fails loudly instead of picking some other bot.
+        default_slug = configured_default_bot_id(self.config)
         bot = self._bots.get(default_slug)
         if not bot:
-            # Fallback to first available bot
-            if self._bots:
-                return next(iter(self._bots.values()))
-            # Ultimate fallback - create a minimal bot
-            return Bot(
-                slug="assistant",
-                name="Assistant",
-                description="Default assistant",
-                system_prompt="You are a helpful assistant.",
-                requires_memory=False,
-            )
+            raise MissingBotIdentity(f"configured DEFAULT_BOT {default_slug!r} is not a known bot")
         return bot
 
     def _is_model_alias(self, alias: str) -> bool:
@@ -641,7 +627,7 @@ class BotManager:
 
     def get_default_slug(self, local_mode: bool = False) -> str:
         """Get the default bot slug."""
-        return _DEFAULTS.get("standard", "nova")
+        return configured_default_bot_id(self.config)
 
 
 def get_bot(slug: str) -> Bot | None:

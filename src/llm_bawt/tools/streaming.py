@@ -119,7 +119,7 @@ def stream_with_tools(
     model_lifecycle: "ModelLifecycleManager | None" = None,
     config: "Config | None" = None,
     user_id: str = "",
-    bot_id: str = "nova",
+    bot_id: str = "",
     max_iterations: int | None = None,
     tool_format: ToolFormat | str = ToolFormat.REACT,
     adapter: "ModelAdapter | None" = None,

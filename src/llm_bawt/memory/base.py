@@ -1,5 +1,6 @@
 """Abstract base class for memory backends."""
 
+from ..utils.bot_identity import require_bot_id
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -21,7 +22,7 @@ class MemoryBackend(ABC):
         bot_id: The bot identifier for memory isolation.
     """
     
-    def __init__(self, config: Any, bot_id: str = "nova"):
+    def __init__(self, config: Any, bot_id: str = ""):
         """Initialize the memory backend.
         
         Args:
@@ -31,7 +32,7 @@ class MemoryBackend(ABC):
                    its own separate memory space.
         """
         self.config = config
-        self.bot_id = bot_id
+        self.bot_id = require_bot_id(bot_id, type(self).__name__)
     
     @abstractmethod
     def add(self, message_id: str, role: str, content: str, timestamp: float) -> None:

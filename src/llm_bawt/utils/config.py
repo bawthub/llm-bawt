@@ -153,7 +153,7 @@ class Config(RuntimeTunables, BaseSettings):
     MODEL_CACHE_DIR: str = Field(default=os.path.expanduser("~/.cache/llm-bawt/models"), description="Directory to cache downloaded GGUF models")
     MODELS_CONFIG_PATH: str = Field(default=str(DEFAULT_MODELS_YAML), description="Legacy path to models YAML (deprecated — models load from DB)")
     DEFAULT_MODEL_ALIAS: Optional[str] = Field(default=None, description="Default model alias if --model is not specified")
-    DEFAULT_BOT: str = Field(default="nova", description="Default bot to use if --bot is not specified")
+    DEFAULT_BOT: str = Field(default="", description="Default bot to use if --bot is not specified; required when no bot is given")
     DEFAULT_USER: Optional[str] = Field(
         default=None,
         description="User profile to use. Set via LLM_BAWT_DEFAULT_USER env var.",
