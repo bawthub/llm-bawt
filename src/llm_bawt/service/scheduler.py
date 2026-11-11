@@ -36,6 +36,7 @@ class JobType(str, Enum):
     MEDIA_GC = "media_gc"
     TOOL_RESULT_GC = "tool_result_gc"
     HARNESS_VERSION_CHECK = "harness_version_check"
+    PLAYGROUND_EXPIRY = "playground_expiry"
     SEND_PROMPT = "send_prompt"
     IDLE_CONTEXT_RESET = "idle_context_reset"
 
@@ -729,7 +730,8 @@ class JobScheduler:
                 # gating would add a separate scan with no real win.
                 return True, None
 
-            if job.job_type in (JobType.TOOL_RESULT_GC, JobType.HARNESS_VERSION_CHECK):
+            if job.job_type in (JobType.TOOL_RESULT_GC, JobType.HARNESS_VERSION_CHECK,
+                                JobType.PLAYGROUND_EXPIRY):
                 # Always-on for the same reason as MEDIA_GC — a cheap sweep.
                 return True, None
         except Exception as e:
@@ -752,6 +754,7 @@ class JobScheduler:
             create_memory_extraction_task,
             create_profile_maintenance_task,
             create_harness_version_check_task,
+            create_playground_expiry_task,
             create_tool_result_gc_task,
         )
         
@@ -814,6 +817,12 @@ class JobScheduler:
             return create_tool_result_gc_task(
                 retention_days=int(config.get("retention_days", 14)),
                 dry_run=bool(config.get("dry_run", False)),
+                bot_id=job.bot_id or "system",
+                user_id=config.get("user_id", "system"),
+            )
+        elif job.job_type == JobType.PLAYGROUND_EXPIRY:
+            config = self._parse_config_json(job.config_json)
+            return create_playground_expiry_task(
                 bot_id=job.bot_id or "system",
                 user_id=config.get("user_id", "system"),
             )
@@ -1034,6 +1043,24 @@ def init_default_jobs(engine, config) -> None:
                 "Created tool_result GC job (nightly @ 04:30 UTC, next: %s)",
                 next_run.isoformat(),
             )
+
+        # TASK-2190: Playground expiry sweep. Deletes artifacts opened longer
+        # ago than playground_view_timeout_minutes (a crashed tab never closed
+        # them) and retries failed blob deletes. Cheap indexed scan; every 5 min.
+        existing_playground_expiry = session.exec(
+            select(ScheduledJob).where(ScheduledJob.job_type == JobType.PLAYGROUND_EXPIRY)
+        ).first()
+        if not existing_playground_expiry:
+            session.add(ScheduledJob(
+                job_type=JobType.PLAYGROUND_EXPIRY,
+                bot_id=SYSTEM_BOT_ID,
+                enabled=config.SCHEDULER_ENABLED,
+                interval_minutes=5,
+                next_run_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+                config_json=json.dumps({"user_id": "system"}),
+            ))
+            session.commit()
+            logger.debug("Created playground expiry job (every 5 minutes)")
 
         # TASK-1975: weekly agent-harness version check. Read-only against
         # PyPI; keeps one open upgrade task. The task owner comes from the

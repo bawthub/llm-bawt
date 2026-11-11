@@ -39,6 +39,7 @@ class BackgroundTasksMixin:
         TaskType.MEDIA_ASSETS_GC: "_process_media_assets_gc",
         TaskType.TOOL_RESULT_GC: "_process_tool_result_gc",
         TaskType.HARNESS_VERSION_CHECK: "_process_harness_version_check",
+        TaskType.PLAYGROUND_EXPIRY: "_process_playground_expiry",
     }
 
     async def process_task(self, task: Task) -> TaskResult:
@@ -750,6 +751,12 @@ class BackgroundTasksMixin:
         retention_days = int(task.payload.get("retention_days", 14))
         dry_run = bool(task.payload.get("dry_run", False))
         return run_tool_result_gc(self.config, retention_days=retention_days, dry_run=dry_run)
+
+    def _process_playground_expiry(self, task: Task) -> dict:
+        """Expire Playground artifacts opened past the view timeout (TASK-2190)."""
+        from ..playground.service import get_playground, view_timeout_minutes
+
+        return get_playground(self.config).sweep(view_timeout_minutes(self.config))
 
     def _process_harness_version_check(self, task: Task) -> dict:
         """Compare pinned agent-harness packages with PyPI (TASK-1975)."""

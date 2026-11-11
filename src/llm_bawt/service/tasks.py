@@ -20,6 +20,7 @@ class TaskType(Enum):
     MEDIA_ASSETS_GC = "media_assets_gc"
     TOOL_RESULT_GC = "tool_result_gc"
     HARNESS_VERSION_CHECK = "harness_version_check"
+    PLAYGROUND_EXPIRY = "playground_expiry"
 
 
 class TaskStatus(Enum):
@@ -289,4 +290,19 @@ def create_memory_extraction_task(
             "batch_size": batch_size,
             "model": model,
         },
+    )
+
+
+def create_playground_expiry_task(
+    bot_id: str = "system",
+    user_id: str = "system",
+    priority: int = -1,
+) -> Task:
+    """Expire Playground artifacts left open past the view timeout (TASK-2190)."""
+    return Task(
+        task_type=TaskType.PLAYGROUND_EXPIRY,
+        bot_id=bot_id,
+        user_id=user_id,
+        priority=priority,
+        payload={},
     )

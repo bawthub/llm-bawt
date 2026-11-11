@@ -837,6 +837,7 @@ from . import media_generation_tools as _media_generation_tools  # noqa: F401, E
 from . import attachment_tools as _attachment_tools  # noqa: F401, E402
 from . import home_audio_tools as _home_audio_tools  # noqa: F401, E402
 from . import notify_tools as _notify_tools  # noqa: F401, E402
+from . import playground_tools as _playground_tools  # noqa: F401, E402
 
 # ---------------------------------------------------------------------------
 # Self-recap tool (agent continuation briefing via Grok)
