@@ -50,10 +50,12 @@ repository files or public logs. Share the same policy **and key** wherever
 the private gate runs. Both tracked denylist files and tracked keys are refused.
 Missing or malformed private configuration exits 2.
 
-Private literal fingerprints are HMAC-SHA256 truncated to 128 bits, not
-dictionary-reversible hashes of operator names. The baseline and diagnostics
-contain only file/rule, opaque fingerprint and count, never matched text.
-Public built-in-rule fingerprints are truncated SHA-256.
+Private literal fingerprints are HMAC-SHA256 truncated to 128 bits. The key
+prevents dictionary guessing of names absent from source, but per-file count
+patterns can reveal which existing source tokens are classified as private.
+The baseline and diagnostics contain only file/rule, opaque fingerprint and
+count, never matched text. Public built-in-rule fingerprints are truncated
+SHA-256.
 
 Public/fork CI deliberately sets `mode: "public"`, with all four lists empty
 and `hmac_key_file: ""`. That explicit mode checks built-in rules but cannot
