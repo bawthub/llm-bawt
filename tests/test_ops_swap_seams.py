@@ -16,7 +16,7 @@ import pytest
 from llm_bawt.ops.config_reconcile import check_compose_identity
 from llm_bawt.ops.image_deploy import DeployFailed, StepError, Swap
 from llm_bawt.ops.routing_reconcile import routing_binding
-from llm_bawt.ops.seeds import SEEDS
+from tests.ops_install_rows import SEEDS
 from tests.test_ops_image_deploy import JOB_ID, NAME, NEW_ID, OLD_ID, SPEC, FakeDocker, _deployer
 
 PREV = f"{NAME}-prev-{JOB_ID[:8]}"

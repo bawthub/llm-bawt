@@ -19,7 +19,7 @@ from llm_bawt.ops.dev_config_reconcile import (
 )
 from llm_bawt.ops.executor import ConfigCheckError, validate_spec
 from llm_bawt.ops.image_deploy import DeployFailed
-from llm_bawt.ops.seeds import SEEDS
+from tests.ops_install_rows import SEEDS
 from llm_bawt.ops.service import APPROVAL_ONLY_ACTIONS, OpsDispatchError, _valid_config_snapshot
 from llm_bawt.ops.tagged_config_reconcile import valid_tagged_binding
 from llm_bawt.ops.worker import run as worker_run

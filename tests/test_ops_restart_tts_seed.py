@@ -5,7 +5,7 @@ import json
 
 from llm_bawt.ops.executor import validate_spec
 from llm_bawt.ops.health_collector import catalog_targets
-from llm_bawt.ops.seeds import SEEDS
+from tests.ops_install_rows import SEEDS
 
 BY_SLUG = {seed["slug"]: seed for seed in SEEDS}
 

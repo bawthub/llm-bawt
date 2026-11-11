@@ -16,7 +16,7 @@ from llm_bawt.ops.routing_reconcile import (
     SCHEMA, WORKER_CAPABILITY_LABEL, RoutingReconciler,
     patched_rule, routing_binding, valid_routing_binding,
 )
-from llm_bawt.ops.seeds import SEEDS
+from tests.ops_install_rows import SEEDS
 from llm_bawt.ops.worker import run as worker_run
 from tests.test_ops_image_deploy import (
     FakeDocker, JOB_ID, NAME, OLD_ID, REPO, SOURCE, _labels, _worker_request,

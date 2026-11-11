@@ -22,7 +22,7 @@ from llm_bawt.ops.config_reconcile import valid_config_binding
 from llm_bawt.ops.executor import ConfigCheckError, DockerExecutor, validate_spec
 from llm_bawt.ops.image_deploy import DeployFailed
 from llm_bawt.ops.release import ReleaseVerificationError
-from llm_bawt.ops.seeds import SEEDS
+from tests.ops_install_rows import SEEDS
 from llm_bawt.ops.source_state import SourceStateError, _path_list
 from llm_bawt.ops.validation import canonical_json
 from llm_bawt.ops.service import OpsDispatchError

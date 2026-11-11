@@ -16,7 +16,7 @@ from llm_bawt.ops.config_reconcile import (
 from llm_bawt.ops.executor import ConfigCheckError, DockerExecutor, validate_spec
 from llm_bawt.ops.health_probe import WORKER_LABEL as HEALTH_PROBE_LABEL
 from llm_bawt.ops.image_deploy import DeployFailed
-from llm_bawt.ops.seeds import SEEDS
+from tests.ops_install_rows import SEEDS
 from llm_bawt.ops.worker import run as worker_run
 from tests.test_ops_image_deploy import (
     COMPOSE_FILES, CONFIG_HASH, DIGEST, JOB_ID, NAME, OLD_ID, PROJECT_DIR, RENDERER, REPO, SOURCE,

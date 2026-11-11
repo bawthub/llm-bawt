@@ -20,7 +20,7 @@ from llm_bawt.ops.compose_config import (
 from llm_bawt.ops.compose_render import ComposeError, ComposeRenderer
 from llm_bawt.ops.executor import ConfigCheckError, validate_spec
 from llm_bawt.ops.image_deploy import DeployFailed
-from llm_bawt.ops.seeds import SEEDS
+from tests.ops_install_rows import SEEDS
 from llm_bawt.ops.source_state import SourceStateError, reserved_env_name, source_plan
 from tests.test_ops_app_config_reconcile import (
     APP_NAME, EXECUTION, OPERATION, SPEC as APP_SPEC, TAG as APP_TAG, AppDocker, StubChecker, _executor,

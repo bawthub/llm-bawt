@@ -14,7 +14,7 @@ from llm_bawt.ops.release import ReleaseVerifier
 from llm_bawt.ops.release_executor import ReleaseExecutor
 from llm_bawt.ops.release_coordinator import ReleaseCoordinator
 from llm_bawt.ops.release_store import ReleaseStore
-from llm_bawt.ops.seeds import SEEDS
+from tests.ops_install_rows import SEEDS
 from llm_bawt.ops.service import OpsService
 from llm_bawt.ops.store import OpsStore
 

@@ -19,7 +19,7 @@ from llm_bawt.ops.operator_run import OPERATOR_BACKEND, dispatch_operator_run
 from llm_bawt.ops.release_coordinator import ReleaseCoordinator
 from llm_bawt.ops.release_executor import ReleaseExecutor
 from llm_bawt.ops.release_store import ReleaseStore
-from llm_bawt.ops.seeds import SEEDS
+from tests.ops_install_rows import SEEDS
 from llm_bawt.ops.service import OpsDispatchError, OpsService
 from llm_bawt.ops.store import OpsStore
 from llm_bawt.service.routes import ops as routes, service_auth

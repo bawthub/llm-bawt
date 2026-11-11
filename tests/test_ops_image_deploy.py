@@ -30,7 +30,7 @@ from llm_bawt.ops.image_deploy import (DEPLOY_SCHEMA, DeployFailed, ImageDeploye
                                        clone_create_body, parse_deployment)
 from llm_bawt.ops.release import (GitHubReleaseVerifier, ReleaseVerificationError, ReleaseVerifier,
                                   binding_matches_args)
-from llm_bawt.ops.seeds import SEEDS
+from tests.ops_install_rows import SEEDS
 from llm_bawt.ops.validation import canonical_json
 from llm_bawt.ops.worker import run as worker_run
 

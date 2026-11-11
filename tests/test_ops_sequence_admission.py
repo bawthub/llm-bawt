@@ -12,7 +12,7 @@ from llm_bawt.ops import OpsDispatchError, OpsService
 from llm_bawt.ops import sequence
 from llm_bawt.ops.executor import DockerExecutor, ExecutorError, validate_spec
 from llm_bawt.ops.restart_health import has_health
-from llm_bawt.ops.seeds import SEEDS, seed_all
+from tests.ops_install_rows import SEEDS, seed_all
 from llm_bawt.ops.sequence_approval import approval_text
 from llm_bawt.ops.worker import OPS_JOB_LABEL, target_selector
 from tests.test_ops_image_deploy import _rehash
