@@ -15,7 +15,7 @@ import re
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.concurrency import run_in_threadpool
-from pydantic import BaseModel, ConfigDict, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from ...task_turn_context import (
     TASK_TURN_CONTEXT_HEADER,
@@ -543,6 +543,42 @@ async def git_identity(request: Request, response: Response):
         "author_email": f"{slug}@bots.bawt.local",
         "turn_id": context.turn_id,
     }
+
+
+class CommitReceiptRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    repo_key: str = Field(min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9:._/-]+$")
+    commit_sha: str = Field(min_length=40, max_length=64)
+    commit_base64: str = Field(min_length=1, max_length=174_764)
+
+
+@router.post("/v1/git/commits")
+async def git_commit_receipt(body: CommitReceiptRequest, request: Request, response: Response):
+    """Bind a commit to its signed authoring turn, never caller-supplied identity."""
+    from ...utils.config import Config
+    from ...utils.db import get_shared_engine
+    from ..commit_authoring_turns import (
+        CommitAttributionConflict, record_commit, validate_commit,
+    )
+
+    response.headers["Cache-Control"] = "no-store"
+    # Reuse exactly the identity endpoint's capability and bot-slug checks.
+    await git_identity(request, response)
+    context = open_task_turn_context(request.headers.get(TASK_TURN_CONTEXT_HEADER))
+    try:
+        sha = validate_commit(body.commit_sha, body.commit_base64, context.bot_id)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error), headers={"Cache-Control": "no-store"}) from None
+    try:
+        await run_in_threadpool(lambda: record_commit(
+            get_shared_engine(Config()), context, body.repo_key, sha,
+        ))
+    except CommitAttributionConflict as error:
+        raise HTTPException(status_code=409, detail=str(error), headers={"Cache-Control": "no-store"}) from None
+    except Exception as error:
+        raise internal_error(error, "Commit attribution failed", public="Commit attribution unavailable") from error
+    return {"commit_sha": sha, "repo_key": body.repo_key, "turn_id": context.turn_id, "bot_id": context.bot_id}
 
 
 @router.get("/v1/providers/github/git-credential")

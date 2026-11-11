@@ -188,7 +188,7 @@ def signed(monkeypatch):
 
     monkeypatch.setattr(task_review_tools, "signed_review_turn", lambda *args, **kwargs: object())
     monkeypatch.setattr(task_review_tools, "resolve_review_provenance",
-                        lambda turn, refs: {"provenance": "signed_turn"})
+                        lambda turn, refs, revision: {"provenance": "signed_turn"})
     monkeypatch.setattr(task_review_tools, "_api_get", fake_get)
 
 

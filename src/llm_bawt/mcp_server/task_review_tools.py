@@ -301,7 +301,7 @@ async def _record_review(
         # Checked before any request: an unsigned r2 could clear Blockers.
         return {"error": "recheck_requires_signed_turn", "code": "recheck_requires_signed_turn"}
     task_refs = await _review_task_refs(task_id) if turn is not None else []
-    payload.update(await asyncio.to_thread(resolve_review_provenance, turn, task_refs))
+    payload.update(await asyncio.to_thread(resolve_review_provenance, turn, task_refs, target_revision))
     if turn is None:
         try:
             return await _api_post(

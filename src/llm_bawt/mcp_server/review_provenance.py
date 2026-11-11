@@ -7,9 +7,8 @@ turn, or a steer whose current generation started; a mere claim does not
 count), and its model is the model of the sending turn recorded on the
 delivery (``sender_turn_id``).
 
-The author's model needs a commit-to-turn record that does not exist yet
-(TASK-1462), so it and ``crossProvider`` stay null with a reason note. A
-``requesterModel`` is never used as the author's model.
+The author's model comes only from a recorded commit-to-signed-turn receipt
+(TASK-1462). A ``requesterModel`` is never used as the author's model.
 
 Every unresolved field is null and carries a ``<field>_unresolved:<reason>``
 note. Notes are sorted so a retry from the same turn produces identical
@@ -19,6 +18,7 @@ provenance (BawtHub rejects a keyed replay whose provenance differs).
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Callable
 
 from llm_bawt.bot_access import BotAccessError
@@ -175,7 +175,67 @@ def _requester(turn: Any, task_refs: list[str], notes: list[str]) -> dict:
     return {"requesterBotId": sender, "requesterModel": model}
 
 
-def resolve_review_provenance(turn: Any | None, task_refs: list[str]) -> dict:
+def commit_turns(revision: str) -> list[tuple[str, str]]:
+    from llm_bawt.service.commit_authoring_turns import authoring_turns
+
+    return authoring_turns(_engine(), revision)
+
+
+def revision_commits(revision: str | None) -> tuple[list[str], str | None]:
+    """Pairs/annotations are allowed; a trailing ' on SHA' is the base, not a target.
+
+    Short SHAs cannot prove uniqueness in the repository (we only see recorded
+    commits). Require ten characters and never silently ignore a short token.
+    """
+    if not revision:
+        return [], AUTHOR_UNRESOLVED
+    if len(revision) > 2048:
+        return [], "author_unresolved:unsupported_revision"
+    target = re.sub(r"\s+on\s+[0-9a-fA-F]{7,64}\s*$", "", revision, flags=re.IGNORECASE)
+    tokens = list(dict.fromkeys(token.lower() for token in re.findall(
+        r"(?<![A-Za-z0-9])([0-9a-fA-F]{7,64})(?![A-Za-z0-9])", target,
+    )))
+    if not tokens or len(tokens) > 8:
+        return [], "author_unresolved:unsupported_revision"
+    if any(len(token) < 10 for token in tokens):
+        return [], "author_unresolved:short_revision"
+    return tokens, None
+
+
+def _author(revision: str | None, notes: list[str]) -> dict:
+    empty = {"authorModel": None, "authorProvider": None}
+    tokens, reason = revision_commits(revision)
+    if reason:
+        notes.append(reason)
+        return empty
+    authors = []
+    for token in tokens:
+        rows = _guarded("author_unresolved:commit_records_unavailable", notes, lambda: commit_turns(token))
+        if rows is None:
+            return empty
+        if len(rows) != 1:
+            notes.append(AUTHOR_UNRESOLVED if not rows else "author_unresolved:ambiguous_commit")
+            return empty
+        author_turn, bot_id = rows[0]
+        model = _guarded("author_unresolved:turn_log_unavailable", notes, lambda: turn_model(author_turn, bot_id))
+        if model is None:
+            if "author_unresolved:turn_log_unavailable" not in notes:
+                notes.append("author_unresolved:no_turn_log")
+            return empty
+        authors.append((bot_id, model))
+    if len(set(authors)) != 1:
+        notes.append("author_unresolved:mixed_authors_or_models")
+        return empty
+    _, model = authors[0]
+    provider = _guarded("author_unresolved:catalog_unavailable", notes, lambda: provider_of(model))
+    if provider is None and "author_unresolved:catalog_unavailable" not in notes:
+        notes.append("author_unresolved:unknown_endpoint")
+    return {"authorModel": model, "authorProvider": provider}
+
+
+def resolve_review_provenance(
+    turn: Any | None, task_refs: list[str], target_revision: str | None = None,
+) -> dict:
     """BawtHub review provenance fields (camelCase, wire-ready) for a caller.
 
     ``turn`` comes from :func:`signed_review_turn` (None = unsigned).
@@ -189,9 +249,11 @@ def resolve_review_provenance(turn: Any | None, task_refs: list[str]) -> dict:
         "provenance": SIGNED_TURN,
         **_reviewer(turn, notes),
         **_requester(turn, task_refs, notes),
-        "authorModel": None,
-        "authorProvider": None,
+        **_author(target_revision, notes),
         "crossProvider": None,
     }
-    notes.append(AUTHOR_UNRESOLVED)
+    if fields["authorProvider"] is not None and fields["reviewerProvider"] is not None:
+        fields["crossProvider"] = fields["authorProvider"] != fields["reviewerProvider"]
+        if not fields["crossProvider"]:
+            notes.append("same_provider:advisory")
     return {**fields, "provenanceNotes": sorted(notes)}

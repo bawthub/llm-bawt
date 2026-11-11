@@ -50,6 +50,7 @@ def world(monkeypatch):
         "models": {(TURN, REVIEWER): "model-r@path-r", (SENDER_TURN, AUTHOR): "model-a@path-a"},
         "vendors": {"model-r@path-r": "vendor-r", "model-a@path-a": "vendor-a"},
         "deliveries": [(AUTHOR, SENDER_TURN)],
+        "commits": {}, "commit_reads": [],
         "task": dict(TASK),
         "posts": [], "routes": [], "paths": [], "gets": [], "delivery_reads": [],
     }
@@ -69,6 +70,12 @@ def world(monkeypatch):
         if isinstance(state["vendors"], Exception):
             raise state["vendors"]
         return state["vendors"].get(ref) if ref else None
+
+    def commit_turns(revision):
+        state["commit_reads"].append(revision)
+        if isinstance(state["commits"], Exception):
+            raise state["commits"]
+        return state["commits"].get(revision, [])
 
     async def fake_get(path, params=None):
         state["gets"].append(path)
@@ -91,17 +98,19 @@ def world(monkeypatch):
     monkeypatch.setattr(provenance, "turn_model", turn_model)
     monkeypatch.setattr(provenance, "requesting_deliveries", deliveries)
     monkeypatch.setattr(provenance, "provider_of", provider_of)
+    monkeypatch.setattr(provenance, "commit_turns", commit_turns)
     monkeypatch.setattr(task_review_tools, "_api_get", fake_get)
     monkeypatch.setattr(task_review_tools, "_api_post", fake_post)
     monkeypatch.setattr(task_review_tools, "_internal_post", fake_internal_post)
     return state
 
 
-def _review(capability=None, *, bot_id=REVIEWER, body="Reviewed on model-x@path-x."):
+def _review(capability=None, *, bot_id=REVIEWER, body="Reviewed on model-x@path-x.", revision=None):
     binding = task_association.set_current_task_turn_capability(capability) if capability else None
     try:
         return asyncio.run(task_review_tools.add_task_review(
             "TASK-7", "IMPLEMENTATION", "APPROVE", body, bot_id, idempotency_key="TASK-7:r1",
+            target_revision=revision,
         ))
     finally:
         if binding is not None:
@@ -137,6 +146,80 @@ def test_requester_model_never_stands_in_for_the_author(world, fernet):
     assert payload["requesterModel"] == "model-a@path-a"
     assert payload["authorModel"] is None
     assert payload["crossProvider"] is None  # differing providers prove nothing yet
+
+
+@pytest.mark.parametrize("same_provider", [True, False])
+def test_recorded_commit_resolves_author_and_provider_check(world, fernet, same_provider):
+    world["commits"]["a" * 40] = [(SENDER_TURN, AUTHOR)]
+    world["vendors"]["model-a@path-a"] = "vendor-r" if same_provider else "vendor-a"
+    _review(_capability(), revision="a" * 40)
+    [payload] = world["posts"]
+    assert payload["authorModel"] == "model-a@path-a"
+    assert payload["authorProvider"] == ("vendor-r" if same_provider else "vendor-a")
+    assert payload["crossProvider"] is not same_provider
+    assert ("same_provider:advisory" in payload["provenanceNotes"]) is same_provider
+    assert AUTHOR_NOTE not in payload["provenanceNotes"]
+
+
+@pytest.mark.parametrize("revision", [
+    "llm-bawt aaaaaaaaaa + BawtHub bbbbbbbbbb",
+    "aaaaaaaaaa on cccccccc",
+    "aaaaaaaaaa",
+])
+def test_pairs_and_base_annotations_only_use_agreeing_recorded_targets(world, fernet, revision):
+    for token in ("aaaaaaaaaa", "bbbbbbbbbb"):
+        world["commits"][token] = [(SENDER_TURN, AUTHOR)]
+    _review(_capability(), revision=revision)
+    [payload] = world["posts"]
+    assert payload["authorModel"] == "model-a@path-a" and payload["crossProvider"] is True
+    assert "cccccccc" not in world["commit_reads"]
+
+
+@pytest.mark.parametrize(("commits", "note"), [
+    ({}, AUTHOR_NOTE),
+    ({"a" * 40: [(SENDER_TURN, AUTHOR), (TURN, REVIEWER)]}, "author_unresolved:ambiguous_commit"),
+    (RuntimeError("db down"), "author_unresolved:commit_records_unavailable"),
+    ({"a" * 40: [("turn-absent", AUTHOR)]}, "author_unresolved:no_turn_log"),
+])
+def test_unproven_commit_author_stays_null(world, fernet, commits, note):
+    world["commits"] = commits
+    _review(_capability(), revision="a" * 40)
+    [payload] = world["posts"]
+    assert payload["authorModel"] is None and payload["crossProvider"] is None
+    assert note in payload["provenanceNotes"]
+
+
+@pytest.mark.parametrize(("revision", "note"), [
+    ("aaaaaaaa", "author_unresolved:short_revision"),
+    ("aaaaaaaaaa + bbbbbbbb", "author_unresolved:short_revision"),
+    ("main", "author_unresolved:unsupported_revision"),
+    ("x" * 2049, "author_unresolved:unsupported_revision"),
+])
+def test_insufficient_revision_is_not_guessed(world, fernet, revision, note):
+    _review(_capability(), revision=revision)
+    [payload] = world["posts"]
+    assert payload["authorModel"] is None and note in payload["provenanceNotes"]
+    assert world["commit_reads"] == []
+
+
+def test_a_pair_cannot_hide_an_unrecorded_or_different_author(world, fernet):
+    world["commits"]["aaaaaaaaaa"] = [(SENDER_TURN, AUTHOR)]
+    _review(_capability(), revision="aaaaaaaaaa + bbbbbbbbbb")
+    assert world["posts"][-1]["authorModel"] is None
+    world["commits"]["bbbbbbbbbb"] = [(TURN, REVIEWER)]
+    _review(_capability(), revision="aaaaaaaaaa + bbbbbbbbbb")
+    assert world["posts"][-1]["authorModel"] is None
+    assert "author_unresolved:mixed_authors_or_models" in world["posts"][-1]["provenanceNotes"]
+
+
+def test_missing_catalog_cannot_become_a_cross_provider_claim(world, fernet):
+    world["commits"]["a" * 40] = [(SENDER_TURN, AUTHOR)]
+    world["vendors"].pop("model-a@path-a")
+    _review(_capability(), revision="a" * 40)
+    [payload] = world["posts"]
+    assert payload["authorModel"] == "model-a@path-a"
+    assert payload["authorProvider"] is None and payload["crossProvider"] is None
+    assert "author_unresolved:unknown_endpoint" in payload["provenanceNotes"]
 
 
 def test_an_unsigned_review_says_so_and_reads_nothing(world):
