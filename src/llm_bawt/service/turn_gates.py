@@ -15,8 +15,8 @@ the producer sees it.
 
 Scope is stored as a predicate and resolved at check time against the bot's
 current profile (S3): a bot that moves onto a held backend is held, one that
-moves off is released. Only agent bots are ever gated; chat bots (Mira among
-them) never are. Gates are PostgreSQL-only, like the lock that linearizes them.
+moves off is released. Only agent bots are ever gated; chat bots never
+are. Gates are PostgreSQL-only, like the lock that linearizes them.
 
 ``turn_admission`` imports this module; never the reverse.
 """

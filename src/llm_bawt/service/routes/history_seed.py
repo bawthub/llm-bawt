@@ -71,7 +71,7 @@ def build_context_seed(
     # resolves None to the BOT's own default_model (priority 3) before the
     # service default (priority 4). Forcing the service default made it an
     # "explicit request" (priority 2), which overrode the bot's real model —
-    # e.g. seeding chat-harness 'mira' (grok-4.3) with the service default
+    # e.g. seeding a chat-harness bot on grok-4.3 with the service default
     # grok-4.5@xai-responses, a responses-only endpoint incompatible with
     # harness=chat → hard failure. TASK-620.
     if llm_bawt is None:

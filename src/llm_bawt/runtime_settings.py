@@ -435,7 +435,7 @@ class BotProfileStore:
 
             # Single-source-of-truth invariant: a bot is an agent iff it has a
             # backend. Refuse to persist an agent-typed row with no backend so
-            # the drift that stranded mira (TASK-516) can never land, no matter
+            # the drift that stranded a chat bot (TASK-516) can never land, no matter
             # which caller (route, CLI, seed, migration) reaches this store.
             if row.bot_type == "agent" and not row.agent_backend:
                 # Message follows the DB-trigger convention ("bot <slug>: ...")

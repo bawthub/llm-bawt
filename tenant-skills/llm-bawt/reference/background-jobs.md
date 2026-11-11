@@ -84,7 +84,7 @@ Each run is recorded in `job_runs`. Snapshot 2026-10-22: `IDLE_CONTEXT_RESET` (a
   - `post_check`: read-only.
   - `purge_ops`: only on an explicit `run(purge_ops=True)`, never at startup.
 - **Status:** committed `4adb798` on llm-bawt master, local and not pushed (reviewed by two same-provider reviewers). The first run is the next app restart; an app process started before that commit doesn't have it. Check with `docker compose logs app | grep "startup recovery check"`. No admin route exists.
-- **First mutating run:** `unresolved_tools` backfills every historical open tool call: 745 calls on 438 turns, June to September 2026, no Mira rows (as of 2026-10-22).
+- **First mutating run:** `unresolved_tools` backfills every historical open tool call: 745 calls on 438 turns, June to September 2026, no protected-bot rows (as of 2026-10-22).
 
 ## How to answer "what is it doing right now"
 

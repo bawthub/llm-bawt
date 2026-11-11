@@ -451,7 +451,7 @@ Cache:
 
 ### 17.1 Live test plan (owner, task step 21; the coordinator checks receipts)
 
-On an idle Claude Code bot the owner picks (never Mira), then repeated on a gpt bot on the claude-code bridge:
+On an idle Claude Code bot the owner picks (never a protected bot), then repeated on a gpt bot on the claude-code bridge:
 
 1. Enable. `/new`. Create two items through the tool. `/new` again: the pin turn's `request_json.system_prompt_pin.text` contains the section, and the pointer's `sections.working_memory.version` matches the namespace.
 2. Edit one item over REST. Send an ordinary message: its `request_json` user message ends with the notice line. Send another: no notice.

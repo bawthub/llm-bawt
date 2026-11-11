@@ -134,8 +134,8 @@ except for deliberate authorized edits.
 `self_model(bot_id=<self>)` shows your current endpoint/model/harness and the
 compatible endpoints. Despite the name, it also works on **another bot**
 (`bot_id=<slug>`, caller is recorded): use it to move a sibling to a different
-model instead of hand-PATCHing profiles or querying the DB. Mira is refused
-unless she is the trusted caller. Endpoint access-path labels are unreliable for
+model instead of hand-PATCHing profiles or querying the DB. A protected bot is
+refused unless it is the trusted caller. Endpoint access-path labels are unreliable for
 billing: native claude-code turns authenticate with the bridge's OAuth
 subscription token even on endpoints labelled `anthropic-api`. action="switch" with endpoint_id persists the change
 through the same profile PATCH as the chat model picker: the server validates
@@ -153,7 +153,7 @@ switch without it and tell the user. The switch is not rolled back if queueing
 itself fails; check result.continue.queued. Codex sessions are model-bound, so
 a Codex switch starts a fresh provider session. Only switch when the user asked
 for it, and say what you switched to (cost and context window differ by
-endpoint). Mira is refused unless she is the caller. Switching another bot
+endpoint). A protected bot is refused unless it is the caller. Switching another bot
 sends the continuation as from you.
 
 ## Editing another bot's profile or tags

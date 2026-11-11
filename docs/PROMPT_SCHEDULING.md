@@ -134,7 +134,7 @@ Create sessions lazily when an occurrence will be delivered. Use normal born-arc
 
 Use `session_policy=continue` on the delivery and an explicit owned `session_id`, not `reset_without_history`. That existing reset function archives the active personal thread; using it would violate the product contract. New empty explicit threads seed no unrelated messages/summaries; verify SDK resume keys are scoped to the explicit thread. Clear context does not edit bot-wide history_scope, model, or memories. Existing authorship must be `user`, not fake bot `scheduler` attribution. Sender namespace may identify the scheduler internally; visible author is the owner.
 
-Verify model compatibility and bind resolution once per occurrence. Request-local overrides must not mutate the user's ordinary conversation model/session. For backends that cannot honor explicit thread isolation/model override, reject creation with a capability error rather than degrade silently. V1 targets the deployed Claude Code/proxy path; no claim of untested legacy backend support. No tests against Mira or other protected targets.
+Verify model compatibility and bind resolution once per occurrence. Request-local overrides must not mutate the user's ordinary conversation model/session. For backends that cannot honor explicit thread isolation/model override, reject creation with a capability error rather than degrade silently. V1 targets the deployed Claude Code/proxy path; no claim of untested legacy backend support. No tests against protected bots or other protected targets.
 
 ## 6. API and user scoping (TASK-167)
 
@@ -199,7 +199,7 @@ Primary deep-linkable page: `/tools/schedules`, discoverable from the Tools laun
 2. Owner-scoped API client/hooks, list/editor/details/actions/preview; use existing bot/model selection.
 3. Tools launcher route and composer shortcut in both UI variants; avoid unrelated chat viewport changes already in flight.
 4. SSE invalidation/history badge + reconnect fallback; deep links, errors, draft preservation and accessibility.
-5. Client `tsc --noEmit`, server `pnpm run build:server` on echo, relevant UI tests, dev checks at 375px and desktop. End-to-end: one-time delivery; recurring interval twice; cron preview; pause/resume; manual-run cadence unchanged; edit/cancel conflicts; wrong user; refresh/restart recovery; context isolation and model override. Use only an authorized disposable test bot, never Mira. No production release/rebuild unless the operator asks.
+5. Client `tsc --noEmit`, server `pnpm run build:server` on echo, relevant UI tests, dev checks at 375px and desktop. End-to-end: one-time delivery; recurring interval twice; cron preview; pause/resume; manual-run cadence unchanged; edit/cancel conflicts; wrong user; refresh/restart recovery; context isolation and model override. Use only an authorized disposable test bot, never a protected bot. No production release/rebuild unless the operator asks.
 
 Dependency order: 167 and 168 depend on 166; 169 depends on both 167 and 168. API and delivery slices can be developed independently after the common schema/contract is fixed.
 
