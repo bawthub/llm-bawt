@@ -30,6 +30,9 @@ def test_affirmative_asks(text):
     "hold off, commit later",
     "the push failed earlier",
     "Keep editing.",
+    "Commit message needs fixing.",
+    "Push notifications are broken.",
+    "Commit it. Actually, don't commit anything yet.",
     "",
 ])
 def test_mentions_questions_and_prohibitions_stay_locked(text):

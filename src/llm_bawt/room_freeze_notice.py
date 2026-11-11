@@ -51,19 +51,27 @@ def render_notice(bot_id: str | None) -> str:
 # A mention ("the last commit"), question ("why did you push?") or prohibition
 # ("do not commit") never matches, so it stays locked.
 _LEAD_IN = r"(?:(?:ok(?:ay)?|yes|yep|sure|great|good|cool|now|then|and|so|please|go ahead and|you can|feel free to)[\s,]+)*"
-_ASK_CLAUSE = re.compile(rf"^\s*{_LEAD_IN}(commit|push|ship)\b", re.IGNORECASE)
+# The verb must take an object from this short list or end the clause, so a
+# noun phrase ("commit message needs fixing", "push notifications") never counts.
+_OBJECT = (r"(?:it|that|this|them|these|those|everything|all|now|"
+           r"(?:the|your|my|these|those) (?:changes?|work|fix(?:es)?|edits?|branch|commits?)|"
+           r"(?:and|then) (?:commit|push|ship))")
+_ASK_CLAUSE = re.compile(rf"^\s*{_LEAD_IN}(?:commit|push|ship)(?:\s+{_OBJECT}\b.*|\s*)$",
+                         re.IGNORECASE)
 _CLAUSE_SPLIT = re.compile(r"[.!;\n]+|,\s*(?:then|and)\s+|\s+(?:then|and then)\s+")
 _NEGATION = re.compile(r"\b(?:not|don'?t|do not|never|no|stop|hold off|wait)\b", re.IGNORECASE)
 
 
 def asks_to_commit(prompt: str) -> bool:
-    """Whether ``prompt`` affirmatively asks to commit, push or ship."""
-    for clause in _CLAUSE_SPLIT.split(prompt or ""):
-        if "?" in clause or _NEGATION.search(clause):
-            continue
-        if _ASK_CLAUSE.search(clause):
-            return True
-    return False
+    """Whether ``prompt`` affirmatively asks to commit, push or ship.
+
+    Any negation anywhere in the message withholds the grant, so a later
+    "actually, don't" wins over an earlier ask.
+    """
+    if _NEGATION.search(prompt or ""):
+        return False
+    return any("?" not in clause and _ASK_CLAUSE.search(clause)
+               for clause in _CLAUSE_SPLIT.split(prompt or ""))
 
 
 def room_freeze_state(prompt: str, *, engine, bot_id: str | None) -> str | None:
