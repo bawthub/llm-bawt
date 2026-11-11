@@ -74,6 +74,14 @@ class FakeStreams:
             await asyncio.sleep(0)  # stands in for BLOCK so loops yield
         return out
 
+    async def xinfo_groups(self, stream):
+        if stream not in self.streams:
+            raise ResponseError("ERR no such key")
+        return [
+            {"name": g, "last-delivered-id": last}
+            for (s, g), last in self.groups.items() if s == stream
+        ]
+
     async def xack(self, stream, group, msg_id):
         return 1
 
@@ -139,6 +147,30 @@ def test_deleted_stream_is_recreated():
         assert await reader.read(count=1, block=1) == []
         entry = redis.add("cmd", {"n": "1"})
         assert _ids(await reader.read(count=1, block=1)) == [entry]
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("loss", ["group", "stream"])
+def test_idle_reader_keeps_command_published_before_recreation(loss):
+    """Codex TASK-684 blocker: an ensured reader that never received anything
+    must not skip the first command published while its group is gone."""
+
+    async def run():
+        redis = FakeStreams()
+        redis.add("cmd", {"n": "history"})
+        reader = GroupReader(redis, "bridge", "worker-0", ["cmd"], initial_id="$")
+        await reader.ensure()
+        assert await reader.read(count=10, block=1) == []  # idle
+
+        if loss == "group":
+            redis.delete_group("cmd", "bridge")
+        else:
+            redis.delete_stream("cmd")
+        fresh = redis.add("cmd", {"n": "fresh"})  # published BEFORE recovery
+
+        assert await reader.read(count=10, block=1) == []  # NOGROUP -> recreate
+        assert _ids(await reader.read(count=10, block=1)) == [fresh]  # no history replay
 
     asyncio.run(run())
 

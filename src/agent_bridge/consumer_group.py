@@ -54,9 +54,13 @@ class GroupReader:
     """XREADGROUP ``>`` on fixed streams, recreating a vanished group.
 
     ``initial_id`` applies only when the group is first created at startup
-    (``"0"`` consumes existing entries, ``"$"`` only new ones). A recreation
-    resumes after the last entry this reader returned, or at ``"$"`` if it has
-    not returned any yet, so a recreated group never replays old commands.
+    (``"0"`` consumes existing entries, ``"$"`` only new ones). The reader keeps
+    a concrete boundary per stream: the group's last-delivered id, read right
+    after the group is ensured, then advanced by every delivered entry. A
+    recreation resumes from that boundary, so it neither replays entries the
+    group already delivered nor skips ones published while it was missing, even
+    for an idle reader. Only if no boundary was ever readable (startup creation
+    failed) does recreation fall back to ``"$"``.
     """
 
     def __init__(
@@ -88,6 +92,23 @@ class GroupReader:
             except Exception:
                 logger.warning("Could not create consumer group %s on %s", self.group, stream,
                                exc_info=True)
+                continue
+            await self._record_boundary(stream)
+
+    async def _record_boundary(self, stream: str) -> None:
+        """Remember the group's last-delivered id unless a delivery already set it."""
+        if stream in self._last_ids:
+            return
+        try:
+            groups = await self._redis.xinfo_groups(stream)
+        except Exception:
+            logger.warning("Could not read consumer group %s position on %s", self.group, stream,
+                           exc_info=True)
+            return
+        for info in groups:
+            if info.get("name") == self.group and info.get("last-delivered-id"):
+                self._last_ids[stream] = info["last-delivered-id"]
+                return
 
     async def read(self, *, count: int, block: int) -> list:
         """One XREADGROUP; on a vanished group, recreate it and return ``[]``."""
@@ -115,3 +136,4 @@ class GroupReader:
                 self.group, stream, exc, start_id,
             )
             await ensure_group(self._redis, stream, self.group, start_id=start_id)
+            await self._record_boundary(stream)
