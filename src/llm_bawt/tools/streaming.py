@@ -232,7 +232,7 @@ def stream_with_tools(
 
             if _looks_like_tool_call_start(stripped):
                 # Definitely a tool call - keep buffering
-                log.debug(f"Response looks like tool call - buffering")
+                log.debug("Response looks like tool call - buffering")
                 is_tool_call = True
                 continue
 
@@ -245,7 +245,7 @@ def stream_with_tools(
             # Haven't decided yet - check threshold
             if len(stripped) >= DECISION_THRESHOLD:
                 # Buffered enough without tool markers - assume it's text
-                log.debug(f"Decision threshold reached - treating as text")
+                log.debug("Decision threshold reached - treating as text")
                 is_tool_call = False
 
         log.debug(f"Stream ended: {chunk_count} chunks, {len(full_response)} chars")

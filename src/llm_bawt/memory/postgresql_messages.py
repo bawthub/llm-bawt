@@ -10,7 +10,7 @@ import logging
 import time
 from typing import Any
 
-from sqlalchemy import delete, select, text, update
+from sqlalchemy import select, text, update
 from sqlalchemy.orm import Session
 
 from ..message_authorship import AuthorReference

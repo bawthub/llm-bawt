@@ -67,7 +67,7 @@ def reload_bots():
         else:
             console.print(f"[yellow]⚠ Service returned status {reload_resp.status_code}[/yellow]")
     except httpx.ConnectError:
-        console.print(f"[dim]ℹ Service not running[/dim]")
+        console.print("[dim]ℹ Service not running[/dim]")
     except Exception as e:
         console.print(f"[yellow]⚠ Could not notify service: {e}[/yellow]")
 
@@ -93,7 +93,7 @@ def provision(llm_bawt_bot, room_name, bot_name, owner):
     if not bot_name:
         bot_name = llm_bawt_bot.title()
 
-    console.print(f"[cyan]Provisioning Nextcloud Talk room...[/cyan]")
+    console.print("[cyan]Provisioning Nextcloud Talk room...[/cyan]")
     console.print(f"  Bot: {llm_bawt_bot}")
     console.print(f"  Room: {room_name}")
     console.print(f"  Owner: {owner}")
@@ -118,7 +118,7 @@ def provision(llm_bawt_bot, room_name, bot_name, owner):
             conversation_token=result.room_token,
         )
 
-        console.print(f"\n[green]✓ Provisioned successfully![/green]")
+        console.print("\n[green]✓ Provisioned successfully![/green]")
         console.print(f"  Bot ID: {result.bot_id}")
         console.print(f"  Room token: {result.room_token}")
         console.print(f"  Room URL: [link]{result.room_url}[/link]")
@@ -129,15 +129,15 @@ def provision(llm_bawt_bot, room_name, bot_name, owner):
             service_url = f"http://{config.SERVICE_HOST}:{config.SERVICE_PORT}"
             reload_resp = httpx.post(f"{service_url}/admin/nextcloud-talk/reload", timeout=5.0)
             if reload_resp.status_code == 200:
-                console.print(f"[dim]✓ Service reloaded bot config[/dim]")
+                console.print("[dim]✓ Service reloaded bot config[/dim]")
             else:
                 console.print(f"[yellow]⚠ Could not reload service (status {reload_resp.status_code})[/yellow]")
         except httpx.ConnectError:
-            console.print(f"[dim]ℹ Service not running - config will be loaded on next start[/dim]")
+            console.print("[dim]ℹ Service not running - config will be loaded on next start[/dim]")
         except Exception as e:
             console.print(f"[yellow]⚠ Could not notify service: {e}[/yellow]")
 
-        console.print(f"\n[green]Test it by sending a message in the room![/green]")
+        console.print("\n[green]Test it by sending a message in the room![/green]")
 
     except ValueError as e:
         console.print(f"[red]Error:[/red] {e}")

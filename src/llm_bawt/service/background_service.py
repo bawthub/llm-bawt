@@ -9,7 +9,6 @@ Core orchestrator that composes focused mixins:
 """
 
 import asyncio
-import json
 import threading
 import time
 from queue import PriorityQueue
@@ -24,7 +23,7 @@ from .chat_streaming import ChatStreamingMixin
 from .instance_manager import InstanceManagerMixin
 from .logging import get_service_logger
 from .schemas import ServiceStatusResponse
-from .tasks import Task, TaskResult, TaskStatus
+from .tasks import Task, TaskResult
 from .turn_lifecycle import TurnLifecycleMixin
 
 log = get_service_logger(__name__)

@@ -27,7 +27,6 @@ from .steer_contract import (
 )
 from .ui_stream import LEGACY_UI_GROUP_PREFIX, UiStreamReader, unified_stream_keys
 from .publisher import (
-    COMMANDS_STREAM,
     HISTORY_STREAM,
     RUN_STREAM_PREFIX,
     UNIFIED_EVENTS_PREFIX,

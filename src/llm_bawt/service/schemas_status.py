@@ -6,9 +6,8 @@ name here so ``from ..schemas import X`` across the service is unchanged.
 
 from __future__ import annotations
 
-from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 # Mirrors the per-module SERVICE_VERSION literal (api.py / background_service.py
 # each keep their own copy); used as a default on the status schemas below.

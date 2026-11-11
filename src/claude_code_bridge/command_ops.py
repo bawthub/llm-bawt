@@ -3,33 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
-import re
-import time
-import uuid
-from collections.abc import AsyncIterable
-from datetime import datetime, timezone
-from pathlib import Path
 
-import httpx
-from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, StreamEvent
-from claude_agent_sdk.types import (
-    AssistantMessage,
-    HookMatcher,
-    MirrorErrorMessage,
-    PermissionResultAllow,
-    PermissionResultDeny,
-    ResultMessage,
-    SystemMessage,
-    TaskNotificationMessage,
-    TaskProgressMessage,
-    TaskStartedMessage,
-    TaskUpdatedMessage,
-    ToolPermissionContext,
-    ToolResultBlock,
-    ToolUseBlock,
-    UserMessage,
-)
 
 from agent_bridge.abort_contract import ABORT_TEARDOWN_BOUND_S, AbortState
 from agent_bridge.user_scope import session_user
@@ -45,37 +19,10 @@ from agent_bridge.steer_contract import (
     INTERRUPT_FRAME_FIELD,
     INTERRUPT_ITEM_FIELD,
 )
-from agent_bridge.approval import (
-    ApprovalDecision,
-    PolicyAction,
-    PolicyBundle,
-    evaluate as evaluate_policies,
-)
-from agent_bridge.events import AgentEvent, AgentEventKind, synthesize_event_id
-from agent_bridge.publisher import COMMANDS_STREAM, RedisPublisher
-from agent_bridge.session_queue import SessionQueue
-from claude_code_bridge.tool_events import normalize_tool_result
-from claude_code_bridge.tool_policy import effective_disallowed_tools
+from agent_bridge.publisher import COMMANDS_STREAM
 
 from ._bridge_helpers import (
-    SESSION_PREFIX,
-    MCP_TOOL_CONTEXT_KEY,
-    _MCP_TOOL_CONTEXT_FALLBACK,
-    _SEED_CLI_VERSION,
-    _SEED_SANITIZE_RE,
-    _XAI_RATES,
-    _XAI_DEFAULT_RATES,
-    _REFRESH_BUFFER_MS,
     _bot_slug_from_session_key,
-    _fmt_tokens,
-    _usage_input_total,
-    _estimate_proxy_cost_usd,
-    _pick_iteration_usage,
-    _read_latest_compact_metadata,
-    _token_expired_or_stale,
-    _get_fresh_oauth_token,
-    _is_cli_crash,
-    _is_auth_failure,
 )
 
 logger = logging.getLogger("claude_code_bridge.bridge")

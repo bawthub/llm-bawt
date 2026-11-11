@@ -6,7 +6,7 @@ pipeline components, see the other modules in this package.
 
 import logging
 
-from ..clients import LLMClient, GrokClient, AgentBackendClient
+from ..clients import LLMClient, GrokClient
 from ..clients.openai_client import OpenAIClient
 from .base import BaseLLMBawt
 from ..utils.config import Config

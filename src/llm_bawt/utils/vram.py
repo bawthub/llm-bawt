@@ -9,7 +9,6 @@ import os
 import re
 import subprocess
 from dataclasses import dataclass
-from pathlib import Path
 
 logger = logging.getLogger(__name__)
 

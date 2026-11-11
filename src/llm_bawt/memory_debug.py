@@ -467,7 +467,7 @@ def handle_list_attrs(entity_id: str):
         if display_name:
             console.print(f"[bold]Name:[/bold] {display_name}")
         if summary:
-            console.print(f"\n[bold]Summary:[/bold]")
+            console.print("\n[bold]Summary:[/bold]")
             console.print(summary)
         console.print()
 
@@ -476,7 +476,7 @@ def handle_list_attrs(entity_id: str):
         if not summary:
             console.print(f"[yellow]No attributes found for {entity_type} '{entity_id}'[/yellow]")
         else:
-            console.print(f"[dim]Individual attributes consolidated into summary above.[/dim]")
+            console.print("[dim]Individual attributes consolidated into summary above.[/dim]")
         return
 
     table = Table(title=f"Profile Attributes for {entity_label}")
@@ -771,7 +771,7 @@ def handle_msg_get(bot_id: str, message_id: str):
         if isinstance(meta, dict):
             console.print(f"[bold]Summary of:[/bold] {meta.get('message_count', '?')} messages")
     
-    console.print(f"\n[bold]Content:[/bold]")
+    console.print("\n[bold]Content:[/bold]")
     console.print(Panel(content or "(empty)", border_style="dim"))
 
 

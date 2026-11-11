@@ -18,7 +18,7 @@ from urllib.parse import quote_plus
 
 from sqlalchemy import BigInteger, Boolean, Column, DateTime, Integer, String, Text, text
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlmodel import Field, Session, SQLModel, create_engine, select
+from sqlmodel import Field, Session, SQLModel, select
 
 from .utils.config import Config, has_database_credentials
 from .utils.schema import SchemaBootstrapGuard

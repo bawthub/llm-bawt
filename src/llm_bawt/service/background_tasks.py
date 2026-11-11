@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import time
 from datetime import datetime, timezone
-from typing import Any
 
 from .http_errors import client_error_text
 from .logging import get_service_logger

@@ -1,11 +1,7 @@
 import argparse
-import json
 import subprocess
 import traceback
 import sys  # Import sys for exit codes
-from rich.console import Console
-from rich.markup import escape
-from rich.text import Text
 from rich.prompt import Prompt
 from llm_bawt.utils.config import Config
 from llm_bawt.utils.config import set_config_value
@@ -19,53 +15,35 @@ from llm_bawt.model_manager import (
     update_models_interactive,
 )
 from llm_bawt.gguf_handler import handle_add_gguf
-from llm_bawt.bot_types import format_bot_type
 from llm_bawt.cli.bot_create import handle_add_chat_bot
 from llm_bawt.cli.vllm_handler import handle_add_vllm
 from llm_bawt.bots import BotManager
-from llm_bawt.utils.streaming import render_streaming_response, render_complete_response
+from llm_bawt.utils.streaming import render_complete_response
 from llm_bawt.shared.logging import LogConfig
-import logging
 from pathlib import Path
-from rich.table import Table
-from rich.panel import Panel
-from typing import Iterator
 
 # CLI command handlers were split out of this module (TASK-554). They are
 # re-imported here so this module stays the facade: the cli.__init__ re-exports
 # (show_status, show_bots, show_users, ...) and main()/run_app() references all
 # resolve unchanged.
 from ._common import console, get_service_client, _is_service_mode
-from .tool_render import (
-    _format_tool_call,
-    _summarize_tool_args,
-    _truncate_middle,
-    _tool_badge,
-    _format_tool_preview,
-    _render_tool_event,
-)
 from .display_cmd import (
     query_via_service,
     inspect_effective_config,
     show_status,
     show_bots,
-    _show_bots_from_service,
-    _show_bots_from_local,
-    _render_job_status_from_service,
     show_job_status,
     trigger_job,
 )
 from .admin_cmd import (
     show_user_profile,
     show_users,
-    _parse_runtime_setting_value,
     show_runtime_settings,
     set_runtime_setting,
     delete_runtime_setting,
     bootstrap_runtime_settings,
     migrate_bots_to_db,
     run_user_profile_setup,
-    ensure_user_profile,
     ensure_default_user,
 )
 
@@ -184,7 +162,7 @@ def main():
     # Handle listing config values
     elif getattr(args, 'list_config', False):
         env_file_path = config_obj.model_config.get('env_file', 'unknown')
-        console.print(f"[bold magenta]Current Configuration Settings[/bold magenta]")
+        console.print("[bold magenta]Current Configuration Settings[/bold magenta]")
         console.print(f"[dim]Config file: {env_file_path}[/dim]\n")
         
         # Define which settings are important and should be set by the user
@@ -235,8 +213,8 @@ def main():
 
                 console.print(f"  [cyan]{field_name}[/cyan]: {current_value_str}")
         
-        console.print(f"\n  [dim]SYSTEM_MESSAGE: (set by bot profile in database)[/dim]")
-        console.print(f"\n[dim]To set a value: llm --config-set KEY value[/dim]")
+        console.print("\n  [dim]SYSTEM_MESSAGE: (set by bot profile in database)[/dim]")
+        console.print("\n[dim]To set a value: llm --config-set KEY value[/dim]")
         console.print(f"[dim]Or edit: {env_file_path}[/dim]")
         sys.exit(0)
     elif getattr(args, "settings_list", False):
@@ -572,8 +550,6 @@ def _query_agent_backend(prompt: str, bot, plaintext_output: bool):
     if plaintext_output:
         print(response)
     else:
-        from rich.markdown import Markdown
-        from rich.panel import Panel
 
         from ..bot_colors import cli_color_for
 

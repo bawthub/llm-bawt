@@ -10,7 +10,6 @@ There is no local fallback, since this process reads no Docker.
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import time
 

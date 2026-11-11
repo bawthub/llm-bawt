@@ -11,7 +11,6 @@ import json
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
 
 from sqlalchemy import text
 
@@ -19,7 +18,6 @@ from ..agent_context import SessionPolicy, validate_session_policy
 from ..bot_tags import BotTags
 from ..bot_types import durable_agent_backend
 from ..bots import BotManager
-from ..inter_bot_delivery_record import DeliveryRecord
 from ..message_authorship import AuthorReference
 from ..model_catalog import bot_model_ref
 from ..utils.schema import SchemaBootstrapGuard

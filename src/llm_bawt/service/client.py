@@ -134,7 +134,7 @@ class ServiceClient:
                 req = urllib.request.Request(f"{self.http_url}/health", method="GET")
                 with urllib.request.urlopen(req, timeout=2.0) as resp:
                     if resp.status == 200:
-                        logger.debug(f"Background service available via HTTP health check")
+                        logger.debug("Background service available via HTTP health check")
                         return True
             except Exception as e:
                 logger.debug(f"HTTP health check failed: {e}")

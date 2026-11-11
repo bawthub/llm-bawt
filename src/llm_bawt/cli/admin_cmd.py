@@ -15,7 +15,6 @@ from rich.panel import Panel
 from rich.prompt import Prompt
 from rich.table import Table
 
-from llm_bawt.bots import BotManager
 from llm_bawt.utils.config import Config, set_config_value
 
 from ._common import console, get_service_client
@@ -290,7 +289,7 @@ def run_user_profile_setup(config: Config, user_id: str) -> bool:
     console.print(Panel.fit("[bold cyan]User Profile Setup[/bold cyan]", border_style="cyan"))
     console.print()
     console.print(f"[dim]Setting up profile for user: {user_id}[/dim]")
-    console.print(f"[dim]Press Enter to skip any field.[/dim]")
+    console.print("[dim]Press Enter to skip any field.[/dim]")
     console.print()
 
     try:

@@ -1,42 +1,31 @@
 from __future__ import annotations
 
 import asyncio
-import base64
-import binascii
 import json
 import logging
 import os
-import shutil
-import tempfile
-import time
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import httpx
 from agent_bridge.abort_rpc import answer_abort
 from agent_bridge.consumer_group import GroupReader
 from agent_bridge.houses import HouseSlot, gate_send, house_from_env, is_recycle, start_recycle
 from agent_bridge.user_scope import session_user
 from agent_bridge.run_status import RUN_STATUS_METHOD, answer_run_status, queue_run_state
 from agent_bridge.send_admission import admit_send
-from agent_bridge.events import AgentEvent, AgentEventKind, synthesize_event_id
+from agent_bridge.events import AgentEventKind
 from agent_bridge.maintenance import is_new_command
-from agent_bridge.publisher import COMMANDS_STREAM, RedisPublisher
-from agent_bridge.session_queue import SessionQueue
+from agent_bridge.publisher import COMMANDS_STREAM
 
 from .app_server_send import CodexAppServerMixin, wants_app_server
 from .auth_broker import materialize_auth_from_broker
 from .process_ledger import ProcessLedger, bind_ledger
-from .transport import CodexTransport, auth_path, validate_auth_json
+from .transport import auth_path
 from .mcp_context import codex_mcp_environment
 from .local_plugins import CodexMcpContextConfigError
 from ._bridge_helpers import (
     CONSUMER_GROUP,
     CONSUMER_NAME,
-    MCP_TOOL_CONTEXT_KEY,
-    _MCP_TOOL_CONTEXT_FALLBACK,
-    _ModelInfoCache,
     _bot_slug_from_session_key,
     _is_auth_failure,
     _is_codex_session_error,

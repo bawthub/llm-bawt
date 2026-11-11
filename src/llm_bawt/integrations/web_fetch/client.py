@@ -6,7 +6,6 @@ from web pages, including JS-rendered content.
 
 import logging
 import os
-from typing import Any
 
 import httpx
 

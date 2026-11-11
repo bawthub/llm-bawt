@@ -25,7 +25,7 @@ import time
 from datetime import datetime
 from typing import Any, Optional
 
-from sqlalchemy import Column, DateTime, Integer, Text, text
+from sqlalchemy import Column, DateTime, Integer, text
 from sqlmodel import Field, SQLModel
 
 from ..utils.config import Config

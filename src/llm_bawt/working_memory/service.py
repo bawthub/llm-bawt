@@ -17,7 +17,7 @@ from ..task_turn_context import TaskTurnContext
 from .contracts import WorkingMemoryError, normalize_create
 from .policy import WorkingMemoryPolicy, is_protected
 from .store import Actor, WorkingMemoryStore
-from .task_links import TaskCatalog, TaskInfo
+from .task_links import TaskCatalog
 
 logger = logging.getLogger(__name__)
 

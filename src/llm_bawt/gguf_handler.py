@@ -43,7 +43,7 @@ def get_or_download_gguf_model(repo_id: str, filename: str, config: Config) -> s
             local_dir=str(model_repo_cache_dir),
             local_dir_use_symlinks=False,
         )
-        console.print(f"[green]Download complete[/green]")
+        console.print("[green]Download complete[/green]")
         return downloaded_path
     except Exception as e:
         console.print(f"[bold red]Error downloading '{filename}':[/bold red] {e}")
@@ -75,7 +75,7 @@ def handle_add_gguf(repo_id: str, config: Config) -> bool:
     console.print(f"Attempting to add GGUF from repository: [cyan]{repo_id}[/cyan]")
 
     try:
-        from huggingface_hub import hf_hub_download, HfApi
+        from huggingface_hub import HfApi
         from huggingface_hub.utils import HfHubHTTPError
 
         api = HfApi()

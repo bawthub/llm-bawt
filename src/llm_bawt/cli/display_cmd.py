@@ -6,10 +6,8 @@ the ``cli.__init__`` facade (``show_status``, ``show_bots``, ...) is unchanged.
 """
 
 import argparse
-import json
 import logging
 import sys
-import traceback
 from typing import Iterator
 
 from rich.markup import escape
@@ -19,7 +17,6 @@ from rich.table import Table
 from llm_bawt.bot_colors import cli_color_for
 from llm_bawt.bot_types import format_bot_type
 from llm_bawt.bots import BotManager
-from llm_bawt.core import LLMBawt
 from llm_bawt.service.delivery_reply import is_accepted_receipt
 from llm_bawt.utils.config import Config
 from llm_bawt.utils.streaming import render_complete_response, render_streaming_response
@@ -42,8 +39,6 @@ def query_via_service(
 
     Returns True if query was handled by service, False if service unavailable.
     """
-    from rich.markdown import Markdown
-    from rich.align import Align
 
     if config is None:
         config = Config()
@@ -501,7 +496,7 @@ def show_status(config: Config, args: argparse.Namespace | None = None):
         tools_val = f"[green]{s_cfg.ha_native_mcp_tools}[/green]" if s_cfg.ha_native_mcp_tools else "[dim]0[/dim]"
         ha_table.add_row("Tools", tools_val)
     elif s_cfg.ha_mcp_enabled:
-        ha_table.add_row("HA MCP", f"[green]✓ Enabled[/green]")
+        ha_table.add_row("HA MCP", "[green]✓ Enabled[/green]")
         ha_table.add_row("URL", f"[dim]{s_cfg.ha_mcp_url}[/dim]")
     else:
         ha_table.add_row("HA MCP", "[dim]Disabled[/dim]")
@@ -673,7 +668,7 @@ def _show_bots_from_service(config: Config, bots_data: list[dict]):
 
     console.print(table)
     console.print()
-    console.print(f"[dim]⭐ = default bot | ✓ = requires database | Use -b/--bot <slug> to select[/dim]")
+    console.print("[dim]⭐ = default bot | ✓ = requires database | Use -b/--bot <slug> to select[/dim]")
     console.print()
 
 
@@ -713,7 +708,7 @@ def _show_bots_from_local(config: Config):
 
     console.print(table)
     console.print()
-    console.print(f"[dim]⭐ = default bot | ✓ = requires database | Use -b/--bot <slug> to select[/dim]")
+    console.print("[dim]⭐ = default bot | ✓ = requires database | Use -b/--bot <slug> to select[/dim]")
     console.print()
 
 
@@ -869,7 +864,7 @@ def trigger_job(config: Config, job_type: str):
     if result and result.get("success"):
         console.print(f"[green]✓ Triggered job: {job_type}[/green]")
         console.print(f"[dim]The scheduler will pick it up within {config.SCHEDULER_CHECK_INTERVAL_SECONDS} seconds.[/dim]")
-        console.print(f"[dim]Run 'llm --job-status' to check the result.[/dim]")
+        console.print("[dim]Run 'llm --job-status' to check the result.[/dim]")
     else:
         error = client.last_error if client else "unknown error"
         console.print(f"[red]Failed to trigger job: {error}[/red]")

@@ -5,7 +5,6 @@ import contextlib
 import json
 from typing import List, Dict, Any, Iterator, Optional, Union
 
-from rich.markdown import Markdown
 from rich.rule import Rule
 from rich.json import JSON
 

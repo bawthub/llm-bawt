@@ -7,8 +7,7 @@ This module provides common functions for streaming LLM output with:
 """
 
 import platform
-import sys
-from typing import Iterator, Callable
+from typing import Iterator
 
 from rich.align import Align
 from rich.console import Console
