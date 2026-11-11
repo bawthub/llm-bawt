@@ -38,6 +38,7 @@ def head_candidate(conn, target: str):
         WHERE d.target_bot_id=:target AND d.lane='normal'
           AND d.status IN ('QUEUED','STEERING','DISPATCHING')
           AND NOT ({_ACCEPTED_OPEN_DISPATCH})
+          AND d.delivery_mode IS DISTINCT FROM 'batched'
         ORDER BY d.ordinal ASC LIMIT 1
     """), {"target": target}).mappings().first()
 

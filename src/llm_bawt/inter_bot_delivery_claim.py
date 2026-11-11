@@ -261,12 +261,25 @@ class DeliveryClaim:
                     NewSessionLifecycle.bind_wait_predecessor(
                         conn, head, bot_id=target, user_id=user_id,
                     )
+                    user_prompt = head["message"]
+                    from . import inter_bot_batch
+
+                    # TASK-1252 S1: an idle opted-in bot drains the plain rows
+                    # behind this head in the same turn. The head keeps owning it.
+                    if not forced and inter_bot_batch.enabled(conn, target):
+                        followers = inter_bot_batch.take_followers(
+                            conn, head, user_id=user_id, config=store.config,
+                        )
+                        if followers:
+                            payload, user_prompt = inter_bot_batch.attach(
+                                conn, head, followers, payload,
+                            )
                     write_reservation(
                         conn,
                         turn_id=head["turn_id"],
                         bot_id=target,
                         user_id=user_id,
-                        user_prompt=head["message"],
+                        user_prompt=user_prompt,
                         request_json=payload,
                         trigger_message_id=head["user_message_id"],
                     )

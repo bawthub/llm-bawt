@@ -334,6 +334,19 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
             "proxy turns additionally disable WebSearch and WebFetch."
         ),
     ),
+    "inbox_batch": SettingDefinition(
+        key="inbox_batch",
+        type="bool",
+        default=False,
+        applies_to=("agent",),
+        storage=STORAGE_RUNTIME_SETTING,
+        label="Batch idle inbox",
+        help=(
+            "TASK-1252: when this agent is idle, plain inter-bot messages queued "
+            "behind the next one start a single turn together instead of one "
+            "turn each. Waited, reset, scheduled and control messages still run alone."
+        ),
+    ),
     "agent_context_warning_percent": SettingDefinition(
         key="agent_context_warning_percent",
         type="int",

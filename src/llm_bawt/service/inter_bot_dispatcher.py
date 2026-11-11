@@ -680,6 +680,13 @@ class InterBotDeliveryDispatcher:
             name=f"inter-bot-heartbeat:{record.id}",
         )
         finalize_awaited = False
+        batch_prompt = (getattr(record, "metadata", None) or {}).get("batch_prompt")
+        if isinstance(batch_prompt, str) and payload.get("messages"):
+            # TASK-1252 S1: this head's turn carries its inbox batch; the
+            # stored payload stays the head's own message for any replay.
+            messages = list(payload["messages"])
+            messages[-1] = {**messages[-1], "content": batch_prompt}
+            payload = {**payload, "messages": messages}
         try:
             payload = {
                 **payload,

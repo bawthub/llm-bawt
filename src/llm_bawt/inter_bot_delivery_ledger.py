@@ -160,6 +160,12 @@ class DeliveryTransitionEvents:
                 return
             staged = [(r, reason_code) for r in records]
             CommitStagedAppends.stage(conn, lambda c: cls.flush(c, staged))
+            # TASK-1252: the settle trigger moved a batch head's followers too.
+            for record in records:
+                if (record.delivery_mode == "turn" and record.status != "DISPATCHING"
+                        and conn.dialect.name == "postgresql"):
+                    from .inter_bot_batch import stage_followers
+                    stage_followers(conn, record.id)
         except Exception:  # noqa: BLE001 - receipts never block a delivery
             cls._count_failure()
             logger.exception("could not stage a delivery event")

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from sqlalchemy import text as sa_text
 
+from .inter_bot_batch import ensure_batch_schema
 from .inter_bot_control_lane import ensure_control_lane_schema
 
 
@@ -189,3 +190,4 @@ def bootstrap_delivery_schema(conn) -> None:
         WHERE status = 'FAILED' AND metadata_json->>'restart_retry_pending' = 'true'
     """))
     ensure_control_lane_schema(conn)  # TASK-1431 control lane
+    ensure_batch_schema(conn)  # TASK-1252 idle inbox batches
