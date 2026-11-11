@@ -8,13 +8,13 @@ turn row). A stalled claimant that resumes afterwards then fails its fence
 - Approval: the continuation claim behind the reservation stopped renewing.
   ``turn_admission.requeue_stale_reservation`` takes it back, through the same
   lock protocol as a user Stop: every lock before any write, so a reservation
-  the claimant consumed since detect keeps its live claim (Loopy B1).
+  the claimant consumed since detect keeps its live claim (review B1).
 - Delivery: the delivery is FAILED or CANCELLED, or ``recover_expired`` already
   nulled its claim. Released through the evidence-checked
   ``release_reservation(delivery_id=…)``. A QUEUED delivery's reservation is
   left alone: ``recover_expired`` re-arms it on purpose, so the requeued
   delivery keeps its place ahead of later chats, and its next claim reuses it
-  (Vex S2).
+  (review S2).
   A row with no delivery id in its payload is matched to its delivery by
   ``turn_id`` (TASK-2142: a re-armed row that already ran carries the chat
   payload). A re-armed row that never started, whose delivery is terminal,
@@ -126,7 +126,7 @@ class OrphanedReservationsStep(RecoveryStep):
             if candidate["kind"] == "approval":
                 owner = candidate["owner"]
                 if action == "revoke_and_release":
-                    # The shared revoke primitive (Loopy B1): every lock before
+                    # The shared revoke primitive (review B1): every lock before
                     # any write, and a reservation the claimant consumed since
                     # detect is left with its live claim.
                     released = requeue_stale_reservation(

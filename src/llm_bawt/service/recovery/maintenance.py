@@ -1,4 +1,4 @@
-"""Small recovery steps (TASK-1232 steps 4, 6, 9 and Vex S1's sweep rule)."""
+"""Small recovery steps (TASK-1232 steps 4, 6, 9 and review S1's sweep rule)."""
 from __future__ import annotations
 
 import asyncio
@@ -22,7 +22,7 @@ from .base import Plan, RecoveryStep, SweepScope
 
 
 # ``failed`` continuations are history, not work: report a count and the
-# newest few, never every row on every pass (Vex S1).
+# newest few, never every row on every pass (review S1).
 FAILED_SAMPLE_LIMIT = 10
 
 
@@ -30,7 +30,7 @@ class CancelledContinuationsStep(RecoveryStep):
     """A cancelled (purged) request's continuation stuck ``dispatching``.
 
     Its claimant went quiet past the lease, so no dispatching→pending writer
-    will ever suppress it (Vex S1). Suppress it here, by CAS on the observed
+    will ever suppress it (review S1). Suppress it here, by CAS on the observed
     token. ``failed`` continuations are reported as one bounded summary.
     """
 

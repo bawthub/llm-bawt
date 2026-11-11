@@ -511,7 +511,7 @@ def revoke_reservation(
     ``connection``
     runs inside the caller's transaction (``activate_hold``).
 
-    Every lock is taken, and the turn row re-checked, BEFORE any write (Vex
+    Every lock is taken, and the turn row re-checked, BEFORE any write (review
     B1): a claimant holding the target lock may consume the row between the
     unlocked head read and our lock, and revoking a consumed row's producer
     would cancel a live run's delivery.
@@ -560,7 +560,7 @@ def _lock_open_reservation(
 
     The one lock protocol for every revoke disposition: target lock → producer
     row → turn row, with the turn re-checked under its own lock. A writer that
-    revokes before this can take a live claimant's authority (Vex B1, Loopy B1).
+    revokes before this can take a live claimant's authority (review B1, second review B1).
     Returns the locked reservation; None when ``turn_id`` is not (or no longer)
     an open reservation, or isn't ``owner``'s; ``_PRODUCER_CHANGED`` when its
     producer changed between the unlocked head read and the lock.
@@ -847,7 +847,7 @@ def requeue_stale_reservation(
     is taken back by a CAS on the observed approval row and token whose lease
     went stale before ``stale_before`` (the token column is not unique, so
     the row id pins it); ``requeued_continuation_state`` suppresses a
-    cancelled request (Vex S1). Only then is the row deleted. False, with
+    cancelled request (review S1). Only then is the row deleted. False, with
     nothing written, when the row is no longer ``owner``'s open reservation
     (a claimant that started the turn keeps its claim) or the claim was
     renewed.

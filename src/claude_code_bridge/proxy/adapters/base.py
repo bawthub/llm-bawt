@@ -56,7 +56,7 @@ def _held_tool_fields(block: dict | None) -> tuple[str, str, str]:
 
 
 def _stop_block_frame(index: int) -> bytes:
-    """Emit a well-formed content_block_stop frame for the splice (Al #1).
+    """Emit a well-formed content_block_stop frame for the splice (review #1).
 
     Kept in adapters/base.py rather than exported from stream.py to avoid
     coupling the retry loop to the translator's internals — the shape is
@@ -335,7 +335,7 @@ class ProviderAdapter(ABC):
         state = TranslatorState()
         policy = lease.policy if lease is not None else self.retry_policy(upstream_model, context)
         route_attempt = context.attempt if lease is not None else 0
-        # Per Al #4: the on_usage callback wired into context.record_usage
+        # Per review #4: the on_usage callback wired into context.record_usage
         # fires INSIDE the translator whenever the upstream emits usage. On
         # retry we want the FINAL SUCCESSFUL attempt's usage to win. The
         # translator populates ``state.usage_snapshot`` on every attempt; we
@@ -534,7 +534,7 @@ class ProviderAdapter(ABC):
                     await close_stream()
 
             # Clean return path — either translator finished successfully OR
-            # populated state.inband_error (Al #2). Same decision path.
+            # populated state.inband_error (review #2). Same decision path.
             if stream_exc is None and state.inband_error is None:
                 return  # success
 
@@ -604,7 +604,7 @@ class ProviderAdapter(ABC):
                         context, stream_exc, bucket=bucket, phase=phase,
                         attempt=attempt, policy=policy,
                     ))
-                # Al #1 block-index hygiene: close any block that was open at
+                # Review #1 block-index hygiene: close any block that was open at
                 # failure time. The translator has already set state.open_block
                 # to None if it emitted the close naturally; if we exited via
                 # exception mid-block, state.open_block is still the last-opened

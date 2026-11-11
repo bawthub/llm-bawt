@@ -578,7 +578,7 @@ def run_app(args: argparse.Namespace, config_obj: Config, resolved_alias: str):
         if not bot:
             console.print(f"[bold red]Unknown bot: {args.bot}[/bold red]. Use --list-bots to see available bots.")
             sys.exit(1)
-        # Only warn if the bot requires memory (e.g., nova)
+        # Only warn if the bot requires memory (e.g., a memory-enabled assistant)
         if bot.requires_memory and config_obj.VERBOSE:
             console.print(f"[dim]Note: Using --local with --bot {args.bot}. The bot will run without database memory.[/dim]")
         bot_id = bot.slug

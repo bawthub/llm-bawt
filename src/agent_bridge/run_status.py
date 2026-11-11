@@ -10,7 +10,7 @@ Reply (:class:`RunStatusReply`, v1)::
 
     {backend, boot_id, request_id, state, detail, pid1}
 
-``pid1`` (TASK-1233 Vex S2) says whether the answering process is its
+``pid1`` (TASK-1233 review S2) says whether the answering process is its
 container's PID 1. It is optional on the wire: a bridge that predates it
 parses to ``None`` (unknown). :func:`proves_restart` is the B1(b) rule built
 on it, against a durable :class:`RunSighting` of the run on its earlier boot.
@@ -267,7 +267,7 @@ def proves_restart(sighting: RunSighting, reply: RunStatusReply) -> bool:
       boot's children went with it. Without PID 1 on either side (or unknown),
       a new boot proves nothing about surviving children.
 
-    The sighting must come from a durable record (Snark step 34), never be
+    The sighting must come from a durable record (review step 34), never be
     inferred; that is the caller's contract.
     """
     return (

@@ -185,7 +185,7 @@ def build_engine(
     Args:
         url: SQLAlchemy URL.
         application_name: Short label that shows up in ``pg_stat_activity``
-            (e.g. ``"llm-bawt:profiles"``, ``"llm-bawt:memory:nova"``).
+            (e.g. ``"llm-bawt:profiles"``, ``"llm-bawt:memory:helper"``).
             Strongly recommended.
         pool_size: Steady-state pool size. **Default 2** — do not bump
             without auditing total engine count first.

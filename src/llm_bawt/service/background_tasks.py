@@ -169,7 +169,7 @@ class BackgroundTasksMixin:
 
         # Remote API call (grok/openai background client). Already on the
         # bounded background pool via process_task, never the default pool
-        # interactive turns use (caid stall 2026-06-15, TASK-274/283).
+        # interactive turns use (bot stall 2026-06-15, TASK-274/283).
         result = ProfileCurationService(profile_manager, llm_client).run(
             entity_id, entity_type, dry_run)
 

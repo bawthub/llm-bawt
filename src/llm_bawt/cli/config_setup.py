@@ -55,7 +55,7 @@ CLIENT_SETTING_GROUPS: List[SettingGroup] = [
         title="Core",
         settings=[
             Setting("DEFAULT_MODEL_ALIAS", "Optional default model alias (leave blank for service-selected model)"),
-            Setting("DEFAULT_BOT", "Default bot personality (nova, spark, …)"),
+            Setting("DEFAULT_BOT", "Default bot personality (a bot slug, e.g. helper)"),
             Setting("DEFAULT_USER", "Default user profile name"),
             Setting("USE_SERVICE", "Route queries through the background service by default"),
         ],

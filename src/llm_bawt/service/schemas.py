@@ -636,7 +636,7 @@ class ProfileAttributeListResponse(BaseModel):
 
 class NextcloudProvisionRequest(BaseModel):
     """Request to provision a Nextcloud Talk room and bot."""
-    bot_id: str = Field(description="llm-bawt bot ID (e.g., nova, monika)")
+    bot_id: str = Field(description="llm-bawt bot ID (e.g., helper)")
     room_name: str | None = Field(default=None, description="Room name (default: bot name)")
     bot_name: str | None = Field(default=None, description="Bot display name (default: bot ID)")
     owner_user_id: str = Field(default="user", description="Room owner")

@@ -196,7 +196,7 @@ def caller_instruction(engine, job_id: str, bot_id: str | None) -> dict[str, Any
     """What the job's own caller must do while the job is QUIESCING and holds it.
 
     The caller's running turn is in the hold roster like any other member
-    (Snark ruling): the job dispatches only once that turn exits. Polling
+    (coordinator ruling): the job dispatches only once that turn exits. Polling
     ops_job_status in the same turn keeps the turn alive until the quiesce
     deadline fails the job, so the caller is told to end its turn.
     ``result_delivery`` says truthfully how it learns the outcome:
@@ -204,7 +204,7 @@ def caller_instruction(engine, job_id: str, bot_id: str | None) -> dict[str, Any
     * ``new_turn``: the terminal receipt arrives as a new turn (TASK-1233 e):
       an approved job's continuation, or a direct job's receipt callback.
     * ``none``: a direct job whose scope covers a caller that had no session to
-      bind a callback to (Vex r2 N2). Nothing is pushed; it checks
+      bind a callback to (review r2 N2). Nothing is pushed; it checks
       ops_job_status in a later turn.
 
     ``None`` for any other state, any other bot, or a caller the job does not

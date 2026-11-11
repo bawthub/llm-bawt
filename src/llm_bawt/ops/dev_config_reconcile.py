@@ -17,7 +17,7 @@ move), renders the target's own Compose service with :data:`DEV_PROFILE`,
 checks ``depends_on`` as a precondition, waits for the declared Docker
 healthcheck and verifies the target's in-container JSON health URL
 (:class:`ServiceConfigReconciler`). It has no source check, so it is confined
-to dev targets (Codex r1 Blocker), at approval and again in the worker:
+to dev targets (review r1 Blocker), at approval and again in the worker:
 
 * the target's OWN rendered Compose service must declare the label
   :data:`DEV_TARGET_LABEL` (``"1"``). The marker lives in the reviewed Compose

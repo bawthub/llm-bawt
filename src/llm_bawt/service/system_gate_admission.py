@@ -76,7 +76,7 @@ class SteerGateRefused(HTTPException):
 class ControlTarget:
     """The one run a control steer may address: the member's pinned request.
 
-    Never the bot's current turn or backend (Snark, carried out-of-scope
+    Never the bot's current turn or backend (review, carried out-of-scope
     member). ``backend``/``session_key`` are None when the pinned run's
     binding is unknown, and such a run is never steered. ``steer_caps`` is
     the pinned run's own capabilities (TASK-1243, ``steer_capabilities``).
@@ -116,7 +116,7 @@ def control_target(member: Mapping[str, Any]) -> ControlTarget | None:
                          steer_caps=run_steer_caps(backend=backend, caps=caps))
 
 
-# The live-member join (agreed with Byte): a member of its job's current
+# The live-member join (agreed in review): a member of its job's current
 # generation, the gate unreleased and unexpired, the job still quiescing.
 # Expiry is read with clock_timestamp(), not now(): every caller evaluates this
 # after waiting on lock_target, and now() is frozen at transaction start, so a

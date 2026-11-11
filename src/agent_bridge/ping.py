@@ -1,4 +1,4 @@
-"""The ``bridge.ping`` readiness RPC (TASK-1297, TASK-1293 C1 / Loopy M2).
+"""The ``bridge.ping`` readiness RPC (TASK-1297, TASK-1293 C1 / review M2).
 
 A strict liveness proof for one bridge's *command consumer*: the same consumer
 that receives ``chat.send`` answers this ping, so a positive reply shows that a

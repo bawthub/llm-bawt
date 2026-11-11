@@ -7,7 +7,7 @@ so nothing would ever start the turn that reads its result. Such a job records
 a receipt callback at creation (:meth:`.service.OpsService.dispatch_job`), and
 this sender delivers it once the job is terminal. It runs in the app process
 (:mod:`llm_bawt.service.ops_receipt_outbox`), which owns the inter-bot
-dispatcher, so each new delivery is announced QUEUED at once (Vex r2 N1):
+dispatcher, so each new delivery is announced QUEUED at once (review r2 N1):
 
 * through the existing durable inter-bot delivery FIFO, from ``system``, as a
   new turn (never a steer) in the caller's current active session;

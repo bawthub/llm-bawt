@@ -20,8 +20,8 @@ logger = logging.getLogger(__name__)
 class Bot:
     """A bot personality with its own system prompt and capabilities."""
 
-    slug: str  # Unique identifier (e.g., "nova", "snark", "mira")
-    name: str  # Display name (e.g., "Nova", "Snark", "Mira")
+    slug: str  # Unique identifier (e.g., "helper", "reviewer")
+    name: str  # Display name (e.g., "Helper", "Reviewer")
     description: str  # Short description for --list-bots
     system_prompt: str  # The system message sent to the LLM
     prompt_override_id: int | None = None  # Active persona override (prompt_templates.id); None => use system_prompt

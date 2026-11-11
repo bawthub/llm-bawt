@@ -332,7 +332,7 @@ class AgentSpawnIndex:
     """Request-local ``SubagentUsage`` spawn lookup over the CLI transcript.
 
     The transcript is scanned at most once per session id, on the first lookup
-    (Snark r2 S1: never one full scan per task). ``session_id`` is read at
+    (review r2 S1: never one full scan per task). ``session_id`` is read at
     lookup time: a fresh-session retry clears the resume id, and then there
     is nothing earlier to find.
     """

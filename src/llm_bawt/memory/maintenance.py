@@ -13,7 +13,7 @@ Usage (background service):
 
 Or via task:
     from llm_bawt.service.tasks import create_maintenance_task
-    task = create_maintenance_task(bot_id="nova")
+    task = create_maintenance_task(bot_id="helper")
 """
 
 import json

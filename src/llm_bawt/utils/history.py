@@ -784,7 +784,7 @@ class HistoryManager:
         # already persisted into self.messages, so with include_history=False
         # ("none"/"summaries" scope) it would be dropped with the rest of raw
         # history and the model would receive a system-only prompt (observed:
-        # nova replying "tool format locked in" to "Hi"). The assembler
+        # a bot replying "tool format locked in" to "Hi"). The assembler
         # reserves the unanswered trailing turn as a mandatory raw floor
         # (summaries then fill the remainder — allocation stays within
         # budget); the id-set below exempts exactly those rows from the

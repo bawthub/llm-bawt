@@ -179,7 +179,7 @@ class TurnStreamFinalizer:
                 # branch only updated the turn log — no assistant row was
                 # persisted, so on reload the reply vanished entirely (user
                 # message with no answer, no error, no retry hint — the exact
-                # "silent death" Loopy hit on 2026-08-19). Now: append a visible
+                # "silent death" a bot hit on 2026-08-19). Now: append a visible
                 # failure marker to any partial text and commit it to history as
                 # the assistant message via _finalize_turn (same mechanism the
                 # abort path uses to preserve partials), keeping status="error"

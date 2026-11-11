@@ -806,7 +806,7 @@ def _patch_payload(existing, request: BotProfilePatchRequest) -> dict[str, objec
     # the existing row was already inconsistent (agent-typed with no backend),
     # copying its bot_type back in would make _validate_profile_payload reject
     # the edit before the store could heal it — the exact loop that blocked
-    # nova/mira. Derive from the FINAL merged agent_backend so clearing the
+    # two live bots. Derive from the FINAL merged agent_backend so clearing the
     # backend in this same PATCH also demotes agent→chat. Only an explicit
     # bot_type in the request overrides (the store guard still enforces that an
     # explicit 'agent' has a backend).

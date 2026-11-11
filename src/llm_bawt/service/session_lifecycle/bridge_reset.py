@@ -83,7 +83,7 @@ class BridgeSessionResetMixin:
         Fire-and-forget from a daemon thread. Rotation runs in BOTH
         loop-thread (streaming dispatch) and executor-thread (non-streaming
         ``_do_query``) contexts, so the publish must not assume a loop —
-        and per Gavel's recheck, socket timeouts alone do NOT bound a sync
+        and per a reviewer's recheck, socket timeouts alone do NOT bound a sync
         publish: DNS resolution of the Redis hostname happens BEFORE the
         connect timeout applies and can block arbitrarily. Offloading the
         entire body (client creation + XADD) to a short-lived daemon thread

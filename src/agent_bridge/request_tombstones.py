@@ -17,7 +17,7 @@ The store is capped, oldest first; an eviction is logged because it means a
 Stop could be forgotten before its TTL.
 
 :class:`AcceptedRequests` is the same store for the requests this process has
-accepted (TASK-1233, Snark's ruling on the refused marker). A refused send is
+accepted (TASK-1233, coordinator ruling on the refused marker). A refused send is
 exit evidence only when this process never accepted it
 (:meth:`AcceptedRequests.never_accepted`), so that store fails safe: after an
 eviction it proves nothing until every evicted entry's TTL has passed.

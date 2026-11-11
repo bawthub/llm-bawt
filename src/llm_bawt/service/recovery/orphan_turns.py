@@ -4,7 +4,7 @@ A candidate is an open, started turn created before this process started (the
 sweep's ``started_at``), with no owner the app can see: no live
 ``TurnExecution`` in this process, no delivery claim (a claimed delivery is
 ``recover_expired``'s, two-phase r2-M4) and no freshly leased approval
-continuation (Vex S5). A turn created since startup belongs to this process's
+continuation (review S5). A turn created since startup belongs to this process's
 own workers and is never a candidate.
 
 Only the bridge can say the run is not executing. The step settles a turn
@@ -154,7 +154,7 @@ class BridgeRunProbe:
             return None, ProbeResult(state="bridge_unreachable", backend=backend, detail="no agent subscriber")
         try:
             # The outer deadline also covers publishing the command: send_rpc's
-            # own timeout starts only once its XADD returns (Loopy r1 A1/B1).
+            # own timeout starts only once its XADD returns (review r1 A1/B1).
             async with asyncio.timeout(self.timeout_seconds):
                 wire = await subscriber.send_rpc(
                     RUN_STATUS_METHOD, {"sessionKey": session_key, "requestId": request_id},

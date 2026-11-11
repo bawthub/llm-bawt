@@ -62,7 +62,7 @@ BATCH_SIZE = 20
 RETRY_BASE_S = 30.0
 RETRY_MAX_S = 900.0
 # Doublings that reach RETRY_MAX_S; the exponent saturates here, so a row that
-# fails for days never overflows the float (Loopy r2).
+# fails for days never overflows the float (review r2).
 _MAX_DOUBLINGS = math.ceil(math.log2(RETRY_MAX_S / RETRY_BASE_S))
 EXCERPT_CHARS = 200
 MODE_SETTING = "delivery_cancel_notice_mode"

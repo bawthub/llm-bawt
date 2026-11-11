@@ -6,7 +6,7 @@ topic names only, never content: the UI refetches what it shows.
 
 Most of this state is written outside the app process (the ops-reconciler
 container, the MCP subprocess, the local video server), so the app cannot
-publish at each write. Instead those writers queue a commit notify on Al's
+publish at each write. Instead those writers queue a commit notify on the
 commit-wake channel (:mod:`.commit_wake`), and one app loop, the
 :class:`StateWatcher`, re-reads a small fingerprint per topic on each wake and
 publishes only the topics whose fingerprint moved. Writers the watcher cannot

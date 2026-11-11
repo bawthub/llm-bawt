@@ -15,7 +15,7 @@ starts after ``PASS_BUDGET_SECONDS - PROBE_TIMEOUT_SECONDS -
 WRITE_RESERVE_SECONDS``. Members are taken least recently probed first, so a
 member left out of one pass leads the next.
 
-Deadlines (Loopy r1 A1/A2). A member's network work, ``run.status`` (its
+Deadlines (review r1 A1/A2). A member's network work, ``run.status`` (its
 publication included) plus the terminal record read, runs under one
 ``PROBE_TIMEOUT_SECONDS`` deadline inside its slot; a member that misses it is
 ambiguous and writes nothing. Its writes then run off the slot, bounded by
@@ -26,7 +26,7 @@ member that has started writing; it waits for it, so nothing is written after
 phase at the budget is cancelled (``cut``); with the reserve that takes
 scheduling drift, never a member that started on time.
 
-Bound (Vex r1 S1, r2 R1). One member holds a slot for at most one probe
+Bound (review r1 S1, r2 R1). One member holds a slot for at most one probe
 timeout, so a pass covers at least :data:`PASS_CAPACITY` members
 (:func:`pass_capacity`): each of the ``CONCURRENCY`` slots starts a probe at
 0, T+e, 2(T+e), ... and a start later than ``PASS_BUDGET_SECONDS - T - R`` is
@@ -47,7 +47,7 @@ per member and answering boot. It runs outside the pass: it is not held by a
 probe slot or the budget, so it never shrinks :data:`PASS_CAPACITY`, and it
 waits up to ``ABORT_RPC_TIMEOUT_S`` because a bridge replies only after the
 cancelled run's teardown. That is a hard bound on the whole call, publication
-included (Loopy r1 B1), and an abort whose member is no longer held is
+included (review r1 B1), and an abort whose member is no longer held is
 cancelled at the next pass. Its reply is logged, never stamped: the evidence
 is the refused or cancelled run's own terminal.
 """
@@ -133,7 +133,7 @@ class QuiesceExitSweep:
             self._probed_at[member.member_id] = time.monotonic()
             reply = terminal = None
             try:
-                # One deadline for the member's whole network phase (Loopy r1 A1).
+                # One deadline for the member's whole network phase (review r1 A1).
                 async with asyncio.timeout(PROBE_TIMEOUT_SECONDS):
                     reply, _result = await self.probe.status(backend=member.backend, session_key=member.session_key,
                                                              request_id=member.request_id, label=member.turn_id)
@@ -150,7 +150,7 @@ class QuiesceExitSweep:
         if verdict.sighting is None and verdict.record is None:
             return verdict.reason
         # From here the pass waits for this member instead of cancelling it:
-        # cancelling the coroutine would not stop the write thread (Loopy r1 A2).
+        # cancelling the coroutine would not stop the write thread (review r1 A2).
         task = asyncio.current_task()
         self._writing.add(task)
         try:
@@ -184,7 +184,7 @@ class QuiesceExitSweep:
 
             reply = None
             try:
-                # The sweep bounds the call itself, whatever the probe does (Loopy r1 B1).
+                # The sweep bounds the call itself, whatever the probe does (review r1 B1).
                 async with asyncio.timeout(abort_contract.ABORT_RPC_TIMEOUT_S):
                     reply = await self.probe.abort(backend=member.backend, session_key=member.session_key,
                                                    request_id=member.request_id)
@@ -247,7 +247,7 @@ class QuiesceExitSweep:
         """Cut the members still probing and wait for every member writing, through any further cancel.
 
         A repeated cancel of the pass would otherwise interrupt the wait and
-        return while a write thread is still in its transaction (Loopy r2).
+        return while a write thread is still in its transaction (review r2).
         The caller re-raises the cancellation once this returns.
         """
         while True:

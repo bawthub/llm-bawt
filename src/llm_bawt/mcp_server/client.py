@@ -52,10 +52,10 @@ class MemoryClient(
     
     Usage:
         # Embedded mode (default, in-process)
-        client = MemoryClient(config, bot_id="nova")
+        client = MemoryClient(config, bot_id="helper")
         
         # Server mode (connects to running MCP server)
-        client = MemoryClient(config, bot_id="nova", server_url="http://localhost:8001")
+        client = MemoryClient(config, bot_id="helper", server_url="http://localhost:8001")
     """
     
     def __init__(

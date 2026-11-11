@@ -17,7 +17,7 @@ When a trusted current-turn capability is present, the caller is recorded as
 attributed correctly. A bot tagged ``private`` (TASK-1329) is refused unless it
 is the trusted caller; an unreadable tag snapshot refuses every cross-bot call.
 
-Continuation scope (Snark review, TASK-1047): a bot-authored delivery always
+Continuation scope (review, TASK-1047): a bot-authored delivery always
 runs as DEFAULT_USER in the target's ACTIVE thread. ``continue_prompt`` is
 therefore accepted only when that is where the follow-up belongs: a trusted
 caller context, the default user, and, for a self-switch, the caller's own

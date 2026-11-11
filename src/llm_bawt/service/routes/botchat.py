@@ -2,7 +2,7 @@
 
 Provides /v1/botchat/{bot_id}/{user_id}/chat/completions and /models
 so clients that can't pass extra params can use a base URL like:
-    http://host:8642/v1/botchat/nova/alex
+    http://host:8642/v1/botchat/helper/alex
 and point their OpenAI-compatible client at it.
 """
 
@@ -38,7 +38,7 @@ _HA_CONFLICTING_LINES = frozenset(
         # of executing them, which fights the tool-calling system.
         "do not execute service without user's confirmation.",
         "use execute_services function only for requested action, not for current states.",
-        # Redundant state restatement instruction — Nova handles this via tools.
+        # Redundant state restatement instruction — the bot handles this via tools.
         "do not restate or appreciate what user says, rather make a quick inquiry.",
     }
 )

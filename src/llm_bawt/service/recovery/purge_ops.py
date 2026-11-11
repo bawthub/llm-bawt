@@ -93,7 +93,7 @@ def purge_ops(engine, *, stamp: RunStamp, dry_run: bool = False) -> dict[str, An
     3. cancel every non-terminal ops job.
 
     A request with no result gets the cancelled result a user cancel writes
-    (Vex C1), and after commit its tool card is resolved, best-effort, so the
+    (review C1), and after commit its tool card is resolved, best-effort, so the
     card no longer renders as actionable or awaiting a result. Every row
     written carries ``stamp`` (``recovery.audit``). The caller publishes each
     cancelled request's ``approval_resolved`` (``publish_purge_resolutions``).

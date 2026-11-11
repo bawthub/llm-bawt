@@ -10,7 +10,7 @@ consumes:
 - :func:`classify_initial_exception` / :func:`classify_stream_exception` — map
   exception classes to failure buckets.
 - :func:`classify_inband_error` — map upstream in-band ``response.failed`` /
-  ``response.error`` / ``error`` payloads to buckets (Al's addition #2 —
+  ``response.error`` / ``error`` payloads to buckets (review addition #2 —
   those events currently short-circuit without raising).
 - :func:`decide` — the state-machine cross product: (bucket × translator state
   × attempt count) → RetryDecision.
@@ -27,7 +27,7 @@ Invariants (spec-locked, enforced here + regressed in tests):
 - **Never retry on ``asyncio.CancelledError``** — client is gone; nothing to serve.
 - **Permanent 4xx / auth / context errors stay capability-classified** — bucket C
   never enters the retry loop even at attempt 1.
-- **Rate-limit cap** (Al #3): if a ``retry-after`` hint exceeds
+- **Rate-limit cap** (review #3): if a ``retry-after`` hint exceeds
   ``RATE_LIMIT_MAX_WAIT_S`` we emit ``rate_limit_error`` immediately and let the
   CLI's own backoff take over — never hold the SDK's stream open on a long wait.
 """
@@ -75,7 +75,7 @@ class RetryPhase(Enum):
 
     CONNECTING = "CONNECTING"        # upstream request not yet returned
     PRE_OUTPUT = "PRE_OUTPUT"        # message_start yielded, no content blocks yet
-    THINKING = "THINKING"            # thinking content forwarded (safe to replay per Al #1 caveat)
+    THINKING = "THINKING"            # thinking content forwarded (safe to replay per review #1 caveat)
     TEXT = "TEXT"                    # text_delta forwarded (partial visible output — fail up)
     TOOL_COMMITTED = "TOOL_COMMITTED"  # content_block_start(tool_use) — HARD no-retry
 
@@ -129,7 +129,7 @@ DEFAULT_BASE_BACKOFF_S = 0.2
 DEFAULT_BACKOFF_CAP_S = 5.0
 DEFAULT_JITTER_S = 0.2
 
-# Al #3: never hold the SDK's SSE stream open longer than this for a rate-limit
+# Review #3: never hold the SDK's SSE stream open longer than this for a rate-limit
 # retry-after. Beyond the cap we emit rate_limit_error immediately and hand off
 # to the CLI's own backoff.
 RATE_LIMIT_MAX_WAIT_S = 10.0
@@ -494,7 +494,7 @@ def classify_stream_exception(exc: BaseException) -> FailureBucket:
 
 
 def classify_inband_error(payload: dict[str, Any]) -> FailureBucket:
-    """Al addition #2: bucket an in-band ``response.failed``/``error`` payload.
+    """Review addition #2: bucket an in-band ``response.failed``/``error`` payload.
 
     These currently short-circuit the translator without raising. The retry loop
     consults this via ``TranslatorState.inband_error`` after a "clean" return.
@@ -651,7 +651,7 @@ def decide(
     (a) close any open content_block before backoff, (b) sleep ``backoff_s``,
     (c) preserve request identity (prompt_cache_key / session_id / account-id
     across the retry), and (d) resume the translator with a monotone block
-    index (Al #1).
+    index (review #1).
 
     When ``retry=False``, ``final_error_type`` is the Anthropic error type to
     surface downstream:
@@ -735,7 +735,7 @@ def decide(
             final_error_type="api_error",
         )
 
-    # Bucket D — rate limit. Al #3: cap retry-after so we don't hold the SDK
+    # Bucket D — rate limit. Review #3: cap retry-after so we don't hold the SDK
     # stream open on a long wait.
     if bucket is FailureBucket.D_RATE_LIMIT:
         wait = retry_after_s if retry_after_s is not None else policy.base_backoff_s
@@ -776,7 +776,7 @@ def decide(
 
     # Buckets A / B / G — transient / 5xx / supervised stall before commitment.
     # THINKING phase: replay this model request; the retry loop is responsible for the
-    # block-index hygiene (Al #1) — closing the open thinking block before the
+    # block-index hygiene (review #1) — closing the open thinking block before the
     # retry resumes, then re-indexing new blocks from state.next_block_index.
     if policy.attempts_remaining <= 0:
         return RetryDecision(

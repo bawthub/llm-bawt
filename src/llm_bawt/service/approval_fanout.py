@@ -138,7 +138,7 @@ def claim_fence(conn, head: dict[str, Any]) -> str | None:
     """Why a claimed approval notice must not run now, or None to let it run.
 
     Called by the delivery claim on the target's ``lock_target`` transaction
-    (Codex B1): a grant revoked or a requester made private after enqueue
+    (review B1): a grant revoked or a requester made private after enqueue
     never reaches the approver. A request notice also needs the card pending.
     """
     if head.get("message_kind") not in KINDS:

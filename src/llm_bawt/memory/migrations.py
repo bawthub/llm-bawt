@@ -1,8 +1,8 @@
 """Migration utilities for llm-bawt memory schema changes.
 
 Run from command line:
-    python -m llm_bawt.memory.migrations backfill_meaning --bot nova
-    python -m llm_bawt.memory.migrations all --bot nova
+    python -m llm_bawt.memory.migrations backfill_meaning --bot helper
+    python -m llm_bawt.memory.migrations all --bot helper
 
 Or import and use programmatically:
     from llm_bawt.memory.migrations import run_all_migrations

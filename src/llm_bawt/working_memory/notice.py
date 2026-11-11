@@ -65,7 +65,7 @@ def has_candidate(decision) -> bool:
     no ``candidate_sections``: a turn that rendered without the section
     (working memory disabled or refused for the bot) stores none, yet its
     fallback bytes are what an auto-compaction adopts. That candidate's entry
-    reads as missing (Loopy 2a r1 B1).
+    reads as missing (review 2a r1 B1).
     """
     return decision.snapshot_unverified or decision.candidate_sections is not None
 

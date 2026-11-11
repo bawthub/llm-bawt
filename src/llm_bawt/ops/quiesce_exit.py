@@ -16,7 +16,7 @@ for members (a) never covered:
   ``exited: null``, or an absence (``not_found`` or ``tombstoned``) with no
   terminal, is no evidence: a tombstone only says the request is no longer
   registered, and every bridge unregisters in ``finally`` whatever its
-  teardown did (Vex r1 B1).
+  teardown did (review r1 B1).
 
 **Holders.** (b) reads two durable boot records per ``(backend, request_id)``,
 both independent of the turn row: the accept first, then the sighting.
@@ -53,7 +53,7 @@ once the deadline has passed, every statement in it runs with
 across statements share the one deadline), and it rolls back instead of
 committing once the deadline has passed. A write blocked on a lock gives up at
 the deadline (:class:`WriteDeadline`, nothing written) and never commits after
-the pass has returned (Loopy r1 A2, r2). The COMMIT itself is not bounded.
+the pass has returned (review r1 A2, r2). The COMMIT itself is not bounded.
 """
 from __future__ import annotations
 
@@ -181,7 +181,7 @@ def judge(member: SweepMember, reply: RunStatusReply | None, terminal: RunTermin
             return Judgement("terminal_survivor")  # already the named blocker; don't rewrite it every pass
         return Judgement("terminal_exited" if exited else "terminal_survivor",
                          _record("c", reply.request_id, reply.backend, terminal.boot_id, exited))
-    # A tombstone alone is never evidence (Vex r1 B1): every bridge releases a
+    # A tombstone alone is never evidence (review r1 B1): every bridge releases a
     # request in ``finally`` whatever its teardown did, and codex tombstones
     # as an abort starts, so the run may still be alive in the boot that
     # answers ``tombstoned``.
@@ -259,7 +259,7 @@ def _transaction(engine, deadline: float | None) -> Iterator[Any]:
 
     def bound(conn, cursor, statement, parameters, context, executemany):
         # Every statement gets only the time left, so waits across statements
-        # share the one absolute deadline (Loopy r2: per-statement timeouts add up).
+        # share the one absolute deadline (review r2: per-statement timeouts add up).
         remaining_ms = int((deadline - time.monotonic()) * 1000)
         if remaining_ms <= 0:
             raise WriteDeadline("write deadline passed before a statement")

@@ -203,7 +203,7 @@ class DeliveryLeaseRecovery:
         cause in its ``recovery`` audit, like a Stop on a reservation). A row
         with execution evidence may belong to a bridge run an app-only restart
         left running: it stays fenced until the recovery sweep's
-        ``orphan_turns`` probe proves the run gone (Loopy r1 B1).
+        ``orphan_turns`` probe proves the run gone (review r1 B1).
         """
         if not turn_id:
             return False

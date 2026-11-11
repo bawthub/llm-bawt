@@ -13,7 +13,7 @@ Per live member (``LIVE_MEMBER_SQL``) that is ``pending`` with no link, or
 * ``lock_target(bot)``, then the member ``FOR UPDATE SKIP LOCKED``, re-read
   with the same selector. Turn rows are only read, never locked:
   ``bind_agent_bridge`` locks the turn row and then updates its members, so
-  locking a turn row while holding a member could deadlock with a bind (Caid,
+  locking a turn row while holding a member could deadlock with a bind (review,
   df30f61).
 * Member-local decisions: revoked, turn gone or ended -> ``not_needed``; the
   job's caller's own turn -> ``self``; no pinned request yet -> skipped,
@@ -78,7 +78,7 @@ SETTLED = "settled"  # a member-local decision; nothing to steer
 
 
 def control_request_id(turn_id: str, agent_request_id: str) -> str:
-    """The run key of one pinned run: the same for every job and gate generation (Caid)."""
+    """The run key of one pinned run: the same for every job and gate generation (review)."""
     return f"steer_quiesce_{turn_id}_{agent_request_id}"
 
 
@@ -121,7 +121,7 @@ class QuiesceControlProducer:
 
         An unpinned member writes nothing and stays due, so it is ordered
         after every pinned one: a batch full of unpinned members would
-        otherwise starve the pinned members behind them (Codex S3 S1).
+        otherwise starve the pinned members behind them (review S3 S1).
         """
         with self.engine.connect() as conn:
             if not conn.execute(sa_text(_TABLES)).scalar():

@@ -34,7 +34,7 @@ def render_streaming_response(
     Args:
         stream_iterator: Iterator yielding string chunks
         console: Rich Console for output
-        panel_title: Title for the panel (e.g., "[bold cyan]Nova[/bold cyan]")
+        panel_title: Title for the panel (e.g., "[bold cyan]Helper[/bold cyan]")
         panel_border_style: Border style for the panel
         plaintext_output: If True, output plain text without formatting
         

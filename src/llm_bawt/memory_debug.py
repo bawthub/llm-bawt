@@ -19,7 +19,7 @@ Usage:
     # === ENTITY PROFILES (user or bot) ===
     llm-memory --list-profiles                   # List all profiles (users and bots)
     llm-memory --list-attrs alex                 # List attributes (auto-detects user/bot)
-    llm-memory --list-attrs nova                 # List attributes for nova
+    llm-memory --list-attrs helper               # List attributes for helper
     llm-memory --delete-attr 42                  # Delete a profile attribute
 
     # === MESSAGE HISTORY (conversation logs) ===

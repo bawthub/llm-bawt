@@ -58,7 +58,7 @@ MAX_COMPOSE_FILES = 4
 RENDER_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 # The CLI's config dir (contexts, credential helpers, aliases, user plugins) is
 # an EMPTY noexec tmpfs the renderer container gets at create time: nothing the
-# image or the project ships can be there (TASK-1476, Loopy DESIGN cmvsde44e).
+# image or the project ships can be there (TASK-1476, review DESIGN cmvsde44e).
 RENDER_DOCKER_CONFIG = "/run/llm-bawt-render/docker"
 # Every path the docker CLI, its loader or its plugins resolve code or config
 # from, inventoried in the pinned renderer image (docker:28.5 / Alpine musl):
@@ -71,7 +71,7 @@ RENDER_DOCKER_CONFIG = "/run/llm-bawt-render/docker"
 RENDER_TRUSTED_ROOTS = ("/bin", "/sbin", "/lib", "/lib64", "/usr", "/etc", "/run", "/var", "/tmp", "/root",
                         "/dev", "/proc", "/sys", RENDER_DOCKER_CONFIG)
 _ENV_VALUE = re.compile(r"[A-Za-z0-9._/:@-]{1,255}")
-# A CLOSED allowlist (Codex r1 Blocker): the renderer executes docker with the
+# A CLOSED allowlist (review r1 Blocker): the renderer executes docker with the
 # project bound, so a name like LD_PRELOAD, DOCKER_* or COMPOSE_* would let a
 # catalog row run project code or redirect the CLI before the source check.
 # Only process-environment identity Compose cannot read from the project
@@ -130,7 +130,7 @@ def renderer_env(config: dict, image_ref: str, project_dir: str) -> list[str]:
     """The renderer's whole environment, ``env -i`` arguments: a fixed PATH and
     DOCKER_CONFIG, the image variable (if any) and the declared ``interpolation_env``.
 
-    Codex r2 / Loopy r1: the docker CLI loads plugins from its config dir
+    review r2 / review r1: the docker CLI loads plugins from its config dir
     (``$HOME/.docker`` unless DOCKER_CONFIG is set) before the system ones, and
     the project is bound at its own path. DOCKER_CONFIG is therefore an empty
     tmpfs, the project may not overlap any trusted path in either direction,

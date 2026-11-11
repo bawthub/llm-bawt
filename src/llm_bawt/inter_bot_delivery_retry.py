@@ -438,7 +438,7 @@ def _restart_retry_failed(
         # so the outer transaction (the FAILED write) is always usable.
         # Whether the host killed this turn is decided first, from the
         # turn row: a refusal from ``_retry`` (e.g. a session reset) says
-        # nothing about why the turn ended (Vex 1231B DESIGN r2 C1).
+        # nothing about why the turn ended (review 1231B DESIGN r2 C1).
         with conn.begin_nested():
             shutdown = restart_abort_cause(
                 _RowView(_turn_row(conn, turn_id))) == HOST_SHUTDOWN

@@ -79,7 +79,7 @@ logger = logging.getLogger(__name__)
 #   - TOOL_COMMITTED (state.tool_committed=True) → hard no-retry
 #   - TEXT (state.text_delta_yielded=True) → default fail-upward with api_error
 #   - THINKING (state.thinking_yielded=True) → retry OK; block-index hygiene
-#     across the splice is the loop's responsibility (Al #1)
+#     across the splice is the loop's responsibility (review #1)
 #   - PRE_OUTPUT (state.message_start_yielded=True, no content) → retry OK
 #   - CONNECTING (state.message_start_yielded=False) → retry OK
 #
@@ -114,7 +114,7 @@ class TranslatorState:
     terminal_event_seen: bool = False    # response.completed / response.incomplete
     committed_output: CommittedOutput = field(default_factory=CommittedOutput)
 
-    # ── Block index bookkeeping (Al #1: monotone indexes across a retry splice) ─
+    # ── Block index bookkeeping (review #1: monotone indexes across a retry splice) ─
     # ``next_block_index`` is the index that WILL be assigned to the next block
     # opened by the translator. When the retry loop closes the current open
     # block and re-invokes the translator with ``resumed_from_index=state.next_block_index``,
@@ -122,13 +122,13 @@ class TranslatorState:
     next_block_index: int = 0
     open_block: dict | None = None       # {"index", "kind", "item_id", "call_id"?, "name"?}
 
-    # ── In-band terminal events (Al #2) ─────────────────────────────────────
+    # ── In-band terminal events (review #2) ─────────────────────────────────────
     # Populated by response.failed / response.error / error SSE events from the
     # upstream. When present after a "clean" return from the translator, the
     # retry loop treats the run as failed and consults classify_inband_error.
     inband_error: dict | None = field(default=None)
 
-    # ── Usage snapshot (Al #4) ──────────────────────────────────────────────
+    # ── Usage snapshot (review #4) ──────────────────────────────────────────────
     # Only the final SUCCESSFUL attempt's usage should count toward turn
     # accounting. The retry loop resets this per attempt; on_usage on the
     # translator populates it. See adapters/base.py::call for the reset dance.
@@ -250,7 +250,7 @@ async def responses_to_anthropic_sse(
     - ``resumed_from_index`` — if not None, skip ``message_start`` (previous
       attempt already emitted it), start block indexes at this integer, and
       assume the caller has already emitted a ``content_block_stop`` for any
-      block open at retry time. Al #1: keeps indexes monotone across the
+      block open at retry time. review #1: keeps indexes monotone across the
       splice; the SDK's Anthropic-SSE parser is strict about this.
     """
     message_id = _anthropic_message_id()
@@ -315,7 +315,7 @@ async def responses_to_anthropic_sse(
     # sequentially (reasoning, then message text, then function calls), so we
     # model a single ``open_block`` and a per-item index map for routing arg
     # deltas to the right tool block.
-    # TASK-714 (Al #1): on a resumed attempt, block indexes start from where
+    # TASK-714 (review #1): on a resumed attempt, block indexes start from where
     # the previous attempt left off — NOT at 0 — so the spliced stream stays
     # monotone. The caller is responsible for emitting content_block_stop on
     # any block that was open at the failure point BEFORE calling us again.
@@ -506,7 +506,7 @@ async def responses_to_anthropic_sse(
                     _set_open({"index": idx, "kind": "thinking", "item_id": ""})
                     yield _open_start_frame("thinking", idx)
                 # TASK-714: mark THINKING phase — retry loop may still replay
-                # this whole call (thinking is display-only per Al's decision).
+                # this whole call (thinking is display-only per coordinator decision).
                 if state is not None:
                     state.thinking_yielded = True
                 yield _sse(
@@ -665,7 +665,7 @@ async def responses_to_anthropic_sse(
                 resp = getattr(event, "response", None)
                 if resp is not None:
                     input_tokens, output_tokens, cache_read, cache_create = _extract_usage(resp)
-                    # TASK-714 (Al #4): stash usage on state so the retry loop
+                    # TASK-714 (review #4): stash usage on state so the retry loop
                     # can pick the FINAL successful attempt's numbers, not the
                     # sum across aborted attempts. Callback still fires for
                     # side effects; the loop is responsible for gating which
@@ -709,7 +709,7 @@ async def responses_to_anthropic_sse(
                 break
 
             # ── terminal: failure / error ───────────────────────────────────
-            # TASK-714 Al #2: in-band terminal errors historically short-circuited
+            # TASK-714 review #2: in-band terminal errors historically short-circuited
             # with a wire error frame and cleanly returned — the exception-only
             # retry loop never saw them. When a state is provided, we instead
             # populate state.inband_error and return cleanly WITHOUT emitting an
@@ -727,7 +727,7 @@ async def responses_to_anthropic_sse(
                 if state is not None:
                     # Retry loop owns the wire response — pass through cleanly
                     # WITHOUT yielding an error frame here. Close-open-block
-                    # hygiene (Al #1) is also the loop's responsibility.
+                    # hygiene (review #1) is also the loop's responsibility.
                     state.inband_error = {"code": code, "message": msg}
                     return
                 # Close any open block before the error so the SDK's parser
@@ -923,7 +923,7 @@ async def responses_to_anthropic_sse(
     except Exception as exc:  # noqa: BLE001
         # TASK-714: when a state is provided the retry loop owns the wire
         # response — we PROPAGATE the exception so the loop can decide bucket +
-        # phase policy. Block-close hygiene (Al #1) becomes the loop's job.
+        # phase policy. Block-close hygiene (review #1) becomes the loop's job.
         # Backcompat: state=None keeps the pre-TASK-714 behavior (emit an SSE
         # error frame with a canonical Anthropic error type and swallow).
         if state is not None:

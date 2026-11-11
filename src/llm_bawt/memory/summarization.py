@@ -952,7 +952,7 @@ class HistorySummarizer:
     """Manages history summarization for a bot.
 
     Usage:
-        summarizer = HistorySummarizer(config, bot_id="nova")
+        summarizer = HistorySummarizer(config, bot_id="helper")
 
         # Dry run to preview
         preview = summarizer.preview_summarizable_sessions()

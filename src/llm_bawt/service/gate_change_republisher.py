@@ -61,7 +61,7 @@ def republish_waiting(dispatcher: Any) -> int:
     """Announce every QUEUED chat row's lifecycle again and wake the dispatcher."""
     store = dispatcher.store
     announced, after = 0, -1
-    while True:  # keyset pages, so every waiting row relabels (Codex r1 B2)
+    while True:  # keyset pages, so every waiting row relabels (review r1 B2)
         with store.engine.connect() as conn:
             page = conn.execute(sa_text(_WAITING_CHAT), {"after": after, "limit": REPUBLISH_BATCH}).all()
         for delivery_id, ordinal in page:
@@ -80,7 +80,7 @@ class GateChangeWaiter(JobCreatedWaiter):
     """The job-created waiter on ``system_gate_changed``, connectable up front.
 
     The loop must be LISTENing before it reads gate state, or a change that
-    commits between the read and the LISTEN is never heard (Codex r1 B1).
+    commits between the read and the LISTEN is never heard (review r1 B1).
     """
 
     def ensure_listening(self) -> bool:
@@ -91,7 +91,7 @@ class GateChangeWaiter(JobCreatedWaiter):
         return True
 
     def wait(self, stop: threading.Event, timeout: float) -> bool:
-        """Like the base wait, but a broken listener raises at once (Codex r2 B1).
+        """Like the base wait, but a broken listener raises at once (review r2 B1).
 
         The base wait logs and sleeps out the rest of ``timeout`` on a listener
         failure; here that could be a whole gate lease with nothing listening.

@@ -65,7 +65,7 @@ def annotate_rows(engine, records: list[Any], views: list[dict[str, Any]]) -> li
     try:
         with engine.connect() as conn:
             reasons = wait_reasons(conn, targets)
-    except Exception:  # noqa: BLE001 - the listing never fails on its label (Codex r1 S1)
+    except Exception:  # noqa: BLE001 - the listing never fails on its label (review r1 S1)
         logger.warning("could not read delivery wait reasons", exc_info=True)
         return views
     for record, view in zip(records, views):

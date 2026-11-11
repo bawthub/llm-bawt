@@ -587,8 +587,8 @@ async def update_task(
     # reviewTransitionMissingBot). When the task has NO owner, the submitting
     # bot (bot_id) fills it so the caller needn't know the internal rule.
     # TASK-1015: bot_id is the ACTOR, never an ownership claim — it must not
-    # reassign a task that already has an owner (TASK-1013 became Al's when
-    # Caid passed bot_id="al"). Reassignment requires explicit agent_bot_id.
+    # reassign a task that already has an owner (TASK-1013 changed owner when
+    # another bot passed its own bot_id). Reassignment requires explicit agent_bot_id.
     if status == "REVIEW" and agent_bot_id is None and bot_id:
         if await _task_is_unowned(task_id):
             body["agentBotId"] = bot_id

@@ -53,7 +53,7 @@ class CommittedOutput:
     @property
     def can_continue(self) -> bool:
         # TASK-1095: a checkpoint holding only committed native reasoning (no
-        # visible text yet) is continuable too — the stall that killed Snark
+        # visible text yet) is continuable too — the stall that killed a live bot turn
         # landed exactly there. Items are what gets replayed; text is only the
         # prefix the candidate must reproduce (empty = nothing to validate).
         return bool(self.items) and not self.blocked

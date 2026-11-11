@@ -246,7 +246,7 @@ def _humanize_bot_constraint_error(exc: Exception) -> str | None:
     compatibility on ``bot_profiles`` (e.g. a claude-code bot must point at an
     Anthropic Messages endpoint). It surfaces through SQLAlchemy as a
     ``DBAPIError`` wrapping a psycopg ``RaiseException`` whose ``RAISE
-    EXCEPTION`` text is already user-friendly (e.g. ``bot loopy: harness
+    EXCEPTION`` text is already user-friendly (e.g. ``bot helper: harness
     claude-code requires an Anthropic Messages endpoint``), so we just lift it
     out of the SQLAlchemy wrapper.
 

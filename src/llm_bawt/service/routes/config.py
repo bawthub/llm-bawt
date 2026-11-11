@@ -20,7 +20,7 @@ router = APIRouter()
 
 @router.get("/v1/config/effective", tags=["System"])
 async def get_effective_config(
-    bot: str = Query(..., description="Bot slug (e.g. nova, snark)"),
+    bot: str = Query(..., description="Bot slug (e.g. helper)"),
     user: str | None = Query(None, description="User id; defaults to service DEFAULT_USER"),
     prompt: str = Query("", description="Optional user prompt to reflect per-turn gates"),
 ):

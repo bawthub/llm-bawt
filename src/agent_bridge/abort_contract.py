@@ -46,7 +46,7 @@ _PROCESS_IS_PID1 = os.getpid() == 1
 
 
 def process_is_pid1() -> bool:
-    """Is this bridge process its container's PID 1? (TASK-1233 Vex S2)
+    """Is this bridge process its container's PID 1? (TASK-1233 review S2)
 
     Only then does a new boot id prove the old process's children are gone:
     when PID 1 exits the kernel kills the whole PID namespace. A bridge run

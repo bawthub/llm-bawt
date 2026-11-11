@@ -241,7 +241,7 @@ def load_steer_jumper(conn, held_head, config):
     asks to steer wants the steer now; holding it made one idle-only
     broadcast silence that sender's every steer for a whole running turn.
     This is a deliberate priority choice, revising the TASK-1758 same-author
-    fence (Codex DESIGN r1 B1). That fence still holds for the author's other
+    fence (review DESIGN r1 B1). That fence still holds for the author's other
     earlier rows (a reset, a scheduled prompt, a delayed steer), and no row
     passes while a steer or an unaccepted dispatch is in flight, so one pass
     happens at a time.

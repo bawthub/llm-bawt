@@ -1,4 +1,4 @@
-"""The durable trace of a recovery sweep or purge run (TASK-1232, Snark ruling a).
+"""The durable trace of a recovery sweep or purge run (TASK-1232, coordinator ruling a).
 
 There is no audit table: logs aren't durable, so every row a run writes
 carries the run's stamp, the ``actor`` and one ``sweep_run_id`` per run, and

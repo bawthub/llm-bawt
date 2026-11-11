@@ -58,7 +58,7 @@ ACCEPTED = "accepted"  # reserved with execution evidence; drains on exit
 RUNNING = "running"  # pending / streaming / cancelling
 DISPOSITIONS = frozenset({REVOKED_UNSTARTED, ACCEPTED, RUNNING})
 
-# Control states on a member row (Al's control lane, B3).
+# Control states on a member row (the control lane, B3).
 CONTROL_STATES = frozenset({
     "pending", "steering", "steered", "unsupported", "not_needed", "self", "unconfirmed", "cancelled",
 })
@@ -692,7 +692,7 @@ def pin_member_request(conn, turn_id: str, request_id: str, steer_caps: str | No
     row; ``activate_hold`` locks the captured turn rows too, so a bind racing a
     capture is either read by the capture or pins the committed member. Only an
     unpinned member is filled: the roster's pinned request decides (B1). Every
-    gate, live or not (Snark z-r1): ``never_bound`` is sound only if every bind
+    gate, live or not (review z-r1): ``never_bound`` is sound only if every bind
     pins, and a member of a lost generation may still be carried. The run's
     ``steer_caps`` (TASK-1243) are pinned with its request.
     """

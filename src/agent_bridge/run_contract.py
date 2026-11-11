@@ -7,7 +7,7 @@ When a bridge admits a ``chat.send`` (``Admission.ACCEPTED``) it publishes a
 ``{request_id, backend, boot_id, pid1}``. ``boot_id`` names the bridge process
 that accepted the request. A later ``run.status`` absence from a different boot
 proves the run died with that process only when both processes were their
-container's PID 1 (TASK-1233 B1(b), Vex S2;
+container's PID 1 (TASK-1233 B1(b), review S2;
 :func:`agent_bridge.run_status.proves_restart`).
 
 Terminal
@@ -36,7 +36,7 @@ and not every path publishes one. The sentinel's stream fields are
 ``teardown.disconnect`` is free text for logs: ``"ok"``, a failure name, null,
 or ``"refused"`` (:data:`REFUSED`). ``"refused"`` marks a send refused as
 tombstoned by a process that never accepted that request, so nothing for it
-ran there and ``exited`` is ``true``. That rests on two delivery facts (Vex
+ran there and ``exited`` is ``true``. That rests on two delivery facts (review
 r2 N1): a request id's ``chat.send`` is published once per dedupe window
 (``command_publisher.command_dedupe_ttl_s``), and bridges read commands with
 ``">"`` only, so a send published before a restart never reaches the new
@@ -57,7 +57,7 @@ Terminal record
 An interactive run stream expires 300s after its ``done``, which is shorter
 than a quiesce can wait for a member, so the same fields are also written as a
 compact Redis hash at :func:`run_terminal_key` that lives
-:data:`RUN_TERMINAL_RETENTION_S` (Vex N4). Quiesce's "not_found and already
+:data:`RUN_TERMINAL_RETENTION_S` (review N4). Quiesce's "not_found and already
 terminal" check reads that record with the same parser
 (``RunTerminal.from_fields(redis.hgetall(run_terminal_key(rid)))``). Quiesce
 caps its timeout at :data:`QUIESCE_TIMEOUT_MAX_S` and polls at most every
@@ -180,7 +180,7 @@ class RunAccepted:
     backend: str
     boot_id: str
     pid1: bool | None = None
-    """Was the accepting process its container's PID 1 (Vex S2)? ``None``
+    """Was the accepting process its container's PID 1 (review S2)? ``None``
     from a bridge that predates the field: unknown, so never proof."""
 
     def to_dict(self) -> dict[str, Any]:

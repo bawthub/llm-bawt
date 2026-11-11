@@ -4,7 +4,7 @@ A bot's active thread carries runtime-specific state: ``agent_session_keys``
 (the SDK transcript to resume) for agent harnesses, and a chat-shaped history
 for direct chat. When a profile save moves the bot to a different runtime
 family (chat <-> agent, or between agent bridges), resuming that state is
-wrong. Example: Nova went agent -> chat -> agent while the same thread stayed
+wrong. Example: a bot went agent -> chat -> agent while the same thread stayed
 active, and the agent turn resumed a days-old SDK transcript from the first
 agent stint.
 

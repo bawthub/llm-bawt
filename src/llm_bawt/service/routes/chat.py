@@ -929,7 +929,7 @@ async def list_pending_questions(
 class SessionResetRequest(BaseModel):
     """Request to reset an agent backend session."""
     bot_id: str = Field(..., description="Bot slug to reset session for")
-    # TASK-257 (Gavel finding): rotation + thread_switched emit must target
+    # TASK-257 (review finding): rotation + thread_switched emit must target
     # the CALLER's user context, not blindly DEFAULT_USER — otherwise a reset
     # issued for another user rotates the default user's thread and publishes
     # on their stream. Optional for backward compatibility (single-user
@@ -1011,7 +1011,7 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
     Create a chat completion (OpenAI-compatible).
     
     Supports all standard OpenAI parameters plus llm_bawt extensions:
-    - `bot_id`: Bot personality to use (default: nova)
+    - `bot_id`: Bot personality to use (default: the configured DEFAULT_BOT)
     - `augment_memory`: Whether to include memory context (default: true)
     - `extract_memory`: Whether to extract memories from response (default: true)
     - `include_summaries`: Whether to inject conversation summary records into context (default: true)

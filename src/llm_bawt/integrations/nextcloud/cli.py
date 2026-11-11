@@ -27,7 +27,7 @@ def list_bots():
 
     if not bots:
         console.print("[yellow]No Nextcloud bots configured.[/yellow]")
-        console.print("Provision one with: [cyan]llm nextcloud provision --bot nova[/cyan]")
+        console.print("Provision one with: [cyan]llm nextcloud provision --bot <bot-slug>[/cyan]")
         return
 
     table = Table(title="Nextcloud Talk Bots")
@@ -73,7 +73,7 @@ def reload_bots():
 
 
 @nextcloud_cli.command(name='provision')
-@click.option('--bot', 'llm_bawt_bot', required=True, help='llm-bawt bot ID (e.g., nova, monika)')
+@click.option('--bot', 'llm_bawt_bot', required=True, help='llm-bawt bot ID (e.g., helper)')
 @click.option('--room-name', help='Room name (default: bot name)')
 @click.option('--bot-name', help='Bot display name (default: bot ID title-cased)')
 @click.option('--owner', default='user', help='Room owner user ID')

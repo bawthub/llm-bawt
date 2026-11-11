@@ -9,7 +9,7 @@ approval snapshot, so the approved scope is the one the driver holds.
 
     {"all_agents": true}
     {"backends": ["claude-code", ...]}
-    {"bots": ["byte", ...]}
+    {"bots": ["<bot-slug>", ...]}
     {"backend_from_arg": "<declared string enum arg>",
      "map": {"<every enum value>": "<agent backend>", ...}}
 

@@ -41,7 +41,7 @@ async def abort_turn(service, turn, *, source: str, peer: str | None) -> str:
         stopped = await _stop_reservation(service, turn, source=source, peer=peer)
         if stopped is not None:
             return stopped
-        # Consumed between our read and the target lock (Vex B1): it is a
+        # Consumed between our read and the target lock (review B1): it is a
         # started turn now, so stop it as one instead of reporting completion.
         current = store.get_turn(turn.id)
         if current is None or current.ended_at is not None:
@@ -83,7 +83,7 @@ async def abort_turn(service, turn, *, source: str, peer: str | None) -> str:
     stop["confirmed"] = stop["bridge_state"] in CONFIRMED_STATES
     if not stop["confirmed"]:
         # The settle releases admission while the old run may still be live,
-        # so the next turn can overlap it on the same session (Vex S1).
+        # so the next turn can overlap it on the same session (review S1).
         stop["admission_released_unconfirmed"] = True
     stop["source"] = source
     coordinator.record_outcome(turn.id, stop["bridge_state"])
@@ -170,7 +170,7 @@ async def _abort_bridge_run(service, turn, execution) -> dict:
         return {"bridge_state": "bridge_unreachable", "backend": backend}
     try:
         # The RPC outlives the bridge's teardown bound, so the reply that
-        # carries the teardown outcome lands before the app gives up (Vex S3).
+        # carries the teardown outcome lands before the app gives up (review S3).
         from agent_bridge.abort_contract import ABORT_RPC_TIMEOUT_S, AbortReply, AbortReplyError
 
         result = await subscriber.send_rpc(
