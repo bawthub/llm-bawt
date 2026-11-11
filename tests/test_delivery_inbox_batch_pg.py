@@ -152,7 +152,9 @@ def test_requeued_head_releases_its_followers_once(gated):
 
 
 @pytest.mark.integration
-def test_restart_pending_failure_releases_and_plain_failure_fails_followers(gated):
+def test_restart_pending_failure_holds_and_plain_failure_fails_followers(gated):
+    from llm_bawt.inter_bot_delivery_retry import restart_retry_recovered
+
     bot = gated.bot()
     _opt_in(gated, bot)
     deliveries, a = _send(gated, bot, "A")
@@ -160,7 +162,11 @@ def test_restart_pending_failure_releases_and_plain_failure_fails_followers(gate
     _claim(deliveries, bot)
     _set_head(deliveries, a.id, "status='FAILED', metadata_json=metadata_json || "
               "'{\"restart_retry_pending\": true}'::jsonb")
-    assert _rows(deliveries, [b.id])[b.id]["status"] == "QUEUED"
+    # Held for the restart-retry decision, not released ahead of it.
+    assert _rows(deliveries, [b.id])[b.id]["status"] == "DISPATCHING"
+    # Not a host shutdown: the sweep ends the follower with its head.
+    restart_retry_recovered(deliveries)
+    assert _rows(deliveries, [b.id])[b.id]["status"] == "FAILED"
 
     bot2 = gated.bot()
     _opt_in(gated, bot2)

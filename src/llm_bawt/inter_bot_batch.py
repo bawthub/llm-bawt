@@ -90,6 +90,9 @@ def plain(row: dict[str, Any], *, user_id: str, config) -> bool:
     payload, meta = _as_dict(row.get("payload_json")), _as_dict(row.get("metadata_json"))
     if (row.get("session_policy") or "continue") != "continue":
         return False
+    # Context maintenance (/compact) must reach the harness verbatim.
+    if row.get("message_kind") == "CONTEXT_MAINTENANCE" or meta.get("context_action"):
+        return False
     if payload.get("reply_mode") == "waited" or any(payload.get(key) for key in _SOLO_PAYLOAD):
         return False
     if any(meta.get(key) for key in _SOLO_METADATA):
@@ -187,6 +190,89 @@ def stage_followers(conn, head_id: str) -> None:
         DeliveryTransitionEvents.stage(conn, *rows, reason_code="inbox_batch_settled")
 
 
+def hold(conn, head_id: str) -> None:
+    """Keep ``head_id``'s followers held through its FAILED write in this transaction."""
+    conn.execute(sa_text("SELECT set_config('llm_bawt.batch_hold', :id, true)"), {"id": head_id})
+
+
+def settle_retry(conn, head_id: str, *, shutdown: bool, child: Any | None) -> Any | None:
+    """Settle a FAILED head's held followers once its restart retry is decided.
+
+    A retry child carries the whole ordered batch prompt, and the followers end
+    FAILED pointing at it (one owner, original order). A host shutdown whose
+    retry was refused or errored releases the followers to QUEUED, so nothing
+    is lost; any other failure ends them with their head.
+    """
+    head = conn.execute(sa_text(
+        "SELECT metadata_json, last_error FROM inter_bot_deliveries WHERE id=:id"
+    ), {"id": head_id}).mappings().first()
+    meta = _as_dict(head["metadata_json"]) if head else {}
+    if "batch_member_ids" not in meta:
+        return child
+    if child is not None:
+        carried = conn.execute(sa_text(
+            "SELECT payload_json FROM inter_bot_deliveries WHERE id=:id FOR UPDATE"
+        ), {"id": child.id}).scalar_one()
+        payload = _as_dict(carried)
+        messages = list(payload.get("messages") or [])
+        original = conn.execute(sa_text(
+            "SELECT payload_json FROM inter_bot_deliveries WHERE id=:id"), {"id": head_id}).scalar_one()
+        head_text = last_text(_as_dict(original)) or ""
+        if messages and isinstance(messages[-1].get("content"), str):
+            content = messages[-1]["content"]
+            batch = meta.get("batch_prompt") or ""
+            content = content.replace(head_text, batch, 1) if head_text and head_text in content \
+                else f"{content}\n\n{batch}"
+            messages[-1] = {**messages[-1], "content": content}
+            payload["messages"] = messages
+        from .inter_bot_delivery_record import DeliveryRecord
+        batch = meta.get("batch_prompt") or ""
+        message = child.message or ""
+        message = message.replace(head_text, batch, 1) if head_text and head_text in message \
+            else f"{message}\n\n{batch}"
+        updated_child = conn.execute(sa_text("""
+            UPDATE inter_bot_deliveries SET payload_json=CAST(:payload AS jsonb), message=:message,
+                metadata_json=COALESCE(metadata_json, '{}'::jsonb)
+                    || jsonb_build_object('batch_carried_ids', CAST(:ids AS jsonb))
+            WHERE id=:id RETURNING *
+        """), {"id": child.id, "payload": json.dumps(payload), "message": message,
+              "ids": json.dumps(meta["batch_member_ids"])}).mappings().one()
+        child = DeliveryRecord.from_mapping(updated_child)
+        rows = conn.execute(sa_text("""
+            UPDATE inter_bot_deliveries SET status='FAILED',
+                last_error='carried by restart retry ' || CAST(:child AS text),
+                metadata_json=COALESCE(metadata_json, '{}'::jsonb)
+                    || jsonb_build_object('batch_carried_by', CAST(:child AS text)),
+                updated_at=now()
+            WHERE batch_head_id=:id AND status='DISPATCHING' AND delivery_mode='batched'
+            RETURNING *
+        """), {"id": head_id, "child": child.id}).mappings().all()
+        DeliveryTransitionEvents.stage(conn, *rows, reason_code="inbox_batch_carried")
+    elif shutdown:
+        rows = conn.execute(sa_text("""
+            UPDATE inter_bot_deliveries SET status='QUEUED', delivery_mode=NULL,
+                target_turn_id=NULL, available_at=now(), next_retry_at=NULL,
+                last_error='released: inbox batch head was not restart-retried', updated_at=now()
+            WHERE batch_head_id=:id AND status='DISPATCHING' AND delivery_mode='batched'
+            RETURNING *
+        """), {"id": head_id}).mappings().all()
+        DeliveryTransitionEvents.stage(conn, *rows, reason_code="inbox_batch_settled")
+    else:
+        rows = conn.execute(sa_text("""
+            UPDATE inter_bot_deliveries SET status='FAILED',
+                last_error=COALESCE(CAST(:error AS text), 'inbox batch head ended'), updated_at=now()
+            WHERE batch_head_id=:id AND status='DISPATCHING' AND delivery_mode='batched'
+            RETURNING *
+        """), {"id": head_id, "error": head["last_error"]}).mappings().all()
+        DeliveryTransitionEvents.stage(conn, *rows, reason_code="inbox_batch_settled")
+    conn.execute(sa_text("""
+        UPDATE inter_bot_deliveries
+        SET metadata_json = metadata_json - 'batch_member_ids' - 'batch_prompt'
+        WHERE id=:id
+    """), {"id": head_id})
+    return child
+
+
 # The head->followers settle trigger. Its follower writes are staged for the
 # ledger by ``stage_followers``, which ``DeliveryTransitionEvents.stage`` calls
 # for every head transition; it lives outside a function on purpose, since
@@ -202,9 +288,13 @@ _SETTLE_FUNCTION = """
                 UPDATE inter_bot_deliveries SET status='DELIVERED',
                     delivered_at=COALESCE(delivered_at, now()), updated_at=now()
                 WHERE batch_head_id=NEW.id AND status='DISPATCHING' AND delivery_mode='batched';
-            ELSIF NEW.status = 'QUEUED'
-                  OR (NEW.status = 'FAILED'
-                      AND COALESCE(NEW.metadata_json->>'restart_retry_pending', '') = 'true') THEN
+            ELSIF NEW.status = 'FAILED'
+                  AND (COALESCE(NEW.metadata_json->>'restart_retry_pending', '') = 'true'
+                       OR current_setting('llm_bawt.batch_hold', true) = NEW.id) THEN
+                -- A restart-retry decision is pending: settle_retry() decides
+                -- the followers with it, keeping the batch under one owner.
+                RETURN NEW;
+            ELSIF NEW.status = 'QUEUED' THEN
                 UPDATE inter_bot_deliveries SET status='QUEUED', delivery_mode=NULL,
                     target_turn_id=NULL, available_at=now(), next_retry_at=NULL,
                     last_error='released with its inbox batch head', updated_at=now()

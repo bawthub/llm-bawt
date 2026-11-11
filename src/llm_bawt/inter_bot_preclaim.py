@@ -63,6 +63,13 @@ def user_bypass_candidate(conn, target: str, *, send_now: bool = False):
               WHERE d.target_bot_id=:target AND d.lane='normal'
                 AND d.status IN ('STEERING','DISPATCHING')
                 AND NOT ({_ACCEPTED_OPEN_DISPATCH})
+                -- A batched follower is in flight exactly as its head is.
+                AND NOT (d.delivery_mode='batched' AND EXISTS (
+                    SELECT 1 FROM inter_bot_deliveries h
+                    WHERE h.id=d.batch_head_id AND h.status='DISPATCHING'
+                      AND h.transport_accepted_at IS NOT NULL
+                      AND EXISTS (SELECT 1 FROM turn_logs t
+                                  WHERE t.id=h.turn_id AND t.ended_at IS NULL)))
           )
         ORDER BY c.ordinal ASC LIMIT 1
     """), {"target": target}).mappings().first()

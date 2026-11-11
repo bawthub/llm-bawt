@@ -408,6 +408,9 @@ def fail_claim_with_restart_retry(
 
     with store.engine.begin() as conn:
         lock_target(conn, record.target_bot_id)
+        if conn.dialect.name == "postgresql":
+            from .inter_bot_batch import hold
+            hold(conn, record.id)
         failed = store.fail_claim(record.id, claim_token, error, connection=conn)
         if failed is None:
             return None, None
@@ -469,6 +472,9 @@ def _restart_retry_failed(
               "outcome": json.dumps(outcome)}).mappings().first()
         if row is not None:
             stamped = DeliveryRecord.from_mapping(row)
+    if conn.dialect.name == "postgresql":
+        from .inter_bot_batch import settle_retry
+        child = settle_retry(conn, delivery_id, shutdown=shutdown, child=child)
     return stamped, child
 
 

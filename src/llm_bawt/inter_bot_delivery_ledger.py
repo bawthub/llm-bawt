@@ -162,7 +162,7 @@ class DeliveryTransitionEvents:
             CommitStagedAppends.stage(conn, lambda c: cls.flush(c, staged))
             # TASK-1252: the settle trigger moved a batch head's followers too.
             for record in records:
-                if (record.delivery_mode == "turn" and record.status != "DISPATCHING"
+                if (record.delivery_mode != "batched" and record.status != "DISPATCHING"
                         and conn.dialect.name == "postgresql"):
                     from .inter_bot_batch import stage_followers
                     stage_followers(conn, record.id)
