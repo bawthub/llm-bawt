@@ -232,7 +232,10 @@ def settle_retry(conn, head_id: str, *, shutdown: bool, child: Any | None) -> An
             else f"{message}\n\n{batch}"
         updated_child = conn.execute(sa_text("""
             UPDATE inter_bot_deliveries SET payload_json=CAST(:payload AS jsonb), message=:message,
-                metadata_json=COALESCE(metadata_json, '{}'::jsonb)
+                -- The head's batch keys were copied with its metadata; the child
+                -- is not a batch head and its own payload is the prompt to send.
+                metadata_json=(COALESCE(metadata_json, '{}'::jsonb)
+                    - 'batch_member_ids' - 'batch_prompt')
                     || jsonb_build_object('batch_carried_ids', CAST(:ids AS jsonb))
             WHERE id=:id RETURNING *
         """), {"id": child.id, "payload": json.dumps(payload), "message": message,
