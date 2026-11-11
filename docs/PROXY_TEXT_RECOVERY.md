@@ -78,7 +78,7 @@ they cannot prove whether the upstream is secretly reasoning.
   and returns `900` on the follow-up. Earlier raw mixed-reasoning A/text A/B/text B
   acceptance also succeeded, but without prefix validation duplicated text.
 
-Activation verified 2026-10-13: Nick explicitly approved one Claude bridge
+Activation verified 2026-10-13: the operator explicitly approved one Claude bridge
 restart; managed job `4a56f71dbcee4e3789e20dab0e18b495` succeeded (exit 0) at
 13:15:36Z. Container start advanced to 13:15:36.134455217Z, Docker health was
 healthy, bridge `/health` returned `redis:true`, and app `/health` returned

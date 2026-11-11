@@ -25,7 +25,7 @@ from tests.test_ops_image_deploy import (
 SEED = next(s for s in SEEDS if s["slug"] == "bawthub.reconcile-prod-routing")
 SPEC = json.loads(SEED["command_script"])
 ROUTER = "traefik.http.routers.frontprod-api"
-RULE = "(Host(`app.bawthub.com`) || Host(`echo.ferreri.us`)) && (PathPrefix(`/api/chat`) || PathPrefix(`/api/clog`))"
+RULE = "(Host(`app.bawthub.com`) || Host(`legacy.example`)) && (PathPrefix(`/api/chat`) || PathPrefix(`/api/clog`))"
 REF = REPO + "@sha256:" + "a" * 64
 REPORT = {"status": "down", "summary": {"ok": 1, "degraded": 0, "down": 1},
           "checks": [{"slug": "bawthub.database", "status": "ok"}, {"slug": "bridge.codex", "status": "down"}]}

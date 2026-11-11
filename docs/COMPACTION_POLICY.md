@@ -133,8 +133,8 @@ truncation. A provider 400 produced a failed compact status with no successful
 boundary/summary. These protocol tests are not evidence of model quality or
 latency.
 
-**Additional read-only command-hook evidence (2026-10-13):** Snark's isolated
-`/tmp/snark-precompact-hook-probe.py` was reproduced locally with CLI 2.1.283,
+**Additional read-only command-hook evidence (2026-10-13):** an independent isolated
+command-hook probe was reproduced locally with CLI 2.1.283,
 runtime SDK 0.2.160, disposable HOME/config/session, local fake provider, no
 paid requests or live settings. It configures a per-probe `PreCompact` command
 hook through `ClaudeAgentOptions.settings` with all other setting sources disabled.
@@ -147,11 +147,13 @@ and checks for the marker in the upstream summary request. Results:
 | Manual bare | null | yes | 1 | none |
 | Manual custom | exact `CUSTOM_KEEP_EVERYTHING_82` | no | 1 | none |
 
-Reproduce (read-only isolated probe; temporary script may not persist):
+Reproduction template (read-only isolated probe; the historical temporary script
+may not persist). Set `CHECKOUT` to the source checkout and `PROBE_SCRIPT` to the
+retained probe script before running:
 
 ```sh
-PYTHONPATH=/app/.venv/lib/python3.12/site-packages:/home/bridge/dev/llm-bawt/src \
-  /home/bridge/dev/llm-bawt/.venv/bin/python /tmp/snark-precompact-hook-probe.py
+PYTHONPATH="/app/.venv/lib/python3.12/site-packages:${CHECKOUT:?}/src" \
+  "${CHECKOUT}/.venv/bin/python" "${PROBE_SCRIPT:?}"
 ```
 
 The earlier read-only probe established the mechanism. The follow-up now tests
@@ -194,11 +196,11 @@ Source and tests only. The new hook is added to persistent Claude settings **at
 bridge startup**, not by editing the live settings during tests. Existing hook
 groups are preserved, and repeated bootstrap is idempotent. App route changes
 and bridge policy need their respective process reloads before deployment can
-be claimed. A bridge restart requires Nick's approval for that exact run and
+be claimed. A bridge restart requires the operator's approval for that exact run and
 managed ops. No commit, push, restart or production deployment was performed
 for this implementation. The existing global compaction threshold (250000),
 selected models and provider caching are unchanged. The compaction prompt is
 now an editable global registry entry with seed/reset text only in the app;
 subsequent edits use the live registry without a bridge/session restart once
 the new source is activated. Do not treat the new source as live until the app
-and bridge are reloaded with Nick's exact-run bridge approval.
+and bridge are reloaded with the operator's exact-run bridge approval.

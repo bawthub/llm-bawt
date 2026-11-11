@@ -2,12 +2,11 @@
 
 ## Observed reference
 
-Read from live Home Assistant (no trigger): `automation.garage_is_open`, ID
-`1682802048166`, alias **ALERT Garage Open**. It invokes
-`media_player.play_media` on `media_player.kitchen_display`, with
-`media-source://tts/google_translate?message=Garage+Door+is+OPEN` and type
-`provider`. It also switches a device and sends a phone notification. This feature
-reuses only the media-player transport; it does not alter or trigger that automation.
+A read-only reference inspection found a Home Assistant garage-door alert using
+`media_player.play_media`, a `media-source://tts/google_translate?...` URL and
+type `provider`. It also switches a device and sends a phone notification.
+This feature reuses only the media-player transport; it does not alter or trigger
+the reference automation. Entity IDs and device names are deployment configuration.
 
 ## Architecture
 
@@ -34,34 +33,32 @@ reference for calling examples and hazards.
 
 ## Configuration
 
-Global DB runtime setting `home_audio` (object; omitted fields use local defaults):
+Global DB runtime setting `home_audio` (object; omitted fields use implementation
+defaults). This is an illustrative configuration, not deployed values: replace
+the example origins and entity IDs with the installation's reachable services
+and explicitly selected targets.
 
 ```json
 {
-  "tts_url": "http://10.0.0.101/api",
-  "media_base_url": "http://10.0.0.101:8642",
+  "tts_url": "http://tts.example/api",
+  "media_base_url": "http://media.example:8642",
   "targets": [
-    "media_player.kitchen_display",
-    "media_player.bedroom_display",
-    "media_player.sunroom_display",
-    "media_player.office_speaker",
-    "media_player.bathroom_speaker",
-    "media_player.chromecastaudio2533",
-    "media_player.all"
+    "media_player.example_display",
+    "media_player.example_speaker"
   ]
 }
 ```
 
 HA base/token reuse `HA_NATIVE_MCP_URL` / `HA_NATIVE_MCP_TOKEN`; the native-MCP
 feature flag does not gate this REST integration. No credentials in runtime JSON.
-`bathroom_speaker` is currently named Basement Speaker. `chromecastaudio2533` is
-Office chrome. Target selection is explicit; All is never a default.
+Discover the installation's entity IDs rather than assuming a device's display
+name matches its entity ID. Target selection is explicit; All is never a default.
 
-The TTS base was verified via `/api/v1/tts/providers` on echo. The media base must
+The reference TTS base was verified via `/api/v1/tts/providers`. The media base must
 be accessible directly by Cast clients with no OAuth/cookies and valid LAN routing.
-The original immutable-asset flow passed live kitchen/sunroom tests with Azure
+The original immutable-asset flow passed live tests on two displays with Azure
 and Moshi. Named replacement needs a fresh live verification after app activation.
-Loopy currently has no default voice: supply a voice or configure the bot profile.
+If a bot has no default voice, supply a voice or configure the bot profile.
 
 ## Queue semantics
 
@@ -110,7 +107,7 @@ There are no added Python dependencies or frontend changes.
 2. After authorized activation, verify `/v1/tts/render` and fresh MCP discovery.
 3. Generate a short WAV silently using a selected available voice; inspect asset
    MIME, byte length, duration, and unauthenticated LAN URL access.
-4. With Nick's selected target/test timing, enqueue one audible test. Verify the
+4. With the operator's selected target/test timing, enqueue one audible test. Verify the
    actual device, exact URL playback state, and terminal job status.
 5. Queue two distinct short messages and check ordering; replay the same key and
    confirm no second announcement. Test cancellation while another job owns lane.

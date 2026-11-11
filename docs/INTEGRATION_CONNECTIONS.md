@@ -40,7 +40,7 @@ configuration is retained; it is not reused as a service-account credential.
 
 **Authority:** delegation can impersonate domain users within its granted scope.
 The configured single-user restriction is application behavior, not an IAM bound.
-Nick approved this Workspace-only direction after that distinction was explained.
+The Workspace-only direction was approved after that distinction was explained.
 
 Routes: PUT `/v1/integrations/{id}/workspace` (service_account_json, subject),
 POST `/v1/integrations/{id}/workspace/verify`. Reuse the existing same-origin proxy.
@@ -88,8 +88,9 @@ of *our* server, not a Google-issued OAuth application credential.
    Google Keep API there and configure the intended Workspace audience. Do not
    assume the Google Home project is the project containing this OAuth client.
 2. Create/use a Google Web application OAuth client. Register exactly:
-   `https://dev.bawthub.com/api/chat/proxy/v1/integrations/google-keep/callback`
-   for dev. Each deployment hostname needs its corresponding registered URI.
+   `https://app.example/api/chat/proxy/v1/integrations/google-keep/callback`
+   after replacing `app.example` with the deployment's hostname. Each deployment
+   hostname needs its corresponding registered URI.
    This slice supports one active callback origin and account per integration.
 3. Read Google's official [Keep authorization overview](https://developers.google.com/workspace/keep/api/guides).
    It documents domain-wide delegation with an OAuth client ID: the administrator
@@ -143,7 +144,7 @@ Google's official [Keep Java quickstart](https://developers.google.com/workspace
 uses a service account authorized through Workspace domain-wide delegation. The
 [service-account protocol](https://developers.google.com/identity/protocols/oauth2/service-account)
 obtains short-lived access tokens from signed assertions, avoiding browser consent
-and the lost refresh-token loop. Nick subsequently approved this Workspace-only
+and the lost refresh-token loop. The operator subsequently approved this Workspace-only
 direction; it is implemented above but still awaits real service-account credentials
 and a successful live Keep API test.
 

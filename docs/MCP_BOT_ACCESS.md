@@ -20,7 +20,7 @@ No cross-bot request starts a worker or performs a lazy policy read.
 The background read uses `bot_tags.TagSnapshot` (TASK-1329:
 every profile with its tags and catalog in one read-only statement).
 
-Nick selected **bounded revocation delay**, not immediate global revocation:
+The selected contract is **bounded revocation delay**, not immediate global revocation:
 - Freshness expires **five seconds from before the snapshot read**, including
   connection/read latency. An observed notification invalidates the old view
   immediately and requests refresh. Cold, failed, expired or disconnected views
@@ -166,7 +166,7 @@ until the underlying thread finishes even if the awaiting request is cancelled.
 
 ## Deliberate exclusions
 
-Nick's 2026-10-23 ruling excludes new send/waited-send/router/reset/compact/cancel
+The 2026-10-23 scope decision excludes new send/waited-send/router/reset/compact/cancel
 mutation restrictions. Availability and router discovery hide private and
 inactive bots (TASK-1329 S3). A private bot can still be messaged or reset; a new
 send to an `inactive` bot is refused with `target_inactive`.

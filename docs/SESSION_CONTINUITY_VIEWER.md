@@ -105,6 +105,6 @@ settings, and additional metadata stay under Technical details.
   distinct dismiss/navigation close reasons.
 
 Frontend HMR does not activate Python changes. App code needs its authorized ops
-restart; bridge receipt code needs Nick's explicit authorization for that exact
+restart; bridge receipt code needs the operator's explicit authorization for that exact
 bridge restart. Until both are active, do not claim an end-to-end live reset was
 verified. Older sessions cannot be backfilled accurately from a fresh preview.
