@@ -56,7 +56,12 @@ _LEAD_IN = r"(?:(?:ok(?:ay)?|yes|yep|sure|great|good|cool|now|then|and|so|please
 _OBJECT = (r"(?:it|that|this|them|these|those|everything|all|now|"
            r"(?:the|your|my|these|those) (?:changes?|work|fix(?:es)?|edits?|branch|commits?)|"
            r"(?:and|then) (?:commit|push|ship))")
-_ASK_CLAUSE = re.compile(rf"^\s*{_LEAD_IN}(?:commit|push|ship)(?:\s+{_OBJECT}\b.*|\s*)$",
+# The clause must be complete: only a closed set of trailing words may follow
+# the object, so "commit this to memory", "push this button ..." or "commit
+# the changes after I approve them" stay locked.
+_TAIL = (r"(?:\s+(?:(?:and|then)\s+(?:commit|push|ship)(?:\s+it)?|now|please|for me|"
+         r"(?:up|to|on)\s+(?:main|master|origin|the branch|github)))*")
+_ASK_CLAUSE = re.compile(rf"^\s*{_LEAD_IN}(?:commit|push|ship)(?:\s+{_OBJECT})?{_TAIL}\s*$",
                          re.IGNORECASE)
 _CLAUSE_SPLIT = re.compile(r"[.!;\n]+|,\s*(?:then|and)\s+|\s+(?:then|and then)\s+")
 _NEGATION = re.compile(r"\b(?:not|don'?t|do not|never|no|stop|hold off|wait)\b", re.IGNORECASE)

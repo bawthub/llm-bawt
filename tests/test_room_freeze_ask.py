@@ -16,6 +16,8 @@ from llm_bawt.room_freeze_notice import asks_to_commit, room_freeze_state, with_
     "please ship it",
     "yes, commit",
     "fix the typo, then commit",
+    "commit the changes and push to master",
+    "push it now",
 ])
 def test_affirmative_asks(text):
     assert asks_to_commit(text)
@@ -33,6 +35,10 @@ def test_affirmative_asks(text):
     "Commit message needs fixing.",
     "Push notifications are broken.",
     "Commit it. Actually, don't commit anything yet.",
+    "Commit this to memory.",
+    "Push this button to reproduce the issue.",
+    "Commit the changes after I approve them.",
+    "Commit it if the tests pass.",
     "",
 ])
 def test_mentions_questions_and_prohibitions_stay_locked(text):
