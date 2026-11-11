@@ -205,7 +205,7 @@ def test_helper_is_host_network_but_has_no_socket_mounts_credentials_or_shell():
     api = HelperDocker({"ready": True, "packet_sent": True})
     receipt = {}
     assert "verified" in wol.run_worker(api, snapshot(), JOB, receipt)
-    body = api.calls[0][2]
+    body = next(c[2] for c in api.calls if c[1].startswith("/containers/create?"))
     assert body["Image"] == IMAGE
     assert body["Entrypoint"] == ["python3", "-I", "/ops/wake_on_lan.py"]
     assert json.loads(body["Cmd"][0]) == SPEC
@@ -379,3 +379,76 @@ def test_catalog_default_timeout_must_cover_maximum_wait():
         OpsStore._validate_op(op)
     op.timeout_seconds = 330
     OpsStore._validate_op(op)
+
+
+# TASK-2161: exited helpers left behind when the parent worker died.
+NOW = 1_800_000_000.0
+
+
+def helper(job, *, status="exited", age=3600, cid=None, name=None, labels=None):
+    from datetime import datetime, timezone
+    finished = datetime.fromtimestamp(NOW - age, timezone.utc).isoformat().replace("+00:00", ".123456789Z")
+    tag = hashlib.sha256(job.encode()).hexdigest()[:24]
+    return {"Id": cid or f"c-{job}", "Name": name or f"/llm-bawt-ops-wake-{tag}",
+            "Config": {"Labels": labels if labels is not None else {wol.HELPER_LABEL: "1", wol.JOB_LABEL: job}},
+            "State": {"Status": status, "Running": status == "running", "FinishedAt": finished}}
+
+
+class OrphanDocker:
+    def __init__(self, containers, *, delete_error=None):
+        self.containers = {c["Id"]: c for c in containers}
+        self.delete_error, self.calls = delete_error, []
+
+    def request(self, method, path, *, body=None):
+        self.calls.append((method, path))
+        if method == "GET" and path.startswith("/containers/json?"):
+            return [{"Id": cid} for cid in self.containers]
+        if method == "GET":
+            return self.containers[path.split("/")[2]]
+        if method == "DELETE":
+            if self.delete_error:
+                raise self.delete_error
+            return None
+        pytest.fail(f"unexpected {method} {path}")
+
+
+def test_reaps_only_old_exited_helpers_of_other_jobs():
+    api = OrphanDocker([
+        helper("dead-job"),
+        helper(JOB),                                        # this job's own name
+        helper("recent", age=60),                           # parent may still be alive
+        helper("running", status="running"),
+        helper("forged", name="/llm-bawt-ops-wake-" + "0" * 24),
+        helper("unlabelled", labels={wol.JOB_LABEL: "unlabelled"}),
+        helper("unrelated", name="/bawthub-nocodb-1"),
+    ])
+    report = wol.reap_orphans(api, JOB, now=lambda: NOW)
+    assert report["removed"] == [{"container_id": "c-dead-job", "job_id": "dead-job"}]
+    assert report["skipped"] == 6
+    deletes = [c for c in api.calls if c[0] == "DELETE"]
+    assert deletes == [("DELETE", "/containers/c-dead-job?v=1")]   # unforced
+    assert not any(c[1].endswith("/start") or "create" in c[1] for c in api.calls)
+
+
+def test_reap_failure_never_blocks_the_wake():
+    api = OrphanDocker([helper("dead-job")], delete_error=OSError("409 conflict"))
+    assert wol.reap_orphans(api, JOB, now=lambda: NOW) == {"removed": [], "skipped": 0, "error": "OSError"}
+
+
+def test_worker_reaps_orphan_before_its_own_helper_and_records_it(monkeypatch):
+    api = HelperDocker({"ready": True, "packet_sent": True})
+    orphans = OrphanDocker([helper("dead-job")])
+    original = api.request
+
+    def request(method, path, *, body=None):
+        if path.startswith("/containers/json?") or (method == "GET" and path.startswith("/containers/c-")) \
+                or path.startswith("/containers/c-"):
+            return orphans.request(method, path)
+        return original(method, path, body=body)
+
+    api.request = request
+    monkeypatch.setattr(wol.time, "time", lambda: NOW)
+    receipt = {}
+    assert "verified" in wol.run_worker(api, snapshot(), JOB, receipt)
+    assert receipt["wake_on_lan_orphans"]["removed"][0]["job_id"] == "dead-job"
+    assert api.calls[-1][:2] == ("DELETE", "/containers/helper?force=1&v=1")

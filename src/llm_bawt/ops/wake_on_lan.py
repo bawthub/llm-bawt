@@ -22,6 +22,13 @@ ACTION = "wake_on_lan"
 WORKER_CAPABILITY_LABEL = "llm-bawt.ops.wake-on-lan"
 POLL_SECONDS = 2
 OUTPUT_LIMIT = 8192
+HELPER_LABEL = "llm-bawt.ops.wake-helper"
+JOB_LABEL = "llm-bawt.ops.job"
+# A live parent deletes its helper seconds after it exits, so a helper exited
+# this long ago has a dead parent. Far beyond any helper's own alarm (<=301s).
+ORPHAN_MIN_AGE_SECONDS = 600
+ORPHAN_SWEEP_LIMIT = 20
+_HELPER_NAME = re.compile(r"/?llm-bawt-ops-wake-([0-9a-f]{24})")
 LIFECYCLE_MARGIN_SECONDS = 30
 _KEYS = frozenset({
     "action", "mac_address", "broadcast_address", "host_address", "tcp_ports",
@@ -155,6 +162,50 @@ def wake(spec: dict, *, clock=time.monotonic, sleep=time.sleep, check=probe, sen
     return {**result, "elapsed_seconds": round(clock() - started, 2)}
 
 
+def _finished_epoch(value) -> float | None:
+    from datetime import datetime
+    if not isinstance(value, str) or value.startswith("0001-"):
+        return None
+    try:
+        return datetime.fromisoformat(re.sub(r"(\.\d{6})\d*", r"\1", value).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def reap_orphans(api, job_id: str, *, now=None) -> dict:
+    """Remove exited helpers left by a parent worker that died (TASK-2161).
+
+    Best effort and bounded; never fails the wake. A container is removed only
+    when it carries the helper label and a job label whose hash is its own
+    name, is not this job's, is stopped, and stopped ORPHAN_MIN_AGE_SECONDS
+    ago. The DELETE is unforced, so Docker refuses one that started since.
+    Nothing is started, so no packet can be replayed.
+    """
+    now = now or time.time
+    report = {"removed": [], "skipped": 0}
+    try:
+        filters = json.dumps({"label": [f"{HELPER_LABEL}=1"], "status": ["exited", "dead"]})
+        listed = api.request("GET", "/containers/json?" + urlencode({"all": "1", "filters": filters})) or []
+        for item in listed[:ORPHAN_SWEEP_LIMIT]:
+            info = api.request("GET", f"/containers/{quote(str(item.get('Id', '')), safe='')}/json") or {}
+            labels = (info.get("Config") or {}).get("Labels") or {}
+            state = info.get("State") or {}
+            owner = labels.get(JOB_LABEL)
+            match = _HELPER_NAME.fullmatch(info.get("Name") or "")
+            finished = _finished_epoch(state.get("FinishedAt"))
+            if (labels.get(HELPER_LABEL) != "1" or not isinstance(owner, str) or owner == job_id
+                    or not match or match.group(1) != hashlib.sha256(owner.encode()).hexdigest()[:24]
+                    or state.get("Status") not in ("exited", "dead") or state.get("Running")
+                    or finished is None or now() - finished < ORPHAN_MIN_AGE_SECONDS):
+                report["skipped"] += 1
+                continue
+            api.request("DELETE", f"/containers/{quote(info['Id'], safe='')}?v=1")
+            report["removed"].append({"container_id": info["Id"], "job_id": owner})
+    except (OSError, RuntimeError, ValueError, TypeError, KeyError, AttributeError) as exc:
+        report["error"] = type(exc).__name__
+    return report
+
+
 def run_worker(api, snapshot: dict, job_id: str, receipt: dict) -> str:
     """Host-net helper has no mounts, secrets, shell or power-off mechanism.
 
@@ -172,6 +223,9 @@ def run_worker(api, snapshot: dict, job_id: str, receipt: dict) -> str:
     image = snapshot["execution"]["worker_image"]
     if not re.fullmatch(r"sha256:[0-9a-f]{64}|[A-Za-z0-9._:/-]+@sha256:[0-9a-f]{64}", image):
         raise ValueError("wake helper requires the immutable worker image")
+    reaped = reap_orphans(api, job_id)
+    if reaped["removed"] or reaped.get("error"):
+        receipt["wake_on_lan_orphans"] = reaped
     tag = hashlib.sha256(job_id.encode()).hexdigest()[:24]
     name = f"llm-bawt-ops-wake-{tag}"
     body = {
