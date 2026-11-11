@@ -42,6 +42,11 @@ GATE_DENY_REASON = (
     "bawthub, or skill-creation for the agent-skills repo) BEFORE any git "
     "commit/push/reset/rebase/merge/stash, then retry this command."
 )
+ROOM_FREEZE_DENY_REASON = (
+    "BLOCKED: the user is in the room (operator freeze). Do not commit, push, reset, "
+    "rebase, merge or stash unless the user's message explicitly asks you to. Leave "
+    "the work uncommitted; that is expected during the freeze."
+)
 REMINDER_ALL = (
     "CONTEXT WAS RESTORED FROM LOSSY SUMMARIES. Any skill you appear to have loaded "
     "earlier is NOT in context now — the rules, commands, paths, and git workflow are "
@@ -95,10 +100,30 @@ def _loaded(data: Mapping) -> set[str]:
         return set()
 
 
+def room_freeze_env(state: str | None) -> dict[str, str]:
+    """The env carrying the command's room freeze state; ``{}`` when none.
+
+    An unknown value is ignored rather than failing the user's turn.
+    """
+    from agent_bridge.room_freeze import ROOM_FREEZE_ENV, ROOM_FREEZE_STATES
+
+    return {ROOM_FREEZE_ENV: state} if state in ROOM_FREEZE_STATES else {}
+
+
+def _deny(reason: str) -> dict:
+    return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                   "permissionDecision": "deny",
+                                   "permissionDecisionReason": reason}}
+
+
 def git_gate(data: Mapping, env: Mapping[str, str]) -> dict | None:
+    from agent_bridge.room_freeze import LOCKED, ROOM_FREEZE_ENV
+
     command = (data.get("tool_input") or {}).get("command")
     if not isinstance(command, str) or not _MUTATING_GIT.search(command):
         return None
+    if env.get(ROOM_FREEZE_ENV) == LOCKED:
+        return _deny(ROOM_FREEZE_DENY_REASON)
     if GIT_SKILLS & (set(injected_skills(env)) | _loaded(data)):
         return None
     return {"hookSpecificOutput": {"hookEventName": "PreToolUse",

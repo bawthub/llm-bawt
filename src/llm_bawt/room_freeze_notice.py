@@ -11,6 +11,9 @@ prompt section.
 from __future__ import annotations
 
 import logging
+import re
+
+from agent_bridge.room_freeze import ASKED, LOCKED
 
 logger = logging.getLogger(__name__)
 
@@ -43,25 +46,42 @@ def render_notice(bot_id: str | None) -> str:
     return definition.default_body()
 
 
-def with_room_freeze_notice(prompt: str, *, engine, bot_id: str | None,
-                            reset_action: str | None = None) -> str:
-    """``prompt``, prefixed with the notice while the bot is in a room freeze.
+_ASKS_TO_COMMIT = re.compile(r"\b(commit|push|ship)\w*\b", re.IGNORECASE)
 
-    Never blocks a turn: a lookup failure sends the prompt unchanged. A reset
-    or bridge command (/new, /clear, /compact) is left alone, since a prefix
-    would turn the command into plain text.
+
+def room_freeze_state(prompt: str, *, engine, bot_id: str | None) -> str | None:
+    """``None`` outside a room freeze, else :data:`LOCKED` or :data:`ASKED`.
+
+    Read before any notice is prefixed, so only the message itself counts.
+    An inter-bot delivery never runs under a room freeze (it waits at the
+    claim), so a turn running now carries the user's message or a system
+    continuation; a continuation's text names no commit, so it stays locked.
+    A lookup failure answers ``None``: a DB fault never blocks a turn.
+    """
+    if engine is None or not bot_id:
+        return None
+    try:
+        if not in_room(engine, bot_id):
+            return None
+    except Exception as error:
+        logger.warning("room freeze lookup failed for %s: %s", bot_id, error)
+        return None
+    return ASKED if _ASKS_TO_COMMIT.search(prompt or "") else LOCKED
+
+
+def with_room_freeze_notice(prompt: str, state: str | None, *, bot_id: str | None,
+                            reset_action: str | None = None) -> str:
+    """``prompt``, prefixed with the notice when ``state`` is a room freeze.
+
+    A reset or bridge command (/new, /clear, /compact) is left alone, since a
+    prefix would turn the command into plain text.
     """
     from .turn_cutoff_notice import is_session_command
 
-    if engine is None or not bot_id or is_session_command(prompt, reset_action):
-        return prompt
-    try:
-        if not in_room(engine, bot_id):
-            return prompt
-    except Exception as error:
-        logger.warning("room freeze lookup failed for %s: %s", bot_id, error)
+    if state is None or is_session_command(prompt, reset_action):
         return prompt
     return f"{render_notice(bot_id)}\n\n{prompt}"
 
 
-__all__ = ["ROOM_FREEZE_NOTICE_KEY", "in_room", "render_notice", "with_room_freeze_notice"]
+__all__ = ["ROOM_FREEZE_NOTICE_KEY", "in_room", "render_notice", "room_freeze_state",
+           "with_room_freeze_notice"]

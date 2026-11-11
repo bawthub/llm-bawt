@@ -9,6 +9,7 @@ from collections.abc import Mapping, Sequence
 
 from .continuity import RESET_SKILLS_FIELD, SEED_FRAMING_FIELD, SeedFraming, reset_skills_field
 from .publisher import COMMANDS_STREAM
+from .room_freeze import ROOM_FREEZE_FIELD, ROOM_FREEZE_STATES
 from .houses import EPOCH_FIELD, TURN_TTL_S, route_new_command, turn_request_key, turn_session_key
 
 logger = logging.getLogger(__name__)
@@ -78,6 +79,7 @@ class CommandPublisherMixin:
         access_path_provider: str | None = None,
         skill_selection: Mapping | None = None,
         injected_skills: Sequence[str] | None = None,
+        room_freeze: str | None = None,
         house: str | None = None,
         on_house_fallback=None,
     ) -> None:
@@ -111,6 +113,10 @@ class CommandPublisherMixin:
             from .skill_selection import INJECTED_FIELD, injected_field
 
             fields[INJECTED_FIELD] = injected_field(injected_skills)
+        if room_freeze is not None:  # TASK-1692: the bridge's git hook blocks commits
+            if room_freeze not in ROOM_FREEZE_STATES:
+                raise ValueError(f"unknown room_freeze state {room_freeze!r}")
+            fields[ROOM_FREEZE_FIELD] = room_freeze
         if attachments:
             fields["attachments"] = json.dumps(attachments, ensure_ascii=False)
         if system_prompt:

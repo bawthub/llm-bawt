@@ -56,6 +56,29 @@ def test_gate_allows_a_skill_loaded_this_session_and_only_that_session():
     assert git_gate(_push("s2"), {}) is not None
 
 
+def test_room_freeze_locks_commits_even_with_a_git_skill_in_context():
+    """TASK-1692: while the user is in the room, commit/push waits for their ask."""
+    from agent_bridge.room_freeze import ROOM_FREEZE_ENV
+    from claude_code_bridge.skill_hooks import ROOM_FREEZE_DENY_REASON, room_freeze_env
+
+    skilled = {INJECTED_SKILLS_ENV: "git-commits"}
+    locked = git_gate(_push(), {**skilled, **room_freeze_env("locked")})
+    assert locked["hookSpecificOutput"]["permissionDecisionReason"] == ROOM_FREEZE_DENY_REASON
+    assert git_gate(_push(), {**skilled, **room_freeze_env("asked")}) is None
+    status = {"session_id": "s1", "tool_input": {"command": "git status"}}
+    assert git_gate(status, {**skilled, **room_freeze_env("locked")}) is None
+    assert room_freeze_env(None) == {} and room_freeze_env("bogus") == {}
+    assert room_freeze_env("locked") == {ROOM_FREEZE_ENV: "locked"}
+
+
+def test_room_freeze_rides_the_command_into_the_request():
+    from agent_bridge.room_freeze import ROOM_FREEZE_FIELD
+    from claude_code_bridge.send_request import SendRequest
+
+    assert ROOM_FREEZE_FIELD == "room_freeze"
+    assert "room_freeze" in SendRequest.__dataclass_fields__
+
+
 def test_gate_passes_read_only_git():
     assert git_gate({"session_id": "s1", "tool_input": {"command": "git status"}}, {}) is None
 

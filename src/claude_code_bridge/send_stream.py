@@ -144,6 +144,7 @@ class ClaudeStreamMixin:
         skill_selection: str | None = None,
         prompt_cache_ttl: str | None = None,
         injected_skills: str | None = None,
+        room_freeze: str | None = None,
     ) -> dict:
         """Build the environment dict handed to ``ClaudeAgentOptions(env=...)``.
 
@@ -170,6 +171,10 @@ class ClaudeStreamMixin:
         from .skill_hooks import injected_skills_env
 
         sdk_env.update(injected_skills_env(injected_skills))
+        # TASK-1692: the user is in the room; the git hook blocks commit/push.
+        from .skill_hooks import room_freeze_env
+
+        sdk_env.update(room_freeze_env(room_freeze))
         if use_proxy:
             sdk_env["ANTHROPIC_BASE_URL"] = self._proxy_base_url  # type: ignore[assignment]
             # The SDK still requires *some* auth token to send; the

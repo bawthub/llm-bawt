@@ -344,6 +344,7 @@ class ClaudeSendMixin(
                         skill_bundle=req.skill_bundle,
                         skill_selection=req.skill_selection,
                         injected_skills=req.injected_skills,
+                        room_freeze=req.room_freeze,
                         native_route=native_route,
                         prompt_cache_ttl=req.prompt_cache_ttl,
                     )

@@ -25,7 +25,7 @@ from typing import Any, Iterator
 
 from .base import AgentBackend
 from ..seed_framing import resolve_seed_framing
-from ..room_freeze_notice import with_room_freeze_notice
+from ..room_freeze_notice import room_freeze_state, with_room_freeze_notice
 from ..turn_cutoff_notice import with_cutoff_notice
 from ..service.upstream_status import upstream_status_queue_item
 from ..utils.config import Config
@@ -237,10 +237,14 @@ class AgentBridgeBackend(AgentBackend):
             session_key=session_key, request_id=request_id,
             reset_action=config.get("bridge_reset_action"),
         )
-        # TASK-1692: while the user is "in the room", say so on every turn.
-        prompt = with_room_freeze_notice(
+        # TASK-1692: while the user is "in the room", say so on every turn, and
+        # tell the bridge's git hook whether this turn's message asked to commit.
+        room_freeze = room_freeze_state(
             prompt, engine=_turn_log_engine(),
             bot_id=str(config.get("bot_id") or "").strip() or None,
+        )
+        prompt = with_room_freeze_notice(
+            prompt, room_freeze, bot_id=str(config.get("bot_id") or "").strip() or None,
             reset_action=config.get("bridge_reset_action"),
         )
 
@@ -327,6 +331,7 @@ class AgentBridgeBackend(AgentBackend):
                             skill_bundle=config.get("skill_bundle"),
                             skill_selection=config.get("skill_selection"),
                             injected_skills=config.get("injected_skills"),
+                            room_freeze=room_freeze,
                             house=config.get("house"),
                             on_house_fallback=house_fallback_for(config),
                             subagent_model=(

@@ -19,6 +19,7 @@ from agent_bridge.continuity import (
     reset_skills_from_field,
 )
 from agent_bridge.prompt_cache import normalize_prompt_cache_ttl
+from agent_bridge.room_freeze import ROOM_FREEZE_FIELD
 from agent_bridge.skill_selection import INJECTED_FIELD, SELECTION_FIELD
 
 from ._bridge_helpers import _bot_slug_from_session_key
@@ -72,6 +73,8 @@ class SendRequest:
     skill_selection: str | None = None
     # TASK-1691: comma-separated refs whose bodies the system prompt carries.
     injected_skills: str | None = None
+    # TASK-1692: "locked"/"asked" while the user is in the room; the git hook reads it.
+    room_freeze: str | None = None
     # App-resolved Claude Code auto-compact window (None = CLI default).
     compact_threshold: int | None = None
     # App-resolved prompt-cache TTL ("5m"/"1h"; None = CLI default).
@@ -294,6 +297,7 @@ class SendRequest:
             skill_bundle=fields.get("skill_bundle"),
             skill_selection=fields.get(SELECTION_FIELD),
             injected_skills=fields.get(INJECTED_FIELD),
+            room_freeze=fields.get(ROOM_FREEZE_FIELD),
             access_path=(
                 str(fields["access_path"]).strip()
                 if fields.get("access_path") is not None else None

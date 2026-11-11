@@ -133,14 +133,22 @@ def test_bot_authored_ordinary_start_is_never_stamped(gated):
 
 @pytest.mark.integration
 def test_notice_is_prefixed_only_while_the_room_freeze_is_live(gated):
-    from llm_bawt.room_freeze_notice import with_room_freeze_notice
+    from agent_bridge.room_freeze import ASKED, LOCKED
+    from llm_bawt.room_freeze_notice import room_freeze_state, with_room_freeze_notice
 
     bot = gated.bot()
     engine = gated.store.engine
-    assert with_room_freeze_notice("hi", engine=engine, bot_id=bot) == "hi"
+
+    def noticed(prompt):
+        state = room_freeze_state(prompt, engine=engine, bot_id=bot)
+        return state, with_room_freeze_notice(prompt, state, bot_id=bot)
+
+    assert noticed("hi") == (None, "hi")
     actor, frozen = _freeze(gated, bot, admit_user=True)
-    noticed = with_room_freeze_notice("hi", engine=engine, bot_id=bot)
-    assert noticed.endswith("\n\nhi") and "in the room" in noticed and "Do not commit" in noticed
-    assert with_room_freeze_notice("/new", engine=engine, bot_id=bot) == "/new"
+    state, text = noticed("hi")
+    assert state == LOCKED
+    assert text.endswith("\n\nhi") and "in the room" in text and "Do not commit" in text
+    assert noticed("ok, commit that and push it")[0] == ASKED
+    assert noticed("/new") == (LOCKED, "/new")
     thaw(engine, frozen.gate_id, actor=actor)
-    assert with_room_freeze_notice("hi", engine=engine, bot_id=bot) == "hi"
+    assert noticed("hi") == (None, "hi")
