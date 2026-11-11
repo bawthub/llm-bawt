@@ -62,6 +62,10 @@ jobs:
       # local stress gate matches CI (TASK-1457).
       - run: make test-all
         env:
+          # Public/fork CI has no installation data. Explicitly empty policy
+          # still enforces the generic path/network/container rules; private
+          # installations run the private policy in their exact-tip gate.
+          GENERAL_USE_DENYLIST_JSON: '{"version":1,"mode":"public","hmac_key_file":"","operator_identities":[],"personal_domains":[],"container_names":[],"bot_slugs":[]}'
           LLM_BAWT_UNIT_TIME_BUDGET_SECONDS: "3"
           LLM_BAWT_REAL_PROCESS_TIME_BUDGET_SECONDS: "7"
           LLM_BAWT_TEST_WORKERS: "2"

@@ -49,7 +49,8 @@ STOP_GRACE_S = (30.0, 10.0)  # SIGINT → SIGTERM → SIGKILL
 RUN_RETENTION_S = 14 * 24 * 3600
 # A patch touching these changes the runner that judges it; the receipt says so.
 RUNNER_FILES = ("Makefile", "pyproject.toml", "uv.lock", "scripts/test_suite.py",
-                "scripts/test_snapshot.py", "tests/conftest.py", "tests/suite_manifest.py")
+                "scripts/test_snapshot.py", "scripts/general_use_contract.py",
+                "general-use-baseline.json", "tests/conftest.py", "tests/suite_manifest.py")
 PROVENANCE_WINDOW_DAYS = 14
 # gate = test-all at exactly REV, recorded as the SHIP receipt (TASK-1457). The
 # repeated stress step is an optional diagnostic (make test-stress), not part of it.

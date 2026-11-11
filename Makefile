@@ -311,7 +311,7 @@ endif  # not Windows
 # DEV TOOLS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-.PHONY: lint format typecheck test test-cov test-integration test-pg-acceptance test-all test-offline-integration test-sdk-probe test-profile test-target test-snapshot test-stress test-timing-report test-sweep gate gate-receipt test-service test-paid
+.PHONY: lint format typecheck test test-cov test-integration test-pg-acceptance test-all contract-guard test-offline-integration test-sdk-probe test-profile test-target test-snapshot test-stress test-timing-report test-sweep gate gate-receipt test-service test-paid
 
 # Every scenario enters the same locked runner; CI calls these targets too.
 # Dev tools share that locked, isolated env: the shared .venv has no dev extra
@@ -346,7 +346,10 @@ test-offline-integration: ## Real local sockets/threads, no DB or service
 test-sdk-probe: ## Opt-in installed SDK CLI vs fake localhost providers; optional NODES=tests/...
 	$(TEST_RUNNER) sdk-probe $(NODES)
 
-test-all: ## Exhaustive fail-closed offline gate: unit + private PG + local integration
+contract-guard: ## General-use ratchet; private policy is external to tracked source
+	python3 scripts/general_use_contract.py
+
+test-all: contract-guard ## Exhaustive fail-closed offline gate: contract + unit + private PG + local integration
 	$(TEST_RUNNER) offline
 
 test-profile: ## Report all unit durations including setup/call/teardown
