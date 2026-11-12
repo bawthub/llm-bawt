@@ -114,8 +114,7 @@ and limitations, with one link from SKILL.md. Publish in the same turn using the
 shared skill workflow, after commit/push authorization; do not strand a live
 unpublished edit. Do not replace the existing skills symlink.
 
-Ambient skill installation does not extend explicit skill bundles. Do not
-change bot profiles or reset sessions just to force visibility. Ordinary source
+Do not change bot profiles or reset sessions just to force visibility. Ordinary source
 repository architecture analysis uses repository tools, not REA.
 
 ## Verification receipts

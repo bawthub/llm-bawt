@@ -67,7 +67,6 @@ class SendRequest:
     # TASK-701: opaque app-signed current-turn authority, forwarded as an MCP
     # HTTP header. The bridge never opens or logs the payload.
     task_turn_capability: str | None = None
-    skill_bundle: str | None = None
     # TASK-1309: the session's pinned managed selection, raw command field;
     # parsed where it is applied so a malformed one fails the turn visibly.
     skill_selection: str | None = None
@@ -294,7 +293,6 @@ class SendRequest:
             thread_resume_id=thread_resume_id,
             explicit_thread=explicit_thread,
             task_turn_capability=task_turn_capability,
-            skill_bundle=fields.get("skill_bundle"),
             skill_selection=fields.get(SELECTION_FIELD),
             injected_skills=fields.get(INJECTED_FIELD),
             room_freeze=fields.get(ROOM_FREEZE_FIELD),

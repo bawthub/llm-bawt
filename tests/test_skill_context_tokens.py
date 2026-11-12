@@ -32,7 +32,6 @@ def test_skill_size_reads_installed_file_only(tmp_path, monkeypatch):
     assert skill_context_tokens({"skill": "llm-bawt:extra"}) is None
     (root / "linked").symlink_to(tmp_path)
     assert skill_context_tokens({"skill": "linked"}) is None
-    assert skill_context_tokens({"skill": "llm-bawt"}, skill_bundle="tenant") is None
 
 
 def test_multiroot_selection_and_frontmatter(tmp_path, monkeypatch):
@@ -44,7 +43,6 @@ def test_multiroot_selection_and_frontmatter(tmp_path, monkeypatch):
     (skill / "SKILL.md").write_text("---\nname: legacy\ndescription: hidden\n---\n" + body)
     monkeypatch.setenv("CLAUDE_CODE_SKILLS_PATH", f"{first}:{second}")
     assert skill_context_tokens({"skill": "legacy"}) == count_result_tokens(body)
-    assert skill_context_tokens({"skill": "legacy"}, skill_bundle="public-bundle") is None
 
 
 def test_bridge_stamps_successful_skill_result_only(tmp_path, monkeypatch):
@@ -54,10 +52,7 @@ def test_bridge_stamps_successful_skill_result_only(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAUDE_CODE_SKILLS_PATH", str(skill.parent))
     emitter = SimpleNamespace(_publish_event=Mock(), _is_image_result_tool=lambda _name: False,
                               _host_parent=lambda _msg, _ledger: None)
-    for tool_name, failed, bundle in [
-        ("Skill", False, None), ("Skill", True, None), ("Bash", False, None),
-        ("Skill", False, "public-bundle"),
-    ]:
+    for tool_name, failed in [("Skill", False), ("Skill", True), ("Bash", False)]:
         message = UserMessage(content=[ToolResultBlock(
             tool_use_id="tool", content="Launching skill: llm-bawt", is_error=failed,
         )])
@@ -66,12 +61,11 @@ def test_bridge_stamps_successful_skill_result_only(tmp_path, monkeypatch):
             tool_names_by_id={"tool": tool_name},
             tool_arguments_by_id={"tool": {"skill": "llm-bawt"}},
             turn_screenshot_assets=[], screenshot_artifacts_by_tool_use_id={},
-            skill_bundle=bundle,
         ))
         result = emitter._publish_event.call_args.kwargs["tool_result_payload"]
         assert result.get("skill_context_tokens") == (
             skill_context_tokens({"skill": "llm-bawt"})
-            if tool_name == "Skill" and not failed and bundle is None else None
+            if tool_name == "Skill" and not failed else None
         )
 
 

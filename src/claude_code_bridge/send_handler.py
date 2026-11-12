@@ -341,7 +341,6 @@ class ClaudeSendMixin(
                         session_key=session_key,
                         thread_session_id=thread_session_id,
                         request_id=request_id,
-                        skill_bundle=req.skill_bundle,
                         skill_selection=req.skill_selection,
                         injected_skills=req.injected_skills,
                         room_freeze=req.room_freeze,
@@ -402,8 +401,6 @@ class ClaudeSendMixin(
 
                     # TASK-623: ClaudeAgentOptions construction moved to
                     # _build_agent_options (behavior-identical).
-                    from agent_bridge.skill_selection import guard_resumed_bundle
-                    guard_resumed_bundle(req.skill_bundle, thread=req.thread_session_id, resume=resume_id)
                     options = self._build_agent_options(
                         model=model,
                         system_prompt=system_prompt,
@@ -418,7 +415,6 @@ class ClaudeSendMixin(
                         post_tool_use_cb=post_tool_use_cb,
                         stderr=_log_stderr,
                         task_turn_capability=task_turn_capability,
-                        skill_bundle=req.skill_bundle,
                         skill_selection=req.skill_selection,
                     )
 
@@ -741,7 +737,6 @@ class ClaudeSendMixin(
                                         screenshot_artifacts_by_tool_use_id
                                     ),
                                     usage_ledger=subagent_usage,
-                                    skill_bundle=req.skill_bundle,
                                     liveness=worker_liveness,
                                 )
                                 # The watchdog observed this message before

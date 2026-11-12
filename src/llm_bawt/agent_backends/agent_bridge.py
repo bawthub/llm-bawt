@@ -328,7 +328,6 @@ class AgentBridgeBackend(AgentBackend):
                                 int(config.get("max_turns"))
                                 if config.get("max_turns") is not None else None
                             ),
-                            skill_bundle=config.get("skill_bundle"),
                             skill_selection=config.get("skill_selection"),
                             injected_skills=config.get("injected_skills"),
                             room_freeze=room_freeze,

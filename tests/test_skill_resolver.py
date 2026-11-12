@@ -9,7 +9,6 @@ from llm_bawt.skills.prompts import render_section
 from llm_bawt.skills.resolver import (
     CATALOG_UNREADABLE,
     NO_EFFECT,
-    NOT_IN_BUNDLE,
     OVER_CAP,
     PROTECTED_BOT,
     SOURCE_MISSING,
@@ -45,7 +44,7 @@ class _Source(SkillSource):
 
 
 def _facts(**overrides) -> BotFacts:
-    base = dict(slug="fixture-one", bot_type="agent", harness="claude-code", bundle=None,
+    base = dict(slug="fixture-one", bot_type="agent", harness="claude-code",
                 tags=frozenset({"coder", "reviewer"}), private=False)
     return BotFacts(**{**base, **overrides})
 
@@ -151,8 +150,7 @@ def test_blanket_exclusions_keep_rows_visible_with_a_reason():
     rows = [_bot("a", "inject"), _bot("b", "disable")]
     source = _Source({"a": 10, "b": 10})
     cases = [(_facts(private=True), PROTECTED_BOT), (_facts(harness="local"), UNSUPPORTED_HARNESS),
-             (_facts(harness=None), UNSUPPORTED_HARNESS), (_facts(bot_type="chat"), UNSUPPORTED_HARNESS),
-             (_facts(bundle="pkg"), NOT_IN_BUNDLE)]
+             (_facts(harness=None), UNSUPPORTED_HARNESS), (_facts(bot_type="chat"), UNSUPPORTED_HARNESS)]
     for facts, reason in cases:
         got = resolve(facts, rows, source, CAPS)
         assert [(e.ref, e.applied, e.reason) for e in got.entries] == [
@@ -163,7 +161,7 @@ def test_blanket_exclusions_keep_rows_visible_with_a_reason():
 
 
 def test_private_wins_over_every_other_exclusion():
-    got = resolve(_facts(private=True, harness="local", bundle="pkg"), [_bot("a", "inject")],
+    got = resolve(_facts(private=True, harness="local"), [_bot("a", "inject")],
                   _Source({"a": 10}), CAPS)
     assert got.entries[0].reason == PROTECTED_BOT
 

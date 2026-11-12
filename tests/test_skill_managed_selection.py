@@ -55,14 +55,12 @@ def test_a_malformed_selection_fails_closed(raw):
 
 def test_claude_gets_an_allow_list_and_keeps_its_settings_sources():
     selection = ManagedSelection.from_manifest(MANIFEST)
-    assert claude_skill_options(None, selection) == {
+    assert claude_skill_options(selection) == {
         "skills": ["alpha", "gamma"], "setting_sources": list(CLAUDE_DEFAULT_SETTING_SOURCES)}
     assert "local" in CLAUDE_DEFAULT_SETTING_SOURCES
-    assert claude_skill_names(None, selection) == ("alpha", "gamma")
+    assert claude_skill_names(selection) == ("alpha", "gamma")
     empty = ManagedSelection.from_manifest({**MANIFEST, "entries": []})
-    assert claude_skill_options(None, empty)["skills"] == []  # managed, nothing chosen: hide all
-    with pytest.raises(SkillSelectionError, match="exclusive"):
-        claude_skill_options("tenant", selection)
+    assert claude_skill_options(empty)["skills"] == []  # managed, nothing chosen: hide all
 
 
 # ── Codex deny-list ─────────────────────────────────────────────────────────
@@ -169,8 +167,6 @@ def test_publisher_validates_the_selection_onto_the_command():
     assert SELECTION_FIELD not in _publish()
     with pytest.raises(SkillSelectionError):
         _publish(skill_selection={"entries": "nope"})
-    with pytest.raises(SkillSelectionError, match="exclusive"):
-        _publish(skill_selection=MANIFEST, skill_bundle="tenant")
 
 
 def test_claude_bridge_reads_the_selection_field():

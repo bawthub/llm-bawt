@@ -139,7 +139,6 @@ class ClaudeStreamMixin:
         openrouter_provider: dict | None = None,
         strict_tools: bool = False,
         apply_patch: str | None = None,
-        skill_bundle: str | None = None,
         native_route: NativeAuthRoute | None = None,
         skill_selection: str | None = None,
         prompt_cache_ttl: str | None = None,
@@ -206,7 +205,7 @@ class ClaudeStreamMixin:
                     strict_tools=strict_tools,
                     apply_patch=apply_patch,
                     skill_names=claude_skill_names(
-                        skill_bundle, ManagedSelection.from_field(skill_selection)),
+                        ManagedSelection.from_field(skill_selection)),
                 )
             )
             # TASK-546: Override every internal/subagent model selector with a
@@ -271,7 +270,6 @@ class ClaudeStreamMixin:
         post_tool_use_cb,
         stderr,
         task_turn_capability: str | None = None,
-        skill_bundle: str | None = None,
         skill_selection: str | None = None,
     ) -> ClaudeAgentOptions:
         """Construct per-attempt options with isolated capability and MCP headers."""
@@ -290,7 +288,7 @@ class ClaudeStreamMixin:
         from agent_bridge.skill_selection import ManagedSelection, claude_skill_options
 
         return ClaudeAgentOptions(
-            **claude_skill_options(skill_bundle, ManagedSelection.from_field(skill_selection)),
+            **claude_skill_options(ManagedSelection.from_field(skill_selection)),
             model=model,
             # TASK-1318: the CLI records the system prompt when a session
             # starts (and on the first turn after a manual /compact) and
@@ -624,7 +622,6 @@ class ClaudeStreamMixin:
         screenshot_artifacts_by_tool_use_id: dict[str, list[dict]],
         tool_arguments_by_id: dict | None = None,
         usage_ledger: SubagentUsage | None = None,
-        skill_bundle: str | None = None,
         liveness: WorkerLiveness | None = None,
     ) -> int:
         """Handle a UserMessage's tool_result blocks (TOOL_END); return ``seq``."""
@@ -708,7 +705,6 @@ class ClaudeStreamMixin:
                 ):
                     tokens = skill_context_tokens(
                         (tool_arguments_by_id or {}).get(block.tool_use_id or ""),
-                        skill_bundle=skill_bundle,
                     )
                     if tokens is not None:
                         result_data["skill_context_tokens"] = tokens

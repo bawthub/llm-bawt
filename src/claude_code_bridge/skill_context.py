@@ -5,14 +5,12 @@ from __future__ import annotations
 from agent_bridge.skill_sources import AmbientSource
 
 
-def skill_context_tokens(arguments: dict | None, *, skill_bundle: str | None = None) -> int | None:
-    """Estimate the loaded legacy SKILL.md body, never a selected bundle's file.
+def skill_context_tokens(arguments: dict | None) -> int | None:
+    """Estimate the loaded ambient SKILL.md body.
 
     The SDK adds framing and referenced files may be loaded later. This is not
     provider billing or a measure of the exact incremental prompt size.
     """
-    if skill_bundle is not None:
-        return None  # Bundle selectors map to immutable plugin packages, not ambient roots.
     name = (arguments or {}).get("skill")
     if not isinstance(name, str):
         return None

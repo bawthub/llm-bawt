@@ -6,8 +6,7 @@ read through a :class:`SkillSource`, so frontmatter parsing, size caps and path
 confinement exist once.
 
 A skill's ``ref`` is the selector the harness already uses: the bare directory
-name for the ambient tree. Registry packages (``package:skill``) get their own
-source once TASK-871 activates the registry.
+name for the ambient tree.
 """
 from __future__ import annotations
 

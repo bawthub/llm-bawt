@@ -6,7 +6,6 @@ so bot facts, the tag snapshot and the cap check are assembled one way.
 Writes are refused when they would:
 - touch a private bot (403) or run with the tag snapshot unreadable (503);
 - name an unknown skill or tag, or use a bad mode or position (422);
-- add a bot row to a bundle bot (409);
 - push any affected bot's injected skills over a cap that were not over it
   before (409, listing each bot, its refs, total and cap).
 """
@@ -70,7 +69,6 @@ class _World:
             slug=slug,
             bot_type=bot.bot_type,
             harness=bot.agent_backend,
-            bundle=(bot.agent_backend_config or {}).get("skill_bundle"),
             tags=self.snapshot.tags.get(slug, frozenset()) if self.snapshot.available else frozenset(),
             private=self.snapshot.has(slug, BehaviorTag.PRIVATE),
         )
@@ -227,7 +225,6 @@ class SkillService:
                 "slug": slug, "locked": False,
                 "bot_type": facts.bot_type, "harness": facts.harness,
                 "supported": facts.bot_type == "agent" and capabilities_for(facts.harness).supported,
-                "bundle": facts.bundle,
                 "row_count": len(resolution.entries),
                 "disabled_count": len(resolution.disabled),
                 "catalog_unreadable": resolution.catalog_unreadable,
@@ -246,7 +243,7 @@ class SkillService:
             raise SkillServiceError(404, f"unknown bot {slug!r}")
         facts = world.facts(slug)
         view = {"slug": slug, "locked": facts.private,
-                "harness": facts.harness, "bundle": facts.bundle,
+                "harness": facts.harness,
                 "capabilities": capabilities_for(facts.harness).to_dict(), "caps": vars(caps)}
         if facts.private:
             return {**view, "tags": [], "entries": [], "manifest": None,
@@ -298,10 +295,7 @@ class SkillService:
         return facts
 
     def _writable_bot(self, world: _World, slug: str) -> BotFacts:
-        facts = self._unprotected_bot(world, slug)
-        if facts.bundle:
-            raise SkillServiceError(409, f"{slug} takes its skills from bundle {facts.bundle!r}")
-        return facts
+        return self._unprotected_bot(world, slug)
 
     def _affected(self, world: _World, scope_type: str, scope_id: str) -> list[str]:
         """Bots a write at this scope can change; validates the scope itself."""

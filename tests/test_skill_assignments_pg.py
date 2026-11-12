@@ -30,7 +30,6 @@ _BOTS = {
     "fixture-two": ("agent", "codex", {}),
     "fixture-local": ("agent", "local", {}),
     "fixture-chat": ("chat", None, {}),
-    "fixture-bundle": ("agent", "claude-code", {"skill_bundle": "fixture-pkg"}),
     "fixture-private": ("agent", "claude-code", {}),
     "fixture-three": ("agent", "claude-code", {}),
 }
@@ -106,7 +105,6 @@ def test_a_bot_without_rows_keeps_discovery_and_one_disable_makes_an_allow_list(
 def test_bot_rows_need_a_writable_bot_and_valid_values(world):
     put = world.service.put
     assert _status(put, "bot", "fixture-private", "alpha", "enable", 0, None)[0] == 403
-    assert _status(put, "bot", "fixture-bundle", "alpha", "enable", 0, None)[0] == 409
     assert _status(put, "bot", "fixture-unknown", "alpha", "enable", 0, None)[0] == 404
     for args in [("bot", "fixture-one", "alpha", "loud", 0, None),
                  ("bot", "fixture-one", "alpha", "inject", -1, None),

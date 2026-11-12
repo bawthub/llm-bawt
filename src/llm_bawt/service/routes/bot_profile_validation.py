@@ -92,13 +92,9 @@ def _validate_profile_payload(payload: dict[str, object]) -> None:
         raise HTTPException(status_code=400, detail="Agent bots require agent_backend")
     config = payload.get("agent_backend_config")
     if isinstance(config, dict) and config.get("skill_bundle") is not None:
-        from agent_bridge.skill_registry import _name
-        try:
-            _name(config["skill_bundle"])
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail="skill_bundle must be a lowercase kebab-case registry name") from exc
-        if agent_backend not in {"claude-code", "codex"}:
-            raise HTTPException(status_code=400, detail="skill_bundle requires Claude Code or Codex")
+        # Skill bundles were retired (TASK-2196); fail loudly instead of
+        # storing a setting nothing reads. Use skill assignments instead.
+        raise HTTPException(status_code=400, detail="skill_bundle is no longer supported; use skill assignments")
     if isinstance(config, dict) and config.get("codex_transport") is not None:
         # TASK-1243: which codex runtime serves the bot's turns.
         if agent_backend != "codex":

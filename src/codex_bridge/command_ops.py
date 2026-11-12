@@ -4,7 +4,6 @@ import asyncio
 import json
 import logging
 import os
-from pathlib import Path
 from typing import Any
 
 from agent_bridge.abort_rpc import answer_abort
@@ -322,17 +321,7 @@ class CodexCommandMixin(CodexAppServerMixin):
                 seeded_id: str | None = None
                 while True:
                     try:
-                        from agent_bridge.skill_selection import guard_resumed_bundle
-                        guard_resumed_bundle(fields.get("skill_bundle"), thread=thread_session_id, resume=resume_id, harness="codex")
                         codex_environment: dict[str, str] | None = None
-                        if fields.get("skill_bundle") is not None:
-                            from agent_bridge.skill_codex import codex_skill_env
-                            from .local_plugins import ensure_bawthub_mcp_config
-                            codex_environment = codex_skill_env(fields["skill_bundle"])
-                            ensure_bawthub_mcp_config(
-                                logger=logger,
-                                codex_home=Path(codex_environment["CODEX_HOME"]),
-                            )
                         if task_turn_capability:
                             codex_environment = codex_mcp_environment(
                                 codex_environment or os.environ,

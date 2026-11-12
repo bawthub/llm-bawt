@@ -60,6 +60,17 @@ def test_profile_accepts_a_codex_transport(monkeypatch, transport):
     assert payload["agent_backend_config"] == {"codex_transport": transport}
 
 
+@pytest.mark.parametrize("backend", ["claude-code", "codex"])
+def test_profile_refuses_the_retired_skill_bundle(monkeypatch, backend):
+    # TASK-2196: nothing reads it any more, so storing it would be a silent no-op.
+    monkeypatch.setattr(bot_profile_validation, "_validate_model_endpoint", lambda payload: None)
+    payload = {"slug": "bot", "bot_type": "agent", "agent_backend": backend,
+               "agent_backend_config": {"skill_bundle": "tenant"}}
+    with pytest.raises(HTTPException) as refused:
+        bot_profile_validation._validate_profile_payload(payload)
+    assert refused.value.status_code == 400 and "no longer supported" in refused.value.detail
+
+
 def _published(**kwargs):
     subscriber = RedisSubscriber("redis://localhost:6379/0")
     fake = MagicMock()

@@ -33,7 +33,7 @@ class _Source(SkillSource):
 
 
 def _resolution(rows=None, bot_type="agent"):
-    facts = BotFacts("fixture-one", bot_type, "claude-code", None, frozenset(), False)
+    facts = BotFacts("fixture-one", bot_type, "claude-code", frozenset(), False)
     rows = rows if rows is not None else [
         Assignment("bot", "fixture-one", "b", "inject", 1),
         Assignment("bot", "fixture-one", "a", "inject", 0),
@@ -131,7 +131,7 @@ def test_an_unmounted_skill_source_injects_nothing(world, tmp_path):
     from agent_bridge.skill_sources import AmbientSource
     from llm_bawt.skills.resolver import SOURCE_MISSING
 
-    facts = BotFacts("fixture-one", "agent", "claude-code", None, frozenset(), False)
+    facts = BotFacts("fixture-one", "agent", "claude-code", frozenset(), False)
     rows = [Assignment("bot", "fixture-one", "a", "inject", 0),
             Assignment("bot", "fixture-one", "b", "enable", 1)]
     world["resolution"] = resolve(facts, rows, AmbientSource((tmp_path / "not-mounted",)),

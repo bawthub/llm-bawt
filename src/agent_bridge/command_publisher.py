@@ -74,7 +74,6 @@ class CommandPublisherMixin:
         thread_resume_id: str | None = None,
         explicit_thread: bool = False,
         task_turn_capability: str | None = None,
-        skill_bundle: str | None = None,
         access_path: str | None = None,
         access_path_provider: str | None = None,
         skill_selection: Mapping | None = None,
@@ -99,15 +98,9 @@ class CommandPublisherMixin:
             "message": message,
             "request_id": request_id,
         }
-        if skill_bundle is not None:
-            from .skill_registry import _name
-
-            fields["skill_bundle"] = _name(skill_bundle)
         if skill_selection is not None:  # TASK-1309: validated before it is published
-            from .skill_selection import SELECTION_FIELD, ManagedSelection, SkillSelectionError
+            from .skill_selection import SELECTION_FIELD, ManagedSelection
 
-            if skill_bundle is not None:
-                raise SkillSelectionError("a skill bundle and a managed selection are exclusive")
             fields[SELECTION_FIELD] = ManagedSelection.from_manifest(skill_selection).to_field()
         if injected_skills:  # TASK-1691: skills whose bodies the system prompt carries
             from .skill_selection import INJECTED_FIELD, injected_field

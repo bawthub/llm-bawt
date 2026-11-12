@@ -9,7 +9,6 @@ below exist once:
   the tag rows a bot carries, ``disable`` > ``inject`` > ``enable``;
 - a private bot gets nothing, whatever its rows say;
 - only agent bots on a supported harness apply skills;
-- a bundle bot's skills come from its bundle, not this source;
 - the harness gets an allow-list (catalog minus disabled) only when at least
   one disable applies; otherwise it keeps its own discovery, so skills added
   later reach the bot without a row;
@@ -46,7 +45,6 @@ _TAG_RANK = {DISABLE: 0, INJECT: 1, ENABLE: 2}
 # Why a row does not apply (or applies without changing anything).
 PROTECTED_BOT = "protected_bot"
 UNSUPPORTED_HARNESS = "unsupported_harness"
-NOT_IN_BUNDLE = "not_in_bundle"
 SOURCE_MISSING = "source_missing"
 OVER_CAP = "over_cap"
 NO_EFFECT = "no_effect"  # an enable with no disable under it
@@ -65,7 +63,6 @@ class BotFacts:
     slug: str
     bot_type: str
     harness: str | None  # Bot.agent_backend
-    bundle: str | None
     tags: frozenset[str]
     private: bool
 
@@ -114,7 +111,7 @@ class SkillResolution:
     harness: str | None
     entries: tuple[ResolvedSkill, ...]
     caps: Caps
-    #: Why this bot's rows apply nothing (private, harness, bundle).
+    #: Why this bot's rows apply nothing (private, harness).
     skip_reason: str | None = None
     #: Catalog refs, read only when a disable needs them.
     catalog: tuple[str, ...] = ()
@@ -207,8 +204,6 @@ def _skip_reason(facts: BotFacts) -> str | None:
         return PROTECTED_BOT
     if facts.bot_type != "agent" or not capabilities_for(facts.harness).supported:
         return UNSUPPORTED_HARNESS
-    if facts.bundle:
-        return NOT_IN_BUNDLE
     return None
 
 
