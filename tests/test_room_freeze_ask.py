@@ -35,6 +35,8 @@ def test_affirmative_asks(text):
     "Commit message needs fixing.",
     "Push notifications are broken.",
     "Commit it. Actually, don't commit anything yet.",
+    "Commit it. Actually, don’t commit anything yet.",
+    "commit it？",
     "Commit this to memory.",
     "Push this button to reproduce the issue.",
     "Commit the changes after I approve them.",

@@ -64,6 +64,8 @@ _TAIL = (r"(?:\s+(?:(?:and|then)\s+(?:commit|push|ship)(?:\s+it)?|now|please|for
 _ASK_CLAUSE = re.compile(rf"^\s*{_LEAD_IN}(?:commit|push|ship)(?:\s+{_OBJECT})?{_TAIL}\s*$",
                          re.IGNORECASE)
 _CLAUSE_SPLIT = re.compile(r"[.!;\n]+|,\s*(?:then|and)\s+|\s+(?:then|and then)\s+")
+_PUNCT_FOLD = str.maketrans({"‘": "'", "’": "'", "ʼ": "'", "＇": "'",
+                             "“": '"', "”": '"', "？": "?", "．": "."})
 _NEGATION = re.compile(r"\b(?:not|don'?t|do not|never|no|stop|hold off|wait)\b", re.IGNORECASE)
 
 
@@ -73,10 +75,12 @@ def asks_to_commit(prompt: str) -> bool:
     Any negation anywhere in the message withholds the grant, so a later
     "actually, don't" wins over an earlier ask.
     """
-    if _NEGATION.search(prompt or ""):
+    # Phones and editors type curly apostrophes and quotes; fold them first.
+    text = (prompt or "").translate(_PUNCT_FOLD)
+    if _NEGATION.search(text):
         return False
     return any("?" not in clause and _ASK_CLAUSE.search(clause)
-               for clause in _CLAUSE_SPLIT.split(prompt or ""))
+               for clause in _CLAUSE_SPLIT.split(text))
 
 
 def room_freeze_state(prompt: str, *, engine, bot_id: str | None) -> str | None:
