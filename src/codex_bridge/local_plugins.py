@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import shutil
+import tomllib
 from pathlib import Path
 
 from agent_bridge import crawl4ai_token
@@ -174,6 +175,21 @@ def _ensure_config_toml_entries(
         new_text += "\n"
     new_text += "\n".join(additions) + "\n"
 
+    # Never replace a parseable config with one this surgery broke.
+    try:
+        tomllib.loads(existing)
+    except tomllib.TOMLDecodeError:
+        pass  # already unparseable; nothing further to protect
+    else:
+        try:
+            tomllib.loads(new_text)
+        except tomllib.TOMLDecodeError as exc:
+            logger.warning(
+                "Not updating %s: MCP server %s edit would produce invalid TOML (%s)",
+                config_path, name, exc,
+            )
+            return
+
     try:
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(new_text)
@@ -189,29 +205,47 @@ def _ensure_config_toml_entries(
     )
 
 
-def _bracket_delta(text: str) -> int:
-    """Net TOML array/inline-table nesting change in ``text``, outside strings."""
+def _bracket_delta(text: str, multiline: str = "") -> tuple[int, str]:
+    """Net TOML array/inline-table nesting change in ``text``, outside strings.
+
+    ``multiline`` is the triple-quote delimiter still open from a previous line
+    (``\'\'\'``/``\"\"\"``) or ``""``; the returned state carries it to the next
+    line so brackets inside multiline strings never count.
+    """
     depth = 0
-    quote = ""
-    escaped = False
-    for ch in text:
+    quote = multiline
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
         if quote:
-            if escaped:
-                escaped = False
-            elif ch == "\\" and quote == '"':
-                escaped = True
-            elif ch == quote:
+            if quote == '"' or quote == '"""':
+                if ch == "\\":
+                    i += 2
+                    continue
+            if text.startswith(quote, i):
+                i += len(quote)
+                # A closing triple quote may absorb up to two extra quotes.
+                if len(quote) == 3:
+                    while i < n and text[i] == quote[0] and text.startswith(quote[0], i):
+                        i += 1
                 quote = ""
+                continue
+            i += 1
             continue
         if ch in ('"', "'"):
-            quote = ch
-        elif ch == "#":
+            quote = ch * 3 if text.startswith(ch * 3, i) else ch
+            i += len(quote)
+            continue
+        if ch == "#":
             break
-        elif ch in "[{":
+        if ch in "[{":
             depth += 1
         elif ch in "]}":
             depth -= 1
-    return depth
+        i += 1
+    # Single-line strings cannot span lines.
+    return depth, quote if len(quote) == 3 else ""
 
 
 def _upsert_mcp_server_config(
@@ -258,11 +292,13 @@ def _upsert_mcp_server_config(
             return
 
         end = len(lines)
+        multiline = ""
         for idx in range(start + 1, len(lines)):
             stripped = lines[idx].strip()
-            if stripped.startswith("[") and stripped.endswith("]"):
+            if not multiline and stripped.startswith("[") and stripped.endswith("]"):
                 end = idx
                 break
+            _, multiline = _bracket_delta(lines[idx], multiline)
 
         # A server is either URL-based or stdio-based. Older bridge releases
         # registered Crawl4AI through ``mcp-remote`` (command/args/env); if we
@@ -270,14 +306,24 @@ def _upsert_mcp_server_config(
         # stdio and rejects the mixed config before starting a turn.
         stdio_keys = {"command", "args", "cwd", "env"}
         section_body = []
-        skip_depth = 0  # open bracket/brace depth of a removed multiline value
+        skipping = False  # inside a removed multiline value
+        skip_depth = 0
+        multiline = ""
         for line in lines[start + 1 : end]:
-            if skip_depth > 0:
-                skip_depth += _bracket_delta(line)
+            if multiline or skipping:
+                delta, multiline = _bracket_delta(line, multiline)
+                if skipping:
+                    skip_depth += delta
+                    skipping = skip_depth > 0 or bool(multiline)
+                else:
+                    section_body.append(line)
                 continue
             if "=" in line and line.split("=", 1)[0].strip() in stdio_keys:
-                skip_depth = max(0, _bracket_delta(line.split("=", 1)[1]))
+                delta, multiline = _bracket_delta(line.split("=", 1)[1])
+                skip_depth = max(0, delta)
+                skipping = skip_depth > 0 or bool(multiline)
                 continue
+            _, multiline = _bracket_delta(line)
             section_body.append(line)
         lines[start + 1 : end] = section_body
         end = start + 1 + len(section_body)
@@ -317,6 +363,21 @@ def _upsert_mcp_server_config(
         new_text = "\n".join(lines)
         if existing.endswith("\n") or not new_text:
             new_text += "\n"
+
+    # Never replace a parseable config with one this surgery broke.
+    try:
+        tomllib.loads(existing)
+    except tomllib.TOMLDecodeError:
+        pass  # already unparseable; nothing further to protect
+    else:
+        try:
+            tomllib.loads(new_text)
+        except tomllib.TOMLDecodeError as exc:
+            logger.warning(
+                "Not updating %s: MCP server %s edit would produce invalid TOML (%s)",
+                config_path, name, exc,
+            )
+            return
 
     try:
         config_path.parent.mkdir(parents=True, exist_ok=True)

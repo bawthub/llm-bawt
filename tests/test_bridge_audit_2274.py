@@ -299,3 +299,63 @@ def test_local_generation_deadline_reports_error_after_worker_stops():
         assert AgentEventKind.ERROR in kinds and AgentEventKind.ASSISTANT_DONE not in kinds
         assert "timeout" in bridge._publish_event.call_args_list[-1].kwargs["text"]
     asyncio.run(run())
+
+
+def test_codex_toml_migration_tracks_multiline_strings(tmp_path):
+    from codex_bridge import local_plugins as lp
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        '[mcp_servers.crawl4ai]\ncommand = "sh"\nargs = [\n  "-c",\n  """\necho ]\n'
+        '[fake]\n""",\n]\nenv = { A = """x\n]"""}\nstartup_timeout_sec = 30\n'
+        'note = \'\'\'\n[not.a.header]\n\'\'\'\n\n[other]\nk = 1\n')
+    lp._upsert_mcp_server_config(config_path=cfg, name="crawl4ai",
+                                 url="http://c/mcp", logger=MagicMock())
+    data = tomllib.loads(cfg.read_text())
+    assert data["mcp_servers"]["crawl4ai"] == {
+        "url": "http://c/mcp", "startup_timeout_sec": 30, "note": "[not.a.header]\n"}
+    assert data["other"] == {"k": 1}
+
+
+def test_codex_toml_upsert_never_writes_unparseable_config(tmp_path, monkeypatch):
+    from codex_bridge import local_plugins as lp
+    cfg = tmp_path / "config.toml"
+    original = '[mcp_servers.crawl4ai]\nurl = "http://old"\n'
+    cfg.write_text(original)
+    lp._upsert_mcp_server_config(config_path=cfg, name="crawl4ai", url="http://c/mcp",
+                                 logger=MagicMock(), extra_lines=["broken = ["])
+    assert cfg.read_text() == original
+
+
+def test_local_generation_never_starts_after_load_exhausts_deadline():
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    from agent_bridge.events import AgentEventKind
+    from tests.test_other_bridge_abort_targeting import make_bridge, send
+
+    async def run():
+        bridge = make_bridge("local")
+        bridge._request_timeout = 0.01
+        redis = SimpleNamespace(xack=AsyncMock())
+        entered = threading.Event()
+
+        class Client:
+            def stream_raw(self, messages):
+                entered.set()
+                yield "should not generate"
+
+        def load(*a, **kw):
+            time.sleep(0.05)
+            return Client()
+
+        bridge._loader = SimpleNamespace(get_client=load)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            bridge._executor = executor
+            async with asyncio.timeout(3):
+                await send(bridge, "r", redis)
+        assert not entered.is_set()
+        kinds = [c.kwargs.get("kind") for c in bridge._publish_event.call_args_list]
+        assert kinds == [AgentEventKind.ERROR]
+        assert "load exceeded" in bridge._publish_event.call_args_list[-1].kwargs["text"]
+    asyncio.run(run())

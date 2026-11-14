@@ -296,6 +296,12 @@ class LocalModelBridge:
                 )
                 self._run_workers[request_id] = worker
                 client = await asyncio.shield(worker)
+                # A slow load can consume the whole budget; never start
+                # generation once the deadline has already passed.
+                if loop.time() >= deadline:
+                    raise TimeoutError(
+                        f"model load exceeded {self._request_timeout:g}s request timeout"
+                    )
 
                 messages = self._build_messages(system_prompt, message)
 
@@ -306,9 +312,17 @@ class LocalModelBridge:
                 _SENTINEL = object()
 
                 def _produce() -> None:
+                    stream = None
                     try:
-                        for chunk in client.stream_raw(messages):
-                            if stop_generation.is_set():
+                        # Check the stop flag before every advance, so a stop
+                        # set earlier never pulls (or starts) another token.
+                        if stop_generation.is_set():
+                            return
+                        stream = iter(client.stream_raw(messages))
+                        while not stop_generation.is_set():
+                            try:
+                                chunk = next(stream)
+                            except StopIteration:
                                 break
                             loop.call_soon_threadsafe(chunk_queue.put_nowait, chunk)
                     except Exception as exc:  # noqa: BLE001 — forwarded below
@@ -316,6 +330,12 @@ class LocalModelBridge:
                             chunk_queue.put_nowait, ("__error__", exc)
                         )
                     finally:
+                        close = getattr(stream, "close", None)
+                        if close is not None:
+                            try:
+                                close()
+                            except Exception:  # noqa: BLE001
+                                logger.debug("stream close failed", exc_info=True)
                         loop.call_soon_threadsafe(chunk_queue.put_nowait, _SENTINEL)
 
                 worker = loop.run_in_executor(self._executor, _produce)
