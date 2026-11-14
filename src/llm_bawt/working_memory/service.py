@@ -54,7 +54,12 @@ class WorkingMemoryService:
         def gate(conn):
             return self.policy.require_tools(bot_id, conn)
         try:
-            self.store.prepare_links(bot_id, user_id, self.catalog.get, authorize=gate)
+            try:
+                self.store.prepare_links(bot_id, user_id, self.catalog.get, authorize=gate)
+            except Exception as exc:
+                # Migration/admission can remain fenced while independently
+                # verified canonical links still need their normal CAS refresh.
+                logger.warning("task link migration pending: %s", exc)
             snapshot = self.store.render_snapshot(bot_id, user_id)
             links = [r for r in snapshot["items"] if r["kind"] == "initiative_link"]
             ready = [row for row in links[:20] if row["canonical_task_id"]]
@@ -107,7 +112,7 @@ class WorkingMemoryService:
         self.store.prepare_links(context.bot_id, context.user_id, self.catalog.get, authorize=gate)
         return self.store.create(
             context.bot_id, context.user_id,
-            {**fields, "initiative_task_id": info.id}, idempotency_key=idempotency_key,
+            fields, idempotency_key=idempotency_key,
             actor=self._bot_actor(context), authorize=gate, task=info,
         )
 

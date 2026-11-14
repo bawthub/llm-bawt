@@ -471,17 +471,31 @@ class WorkingMemoryStore:
 
     def replay_legacy_link(self, bot_id: str, user_id: str, fields: Mapping[str, Any], *,
                            idempotency_key: Any, authorize: Authorize) -> dict[str, Any] | None:
-        """Preserve an old TASK-N create fingerprint before new creates canonicalize."""
+        """Resolve durable replay/removal/conflict before any task-catalog read."""
         bot, user = normalize_identity(bot_id, user_id)
         key = normalize_idempotency_key(idempotency_key)
-        fingerprint = create_fingerprint(normalize_create(fields))
+        payload = normalize_create(fields)
+        fingerprint = create_fingerprint(payload)
         with self._write(bot, user, authorize) as write:
             prior = write.conn.execute(text(
                 "SELECT item_id, create_fingerprint FROM working_memory_changes"
                 " WHERE bot_id=:bot AND user_id=:user AND kind='create' AND idempotency_key=CAST(:key AS uuid)"
             ), {"bot": bot, "user": user, "key": key}).mappings().first()
-            if prior is None or prior["create_fingerprint"] != fingerprint:
+            if prior is None:
                 return None
+            if prior["create_fingerprint"] not in (None, fingerprint):
+                # Compatibility with older creates that fingerprinted the
+                # canonical ID, not the original TASK-N request. Only the
+                # durable item's own alias can establish that equivalence.
+                row = write.conn.execute(text(
+                    "SELECT canonical_task_id, task_short_id FROM working_memory_items"
+                    " WHERE id=:id AND bot_id=:bot AND user_id=:user AND kind='initiative_link'"
+                ), {"id": prior["item_id"], "bot": bot, "user": user}).mappings().first()
+                if (row is not None and row["canonical_task_id"]
+                        and payload["initiative_task_id"] == row["task_short_id"]):
+                    canonical = create_fingerprint({**payload, "initiative_task_id": row["canonical_task_id"]})
+                    if prior["create_fingerprint"] == canonical:
+                        fingerprint = canonical
             return self._replay(write, prior, fingerprint)
 
     def prepare_links(self, bot_id: str, user_id: str, resolve: Callable[[str], TaskInfo], *,
@@ -502,7 +516,8 @@ class WorkingMemoryStore:
                 original = conn.execute(text(
                     "SELECT id, initiative_task_id, canonical_task_id, status, removed_at, revision"
                     " FROM working_memory_items WHERE bot_id=:bot AND user_id=:user"
-                    " AND kind='initiative_link' ORDER BY created_at,id LIMIT 257"
+                    " AND kind='initiative_link' AND canonical_task_id IS NULL"
+                    " ORDER BY created_at,id LIMIT 257"
                 ), {"bot": bot, "user": user}).mappings().all()
                 unknown_purge = conn.execute(text(
                     "SELECT 1 FROM working_memory_changes c LEFT JOIN working_memory_task_purge_audit a"
@@ -517,13 +532,14 @@ class WorkingMemoryStore:
             current = write.conn.execute(text(
                 "SELECT id, initiative_task_id, canonical_task_id, status, removed_at, revision"
                 " FROM working_memory_items WHERE bot_id=:bot AND user_id=:user"
-                " AND kind='initiative_link' ORDER BY created_at,id LIMIT 257"
+                " AND kind='initiative_link' AND canonical_task_id IS NULL"
+                " ORDER BY created_at,id LIMIT 257"
             ), {"bot": bot, "user": user}).mappings().all()
             if [tuple(r.values()) for r in current] != [tuple(r.values()) for r in original]:
                 # A concurrent canonical create/backfill already passed this same
                 # namespace audit; do not reject a legitimate racing association.
                 # New legacy rows still need fresh resolution off this lock.
-                if len(current) > 256 or any(not r["canonical_task_id"] for r in current):
+                if current:
                     raise WorkingMemoryError("task_link_audit_pending", "links changed during audit; retry")
             # Also check the previously empty namespace: a concurrent purge is
             # serialized by this lock and must never be missed by the gate.
@@ -533,6 +549,19 @@ class WorkingMemoryStore:
                 " AND c.kind='purged' AND a.item_id IS NULL LIMIT 1"
             ), {"bot": bot, "user": user}).first():
                 raise WorkingMemoryError("task_link_audit_pending", "historical purge needs owner audit")
+            # Verified canonical history neither consumes the migration budget
+            # nor needs repeated suppression/duplicate scans. Only include
+            # canonical rows for tasks touched by this legacy batch.
+            if not current:
+                return
+            current = write.conn.execute(text(
+                "SELECT id, initiative_task_id, canonical_task_id, status, removed_at, revision"
+                " FROM working_memory_items WHERE bot_id=:bot AND user_id=:user"
+                " AND kind='initiative_link' AND"
+                " (id = ANY(CAST(:legacy_ids AS uuid[])) OR canonical_task_id = ANY(:tasks))"
+                " ORDER BY created_at,id"
+            ), {"bot": bot, "user": user, "legacy_ids": [str(r["id"]) for r in current],
+                "tasks": sorted({info.id for info in resolved.values()})}).mappings().all()
             groups: dict[str, list[Mapping[str, Any]]] = {}
             for row in current:
                 task_id = row["canonical_task_id"] or resolved[row["initiative_task_id"]].id
@@ -582,8 +611,8 @@ class WorkingMemoryStore:
         key = normalize_idempotency_key(idempotency_key)
         payload = normalize_create(fields)
         if task is not None:
-            if payload["kind"] != "initiative_link" or payload["initiative_task_id"] != task.id:
-                raise WorkingMemoryError("invalid_request", "link task identity must be canonical")
+            if payload["kind"] != "initiative_link" or payload["initiative_task_id"] not in (task.id, task.short_id):
+                raise WorkingMemoryError("invalid_request", "link task identity does not match the verified task")
         fingerprint = create_fingerprint(payload)
         with self._write(bot, user, authorize) as write:
             prior = write.conn.execute(text(
@@ -625,7 +654,7 @@ class WorkingMemoryStore:
                 RETURNING {_ITEM_COLUMNS}
             """), {
                 "id": item_id, "bot": bot, "user": user, "kind": payload["kind"],
-                "task": payload["initiative_task_id"], "canonical": task.id if task else None,
+                "task": task.id if task else payload["initiative_task_id"], "canonical": task.id if task else None,
                 "short": task.short_id if task else None, "title": task.title[:160] if task else None,
                 "task_status": task.status if task else None, "objective": payload["objective"],
                 "status": payload["status"], "next_action": payload["next_action"],

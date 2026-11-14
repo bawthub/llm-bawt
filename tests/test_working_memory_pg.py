@@ -1105,7 +1105,7 @@ def test_historical_unidentifiable_purge_gates_new_task_links(wm, monkeypatch):
 def test_reconciliation_updates_task_pointer_and_archives_without_reopening(wm, monkeypatch):
     task, catalog = _task_links(wm, monkeypatch)
     ctx = wm.context()
-    item = wm.service.link_associated(ctx, task.id)["item"]
+    wm.service.link_associated(ctx, task.id)
     assert wm.service.bot_list(ctx)["version"] == 1  # unchanged task never bumps
     catalog.get = lambda ref: dataclasses.replace(task, title="New title", status="BLOCKED")
     listed = wm.service.bot_list(ctx)
@@ -1130,6 +1130,95 @@ def test_reconciliation_cancels_unavailable_task_ownership(wm, monkeypatch, endi
     wm.service.bot_list(ctx)
     assert wm.service.owner_list(wm.bots["on"], wm.user)["items"][0]["status"] == "cancelled"
     assert wm.changes(item["id"])[-1]["session_id"] is None
+
+
+def test_257_verified_archived_links_do_not_disable_create_or_refresh(wm, monkeypatch):
+    task, catalog = _task_links(wm, monkeypatch)
+    with wm.engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO working_memory_items
+                (id, bot_id, user_id, kind, initiative_task_id, canonical_task_id,
+                 objective, status, revision, archived_at)
+            SELECT gen_random_uuid(), :bot, :user, 'initiative_link',
+                   'retained-' || n, 'retained-' || n, 'Verified history', 'done', 1, now()
+            FROM generate_series(1, 257) n
+        """), {"bot": wm.bots["on"], "user": wm.user})
+    item = wm.service.link_associated(wm.context(), task.id)["item"]
+    catalog.get = lambda ref: dataclasses.replace(task, status="COMPLETED")
+    wm.service.reconcile(wm.bots["on"], wm.user)
+    with wm.engine.connect() as conn:
+        assert conn.execute(text("SELECT status FROM working_memory_items WHERE id=:id"),
+                            {"id": item["id"]}).scalar_one() == "done"
+
+
+def test_unresolvable_removed_legacy_link_does_not_block_canonical_refresh(wm, monkeypatch):
+    task, catalog = _task_links(wm, monkeypatch)
+    item = wm.service.link_associated(wm.context(), task.id)["item"]
+    legacy = wm.service.store.create(wm.bots["on"], wm.user, {
+        "kind": "initiative_link", "initiative_task_id": "TASK-999999", "objective": "Unresolvable old link",
+    }, idempotency_key=_key(), actor=Actor("bot", wm.bots["on"]))["item"]
+
+    def resolve(ref):
+        if ref in (task.id, task.short_id):
+            return dataclasses.replace(task, status="COMPLETED")
+        raise WorkingMemoryError("task_unavailable", "missing")
+
+    catalog.get = resolve
+    wm.service.owner_delete(wm.bots["on"], wm.user, legacy["id"], hard=False)
+    wm.service.reconcile(wm.bots["on"], wm.user)
+    with wm.engine.connect() as conn:
+        assert conn.execute(text("SELECT status FROM working_memory_items WHERE id=:id"),
+                            {"id": item["id"]}).scalar_one() == "done"
+    # Migration failure still fences new links; it is not an admission grant.
+    assert _code(lambda: wm.service.link_associated(wm.context(), task.id)) == "task_unavailable"
+
+
+@pytest.mark.parametrize("old_canonical_fingerprint", [False, True])
+def test_link_retry_before_catalog_uses_original_request_or_durable_legacy_alias(
+    wm, monkeypatch, old_canonical_fingerprint,
+):
+    task, catalog = _task_links(wm, monkeypatch)
+    fields = {"kind": "initiative_link", "initiative_task_id": task.short_id, "objective": "Original request"}
+    key = _key()
+    if old_canonical_fingerprint:
+        created = wm.service.store.create(wm.bots["on"], wm.user,
+            {**fields, "initiative_task_id": task.id}, idempotency_key=key,
+            actor=Actor("bot", wm.bots["on"]), task=task)
+    else:
+        created = wm.service.bot_create(wm.context(), fields, key)
+    item = created["item"]
+    wm.service.bot_update(wm.context(), item["id"], item["revision"], {"objective": "Current item"})
+    version, change_count = wm.version(), len(wm.changes(item["id"]))
+
+    def forbidden(ref):
+        pytest.fail("durable replay and conflict must precede task-catalog access")
+
+    catalog.get = forbidden
+    replay = wm.service.bot_create(wm.context(), fields, key)
+    assert replay["replayed"] and replay["item"]["objective"] == "Current item"
+    assert _code(lambda: wm.service.bot_create(
+        wm.context(), {**fields, "objective": "Different request"}, key)) == "idempotency_conflict"
+    assert wm.version() == version and len(wm.changes(item["id"])) == change_count
+
+
+@pytest.mark.parametrize("hard", [False, True])
+@pytest.mark.parametrize("short_ref", [False, True])
+def test_removed_link_retry_never_needs_catalog_or_resurrects_item(wm, monkeypatch, hard, short_ref):
+    task, catalog = _task_links(wm, monkeypatch)
+    fields = {"kind": "initiative_link", "initiative_task_id": task.short_id if short_ref else task.id,
+              "objective": "Remove me"}
+    key = _key()
+    item = wm.service.bot_create(wm.context(), fields, key)["item"]
+    wm.service.owner_delete(wm.bots["on"], wm.user, item["id"], hard=hard)
+    version = wm.version()
+
+    def forbidden(ref):
+        pytest.fail("durable removal must precede task-catalog access")
+
+    catalog.get = forbidden
+    assert _code(lambda: wm.service.bot_create(wm.context(), fields, key)) == "removed"
+    assert wm.version() == version
+    assert wm.service.store.list_items(wm.bots["on"], wm.user)["items"] == []
 
 
 def test_task_pointer_actual_sent_prompt_keeps_pin_until_boundary(wm, ses, monkeypatch):
