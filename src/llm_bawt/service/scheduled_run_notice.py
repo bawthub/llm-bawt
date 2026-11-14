@@ -97,8 +97,9 @@ def reconcile_finished(engine, service, bot_id, user_id):
             ORDER BY o.updated_at DESC, o.run_id DESC LIMIT :batch
         """), {"bot": bot_id, "user": user_id, "batch": MAX_NOTICES}).scalars().all()
     # Runs synchronously inside turn preparation, so the delivery records
-    # _reconcile returns are not emitted here; the next PromptDeliveryWorker
-    # sweep publishes the UI events for these runs.
+    # _reconcile returns are discarded and no delivery events are emitted for
+    # these runs. The sweep cannot catch up: _reconcile makes the occurrences
+    # terminal, and the sweep only selects nonterminal ones.
     worker = PromptDeliveryWorker(engine, service)
     for run_id in ids:
         worker._reconcile(run_id, datetime.now(timezone.utc))
