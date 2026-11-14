@@ -701,6 +701,8 @@ class BackgroundTasksMixin:
                     else:
                         actions = [MemoryAction(action="ADD", fact=f) for f in facts]
 
+                    written: list = []
+                    failed_writes: set[int] = set()
                     for action in actions:
                         fact = action.fact
                         if not fact:
@@ -744,28 +746,47 @@ class BackgroundTasksMixin:
                                 memory_client.delete_memory(
                                     memory_id=action.target_memory_id,
                                 )
-
-                            # Profile attribute extraction
-                            if action.action in ("ADD", "UPDATE") and profile_enabled:
-                                from ..mcp_server.extraction import (
-                                    extract_profile_attributes_from_fact,
-                                )
-                                extract_profile_attributes_from_fact(
-                                    fact=fact,
-                                    user_id=user_id,
-                                    config=self.config,
-                                    raise_errors=True,
-                                )
+                            if action.action in ("ADD", "UPDATE"):
+                                written.append(fact)
                         except MemoryUpdateDuplicateError as e:
                             # Dedup, not a failed write: the fact already exists.
                             log.info("[MemExtract] UPDATE folded into a duplicate: %s", e)
                         except Exception as e:
                             failed_actions += 1
+                            failed_writes.add(id(fact))
                             log.warning(
                                 "[MemExtract] Failed action %s: %s",
                                 action.action,
                                 e,
                             )
+
+                    # Profile candidates. A retry can't rely on the memory
+                    # actions: a fact whose memory landed on an earlier
+                    # attempt now dedups away, though its profile write may
+                    # have failed. So a retry offers every fact again, through
+                    # an idempotent insert that skips ones already recorded.
+                    if profile_enabled:
+                        from ..mcp_server.extraction import (
+                            extract_profile_attributes_from_fact,
+                        )
+                        retry = attempt > 1
+                        profile_facts = facts if retry else written
+                        for fact in profile_facts:
+                            if id(fact) in failed_writes:
+                                continue
+                            try:
+                                extract_profile_attributes_from_fact(
+                                    fact=fact,
+                                    user_id=user_id,
+                                    config=self.config,
+                                    raise_errors=True,
+                                    idempotent=retry,
+                                )
+                            except Exception as e:
+                                failed_actions += 1
+                                log.warning(
+                                    "[MemExtract] Failed profile write: %s", e,
+                                )
 
             except Exception as e:
                 failure = f"extraction failed: {e}"

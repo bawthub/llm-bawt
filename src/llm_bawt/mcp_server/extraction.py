@@ -88,11 +88,14 @@ def extract_profile_attributes_from_fact(
     config: Config | None = None,
     *,
     raise_errors: bool = False,
+    idempotent: bool = False,
 ) -> bool:
     """Extract profile attributes from a fact if the LLM identified it as one.
 
     ``raise_errors`` re-raises a failed write instead of returning False, so
     a caller that retries on failure can tell it from "nothing to store".
+    ``idempotent`` reuses a matching candidate rather than adding a second
+    one (see ``ProfileManager.add_candidate``).
     
     The LLM extraction prompt now includes profile_attribute classification.
     This function reads that classification and stores the attribute.
@@ -177,6 +180,7 @@ def extract_profile_attributes_from_fact(
             confidence=importance,  # Map importance to confidence
             source="extracted",
             source_message_id=source_message_id,
+            idempotent=idempotent,
         )
         
         # If this is a name attribute, also set display_name on the profile

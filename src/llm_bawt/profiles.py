@@ -458,14 +458,35 @@ class ProfileManager:
         confidence: float,
         source: str,
         source_message_id: str | None = None,
+        *,
+        idempotent: bool = False,
     ) -> ProfileAttribute:
-        """Record an unreviewed fact; it isn't rendered until curation promotes it."""
+        """Record an unreviewed fact; it isn't rendered until curation promotes it.
+
+        ``idempotent`` returns an existing row for the same key and source
+        message (or the same value when there's no source message) instead of
+        adding another, so a retried extraction batch doesn't duplicate it.
+        """
         entity_id = entity_id.lower().strip()
+        category = category.lower().strip()
+        key = key.lower().strip()
         self.get_or_create_profile(entity_type, entity_id)
         with Session(self.engine) as session:
+            if idempotent:
+                existing = session.exec(select(ProfileAttribute).where(
+                    ProfileAttribute.entity_type == entity_type,
+                    ProfileAttribute.entity_id == entity_id,
+                    ProfileAttribute.category == category,
+                    ProfileAttribute.key == key,
+                    ProfileAttribute.source == source,
+                    ProfileAttribute.source_message_id == source_message_id,
+                )).all()
+                for row in existing:
+                    if source_message_id is not None or row.value == value:
+                        return row
             attr = ProfileAttribute(
                 entity_type=entity_type, entity_id=entity_id,
-                category=category.lower().strip(), key=key.lower().strip(), value=value,
+                category=category, key=key, value=value,
                 confidence=confidence, source=source, source_message_id=source_message_id,
                 status=STATUS_CANDIDATE,
             )

@@ -211,6 +211,75 @@ def test_profile_write_failure_is_raised_when_asked(monkeypatch: pytest.MonkeyPa
         profile_mod.extract_profile_attributes_from_fact(fact, "u", config, raise_errors=True)  # type: ignore[arg-type]
 
 
+def test_profile_failure_after_memory_write_is_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Memory lands on attempt 1, the profile write fails; the retry dedups the
+    memory away (real heuristic dedup) and must still write the profile."""
+    from llm_bawt.mcp_server import extraction as profile_mod
+
+    class _StoredMemory(_Memory):
+        def list_memories(self, **_kw: Any) -> list[dict[str, Any]]:
+            return [{"id": f"m{i}", "content": c, "importance": 0.9}
+                    for i, c in enumerate(self.added)]
+
+    memory = _StoredMemory()
+    service, backend, task = _service(monkeypatch, memory)
+    service.config = SimpleNamespace(MEMORY_PROFILE_ATTRIBUTE_ENABLED=True)  # type: ignore[attr-defined]
+    fact = ExtractedFact(content=FACT.content, tags=["pets"], importance=0.9,
+                         source_message_ids=["h1"], profile_attribute={"category": "fact", "key": "pets"})
+    _extract_script(monkeypatch, [[fact], [fact]])
+    # Production dedup, not the LLM path.
+    monkeypatch.setattr(MemoryExtractionService, "determine_memory_actions",
+                        MemoryExtractionService._determine_actions_with_heuristics)
+    calls: list[bool] = []
+
+    def profile_write(*, fact: Any, user_id: str, config: Any, raise_errors: bool, idempotent: bool) -> bool:
+        calls.append(idempotent)
+        if len(calls) == 1:
+            raise RuntimeError("profile store down")
+        return True
+
+    monkeypatch.setattr(profile_mod, "extract_profile_attributes_from_fact", profile_write)
+
+    with pytest.raises(ExtractionBatchFailed, match="attempt 1/3"):
+        service._process_memory_extraction(task)
+    assert memory.added == [FACT.content]
+    assert backend.processed == []
+
+    service._process_memory_extraction(task)
+    assert memory.added == [FACT.content]  # deduped, not added twice
+    assert calls == [False, True]  # the retry rewrote the profile, idempotently
+    assert backend.processed == ["h1", "r1"]
+
+
+def test_idempotent_candidate_is_not_duplicated() -> None:
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import Session, SQLModel, create_engine, select
+
+    from llm_bawt.profiles import EntityProfile, EntityType, ProfileAttribute, ProfileManager
+
+    engine = create_engine("sqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(engine, tables=[ProfileAttribute.__table__, EntityProfile.__table__])
+    pm = ProfileManager.__new__(ProfileManager)
+    pm.engine = engine
+    kw = dict(entity_type=EntityType.USER, entity_id="u", category="fact", key="pets",
+              confidence=0.9, source="extracted")
+
+    first = pm.add_candidate(value="Nick has a dog named Biscuit", source_message_id="h1", **kw)
+    again = pm.add_candidate(value="Nick has a dog named Biscuit", source_message_id="h1", idempotent=True, **kw)
+    reworded = pm.add_candidate(value="Nick owns a dog, Biscuit", source_message_id="h1", idempotent=True, **kw)
+    unsourced = pm.add_candidate(value="Nick has a cat", **kw)
+    unsourced_again = pm.add_candidate(value="Nick has a cat", idempotent=True, **kw)
+    other_unsourced = pm.add_candidate(value="Nick has a parrot", idempotent=True, **kw)
+    plain = pm.add_candidate(value="Nick has a dog named Biscuit", source_message_id="h1", **kw)
+
+    assert again.id == reworded.id == first.id
+    assert unsourced_again.id == unsourced.id
+    assert other_unsourced.id != unsourced.id
+    assert plain.id != first.id  # default behavior unchanged
+    with Session(engine) as session:
+        assert len(session.exec(select(ProfileAttribute)).all()) == 4
+
+
 def test_failure_marks_run_failed(monkeypatch: pytest.MonkeyPatch) -> None:
     from llm_bawt.service.tasks import TaskStatus, TaskType
 
