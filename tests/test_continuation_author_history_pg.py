@@ -52,12 +52,15 @@ def history(private_app_pg):
     manager.ensure_schema()
     hm = HistoryManager(client=SimpleNamespace(), config=config, db_backend=manager,
                         bot_id=bot, user_id=USER_ID)
-    return SimpleNamespace(hm=hm, storage=storage, bot=bot)
+    # The request path supplies an owned session explicitly; constructing the
+    # history manager alone does not assign an owner to its legacy fallback.
+    session = manager.get_or_create_active_session(bot_id=bot, user_id=USER_ID)
+    return SimpleNamespace(hm=hm, storage=storage, bot=bot, session=session)
 
 
 def _write(history, request, content):
     author = continuation_author(request) or AuthorReference.user(USER_ID)
-    history.hm.add_message("user", content, author=author)
+    history.hm.add_message("user", content, author=author, session_id=history.session)
     return history.hm.messages[-1].db_id
 
 
@@ -80,7 +83,11 @@ def test_continuations_persist_and_read_back_as_system(history):
     assert tuple(_stored(history, human_id)) == ("user", USER_ID)
     assert tuple(_stored(history, forged_id)) == ("user", USER_ID)
 
-    rows = asyncio.run(history.storage.get_unprocessed_messages(history.bot))
+    # Selection follows session ownership, not speaker attribution: system
+    # continuations remain readable in this owner's batch but not another's.
+    assert asyncio.run(history.storage.get_unprocessed_messages(history.bot)) == []
+    assert asyncio.run(history.storage.get_unprocessed_messages(history.bot, user_id="other-owner")) == []
+    rows = asyncio.run(history.storage.get_unprocessed_messages(history.bot, user_id=USER_ID))
     by_id = {m.id: m for m in rows}
     assert by_id[mcp_id].author == AuthorReference("system", "approval-continuation:mcp")
     assert by_id[harness_id].author == AuthorReference("system", "approval-continuation:harness")
