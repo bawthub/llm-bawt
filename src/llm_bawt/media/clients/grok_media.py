@@ -89,8 +89,9 @@ class GrokMediaClient(MediaClient):
         """Poll the status of a video generation job."""
         resp = await self._client.get(f"/videos/{provider_job_id}")
 
-        # 4xx errors are permanent — return as failed instead of raising
-        if 400 <= resp.status_code < 500:
+        # 4xx errors are permanent — return as failed instead of raising.
+        # 408/429 are transient: raise so the caller's bounded retry path runs.
+        if 400 <= resp.status_code < 500 and resp.status_code not in (408, 429):
             error_text = resp.text[:300]
             logger.error("xAI poll returned %s: %s", resp.status_code, error_text)
             return GenerationResult(

@@ -678,6 +678,8 @@ def set_config_value(key: str, value: str, config: Config) -> bool:
             updated_lines.append(line) # Keep existing line
 
     if not found:
+        if updated_lines and not updated_lines[-1].endswith(("\n", "\r")):
+            updated_lines[-1] += "\n"
         updated_lines.append(new_line)
     try:
         dotenv_path.parent.mkdir(parents=True, exist_ok=True)
@@ -704,3 +706,16 @@ def has_database_credentials(cfg: Config | None = None) -> bool:
 
 
 config = Config()
+
+
+_SECRET_NAME_PARTS = {"SECRET", "TOKEN", "PASSWORD", "KEY"}
+
+
+def is_secret_config_field(name: str) -> bool:
+    """Whether a config field holds a credential and must be masked in output.
+
+    Matches whole name parts (``*_API_KEY``, ``*_SECRET``, ``*_TOKEN``,
+    ``*_PASSWORD``) so counters like ``MAX_TOKENS`` are not masked.
+    """
+    parts = set((name or "").upper().split("_"))
+    return bool(parts & _SECRET_NAME_PARTS)

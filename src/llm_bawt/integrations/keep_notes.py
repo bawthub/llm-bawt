@@ -214,6 +214,9 @@ class KeepNotes:
                 return {"note": self._share(http, headers, note["id"], emails)}
             except IntegrationError as exc:
                 return {"note": note, "warning": "collaborators_not_added", "error": str(exc)}
+            except httpx.HTTPError:
+                # The note exists; whether sharing applied is unknown.
+                return {"note": note, "warning": "collaborators_unknown", "error": "google_unavailable"}
 
     def delete(self, note_id: str) -> dict:
         with self._session() as (http, headers):
@@ -275,8 +278,13 @@ class KeepNotes:
                     copy = self._share(http, headers, copy["id"], _emails(emails))
                 except IntegrationError:
                     return {"note": copy, "original_deleted": False, "warning": "collaborators_not_copied"}
+                except httpx.HTTPError:
+                    return {"note": copy, "original_deleted": False, "warning": "collaborators_unknown"}
             try:
                 self._check(http.delete(f"{KEEP_URL}/{original['id']}", headers=headers))
             except IntegrationError:
                 return {"note": copy, "original_deleted": False, "warning": "original_not_deleted"}
+            except httpx.HTTPError:
+                # The DELETE may have been applied; don't claim the original survived.
+                return {"note": copy, "original_deleted": None, "warning": "original_delete_unknown"}
             return {"note": copy, "original_deleted": True}

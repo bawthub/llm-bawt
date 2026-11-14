@@ -233,6 +233,10 @@ def bootstrap_runtime_settings(config: Config, bot_id: str | None, overwrite: bo
 
     # Fetch current global settings to check for existing keys
     existing_resp = client.get_settings(scope_type="global")
+    if existing_resp is None and not overwrite:
+        # Can't tell what exists, so we can't honour overwrite=False.
+        console.print("[red]Could not read existing settings; nothing was written.[/red]")
+        return False
     global_existing_keys = set()
     if existing_resp:
         for item in existing_resp.get("settings", []):
@@ -251,6 +255,9 @@ def bootstrap_runtime_settings(config: Config, bot_id: str | None, overwrite: bo
 
     for bot in bots:
         bot_resp = client.get_settings(scope_type="bot", scope_id=bot.slug)
+        if bot_resp is None and not overwrite:
+            console.print(f"[red]Could not read settings for {bot.slug}; nothing was written.[/red]")
+            return False
         bot_existing_keys = set()
         if bot_resp:
             for item in bot_resp.get("settings", []):
@@ -262,8 +269,9 @@ def bootstrap_runtime_settings(config: Config, bot_id: str | None, overwrite: bo
             batch_items.append({"scope_type": "bot", "scope_id": bot.slug, "key": key, "value": value})
             set_count += 1
 
-    if batch_items:
-        client.batch_set_settings(batch_items)
+    if batch_items and client.batch_set_settings(batch_items) is None:
+        console.print("[red]Saving settings failed (or its outcome is unknown).[/red]")
+        return False
 
     scope_label = f"bot '{bot_id}'" if bot_id else "all bots"
     console.print(
@@ -306,10 +314,14 @@ def run_user_profile_setup(config: Config, user_id: str) -> bool:
         occupation = Prompt.ask("What do you do? (occupation)", default=existing_attrs.get("occupation", ""))
         console.print()
 
-        if name:
-            client.upsert_profile_attribute("user", user_id, "fact", "name", name)
-        if occupation:
-            client.upsert_profile_attribute("user", user_id, "fact", "occupation", occupation)
+        failed = [
+            key
+            for key, value in (("name", name), ("occupation", occupation))
+            if value and client.upsert_profile_attribute("user", user_id, "fact", key, value) is None
+        ]
+        if failed:
+            console.print(f"[red]Not saved (failed or unknown): {', '.join(failed)}[/red]")
+            return False
         console.print(f"[green]✓ User profile saved for '{user_id}'[/green]")
         console.print()
         return True

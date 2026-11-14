@@ -226,6 +226,7 @@ class MediaAssetStore:
             VALUES
                 (:id, :sha256, :mime_type, :original_mime_type, :size_bytes,
                  :width, :height, :kind, :filename, :source, :owner_user_id, :expires_at)
+            ON CONFLICT (sha256) WHERE storage_key IS NULL DO NOTHING
             RETURNING *
         """)
         params = {
@@ -245,7 +246,11 @@ class MediaAssetStore:
         with self.engine.connect() as conn:
             row = conn.execute(insert_sql, params).mappings().first()
             conn.commit()
-            return dict(row) if row else {}
+        if row:
+            return dict(row)
+        # A concurrent upload of the same bytes inserted first; return its row.
+        existing = self.get_by_sha256(sha256)
+        return existing if existing is not None else {}
 
     def replace_named(self, *, storage_key: str, write_blob, **metadata) -> dict[str, Any]:
         """Serialize named writes and update one row, never immutable dedup rows.

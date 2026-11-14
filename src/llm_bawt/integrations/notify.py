@@ -165,14 +165,19 @@ def push_title(bot_id: str, title: str | None, sender: str | None = None) -> str
 
 async def send_to_service(http: httpx.AsyncClient, credentials: HACredentials, service: str,
                           payload: dict) -> str:
-    """``sent`` or ``ha_error:<status|unreachable>``; never a body or the token."""
+    """``sent``, ``unknown`` or ``ha_error:<status|unreachable>``; never a body or the token."""
     try:
         response = await http.post(
             f"{credentials.base_url}/api/services/notify/{service}", json=payload,
             headers={"Authorization": f"Bearer {credentials.token}"}, timeout=_TIMEOUT)
-    except httpx.HTTPError as error:
+    except (httpx.ConnectError, httpx.ConnectTimeout) as error:
+        # Never reached HA: definitely not sent.
         logger.warning("notify %s unreachable: %s", service, type(error).__name__)
         return "ha_error:unreachable"
+    except httpx.HTTPError as error:
+        # Request may have been accepted before the failure: outcome unknown.
+        logger.warning("notify %s outcome unknown: %s", service, type(error).__name__)
+        return "unknown"
     if response.is_success:
         return "sent"
     logger.warning("notify %s returned HTTP %s", service, response.status_code)
@@ -230,6 +235,12 @@ class Notifier:
         if failed:
             # Some phone already got it: "partial:" keeps counting toward the
             # limits so a retry can't push to that phone twice.
-            result = failed[0] if len(failed) == len(results) else f"partial:{failed[0]}"
+            if len(failed) < len(results):
+                result = f"partial:{failed[0]}"
+            elif "unknown" in failed:
+                # No confirmed delivery, but one may have gone out: keep it counted.
+                result = "unknown"
+            else:
+                result = failed[0]
         await asyncio.to_thread(self.store.finish, row, result)
         return {"result": result, "id": row, "services": results}

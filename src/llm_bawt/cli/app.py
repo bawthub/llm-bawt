@@ -4,7 +4,7 @@ import traceback
 import sys  # Import sys for exit codes
 from rich.prompt import Prompt
 from llm_bawt.utils.config import Config
-from llm_bawt.utils.config import set_config_value
+from llm_bawt.utils.config import is_secret_config_field, set_config_value
 from llm_bawt.utils.input_handler import MultilineInputHandler
 from llm_bawt.core import LLMBawt
 from llm_bawt.model_manager import (
@@ -136,7 +136,8 @@ def main():
         key, value = args.config_set
         success = set_config_value(key, value, config_obj)
         if success:
-            console.print(f"[green]Configuration '{key}' set to '{value}' in {config_obj.model_config.get('env_file', 'unknown')}.[/green]")
+            shown = "****" if is_secret_config_field(key) else value
+            console.print(f"[green]Configuration '{key}' set to '{shown}' in {config_obj.model_config.get('env_file', 'unknown')}.[/green]")
             sys.exit(0)
         else:
             console.print(f"[bold red]Failed to set configuration '{key}'.[/bold red]")
@@ -194,7 +195,7 @@ def main():
         
         # Show all settings grouped by category
         exclude_fields = {'defined_models', 'available_ollama_models', 'ollama_checked', 'model_config', 'SYSTEM_MESSAGE'}
-        secret_fields = {'OPENAI_API_KEY', 'POSTGRES_PASSWORD', 'ANTHROPIC_API_KEY', 'GOOGLE_API_KEY'}
+        secret_fields = {name for name in config_obj.model_fields if is_secret_config_field(name)}
         
         console.print("[bold]All Settings:[/bold]")
         for field_name, field_info in sorted(config_obj.model_fields.items()):
@@ -321,7 +322,9 @@ def main():
                 console.print("[yellow]Service not available. Start with: llm-service[/yellow]")
                 sys.exit(1)
 
-            client.upsert_profile_attribute("user", user_id, category_str, key, value)
+            if client.upsert_profile_attribute("user", user_id, category_str, key, value) is None:
+                console.print(f"[red]Saving {category_str}.{key} failed (or its outcome is unknown).[/red]")
+                sys.exit(1)
             console.print(f"[green]Set {category_str}.{key} = {value}[/green]")
         except ValueError:
             console.print("[red]Use format: --user-profile-set category.key=value[/red]")
@@ -493,7 +496,7 @@ def main():
                 return
     
     try:
-        run_app(args, config_obj, resolved_alias)
+        run_app(args, config_obj, resolved_alias, service_required=use_service)
     except Exception as e:
         console.print(f"[bold red]An unexpected error occurred during application execution:[/bold red] {e}")
         if config_obj.VERBOSE:
@@ -565,7 +568,12 @@ def _query_agent_backend(prompt: str, bot, plaintext_output: bool):
         )
 
 
-def run_app(args: argparse.Namespace, config_obj: Config, resolved_alias: str):
+def run_app(
+    args: argparse.Namespace,
+    config_obj: Config,
+    resolved_alias: str,
+    service_required: bool = False,
+):
     # Determine which bot to use
     bot_manager = BotManager(config_obj, local_only=getattr(args, 'local', False))
     
@@ -617,7 +625,10 @@ def run_app(args: argparse.Namespace, config_obj: Config, resolved_alias: str):
     user_id = args.user if args.user else config_obj.DEFAULT_USER
     
     # Determine service mode: --local flag disables, otherwise check config/flags
-    service_explicitly_set = not args.local and (getattr(args, 'service', False) or config_obj.USE_SERVICE)
+    # service_required: main() already chose service mode (e.g. a non-OpenAI model).
+    service_explicitly_set = not args.local and (
+        getattr(args, 'service', False) or config_obj.USE_SERVICE or service_required
+    )
     use_tools = getattr(bot, 'uses_tools', False)
     use_service = service_explicitly_set
 

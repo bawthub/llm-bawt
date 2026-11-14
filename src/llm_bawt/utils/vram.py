@@ -74,9 +74,9 @@ def _detect_vram_torch() -> VRAMInfo | None:
 
         device = torch.cuda.current_device()
         props = torch.cuda.get_device_properties(device)
-        total = props.total_memory
-        # Use memory_reserved to get a better picture of what's actually free
-        free = total - torch.cuda.memory_reserved(device)
+        # mem_get_info reports device-wide free memory, including other
+        # processes and non-PyTorch allocators.
+        free, total = torch.cuda.mem_get_info(device)
 
         return VRAMInfo(
             total_bytes=total,
@@ -346,15 +346,19 @@ def auto_size_context_window(
 
     # ── Fallback: no VRAM info or no model path ──
     if yaml_context_window:
-        return ContextSizingResult(
+        result = ContextSizingResult(
             context_window=int(yaml_context_window),
             source="model-definition",
         )
-
-    return ContextSizingResult(
-        context_window=global_n_ctx,
-        source="global-config",
-    )
+    else:
+        result = ContextSizingResult(
+            context_window=global_n_ctx,
+            source="global-config",
+        )
+    if native_limit and result.context_window > int(native_limit):
+        result.context_window = int(native_limit)
+        result.source = "native-limit"
+    return result
 
 
 def _extract_model_size_hint(model_definition: dict) -> str | None:

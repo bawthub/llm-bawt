@@ -36,7 +36,8 @@ _log = Table(
     Index("ix_notify_log_bot_created", "bot_id", "created_at"),
     Index("ix_notify_log_created", "created_at"),
 )
-DELIVERING = ("sending", "sent")
+# "unknown" = HA may have pushed (response lost); it still counts for dedupe/limits.
+DELIVERING = ("sending", "sent", "unknown")
 _ADMIT_LOCK = "SELECT pg_advisory_xact_lock(hashtext('notify-user-admit'))"
 
 

@@ -156,23 +156,27 @@ def _save_value(
     from llm_bawt.utils.env import set_env_value
 
     env_var = _env_var_name(setting, env_prefix)
+
+    # Validate against the Config field before touching .env or live state, using
+    # the same coercion pydantic applies on the next launch.
+    coerced: object = value
+    field_info = None if setting.env_only else config.model_fields.get(setting.key)
+    if field_info is not None:
+        from pydantic import TypeAdapter, ValidationError
+
+        try:
+            coerced = TypeAdapter(field_info.annotation).validate_python(value)
+        except ValidationError:
+            print(f"  Invalid value for {env_var}: {value!r}")
+            return False
+
     if not set_env_value(dotenv_path, env_var, value):
         return False
 
     # Update live state
     os.environ[env_var] = value
     if not setting.env_only:
-        # Coerce booleans / ints back to the right type
-        field_info = config.model_fields.get(setting.key)
-        if field_info and field_info.annotation is bool:
-            setattr(config, setting.key, value.lower() in ("true", "1", "yes"))
-        elif field_info and field_info.annotation is int:
-            try:
-                setattr(config, setting.key, int(value))
-            except ValueError:
-                setattr(config, setting.key, value)
-        else:
-            setattr(config, setting.key, value)
+        setattr(config, setting.key, coerced)
     return True
 
 

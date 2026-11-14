@@ -34,7 +34,12 @@ def talk(monkeypatch):
         calls.append(kwargs)
         return True
 
+    async def send_outcome(**kwargs):
+        calls.append(kwargs)
+        return "sent"
+
     monkeypatch.setattr(webhook, "send_nextcloud_message", send)
+    monkeypatch.setattr(webhook, "send_nextcloud_message_outcome", send_outcome)
     import llm_bawt.bots as bots
     monkeypatch.setattr(bots, "BotManager", lambda config: SimpleNamespace(
         get_bot=lambda bot: SimpleNamespace(agent_backend=None, harness=None)
@@ -231,9 +236,51 @@ async def test_outbound_uncertainty_never_posts_second_message(monkeypatch, talk
     async def complete(request):
         return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="answer"))])
 
-    monkeypatch.setattr(webhook, "send_nextcloud_message", send)
+    monkeypatch.setattr(webhook, "send_nextcloud_message_outcome", send)
     monkeypatch.setattr(dependencies, "get_service", lambda: SimpleNamespace(chat_completion=complete))
     result = await webhook.handle_nextcloud_webhook(FakeRequest())
     assert result["status"] == "outbound_uncertain"
     assert len(talk) == 1
     assert talk[0]["message"] == "answer"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exc,expected", [
+    (None, "outbound_failed"),
+    ("connect", "outbound_failed"),
+    ("read", "outbound_uncertain"),
+])
+async def test_inline_reply_uses_real_sender_outcome(monkeypatch, talk, exc, expected):
+    """TASK-2260: the real sender's failure/uncertainty reaches the receipt; no replay."""
+    import httpx
+
+    monkeypatch.undo()  # drop the stubbed senders; keep the real one
+    monkeypatch.setattr(webhook, "verify_nextcloud_signature", lambda *args: True)
+    monkeypatch.setattr(webhook, "get_nextcloud_manager", lambda: SimpleNamespace(
+        get_bot_by_conversation=lambda token: SimpleNamespace(llm_bawt_bot="nova", secret="secret")
+    ))
+    import llm_bawt.bots as bots
+    monkeypatch.setattr(bots, "BotManager", lambda config: SimpleNamespace(
+        get_bot=lambda bot: SimpleNamespace(agent_backend=None, harness=None)
+    ))
+    posts = []
+
+    def handler(request):
+        posts.append(request)
+        if exc == "connect":
+            raise httpx.ConnectError("refused")
+        if exc == "read":
+            raise httpx.ReadTimeout("lost")
+        return httpx.Response(500)
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(webhook.httpx, "AsyncClient",
+                        lambda *a, **k: real_client(transport=httpx.MockTransport(handler)))
+
+    async def complete(request):
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="answer"))])
+
+    monkeypatch.setattr(dependencies, "get_service", lambda: SimpleNamespace(chat_completion=complete))
+    result = await webhook.handle_nextcloud_webhook(FakeRequest())
+    assert result["status"] == expected
+    assert len(posts) == 1

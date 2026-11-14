@@ -69,6 +69,9 @@ class MediaGenerationService:
         resolution: str | None = None,
         num_outputs: int = 1,
     ) -> GeneratedImage:
+        if num_outputs != 1:
+            # Only one output is persisted; refuse before paying for discarded ones.
+            raise ValueError("num_outputs must be 1; multiple outputs are not supported")
         canonical, resolved_model, resolved_aspect, resolved_resolution = self.resolve_request(
             provider=provider,
             media_type="image",

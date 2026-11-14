@@ -41,6 +41,20 @@ async def send_nextcloud_message(
     secret: str,
     reply_to: Optional[int] = None,
 ) -> bool:
+    """Send a Talk message; True only on confirmed success."""
+    outcome = await send_nextcloud_message_outcome(
+        nextcloud_url, conversation_token, message, secret, reply_to=reply_to
+    )
+    return outcome == "sent"
+
+
+async def send_nextcloud_message_outcome(
+    nextcloud_url: str,
+    conversation_token: str,
+    message: str,
+    secret: str,
+    reply_to: Optional[int] = None,
+) -> str:
     """
     Send a message to Nextcloud Talk.
 
@@ -52,7 +66,8 @@ async def send_nextcloud_message(
         reply_to: Optional message ID to reply to
 
     Returns:
-        True if successful, False otherwise
+        "sent", "failed" (definitely not delivered) or "unknown" (the
+        request may have been accepted before the connection failed).
     """
     url = f"{nextcloud_url}/ocs/v2.php/apps/spreed/api/v1/bot/{conversation_token}/message"
 
@@ -93,14 +108,17 @@ async def send_nextcloud_message(
 
             if response.status_code == 201:
                 log.info(f"✓ Message sent to {conversation_token} ({len(message)} chars)")
-                return True
+                return "sent"
             else:
                 log.error(f"Failed to send message: {response.status_code} {response.text}")
                 log.error(f"Message was ({len(message)} chars): {message[:200]}...")
-                return False
+                return "failed"
+    except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+        log.error(f"Error sending message (not delivered): {e}")
+        return "failed"
     except Exception as e:
-        log.error(f"Error sending message: {e}")
-        return False
+        log.error(f"Error sending message (outcome unknown): {e}")
+        return "unknown"
 
 
 async def handle_nextcloud_webhook(request: Request) -> dict:
@@ -269,13 +287,18 @@ async def handle_nextcloud_webhook(request: Request) -> dict:
                 resp_preview = llm_response[:100] + "..." if len(llm_response) > 100 else llm_response
                 log.info(f"🤖 Response ({len(llm_response)} chars): {resp_preview!r}")
                 sending_reply = True
-                await send_nextcloud_message(
+                outcome = await send_nextcloud_message_outcome(
                     nextcloud_url=backend.rstrip('/'),
                     conversation_token=conversation_token,
                     message=llm_response,
                     secret=bot_config.secret,
                     reply_to=reply_to,
                 )
+                if outcome != "sent":
+                    # Never replay: an "unknown" send may already be visible.
+                    status = "outbound_uncertain" if outcome == "unknown" else "outbound_failed"
+                    return {"status": status, "bot": bot_config.llm_bawt_bot,
+                            "message": message, "from": actor_name}
 
         except Exception as e:
             log.error(f"Error processing message with bot {bot_config.llm_bawt_bot}: {e}", exc_info=True)

@@ -172,6 +172,31 @@ def _collect_service_info(config: Config, local_only: bool = False) -> tuple[Ser
     return info, raw_status
 
 
+def _mcp_probe_ok(response) -> bool:
+    """True when the JSON-RPC reply carries a result and no error."""
+    import json
+
+    text = response.text or ""
+    payload = None
+    if "text/event-stream" in (response.headers.get("content-type") or ""):
+        for line in text.splitlines():
+            if line.startswith("data:"):
+                try:
+                    payload = json.loads(line[5:].strip())
+                except ValueError:
+                    continue
+                break
+    else:
+        try:
+            payload = json.loads(text)
+        except ValueError:
+            payload = None
+    if not isinstance(payload, dict) or "error" in payload:
+        return False
+    result = payload.get("result")
+    return isinstance(result, dict) and not result.get("isError")
+
+
 def _collect_mcp_info(config: Config, default_bot_slug: str) -> McpInfo:
     """Collect llm-bawt MCP server status."""
     mcp_server_url = (config.MCP_SERVER_URL or "").strip()
@@ -184,16 +209,14 @@ def _collect_mcp_info(config: Config, default_bot_slug: str) -> McpInfo:
     try:
         import httpx
 
+        # Protocol-level probe: initialize reads no conversation content.
         probe_payload = {
             "jsonrpc": "2.0",
-            "method": "tools/call",
+            "method": "initialize",
             "params": {
-                "name": "get_messages",
-                "arguments": {
-                    "bot_id": default_bot_slug,
-                    "since_seconds": 60,
-                    "limit": 1,
-                },
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": {"name": "llm-bawt-status", "version": "1"},
             },
             "id": "status-probe",
         }
@@ -203,7 +226,10 @@ def _collect_mcp_info(config: Config, default_bot_slug: str) -> McpInfo:
             headers={"Accept": "application/json, text/event-stream"},
             timeout=2.0,
         )
-        if response.status_code == 200:
+        if response.status_code != 200:
+            info.status = "error"
+            info.http_status = response.status_code
+        elif _mcp_probe_ok(response):
             info.status = "up"
         else:
             info.status = "error"

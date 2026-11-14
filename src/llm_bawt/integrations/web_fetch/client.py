@@ -113,12 +113,7 @@ class WebFetchClient:
             lines.append("")
 
             header = "\n".join(lines)
-            remaining_chars = self._max_content_chars - len(header)
-
-            if len(markdown) > remaining_chars:
-                markdown = markdown[:remaining_chars] + "\n\n[Content truncated]"
-
-            return header + markdown
+            return _bound_output(header, markdown, self._max_content_chars)
 
         except httpx.HTTPStatusError as e:
             return self._handle_http_error(e)
@@ -155,3 +150,17 @@ class WebFetchClient:
     def __del__(self) -> None:
         if self._client:
             self._client.close()
+
+
+_TRUNCATION_MARKER = "\n\n[Content truncated]"
+
+
+def _bound_output(header: str, markdown: str, budget: int) -> str:
+    """Join header and body so the whole result, marker included, fits budget."""
+    budget = max(int(budget), 1)
+    full = header + markdown
+    if len(full) <= budget:
+        return full
+    if len(_TRUNCATION_MARKER) >= budget:
+        return full[:budget]
+    return full[: budget - len(_TRUNCATION_MARKER)] + _TRUNCATION_MARKER

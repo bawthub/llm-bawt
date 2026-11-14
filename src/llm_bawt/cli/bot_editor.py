@@ -57,8 +57,9 @@ def _build_settings_yaml(settings: dict) -> str:
         if field_info and field_info.description:
             lines.append(f"  # {field_info.description}")
         # Let PyYAML format the value correctly
-        rendered = yaml.safe_dump({key: value}, default_flow_style=False).strip()
-        lines.append(f"  {rendered}")
+        rendered = yaml.safe_dump({key: value}, default_flow_style=False).rstrip("\n")
+        # Indent every line so nested maps, lists and block strings stay under their key.
+        lines.extend(f"  {line}" for line in rendered.split("\n"))
     lines.append("")
     return "\n".join(lines)
 
@@ -207,7 +208,10 @@ def edit_bot_yaml(config: Config, bot_slug: str) -> bool:
 
     edited_color = out.pop("color", None)
 
-    if out == editable_fields and new_settings == effective_settings:
+    # Compare like with like: the edited copy has slug/color removed.
+    unchanged_fields = {k: v for k, v in editable_fields.items() if k not in ("slug", "color")}
+    if (out == unchanged_fields and edited_color == editable_fields.get("color")
+            and new_settings == effective_settings):
         console.print("[dim]No changes detected.[/dim]")
         return True
 
@@ -231,7 +235,8 @@ def edit_bot_yaml(config: Config, bot_slug: str) -> bool:
         "uses_home_assistant": out.get("uses_home_assistant", bot.uses_home_assistant),
         "default_model": out.get("default_model", bot.default_model),
         "color": edited_color,
-        "default_voice": out.get("default_voice"),
+        # Not in the editable YAML, so keep the stored voice unless the user added one.
+        "default_voice": out.get("default_voice", getattr(bot, "default_voice", None)),
         "nextcloud_config": out.get("nextcloud", raw.get("nextcloud")),
         "bot_type": raw.get("bot_type", bot.bot_type),
         "agent_backend": bot.agent_backend,
@@ -239,25 +244,37 @@ def edit_bot_yaml(config: Config, bot_slug: str) -> bool:
     }
 
     client = _get_service_client(config)
-    if client and client.is_available():
-        client.upsert_bot_profile(slug, profile_payload)
-        console.print(f"[green]Personality saved:[/green] {slug} -> service")
+    if not client or not client.is_available():
+        console.print("[red]Service not available; nothing was saved.[/red]")
+        return False
+    if client.upsert_bot_profile(slug, profile_payload) is None:
+        console.print(f"[red]Saving {slug} failed; no settings were written.[/red]")
+        return False
+    console.print(f"[green]Personality saved:[/green] {slug} -> service")
 
-        settings_changed = 0
-        for key, value in new_settings.items():
-            old_val = db_bot_settings.get(key)
-            template_val = template.get(key)
-            if old_val != value or (old_val is None and value != template_val):
-                client.set_setting("bot", slug, key, value)
+    settings_changed = 0
+    settings_failed: list[str] = []
+    for key, value in new_settings.items():
+        old_val = db_bot_settings.get(key)
+        template_val = template.get(key)
+        if old_val != value or (old_val is None and value != template_val):
+            if client.set_setting("bot", slug, key, value) is None:
+                settings_failed.append(key)
+            else:
                 settings_changed += 1
-        for key in db_bot_settings:
-            if key not in new_settings:
-                client.delete_setting("bot", key, scope_id=slug)
+    for key in db_bot_settings:
+        if key not in new_settings:
+            if client.delete_setting("bot", key, scope_id=slug) is None:
+                settings_failed.append(key)
+            else:
                 settings_changed += 1
-        if settings_changed:
-            console.print(f"[green]Settings saved:[/green] {settings_changed} key(s) -> service (bot/{slug})")
-        else:
-            console.print("[dim]Settings unchanged.[/dim]")
+    if settings_changed:
+        console.print(f"[green]Settings saved:[/green] {settings_changed} key(s) -> service (bot/{slug})")
+    elif not settings_failed:
+        console.print("[dim]Settings unchanged.[/dim]")
+    if settings_failed:
+        console.print(f"[red]Settings not saved (failed or unknown):[/red] {', '.join(settings_failed)}")
+        return False
 
     from llm_bawt.bots import invalidate_bots_cache
 
@@ -312,6 +329,7 @@ def edit_global_settings(config: Config) -> bool:
             return False
 
     changed = 0
+    failed: list[str] = []
 
     for key, value in new_settings.items():
         old_val = current_db.get(key)
@@ -320,17 +338,24 @@ def edit_global_settings(config: Config) -> bool:
             continue
         if old_val is None and value == default_val:
             continue
-        client.set_setting("global", None, key, value)
-        changed += 1
+        if client.set_setting("global", None, key, value) is None:
+            failed.append(key)
+        else:
+            changed += 1
 
     for key in current_db:
         if key not in new_settings:
-            client.delete_setting("global", key)
-            changed += 1
+            if client.delete_setting("global", key) is None:
+                failed.append(key)
+            else:
+                changed += 1
 
     if changed:
         console.print(f"[green]Global settings saved:[/green] {changed} key(s) -> service (global/*)")
-    else:
+    elif not failed:
         console.print("[dim]Global settings unchanged.[/dim]")
+    if failed:
+        console.print(f"[red]Global settings not saved (failed or unknown):[/red] {', '.join(failed)}")
+        return False
 
     return True

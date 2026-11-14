@@ -687,7 +687,7 @@ class S3BlobBackend:
         except BotoCoreError as e:
             raise BlobBackendUnavailable(f"S3 GET {key!r} transport error: {e}") from e
 
-        return resp["Body"].read()
+        return _read_body(resp, key)
 
     def get_range(self, key: str, range_header: str | None) -> BlobRange:
         from botocore.exceptions import BotoCoreError, ClientError
@@ -710,7 +710,7 @@ class S3BlobBackend:
         except BotoCoreError as e:
             raise BlobBackendUnavailable(f"S3 GET {key!r} transport error: {e}") from e
 
-        body = resp["Body"].read()
+        body = _read_body(resp, key)
         content_type = resp.get("ContentType") or _guess_mime_from_key(key)
         content_range = resp.get("ContentRange") or ""
         content_length = resp.get("ContentLength") or len(body)
@@ -952,3 +952,21 @@ def get_blob_backend(
         f"unknown LLM_BAWT_STORAGE_BACKEND value: {backend_kind!r} "
         f"(expected 'fs' or 's3')"
     )
+
+
+def _read_body(resp: dict, key: str) -> bytes:
+    """Read and close an S3 streaming body, mapping transport failures."""
+    from botocore.exceptions import BotoCoreError
+
+    body = resp["Body"]
+    try:
+        return body.read()
+    except (BotoCoreError, OSError) as e:
+        raise BlobBackendUnavailable(f"S3 GET {key!r} body read failed: {e}") from e
+    finally:
+        close = getattr(body, "close", None)
+        if close is not None:
+            try:
+                close()
+            except Exception:
+                pass

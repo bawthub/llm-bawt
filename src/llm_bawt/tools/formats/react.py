@@ -58,11 +58,12 @@ TOOL_NAME_ALIASES = {
     "internet_search": "web_search",
     "google": "web_search",
     # Model tool variations
-    "current_model": "model",
-    "get_model": "model",
-    "list_models": "model",
-    "show_models": "model",
-    "available_models": "model",
+    "current_model": "get_current_model",
+    "get_model": "get_current_model",
+    # Keep the list intent; the executor's legacy map supplies action=list.
+    "list_models": "list_models",
+    "show_models": "list_models",
+    "available_models": "list_models",
 }
 
 

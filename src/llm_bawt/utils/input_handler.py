@@ -52,7 +52,8 @@ class MultilineInputHandler:
                 if line.strip() == "EOF":
                     break
                 lines.append(line)
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, EOFError):
+            # Ctrl+D / Ctrl+Z ends multiline input; keep what was typed.
             self.console.print("\n[italic]Input complete.[/italic]")
             return "\n".join(lines)
             

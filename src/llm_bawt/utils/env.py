@@ -56,6 +56,8 @@ def set_env_value(path: Path, key: str, value: str) -> bool:
             updated_lines.append(line)
 
     if not updated:
+        if updated_lines and not updated_lines[-1].endswith(("\n", "\r")):
+            updated_lines[-1] += "\n"
         updated_lines.append(new_line)
 
     try:

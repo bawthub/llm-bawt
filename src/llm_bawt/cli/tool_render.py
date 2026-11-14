@@ -25,7 +25,7 @@ def _format_tool_call(tool_name: str, tool_args: dict | str) -> str:
             # Unparseable string — truncate and show as-is
             display = tool_args[:90] + "…" if len(tool_args) > 90 else tool_args
             return f"{tool_name}({display.replace('[', chr(92) + '[')})"
-        if not isinstance(tool_args, dict):
+        if not isinstance(tool_args, dict) or not tool_args:
             return tool_name
 
     # Keys to try as the "primary" display arg, in preference order
@@ -56,7 +56,7 @@ def _summarize_tool_args(tool_args: dict | str) -> tuple[str | None, str | None,
             tool_args = json.loads(tool_args)
         except (json.JSONDecodeError, ValueError):
             return None, tool_args, 0
-        if not isinstance(tool_args, dict):
+        if not isinstance(tool_args, dict) or not tool_args:
             return None, None, 0
 
     primary_keys = ("command", "file_path", "path", "pattern", "query", "url", "description", "prompt", "code", "text", "content", "subagent_type")

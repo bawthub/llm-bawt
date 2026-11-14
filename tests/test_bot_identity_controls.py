@@ -65,8 +65,16 @@ def test_remote_cli_without_local_db_reaches_service(monkeypatch, explicit_bot):
         argv += ["--bot", "alpha"]
     monkeypatch.setattr(sys, "argv", [*argv, "hello"])
     calls = []
-    monkeypatch.setattr(app, "run_app", lambda args, cfg, model: calls.append((cfg.DEFAULT_BOT, model)))
+    modes = []
+
+    def fake_run_app(args, cfg, model, service_required=False):
+        calls.append((cfg.DEFAULT_BOT, model))
+        modes.append(service_required)
+
+    monkeypatch.setattr(app, "run_app", fake_run_app)
     with pytest.raises(SystemExit) as exit_info:
         app.main()
     assert exit_info.value.code == 0
     assert calls == [("alpha", None)]
+    # TASK-2260: main's resolved service mode is passed through to run_app.
+    assert modes == [True]

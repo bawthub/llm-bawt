@@ -67,6 +67,8 @@ class Rig:
         self.requests.append(request)
         if self.unreachable:
             raise httpx.ConnectError("down", request=request)
+        if getattr(self, "response_lost", False):
+            raise httpx.ReadTimeout("accepted, response lost", request=request)
         service = request.url.path.rsplit("/", 1)[-1]
         return httpx.Response(self.statuses.get(service, 200), text=f"echo {TOKEN}")
 
@@ -232,6 +234,18 @@ async def test_partial_delivery_still_counts_toward_the_rate_limit(rig, store):
     assert receipt["services"] == {"mobile_app_one": "sent", "mobile_app_two": "ha_error:502"}
     later = await send(rig, store, at=NOON + timedelta(minutes=1))
     assert later["result"] == "suppressed:rate_limit"
+
+
+@pytest.mark.anyio
+async def test_lost_response_is_unknown_and_blocks_an_immediate_duplicate(rig, store):
+    """TASK-2260: HA may have pushed; a same-key retry must not push again."""
+    rig.response_lost = True
+    receipt = await send(rig, store, dedupe_key="k1")
+    assert receipt["result"] == "unknown"
+    rig.response_lost = False
+    again = await send(rig, store, dedupe_key="k1", at=NOON + timedelta(seconds=5))
+    assert again["result"].startswith("suppressed:")
+    assert len(rig.requests) == 1
 
 
 # --- suppression ---------------------------------------------------------

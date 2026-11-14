@@ -335,7 +335,7 @@ class InstanceManagerMixin:
         session_key = (bot_id, user_id)
 
         # Check for pending model switch (from switch_model tool)
-        pending = self._model_lifecycle.clear_pending_switch()
+        pending = self._model_lifecycle.clear_pending_switch(owner=session_key)
         if pending:
             log.info(f"🔄 Switching to model: {pending}")
             # Store as session override so subsequent requests use this model

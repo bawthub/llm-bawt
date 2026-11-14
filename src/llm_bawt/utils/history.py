@@ -23,7 +23,8 @@ logger = logging.getLogger(__name__)
 # persona/system prompt. Detected by content prefix so the two are separable in
 # the context payload (chat keeps these; the plain system row is discarded by
 # both delivery modes). Keep in sync with core/base.py's inline check.
-_TOOL_RESULT_PREFIXES = ("[Tool Results]", "[Tools used:")
+# "[Tool Results" also matches the CLI's timestamped "[Tool Results @ ...]" rows.
+_TOOL_RESULT_PREFIXES = ("[Tool Results]", "[Tool Results @ ", "[Tools used:")
 
 
 def owner_file_key(bot_id: str, user_id: str) -> str:

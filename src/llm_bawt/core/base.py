@@ -22,7 +22,7 @@ from rich.console import Console
 from ..clients import LLMClient
 from ..tools import get_tools_list, query_with_tools
 from ..utils.paths import resolve_log_dir
-from ..utils.history import HistoryManager, Message, scope_flags
+from ..utils.history import HistoryManager, Message, _is_tool_result_system, scope_flags
 from .prompt_builder import PromptBuilder
 from .prompt_manifest import PROMPT_MANIFEST, STABLE, PER_TURN
 from .initialization import OrchestratorInitializationMixin
@@ -194,7 +194,18 @@ class BaseLLMBawt(OrchestratorInitializationMixin, PromptSectionsMixin, ABC):
                 if self.bot.uses_tools and self.config.VERBOSE:
                     logger.info(f"Tool calling disabled for model {self.resolved_model_alias} (tool_format=none)")
             else:
-                use_tools = (self.bot.uses_tools and (self.memory is not None or self.home_client is not None or self.ha_native_client is not None)) or (
+                has_tool_backend = any(
+                    c is not None
+                    for c in (
+                        self.memory,
+                        self.home_client,
+                        self.ha_native_client,
+                        getattr(self, "search_client", None),
+                        getattr(self, "news_client", None),
+                        getattr(self, "web_fetch_client", None),
+                    )
+                )
+                use_tools = (self.bot.uses_tools and has_tool_backend) or (
                     self.memory and not self.bot.uses_tools
                 )
             # Resolve per-bot generation parameters once for this query
@@ -494,10 +505,7 @@ class BaseLLMBawt(OrchestratorInitializationMixin, PromptSectionsMixin, ABC):
             for msg in history:
                 if msg.role in ("user", "assistant"):
                     ha_msgs.append(msg)
-                elif msg.role == "system" and msg.content and (
-                    msg.content.startswith("[Tool Results]")
-                    or msg.content.startswith("[Tools used:")
-                ):
+                elif _is_tool_result_system(msg):
                     ha_msgs.append(msg)
                 # Skip 'summary' role entirely
             messages.extend(ha_msgs[-6:])

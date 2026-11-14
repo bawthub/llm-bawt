@@ -41,6 +41,8 @@ def api(manager, key):
         assert request.headers["authorization"] == "Bearer tok"
         path, method = request.url.path, request.method
         state["calls"].append((method, path, request.content.decode() if request.content else ""))
+        if (method, path) in state.get("raise", {}):
+            raise httpx.ReadTimeout("response lost")
         if (method, path) in state["fail"]:
             return httpx.Response(state["fail"][(method, path)], json={"error": {"message": "NO LEAK"}})
         if path == "/v1/notes" and method == "GET":
@@ -173,3 +175,22 @@ def test_routes_and_bounded_errors(api, manager, monkeypatch):
     denied = client.get("/v1/integrations/google-keep/keep/notes/abc")
     assert denied.status_code == 400 and "NO LEAK" not in denied.text
     assert client.get("/v1/integrations/other/keep/notes").status_code == 404
+
+
+def test_replace_reports_unknown_delete_after_transport_failure(api):
+    """TASK-2260: a timeout during DELETE keeps the new note and says the outcome is unknown."""
+    keep, state = api
+    state.setdefault("raise", {})[("DELETE", "/v1/notes/abc")] = True
+    out = keep.replace("abc", "Groceries", text="hi")
+    assert out["original_deleted"] is None
+    assert out["warning"] == "original_delete_unknown"
+    assert out["note"]["id"].startswith("new")
+
+
+def test_create_keeps_note_when_sharing_times_out(api):
+    """TASK-2260: a timeout while sharing returns the created note, not a generic error."""
+    keep, state = api
+    state.setdefault("raise", {})[("POST", "/v1/notes/new1/permissions:batchCreate")] = True
+    out = keep.create("Hi", text="x", collaborators=["pal@example.com"])
+    assert out["warning"] == "collaborators_unknown"
+    assert out["note"]["id"] == "new1"

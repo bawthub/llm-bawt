@@ -59,8 +59,9 @@ class MediaGenerationRequest(BaseModel):
     num_outputs: int = Field(
         default=1,
         ge=1,
-        le=4,
-        description="Number of outputs to generate (image only, default 1)",
+        # Only one output is stored per generation; extra paid outputs would be discarded.
+        le=1,
+        description="Number of outputs to generate (only 1 is supported)",
     )
 
 

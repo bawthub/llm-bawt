@@ -731,13 +731,22 @@ class ProfileManager:
         value: Any | None = None,
         confidence: float | None = None,
         source: str | None = None,
+        entity_type: EntityType | None = None,
+        entity_id: str | None = None,
     ) -> ProfileAttribute | None:
         """Update a specific attribute by its database ID.
+
+        When entity_type/entity_id are given, the attribute must belong to that
+        entity; otherwise it is treated as not found.
 
         Returns updated attribute, or None if not found.
         """
         with Session(self.engine) as session:
             statement = select(ProfileAttribute).where(ProfileAttribute.id == attribute_id)
+            if entity_type is not None:
+                statement = statement.where(ProfileAttribute.entity_type == entity_type)
+            if entity_id is not None:
+                statement = statement.where(ProfileAttribute.entity_id == entity_id)
             attr = session.exec(statement).first()
             if not attr:
                 return None

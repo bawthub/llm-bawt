@@ -84,32 +84,6 @@ def parse_date_param(value: str | None) -> float | None:
     for fmt in formats:
         try:
             dt = datetime.strptime(value, fmt)
-            now = datetime.now()
-            today = now.replace(hour=0, minute=0, second=0, microsecond=0)
-            
-            # Check if date is unreasonable (hallucinated)
-            # - More than 1 year in the past
-            # - More than 7 days in the future
-            days_diff = (dt - today).days
-            
-            if days_diff > 7 or days_diff < -365:
-                # LLM hallucinated a completely wrong date
-                # Interpret as relative: use the day-of-month offset from "today" in that month
-                # But simpler: if asking about "yesterday", the offset from their "today" is -1
-                # Check their date vs their presumed "today" (next day in sequence)
-                
-                # Heuristic: LLM often provides consecutive dates for since/until
-                # e.g., since=2024-10-09, until=2024-10-10 (1 day range = "yesterday")
-                # So just use the day offset they intended
-                
-                # For now, if date is way off, assume they meant "yesterday" 
-                # and use actual yesterday
-                logger.warning(
-                    f"Date '{value}' is {days_diff} days from today, "
-                    f"interpreting as yesterday (actual: {(today - timedelta(days=1)).strftime('%Y-%m-%d')})"
-                )
-                dt = today - timedelta(days=1)
-            
             return dt.timestamp()
         except ValueError:
             continue
@@ -231,14 +205,13 @@ class ToolExecutor:
         Returns:
             Formatted result string for injection into conversation.
         """
-        self._call_count += 1
-
         if not self.can_execute_more():
             return format_tool_result(
                 tool_call.name,
                 None,
                 error=f"Too many tool calls this turn (max {self._max_tool_calls})"
             )
+        self._call_count += 1
 
         # Normalize legacy tool names to consolidated tools
         original_name = tool_call.name
@@ -942,6 +915,8 @@ class ToolExecutor:
                     value=value,
                     confidence=float(confidence) if confidence is not None else None,
                     source="inferred",
+                    entity_type=EntityType.USER,
+                    entity_id=self.user_id,
                 )
                 if not updated:
                     return format_tool_result(tool_call.name, None, error=f"Attribute id {attribute_id} not found")
@@ -1158,6 +1133,8 @@ class ToolExecutor:
         category = tool_call.arguments.get("category", "").strip()
         key = tool_call.arguments.get("key", "").strip()
         query = tool_call.arguments.get("query", "").strip()
+        if category.lower() == "communication":
+            category = "communication_style"
 
         if not query and (not category or not key):
             return format_tool_result(
@@ -1305,7 +1282,7 @@ class ToolExecutor:
 
         search_type = tool_call.arguments.get("type", "web").lower()
         query = tool_call.arguments.get("query", "")
-        max_results = tool_call.arguments.get("max_results", 5)
+        max_results = tool_call.arguments.get("max_results", tool_call.arguments.get("n_results", 5))
 
         if not query:
             return format_tool_result(
@@ -1405,7 +1382,7 @@ class ToolExecutor:
 
         action = tool_call.arguments.get("action", "search").lower()
         query = tool_call.arguments.get("query", "")
-        max_results = tool_call.arguments.get("max_results", 5)
+        max_results = tool_call.arguments.get("max_results", tool_call.arguments.get("n_results", 5))
 
         try:
             if action == "headlines":
@@ -1606,6 +1583,19 @@ class ToolExecutor:
 
                 text = self.home_client.set(entity=entity, state=state, brightness=brightness)
                 attempted_resolution = False
+                if "multiple matches" in (text or "").lower():
+                    # Never pick a device for a state change the user didn't choose.
+                    suggestions = self._home_suggest_entities(entity, max_items=5)
+                    hint = f" Candidates: {', '.join(suggestions)}" if suggestions else ""
+                    return format_tool_result(
+                        tool_call.name,
+                        None,
+                        error=(
+                            f"Entity '{entity}' matches multiple devices; nothing was changed. "
+                            f"Ask which one, then retry with the exact entity ID.{hint}"
+                        ),
+                    )
+
                 if self._home_needs_resolution(text):
                     resolved = self._home_resolve_entity(entity)
                     if resolved:
@@ -1763,6 +1753,10 @@ class ToolExecutor:
         best_score, has_overlap = score_and_overlap(best)
         if not has_overlap or best_score < 0.55:
             return None
+        if len(ranked) > 1:
+            runner_score, runner_overlap = score_and_overlap(ranked[1])
+            if runner_overlap and best_score - runner_score < 0.05:
+                return None  # ambiguous: no unique best match
         return best
 
     def _home_suggest_entities(self, entity: str, max_items: int = 3) -> list[str]:
@@ -1955,7 +1949,9 @@ class ToolExecutor:
             )
 
         try:
-            success, message = self.model_lifecycle.switch_model(model_name)
+            success, message = self.model_lifecycle.switch_model(
+                model_name, owner=(self.bot_id, self.user_id)
+            )
 
             if success:
                 logger.info(f"Model switch requested: {model_name}")

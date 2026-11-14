@@ -750,7 +750,7 @@ def _render_job_status_from_service(config: Config) -> bool:
             last_run_str = "[dim]never[/dim]"
             if job.get("last_run_at"):
                 try:
-                    last_run = datetime.fromisoformat(job["last_run_at"].replace("Z", "+00:00")).replace(tzinfo=None)
+                    last_run = _aware_utc(job["last_run_at"])
                     ago = now - last_run
                     if ago.total_seconds() < 3600:
                         last_run_str = f"{int(ago.total_seconds() // 60)}m ago"
@@ -764,7 +764,7 @@ def _render_job_status_from_service(config: Config) -> bool:
             next_run_str = "[dim]pending[/dim]"
             if job.get("next_run_at"):
                 try:
-                    next_run = datetime.fromisoformat(job["next_run_at"].replace("Z", "+00:00")).replace(tzinfo=None)
+                    next_run = _aware_utc(job["next_run_at"])
                     until = next_run - now
                     if until.total_seconds() < 0:
                         next_run_str = "[yellow]overdue[/yellow]"
@@ -870,3 +870,11 @@ def trigger_job(config: Config, job_type: str):
         console.print(f"[red]Failed to trigger job: {error}[/red]")
 
 
+def _aware_utc(value: str):
+    """Parse an ISO timestamp as timezone-aware; naive values are UTC."""
+    from datetime import datetime, timezone
+
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed

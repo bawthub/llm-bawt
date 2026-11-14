@@ -324,7 +324,8 @@ class ToolLoop:
                 )
                 results.append(format_tool_result(tc.name, None, error="Too many tool calls this turn"))
                 tool_messages.append(self._result_to_message(formatted, tc, add_guidance=False))
-                break
+                # Every requested call needs a result, so keep going without executing.
+                continue
             
             tool_call = ToolCall(name=tc.name, arguments=tc.arguments, raw_text=tc.raw_text or "")
             result = self.executor.execute(tool_call)

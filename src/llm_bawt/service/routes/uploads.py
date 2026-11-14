@@ -361,8 +361,15 @@ async def upload_asset(
     if not raw:
         raise HTTPException(status_code=400, detail="Empty upload body")
 
+    store = _store()
+    if store.db is None:
+        # Without the metadata DB the asset ID could never be read back.
+        raise HTTPException(
+            status_code=503,
+            detail="Media metadata database unavailable; try again shortly",
+        )
     try:
-        asset = _store().upload(
+        asset = store.upload(
             raw_bytes=raw,
             original_mime=mime,
             source=source,

@@ -23,6 +23,13 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 
+def _owner_key(owner: tuple[str, str] | None) -> tuple[str, str] | None:
+    if owner is None:
+        return None
+    bot_id, user_id = owner
+    return (str(bot_id or "").lower().strip(), str(user_id or ""))
+
+
 class ModelLifecycleManager:
     """Singleton manager for model lifecycle.
     
@@ -50,7 +57,8 @@ class ModelLifecycleManager:
         self._current_model_alias: str | None = None
         self._current_client: "LLMClient | None" = None
         self._model_lock = threading.RLock()
-        self._pending_model_switch: str | None = None
+        # Pending switches keyed by owner (bot_id, user_id); None = unscoped admin request.
+        self._pending_model_switches: dict[tuple[str, str] | None, str] = {}
         
         # Callbacks for model switch events
         self._on_model_unloaded: list = []
@@ -214,7 +222,9 @@ class ModelLifecycleManager:
             logger.info(f"Model registered as primary: {alias}")
             return True
     
-    def switch_model(self, new_alias: str) -> tuple[bool, str]:
+    def switch_model(
+        self, new_alias: str, owner: tuple[str, str] | None = None
+    ) -> tuple[bool, str]:
         """Request a switch to a different model.
         
         This does NOT unload the current model immediately - that would crash
@@ -227,6 +237,7 @@ class ModelLifecycleManager:
         Returns:
             Tuple of (success, message)
         """
+        owner = _owner_key(owner)
         with self._model_lock:
             # Normalize the alias (case-insensitive match)
             normalized_alias = self._normalize_alias(new_alias)
@@ -236,34 +247,42 @@ class ModelLifecycleManager:
             
             # Already using this model?
             if self._current_model_alias == normalized_alias:
+                # Choosing the current model cancels this owner's pending switch.
+                self._pending_model_switches.pop(owner, None)
                 return True, f"Already using model '{normalized_alias}'"
             
             previous = self._current_model_alias
             
             # Mark the pending switch - do NOT unload yet!
             # The actual switch will happen when _get_llm_bawt is called next
-            self._pending_model_switch = normalized_alias
+            self._pending_model_switches[owner] = normalized_alias
             
             if previous:
                 return True, f"Got it! I'll switch from '{previous}' to '{normalized_alias}' for your next message."
             else:
                 return True, f"Got it! I'll use '{normalized_alias}' for your next message."
     
-    def has_pending_switch(self) -> str | None:
-        """Check if there's a pending model switch.
-        
-        Returns the model alias to switch to, or None if no switch pending.
-        """
-        return getattr(self, '_pending_model_switch', None)
+    def has_pending_switch(self, owner: tuple[str, str] | None = None) -> str | None:
+        """Return the pending switch for this owner (or the unscoped one), if any."""
+        owner = _owner_key(owner)
+        with self._model_lock:
+            pending = self._pending_model_switches.get(owner)
+            if pending is None and owner is not None:
+                pending = self._pending_model_switches.get(None)
+            return pending
     
-    def clear_pending_switch(self) -> str | None:
-        """Clear and return the pending switch.
-        
-        Returns the model alias that was pending, or None.
+    def clear_pending_switch(self, owner: tuple[str, str] | None = None) -> str | None:
+        """Clear and return the pending switch for this owner.
+
+        Only the owner's own request (or an unscoped admin request) is consumed,
+        so one bot/user never receives another's switch.
         """
-        pending = getattr(self, '_pending_model_switch', None)
-        self._pending_model_switch = None
-        return pending
+        owner = _owner_key(owner)
+        with self._model_lock:
+            pending = self._pending_model_switches.pop(owner, None)
+            if pending is None and owner is not None:
+                pending = self._pending_model_switches.pop(None, None)
+            return pending
     
     def on_model_unloaded(self, callback):
         """Register a callback for when a model is unloaded."""

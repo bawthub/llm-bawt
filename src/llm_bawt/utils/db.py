@@ -55,7 +55,6 @@ from __future__ import annotations
 import logging
 import threading
 from typing import Any
-from urllib.parse import quote_plus
 
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
@@ -151,7 +150,17 @@ def build_postgres_url(config: Any) -> str | None:
     database = getattr(config, "POSTGRES_DATABASE", None)
     if not user or not database:
         return None
-    return f"postgresql+psycopg2://{user}:{quote_plus(password)}@{host}:{port}/{database}"
+    from sqlalchemy.engine import URL
+
+    # URL.create percent-encodes every component (spaces, '+', '@', '/', ...).
+    return URL.create(
+        "postgresql+psycopg2",
+        username=user,
+        password=password or None,
+        host=host,
+        port=port,
+        database=database,
+    ).render_as_string(hide_password=False)
 
 
 def build_engine(

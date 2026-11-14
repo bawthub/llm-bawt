@@ -164,11 +164,17 @@ def _normalize_to_original(raw_bytes: bytes) -> tuple[bytes, Image.Image, int, i
     # just its pixel buffer.
     src.load()  # force-decode before we touch .mode / .size
 
-    # Step 2: collapse exotic color modes. Preserve RGBA so transparent
-    # screenshots don't lose their alpha channel.
+    # Apply EXIF orientation to the pixels before the metadata is dropped,
+    # so phone photos keep displaying upright.
+    from PIL import ImageOps
+
+    src = ImageOps.exif_transpose(src) or src
+
+    # Step 2: collapse exotic color modes. Preserve alpha, including palette
+    # (P) and colour-key ("transparency" info) transparency.
     if src.mode == "RGBA":
         target_mode = "RGBA"
-    elif src.mode == "LA":
+    elif src.mode in ("LA", "PA") or "transparency" in src.info:
         src = src.convert("RGBA")
         target_mode = "RGBA"
     else:

@@ -7,6 +7,9 @@ from .base import ToolCallRequest, ToolFormatHandler
 from ...shared.output_sanitizer import strip_tool_protocol_leakage
 
 
+ANY_JSON_TYPES = ("string", "number", "boolean", "array", "object")
+
+
 def _json_type(param_type: str) -> tuple[str, dict | None]:
     mapping = {
         "string": "string",
@@ -14,7 +17,6 @@ def _json_type(param_type: str) -> tuple[str, dict | None]:
         "float": "number",
         "number": "number",
         "boolean": "boolean",
-        "any": "object",
     }
 
     if param_type.startswith("list[") or param_type.startswith("array["):
@@ -108,13 +110,21 @@ class NativeOpenAIFormatHandler(ToolFormatHandler):
             properties: dict[str, Any] = {}
             required: list[str] = []
             for param in getattr(tool, "parameters", []) or []:
-                json_type, items = _json_type(param.type)
-                prop: dict[str, Any] = {
-                    "type": json_type,
-                    "description": param.description,
-                }
-                if items:
-                    prop["items"] = items
+                if param.type == "any":
+                    # Accept any JSON value (string, number, bool, list or object).
+                    prop: dict[str, Any] = {
+                        "type": list(ANY_JSON_TYPES),
+                        "items": {},
+                        "description": param.description,
+                    }
+                else:
+                    json_type, items = _json_type(param.type)
+                    prop = {
+                        "type": json_type,
+                        "description": param.description,
+                    }
+                    if items:
+                        prop["items"] = items
                 if param.default is not None:
                     prop["default"] = param.default
                 properties[param.name] = prop

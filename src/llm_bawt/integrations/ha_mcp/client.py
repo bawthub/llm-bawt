@@ -26,6 +26,44 @@ from ..ha_credentials import (
 logger = logging.getLogger(__name__)
 
 
+def run_bounded(coro, timeout: float):
+    """Run a coroutine from sync code with a hard timeout.
+
+    Raises TimeoutError when the call doesn't finish in time; the outcome on
+    the Home Assistant side is then unknown (the request may still apply).
+    """
+
+    async def _bounded():
+        return await asyncio.wait_for(coro, timeout=timeout)
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(_bounded())
+
+    result: Any = None
+    error: BaseException | None = None
+
+    def _runner():
+        nonlocal result, error
+        try:
+            result = asyncio.run(_bounded())
+        except BaseException as exc:
+            error = exc
+
+    thread = threading.Thread(target=_runner, daemon=True)
+    thread.start()
+    # wait_for cancels local work at the deadline; allow a short grace for cleanup.
+    thread.join(timeout=timeout + 5)
+    if thread.is_alive():
+        raise TimeoutError(
+            f"Home Assistant call did not finish within {timeout:.0f}s; outcome unknown"
+        )
+    if error is not None:
+        raise error
+    return result
+
+
 class HAToolError(RuntimeError):
     """A native HA tool call failed; the message is safe to show the model."""
 
@@ -186,30 +224,8 @@ class HomeAssistantNativeClient:
 
     # --- Sync/async bridge ---
 
-    @staticmethod
-    def _run_async(coro):
-        """Run an async coroutine from sync context, handling existing event loops."""
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            return asyncio.run(coro)
-
-        result: Any = None
-        error: BaseException | None = None
-
-        def _runner():
-            nonlocal result, error
-            try:
-                result = asyncio.run(coro)
-            except BaseException as exc:
-                error = exc
-
-        thread = threading.Thread(target=_runner, daemon=True)
-        thread.start()
-        thread.join(timeout=30)
-        if error is not None:
-            raise error
-        return result
+    def _run_async(self, coro):
+        return run_bounded(coro, self._timeout)
 
     @staticmethod
     def _extract_text(result: Any) -> str:
@@ -326,29 +342,8 @@ class HomeAssistantMCPClient:
                 await session.initialize()
                 return await session.call_tool(name, arguments)
 
-    @staticmethod
-    def _run_async(coro):
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            return asyncio.run(coro)
-
-        result: Any = None
-        error: BaseException | None = None
-
-        def _runner():
-            nonlocal result, error
-            try:
-                result = asyncio.run(coro)
-            except BaseException as exc:  # pragma: no cover - defensive
-                error = exc
-
-        thread = threading.Thread(target=_runner, daemon=True)
-        thread.start()
-        thread.join()
-        if error is not None:
-            raise error
-        return result
+    def _run_async(self, coro):
+        return run_bounded(coro, self._timeout)
 
     @staticmethod
     def _extract_text(result: Any) -> str:
