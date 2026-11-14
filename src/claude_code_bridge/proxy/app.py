@@ -15,10 +15,12 @@ from typing import Optional
 
 import uvicorn
 from fastapi import FastAPI
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .adapters import close_all, start_all
 from .claude_oauth import ClaudeOAuthGateway, router as claude_oauth_router
 from .routes import router as messages_router
+from .errors import anthropic_http_exception_handler
 from .request_context import ProxyCancellationRegistry, ProxyStatusCallback
 from .retry import RetryBudgetRegistry
 
@@ -55,6 +57,7 @@ def create_app(
         redoc_url=None,
         openapi_url=None,
     )
+    app.add_exception_handler(StarletteHTTPException, anthropic_http_exception_handler)
     app.state.proxy_status_callback = status_callback
     app.state.proxy_cancellations = cancellation_registry or ProxyCancellationRegistry()
     app.state.proxy_retry_budgets = RetryBudgetRegistry()

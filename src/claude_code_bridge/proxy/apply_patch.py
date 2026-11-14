@@ -89,6 +89,7 @@ class PatchError(ValueError):
 class Chunk:
     lines: list[tuple[str, str]] = field(default_factory=list)  # (" "|"-"|"+", text)
     anchor: str | None = None  # text after "@@ ", a line to search after
+    at_eof: bool = False
 
 
 @dataclass
@@ -179,6 +180,9 @@ def parse_patch(text: str) -> list[FileOp]:
                 "Move to is not supported. Add the file at the new path and Delete the old one."
             )
         if raw.strip() == "*** End of File":
+            if cur is None or cur.kind != "update" or not cur.chunks:
+                raise PatchError("End of File must follow an Update File section.")
+            cur.chunks[-1].at_eof = True
             continue
         if cur is None:
             if not raw.strip():
@@ -313,6 +317,12 @@ def _update_edits(op: FileOp, path: str) -> list[dict]:
             )
 
         def locate(want: list[str]) -> int | None:
+            if chunk.at_eof:
+                at_end = len(lines) - len(want)
+                minimum = max(cursor, anchor_at if anchor_at is not None else cursor)
+                if at_end < minimum:
+                    return None
+                return _find(lines, want, at_end)
             if anchor_at is None:
                 return _find(lines, want, cursor)
             # Search after the anchor; models often repeat it as first context.

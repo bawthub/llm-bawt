@@ -28,6 +28,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from typing import AsyncIterator, ClassVar
 
@@ -52,6 +53,40 @@ _ANTHROPIC_VERSION = "2023-06-01"
 # Generous read timeout: agent turns with many tool calls stream for a long
 # time. No total timeout — rely on the connect/read granular limits.
 _TIMEOUT = httpx.Timeout(connect=15.0, read=600.0, write=60.0, pool=15.0)
+_SSE_BOUNDARY = re.compile(rb"\r?\n\r?\n")
+_MAX_FRAME_BYTES = 16 * 1024 * 1024
+
+
+def _rewrite_message_start(frame: bytes, model: str) -> bytes:
+    """Rewrite only the response model, never tool inputs or text mentioning it.
+
+    Called with complete SSE frames, independent of HTTP chunk/UTF-8 splits.
+    Non-message-start frames (including malformed data) are byte-for-byte relayed.
+    Preserve SSE metadata and line endings on the rewritten frame as well.
+    """
+    lines = frame.splitlines(keepends=True)
+    data_indices = [i for i, line in enumerate(lines) if line.startswith(b"data:")]
+    if not data_indices:
+        return frame
+    data = b"\n".join(lines[i][5:].strip() for i in data_indices)
+    try:
+        payload = json.loads(data)
+    except (ValueError, UnicodeDecodeError):
+        return frame
+    if not isinstance(payload, dict) or payload.get("type") != "message_start":
+        return frame
+    message = payload.get("message")
+    if not isinstance(message, dict) or "model" not in message:
+        return frame
+    if message["model"] == model:
+        return frame
+    message["model"] = model
+    first = data_indices[0]
+    ending = b"\r\n" if lines[first].endswith(b"\r\n") else b"\n"
+    lines[first] = b"data: " + json.dumps(payload).encode() + ending
+    for i in reversed(data_indices[1:]):
+        del lines[i]
+    return b"".join(lines)
 
 
 class AnthropicPassthroughAdapter(ProviderAdapter):
@@ -187,20 +222,16 @@ class AnthropicPassthroughAdapter(ProviderAdapter):
                 raise RuntimeError(
                     f"{self.LABEL} upstream {resp.status_code}: {detail[:500]}"
                 )
-            # Observe original bytes before the existing model-name rewrite.
+            # Observe decoded SSE before the model-name rewrite. The route
+            # emits fresh SSE headers, not the upstream Content-Encoding, so
+            # compressed HTTP bodies must be decoded here (unlike claude_oauth).
             # Keep reading usage through message_delta; late input/cache fields
             # are common on compatible endpoints. Telemetry cannot alter flow.
             telemetry = PassthroughTelemetry(context)
             telemetry_enabled = True
-            # The upstream echoes the bare model name ("glm-5.2") in
-            # message_start. The SDK CLI validates that the response
-            # model matches what it sent ("zai/glm-5.2"). Rewrite the
-            # model field in the raw SSE so the CLI doesn't reject the
-            # response as malformed.
-            bare_model_bytes = f'"model": "{upstream_model}"'.encode()
-            full_model_bytes = f'"model": "{original_model}"'.encode()
+            pending = b""
             try:
-                async for chunk in resp.aiter_raw():
+                async for chunk in resp.aiter_bytes():
                     if not chunk:
                         continue
                     if telemetry_enabled:
@@ -208,9 +239,17 @@ class AnthropicPassthroughAdapter(ProviderAdapter):
                             telemetry.feed(chunk, (time.perf_counter() - upstream_started) * 1000)
                         except Exception:  # noqa: BLE001 — telemetry cannot break the relay
                             telemetry_enabled = False
-                    if bare_model_bytes in chunk:
-                        chunk = chunk.replace(bare_model_bytes, full_model_bytes)
-                    yield chunk
+                    pending += chunk
+                    while match := _SSE_BOUNDARY.search(pending):
+                        if match.end() > _MAX_FRAME_BYTES:
+                            raise RuntimeError("Proxy SSE frame exceeds safe buffer")
+                        frame, pending = pending[:match.end()], pending[match.end():]
+                        yield _rewrite_message_start(frame, original_model)
+                    if len(pending) > _MAX_FRAME_BYTES:
+                        raise RuntimeError("Proxy SSE frame exceeds safe buffer")
+                if pending:
+                    # Leave incomplete-frame handling to the route's guard.
+                    yield pending
             finally:
                 # Also retain observed usage on early disconnect/upstream error;
                 # counts are only what was supplied, not an estimate of billing.

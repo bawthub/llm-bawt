@@ -151,7 +151,7 @@ def install_upstream(monkeypatch, chunks, *, fail=False):
     class Response:
         status_code = 200
 
-        async def aiter_raw(self):
+        async def aiter_bytes(self):
             for chunk in chunks:
                 yield chunk
             if fail:
@@ -188,7 +188,9 @@ def test_adapter_observes_late_usage_and_logs_once_preserving_wire_bytes(monkeyp
 
     with caplog.at_level("INFO"):
         out = asyncio.run(run())
-    assert out == chunks  # no coalescing, dropped bytes, decoding or extra events
+    # TASK-2240 frames complete SSE events for structural rewriting. Transport
+    # boundaries may change, but unrelated payload bytes and events must not.
+    assert b"".join(out) == raw
     assert ctx.local_setup_ms == pytest.approx(100)
     assert ctx.upstream_ttfb_ms == pytest.approx(100)
     assert ctx.first_output_ms is not None and ctx.first_output_ms > ctx.upstream_ttfb_ms

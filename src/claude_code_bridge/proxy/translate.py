@@ -646,6 +646,12 @@ def anthropic_to_responses(
     if tools:
         payload["tools"] = tools
         tc = body.get("tool_choice")
+        if isinstance(tc, dict):
+            kind = tc.get("type")
+            if kind in {"tool", "function"} and tc.get("name"):
+                tc = {"type": "function", "name": tc["name"]}
+            else:
+                tc = {"auto": "auto", "any": "required", "none": "none"}.get(kind)
         if tc and not disable_skill:
             payload["tool_choice"] = tc
 

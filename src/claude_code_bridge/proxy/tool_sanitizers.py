@@ -33,10 +33,9 @@ logger = logging.getLogger(__name__)
 # strings (single/double), template literals (with nested ${} expressions),
 # and comments (single-line // and multi-line /* */).
 #
-# Regex literals are NOT tracked -- a regex containing unbalanced braces
-# (e.g. /}/) would throw off the depth counter.  This is acceptable:
-# unbalanced-brace regex is vanishingly rare in Playwright automation code,
-# and a false negative (not stripping) is always safe.
+# Regex literals are NOT tracked: unbalanced braces (e.g. /}/) can make
+# truncation destructive. The scanner bails on non-comment slashes outside
+# strings; callers also exclude unsupported function shapes.
 # ---------------------------------------------------------------------------
 
 
@@ -81,6 +80,8 @@ def _skip_js_template_expr(code: str, start: int) -> int:
                 end = code.find("*/", i + 2)
                 i = end + 2 if end != -1 else n
                 continue
+        if c == "/":
+            return n  # Could be a regex; do not guess its brace boundaries.
         # Strings
         if c in ("'", '"'):
             i = _skip_js_string(code, i)
@@ -148,6 +149,9 @@ def _scan_js_balanced_end(code: str) -> int | None:
                 i = end + 2 if end != -1 else n
                 continue
 
+        if c == "/":
+            return None  # Regex or division: an uncertain boundary stays intact.
+
         # String literals
         if c in ("'", '"'):
             i = _skip_js_string(code, i)
@@ -211,17 +215,14 @@ def strip_js_trailing_tokens(
         if not isinstance(value, str):
             continue
 
-        # The brace scanner cannot parse regex literals or destructured/default
-        # parameters. Now that browser_evaluate's real `function` field is
-        # covered, avoid destructive guesses on those valid function shapes.
-        # The PreToolUse syntax check gives malformed ones back to the model.
-        if tool_name == "browser_evaluate" or tool_name.endswith("__browser_evaluate"):
-            simple_body = re.match(
-                r"^\s*(?:async\s+)?(?:\([^{}]*\)|[$A-Za-z_][$\w]*)\s*=>\s*\{",
-                value,
-            )
-            if not simple_body or "/" in value:
-                continue
+        # Neither browser tool can safely use the brace scanner on regexes or
+        # unsupported function shapes. Leave uncertain code unchanged.
+        simple_body = re.match(
+            r"^\s*(?:async\s+)?(?:\([^{}]*\)|[$A-Za-z_][$\w]*)\s*=>\s*\{",
+            value,
+        )
+        if not simple_body:
+            continue
 
         end_pos = _scan_js_balanced_end(value)
         if end_pos is None:
@@ -239,10 +240,8 @@ def strip_js_trailing_tokens(
         # wrapper paren/bracket), this is likely valid code.  Leave it alone.
         if trailing_stripped[0] in ".([])":
             continue
-        if (tool_name == "browser_evaluate" or tool_name.endswith("__browser_evaluate")) and (
-            not trailing_stripped[0].isalpha()
-            or trailing_stripped.split(maxsplit=1)[0] in {"in", "instanceof"}
-        ):
+        if (not trailing_stripped[0].isalpha()
+                or trailing_stripped.split(maxsplit=1)[0] in {"in", "instanceof"}):
             continue
 
         cleaned = value[:end_pos]

@@ -11,7 +11,25 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
+from fastapi.exception_handlers import http_exception_handler
+from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+
+async def anthropic_http_exception_handler(
+    request: Request, exc: StarletteHTTPException,
+):
+    """Send our envelope as the body, not FastAPI's ``{detail: ...}`` wrapper.
+
+    Unrelated framework errors retain the default handler. Native OAuth
+    responses are returned directly and never pass through this handler.
+    """
+    detail = exc.detail
+    if (isinstance(detail, dict) and detail.get("type") == "error"
+            and isinstance(detail.get("error"), dict)):
+        return JSONResponse(status_code=exc.status_code, content=detail, headers=exc.headers)
+    return await http_exception_handler(request, exc)
 
 
 # Maps OpenAI-ish error codes onto Anthropic error type strings. Anthropic's

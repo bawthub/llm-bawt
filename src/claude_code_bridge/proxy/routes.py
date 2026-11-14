@@ -453,7 +453,7 @@ async def _anthropic_sse_to_message(
                 started = payload.get("message") or {}
                 message = dict(started)
                 if isinstance(started.get("usage"), dict):
-                    usage = started["usage"]
+                    usage = dict(started["usage"])
                 continue
             if ptype == "content_block_start":
                 idx = int(payload.get("index", 0) or 0)
@@ -483,7 +483,9 @@ async def _anthropic_sse_to_message(
                 stop_reason = delta.get("stop_reason")
                 stop_sequence = delta.get("stop_sequence")
                 if isinstance(payload.get("usage"), dict):
-                    usage = payload["usage"]
+                    # Delta usage is a partial cumulative snapshot: retain
+                    # initial input/cache counts unless explicitly updated.
+                    usage = {**(usage or {}), **payload["usage"]}
                 continue
             if ptype == "message_stop":
                 _finalize_tool_inputs()

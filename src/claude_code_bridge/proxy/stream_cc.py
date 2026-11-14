@@ -278,6 +278,9 @@ async def chat_completions_to_anthropic_sse(
                         loop_breaker.observe(tool_index, piece, kind="tool_use")
                         call["arguments"] += piece
 
+        if finish_reason not in _STOP_REASON_MAP:
+            raise RuntimeError("Chat Completions stream ended without a valid finish_reason")
+
         async for frame in close_open():
             yield frame
 

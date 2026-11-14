@@ -16,10 +16,12 @@ Anthropic Messages endpoint and records exactly what the adapter sent.
 from __future__ import annotations
 
 import asyncio
+import gzip
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+import httpx
 import pytest
 
 from claude_code_bridge.proxy.adapters import lookup
@@ -291,6 +293,110 @@ def test_openrouter_round_trip_preserves_nested_slashes(fake_upstream, monkeypat
     assert captured["body"]["stream"] is True
     assert b'"model": "openrouter/qwen/qwen3-coder"' in out
     assert b"message_stop" in out
+
+
+# --- decoded and structurally rewritten SSE (no sockets) ----------------
+
+
+@pytest.mark.parametrize("compressed", [False, True], ids=["plain", "gzip"])
+@pytest.mark.parametrize("chunk_size", [1, 7, 65536])
+@pytest.mark.parametrize("compact", [False, True])
+def test_passthrough_decodes_and_rewrites_only_start_model(
+    monkeypatch, compressed, chunk_size, compact,
+):
+    from claude_code_bridge.proxy.request_context import ProxyRequestContext
+
+    upstream = "glm-5.2"
+    original = 'zai/glm-5.2-"alias"'
+    newline = b"\r\n" if compact else b"\n"
+    start = {
+        "type": "message_start",
+        "model": upstream,  # Not message.model: must remain untouched.
+        "message": {
+            "id": "m", "model": upstream,
+            "metadata": {"model": upstream},
+            "content": [{"type": "text", "text": '模型: "model": "glm-5.2"'}],
+            "usage": {"input_tokens": 50, "cache_read_input_tokens": 150},
+        },
+    }
+    data = json.dumps(start, ensure_ascii=False, separators=(",", ":") if compact else None)
+    # Exercise multiline SSE data as well as compact one-line JSON.
+    if not compact:
+        data = data.replace(', "message":', ',\ndata: "message":', 1)
+    start_frame = (
+        b": upstream comment" + newline + b"id: first" + newline
+        + b"event: message_start" + newline + b"data: " + data.encode()
+        + newline * 2
+    )
+    tool_frame = (
+        b"event: content_block_start\ndata: "
+        + json.dumps({"type": "content_block_start", "content_block": {
+            "type": "tool_use", "input": {"model": upstream},
+        }}).encode() + b"\n\n"
+    )
+    text_frame = (
+        b'event: content_block_delta\ndata: {"type":"content_block_delta",'
+        b'"delta":{"type":"text_delta","text":"glm-5.2"}, "model": "glm-5.2"}\n\n'
+    )
+    suffix = (
+        tool_frame + text_frame
+        + b'event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":7}}\n\n'
+        + b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+    )
+    wire = start_frame + suffix
+    if compressed:
+        wire = gzip.compress(wire)
+
+    class Chunks(httpx.AsyncByteStream):
+        closed = False
+
+        async def __aiter__(self):
+            for offset in range(0, len(wire), chunk_size):
+                yield wire[offset:offset + chunk_size]
+
+        async def aclose(self):
+            self.closed = True
+
+    stream = Chunks()
+    captured = []
+
+    def respond(request):
+        captured.append(json.loads(request.content))
+        headers = {"content-type": "text/event-stream"}
+        if compressed:
+            headers["content-encoding"] = "gzip"
+        return httpx.Response(200, headers=headers, stream=stream)
+
+    context = ProxyRequestContext(request_id="offline", provider="zai")
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            adapter = ZaiAdapter()
+            monkeypatch.setattr(adapter, "_api_key", lambda: "offline-test-key")
+
+            async def http_client():
+                return client
+
+            monkeypatch.setattr(adapter, "http_client", http_client)
+            return b"".join([chunk async for chunk in adapter.call(
+                {"model": original}, upstream, context,
+            )])
+
+    output = asyncio.run(run())
+    assert captured == [{"model": upstream, "stream": True}]
+    assert output.endswith(suffix)  # All non-start frames byte-identical.
+    rewritten_start = output[:-len(suffix)]
+    decoded = json.loads(b"\n".join(
+        line[5:].strip() for line in rewritten_start.splitlines()
+        if line.startswith(b"data:")
+    ))
+    start["message"]["model"] = original
+    assert decoded == start  # No other JSON path changed, even within start.
+    assert rewritten_start.startswith(b": upstream comment" + newline + b"id: first" + newline)
+    assert context.input_tokens == 200
+    assert context.cached_tokens == 150
+    assert context.output_tokens == 7
+    assert stream.closed
 
 
 # --- usage tap ----------------------------------------------------------
