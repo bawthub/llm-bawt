@@ -192,7 +192,7 @@ class ToolLoop:
                 if tool_calls:
                     # Log before execution so we see what's being attempted
                     for tc in tool_calls:
-                        logger.info(f"🔧 {tc.name}({tc.arguments})")
+                        logger.debug(f"🔧 {tc.name}({tc.arguments})")
                     
                     # Execute tools
                     tool_messages, tool_results = self._execute_tools(tool_calls, handler)

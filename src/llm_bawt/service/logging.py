@@ -507,63 +507,29 @@ class ServiceLogger:
         params: dict[str, Any] | None = None,
         result: Any | None = None,
     ) -> None:
-        """Log MCP tool operations - single line, always with context."""
-        
-        def _sanitize(text: str, max_len: int = 40) -> str:
-            """Sanitize text for single-line logging."""
-            text = " ".join(text.split())  # Collapse all whitespace
-            return text[:max_len] + "..." if len(text) > max_len else text
-        
-        if operation == "get_messages":
-            icon = ICONS["history"]
-            if count == 0 or not result:
-                msg = f"{icon} History: empty"
-            else:
-                first = result[0] if isinstance(result, list) else result
-                first_content = first.get("content", "") if isinstance(first, dict) else str(first)
-                if count == 1:
-                    msg = f"{icon} History ({count}): \"{_sanitize(first_content)}\""
-                else:
-                    last = result[-1] if isinstance(result, list) else result
-                    last_content = last.get("content", "") if isinstance(last, dict) else str(last)
-                    msg = f"{icon} History ({count}): \"{_sanitize(first_content, 30)}\" → \"{_sanitize(last_content, 30)}\""
-                
-        elif operation == "add_message":
-            icon = ICONS["success"]
-            role = params.get("role", "?") if params else "?"
-            content = params.get("content", "") if params else ""
-            msg = f"{icon} Saved [{role}]: \"{_sanitize(content, 50)}\""
-            
-        elif operation == "search_memories":
-            icon = ICONS["memory"]
-            query = params.get("query", "") if params else ""
-            msg = f"{icon} Memory search \"{_sanitize(query, 30)}\": {count or 0} results"
-            
-        elif operation == "store_memory":
-            icon = ICONS["memory"]
-            content = params.get("content", "") if params else ""
-            importance = params.get("importance", 0.5) if params else 0.5
-            msg = f"{icon} Stored (imp={importance:.1f}): \"{_sanitize(content, 50)}\""
-            
-        elif operation == "delete_memory":
-            icon = ICONS["memory"]
-            memory_id = params.get("memory_id", "?") if params else "?"
-            msg = f"{icon} Deleted memory: {memory_id}"
-            
-        elif operation == "clear_messages":
-            icon = ICONS["history"]
-            msg = f"{icon} Cleared history"
-            
-        else:
-            icon = ICONS["tool"]
-            msg = f"{icon} {operation}"
-            if count is not None:
-                msg += f" ({count})"
-        
+        """Log an MCP tool operation as one ``mcp_op`` line (TASK-2225).
+
+        Successful calls are DEBUG (per-call chatter); failures are WARN.
+        Message and memory contents are never logged, only sizes.
+        """
+        parts = [f"mcp_op op={operation}"]
+        if bot_id:
+            parts.append(f"bot={bot_id}")
+        if count is not None:
+            parts.append(f"count={count}")
         if duration_ms is not None:
-            msg += f" [{duration_ms:.0f}ms]"
-            
-        self._logger.info(msg) if success else self._logger.warning(msg + " [FAILED]")
+            parts.append(f"ms={duration_ms:.0f}")
+        if params and isinstance(params.get("content"), str):
+            parts.append(f"content_chars={len(params['content'])}")
+        if not success:
+            parts.append("ok=false")
+            if details:
+                parts.append(f"detail={_logfmt.quote(details)}")
+        line = " ".join(parts)
+        if success:
+            self._logger.debug(line)
+        else:
+            self._logger.warning(line)
 
     def _log_mcp_params(self, operation: str, params: dict[str, Any]) -> None:
         """Log MCP operation parameters in verbose mode - one line."""

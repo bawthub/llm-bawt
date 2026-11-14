@@ -155,7 +155,7 @@ class NativeToolStream:
                             except _json.JSONDecodeError:
                                 args = {}
 
-                            log.info(f"🔧 {name}({args})")
+                            log.debug(f"🔧 {name}({args})")
                             # Push OpenAI-format tool_call delta to queue
                             put_queue_item_threadsafe(
                                 loop,

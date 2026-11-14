@@ -435,7 +435,7 @@ class AgentBridgeBackend(AgentBackend):
                                 if delta:
                                     if first_delta_at is None:
                                         first_delta_at = time.time()
-                                        logger.info(
+                                        logger.debug(
                                             "%s first-token latency: %.1fms request_id=%s",
                                         self.name,
                                             (first_delta_at - request_started) * 1000,
@@ -589,7 +589,7 @@ class AgentBridgeBackend(AgentBackend):
                                     tool_use_id=event.tool_use_id,
                                 )
                                 tool_calls.append(tc)
-                                logger.info("%s tool event: %s", self.name, tc.display_name)
+                                logger.debug("%s tool event: %s", self.name, tc.display_name)
                                 tool_item = {
                                     "event": "tool_call",
                                     "name": tc.display_name,

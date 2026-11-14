@@ -182,7 +182,7 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                 llm_bawt._tts_mode and _avatar_visible and _animations
             )
             llm_bawt._avatar_visible = _avatar_visible
-            log.info(
+            log.debug(
                 "🎬 tts_mode=%s (req=%s bot=%s) avatar_visible=%s %d animations classifier=%s",
                 llm_bawt._tts_mode, request.tts_mode, llm_bawt.bot.tts_mode,
                 _avatar_visible, len(_animations), _run_classifier,

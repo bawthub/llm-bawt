@@ -118,7 +118,7 @@ class RedisSubscriber(CommandPublisherMixin):
         try:
             await self._redis.ping()
             self._connected = True
-            logger.info("Redis subscriber connected")
+            logger.debug("Redis subscriber connected")
         except Exception as e:
             logger.error("Redis subscriber connect failed: %s", e)
 
@@ -468,7 +468,7 @@ class RedisSubscriber(CommandPublisherMixin):
         last_id = "0"  # read from beginning (stream is created fresh per run)
         loop_time = asyncio.get_event_loop().time
         deadline = loop_time() + timeout_s
-        logger.info(
+        logger.debug(
             "subscribe_run started: request_id=%s timeout_s=%.0f stream=%s",
             request_id, timeout_s, stream_key,
         )
