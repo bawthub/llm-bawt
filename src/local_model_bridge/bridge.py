@@ -55,6 +55,7 @@ class LocalModelBridge:
     model, and publishes AgentEvent-formatted text deltas back to Redis."""
 
     DEFAULT_REQUEST_TIMEOUT = 1800
+    SHUTDOWN_UNLOAD_WAIT = 10.0
 
     def __init__(
         self,
@@ -76,6 +77,10 @@ class LocalModelBridge:
         # Single worker so all CUDA / generation work is serialized — only one
         # local model is ever loaded, and only one generation runs at a time.
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="local-infer")
+        # TASK-2278: held by a send from model load until its last worker job
+        # stops, and by shutdown around its unload, so no load or unload runs
+        # between a send's load and its generation.
+        self._model_lock = asyncio.Lock()
         # request_id -> originating frontend user-message UUID (stamped on every
         # emitted event); cleared when the send finalizes.
         self._trigger_message_ids: dict[str, str] = {}
@@ -102,10 +107,21 @@ class LocalModelBridge:
                 await self._command_task
             except (asyncio.CancelledError, Exception):
                 pass
+        # Unload only once no send is between load and the end of generation;
+        # a native token can't be interrupted, so wait briefly, then leave the
+        # model to process exit rather than unload under a running generation.
+        # The lock stays held so no queued send loads after this point.
         try:
-            self._loader.unload()
-        except Exception:
-            logger.debug("loader.unload raised during stop", exc_info=True)
+            await asyncio.wait_for(self._model_lock.acquire(), self.SHUTDOWN_UNLOAD_WAIT)
+        except asyncio.TimeoutError:
+            logger.warning("Generation still running at stop; skipping model unload")
+        else:
+            try:
+                await asyncio.get_running_loop().run_in_executor(
+                    self._executor, self._loader.unload,
+                )
+            except Exception:
+                logger.debug("loader.unload raised during stop", exc_info=True)
         self._executor.shutdown(wait=False, cancel_futures=True)
         self._publisher.close()
         logger.info("LocalModelBridge stopped")
@@ -284,8 +300,14 @@ class LocalModelBridge:
             stop_generation = Event()
             worker = None
             deadline = loop.time() + self._request_timeout
+            holds_model = False
 
             try:
+                # Load and generation are separate worker jobs, so another
+                # session's load could otherwise run between them and unload
+                # this model. Hold the model from load until the worker stops.
+                await self._model_lock.acquire()
+                holds_model = True
                 # Load (or switch to) the requested model on the inference
                 # worker thread so VRAM allocation doesn't block the event loop.
                 worker = loop.run_in_executor(
@@ -429,6 +451,9 @@ class LocalModelBridge:
                     model=model_alias,
                 )
             finally:
+                # Every path above has waited for the worker to stop.
+                if holds_model:
+                    self._model_lock.release()
                 await finalize()
 
     @staticmethod
