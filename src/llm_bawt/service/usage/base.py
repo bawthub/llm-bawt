@@ -80,5 +80,3 @@ class UsageAdapter(ABC):
         )
         fields.update(overrides)
         return ProviderUsage(**fields)
-
-

@@ -61,5 +61,3 @@ def write_manifest(entries: dict[str, dict[str, Any]], root: Path | None = None)
         "prompts": {key: entries[key] for key in sorted(entries)},
     }
     path.write_text(json.dumps(payload, indent=2, sort_keys=False) + "\n", encoding="utf-8")
-
-

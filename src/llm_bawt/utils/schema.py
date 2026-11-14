@@ -169,5 +169,3 @@ def drop_columns(
     savepoint.commit()
     conn.execute(text("SELECT set_config('lock_timeout', :v, true)"), {"v": previous})
     return [statement]
-
-

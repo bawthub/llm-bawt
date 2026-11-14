@@ -168,4 +168,3 @@ class ConfigResolver:
         """Resolve a prompt body. Returns the ``ResolvedPrompt`` (with ``.body``,
         ``.source``, ``.scope_type``/``.scope_id``) or None for unknown keys."""
         return self._prompts.resolve(key, scope_type=scope_type, scope_id=scope_id)
-
