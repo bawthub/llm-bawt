@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from sqlmodel import Field, SQLModel, Session, select
 from sqlalchemy import Column, DateTime, Text, text
+from sqlalchemy import delete as sa_delete, update as sa_update
 from ..bot_identities import SYSTEM_BOT_ID, WILDCARD_BOT_ID
 from ..runtime_settings import RuntimeSettingsResolver
 
@@ -875,6 +876,45 @@ class JobScheduler:
         return None
 
 
+def _ensure_wildcard_job(session: Session, job_type: JobType, make_wildcard) -> None:
+    """Make sure one wildcard job of ``job_type`` exists, absorbing legacy per-bot jobs.
+
+    Older installs had one job per bot. When no wildcard exists yet, this adds
+    it, moves the legacy jobs' run history onto it (each run keeps its own
+    ``bot_id``), then removes the legacy job rows, all in one transaction. Once
+    the wildcard exists, later startups change nothing.
+    """
+    bind = session.get_bind()
+    if bind.dialect.name == "postgresql":
+        # Two app workers starting together must not both create a wildcard.
+        session.execute(text("SELECT pg_advisory_xact_lock(hashtext('wildcard-job-bootstrap'))"))
+    jobs = session.exec(select(ScheduledJob).where(ScheduledJob.job_type == job_type)).all()
+    if any(job.bot_id == WILDCARD_BOT_ID for job in jobs):
+        session.commit()  # release the advisory lock
+        return
+    wildcard = make_wildcard()
+    session.add(wildcard)
+    session.flush()
+    legacy_ids = [job.id for job in jobs]
+    try:
+        if legacy_ids:
+            moved = session.execute(
+                sa_update(JobRun).where(JobRun.job_id.in_(legacy_ids)).values(job_id=wildcard.id)
+            ).rowcount
+            session.execute(sa_delete(ScheduledJob).where(ScheduledJob.id.in_(legacy_ids)))
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    if legacy_ids:
+        logger.info(
+            "Migrated %d per-bot %s jobs to wildcard, keeping %d runs",
+            len(legacy_ids), job_type.value, moved,
+        )
+    else:
+        logger.debug("Created wildcard %s job", job_type.value)
+
+
 def init_default_jobs(engine, config) -> None:
     """Initialize default scheduled jobs if they don't exist."""
     global_settings = RuntimeSettingsResolver(config=config)
@@ -921,88 +961,40 @@ def init_default_jobs(engine, config) -> None:
         # Ensure a single wildcard history summarization job exists.
         # At execution time, _execute_job expands bot_id="*" to all bots
         # so newly-created bots are automatically included.
-        # Migrate: remove legacy per-bot jobs if a wildcard doesn't exist yet.
-        existing_history_jobs = session.exec(
-            select(ScheduledJob).where(ScheduledJob.job_type == JobType.HISTORY_SUMMARIZATION)
-        ).all()
-        existing_history_bot_ids = {j.bot_id for j in existing_history_jobs}
-        if "*" not in existing_history_bot_ids:
-            # Delete old per-bot jobs — the wildcard replaces them
-            for old_job in existing_history_jobs:
-                session.delete(old_job)
-            if existing_history_jobs:
-                session.commit()
-                logger.info(
-                    "Migrated %d per-bot history summarization jobs to wildcard",
-                    len(existing_history_jobs),
+        _ensure_wildcard_job(session, JobType.HISTORY_SUMMARIZATION, lambda: ScheduledJob(
+            job_type=JobType.HISTORY_SUMMARIZATION,
+            bot_id=WILDCARD_BOT_ID,
+            enabled=config.SCHEDULER_ENABLED,
+            interval_minutes=int(
+                global_settings.resolve(
+                    "history_summarization_interval_minutes",
+                    getattr(config, "HISTORY_SUMMARIZATION_INTERVAL_MINUTES", 30),
                 )
-
-        existing_history = session.exec(
-            select(ScheduledJob).where(ScheduledJob.job_type == JobType.HISTORY_SUMMARIZATION)
-        ).first()
-
-        if not existing_history:
-            history_job = ScheduledJob(
-                job_type=JobType.HISTORY_SUMMARIZATION,
-                bot_id=WILDCARD_BOT_ID,
-                enabled=config.SCHEDULER_ENABLED,
-                interval_minutes=int(
-                    global_settings.resolve(
-                        "history_summarization_interval_minutes",
-                        getattr(config, "HISTORY_SUMMARIZATION_INTERVAL_MINUTES", 30),
-                    )
-                ),
-                config_json=json.dumps(
-                    {
-                        "user_id": "system",
-                        "use_heuristic_fallback": True,
-                        "max_tokens_per_chunk": 4000,
-                    }
-                ),
-            )
-            session.add(history_job)
-            session.commit()
-            logger.debug("Created wildcard history summarization job")
+            ),
+            config_json=json.dumps(
+                {
+                    "user_id": "system",
+                    "use_heuristic_fallback": True,
+                    "max_tokens_per_chunk": 4000,
+                }
+            ),
+        ))
 
         # Ensure a single wildcard memory extraction job exists.
-        # Migrate: remove legacy per-bot jobs if a wildcard doesn't exist yet.
-        existing_extraction_jobs = session.exec(
-            select(ScheduledJob).where(ScheduledJob.job_type == JobType.MEMORY_EXTRACTION)
-        ).all()
-        existing_extraction_bot_ids = {j.bot_id for j in existing_extraction_jobs}
-        if "*" not in existing_extraction_bot_ids:
-            for old_job in existing_extraction_jobs:
-                session.delete(old_job)
-            if existing_extraction_jobs:
-                session.commit()
-                logger.info(
-                    "Migrated %d per-bot memory extraction jobs to wildcard",
-                    len(existing_extraction_jobs),
-                )
-
-        existing_extraction = session.exec(
-            select(ScheduledJob).where(ScheduledJob.job_type == JobType.MEMORY_EXTRACTION)
-        ).first()
-
-        if not existing_extraction:
-            default_user = config.DEFAULT_USER or "user"
-            extraction_job = ScheduledJob(
-                job_type=JobType.MEMORY_EXTRACTION,
-                bot_id=WILDCARD_BOT_ID,
-                enabled=config.SCHEDULER_ENABLED,
-                interval_minutes=int(
-                    getattr(config, "MEMORY_EXTRACTION_INTERVAL_MINUTES", 30),
-                ),
-                config_json=json.dumps(
-                    {
-                        "user_id": default_user,
-                        "batch_size": 50,
-                    }
-                ),
-            )
-            session.add(extraction_job)
-            session.commit()
-            logger.debug("Created wildcard memory extraction job")
+        _ensure_wildcard_job(session, JobType.MEMORY_EXTRACTION, lambda: ScheduledJob(
+            job_type=JobType.MEMORY_EXTRACTION,
+            bot_id=WILDCARD_BOT_ID,
+            enabled=config.SCHEDULER_ENABLED,
+            interval_minutes=int(
+                getattr(config, "MEMORY_EXTRACTION_INTERVAL_MINUTES", 30),
+            ),
+            config_json=json.dumps(
+                {
+                    "user_id": config.DEFAULT_USER or "user",
+                    "batch_size": 50,
+                }
+            ),
+        ))
 
         # TASK-231: nightly media_assets GC. Single global job (bot_id="system"
         # — it scans the whole table, not per-bot). Runs once a day at 04:00
