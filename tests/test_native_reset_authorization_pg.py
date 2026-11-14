@@ -54,7 +54,7 @@ def test_native_committed_reset_history_has_zero_authorization_selects(world, mo
         conn.execute(text("CREATE TABLE fixture_messages (id TEXT, session_id TEXT, content TEXT)"))
     assert PolicyRefresher(world.engine).refresh()
     server = CatalogFastMCP("native-reset-pg", bot_policy_resolver=BotPolicyResolver(world.engine),
-        stateless_http=True, json_response=True, approval_store_provider=lambda: FakeStore(None, []))
+        approval_store_provider=lambda: FakeStore(None, []))
     successor = SessionResetLineage.delivery_successor_id("delivery-test")
     stored, sql, stages = [], [], []
 
@@ -109,7 +109,7 @@ def test_native_committed_reset_history_has_zero_authorization_selects(world, mo
 
     event.listen(world.engine, "before_cursor_execute", query)
     try:
-        app = BotAccessMiddleware(TaskTurnCapabilityMiddleware(server.streamable_http_app()))
+        app = BotAccessMiddleware(TaskTurnCapabilityMiddleware(server.streamable_http_app(stateless_http=True, json_response=True)))
         with TestClient(app, base_url="http://localhost:8000") as http:
             headers = []
 

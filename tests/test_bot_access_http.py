@@ -18,7 +18,6 @@ from tests.test_mcp_approval_interceptor import FakeStore
 def test_service_client_signed_http_roundtrip_and_private_other_denial(monkeypatch, signer):
     seen = []
     server = CatalogFastMCP("http-proof", bot_policy_resolver=Resolver(),
-                            stateless_http=True, json_response=True,
                             approval_store_provider=lambda: FakeStore(None, []))
 
     async def messages_get(bot_id: str, limit: int = 50, session_id: str | None = None,
@@ -44,7 +43,7 @@ def test_service_client_signed_http_roundtrip_and_private_other_denial(monkeypat
     server.add_tool(tools.get_messages, name="messages_get")
     server.add_tool(tools.search_memories, name="memory_search")
     server.mark_tools_registered()
-    app = server.streamable_http_app()
+    app = server.streamable_http_app(stateless_http=True, json_response=True)
     with TestClient(BotAccessMiddleware(app), base_url="http://localhost:8000") as http:
         def urlopen(request, **kwargs):
             response = http.post("/mcp", content=request.data, headers=dict(request.header_items()))
@@ -87,7 +86,6 @@ def test_userless_operator_history_route_uses_real_signed_mcp(monkeypatch, signe
     from llm_bawt.service.routes.history_pages import _load_sorted_visible_messages
 
     server = CatalogFastMCP("operator-history", bot_policy_resolver=Resolver(),
-                            stateless_http=True, json_response=True,
                             approval_store_provider=lambda: FakeStore(None, []))
     seen = []
 
@@ -100,7 +98,7 @@ def test_userless_operator_history_route_uses_real_signed_mcp(monkeypatch, signe
     monkeypatch.setattr(server.bot_access, "_session_owner", lambda sid: ("private_fixture", "user_a"))
     server.add_tool(tools.get_messages, name="messages_get")
     server.mark_tools_registered()
-    with TestClient(BotAccessMiddleware(server.streamable_http_app()),
+    with TestClient(BotAccessMiddleware(server.streamable_http_app(stateless_http=True, json_response=True)),
                     base_url="http://localhost:8000") as http:
         def urlopen(request, **kwargs):
             response = http.post("/mcp", content=request.data, headers=dict(request.header_items()))
@@ -131,7 +129,6 @@ def test_runtime_history_write_real_service_transport_has_zero_policy_reads(monk
     monkeypatch.setattr("llm_bawt.bot_access.refresh.read_snapshot_rows", lambda _: rows)
     assert owner.refresh()
     server = CatalogFastMCP("runtime-history", bot_policy_resolver=BotPolicyResolver(engine),
-        stateless_http=True, json_response=True,
         approval_store_provider=lambda: FakeStore(None, []))
     stored = []
 
@@ -144,7 +141,7 @@ def test_runtime_history_write_real_service_transport_has_zero_policy_reads(monk
     monkeypatch.setattr(server.bot_access, "_session_owner", ownership)
     server.add_tool(tools.add_message, name="messages_add")
     server.mark_tools_registered()
-    with TestClient(BotAccessMiddleware(server.streamable_http_app()),
+    with TestClient(BotAccessMiddleware(server.streamable_http_app(stateless_http=True, json_response=True)),
                     base_url="http://localhost:8000") as http:
         def urlopen(request, **kwargs):
             response = http.post("/mcp", content=request.data, headers=dict(request.header_items()))

@@ -22,7 +22,7 @@ import re
 from typing import Any
 
 import httpx
-from mcp.server.fastmcp import Image
+from mcp.server.mcpserver import Image
 
 from .media_generation_tools import _sniff_image_format
 from .server import mcp

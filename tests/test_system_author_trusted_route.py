@@ -195,7 +195,7 @@ def _args(author_id=MCP_ID, bot=BOT, **extra):
 
 async def _call(server, args):
     with invocation_context("messages_add", args):  # as CatalogFastMCP.call_tool binds it
-        return await server._tool_manager.call_tool("messages_add", args)
+        return await server._tool_manager.call_tool("messages_add", args, None)
 
 
 @pytest.mark.asyncio

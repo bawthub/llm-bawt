@@ -13,6 +13,7 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
+from mcp.types import CallToolResult
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import SQLAlchemyError
 from agent_bridge.approval import evaluate
@@ -290,6 +291,9 @@ def _decode_stored_args(row) -> dict[str, Any]:
 
 def _normalize_mcp_result(result: Any) -> Any:
     """Convert FastMCP content blocks/results into a durable JSON value."""
+    if isinstance(result, CallToolResult):
+        # mcp 2.x returns the whole result; store its content blocks as before.
+        result = list(result.content)
     if isinstance(result, dict):
         return result
     if isinstance(result, (str, int, float, bool)) or result is None:

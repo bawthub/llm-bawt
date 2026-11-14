@@ -308,8 +308,7 @@ def test_not_found_error_does_not_echo_huge_server_body(monkeypatch):
 @pytest.mark.parametrize("reader", [task_tools.get_task, project_tools.get_task_context])
 @pytest.mark.parametrize("path", [None, "/task/description"])
 def test_real_fastmcp_serialized_result_fits_transport_budget(monkeypatch, reader, path):
-    from mcp.server.fastmcp import FastMCP
-    from mcp.types import CallToolResult
+    from mcp.server.mcpserver import MCPServer as FastMCP
     api = Api()
     api.task["description"] = '"\\😀' * 60_000
     install(monkeypatch, api)
@@ -318,11 +317,7 @@ def test_real_fastmcp_serialized_result_fits_transport_budget(monkeypatch, reade
         server = FastMCP("bounded-task-test")
         server.add_tool(reader, name="read")
         result = await server.call_tool("read", {"task_id": "TASK-1907", "path": path})
-        if isinstance(result, tuple):
-            content, structured = result
-        else:
-            content, structured = result, None
-        return CallToolResult(content=content, structuredContent=structured).model_dump_json()
+        return result.model_dump_json(by_alias=True, exclude_none=True)
 
     wire = run(exercise())
     # Includes FastMCP's text/structured duplication and escaping, not just value.

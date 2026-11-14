@@ -76,10 +76,10 @@ async def test_every_bot_target_registered_handler_denies_before_execution(name,
 
     server.add_tool(handler, name=name)
     with pytest.raises(Exception, match="access_denied"):
-        await server._tool_manager.call_tool(name, {})
+        await server._tool_manager.call_tool(name, {}, None)
     assert calls == []
     with identity(turn()):
-        await server._tool_manager.call_tool(name, {})
+        await server._tool_manager.call_tool(name, {}, None)
     assert calls == ["private_fixture"]
     assert current_bot_access() is None
 
@@ -221,7 +221,7 @@ async def test_service_conversation_proof_does_not_survive_as_approved_owner_aut
     try:
         # Immediate service invocation uses memory proof at both stages.
         await server.bot_access.preflight("messages_add", args)
-        await server._tool_manager.call_tool("messages_add", args)
+        await server._tool_manager.call_tool("messages_add", args, None)
         ownership.assert_not_called()
         # Approved execution reauthorizes using its SERVER-OWNED caller; the
         # stale service proof cannot bypass its authoritative ownership check.
@@ -269,7 +269,7 @@ async def test_concurrent_principals_and_failure_cleanup(signer):
     async def invoke(bot):
         with identity(turn(bot)):
             try:
-                await server._tool_manager.call_tool("messages_get", {"bot_id": bot})
+                await server._tool_manager.call_tool("messages_get", {"bot_id": bot}, None)
             except Exception as error:
                 assert "handler failure" in str(error)
             assert current_bot_access() is None
@@ -306,9 +306,9 @@ async def test_service_principal_never_bypasses_approval_and_raw_arguments_bind(
         try:
             result = await server.call_tool("messages_get", arguments)
             if action is PolicyAction.DENY:
-                assert result["status"] == "denied"
+                assert json.loads(result.content[0].text)["status"] == "denied"
             elif action is PolicyAction.REQUIRE_APPROVAL:
-                assert result["status"] == "approval_context_missing"
+                assert json.loads(result.content[0].text)["status"] == "approval_context_missing"
             assert not store.rows
         finally:
             _service_capability.reset(token)
@@ -344,9 +344,9 @@ async def test_runtime_conversation_proof_keeps_service_approval_semantics(signe
         try:
             result = await server.call_tool("messages_add", arguments)
             if action is PolicyAction.DENY:
-                assert result["status"] == "denied"
+                assert json.loads(result.content[0].text)["status"] == "denied"
             elif action is PolicyAction.REQUIRE_APPROVAL:
-                assert result["status"] == "approval_context_missing"
+                assert json.loads(result.content[0].text)["status"] == "approval_context_missing"
             assert not store.rows
         finally:
             _service_capability.reset(binding)
@@ -365,7 +365,7 @@ async def test_actual_special_tool_denial_precedes_handler(monkeypatch, name, ar
     ensure_tools_registered()
     monkeypatch.setattr(mcp.bot_access, "_resolver", Resolver())
     with pytest.raises(Exception, match="access_denied"):
-        await mcp._tool_manager.call_tool(name, arguments)
+        await mcp._tool_manager.call_tool(name, arguments, None)
 
 
 @pytest.mark.asyncio
@@ -380,9 +380,9 @@ async def test_session_indirection_denied_before_registered_handler(monkeypatch,
     catalog.add_tool(handler, name=name)
     monkeypatch.setattr(catalog.bot_access, "_session_owner", lambda id: ("private_fixture", "user_a"))
     with pytest.raises(Exception, match="access_denied"):
-        await catalog._tool_manager.call_tool(name, {"bot_id": "public_fixture", "session_id": "hidden"})
+        await catalog._tool_manager.call_tool(name, {"bot_id": "public_fixture", "session_id": "hidden"}, None)
     with identity(turn(user="user_b")), pytest.raises(Exception, match="access_denied"):
-        await catalog._tool_manager.call_tool(name, {"bot_id": "private_fixture", "session_id": "hidden"})
+        await catalog._tool_manager.call_tool(name, {"bot_id": "private_fixture", "session_id": "hidden"}, None)
     assert not calls
 
 
@@ -396,7 +396,7 @@ async def test_protected_session_defaults_pin_user_and_reject_pointer_override(m
 
     catalog.add_tool(handler, name="sessions_rotate")
     with identity(turn()):
-        await catalog._tool_manager.call_tool("sessions_rotate", {"bot_id": "private_fixture"})
+        await catalog._tool_manager.call_tool("sessions_rotate", {"bot_id": "private_fixture"}, None)
         with pytest.raises(Exception, match="access_denied"):
-            await catalog._tool_manager.call_tool("sessions_rotate", {"bot_id": "private_fixture", "user_id": "user_b"})
+            await catalog._tool_manager.call_tool("sessions_rotate", {"bot_id": "private_fixture", "user_id": "user_b"}, None)
     assert seen == [("private_fixture", "user_a")]

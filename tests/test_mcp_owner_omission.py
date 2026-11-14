@@ -24,7 +24,7 @@ async def test_owner_omission(monkeypatch, name, handler, extra, bot):
     catalog = CatalogFastMCP("owner-omission-probe", bot_policy_resolver=Resolver())
     catalog.add_tool(handler, name=name)
     with identity(turn(user="user_a")):
-        await catalog._tool_manager.call_tool(name, {"bot_id": bot, **extra})
+        await catalog._tool_manager.call_tool(name, {"bot_id": bot, **extra}, None)
     assert len(calls) == 1
     assert calls[0]["user_id"] == "user_a", "user-bound call reached unscoped storage"
 
@@ -45,5 +45,5 @@ async def test_other_user_is_refused(monkeypatch, name, handler, extra):
     catalog = CatalogFastMCP("owner-omission-probe", bot_policy_resolver=Resolver())
     catalog.add_tool(handler, name=name)
     with identity(turn(user="user_a")), pytest.raises(Exception):
-        await catalog._tool_manager.call_tool(name, {"bot_id": "public_fixture", "user_id": "user_b", **extra})
+        await catalog._tool_manager.call_tool(name, {"bot_id": "public_fixture", "user_id": "user_b", **extra}, None)
     assert calls == []

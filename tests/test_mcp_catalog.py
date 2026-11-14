@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 import tiktoken
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer as FastMCP
 
 from llm_bawt.mcp_server.approval_interceptor import ApprovalAwareFastMCP
 from llm_bawt.mcp_server.catalog import CatalogFastMCP, compact_schema
@@ -26,9 +26,9 @@ async def test_catalog_covers_every_registered_tool_without_changing_validation(
     assert [tool.name for tool in original] == [tool.name for tool in compact]
     assert set(TOOL_SUMMARIES) == {tool.name for tool in original}
     for before, after in zip(original, compact, strict=True):
-        assert after.inputSchema == compact_schema(before.inputSchema)
+        assert after.input_schema == compact_schema(before.input_schema)
         # Everything outside the two presentation fields stays identical.
-        excluded = {"description", "inputSchema"}
+        excluded = {"description", "input_schema"}
         assert before.model_dump(exclude=excluded) == after.model_dump(exclude=excluded)
         assert after.description.endswith(f"Details: {tool_reference(after.name)}.")
     # Reading discovery must not mutate FastMCP's actual validator schemas.
@@ -42,7 +42,7 @@ async def test_catalog_covers_every_registered_tool_without_changing_validation(
 async def test_authorization_adapters_still_delegate_both_approval_entry_points(monkeypatch):
     calls = []
 
-    async def ordinary(self, name, arguments):
+    async def ordinary(self, name, arguments, context=None):
         calls.append(("ordinary", name, arguments))
         return "ordinary-result"
 
@@ -113,7 +113,7 @@ def test_nested_schema_keywords_and_data_are_distinct():
 async def test_task_outcome_guidance_survives_catalog_compaction():
     tools = {tool.name: tool for tool in await mcp.list_tools()}
     for name in ("tasks_create", "tasks_update"):
-        field = tools[name].inputSchema["properties"]["outcome"]
+        field = tools[name].input_schema["properties"]["outcome"]
         for wording in ("What changed", "1-3 plain sentences", "400 chars",
                         "No task IDs", "receipts", "tests", "file names",
                         "review steps", "response/check_links"):
@@ -207,7 +207,7 @@ async def test_catalog_token_budgets():
     # TASK-1534: activity_get names its change history and cursor (+1): 5,105.
     # TASK-2279: messages_forget, one owner-scoped select/ignore/memory delete (+31): 5,136.
     assert sum(descriptions) <= 5136, f"Descriptions grew to {sum(descriptions)} tokens"
-    definitions = [{"name": f"mcp__bawthub__{t.name}", "description": t.description or "", "input_schema": t.inputSchema} for t in tools]
+    definitions = [{"name": f"mcp__bawthub__{t.name}", "description": t.description or "", "input_schema": t.input_schema} for t in tools]
     total = len(encoder.encode(json.dumps(definitions, ensure_ascii=False, separators=(",", ":"))))
     # TASK-900: explicit X search adds ~160 tokens; measured catalog 11,239.
     # Keep its paid-call warning and typed time/pagination fields intact.
@@ -379,32 +379,38 @@ def test_bulky_lookups_name_the_cheaper_tool(name, cheaper):
 
 
 def test_tool_results_are_compact_json():
-    from mcp.types import ImageContent, TextContent
+    from mcp.types import CallToolResult, ImageContent, TextContent
 
     from llm_bawt.mcp_server.catalog import compact_call_result
 
     pretty = TextContent(type="text", text=json.dumps({"a": [1, {"b": "é"}]}, indent=2, ensure_ascii=False))
-    image = ImageContent(type="image", data="AA==", mimeType="image/png")
+    image = ImageContent(type="image", data="AA==", mime_type="image/png")
     plain = TextContent(type="text", text="{not json")
 
-    [compact, untouched_image, untouched_text] = compact_call_result([pretty, image, plain])
+    result = compact_call_result(CallToolResult(content=[pretty, image, plain]))
+    [compact, untouched_image, untouched_text] = result.content
     assert compact.text == '{"a":[1,{"b":"é"}]}'
     assert json.loads(compact.text) == json.loads(pretty.text)
     assert (untouched_image, untouched_text) == (image, plain)
 
-    blocks, structured = compact_call_result(([pretty], {"result": 1}))
-    assert blocks[0].text == compact.text and structured == {"result": 1}
-    assert compact_call_result({"error": "denied"}) == {"error": "denied"}
+    structured = compact_call_result(CallToolResult(content=[pretty], structured_content={"result": 1}))
+    assert structured.content[0].text == compact.text
+    assert structured.structured_content == {"result": 1}
+    unchanged = CallToolResult(content=[plain])
+    assert compact_call_result(unchanged) is unchanged
 
 
 @pytest.mark.anyio
 async def test_call_tool_returns_compact_json(monkeypatch):
     # FastMCP renders a dict result with indent=2; the catalog server re-emits it.
-    from mcp.types import TextContent
+    from mcp.types import CallToolResult, TextContent
 
-    async def fastmcp_result(self, name, arguments):
+    async def fastmcp_result(self, name, arguments, context=None):
         value = {"rows": [{"id": 1}, {"id": 2}]}
-        return [TextContent(type="text", text=json.dumps(value, indent=2))], value
+        return CallToolResult(
+            content=[TextContent(type="text", text=json.dumps(value, indent=2))],
+            structured_content=value,
+        )
 
     async def allow(self, name, arguments):
         return None
@@ -414,8 +420,8 @@ async def test_call_tool_returns_compact_json(monkeypatch):
     monkeypatch.setattr(type(server.bot_access), "preflight", allow)
 
     result = await server.call_tool("rows", {})
-    blocks = result[0] if isinstance(result, tuple) else result
-    assert blocks[0].text == '{"rows":[{"id":1},{"id":2}]}'
+    assert result.content[0].text == '{"rows":[{"id":1},{"id":2}]}'
+    assert result.structured_content == {"rows": [{"id": 1}, {"id": 2}]}
 
 
 def test_task_update_closure_guidance_matches_visual_review_policy():
@@ -463,7 +469,7 @@ async def test_blocked_definition_reaches_task_write_tools():
         assert ("Never nits" if name == "tasks_create" else "rules in tasks_create") in description
         assert BLOCKED_DEFINITION in function.__doc__
         assert "{blocked_definition}" not in function.__doc__
-        assert "blocked_reason" in tools[name].inputSchema["properties"]
+        assert "blocked_reason" in tools[name].input_schema["properties"]
     for clause in ("only the user can make", "restart, deploy/ship, credentials", "against the user's stated intent",
                    "bot-vs-bot disagreements (the arbiter mediates)", "misusing BLOCKED is a process failure"):
         assert clause in BLOCKED_DEFINITION
@@ -480,7 +486,7 @@ async def test_unknown_tools_remain_discoverable_and_callables_unchanged():
 
     tool = (await server.list_tools())[0]
     assert tool.description == "An unconverted tool's description must not disappear."
-    assert tool.inputSchema["properties"]["title"]["default"] == "hello"
+    assert tool.input_schema["properties"]["title"]["default"] == "hello"
     # Isolated pure callable only; direct base dispatch tests unchanged binding.
     result = await FastMCP.call_tool(server, "new_unmigrated_tool", {"title": "preserved"})
     assert "preserved" in str(result)
@@ -504,13 +510,13 @@ async def test_real_mutation_still_passes_through_policy_gate(monkeypatch):
     monkeypatch.setattr(interceptor, "evaluate", lambda *args: SimpleNamespace(action=PolicyAction.DENY, subject="test"))
     await server.list_tools()
     result = await server.call_tool("tasks_delete", {"task_id": "test-task"})
-    assert result["status"] == "denied"
+    assert result.structured_content["status"] == "denied"
     assert called == []
 
 
 @pytest.mark.anyio
 async def test_mcp_protocol_advertises_compact_catalog(monkeypatch):
-    from mcp.shared.memory import create_connected_server_and_client_session
+    from mcp import Client
     from unittest.mock import Mock
     from llm_bawt.utils import db
 
@@ -521,14 +527,15 @@ async def test_mcp_protocol_advertises_compact_catalog(monkeypatch):
     # Real policy startup/teardown is covered by test_bot_policy_refresh_pg.py.
     engine_factory = Mock(return_value=None)
     monkeypatch.setattr(db, "get_shared_engine", engine_factory)
-    async with create_connected_server_and_client_session(mcp) as session:
+    # Claude and Codex connect with the initialize handshake ("legacy" in 2.x).
+    async with Client(mcp, mode="legacy") as session:
         result = await session.list_tools()
     engine_factory.assert_called_once()
     assert len(result.tools) == len(TOOL_SUMMARIES)
     task = next(t for t in result.tools if t.name == "tasks_create")
     assert "Details: bawthub-mcp/" in task.description
-    assert "title" in task.inputSchema["properties"]
-    assert "title" not in task.inputSchema
+    assert "title" in task.input_schema["properties"]
+    assert "title" not in task.input_schema
 
 
 # The bawthub-mcp skill publishes exactly these pages. Its own check

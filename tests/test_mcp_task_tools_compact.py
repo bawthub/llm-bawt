@@ -3,7 +3,7 @@ import json
 from typing import Any
 
 import pytest
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer as FastMCP
 
 from llm_bawt.mcp_server import task_tools
 from llm_bawt.mcp_server.server import mcp
@@ -500,7 +500,7 @@ def test_long_outcome_error_reaches_mcp_caller(monkeypatch, name, key):
     content = _run(FastMCP.call_tool(
         mcp, name, {key: "TASK-1", "outcome": "x" * 600},
     ))
-    structured = json.loads(content[0].text)
+    structured = json.loads(content.content[0].text)
     assert "400" in structured["error"]
     assert "response" in structured["error"]
     assert "check_links" in structured["error"]
@@ -646,7 +646,7 @@ def test_create_tool_schema_exposes_agent_bot_id() -> None:
     from llm_bawt.mcp_server.server import mcp
 
     tools = {tool.name: tool for tool in asyncio.run(mcp.list_tools())}
-    assert "agent_bot_id" in tools["tasks_create"].inputSchema["properties"]
+    assert "agent_bot_id" in tools["tasks_create"].input_schema["properties"]
 
 
 def test_compact_task_counts_dependencies_by_real_and_legacy_names() -> None:

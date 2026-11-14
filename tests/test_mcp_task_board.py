@@ -149,14 +149,14 @@ def test_a_board_without_the_rows_filter_says_so(monkeypatch: pytest.MonkeyPatch
 
 def test_the_schema_rejects_an_unknown_window(monkeypatch: pytest.MonkeyPatch) -> None:
     # "3d" once came back as the 7d board with no word of the swap.
-    from mcp.server.fastmcp.exceptions import ToolError
+    from mcp.server.mcpserver.exceptions import ToolError
 
     from llm_bawt.mcp_server.server import mcp
 
     requests = _stub(monkeypatch)
     tool = mcp._tool_manager.get_tool("tasks_board")
     with pytest.raises(ToolError, match="Input should be '1h', '6h', '24h', '48h', '7d', '30d' or 'all'"):
-        _run(tool.run({"updated": "3d"}))
+        _run(tool.run({"updated": "3d"}, None))
     assert requests == []
 
 

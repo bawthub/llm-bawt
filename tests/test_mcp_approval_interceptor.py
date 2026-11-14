@@ -87,7 +87,6 @@ def _server(store, order, executed):
 
     mcp = ApprovalAwareFastMCP(
         "test",
-        json_response=True,
         approval_store_provider=lambda: store,
         approval_publisher=publish,
         operations_preparer=lambda operation, args: {
@@ -142,9 +141,9 @@ def _call_codex(mcp, capability, args, *, request_id="rpc-42", envelope=None):
     )
     capability_binding = task_association.set_current_task_turn_capability(capability)
     request_binding = task_association.set_current_mcp_request_context(envelope)
-    mcp.get_context = lambda: SimpleNamespace(request_id=request_id)
     try:
-        return asyncio.run(mcp.call_tool("ops_run", args))
+        return asyncio.run(mcp.call_tool(
+            "ops_run", args, SimpleNamespace(request_id=request_id)))
     finally:
         task_association.reset_current_mcp_request_context(request_binding)
         task_association.reset_current_task_turn_capability(capability_binding)
@@ -158,8 +157,8 @@ def test_allow_strips_reserved_context_before_binding_and_executes(capability):
     )
     assert executed == [("llm-bawt.restart-app", {})]
     assert store.rows == []
-    assert len(result) == 1
-    assert '"ran": "llm-bawt.restart-app"' in result[0].text
+    assert len(result.content) == 1
+    assert '"ran": "llm-bawt.restart-app"' in result.content[0].text
 
 
 def test_deny_never_executes_or_persists(capability):
@@ -168,7 +167,7 @@ def test_deny_never_executes_or_persists(capability):
     result = _call(
         _server(store, order, executed), capability, _stamped_args(capability)
     )
-    assert result["status"] == "denied"
+    assert result.structured_content["status"] == "denied"
     assert executed == []
     assert store.rows == []
 
@@ -179,8 +178,8 @@ def test_require_commits_before_publish_and_returns_pending(capability):
     result = _call(
         _server(store, order, executed), capability, _stamped_args(capability)
     )
-    assert result["status"] == "approval_required"
-    assert "Do not retry" in result["message"]
+    assert result.structured_content["status"] == "approval_required"
+    assert "Do not retry" in result.structured_content["message"]
     assert executed == []
     assert order == ["persist", "publish"]
     row, persisted = store.rows[0]
@@ -214,7 +213,7 @@ def test_singleton_projects_committed_superseded_cards_before_publishing_new_car
         order.append("resolve_old")
 
     monkeypatch.setattr(approval_policies, "resolve_mcp_card", project)
-    assert _call(mcp, capability, _stamped_args(capability))["status"] == "approval_required"
+    assert _call(mcp, capability, _stamped_args(capability)).structured_content["status"] == "approval_required"
     assert order == ["persist", "resolve_old", "publish"]
     assert executed == []
 
@@ -238,7 +237,7 @@ def test_ops_run_schema_violation_files_no_card(capability, clean):
         tool_use_id="toolu_bad", agent_request_id="req_bad",
         session_key="snark:nick", backend="claude-code")
     result = _call(mcp, capability, {**clean, MCP_CALL_CONTEXT_KEY: stamp})
-    assert result["status"] == "args_invalid" and result["is_error"] is True
+    assert result.structured_content["status"] == "args_invalid" and result.structured_content["is_error"] is True
     assert store.rows == [] and order == [] and executed == [] and prepared == []
 
 
@@ -246,7 +245,7 @@ def test_valid_ops_run_shape_still_files_card(capability):
     order, executed = [], []
     store = FakeStore(_policy(PolicyAction.REQUIRE_APPROVAL), order)
     mcp = _server(store, order, executed)
-    assert _call(mcp, capability, _stamped_args(capability))["status"] == "approval_required"
+    assert _call(mcp, capability, _stamped_args(capability)).structured_content["status"] == "approval_required"
     assert len(store.rows) == 1 and executed == []
 
 
@@ -260,7 +259,7 @@ def test_handoff_only_operation_files_no_card(capability, action):
         "spec": {"action": action, "compose_project": "bawthub", "compose_service": "tts"},
         "resolved_args": {}}
     result = _call(mcp, capability, _stamped_args(capability))
-    assert result["status"] == "gpu_handoff_required" and result["is_error"] is True
+    assert result.structured_content["status"] == "gpu_handoff_required" and result.structured_content["is_error"] is True
     assert store.rows == [] and order == [] and executed == []
 
 
@@ -279,7 +278,7 @@ def test_routing_approval_displays_exact_target_image_and_delta(capability):
         session_key="snark:nick", backend="claude-code",
     )
     result = _call(mcp, capability, {**clean, MCP_CALL_CONTEXT_KEY: stamp})
-    assert result["status"] == "approval_required" and not executed
+    assert result.structured_content["status"] == "approval_required" and not executed
     prompt = store.rows[0][0].prompt
     for key in ("container_id", "image_ref", "config_hash", "before_rule", "after_rule"):
         assert approved["routing"][key] in prompt
@@ -301,7 +300,7 @@ def test_config_approval_displays_names_mounts_and_enum_values_only(capability):
         session_key="snark:nick", backend="claude-code",
     )
     result = _call(mcp, capability, {**clean, MCP_CALL_CONTEXT_KEY: stamp})
-    assert result["status"] == "approval_required" and not executed
+    assert result.structured_content["status"] == "approval_required" and not executed
     prompt = store.rows[0][0].prompt
     config = approved["config"]
     for text in (config["container_id"], config["image_ref"], *config["drift"], *config["mounts"],
@@ -316,7 +315,7 @@ def test_tampered_args_fail_before_policy_or_execution(capability):
     args = _stamped_args(capability)
     args["operation"] = "llm-bawt.restart-redis"
     result = _call(_server(store, order, executed), capability, args)
-    assert result["status"] == "approval_context_invalid"
+    assert result.structured_content["status"] == "approval_context_invalid"
     assert executed == []
     assert store.rows == []
 
@@ -327,8 +326,8 @@ def test_codex_require_persists_routable_context_once_per_protocol_call(capabili
     mcp = _server(store, order, executed)
     clean = {"operation": "llm-bawt.restart-app", "args": {}}
 
-    first = _call_codex(mcp, capability, clean)
-    retry = _call_codex(mcp, capability, clean)
+    first = _call_codex(mcp, capability, clean).structured_content
+    retry = _call_codex(mcp, capability, clean).structured_content
 
     assert first["approval_request_id"] == retry["approval_request_id"]
     assert order == ["persist", "publish", "persist"]
@@ -350,7 +349,7 @@ def test_contextual_call_missing_or_forged_header_executes_nothing(capability):
     mcp = _server(store, order, executed)
 
     result = _call(mcp, capability, {"operation": "llm-bawt.restart-app"})
-    assert result["status"] == "approval_context_missing"
+    assert result.structured_content["status"] == "approval_context_missing"
 
     forged = mint_mcp_request_context(
         capability="wrong",
@@ -364,7 +363,7 @@ def test_contextual_call_missing_or_forged_header_executes_nothing(capability):
         {"operation": "llm-bawt.restart-app"},
         envelope=forged,
     )
-    assert result["status"] == "approval_context_invalid"
+    assert result.structured_content["status"] == "approval_context_invalid"
     assert executed == []
     assert store.rows == []
 
@@ -386,10 +385,10 @@ def test_codex_context_missing_capability_or_invalid_turn_executes_nothing(capab
         result = asyncio.run(mcp.call_tool("ops_run", clean))
     finally:
         task_association.reset_current_mcp_request_context(request_binding)
-    assert result["status"] == "approval_context_missing"
+    assert result.structured_content["status"] == "approval_context_missing"
 
     result = _call_codex(mcp, capability + "forged", clean, envelope=envelope)
-    assert result["status"] == "approval_context_invalid"
+    assert result.structured_content["status"] == "approval_context_invalid"
     assert executed == []
     assert store.rows == []
 
@@ -400,13 +399,13 @@ def test_raw_mcp_non_gated_call_remains_allowed_but_gated_call_fails_closed():
     allowed = _server(FakeStore(_policy(PolicyAction.ALLOW), order), order, executed)
     result = asyncio.run(allowed.call_tool("ops_run", clean))
     assert executed == [("llm-bawt.restart-app", {})]
-    assert len(result) == 1
+    assert len(result.content) == 1
 
     order, executed = [], []
     gated_store = FakeStore(_policy(PolicyAction.REQUIRE_APPROVAL), order)
     result = asyncio.run(
         _server(gated_store, order, executed).call_tool("ops_run", clean)
     )
-    assert result["status"] == "approval_context_missing"
+    assert result.structured_content["status"] == "approval_context_missing"
     assert executed == []
     assert gated_store.rows == []

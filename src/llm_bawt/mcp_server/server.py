@@ -1032,11 +1032,11 @@ def run_server(
         # task-turn capability can reach task tools without becoming a model
         # argument or leaking through process-global state.
         import uvicorn
+        from .registry import HTTP_APP_OPTIONS
         from .task_association import TaskTurnCapabilityMiddleware
 
-        mcp.settings.host = final_host
-        mcp.settings.port = final_port
-        app = BotAccessMiddleware(TaskTurnCapabilityMiddleware(mcp.streamable_http_app()))
+        app = BotAccessMiddleware(TaskTurnCapabilityMiddleware(
+            mcp.streamable_http_app(**HTTP_APP_OPTIONS, host=final_host)))
         config = uvicorn.Config(
             app,
             host=final_host,

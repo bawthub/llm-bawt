@@ -51,17 +51,19 @@ async def _policy_lifespan(_server):
         yield {}
 
 
-mcp = CatalogFastMCP(
-    "bawthub",
-    lifespan=_policy_lifespan,
-    json_response=True,
-    stateless_http=True,
-    transport_security=TransportSecuritySettings(
+mcp = CatalogFastMCP("bawthub", lifespan=_policy_lifespan)
+
+# mcp 2.x takes the HTTP transport options when the ASGI app is built, not at
+# construction. ``run_server`` passes these to ``streamable_http_app``.
+HTTP_APP_OPTIONS = {
+    "json_response": True,
+    "stateless_http": True,
+    "transport_security": TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
         allowed_hosts=_allowed_hosts,
         allowed_origins=_allowed_origins,
     ),
-)
+}
 
 # Suppress uvicorn access logs by setting log_level to WARNING
 # We log our own human-friendly MCP operation summaries via ServiceLogger

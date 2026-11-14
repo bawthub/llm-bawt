@@ -16,7 +16,7 @@ import pytest
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer as FastMCP
 
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, ResultMessage
 from claude_agent_sdk.types import ToolResultBlock, UserMessage
@@ -70,7 +70,7 @@ class _McpService:
         self.calls = 0
 
     async def start(self):
-        fixture = FastMCP("probe", json_response=True, stateless_http=True)
+        fixture = FastMCP("probe")
 
         @fixture.tool(name="ping")
         def ping() -> str:
@@ -82,7 +82,7 @@ class _McpService:
         sock.bind(("127.0.0.1", self.port or 0))
         self.port = sock.getsockname()[1]
         self.sock = sock
-        app = fixture.streamable_http_app() if self.transport == "http" else fixture.sse_app()
+        app = fixture.streamable_http_app(json_response=True, stateless_http=True) if self.transport == "http" else fixture.sse_app()
         server = uvicorn.Server(uvicorn.Config(app, log_level="error"))
         server.install_signal_handlers = lambda: None
         self.server = server

@@ -4,7 +4,7 @@ import asyncio
 
 import httpx
 import pytest
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer as FastMCP
 
 from llm_bawt.mcp_server import task_api, task_review_tools
 from llm_bawt.mcp_server.server import mcp
@@ -120,14 +120,14 @@ def test_review_proxy_uses_shared_http_client_and_preserves_api_errors(monkeypat
 async def test_review_tool_discovery_requires_typed_stage_verdict_and_actor():
     tools = {tool.name: tool for tool in await FastMCP.list_tools(mcp)}
     assert {"tasks_reviews_list", "tasks_reviews_add"} <= tools.keys()
-    add = tools["tasks_reviews_add"].inputSchema
+    add = tools["tasks_reviews_add"].input_schema
     assert set(add["required"]) == {"task_id", "stage", "verdict", "body", "bot_id"}
     assert add["properties"]["stage"]["enum"] == ["DESIGN", "IMPLEMENTATION"]
     assert add["properties"]["verdict"]["enum"] == [
         "APPROVE", "APPROVE_WITH_CHANGES", "REQUEST_CHANGES", "COMMENT",
     ]
     assert "author" not in add["properties"]
-    assert set(tools["tasks_reviews_list"].inputSchema["required"]) == {"task_id"}
+    assert set(tools["tasks_reviews_list"].input_schema["required"]) == {"task_id"}
 
 
 @pytest.fixture
@@ -169,7 +169,7 @@ def test_reviews_add_forwards_findings_in_order_with_wire_keys(monkeypatch):
 @pytest.mark.anyio
 async def test_review_tool_discovery_types_findings():
     tools = {tool.name: tool for tool in await FastMCP.list_tools(mcp)}
-    add = tools["tasks_reviews_add"].inputSchema
+    add = tools["tasks_reviews_add"].input_schema
     assert "findings" in add["properties"] and "findings" not in add["required"]
     item = add["$defs"]["ReviewFindingInput"]
     assert item["properties"]["severity"]["enum"] == [
@@ -284,10 +284,10 @@ def test_recheck_arguments_are_checked_before_any_request(monkeypatch):
 @pytest.mark.anyio
 async def test_review_tool_discovery_types_rechecks_and_resolution():
     tools = {tool.name: tool for tool in await FastMCP.list_tools(mcp)}
-    add = tools["tasks_reviews_add"].inputSchema
+    add = tools["tasks_reviews_add"].input_schema
     assert {"rechecks_review_id", "resolutions"} <= add["properties"].keys()
     assert not {"rechecks_review_id", "resolutions"} & set(add["required"])
-    resolve = tools["tasks_reviews_resolve_finding"].inputSchema
+    resolve = tools["tasks_reviews_resolve_finding"].input_schema
     assert set(resolve["required"]) == {"task_id", "review_id", "finding_id", "resolution", "bot_id"}
     assert resolve["properties"]["resolution"]["enum"] == ["FIXED", "DEFERRED", "WITHDRAWN"]
 
@@ -324,7 +324,7 @@ def test_empty_required_entry_fields_reach_bawthub_for_validation():
 @pytest.mark.anyio
 async def test_review_tool_discovery_lets_optional_entry_fields_be_null():
     tools = {tool.name: tool for tool in await FastMCP.list_tools(mcp)}
-    defs = tools["tasks_reviews_add"].inputSchema["$defs"]
+    defs = tools["tasks_reviews_add"].input_schema["$defs"]
     resolution = defs["FindingResolutionInput"]
     assert set(resolution["required"]) == {"finding_id", "resolution"}
     for key in ("revision", "task", "note"):

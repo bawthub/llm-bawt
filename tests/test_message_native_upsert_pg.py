@@ -185,7 +185,7 @@ def http_runtime(real_storage, rig, monkeypatch):
     profiles.upsert({"slug": other_bot, "include_in_global_search": False})
     assert PolicyRefresher(rig.engine).refresh()
     server = CatalogFastMCP("full-storage-write-pg", bot_policy_resolver=BotPolicyResolver(rig.engine),
-        stateless_http=True, json_response=True, approval_store_provider=lambda: FakeStore(None, []))
+        approval_store_provider=lambda: FakeStore(None, []))
     for function, name in ((session_tools.get_session, "sessions_get"),
                            (session_tools.get_active_session, "sessions_get_active"),
                            (session_tools.rotate_session, "sessions_rotate"),
@@ -201,7 +201,7 @@ def http_runtime(real_storage, rig, monkeypatch):
         return await authorize(name, arguments, **kwargs)
 
     monkeypatch.setattr(server.bot_access, "authorize", track)
-    app = BotAccessMiddleware(TaskTurnCapabilityMiddleware(server.streamable_http_app()))
+    app = BotAccessMiddleware(TaskTurnCapabilityMiddleware(server.streamable_http_app(stateless_http=True, json_response=True)))
     with TestClient(app, base_url="http://localhost:8000") as http:
         def urlopen(request, **kwargs):
             response = http.post("/mcp", content=request.data, headers=dict(request.header_items()))

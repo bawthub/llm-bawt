@@ -7,7 +7,7 @@ from typing import Any
 
 import httpx
 import pytest
-from mcp.server.fastmcp import Image
+from mcp.server.mcpserver import Image
 
 from llm_bawt.mcp_server import attachment_tools
 from llm_bawt.mcp_server.task_images import ImageRefError

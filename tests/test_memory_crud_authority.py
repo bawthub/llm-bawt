@@ -43,7 +43,7 @@ async def test_registered_crud_passes_personal_authority(monkeypatch, name, hand
     catalog = CatalogFastMCP("memory-owner-probe", bot_policy_resolver=Resolver())
     catalog.add_tool(handler, name=name)
     with identity(turn(user=user)):
-        await catalog._tool_manager.call_tool(name, {"bot_id": "public_fixture", **extra})
+        await catalog._tool_manager.call_tool(name, {"bot_id": "public_fixture", **extra}, None)
     assert len(calls) == 1
     assert calls[0]["authority"] == MemoryAuthority(user_id=user)
     assert not calls[0]["authority"].operator
@@ -97,9 +97,9 @@ async def test_registered_fact_extraction_uses_sourced_writer_and_bound_owner(mo
                  "messages": [{"id": "source", "role": "user", "content": "Synthetic fact"}],
                  "use_llm": False}
     with identity(turn(user="user_a")):
-        await catalog._tool_manager.call_tool("facts_extract", arguments)
+        await catalog._tool_manager.call_tool("facts_extract", arguments, None)
         with pytest.raises(Exception, match="access_denied"):
-            await catalog._tool_manager.call_tool("facts_extract", {**arguments, "user_id": "user_b"})
+            await catalog._tool_manager.call_tool("facts_extract", {**arguments, "user_id": "user_b"}, None)
     assert len(calls) == 1
     assert calls[0]["authority"] == MemoryAuthority(user_id="user_a")
     assert calls[0]["source_message_ids"] == ["source"]
@@ -203,4 +203,4 @@ async def test_supersede_is_noop_for_either_registered_user(monkeypatch, user):
     catalog.add_tool(tools.supersede_memory, name="memory_supersede")
     with identity(turn(user=user)):
         await catalog._tool_manager.call_tool("memory_supersede", {
-            "bot_id": "public_fixture", "old_memory_id": "foreign", "new_memory_id": "own"})
+            "bot_id": "public_fixture", "old_memory_id": "foreign", "new_memory_id": "own"}, None)

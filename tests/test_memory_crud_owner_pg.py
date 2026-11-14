@@ -144,7 +144,7 @@ async def test_registered_mcp_foreign_ids_never_mutate_real_store(owned_clients,
     id_key = "old_memory_id" if method == "memory_supersede" else "memory_id"
     with identity(turn(bot=backend.bot_id, user="owner-a")):
         await catalog._tool_manager.call_tool(method, {
-            "bot_id": backend.bot_id, id_key: target.id, **extra})
+            "bot_id": backend.bot_id, id_key: target.id, **extra}, None)
     with backend.engine.connect() as conn:
         row = conn.execute(text(f"""SELECT content, importance, intent, owner_user_id
             FROM {backend._memories_table_name} WHERE id=:id"""), {"id": target.id}).mappings().one()

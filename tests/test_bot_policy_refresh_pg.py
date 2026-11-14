@@ -313,7 +313,7 @@ def test_committed_runtime_rotation_history_http_has_zero_authorization_selects(
     owner = PolicyRefresher(world.engine)
     assert owner.refresh()
     server = CatalogFastMCP("runtime-ownership-pg", bot_policy_resolver=BotPolicyResolver(world.engine),
-        stateless_http=True, json_response=True, approval_store_provider=lambda: FakeStore(None, []))
+        approval_store_provider=lambda: FakeStore(None, []))
     successor = str(uuid.uuid4())
     stored = []
 
@@ -361,7 +361,7 @@ def test_committed_runtime_rotation_history_http_has_zero_authorization_selects(
 
     event.listen(world.engine, "before_cursor_execute", query)
     try:
-        app = BotAccessMiddleware(TaskTurnCapabilityMiddleware(server.streamable_http_app()))
+        app = BotAccessMiddleware(TaskTurnCapabilityMiddleware(server.streamable_http_app(stateless_http=True, json_response=True)))
         with TestClient(app, base_url="http://localhost:8000") as http:
             def urlopen(request, **kwargs):
                 response = http.post("/mcp", content=request.data, headers=dict(request.header_items()))

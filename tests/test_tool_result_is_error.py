@@ -136,7 +136,7 @@ def _ha_call(executor):
 
 
 def _content(text, *, is_error):
-    return SimpleNamespace(content=[SimpleNamespace(text=text)], isError=is_error)
+    return SimpleNamespace(content=[SimpleNamespace(text=text)], is_error=is_error)
 
 
 def test_real_ha_client_failures_are_error_results(monkeypatch):

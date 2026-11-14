@@ -199,7 +199,7 @@ def test_mcp_allow_and_deny_are_audited_separately(client, store):
     asyncio.run(server.call_tool("harmless", {"value": "hello"}))
     policy = store.create({"tool_name": "harmless", "action": "deny"})
     denied = asyncio.run(server.call_tool("harmless", {"value": "blocked"}))
-    assert denied["status"] == "denied"
+    assert denied.structured_content["status"] == "denied"
     response = client.get("/v1/tool-approval-decisions?limit=1&offset=0").json()
     assert response["total"] == 2 and len(response["decisions"]) == 1
     assert response["decisions"][0]["policy_id"] == policy.id
@@ -215,7 +215,7 @@ def test_raw_gated_mcp_call_fails_before_snapshot_or_persistence(store):
         approval_publisher=lambda payload: None,
         operations_preparer=lambda operation, args: prepared.append((operation, args)) or snapshot)
     result = asyncio.run(server.call_tool("ops_run", {"operation": "demo", "args": {}}))
-    assert result["status"] == "approval_context_missing"
+    assert result.structured_content["status"] == "approval_context_missing"
     assert prepared == []
     assert store.count_requests() == 0
 

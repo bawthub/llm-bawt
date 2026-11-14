@@ -73,7 +73,7 @@ async def invoke(server, kind, name, args, user="user_a"):
             return await server.call_approved_tool(name, args,
                 expected_invocation_hash=canonical_invocation_hash(name, args),
                 caller_context=ApprovedCallerContext(bot_id="private_fixture", user_id=user))
-        return await server._tool_manager.call_tool(name, args)
+        return await server._tool_manager.call_tool(name, args, None)
 
 
 @pytest.mark.asyncio
@@ -107,7 +107,7 @@ async def test_supplied_user_cannot_replace_trusted_owner(history_catalog, name,
 async def test_public_target_still_requires_identity(history_catalog, name, user):
     server, calls = history_catalog
     with pytest.raises(Exception, match="caller_unavailable"):
-        await server._tool_manager.call_tool(name, {"bot_id": "public_fixture", "user_id": user})
+        await server._tool_manager.call_tool(name, {"bot_id": "public_fixture", "user_id": user}, None)
     assert not calls
 
 
@@ -120,11 +120,11 @@ async def test_existing_signed_operator_self_read_and_clear_remain_separate(hist
     if name == "messages_clear" and user is not None:
         # Existing service clear-all has no arbitrary-user mutation authority.
         with service_call(name, args), pytest.raises(Exception, match="access_denied"):
-            await server._tool_manager.call_tool(name, args)
+            await server._tool_manager.call_tool(name, args, None)
         assert not calls
         return
     with service_call(name, args):
-        await server._tool_manager.call_tool(name, args)
+        await server._tool_manager.call_tool(name, args, None)
     if name == "messages_clear" and user is None:
         assert calls == [("operator_clear_all", {"bot_id": "private_fixture"})]
     else:
@@ -136,7 +136,7 @@ async def test_userless_service_cannot_do_partial_cleanup(history_catalog):
     server, calls = history_catalog
     name, args = "messages_remove_last_partial", {"bot_id": "private_fixture"}
     with service_call(name, args), pytest.raises(Exception, match="caller_unavailable"):
-        await server._tool_manager.call_tool(name, args)
+        await server._tool_manager.call_tool(name, args, None)
     assert not calls
 
 

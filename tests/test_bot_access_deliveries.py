@@ -33,13 +33,13 @@ async def test_registered_receipt_tools_use_scoped_reader_not_http(monkeypatch):
     catalog = CatalogFastMCP("receipts", bot_policy_resolver=Resolver())
     catalog.add_tool(inter_bot_tools.get_delivery, name="bots_delivery_get")
     catalog.add_tool(inter_bot_tools.list_deliveries, name="bots_deliveries_list")
-    await catalog._tool_manager.call_tool("bots_delivery_get", {"delivery_id": "private-receipt"})
-    await catalog._tool_manager.call_tool("bots_deliveries_list", {"limit": 500})
+    await catalog._tool_manager.call_tool("bots_delivery_get", {"delivery_id": "private-receipt"}, None)
+    await catalog._tool_manager.call_tool("bots_deliveries_list", {"limit": 500}, None)
     assert calls[:2] == [frozenset({"public_fixture"})] * 2
     assert calls[2]["limit"] == 50
     for field in ("bot_id", "sender_bot_id", "target_bot_id"):
         with pytest.raises(Exception, match="access_denied"):
-            await catalog._tool_manager.call_tool("bots_deliveries_list", {field: "private_fixture"})
+            await catalog._tool_manager.call_tool("bots_deliveries_list", {field: "private_fixture"}, None)
     assert len(calls) == 3
 
 

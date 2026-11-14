@@ -252,7 +252,7 @@ def test_bot_send_tool_schema_has_no_service_field(name):
         assert not any(p.kind is p.VAR_KEYWORD for p in parameters.values())
     schema = asyncio.run(server.mcp.list_tools())
     send = next(tool for tool in schema if tool.name == "bots_send_message")
-    assert name not in send.inputSchema["properties"]
+    assert name not in send.input_schema["properties"]
 
 
 def test_extra_service_arguments_to_the_tool_are_never_forwarded(monkeypatch):
@@ -269,7 +269,7 @@ def test_extra_service_arguments_to_the_tool_are_never_forwarded(monkeypatch):
     monkeypatch.setattr(server, "_enqueue_durable", enqueue)
     monkeypatch.setattr(tools, "_target_refusal", nothing)
     monkeypatch.setattr(tools, "_waited_reply_origin", nothing)
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.mcpserver import MCPServer as FastMCP
 
     # The FastMCP argument model, minus the approval interceptor (tested elsewhere).
     result = asyncio.run(FastMCP.call_tool(server.mcp, "bots_send_message", {

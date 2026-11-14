@@ -5,8 +5,8 @@ from typing import Any
 
 import httpx
 import pytest
-from mcp.server.fastmcp import FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver import MCPServer as FastMCP
+from mcp.server.mcpserver.exceptions import ToolError
 
 from llm_bawt.mcp_server import project_tools, step_tools
 from llm_bawt.mcp_server.server import mcp
@@ -25,7 +25,8 @@ def mcp_call(name: str, arguments: dict[str, Any]) -> Any:
     tests missed the hidden error. The base dispatch keeps the approval
     policy store (a DB dependency) out of these unit tests.
     """
-    return run(FastMCP.call_tool(mcp, name, arguments))
+    result = run(FastMCP.call_tool(mcp, name, arguments))
+    return result.content, result.structured_content
 
 
 def bawthub_error(status_code: int, message: str) -> httpx.HTTPStatusError:
@@ -223,11 +224,11 @@ def test_published_schemas_carry_the_status_enum() -> None:
     enum = ["PENDING", "RUNNING", "COMPLETED", "FAILED", "SKIPPED"]
 
     for name in ("steps_add", "steps_set", "tasks_create"):
-        schema = tools[name].inputSchema
+        schema = tools[name].input_schema
         step_def = schema["$defs"]["TaskStepInput"]
         assert step_def["properties"]["status"]["enum"] == enum, name
 
-    status = tools["steps_update"].inputSchema["properties"]["status"]
+    status = tools["steps_update"].input_schema["properties"]["status"]
     assert {"enum": enum, "type": "string"} in status["anyOf"]
 
 

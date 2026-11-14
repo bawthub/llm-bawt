@@ -49,7 +49,7 @@ async def test_userless_service_self_retains_read_close_user_filters(monkeypatch
     if name in {"messages_get", "sessions_get", "sessions_close"}:
         args["session_id"] = "s1"
     with service_call(name, args):
-        await server._tool_manager.call_tool(name, args)
+        await server._tool_manager.call_tool(name, args, None)
     assert calls == [("private_fixture", user, args.get("session_id"))]
 
 
@@ -61,7 +61,7 @@ async def test_userless_service_filter_cannot_target_another_bot(monkeypatch, si
     server, calls = catalog(monkeypatch, name)
     args = {"bot_id": target}
     with service_call(name, args), pytest.raises(Exception, match="access_denied"):
-        await server._tool_manager.call_tool(name, args)
+        await server._tool_manager.call_tool(name, args, None)
     assert not calls
 
 
@@ -72,7 +72,7 @@ async def test_userless_service_never_grants_user_authorship(monkeypatch, signer
     server, calls = catalog(monkeypatch, name)
     args = {"bot_id": "private_fixture", "user_id": "user_a"}
     with service_call(name, args), pytest.raises(Exception, match="access_denied"):
-        await server._tool_manager.call_tool(name, args)
+        await server._tool_manager.call_tool(name, args, None)
     assert not calls
 
 
@@ -82,7 +82,7 @@ async def test_userless_service_session_owner_must_still_match_bot(monkeypatch, 
     server, calls = catalog(monkeypatch, name, owner=("public_fixture", "user_a"))
     args = {"bot_id": "private_fixture", "session_id": "other"}
     with service_call(name, args), pytest.raises(Exception, match="access_denied"):
-        await server._tool_manager.call_tool(name, args)
+        await server._tool_manager.call_tool(name, args, None)
     assert not calls
 
 
@@ -91,7 +91,7 @@ async def test_userless_service_cannot_accept_another_bots_pointer(monkeypatch, 
     server, calls = catalog(monkeypatch, "sessions_rotate")
     args = {"bot_id": "public_fixture", "accept_pointer": True}
     with service_call("sessions_rotate", args), pytest.raises(Exception, match="access_denied"):
-        await server._tool_manager.call_tool("sessions_rotate", args)
+        await server._tool_manager.call_tool("sessions_rotate", args, None)
     assert not calls
 
 
@@ -100,7 +100,7 @@ async def test_userless_service_still_cannot_search_aggregate_memories(monkeypat
     server, calls = catalog(monkeypatch, "memory_search_all")
     args = {"bot_id": "private_fixture"}
     with service_call("memory_search_all", args), pytest.raises(Exception, match="caller_unavailable"):
-        await server._tool_manager.call_tool("memory_search_all", args)
+        await server._tool_manager.call_tool("memory_search_all", args, None)
     assert not calls
 
 
@@ -117,7 +117,7 @@ async def test_user_bound_service_does_not_gain_filter_authority(monkeypatch, si
     server, calls = catalog(monkeypatch, name)
     args = {"bot_id": "private_fixture", "user_id": "user_b"}
     with service_call(name, args, user="user_a"), pytest.raises(Exception, match="access_denied"):
-        await server._tool_manager.call_tool(name, args)
+        await server._tool_manager.call_tool(name, args, None)
     assert not calls
 
 
@@ -160,5 +160,5 @@ async def test_all_session_tools_require_explicit_bot_namespace():
     names = {"sessions_get", "sessions_close", "sessions_list", "sessions_get_active",
              "sessions_get_or_create_active", "sessions_rotate"}
     for name in names:
-        assert "bot_id" in tools[name].inputSchema["required"], name
+        assert "bot_id" in tools[name].input_schema["required"], name
         assert "required bot_id" in tools[name].description, name

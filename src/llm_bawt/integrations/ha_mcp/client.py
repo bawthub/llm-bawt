@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import threading
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -157,7 +158,7 @@ class HomeAssistantNativeClient:
                 tool_def = HAToolDefinition(
                     name=t.name,
                     description=t.description or "",
-                    input_schema=t.inputSchema or {"type": "object", "properties": {}},
+                    input_schema=t.input_schema or {"type": "object", "properties": {}},
                 )
                 self._tools.append(tool_def)
                 self._tool_names.add(t.name)
@@ -195,32 +196,37 @@ class HomeAssistantNativeClient:
             logger.error(f"HA tool call failed: {name}({arguments}): {e}")
             raise HAToolError(f"Error calling HA tool {name}: {e}") from e
         text = self._extract_text(result)
-        if getattr(result, "isError", False) is True:
+        if getattr(result, "is_error", False) is True:
             raise HAToolError(text or f"HA tool {name} reported an error")
         return text
 
     # --- Async internals ---
 
-    async def _discover_tools_async(self, credentials: HACredentials):
+    @staticmethod
+    @asynccontextmanager
+    async def _session(credentials: HACredentials):
+        """An initialized MCP session to HA's streamable HTTP endpoint."""
         from mcp import ClientSession
-        from mcp.client.streamable_http import streamablehttp_client
+        from mcp.client.streamable_http import streamable_http_client
+        from mcp.shared._httpx_utils import create_mcp_http_client
 
         headers = {"Authorization": f"Bearer {credentials.token}"}
-        async with streamablehttp_client(credentials.mcp_url, headers=headers) as (read, write, _):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                result = await session.list_tools()
-                return result.tools
+        async with create_mcp_http_client(headers=headers) as http_client:
+            async with streamable_http_client(
+                credentials.mcp_url, http_client=http_client,
+            ) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    yield session
+
+    async def _discover_tools_async(self, credentials: HACredentials):
+        async with self._session(credentials) as session:
+            result = await session.list_tools()
+            return result.tools
 
     async def _call_tool_async(self, credentials: HACredentials, name: str, arguments: dict[str, Any]):
-        from mcp import ClientSession
-        from mcp.client.streamable_http import streamablehttp_client
-
-        headers = {"Authorization": f"Bearer {credentials.token}"}
-        async with streamablehttp_client(credentials.mcp_url, headers=headers) as (read, write, _):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                return await session.call_tool(name, arguments)
+        async with self._session(credentials) as session:
+            return await session.call_tool(name, arguments)
 
     # --- Sync/async bridge ---
 

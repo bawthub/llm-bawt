@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import logging
 
-from mcp.server.fastmcp import Image
+from mcp.server.mcpserver import Image
 
 from llm_bawt.media import get_media_store
 from llm_bawt.default_user import resolve_user_id

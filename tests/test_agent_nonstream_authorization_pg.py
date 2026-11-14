@@ -58,7 +58,7 @@ def test_agent_nonstream_initial_and_final_history_http_owner_provenance(world, 
             new_id=successor, idempotency_key="delivery-test", working_memory_mode="pinned")
     assert PolicyRefresher(world.engine).refresh()
     server = CatalogFastMCP("agent-nonstream-pg", bot_policy_resolver=BotPolicyResolver(world.engine),
-        stateless_http=True, json_response=True, approval_store_provider=lambda: FakeStore(None, []))
+        approval_store_provider=lambda: FakeStore(None, []))
     stored, sql, stages = [], [], []
 
     async def get_session(session_id, **kwargs):
@@ -98,7 +98,7 @@ def test_agent_nonstream_initial_and_final_history_http_owner_provenance(world, 
 
     event.listen(world.engine, "before_cursor_execute", query)
     try:
-        app = BotAccessMiddleware(TaskTurnCapabilityMiddleware(server.streamable_http_app()))
+        app = BotAccessMiddleware(TaskTurnCapabilityMiddleware(server.streamable_http_app(stateless_http=True, json_response=True)))
         with TestClient(app, base_url="http://localhost:8000") as http:
             headers = []
 

@@ -13,9 +13,9 @@ import json
 from copy import deepcopy
 from typing import Any
 
-from mcp.types import TextContent, Tool
+from mcp.types import CallToolResult, TextContent, Tool
 
-from .approval_interceptor import ApprovalAwareFastMCP
+from .approval_interceptor import ApprovalAwareFastMCP, PolicyResult
 from .catalog_contracts import TOOL_SUMMARIES, tool_description
 from .bot_access import ToolBotAccess, invocation_context
 from agent_bridge.mcp_call_context import MCP_CALL_CONTEXT_KEY
@@ -77,17 +77,17 @@ def compact_json_text(block: Any) -> Any:
 
 
 def compact_call_result(result: Any) -> Any:
-    """A FastMCP call_tool result with every JSON text block compacted.
+    """A tool's ``CallToolResult`` with every JSON text content block compacted.
 
-    The result is content blocks, or (content blocks, structured content) for a
-    tool with an output schema. Structured content and any other shape (an
-    approval error dict) pass through unchanged.
+    Structured content and any other shape (an input-required result) pass
+    through unchanged.
     """
-    if isinstance(result, tuple) and len(result) == 2 and isinstance(result[0], list):
-        return ([compact_json_text(block) for block in result[0]], result[1])
-    if isinstance(result, list):
-        return [compact_json_text(block) for block in result]
-    return result
+    if not isinstance(result, CallToolResult) or isinstance(result, PolicyResult):
+        return result
+    content = [compact_json_text(block) for block in result.content]
+    if all(new is old for new, old in zip(content, result.content)):
+        return result
+    return result.model_copy(update={"content": content})
 
 
 class CatalogFastMCP(ApprovalAwareFastMCP):
@@ -101,14 +101,14 @@ class CatalogFastMCP(ApprovalAwareFastMCP):
         wrapped = self.bot_access.register(name or fn.__name__, fn)
         return super().add_tool(wrapped, name, *args, **kwargs)
 
-    async def call_tool(self, name, arguments):
+    async def call_tool(self, name, arguments, context=None):
         public = dict(arguments or {})
         public.pop(MCP_CALL_CONTEXT_KEY, None)
         with invocation_context(name, public):
             # Avoid doomed ASK cards. The registered callable checks again at
             # execution, including approved execution's bypass of call_tool.
             await self.bot_access.preflight(name, public)
-            return compact_call_result(await super().call_tool(name, arguments))
+            return compact_call_result(await super().call_tool(name, arguments, context))
 
     async def call_approved_tool(self, name, arguments, **kwargs):
         with invocation_context(name, arguments):
@@ -122,7 +122,7 @@ class CatalogFastMCP(ApprovalAwareFastMCP):
                 # require explicit coverage before they can land in this repo.
                 "description": tool_description(tool.name)
                 if tool.name in TOOL_SUMMARIES else tool.description,
-                "inputSchema": compact_schema(tool.inputSchema),
+                "input_schema": compact_schema(tool.input_schema),
             })
             for tool in tools
         ]

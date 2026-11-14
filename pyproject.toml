@@ -104,7 +104,7 @@ service = [
 
 mcp = [
     # mcp 2.x removed mcp.server.fastmcp, which the MCP server imports.
-    "mcp[cli]>=1.0.0,<2",
+    "mcp[cli]>=2.3.0,<3",
 ]
 
 search = [

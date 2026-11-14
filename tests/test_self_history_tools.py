@@ -33,11 +33,11 @@ async def _invoke(catalog, name, args, *, user="user_a", kind="turn"):
             expected_invocation_hash=canonical_invocation_hash(name, args),
             caller_context=ApprovedCallerContext(bot_id="public_fixture", user_id=user),
         )
-        return json.loads(blocks[0].text)
+        return json.loads(blocks.content[0].text)
     context = (service_call(name, args, bot="public_fixture", user=user)
                if kind == "service" else identity(turn(bot="public_fixture", user=user)))
     with context:
-        return await catalog._tool_manager.call_tool(name, args)
+        return await catalog._tool_manager.call_tool(name, args, None)
 
 
 def test_self_tool_catalog_matches_supported_tools():
@@ -161,7 +161,7 @@ async def test_self_history_requires_user_before_read_or_forward(history_catalog
         elif kind == "userless_service":
             await _invoke(history_catalog, name, args, user=None, kind="service")
         else:
-            await history_catalog._tool_manager.call_tool(name, args)
+            await history_catalog._tool_manager.call_tool(name, args, None)
     read.assert_not_awaited()
     send.assert_not_awaited()
 

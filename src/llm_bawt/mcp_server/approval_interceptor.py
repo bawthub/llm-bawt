@@ -9,6 +9,7 @@ field is stripped before FastMCP schema validation/function binding.
 from __future__ import annotations
 
 import contextvars
+import functools
 import hashlib
 import inspect
 import json
@@ -25,7 +26,10 @@ from agent_bridge.mcp_call_context import (
     derive_mcp_call_context,
     verify_mcp_call_context,
 )
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import Context, MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
+from mcp.shared.exceptions import MCPError
+from mcp.types import CallToolResult, TextContent
 
 from ..approval_policies import (
     ApprovalDuplicatePending,
@@ -98,8 +102,68 @@ def current_approved_caller_context() -> ApprovedCallerContext | None:
     return _approved_caller_context.get()
 
 
-class ApprovalAwareFastMCP(FastMCP):
-    """FastMCP whose ``call_tool`` performs app-owned policy interception."""
+def _v1_tool_semantics(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """``fn`` as an async tool that behaves as it did under mcp 1.x.
+
+    mcp 2.x changes two things this server relies on:
+    - It replaces the text of any exception that isn't a ``ToolError`` with a
+      bare ``Error executing tool <name>``. Our tools raise ordinary exceptions
+      (``BotAccessError``, ``ValueError``) as reasons the model reads and acts on,
+      so re-raise them as ``ToolError``. The client then sees
+      ``Error executing tool <name>: <reason>`` exactly as before.
+    - It runs sync tools on a worker thread. 1.x ran them inline on the event
+      loop; keep that, so moving tools to threads stays a separate decision.
+    """
+    if getattr(fn, "_v1_tool_semantics", False):
+        return fn
+    signature = inspect.signature(fn, eval_str=True)
+
+    @functools.wraps(fn)
+    async def tool(*args, **kwargs):
+        try:
+            result = fn(*args, **kwargs)
+            return await result if inspect.isawaitable(result) else result
+        except (ToolError, MCPError):
+            raise
+        except Exception as error:
+            raise ToolError(str(error)) from error
+
+    tool.__signature__ = signature
+    tool.__annotations__ = inspect.get_annotations(fn, eval_str=True)
+    tool._v1_tool_semantics = True
+    return tool
+
+
+class PolicyResult(CallToolResult):
+    """The interceptor's own outcome (denial, approval card, context error).
+
+    The catalog leaves it as is: under mcp 1.x its JSON text was never compacted.
+    """
+
+
+def policy_result(result: Any, *, has_output_schema: bool = False) -> Any:
+    """A policy outcome dict rendered as mcp 1.x rendered it on the wire.
+
+    mcp 1.x serialized a dict returned from ``call_tool`` as indented JSON text
+    plus the same dict as structured content, without ``isError``. mcp 2.x puts
+    ``call_tool``'s return value on the wire as-is, so build that result here.
+
+    One deliberate difference, for a tool with an output schema: 1.x validated
+    this dict against that schema, failed, and sent ``isError`` with only
+    ``Output validation error``, hiding the denial or approval reply from the
+    model. It is still ``isError`` (clients validate structured content against
+    the schema unless the result is an error), but now carries the outcome text.
+    """
+    if not isinstance(result, dict):
+        return result
+    text = [TextContent(type="text", text=json.dumps(result, indent=2))]
+    if has_output_schema:
+        return PolicyResult(content=text, is_error=True)
+    return PolicyResult(content=text, structured_content=result, is_error=False)
+
+
+class ApprovalAwareFastMCP(MCPServer):
+    """MCP server whose ``call_tool`` performs app-owned policy interception."""
 
     def __init__(
         self,
@@ -114,6 +178,9 @@ class ApprovalAwareFastMCP(FastMCP):
         self._approval_publisher = approval_publisher
         self._operations_preparer = operations_preparer
         self._tools_registered = False
+
+    def add_tool(self, fn, name=None, *args, **kwargs):
+        return super().add_tool(_v1_tool_semantics(fn), name, *args, **kwargs)
 
     def mark_tools_registered(self) -> None:
         """Every tool module has registered on this instance (``registry``)."""
@@ -199,7 +266,24 @@ class ApprovalAwareFastMCP(FastMCP):
         finally:
             _approved_caller_context.reset(token)
 
-    async def call_tool(self, name: str, arguments: dict[str, Any]):
+    async def call_tool(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        context: Context | None = None,
+    ):
+        tool = self._tool_manager.get_tool(name)
+        return policy_result(
+            await self._intercept_call(name, arguments, context),
+            has_output_schema=bool(tool is not None and tool.output_schema),
+        )
+
+    async def _intercept_call(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        context: Context | None,
+    ):
         received = dict(arguments or {})
         raw_call_context = received.pop(MCP_CALL_CONTEXT_KEY, None)
         capability = current_task_turn_capability()
@@ -234,11 +318,12 @@ class ApprovalAwareFastMCP(FastMCP):
                         raw_context=raw_call_context,
                     )
                 else:
-                    protocol_context = self.get_context()
+                    if context is None:
+                        raise LookupError("no protocol request context")
                     call_context = derive_mcp_call_context(
                         capability=capability,
                         raw_request_context=raw_request_context,
-                        protocol_request_id=protocol_context.request_id,
+                        protocol_request_id=context.request_id,
                         tool_name=name,
                         tool_input=received,
                     )
@@ -282,7 +367,7 @@ class ApprovalAwareFastMCP(FastMCP):
             turn_id=turn_context.turn_id if turn_context else None,
         )
         if decision.action is PolicyAction.ALLOW:
-            return await super().call_tool(name, received)
+            return await super().call_tool(name, received, context)
         if decision.action is PolicyAction.DENY:
             return {
                 "status": "denied",

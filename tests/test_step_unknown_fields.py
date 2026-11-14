@@ -10,8 +10,8 @@ import asyncio
 from typing import Any
 
 import pytest
-from mcp.server.fastmcp import FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver import MCPServer as FastMCP
+from mcp.server.mcpserver.exceptions import ToolError
 
 from llm_bawt.mcp_server import step_tools, task_tools
 from llm_bawt.mcp_server.server import mcp
@@ -81,7 +81,7 @@ def test_published_step_schema_forbids_extra_fields() -> None:
     tools = {tool.name: tool for tool in run(mcp.list_tools())}
 
     for name in ("steps_add", "steps_set", "tasks_create"):
-        step_def = tools[name].inputSchema["$defs"]["TaskStepInput"]
+        step_def = tools[name].input_schema["$defs"]["TaskStepInput"]
         assert step_def.get("additionalProperties") is False, name
 
 

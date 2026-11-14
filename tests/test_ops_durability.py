@@ -373,7 +373,8 @@ def ops_gate(system, monkeypatch):
             backend="claude-code")
         token = task_association.set_current_task_turn_capability(capability)
         try:
-            return asyncio.run(registry.mcp.call_tool("ops_run", {**args, MCP_CALL_CONTEXT_KEY: stamp}))
+            return asyncio.run(registry.mcp.call_tool(
+                "ops_run", {**args, MCP_CALL_CONTEXT_KEY: stamp})).structured_content
         finally:
             task_association.reset_current_task_turn_capability(token)
 
