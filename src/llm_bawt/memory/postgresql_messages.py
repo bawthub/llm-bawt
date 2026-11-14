@@ -347,36 +347,108 @@ class PostgreSQLMessageMixin:
                 logger.error(f"Failed to search messages: {e}")
                 return []
 
-    def ignore_recent_messages(self, count: int) -> int:
-        """Move the last N messages to the forgotten table.
-        
-        Returns the number of messages actually forgotten.
-        """
-        try:
-            forgotten = self._forget_where(
-                f"id IN (SELECT id FROM {self._messages_table_name} "
-                "ORDER BY timestamp DESC LIMIT :count)",
-                {"count": count},
-            )
-        except Exception as e:
-            logger.error(f"Failed to forget messages: {e}")
-            return 0
-        logger.debug(f"Forgot {forgotten} messages")
-        return forgotten
+    def _owned_selection(
+        self,
+        *,
+        user_id: str,
+        session_id: str | None,
+        count: int | None,
+        minutes: int | None,
+    ) -> tuple[str, dict[str, Any]]:
+        """Select the caller's newest messages (TASK-2279).
 
-    def ignore_messages_since_minutes(self, minutes: int) -> int:
-        """Move all messages from the last N minutes to the forgotten table.
-        
-        Returns the number of messages actually forgotten.
+        A bot partition holds every user's threads, so count/time selection is
+        bound to the caller's sessions, and to one thread when given. Returns a
+        sub-select of IDs plus its bind parameters.
         """
-        cutoff = time.time() - (minutes * 60)
-        try:
-            forgotten = self._forget_where("timestamp >= :cutoff", {"cutoff": cutoff})
-        except Exception as e:
-            logger.error(f"Failed to forget messages: {e}")
-            return 0
-        logger.debug(f"Forgot {forgotten} messages from last {minutes} minutes")
-        return forgotten
+        if not user_id or not str(user_id).strip():
+            raise ValueError("user_id is required to forget messages")
+        if (count is None) == (minutes is None):
+            raise ValueError("pass exactly one of count or minutes")
+        from .short_term_message_reads import history_owner_clause
+
+        params: dict[str, Any] = {}
+        where = [history_owner_clause(params, bot_id=self.bot_id, user_id=user_id)]
+        if session_id:
+            where.append("session_id = :scope_session")
+            params["scope_session"] = session_id
+        if minutes is not None:
+            where.append("timestamp >= :cutoff")
+            params["cutoff"] = time.time() - (int(minutes) * 60)
+            limit = ""
+        else:
+            limit = " LIMIT :count"
+            params["count"] = int(count)
+        return (
+            f"SELECT id FROM {self._messages_table_name} WHERE {' AND '.join(where)}"
+            f" ORDER BY timestamp DESC, id DESC{limit}",
+            params,
+        )
+
+    def ignore_recent_messages(
+        self, count: int, *, user_id: str, session_id: str | None = None,
+    ) -> int:
+        """Move the caller's last N messages to the forgotten table."""
+        selected, params = self._owned_selection(
+            user_id=user_id, session_id=session_id, count=count, minutes=None)
+        return self._forget_where(f"id IN ({selected})", params)
+
+    def ignore_messages_since_minutes(
+        self, minutes: int, *, user_id: str, session_id: str | None = None,
+    ) -> int:
+        """Move the caller's messages from the last N minutes to forgotten storage."""
+        selected, params = self._owned_selection(
+            user_id=user_id, session_id=session_id, count=None, minutes=minutes)
+        return self._forget_where(f"id IN ({selected})", params)
+
+    def forget_owned_messages(
+        self,
+        *,
+        user_id: str,
+        session_id: str | None = None,
+        count: int | None = None,
+        minutes: int | None = None,
+    ) -> dict[str, Any]:
+        """Forget the caller's messages and the memories sourced from them.
+
+        One transaction selects one stable ID set, moves exactly those rows,
+        and deletes only memories whose sources include a moved ID.
+        """
+        from .message_store import MESSAGE_STATE_COLUMNS
+
+        selected, params = self._owned_selection(
+            user_id=user_id, session_id=session_id, count=count, minutes=minutes)
+        cols = ", ".join(MESSAGE_STATE_COLUMNS)
+        refresh = ", ".join(
+            f"{c} = EXCLUDED.{c}" for c in (*MESSAGE_STATE_COLUMNS[1:], "forgotten_at")
+        )
+        with self.engine.begin() as conn:
+            ids = [r.id for r in conn.execute(text(f"{selected} FOR UPDATE"), params)]
+            if not ids:
+                return {"message_ids": [], "messages_ignored": 0, "memories_deleted": 0}
+            moved = conn.execute(text(f"""
+                WITH moved AS (
+                    DELETE FROM {self._messages_table_name}
+                    WHERE id = ANY(:ids)
+                    RETURNING {cols}
+                )
+                INSERT INTO {self._forgotten_table_name} ({cols}, forgotten_at)
+                SELECT {cols}, CURRENT_TIMESTAMP FROM moved
+                ON CONFLICT (bot_id, id) DO UPDATE SET {refresh}
+                RETURNING id
+            """), {"ids": ids}).fetchall()
+            moved_ids = sorted(r.id for r in moved)
+            memories = conn.execute(text(f"""
+                DELETE FROM {self._memories_table_name}
+                WHERE source_message_ids::jsonb ?| CAST(:ids AS text[])
+                RETURNING id
+            """), {"ids": moved_ids}).fetchall() if moved_ids else []
+        logger.debug("Forgot %d messages and %d memories", len(moved_ids), len(memories))
+        return {
+            "message_ids": moved_ids,
+            "messages_ignored": len(moved_ids),
+            "memories_deleted": len(memories),
+        }
 
     def _forget_where(self, where_sql: str, params: dict[str, Any]) -> int:
         """Move matching canonical messages, with all durable state, to forgotten storage.
@@ -579,54 +651,33 @@ class PostgreSQLMessageMixin:
             result = conn.execute(text(f"SELECT COUNT(*) FROM {self._forgotten_table_name}"))
             return result.scalar() or 0
 
-    def preview_recent_messages(self, count: int) -> list[dict]:
-        """Preview the last N messages (for confirmation before forget).
-        
-        Returns list of message dicts with id, role, content, timestamp.
-        """
+    def _preview_owned(self, **selection: Any) -> list[dict]:
+        selected, params = self._owned_selection(**selection)
         with self.engine.connect() as conn:
-            sql = text(f"""
+            rows = conn.execute(text(f"""
                 SELECT id, role, content, timestamp
                 FROM {self._messages_table_name}
-                ORDER BY timestamp DESC
-                LIMIT :count
-            """)
-            rows = conn.execute(sql, {"count": count}).fetchall()
-            
-            return [
-                {
-                    "id": row.id,
-                    "role": row.role,
-                    "content": row.content,
-                    "timestamp": row.timestamp,
-                }
-                for row in reversed(rows)  # Return in chronological order
-            ]
+                WHERE id IN ({selected})
+                ORDER BY timestamp ASC, id ASC
+            """), params).fetchall()
+        return [
+            {"id": row.id, "role": row.role, "content": row.content, "timestamp": row.timestamp}
+            for row in rows
+        ]
 
-    def preview_messages_since_minutes(self, minutes: int) -> list[dict]:
-        """Preview messages from the last N minutes (for confirmation before forget).
-        
-        Returns list of message dicts with id, role, content, timestamp.
-        """
-        cutoff = time.time() - (minutes * 60)
-        with self.engine.connect() as conn:
-            sql = text(f"""
-                SELECT id, role, content, timestamp
-                FROM {self._messages_table_name}
-                WHERE timestamp >= :cutoff
-                ORDER BY timestamp ASC
-            """)
-            rows = conn.execute(sql, {"cutoff": cutoff}).fetchall()
-            
-            return [
-                {
-                    "id": row.id,
-                    "role": row.role,
-                    "content": row.content,
-                    "timestamp": row.timestamp,
-                }
-                for row in rows
-            ]
+    def preview_recent_messages(
+        self, count: int, *, user_id: str, session_id: str | None = None,
+    ) -> list[dict]:
+        """Preview the caller's last N messages, chronological."""
+        return self._preview_owned(
+            user_id=user_id, session_id=session_id, count=count, minutes=None)
+
+    def preview_messages_since_minutes(
+        self, minutes: int, *, user_id: str, session_id: str | None = None,
+    ) -> list[dict]:
+        """Preview the caller's messages from the last N minutes, chronological."""
+        return self._preview_owned(
+            user_id=user_id, session_id=session_id, count=None, minutes=minutes)
 
     def preview_ignored_messages(self) -> list[dict]:
         """Preview all currently forgotten messages (for confirmation before restore).

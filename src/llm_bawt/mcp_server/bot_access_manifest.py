@@ -7,7 +7,7 @@ BOT_TARGET_TOOLS = frozenset({
     "memory_update_meaning", "messages_add", "messages_get", "messages_get_by_id",
     "messages_get_for_summary", "messages_preview_recent", "messages_preview_since_minutes",
     "messages_preview_ignored", "messages_ignore_recent", "messages_ignore_since_minutes",
-    "messages_ignore_by_id", "messages_restore_ignored", "messages_mark_recalled",
+    "messages_ignore_by_id", "messages_forget", "messages_restore_ignored", "messages_mark_recalled",
     "messages_clear", "messages_remove_last_partial", "facts_extract", "context_get_recent",
     "system_stats", "system_run_maintenance", "sessions_get", "sessions_close",
     "sessions_get_active", "sessions_get_or_create_active", "sessions_rotate",

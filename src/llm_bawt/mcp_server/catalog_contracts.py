@@ -53,6 +53,7 @@ TOOL_SUMMARIES: dict[str, str] = {
     "messages_preview_ignored": "Read bot_id's ignored messages without restoring them.",
     "messages_ignore_recent": "Move the latest count messages out of active history into ignored storage; preview first.",
     "messages_ignore_since_minutes": "Ignore messages from the last minutes; preview the affected window first.",
+    "messages_forget": "Ignore your latest count (or minutes of) messages and delete memories sourced from them.",
     "messages_ignore_by_id": "Soft-delete one message into ignored storage; use messages_restore_ignored to restore ignored history.",
     "messages_restore_ignored": "Restore ALL ignored messages for bot_id into history.",
     "messages_get_for_summary": "Read original messages referenced by a stored summary_id.",

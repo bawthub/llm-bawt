@@ -210,6 +210,8 @@ class MemoryForgetRequest(BaseModel):
     count: int | None = None  # forget recent N
     minutes: int | None = None  # forget last N minutes
     message_id: str | None = None  # forget specific message by ID
+    user_id: str | None = None  # owner for count/minutes (TASK-2279)
+    session_id: str | None = None  # optional single thread
 
 class MemoryForgetResponse(BaseModel):
     """Response for forget operation."""

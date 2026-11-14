@@ -11,6 +11,11 @@ from typing import Any
 from .client_runtime import _run_async
 
 
+def _wire(scope: dict[str, Any]) -> dict[str, Any]:
+    """Server mode: the signed principal carries the user, not an argument."""
+    return {k: v for k, v in scope.items() if k != "user_id"}
+
+
 class MemoryClientAdminMixin:
     """Stats, previews, forget/ignore, consolidation and maintenance."""
 
@@ -33,24 +38,41 @@ class MemoryClientAdminMixin:
         backend = storage.get_backend(self.bot_id)
         return backend.get_high_importance_memories(n_results=limit, min_importance=min_importance)
 
+    def _forget_scope(self, session_id: str | None) -> dict[str, Any]:
+        """Owner and optional thread for count/time selection (TASK-2279).
+
+        The client's bound user owns the selection; a bot partition holds every
+        user's threads, so a user-less client cannot select by count or time.
+        """
+        user_id = self._service_principal.user_id
+        if not user_id:
+            raise ValueError("a user-bound memory client is required to select messages by count or time")
+        scope: dict[str, Any] = {"user_id": user_id}
+        if session_id:
+            scope["session_id"] = session_id
+        return scope
+
+
+    def _owned_backend(self, *, provision: bool = False):
+        storage = self._get_storage()
+        if provision:
+            return storage.get_backend(self.bot_id, provision_schema=True)
+        return storage.get_backend(self.bot_id)
+
     def preview_recent_messages(self, count: int = 10) -> list[dict[str, Any]]:
         self._ensure_initialized()
+        scope = self._forget_scope(None)
         if self.server_url:
-            return self._call_server("messages_preview_recent", {"bot_id": self.bot_id, "count": count})
-        storage = self._get_storage()
-        backend = storage.get_backend(self.bot_id)
-        return backend.preview_recent_messages(count)
+            return self._call_server("messages_preview_recent", {"bot_id": self.bot_id, "count": count, **_wire(scope)})
+        return self._owned_backend().preview_recent_messages(count=count, **scope)
 
     def preview_messages_since_minutes(self, minutes: int) -> list[dict[str, Any]]:
         self._ensure_initialized()
+        scope = self._forget_scope(None)
         if self.server_url:
             return self._call_server(
-                "messages_preview_since_minutes",
-                {"bot_id": self.bot_id, "minutes": minutes},
-            )
-        storage = self._get_storage()
-        backend = storage.get_backend(self.bot_id)
-        return backend.preview_messages_since_minutes(minutes)
+                "messages_preview_since_minutes", {"bot_id": self.bot_id, "minutes": minutes, **_wire(scope)})
+        return self._owned_backend().preview_messages_since_minutes(minutes=minutes, **scope)
 
     def preview_ignored_messages(self) -> list[dict[str, Any]]:
         self._ensure_initialized()
@@ -60,46 +82,37 @@ class MemoryClientAdminMixin:
         backend = storage.get_backend(self.bot_id)
         return backend.preview_ignored_messages()
 
-    def forget_recent_messages(self, count: int) -> dict[str, int]:
-        """Forget last N messages and delete related memories (best-effort)."""
-        preview = self.preview_recent_messages(count)
-        message_ids = [m.get("id") for m in preview if m.get("id")]
+    def _forget(self, session_id: str | None, **selection: int) -> dict[str, Any]:
+        """Ignore the caller's selection and delete memories sourced from it.
 
-        memories_deleted = 0
-        if message_ids:
-            memories_deleted = self.delete_memories_by_source_message_ids(message_ids)
+        One storage transaction selects, moves and deletes the same ID set.
+        """
+        self._ensure_initialized()
+        scope = self._forget_scope(session_id)
+        if self.server_url:
+            return self._call_server("messages_forget", {"bot_id": self.bot_id, **selection, **_wire(scope)})
+        return self._owned_backend(provision=True).forget_owned_messages(**selection, **scope)
 
-        ignored = self.ignore_recent_messages(count)
-        return {"messages_ignored": ignored, "memories_deleted": memories_deleted}
+    def forget_recent_messages(self, count: int, *, session_id: str | None = None) -> dict[str, Any]:
+        return self._forget(session_id, count=int(count))
 
-    def forget_messages_since_minutes(self, minutes: int) -> dict[str, int]:
-        preview = self.preview_messages_since_minutes(minutes)
-        message_ids = [m.get("id") for m in preview if m.get("id")]
-
-        memories_deleted = 0
-        if message_ids:
-            memories_deleted = self.delete_memories_by_source_message_ids(message_ids)
-
-        ignored = self.ignore_messages_since_minutes(minutes)
-        return {"messages_ignored": ignored, "memories_deleted": memories_deleted}
+    def forget_messages_since_minutes(self, minutes: int, *, session_id: str | None = None) -> dict[str, Any]:
+        return self._forget(session_id, minutes=int(minutes))
 
     def ignore_recent_messages(self, count: int) -> int:
         self._ensure_initialized()
+        scope = self._forget_scope(None)
         if self.server_url:
-            return int(self._call_server("messages_ignore_recent", {"bot_id": self.bot_id, "count": count}))
-        storage = self._get_storage()
-        backend = storage.get_backend(self.bot_id, provision_schema=True)
-        return int(backend.ignore_recent_messages(count))
+            return int(self._call_server("messages_ignore_recent", {"bot_id": self.bot_id, "count": count, **_wire(scope)}))
+        return int(self._owned_backend(provision=True).ignore_recent_messages(count=count, **scope))
 
     def ignore_messages_since_minutes(self, minutes: int) -> int:
         self._ensure_initialized()
+        scope = self._forget_scope(None)
         if self.server_url:
-            return int(
-                self._call_server("messages_ignore_since_minutes", {"bot_id": self.bot_id, "minutes": minutes})
-            )
-        storage = self._get_storage()
-        backend = storage.get_backend(self.bot_id, provision_schema=True)
-        return int(backend.ignore_messages_since_minutes(minutes))
+            return int(self._call_server(
+                "messages_ignore_since_minutes", {"bot_id": self.bot_id, "minutes": minutes, **_wire(scope)}))
+        return int(self._owned_backend(provision=True).ignore_messages_since_minutes(minutes=minutes, **scope))
 
     def get_message_by_id(self, message_id: str) -> dict | None:
         """Get a specific message by ID (supports prefix match)."""

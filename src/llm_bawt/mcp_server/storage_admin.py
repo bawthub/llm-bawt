@@ -28,25 +28,45 @@ class StorageAdminMixin:
             return backend.list_recent(n=n)
         return []
 
-    async def preview_recent_messages(self, bot_id: str = "default", count: int = 10) -> list[dict[str, Any]]:
+    async def preview_recent_messages(
+        self, bot_id: str = "default", count: int = 10, *,
+        user_id: str, session_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         backend = self._get_backend(bot_id)
-        return backend.preview_recent_messages(count)
+        return backend.preview_recent_messages(count, user_id=user_id, session_id=session_id)
 
-    async def preview_messages_since_minutes(self, bot_id: str = "default", minutes: int = 60) -> list[dict[str, Any]]:
+    async def preview_messages_since_minutes(
+        self, bot_id: str = "default", minutes: int = 60, *,
+        user_id: str, session_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         backend = self._get_backend(bot_id)
-        return backend.preview_messages_since_minutes(minutes)
+        return backend.preview_messages_since_minutes(minutes, user_id=user_id, session_id=session_id)
 
     async def preview_ignored_messages(self, bot_id: str = "default") -> list[dict[str, Any]]:
         backend = self._get_backend(bot_id)
         return backend.preview_ignored_messages()
 
-    async def ignore_recent_messages(self, bot_id: str = "default", count: int = 10) -> int:
+    async def ignore_recent_messages(
+        self, bot_id: str = "default", count: int = 10, *,
+        user_id: str, session_id: str | None = None,
+    ) -> int:
         backend = self._get_backend(bot_id, provision_schema=True)
-        return backend.ignore_recent_messages(count)
+        return backend.ignore_recent_messages(count, user_id=user_id, session_id=session_id)
 
-    async def ignore_messages_since_minutes(self, bot_id: str = "default", minutes: int = 60) -> int:
+    async def ignore_messages_since_minutes(
+        self, bot_id: str = "default", minutes: int = 60, *,
+        user_id: str, session_id: str | None = None,
+    ) -> int:
         backend = self._get_backend(bot_id, provision_schema=True)
-        return backend.ignore_messages_since_minutes(minutes)
+        return backend.ignore_messages_since_minutes(minutes, user_id=user_id, session_id=session_id)
+
+    async def forget_owned_messages(
+        self, bot_id: str = "default", *, user_id: str, session_id: str | None = None,
+        count: int | None = None, minutes: int | None = None,
+    ) -> dict[str, Any]:
+        backend = self._get_backend(bot_id, provision_schema=True)
+        return backend.forget_owned_messages(
+            user_id=user_id, session_id=session_id, count=count, minutes=minutes)
 
     async def get_message_by_id(
         self, bot_id: str = "default", message_id: str = "",

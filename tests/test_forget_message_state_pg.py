@@ -29,11 +29,28 @@ def backend(private_app_pg):  # noqa: F811
     return PostgreSQLMemoryBackend(private_app_pg, bot_id=slug)
 
 
+OWNER = "forget-owner"
+
+
+def _owner_session(backend):
+    """Count/time forget is owner-scoped (TASK-2279); rows need a user's thread."""
+    sid = getattr(backend, "_fixture_session", None)
+    if sid is None:
+        sid = str(uuid.uuid4())
+        with backend.engine.begin() as conn:
+            conn.execute(text(
+                "INSERT INTO sessions (id, bot_id, user_id, started_at, status) "
+                "VALUES (:id, :bot, :user, NOW(), 'archived')"
+            ), {"id": sid, "bot": backend.bot_id, "user": OWNER})
+        backend._fixture_session = sid
+    return sid
+
+
 def _add(backend, content, *, ts, anchor=None):
     """One message with every durable column set to a non-default value."""
     mid = str(uuid.uuid4())
     backend.add_message(
-        mid, "assistant", content, ts,
+        mid, "assistant", content, ts, session_id=_owner_session(backend),
         attachments=[{"asset_id": f"a-{content}", "kind": "image", "name": "card.png"}],
         reasoning=f"thinking about {content}",
         author=AuthorReference("bot", backend.bot_id),
@@ -86,7 +103,7 @@ def test_forget_recent_count_and_restore_keep_every_column(backend):
     ids = [_add(backend, f"m{i}", ts=now - 30 + i) for i in range(3)]
     before = {m: _state(backend, backend._messages_table_name, m) for m in ids}
 
-    assert backend.ignore_recent_messages(2) == 2
+    assert backend.ignore_recent_messages(2, user_id=OWNER) == 2
     assert _state(backend, backend._messages_table_name, ids[0]) == before[ids[0]]
     _assert_round_trip(backend, ids[1:], before)
 
@@ -97,7 +114,7 @@ def test_forget_time_window_and_restore_keep_every_column(backend):
     recent = [_add(backend, f"r{i}", ts=now - 60 + i) for i in range(2)]
     before = {m: _state(backend, backend._messages_table_name, m) for m in recent}
 
-    assert backend.ignore_messages_since_minutes(5) == 2
+    assert backend.ignore_messages_since_minutes(5, user_id=OWNER) == 2
     assert _state(backend, backend._messages_table_name, old) is not None
     _assert_round_trip(backend, recent, before)
 

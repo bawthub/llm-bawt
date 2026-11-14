@@ -125,7 +125,7 @@ def test_moved_transport_still_raises_tool_errors(monkeypatch):
 
 
 def test_moved_methods_keep_embedded_backend_provisioning():
-    client = MemoryClient(SimpleNamespace(), bot_id="public_fixture")
+    client = MemoryClient(SimpleNamespace(), bot_id="public_fixture", user_id="nick")
     backend = Mock()
     backend.ignore_recent_messages.return_value = 2
     backend.stats.return_value = {"ok": True}
@@ -137,6 +137,21 @@ def test_moved_methods_keep_embedded_backend_provisioning():
     storage.get_backend.assert_called_with("public_fixture")
     assert client.ignore_recent_messages(2) == 2
     storage.get_backend.assert_called_with("public_fixture", provision_schema=True)
+    backend.ignore_recent_messages.assert_called_with(count=2, user_id="nick")
+
+
+def test_count_forget_requires_a_user_bound_client():
+    """TASK-2279: a user-less client must not select a bot's newest messages."""
+    client = MemoryClient(SimpleNamespace(), bot_id="public_fixture")
+    client._storage, client._initialized = Mock(), True
+    for call in (lambda: client.forget_recent_messages(3), lambda: client.preview_recent_messages(3),
+                 lambda: client.ignore_messages_since_minutes(5)):
+        try:
+            call()
+        except ValueError:
+            continue
+        raise AssertionError("user-less selection was allowed")
+    client._storage.get_backend.assert_not_called()
 
 
 def test_server_mode_short_term_manager_is_the_reexported_adapter(monkeypatch):

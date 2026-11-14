@@ -28,6 +28,17 @@ router = APIRouter()
 log = get_service_logger(__name__)
 
 
+def _owner_client(bot_id: str, user_id: str | None):
+    """User-bound client for count/time selection (TASK-2279).
+
+    A bot's history holds every user's threads; selecting "the newest N" or
+    "the last M minutes" without an owner would reach other users' messages.
+    """
+    if not user_id or not user_id.strip():
+        raise HTTPException(status_code=400, detail="user_id is required to select messages by count or minutes")
+    return _require_memory_client_for_bot(bot_id, user_id.strip())
+
+
 def _build_preview_response(bot_id: str, messages: list[dict]) -> MessagesPreviewResponse:
     return MessagesPreviewResponse(
         bot_id=bot_id,
@@ -44,8 +55,8 @@ def _build_preview_response(bot_id: str, messages: list[dict]) -> MessagesPrevie
     )
 
 
-def _require_memory_client_for_bot(bot_id: str):
-    client = get_service().get_memory_client(bot_id)
+def _require_memory_client_for_bot(bot_id: str, user_id: str | None = None):
+    client = get_service().get_memory_client(bot_id, user_id) if user_id else get_service().get_memory_client(bot_id)
     if not client:
         raise HTTPException(status_code=503, detail="Memory service unavailable")
     return client
@@ -254,9 +265,11 @@ def forget_messages(
             raise HTTPException(status_code=404, detail=f"Message {request.message_id} not found")
 
         if request.count:
-            result = client.forget_recent_messages(request.count)
+            owner = _owner_client(bot_id, request.user_id)
+            result = owner.forget_recent_messages(request.count, session_id=request.session_id)
         elif request.minutes:
-            result = client.forget_messages_since_minutes(request.minutes)
+            owner = _owner_client(bot_id, request.user_id)
+            result = owner.forget_messages_since_minutes(request.minutes, session_id=request.session_id)
         else:
             raise HTTPException(status_code=400, detail="Must specify count, minutes, or message_id")
 
@@ -295,13 +308,15 @@ def restore_messages(
 @router.get("/v1/memory/preview/recent", response_model=MessagesPreviewResponse, tags=["Memory"])
 def preview_recent_messages(
     count: int = Query(10, description="Number of recent messages to preview"),
+    user_id: str | None = Query(None, description="Owner whose messages to preview (required)"),
     bot_id: str = Depends(get_effective_bot_id),
-    client=Depends(require_memory_client),
 ):
     """Preview recent messages before forgetting."""
     try:
-        messages = client.preview_recent_messages(count)
+        messages = _owner_client(bot_id, user_id).preview_recent_messages(count)
         return _build_preview_response(bot_id, messages)
+    except HTTPException:
+        raise
     except Exception as e:
         raise internal_error(e, f"Failed to preview messages for bot '{bot_id}'") from e
 
@@ -309,13 +324,15 @@ def preview_recent_messages(
 @router.get("/v1/memory/preview/minutes", response_model=MessagesPreviewResponse, tags=["Memory"])
 def preview_messages_since_minutes(
     minutes: int = Query(..., description="Number of minutes to look back"),
+    user_id: str | None = Query(None, description="Owner whose messages to preview (required)"),
     bot_id: str = Depends(get_effective_bot_id),
-    client=Depends(require_memory_client),
 ):
     """Preview messages from last N minutes before forgetting."""
     try:
-        messages = client.preview_messages_since_minutes(minutes)
+        messages = _owner_client(bot_id, user_id).preview_messages_since_minutes(minutes)
         return _build_preview_response(bot_id, messages)
+    except HTTPException:
+        raise
     except Exception as e:
         raise internal_error(e, f"Failed to preview messages by minutes for bot '{bot_id}'") from e
 

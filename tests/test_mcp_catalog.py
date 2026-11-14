@@ -205,7 +205,8 @@ async def test_catalog_token_budgets():
     # TASK-1538: usage_utility_rollup, utility-model token use (+36): 5,072.
     # TASK-2190: playground_send, one-time-view artifacts for the user (+32): 5,104.
     # TASK-1534: activity_get names its change history and cursor (+1): 5,105.
-    assert sum(descriptions) <= 5105, f"Descriptions grew to {sum(descriptions)} tokens"
+    # TASK-2279: messages_forget, one owner-scoped select/ignore/memory delete (+31): 5,136.
+    assert sum(descriptions) <= 5136, f"Descriptions grew to {sum(descriptions)} tokens"
     definitions = [{"name": f"mcp__bawthub__{t.name}", "description": t.description or "", "input_schema": t.inputSchema} for t in tools]
     total = len(encoder.encode(json.dumps(definitions, ensure_ascii=False, separators=(",", ":"))))
     # TASK-900: explicit X search adds ~160 tokens; measured catalog 11,239.
@@ -328,7 +329,9 @@ async def test_catalog_token_budgets():
     # TASK-1534: activity_get cursor argument for stable history paging: 18,829 (+21).
     # TASK-2249: bots_list_available detail enum (compact default) and the
     # trimmed-row notes on tasks_board/working_memory_list: 18,869 (+40).
-    assert total <= 18869, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-2279: messages_forget selects, ignores and deletes sourced memories
+    # in one owner-scoped transaction (optional session_id): 18,997 (+128).
+    assert total <= 18997, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 

@@ -572,16 +572,33 @@ async def list_memories(
     )
 
 
+def _forget_owner(bot_id: str) -> str:
+    """Signed caller's user for count/time selection (TASK-2279).
+
+    A bot partition holds every user's threads; the selection never spans
+    users, and a tool argument cannot name another owner.
+    """
+    return history_caller_user(bot_id, None)
+
+
 @mcp.tool(name="messages_preview_recent")
-async def preview_recent_messages(bot_id: str = "default", count: int = 10) -> list[dict]:
+async def preview_recent_messages(
+    bot_id: str = "default", count: int = 10,
+) -> list[dict]:
+    owner = _forget_owner(bot_id)
     storage = _get_storage()
-    return await storage.preview_recent_messages(bot_id=bot_id, count=count)
+    return await storage.preview_recent_messages(
+        bot_id=bot_id, count=count, user_id=owner)
 
 
 @mcp.tool(name="messages_preview_since_minutes")
-async def preview_messages_since_minutes(bot_id: str = "default", minutes: int = 60) -> list[dict]:
+async def preview_messages_since_minutes(
+    bot_id: str = "default", minutes: int = 60,
+) -> list[dict]:
+    owner = _forget_owner(bot_id)
     storage = _get_storage()
-    return await storage.preview_messages_since_minutes(bot_id=bot_id, minutes=minutes)
+    return await storage.preview_messages_since_minutes(
+        bot_id=bot_id, minutes=minutes, user_id=owner)
 
 
 @mcp.tool(name="messages_preview_ignored")
@@ -591,15 +608,31 @@ async def preview_ignored_messages(bot_id: str = "default") -> list[dict]:
 
 
 @mcp.tool(name="messages_ignore_recent")
-async def ignore_recent_messages(bot_id: str = "default", count: int = 10) -> int:
+async def ignore_recent_messages(
+    bot_id: str = "default", count: int = 10) -> int:
+    owner = _forget_owner(bot_id)
     storage = _get_storage()
-    return await storage.ignore_recent_messages(bot_id=bot_id, count=count)
+    return await storage.ignore_recent_messages(bot_id=bot_id, count=count, user_id=owner)
 
 
 @mcp.tool(name="messages_ignore_since_minutes")
-async def ignore_messages_since_minutes(bot_id: str = "default", minutes: int = 60) -> int:
+async def ignore_messages_since_minutes(
+    bot_id: str = "default", minutes: int = 60) -> int:
+    owner = _forget_owner(bot_id)
     storage = _get_storage()
-    return await storage.ignore_messages_since_minutes(bot_id=bot_id, minutes=minutes)
+    return await storage.ignore_messages_since_minutes(bot_id=bot_id, minutes=minutes, user_id=owner)
+
+
+@mcp.tool(name="messages_forget")
+async def forget_messages(
+    bot_id: str = "default", count: int | None = None, minutes: int | None = None,
+    session_id: str | None = None,
+) -> dict:
+    """Ignore your newest messages and delete memories sourced from exactly those."""
+    owner = _forget_owner(bot_id)
+    storage = _get_storage()
+    return await storage.forget_owned_messages(
+        bot_id=bot_id, user_id=owner, session_id=session_id, count=count, minutes=minutes)
 
 
 @mcp.tool(name="messages_get_by_id")
