@@ -80,10 +80,11 @@ def _require_memory_client_for_bot(bot_id: str, user_id: str | None = None):
 
 @router.get("/v1/memory/stats", response_model=MemoryStatsResponse, tags=["Memory"])
 def get_memory_stats(
+    user_id: str | None = Query(None, description="Count only this user's memories and messages"),
     bot_id: str = Depends(get_effective_bot_id),
-    client=Depends(require_memory_client),
 ):
-    """Get memory statistics for a bot."""
+    """Get memory statistics for a bot, narrowed to user_id when given."""
+    client = _scoped_client(bot_id, user_id)
     try:
         stats = client.stats()
         return MemoryStatsResponse(
@@ -154,10 +155,11 @@ def search_memory(request: MemorySearchRequest):
 @router.get("/v1/memory", response_model=MemorySearchResponse, tags=["Memory"])
 def list_memories(
     limit: int = Query(20, description="Max results"),
+    user_id: str | None = Query(None, description="List only memories this user may see"),
     bot_id: str = Depends(get_effective_bot_id),
-    client=Depends(require_memory_client),
 ):
-    """List all memories for a bot (ordered by importance)."""
+    """List memories for a bot (ordered by importance), narrowed to user_id when given."""
+    client = _scoped_client(bot_id, user_id)
     try:
         memories = client.list_memories(limit=limit, min_importance=0.0)
 

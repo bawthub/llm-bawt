@@ -163,12 +163,15 @@ def test_history_search_delegated_failure_hides_db_details(route, monkeypatch, c
     assert "needle" in caplog.records[-1].getMessage() and LEAK in caplog.records[-1].getMessage()
 
 
-def test_memory_stats_db_failure_keeps_500_without_db_details():
+def test_memory_stats_db_failure_keeps_500_without_db_details(monkeypatch):
     def stats():
         raise RuntimeError(LEAK)
 
+    client = SimpleNamespace(stats=stats)
+    monkeypatch.setattr(
+        "llm_bawt.service.routes.memory._scoped_client", lambda _bot_id, _user_id: client)
     with pytest.raises(HTTPException) as caught:
-        get_memory_stats(bot_id="example", client=SimpleNamespace(stats=stats))
+        get_memory_stats(user_id=None, bot_id="example")
 
     assert caught.value.status_code == 500
     assert re.fullmatch(r"Internal error \(RuntimeError, ref [0-9a-f]{8}\); see the app log", caught.value.detail)

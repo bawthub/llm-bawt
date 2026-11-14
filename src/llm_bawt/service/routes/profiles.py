@@ -59,12 +59,15 @@ def _normalize_entity_type(entity_type: str | None) -> str | None:
 
 
 @router.get("/v1/profiles", response_model=ProfileListResponse, tags=["Profiles"])
-def list_profiles(entity_type: str | None = None):
+def list_profiles(entity_type: str | None = None, entity_id: str | None = None):
     """List profiles.
 
     - /v1/profiles: list all user + bot profiles
     - /v1/profiles?entity_type=user|bot: list by type
+    - entity_id narrows the result to that entity's profiles (TASK-2279)
     """
+    if entity_id is not None and not entity_id.strip():
+        raise HTTPException(status_code=400, detail="entity_id must be nonblank")
     service = get_service()
 
     try:
@@ -74,17 +77,23 @@ def list_profiles(entity_type: str | None = None):
         normalized_entity_type = _normalize_entity_type(entity_type)
 
         result_profiles: list[ProfileDetail] = []
+        wanted = entity_id.strip().lower() if entity_id is not None else None
+
+        def _kept(profiles):
+            if wanted is None:
+                return profiles
+            return [p for p in profiles if str(p.entity_id).strip().lower() == wanted]
 
         if normalized_entity_type:
             target_type = EntityType.USER if normalized_entity_type == "user" else EntityType.BOT
-            typed_profiles = manager.list_profiles(target_type)
+            typed_profiles = _kept(manager.list_profiles(target_type))
             result_profiles = [
                 _get_profile_detail(manager, target_type, normalized_entity_type, profile.entity_id)
                 for profile in typed_profiles
             ]
         else:
-            user_profiles = manager.list_profiles(EntityType.USER)
-            bot_profiles = manager.list_profiles(EntityType.BOT)
+            user_profiles = _kept(manager.list_profiles(EntityType.USER))
+            bot_profiles = _kept(manager.list_profiles(EntityType.BOT))
 
             result_profiles.extend(
                 _get_profile_detail(manager, EntityType.USER, "user", profile.entity_id)
