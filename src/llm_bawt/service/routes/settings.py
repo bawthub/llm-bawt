@@ -17,7 +17,13 @@ from ...bot_tags.store import BotTagStore
 from ...bot_tags.vocabulary import API_ASSIGNER
 from ...bot_types import normalize_bot_type
 from ...task_turn_context import TASK_TURN_CONTEXT_HEADER, TaskTurnContextError, open_task_turn_context
-from ...runtime_settings import BotAlreadyExists, BotProfileNotFound, RuntimeSetting, cleanup_orphaned_bot_data
+from ...runtime_settings import (
+    RUNTIME_SETTING_KEY_MAX_LENGTH,
+    BotAlreadyExists,
+    BotProfileNotFound,
+    RuntimeSetting,
+    cleanup_orphaned_bot_data,
+)
 from ...bot_create_transaction import BotCreateTransaction
 from ...orphan_partitions import PartitionExecutionHalted
 from ..providers.base import CREDENTIAL_SETTING_PREFIXES, is_credential_setting_key
@@ -84,6 +90,20 @@ def _refuse_credential_key(key: str) -> None:
         )
 
 
+def _refuse_setting_identity_length(scope_id: str, key: str) -> None:
+    """Refuse a key or scope id longer than its ``runtime_settings`` column (TASK-2204)."""
+    if len(key) > RUNTIME_SETTING_KEY_MAX_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Setting key is longer than {RUNTIME_SETTING_KEY_MAX_LENGTH} characters",
+        )
+    if len(scope_id) > RUNTIME_SETTING_KEY_MAX_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Setting scope id is longer than {RUNTIME_SETTING_KEY_MAX_LENGTH} characters",
+        )
+
+
 def _validate_setting_writes(engine, writes: list[tuple[str, str, str, object]], *, conn=None) -> None:
     """Refuse a setting write that a feature gate forbids, before anything is stored.
 
@@ -91,7 +111,8 @@ def _validate_setting_writes(engine, writes: list[tuple[str, str, str, object]],
     true needs a non-protected claude-code bot. Credential keys are refused
     outright (TASK-1520).
     """
-    for scope_type, _scope_id, key, value in writes:
+    for scope_type, scope_id, key, value in writes:
+        _refuse_setting_identity_length(scope_id, key)
         _refuse_credential_key(key)
         from ..crawl4ai_token_export import GENERATION_KEY, validate_generation  # noqa: PLC0415
 
@@ -589,11 +610,13 @@ def batch_upsert_runtime_settings(request: RuntimeSettingBatchUpsertRequest):
     ]
     # Every item is validated before any is applied.
     _validate_setting_writes(store.engine, [(st, sid, item.key, item.value) for st, sid, item in scoped])
+    # One transaction: a database error on any item leaves every setting as it
+    # was, and caches are invalidated only after the commit (TASK-2204).
+    store.set_values([(st, sid, item.key, item.value) for st, sid, item in scoped])
     applied: list[dict] = []
     touched_bots: set[str] = set()
     touched_global = False
     for st, sid, item in scoped:
-        store.set_value(st, sid, item.key, item.value)
         if st == "bot":
             touched_bots.add(sid)
         else:

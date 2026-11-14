@@ -686,16 +686,18 @@ class RuntimeSettingsListResponse(BaseModel):
 class RuntimeSettingUpsertRequest(BaseModel):
     """Upsert one runtime setting."""
     scope_type: Literal["global", "bot"]
-    scope_id: str | None = None
-    key: str
+    # 128 = runtime_settings.scope_id / key width (TASK-2204).
+    scope_id: str | None = Field(default=None, max_length=128)
+    key: str = Field(max_length=128)
     value: Any
 
 
 class RuntimeSettingBatchItem(BaseModel):
     """One runtime setting upsert in a batch request."""
     scope_type: Literal["global", "bot"]
-    scope_id: str | None = None
-    key: str
+    # 128 = runtime_settings.scope_id / key width (TASK-2204).
+    scope_id: str | None = Field(default=None, max_length=128)
+    key: str = Field(max_length=128)
     value: Any
 
 

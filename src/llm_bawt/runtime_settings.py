@@ -36,6 +36,10 @@ def _is_global_only(key: str) -> bool:
     return is_global_only_runtime_setting(key)
 
 
+RUNTIME_SETTING_KEY_MAX_LENGTH = 128
+"""Width of ``runtime_settings.key`` and ``scope_id``."""
+
+
 class RuntimeSetting(SQLModel, table=True):
     """DB-backed runtime setting."""
 
@@ -47,10 +51,10 @@ class RuntimeSetting(SQLModel, table=True):
         description="global or bot",
     )
     scope_id: str = Field(
-        sa_column=Column(String(128), nullable=False, index=True),
+        sa_column=Column(String(RUNTIME_SETTING_KEY_MAX_LENGTH), nullable=False, index=True),
         description="* for global, bot slug for bot scope",
     )
-    key: str = Field(sa_column=Column(String(128), nullable=False, index=True))
+    key: str = Field(sa_column=Column(String(RUNTIME_SETTING_KEY_MAX_LENGTH), nullable=False, index=True))
     value_json: str = Field(sa_column=Column(Text, nullable=False))
     updated_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),
@@ -848,28 +852,39 @@ class RuntimeSettingsStore:
 
     def set_value(self, scope_type: str, scope_id: str, key: str, value: Any) -> None:
         """Upsert setting value."""
+        self.set_values([(scope_type, scope_id, key, value)])
+
+    def set_values(self, writes: list[tuple[str, str, str, Any]]) -> None:
+        """Upsert several settings in one transaction: all are stored or none (TASK-2204)."""
         if self.engine is None:
             raise RuntimeError("Runtime settings DB unavailable")
-        value_json = json.dumps(value, ensure_ascii=False)
+        encoded = [
+            (scope_type, scope_id, key, json.dumps(value, ensure_ascii=False))
+            for scope_type, scope_id, key, value in writes
+        ]
         with Session(self.engine) as session:
-            row = session.exec(
-                select(RuntimeSetting).where(
-                    RuntimeSetting.scope_type == scope_type,
-                    RuntimeSetting.scope_id == scope_id,
-                    RuntimeSetting.key == key,
-                )
-            ).first()
-            if row:
-                row.value_json = value_json
-                row.updated_at = datetime.now(timezone.utc)
-            else:
-                row = RuntimeSetting(
-                    scope_type=scope_type,
-                    scope_id=scope_id,
-                    key=key,
-                    value_json=value_json,
-                )
-            session.add(row)
+            for scope_type, scope_id, key, value_json in encoded:
+                row = session.exec(
+                    select(RuntimeSetting).where(
+                        RuntimeSetting.scope_type == scope_type,
+                        RuntimeSetting.scope_id == scope_id,
+                        RuntimeSetting.key == key,
+                    )
+                ).first()
+                if row:
+                    row.value_json = value_json
+                    row.updated_at = datetime.now(timezone.utc)
+                else:
+                    row = RuntimeSetting(
+                        scope_type=scope_type,
+                        scope_id=scope_id,
+                        key=key,
+                        value_json=value_json,
+                    )
+                session.add(row)
+                # Flush per item so a repeated key in one batch updates the
+                # row just added instead of inserting a duplicate.
+                session.flush()
             session.commit()
 
     def delete_value(self, scope_type: str, scope_id: str, key: str) -> bool:
