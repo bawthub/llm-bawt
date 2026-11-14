@@ -84,7 +84,8 @@ class ToolChangedFileCapture:
         if not request_id or not is_file_modifying_tool(tool_name):
             return
         args = arguments if isinstance(arguments, dict) else {}
-        raw_path = args.get("file_path")
+        # NotebookEdit names its target notebook_path, not file_path.
+        raw_path = args.get("file_path") or args.get("notebook_path")
         if not isinstance(raw_path, str) or not raw_path.strip():
             return
         try:

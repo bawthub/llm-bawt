@@ -537,9 +537,11 @@ class CodexEventMixin:
             return seq
 
         if item_type in ("commandExecution", "command_execution"):
+            # The completed item is authoritative; buffered updates may be partial.
             output = (
-                buf.get("aggregated_output")
-                or self._dig(item, "aggregated_output")
+                self._dig(item, "aggregated_output")
+                or self._dig(item, "aggregatedOutput")
+                or buf.get("aggregated_output")
                 or "".join(buf.get("output", []))
             )
             exit_code = self._dig(item, "exit_code") or self._dig(item, "exitCode") or 0

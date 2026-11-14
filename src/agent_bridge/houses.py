@@ -294,10 +294,12 @@ class HouseSlot:
                 continue
             self._turns.pop((session_key, request_id), None)
             await self._redis.delete(turn_request_key(request_id))
-            sess_key = turn_session_key(self.backend, session_key)
-            if await self._redis.get(sess_key) == self.stream and not any(
-                    s == session_key for s, _ in self._turns):
-                await self._redis.delete(sess_key)
+            if not any(s == session_key for s, _ in self._turns):
+                # Compare-and-delete in one step: a newer turn on another
+                # house may claim the session between a GET and a DEL.
+                await self._redis.eval(_RELEASE_LEASE_LUA, 1,
+                                       turn_session_key(self.backend, session_key),
+                                       self.stream)
 
     async def _publish_preview(self) -> None:
         """Campus preview status (TASK-2131); never fails the heartbeat."""
@@ -350,8 +352,12 @@ class HouseSlot:
             await redis.xack(self.stream, group, msg_id)
             return False
         self.recycling = True
-        await redis.xack(self.stream, group, msg_id)
-        await redis.eval(_RELEASE_LEASE_LUA, 1, lease_key(self.house, self.backend), self.epoch)
+        # Both steps are idempotent; retry through a Redis blip rather than
+        # leaving the slot recycling forever (not admitting, not renewing).
+        await self._until_done(lambda: redis.xack(self.stream, group, msg_id), "ack")
+        await self._until_done(lambda: redis.eval(
+            _RELEASE_LEASE_LUA, 1, lease_key(self.house, self.backend), self.epoch),
+            "lease release")
         logger.info("house %s/%s recycling: lease released, draining", self.house, self.backend)
         while True:
             unread = await self._unread(redis, group)
@@ -365,6 +371,18 @@ class HouseSlot:
                 exit_process()
                 return True
             await asyncio.sleep(RECYCLE_POLL_S)
+
+    async def _until_done(self, step: Callable[[], Any], what: str) -> None:
+        while True:
+            try:
+                await step()
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("house %s/%s recycle %s failed; retrying", self.house,
+                               self.backend, what, exc_info=True)
+                await asyncio.sleep(RECYCLE_POLL_S)
 
     async def _unread(self, redis: Any, group: str) -> int:
         """Entries on this house's stream not yet read by its group."""

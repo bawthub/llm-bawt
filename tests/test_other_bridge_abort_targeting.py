@@ -27,6 +27,7 @@ def make_bridge(kind):
         bridge = LocalModelBridge.__new__(LocalModelBridge)
         bridge._publish_event = MagicMock()
         bridge._run_workers = {}
+        bridge._request_timeout = LocalModelBridge.DEFAULT_REQUEST_TIMEOUT
     else:
         raise ValueError(f"no test bridge for {kind!r}")
     bridge._session_queue = SessionQueue()

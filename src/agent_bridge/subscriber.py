@@ -40,6 +40,14 @@ INACTIVITY_TIMEOUT_MARKER = "produced no event for"
 which is how a watchdog kill is recognized afterwards (TASK-1738)."""
 
 
+def _utf16(text: str) -> bytes:
+    return text.encode("utf-16-le", errors="surrogatepass")
+
+
+def _from_utf16(data: bytes) -> str:
+    return data.decode("utf-16-le", errors="surrogatepass")
+
+
 def _rpc_reply_matches(fields: dict, backend: str | None) -> bool:
     """Whether an RPC reply may answer a call addressed to *backend*.
 
@@ -649,17 +657,21 @@ class RedisSubscriber(CommandPublisherMixin):
             for e in events
             if e.get("_type") == "text_delta" and e.get("turn_id") == turn_id
         ]
-        text = ""
+        # Offsets are UTF-16 code units (the producer uses JS string length),
+        # so splice in UTF-16-LE bytes: 2 bytes per unit.
+        buf = bytearray()
         for e in sorted(deltas, key=lambda d: d.get("text_offset") or 0):
             off = e.get("text_offset")
-            chunk = e.get("delta", "")
+            chunk = _utf16(e.get("delta", ""))
             if not isinstance(off, int):
-                text += chunk
+                buf += chunk
                 continue
-            if off > len(text):
-                text += " " * (off - len(text))
-            text = text[:off] + chunk + text[off + len(chunk):]
-        full_text = text.rstrip()
+            start = off * 2
+            if start > len(buf):
+                buf += _utf16(" ") * ((start - len(buf)) // 2)
+            buf[start:start + len(chunk)] = chunk
+        full_text = _from_utf16(bytes(buf)).rstrip()
+        full_units = _utf16(full_text)
 
         # Each tool_start cuts the assistant text into a new bubble. Split on
         # those offsets and take the last NON-EMPTY segment: while a tool is
@@ -677,9 +689,10 @@ class RedisSubscriber(CommandPublisherMixin):
                 and isinstance(e.get("text_offset"), int)
             }
         )
-        cuts = [0, *boundaries, len(full_text)]
+        cuts = [0, *(b * 2 for b in boundaries), len(full_units)]
         segments = [
-            full_text[cuts[i]:cuts[i + 1]].strip() for i in range(len(cuts) - 1)
+            _from_utf16(full_units[cuts[i]:cuts[i + 1]]).strip()
+            for i in range(len(cuts) - 1)
         ]
         non_empty = [s for s in segments if s]
         last_bubble = non_empty[-1] if non_empty else full_text.strip()
@@ -903,7 +916,13 @@ class RedisSubscriber(CommandPublisherMixin):
         except Exception:
             pass
         try:
+            # An explicit connection_pool is not owned by the client, so
+            # aclose() leaves its sockets to GC; disconnect it ourselves.
             await self._pub_redis.aclose()
+        except Exception:
+            pass
+        try:
+            await self._pub_redis.connection_pool.disconnect()
         except Exception:
             pass
 

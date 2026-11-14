@@ -58,6 +58,8 @@ PNPM_STORE = DEV_ROOT / ".pnpm-store"
 LOG_PATH = Path("/tmp/house-preview.log")
 CHECK_S = 10.0
 RETRY_S = (15.0, 60.0, 300.0)
+_DELETE_IF_EQUAL = ("if redis.call('GET', KEYS[1]) == ARGV[1] then "
+                    "return redis.call('DEL', KEYS[1]) end return 0")
 STOP_GRACE_S = 8.0
 INSTALL_TIMEOUT_S = 900.0
 #: The normal frontend pair, as ``docker/house-preview`` runs it.
@@ -325,15 +327,24 @@ class PreviewSupervisor:
             else:
                 await self._show("empty", "<p>No preview is running.</p>")
             return
+        if self._run is not None and self._run.done() and not self._run.cancelled():
+            exc = self._run.exception()
+            self._run = None
+            if exc is not None:
+                # An unexpected _serve error: retrieve it and back off like any failure.
+                logger.error("house %s preview run failed", self.house, exc_info=exc)
+                await self._failed(self.target, f"preview run failed ({exc})")
         if self._run is None or self._run.done():
             if time.monotonic() >= self._retry_at:
                 self._run = asyncio.create_task(self._serve(self.target))
 
     async def _valid_choice(self, key: str) -> str | None:
         """The stored path if its bot still lives here; a stale choice is deleted."""
-        choice = parse_choice(await self._redis.get(key))
+        raw = await self._redis.get(key)
+        choice = parse_choice(raw)
         if choice is None:
-            await self._redis.delete(key)
+            if raw is not None:
+                await self._delete_if(key, raw)
             return None
         bot, path = choice
         house = await self._house_of(bot)
@@ -343,9 +354,13 @@ class PreviewSupervisor:
         if house != self.house:
             logger.info("house %s: dropping %s's preview choice (now in %s)",
                         self.house, bot, house or "the mansion")
-            await self._redis.delete(key)
+            await self._delete_if(key, raw)
             return None
         return path
+
+    async def _delete_if(self, key: str, expected: Any) -> None:
+        """Delete only the value we inspected; a newer submitted choice survives."""
+        await self._redis.eval(_DELETE_IF_EQUAL, 1, key, expected)
 
     async def _show(self, status: str, detail: str) -> None:
         self.fallback.page = render_page(self.house, self.occ, status, detail, self.campus_url)
@@ -366,10 +381,15 @@ class PreviewSupervisor:
         if not ok:
             return await self._failed(front, "dependency install failed")
         await self.fallback.stop()
-        with LOG_PATH.open("ab") as log:
-            self._proc = await asyncio.create_subprocess_exec(
-                *PAIR, cwd=front, env=_child_env(), stdout=log,
-                stderr=asyncio.subprocess.STDOUT, start_new_session=True)
+        try:
+            with LOG_PATH.open("ab") as log:
+                self._proc = await asyncio.create_subprocess_exec(
+                    *PAIR, cwd=front, env=_child_env(), stdout=log,
+                    stderr=asyncio.subprocess.STDOUT, start_new_session=True)
+        except Exception as exc:  # e.g. checkout removed, spawn resource error
+            # Nothing was started: restore the fallback page and back off.
+            self._proc = None
+            return await self._failed(front, f"preview launch failed ({exc})")
         self._groups.add(self._proc.pid)
         logger.info("house %s preview started: %s pid %s", self.house, front, self._proc.pid)
         code = await self._proc.wait()

@@ -44,8 +44,15 @@ def _is_vite(argv: list[str]) -> bool:
     if not argv or argv[0].endswith(("sh", "concurrently")):
         return False
     joined = " ".join(argv)
-    return ("vite" in joined and str(PREVIEW_PORT) in joined
-            and "concurrently" not in joined)
+    if "concurrently" in joined or not any(
+            Path(a).name in ("vite", "vite.js") for a in argv):
+        return False
+    port = str(PREVIEW_PORT)
+    # Exact --port value; a substring match also accepted --port 15173.
+    return any(
+        (a == "--port" and i + 1 < len(argv) and argv[i + 1] == port)
+        or a == f"--port={port}"
+        for i, a in enumerate(argv))
 
 
 def find_preview_cwd(proc: Path = Path("/proc")) -> Path | None:

@@ -297,7 +297,9 @@ class LlamaCppClient(LLMClient):
         except Exception as e:
             self.console.print(f"\n[bold red]Error processing llama.cpp stream:[/bold red] {e}")
             logger.exception("Error processing llama.cpp stream")
-            yield f"\nERROR: {e}"
+            # Propagate so callers report a failed turn, not a completed one
+            # whose text ends in an error string. Partial deltas already went out.
+            raise
 
     def get_styling(self) -> tuple[str | None, str]:
         """Return Llama.cpp specific styling."""
@@ -458,7 +460,7 @@ class LlamaCppClient(LLMClient):
                     
         except Exception as e:
             logger.exception(f"Error in stream_with_tools: {e}")
-            yield f"\nERROR: {e}"
+            raise
 
     def unload(self) -> None:
         """Unload the GGUF model and free GPU/CPU memory."""

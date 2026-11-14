@@ -283,6 +283,7 @@ class LocalModelBridge:
             loop = asyncio.get_running_loop()
             stop_generation = Event()
             worker = None
+            deadline = loop.time() + self._request_timeout
 
             try:
                 # Load (or switch to) the requested model on the inference
@@ -322,7 +323,18 @@ class LocalModelBridge:
 
                 aborted = False
                 while True:
-                    item = await chunk_queue.get()
+                    # Cooperative deadline: a native token or model load cannot
+                    # be interrupted, so this fires at chunk boundaries; the
+                    # error path below holds the session until the worker stops.
+                    remaining = deadline - loop.time()
+                    try:
+                        if remaining <= 0:
+                            raise asyncio.TimeoutError
+                        item = await asyncio.wait_for(chunk_queue.get(), remaining)
+                    except asyncio.TimeoutError:
+                        raise TimeoutError(
+                            f"generation exceeded {self._request_timeout:g}s request timeout"
+                        ) from None
                     if item is _SENTINEL:
                         break
                     if isinstance(item, tuple) and len(item) == 2 and item[0] == "__error__":

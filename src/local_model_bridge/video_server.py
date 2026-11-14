@@ -293,9 +293,12 @@ def content(job_id: str) -> FileResponse:
 
 @app.delete("/videos/{job_id}")
 def remove(job_id: str) -> dict:
-    if jobs.status(job_id)["status"] == "processing":
+    # A pending job still sits in the drain queue; deleting only its status
+    # would let _drain recreate and render it. Only terminal jobs are removable.
+    if jobs.status(job_id)["status"] in ("pending", "processing"):
         raise HTTPException(status_code=409, detail="Generation in progress")
     jobs.jobs.pop(job_id, None)
+    jobs.directory.joinpath(f"{job_id}.input.json").unlink(missing_ok=True)
     jobs.directory.joinpath(f"{job_id}.mp4").unlink(missing_ok=True)
     jobs.directory.joinpath(f"{job_id}.json").unlink(missing_ok=True)
     jobs.directory.joinpath(f"{job_id}.progress").unlink(missing_ok=True)

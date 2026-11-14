@@ -43,6 +43,12 @@ class FakeRedis:
     async def delete(self, key):
         self.data.pop(key, None)
 
+    async def eval(self, script, numkeys, key, expected):  # compare-and-delete
+        if self.data.get(key) == expected:
+            del self.data[key]
+            return 1
+        return 0
+
 
 def _campus(house="h1", tenants=(), hidden=0):
     return {"houses": [{"id": house, "tenants": list(tenants), "hidden_tenants": hidden}],

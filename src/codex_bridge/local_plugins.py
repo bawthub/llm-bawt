@@ -189,6 +189,31 @@ def _ensure_config_toml_entries(
     )
 
 
+def _bracket_delta(text: str) -> int:
+    """Net TOML array/inline-table nesting change in ``text``, outside strings."""
+    depth = 0
+    quote = ""
+    escaped = False
+    for ch in text:
+        if quote:
+            if escaped:
+                escaped = False
+            elif ch == "\\" and quote == '"':
+                escaped = True
+            elif ch == quote:
+                quote = ""
+            continue
+        if ch in ('"', "'"):
+            quote = ch
+        elif ch == "#":
+            break
+        elif ch in "[{":
+            depth += 1
+        elif ch in "]}":
+            depth -= 1
+    return depth
+
+
 def _upsert_mcp_server_config(
     *,
     config_path: Path,
@@ -244,14 +269,16 @@ def _upsert_mcp_server_config(
         # merely add ``url`` to that section, Codex still classifies it as
         # stdio and rejects the mixed config before starting a turn.
         stdio_keys = {"command", "args", "cwd", "env"}
-        section_body = [
-            line
-            for line in lines[start + 1 : end]
-            if not (
-                "=" in line
-                and line.split("=", 1)[0].strip() in stdio_keys
-            )
-        ]
+        section_body = []
+        skip_depth = 0  # open bracket/brace depth of a removed multiline value
+        for line in lines[start + 1 : end]:
+            if skip_depth > 0:
+                skip_depth += _bracket_delta(line)
+                continue
+            if "=" in line and line.split("=", 1)[0].strip() in stdio_keys:
+                skip_depth = max(0, _bracket_delta(line.split("=", 1)[1]))
+                continue
+            section_body.append(line)
         lines[start + 1 : end] = section_body
         end = start + 1 + len(section_body)
 

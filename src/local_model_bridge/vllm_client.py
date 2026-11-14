@@ -293,7 +293,9 @@ class VLLMClient(LLMClient):
             Small text chunks (word + trailing whitespace).
         """
         import re
-        for chunk in re.findall(r'\S+\s*|\n', text):
+        # \s*\S+\s* keeps leading/indent whitespace; the trailing \s+ covers
+        # whitespace-only text so concatenated chunks equal the input.
+        for chunk in re.findall(r'\s*\S+\s*|\s+', text):
             yield chunk
 
     def query(

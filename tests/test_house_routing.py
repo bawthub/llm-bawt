@@ -73,6 +73,11 @@ class FakeRedis:
 
     async def eval(self, script, numkeys, *args):
         keys, argv = args[:numkeys], args[numkeys:]
+        if script == houses._RELEASE_LEASE_LUA:  # compare-and-delete
+            if self.kv.get(keys[0]) == argv[0]:
+                del self.kv[keys[0]]
+                return 1
+            return 0
         if keys[0] in self.kv:
             return [0, self.kv[keys[0]]]
         start = 2 if "ARGV[2], 1" in script else 1  # chat.send carries request_id first

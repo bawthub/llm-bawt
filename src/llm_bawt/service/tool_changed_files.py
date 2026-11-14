@@ -40,7 +40,7 @@ class ToolChangedFilesCoordinator:
             arguments = event.get("arguments")
             if not is_file_modifying_tool(tool_name) or not isinstance(arguments, dict):
                 return None
-            raw_path = arguments.get("file_path")
+            raw_path = arguments.get("file_path") or arguments.get("notebook_path")
             if not isinstance(raw_path, str) or not raw_path.strip():
                 return None
             normalized = raw_path.replace("\\", "/")
