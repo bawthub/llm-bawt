@@ -321,3 +321,21 @@ def test_save_with_connected_at_does_not_crash(monkeypatch) -> None:
 
     assert saved["record"].connected_at == "2026-01-01T00:00:00Z"
     assert saved["record"].secret["codex_auth"]["tokens"]["refresh_token"] == "ref"
+
+
+def test_snapshot_without_limit_windows_is_not_cached_as_authoritative(monkeypatch):
+    from unittest.mock import AsyncMock
+    from llm_bawt.service import usage
+
+    adapter = usage.get_adapter("openai_chatgpt")
+    scope = mod.account_scope("account-A")
+    monkeypatch.setattr(adapter, "report_identity", lambda: scope)
+    monkeypatch.setattr(adapter, "_read_snapshot", AsyncMock(return_value=None))
+    monkeypatch.setattr(adapter, "_fetch_live_snapshot", AsyncMock(return_value={
+        "account_scope": scope, "captured_at": int(time.time()), "plan_type": "pro",
+    }))
+    monkeypatch.delitem(usage._cache, adapter.provider, raising=False)
+    result = asyncio.run(adapter.fetch())
+    assert not result.available and result.status != "ok"
+    asyncio.run(usage._report(adapter, force=False))
+    assert adapter.provider not in usage._cache

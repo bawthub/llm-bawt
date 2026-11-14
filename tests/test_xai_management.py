@@ -69,8 +69,6 @@ def offline(monkeypatch):
 
     monkeypatch.setattr(httpx, "get", no_network)
     monkeypatch.setattr(httpx.AsyncClient, "get", no_network)
-    for env in XaiUsageAdapter.key_env_vars:
-        monkeypatch.delenv(env, raising=False)
     return store
 
 

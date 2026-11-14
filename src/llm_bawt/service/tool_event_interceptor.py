@@ -79,7 +79,6 @@ class ToolEventInterceptor:
         scheduled_notices: Any,
         tool_calls: Any,
         exec_stamps: Any,
-        call_index: list[int],
         confirmed_start_reaped: list[bool],
     ) -> None:
         self.ctx = ctx
@@ -93,7 +92,6 @@ class ToolEventInterceptor:
         self.scheduled_notices = scheduled_notices
         self.tool_calls = tool_calls
         self.exec_stamps = exec_stamps
-        self.call_index = call_index
         self.confirmed_start_reaped = confirmed_start_reaped
         self.state = InterceptorState()
         self._protocol_partial_text = ""
@@ -483,7 +481,6 @@ class ToolEventInterceptor:
 
     def _on_tool_call(self, item: dict) -> None:
         text_chars = self.state.text_chars
-        self.call_index[0] += 1
         cid = f"call_{uuid.uuid4().hex[:8]}"
         self.tool_calls.start(
             call_id=cid,

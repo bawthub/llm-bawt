@@ -14,7 +14,6 @@ Coding keys are subscription plans with usage windows, not per-token credit.
 from __future__ import annotations
 
 import asyncio
-import os
 from datetime import datetime, timezone
 from typing import Any
 
@@ -38,7 +37,6 @@ class ApiKeyBalanceAdapter(UsageAdapter):
     kind = "balance"
     balance_mode = BALANCE_ANCHOR
     connection_id: str = ""  # providers.registry id whose stored key pays these paths
-    key_env_vars: tuple[str, ...] = ()  # legacy env keys the inference clients still accept
 
     def _connection(self):
         from ...dependencies import get_service
@@ -50,9 +48,7 @@ class ApiKeyBalanceAdapter(UsageAdapter):
         from ...providers.base import STATUS_CONNECTED
 
         record = self._connection()
-        if record is not None and record.status == STATUS_CONNECTED:
-            return True
-        return any(os.getenv(name) for name in self.key_env_vars)
+        return record is not None and record.status == STATUS_CONNECTED
 
     def credential_connected_at(self) -> datetime | None:
         record = self._connection()

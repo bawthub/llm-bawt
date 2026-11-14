@@ -369,7 +369,8 @@ class OpenAIChatGPTUsageAdapter(UsageAdapter):
         if not limits:
             return self._base(
                 available=False,
-                status=STATUS_OK,
+                # Not authoritative: STATUS_OK would be cached for the full TTL.
+                status=STATUS_ERROR,
                 display_name=display,
                 error="Codex snapshot present but carried no usable limit windows.",
                 raw=snap,

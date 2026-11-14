@@ -2,7 +2,7 @@
 
 Single owner of the ``upstream_status`` field list: the bridge-event relay
 (``agent_backends/agent_bridge.py``) and the unified-SSE publisher
-(``service/turn_stream_worker.py``) both go through here instead of each
+(``service/tool_event_interceptor.py``) both go through here instead of each
 enumerating fields by hand.
 
 Turn phase is transient display state. It is never persisted or replayed;

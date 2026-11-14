@@ -127,8 +127,6 @@ class BackgroundService(
 
         # Cancellation support: when a new request comes in, cancel the current one
         # This handles the case where UI sends partial transcriptions that build up
-        self._current_generation_cancel: threading.Event | None = None
-        self._generation_done: threading.Event | None = None  # Signals when generation finishes
         self._cancel_lock = threading.Lock()
 
         # Memory client cache keyed by (bot_id, user_id).

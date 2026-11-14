@@ -91,7 +91,11 @@ def get_cached(provider: str) -> ProviderUsage | None:
 
 
 def invalidate_cache(provider: str) -> None:
-    """Discard a report after its runtime settings change."""
+    """Discard a provider's cached report.
+
+    Called when its reporting identity or settings change, and when a fresh
+    fetch fails so a stale good snapshot is never served as current.
+    """
     _cache.pop(provider, None)
     _cache_identities.pop(provider, None)
 

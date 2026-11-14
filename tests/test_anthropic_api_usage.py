@@ -581,8 +581,6 @@ async def test_api_key_report_follows_the_connected_credential(monkeypatch):
     from llm_bawt.service.usage.adapters import OpenAIApiUsageAdapter, XaiUsageAdapter
 
     monkeypatch.setenv("OPENAI_API_KEY", "sk-env")  # never another provider's key
-    for env in XaiUsageAdapter.key_env_vars:
-        monkeypatch.delenv(env, raising=False)
     xai = XaiUsageAdapter()
     monkeypatch.setattr(xai, "_connection", lambda: None)
     missing = await xai.fetch()

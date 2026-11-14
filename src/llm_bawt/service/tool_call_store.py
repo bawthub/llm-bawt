@@ -492,7 +492,9 @@ class ToolCallStore:
                 if attachments:
                     row.attachments_json = json.dumps(attachments)
                 run_started_at = row.exec_started_at or row.started_at
-                if ended_at and run_started_at:
+                # Replayed non-stream calls stamp start and end together; an
+                # unmeasured duration stays null rather than reading as 0 ms.
+                if ended_at and run_started_at and ended_at > run_started_at:
                     row.duration_ms = (ended_at - run_started_at) * 1000
                 session.add(row)
                 session.flush()

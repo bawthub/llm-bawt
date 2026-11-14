@@ -9,8 +9,9 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
-# Mirrors the per-module SERVICE_VERSION literal (api.py / background_service.py
-# each keep their own copy); used as a default on the status schemas below.
+# Mirrors the per-module SERVICE_VERSION literal (api.py, background_service.py
+# and schemas.py each keep their own copy); used as a default on the status
+# schemas below.
 SERVICE_VERSION = "0.1.0"
 
 

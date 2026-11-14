@@ -430,7 +430,6 @@ class TurnStreamWorker(TurnStreamPublishMixin):
 
             # Wrap stream to publish tool events directly to Redis
             # from this thread (survives SSE generator cancellation).
-            _oc_call_index = [0]
             # Stable correlator for in-flight agent tool calls. Claude's
             # tool_use_id is authoritative; name/LIFO fallback covers providers
             # that do not expose one.
@@ -457,7 +456,6 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                 scheduled_notices=scheduled_notices,
                 tool_calls=_oc_tool_calls,
                 exec_stamps=_exec_stamps,
-                call_index=_oc_call_index,
                 confirmed_start_reaped=_confirmed_start_reaped,
             )
 

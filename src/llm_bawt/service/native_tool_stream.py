@@ -81,12 +81,8 @@ class NativeToolStream:
                 # generates a text response.  Dropping the schema
                 # entirely causes some providers (xAI) to ignore
                 # function_call_output items and return nothing.
-                if has_executed_tools:
-                    current_tools = tools_schema
-                    current_tool_choice = "none"
-                else:
-                    current_tools = tools_schema
-                    current_tool_choice = "auto"
+                current_tools = tools_schema
+                current_tool_choice = "none" if has_executed_tools else "auto"
 
                 # TASK-216: stream text tokens immediately instead
                 # of buffering until we know whether a tool will
@@ -104,12 +100,6 @@ class NativeToolStream:
                 # (TTS speaks naturally); for chat the preamble
                 # text shows up alongside the tool result, which
                 # is acceptable.
-                #
-                # We still track yielded text in `yielded_text` so
-                # downstream code that previously consumed
-                # text_buffer (e.g. the no-tool-call early return)
-                # can be reasoned about.
-                yielded_text: list[str] = []
 
                 for item in llm_bawt.client.stream_with_tools(
                     current_msgs,
@@ -121,7 +111,6 @@ class NativeToolStream:
                         return
                     if isinstance(item, str):
                         # Stream immediately — no buffering.
-                        yielded_text.append(item)
                         yield item
                     elif isinstance(item, dict) and "tool_calls" in item:
                         tool_calls = item["tool_calls"]
@@ -134,12 +123,6 @@ class NativeToolStream:
                         # TASK-215: trigger_animation interception removed.
                         # All tool calls in this stream are real.
                         real_tool_calls = tool_calls
-
-                        # Tools follow streamed text. The text has
-                        # already been delivered to the client; we
-                        # can't take it back. (No-op kept here so
-                        # downstream diff is small.)
-                        yielded_text.clear()
 
                         # Emit tool calls as OpenAI delta.tool_calls, then execute
                         tool_results = []

@@ -53,7 +53,7 @@ def _make(*, agent=True, reaped=(), changed=None, usage=None, tts=None, redis=No
         persist_publish_approval=approval, persist_publish_await=await_,
         changed_files=changed_files, turn_usage=turn_usage, pin_confirmer=pin,
         scheduled_notices=notices, tool_calls=tool_calls, exec_stamps=stamps,
-        call_index=[0], confirmed_start_reaped=[False],
+        confirmed_start_reaped=[False],
     )
     return SimpleNamespace(
         it=interceptor, ctx=ctx, svc=svc, published=published, pin=pin,

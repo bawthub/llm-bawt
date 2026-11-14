@@ -121,6 +121,8 @@ def _normalize_tool_call_details(tool_calls: list[dict] | None) -> list[dict]:
 
 
 class TurnLifecycleMixin:
+    """Mixin providing turn persistence and generation lifecycle for BackgroundService."""
+
     @staticmethod
     def _resolve_turn_token_usage(llm_bawt: Any, explicit_usage: dict | None) -> dict | None:
         """Prefer streamed usage, then the agent backend's last partial/final result."""
@@ -133,8 +135,6 @@ class TurnLifecycleMixin:
             if isinstance(usage, dict) and usage:
                 return usage
         return None
-
-    """Mixin providing turn persistence and generation lifecycle for BackgroundService."""
 
     # ---- Generation cancellation ----
 
@@ -186,10 +186,6 @@ class TurnLifecycleMixin:
             done_event = done_event if done_event is not None else threading.Event()
             self._gen_cancels[key] = cancel_event
             self._gen_dones[key] = done_event
-
-            # Keep legacy single-slot fields in sync for any code that reads them
-            self._current_generation_cancel = cancel_event
-            self._generation_done = done_event
             return cancel_event, done_event
 
     def _end_generation(self, cancel_event: threading.Event, done_event: threading.Event, bot_id: str | None = None):
@@ -207,10 +203,6 @@ class TurnLifecycleMixin:
             if self._gen_cancels.get(key) is cancel_event:
                 del self._gen_cancels[key]
                 self._gen_dones.pop(key, None)
-            # Keep legacy fields in sync
-            if self._current_generation_cancel is cancel_event:
-                self._current_generation_cancel = None
-                self._generation_done = None
 
     # ---- Turn log persistence ----
 

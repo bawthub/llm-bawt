@@ -138,7 +138,8 @@ class TurnStreamFinalizer:
                 ctx.question_id_holder[0] = None
 
         # Wrap finalization so the sentinel, turn_complete event, and generation
-        # cleanup still fire when persistence raises (for example, DB failure).
+        # cleanup still fire when a finalization step raises. _update_turn_log
+        # swallows its own errors; this covers _finalize_turn and the rest.
         try:
             if externally_aborted:
                 # /v1/chat/abort owns this terminal state. Keep any partial reply

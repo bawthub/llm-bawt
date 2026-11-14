@@ -8,7 +8,7 @@ of — is an account balance:
     GET https://api.moonshot.ai/v1/users/me/balance
     Authorization: Bearer $MOONSHOT_API_KEY
 
-so instead of xAI's empty-limits placeholder we can surface real remaining
+so like xAI's management-reported balance we can surface real remaining
 credit, which is the number that actually predicts "will my next turn work".
 
 **Mapping note (deliberate, read before "fixing" it).** A prepaid balance has
