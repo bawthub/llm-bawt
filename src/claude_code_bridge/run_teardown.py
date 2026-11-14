@@ -62,9 +62,10 @@ logger = logging.getLogger(__name__)
 
 # claude-agent-sdk versions whose private layout this module was verified
 # against (``client._transport._process``, ``close()`` escalation). The
-# claude-code-bridge image and uv.lock both pin 0.2.177 (transport/client files are byte-identical to 0.2.160;
-# 0.2.177 query.py only adds the opt-in HookMatcher.on_failure initialize check, TASK-1983);
-# tests/test_bridge_dependency_lock.py keeps them equal (TASK-1269).
+# claude-code-bridge image (``claude-agent-sdk>=0.2.180``) and uv.lock (0.2.180) must
+# agree; tests/test_bridge_dependency_lock.py keeps them equal (TASK-1269). A version
+# outside this set has not been checked against that layout. (0.2.177 query.py only
+# added the opt-in HookMatcher.on_failure initialize check, TASK-1983.)
 VERIFIED_SDK_VERSIONS = frozenset({"0.2.160", "0.2.176", "0.2.177", "0.2.180"})
 
 DISCONNECT_OK = "ok"
