@@ -107,6 +107,32 @@ def test_nonstream_failure_never_returns_receipt(monkeypatch, reply, code):
     service.chat_completion.assert_awaited_once()
 
 
+@pytest.mark.parametrize("reply,text", [
+    # TASK-2295: early Stop (no output) and late Stop (partial saved).
+    ({"status": "FAILED", "stopped": True, "response_text": ""}, ""),
+    ({"status": "FAILED", "stopped": True, "response_text": "partial"}, "partial"),
+    ({"status": "CANCELLED", "stopped": True, "response_text": ""}, ""),
+])
+@pytest.mark.parametrize("stream", [False, True])
+def test_stopped_agent_turn_answers_like_a_stopped_chat_turn(monkeypatch, reply, text, stream):
+    events = [": connected\n\n", f"data: {json.dumps(RECEIPT)}\n\n", "data: [DONE]\n\n"]
+    monkeypatch.setattr(adapter, "observe_receipt", AsyncMock(return_value=reply))
+    client, _service, path = _client(monkeypatch, stream_events=events)
+    with client:
+        response = client.post(path, json={**BODY, "stream": stream})
+    assert response.status_code == 200
+    if stream:
+        chunks = [line[6:] for line in response.text.split("\n\n") if line.startswith("data: ")]
+        assert chunks[-1] == "[DONE]"
+        assert all("error" not in json.loads(item) for item in chunks[:-1])
+        assert json.loads(chunks[0])["choices"][0]["delta"]["content"] == text
+        assert json.loads(chunks[1])["choices"][0]["finish_reason"] == "stop"
+    else:
+        choice = response.json()["choices"][0]
+        assert choice["finish_reason"] == "stop"
+        assert choice["message"]["content"] == text
+
+
 @pytest.mark.parametrize("reply,status", [
     ({"status": "DELIVERED", "response_text": "the answer"}, 200),
     ({"status": "IN_FLIGHT"}, 504),

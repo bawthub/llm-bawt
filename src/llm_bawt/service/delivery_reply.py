@@ -15,6 +15,14 @@ QUEUED_RECEIPT = "chat.completion.queued"
 IN_FLIGHT_RECEIPT = "chat.completion.in_flight"
 ACCEPTED_RECEIPTS = frozenset({QUEUED_RECEIPT, IN_FLIGHT_RECEIPT})
 
+# TASK-2295: a stopped turn keeps its FAILED status for every existing
+# consumer (it is not a verified answer), but carries ``stopped=True`` and its
+# saved partial text so the public chat API can present it like a stopped
+# chat turn. The CANCELLED notice is the one InterBotDeliveryStore stamps when
+# the user stops a delivery before its run starts.
+STOPPED_TURN_STATUSES = frozenset({"aborted", "cancelled"})
+USER_STOP_BEFORE_RUN = "Stopped by user"
+
 
 def is_accepted_receipt(value: Any) -> bool:
     """True when a chat result is an admission receipt rather than a reply."""
@@ -142,17 +150,27 @@ def _receipt(
     if record.status != "DELIVERED":
         if record.status in {"FAILED", "CANCELLED"}:
             receipt["error"] = record.last_error or record.status.lower()
+        if record.status == "CANCELLED" and record.last_error == USER_STOP_BEFORE_RUN:
+            receipt.update(stopped=True, response_text="")
         return receipt
 
     turn = turns.get_turn(record.turn_id)
     if (
         turn is None
-        or turn.ended_at is None
         or turn.bot_id != bot_id
         or turn.user_id != user_id
         or turn.trigger_message_id != user_message_id
     ):
         receipt["status"] = "UNRESOLVED"
+        return receipt
+    if turn.ended_at is None:
+        # TASK-2295: a user Stop settles the delivery before the turn's own
+        # terminal commit lands. The exact turn is still finishing, not lost.
+        receipt["status"] = "IN_FLIGHT"
+        return receipt
+    if turn.status in STOPPED_TURN_STATUSES and not turn.error_text:
+        receipt.update(status="FAILED", error="Turn was stopped", stopped=True,
+                       response_text=turn.response_text or "")
         return receipt
     if turn.status not in {"ok", "completed"} or turn.error_text:
         receipt.update(status="FAILED", error="Turn ended without a verified answer")
@@ -174,6 +192,9 @@ def resolve_direct_turn_reply(
         raise DeliveryReplyMismatch("direct turn does not match the original request")
     if turn.ended_at is None:
         return {"turn_id": turn_id, "status": "IN_FLIGHT"}
+    if turn.status in STOPPED_TURN_STATUSES and not turn.error_text:
+        return {"turn_id": turn_id, "status": "FAILED", "stopped": True,
+                "response_text": turn.response_text or ""}
     if turn.status not in {"ok", "completed"} or turn.error_text:
         return {"turn_id": turn_id, "status": "FAILED"}
     return {"turn_id": turn_id, "status": "DELIVERED", "response_text": turn.response_text or ""}

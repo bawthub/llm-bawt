@@ -33,6 +33,12 @@ def _model(request: ChatCompletionRequest) -> str:
     return request.model or request.bot_id or "agent"
 
 
+def _stopped(reply: dict[str, Any]) -> bool:
+    """A user-stopped turn answers like a stopped chat turn (TASK-2295):
+    HTTP 200, its saved partial text, finish_reason stop and [DONE]."""
+    return reply.get("stopped") is True
+
+
 def _reply_error(reply: dict[str, Any]) -> tuple[int, str]:
     status = str(reply.get("status") or "UNRESOLVED")
     detail = str(reply.get("error") or (
@@ -65,7 +71,7 @@ async def completion_response(service: Any, request: ChatCompletionRequest):
         reply = await observe_receipt(service, request, response)
     except DeliveryReplyMismatch as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    if reply.get("status") != "DELIVERED":
+    if reply.get("status") != "DELIVERED" and not _stopped(reply):
         status, detail = _reply_error(reply)
         raise HTTPException(status_code=status, detail=detail)
     return ChatCompletionResponse(
@@ -99,7 +105,7 @@ async def _wait_stream_reply(service: Any, request: ChatCompletionRequest, recei
     finally:
         if not task.done():
             task.cancel()
-    if reply.get("status") != "DELIVERED":
+    if reply.get("status") != "DELIVERED" and not _stopped(reply):
         status, detail = _reply_error(reply)
         yield _stream_error(detail, status)
         return

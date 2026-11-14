@@ -84,7 +84,6 @@ def test_pending_and_failed_deliveries_never_expose_reply(status):
 
 
 @pytest.mark.parametrize("field,value", [
-    ("ended_at", None),
     ("bot_id", "other"), ("user_id", "other"),
     ("trigger_message_id", "other"),
 ])
@@ -94,12 +93,50 @@ def test_delivered_without_matching_finished_turn_is_unresolved(field, value):
     assert "response_text" not in result
 
 
-@pytest.mark.parametrize("changes", [{"status": "aborted"}, {"status": "error"},
-                                     {"error_text": "failure"}])
+def test_delivered_before_its_turn_finishes_stays_pending():
+    """TASK-2295: a user Stop settles the delivery before the turn's terminal
+    commit; the exact turn is still finishing, not unresolved."""
+    result = lookup(delivery("DELIVERED", last_error="Stopped by user after it ran"),
+                    turn(ended_at=None, status="cancelling"))
+    assert result["status"] == "IN_FLIGHT"
+    assert "response_text" not in result
+
+
+@pytest.mark.parametrize("changes", [{"status": "error"}, {"error_text": "failure"},
+                                     {"status": "aborted", "error_text": "bridge died"}])
 def test_delivered_terminal_failure_is_not_left_polling(changes):
     result = lookup(delivery("DELIVERED"), turn(**changes))
     assert result["status"] == "FAILED"
     assert "response_text" not in result
+    assert "stopped" not in result
+
+
+@pytest.mark.parametrize("status", ["aborted", "cancelled"])
+def test_stopped_turn_stays_failed_but_carries_its_partial(status):
+    result = lookup(delivery("DELIVERED", last_error="Stopped by user after it ran"),
+                    turn(status=status, response_text="partial"))
+    assert result["status"] == "FAILED"  # still no verified answer for other consumers
+    assert result["stopped"] is True
+    assert result["response_text"] == "partial"
+
+
+def test_stop_before_run_is_a_stopped_cancellation():
+    result = lookup(delivery("CANCELLED", last_error="Stopped by user"), turn())
+    assert result["status"] == "CANCELLED"
+    assert result["stopped"] is True and result["response_text"] == ""
+
+
+def test_other_cancellation_is_not_a_stop():
+    result = lookup(delivery("CANCELLED", last_error="Cancelled by sender"), turn())
+    assert "stopped" not in result and "response_text" not in result
+
+
+def test_direct_stopped_turn_carries_its_partial():
+    result = resolve_direct_turn_reply(
+        Turns(turn(status="aborted", response_text="partial")), "turn-test",
+        bot_id="bot", user_id="owner", user_message_id="message")
+    assert result == {"turn_id": "turn-test", "status": "FAILED", "stopped": True,
+                      "response_text": "partial"}
 
 
 def test_exact_finished_turn_returns_its_reply():
