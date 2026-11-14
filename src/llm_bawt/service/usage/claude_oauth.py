@@ -193,29 +193,29 @@ def _read_file_bundle() -> dict | None:
 
 
 def _load() -> tuple[dict, dict | None]:
-    """Return (raw_record_json, oauth_bundle), preferring an unsaved rotation."""
-    global _pending
-    raw, bundle = _load_db()
+    """Return (raw_record_json, oauth_bundle), preferring an unsaved rotation.
+
+    Never clears ``_pending``: a reader's DB snapshot may be stale, so only the
+    locked save path (:func:`_persist_rotated`) decides a pending bundle is done.
+    """
     pending = _pending
-    if pending is None:
-        return raw, bundle
-    consumed, rotated = pending
-    if bundle and bundle.get("refreshToken") == consumed:
-        return raw, rotated
-    # The DB row changed (reconnect, disconnect, or the save landed).
-    if _pending is pending:
-        _pending = None
+    raw, bundle = _load_db()
+    if pending is not None and bundle and bundle.get("refreshToken") == pending[0]:
+        return raw, pending[1]
     return raw, bundle
 
 
 def _persist_rotated(raw: dict, consumed: str | None, rotated: dict) -> bool:
     """Save a rotated bundle; on failure keep it pending and report degraded.
 
-    Caller holds _REFRESH_LOCK.
+    The save is conditional on the DB row still holding ``consumed`` (checked
+    under a row lock), so a reconnect or disconnect that landed meanwhile wins
+    and the stale rotation is dropped. Returns True when nothing is left
+    pending. Caller holds _REFRESH_LOCK.
     """
     global _pending
     try:
-        _save(raw, rotated)
+        saved = _save(raw, rotated, expect_refresh_token=consumed)
     except Exception as e:  # noqa: BLE001
         logger.warning("Refreshed Claude token but could not persist to DB; keeping it in memory and retrying: %s", e)
         if consumed:
@@ -223,6 +223,8 @@ def _persist_rotated(raw: dict, consumed: str | None, rotated: dict) -> bool:
         _record_refresh_outcome(f"rotated token not yet saved: {e}")
         return False
     _pending = None
+    if not saved:
+        logger.warning("Claude credential changed during refresh (reconnect or disconnect); dropping rotated bundle")
     _record_refresh_outcome(None)
     return True
 
@@ -233,9 +235,7 @@ def _retry_pending_save() -> bool:
         pending = _pending
         if pending is None:
             return True
-        raw, bundle = _load()
-        if _pending is None or bundle is not pending[1]:
-            return True
+        raw, _ = _load_db()
         return _persist_rotated(raw, pending[0], pending[1])
 
 
@@ -275,8 +275,12 @@ def _load_db() -> tuple[dict, dict | None]:
     return raw, bundle
 
 
-def _save(raw: dict, bundle: dict) -> None:
-    """Persist the bundle to the DB row (the only write path, TASK-636)."""
+def _save(raw: dict, bundle: dict, *, expect_refresh_token: str | None = None) -> bool:
+    """Persist the bundle to the DB row (the only write path, TASK-636).
+
+    With ``expect_refresh_token``, saves only if the row still holds that
+    refresh token (atomic under a row lock); returns False when it does not.
+    """
     store = _credential_store()
     if store is None or not store.available:
         raise RuntimeError("CredentialStore unavailable — cannot persist Claude bundle")
@@ -286,27 +290,34 @@ def _save(raw: dict, bundle: dict) -> None:
         ConnectionRecord,
     )
 
-    store.save(
-        ConnectionRecord(
-            provider=_PROVIDER_ID,
-            status=STATUS_CONNECTED,
-            auth_method=AUTH_CLI_OAUTH,
-            account=bundle.get("subscriptionType") or "claude-subscription",
-            meta={
-                "scopes": bundle.get("scopes") or [],
-                "expires_at": bundle.get("expiresAt"),
-                # Preserve the wizard login timestamp across refreshes — the
-                # ~30-day session-lifetime warning keys off it (providers/claude.py).
-                **(
-                    {"connected_at": raw["connected_at"]}
-                    if raw.get("connected_at")
-                    else {}
-                ),
-            },
-            secret={_SECRET_KEY: bundle},
-            connected_at=raw.get("connected_at"),
-        )
+    record = ConnectionRecord(
+        provider=_PROVIDER_ID,
+        status=STATUS_CONNECTED,
+        auth_method=AUTH_CLI_OAUTH,
+        account=bundle.get("subscriptionType") or "claude-subscription",
+        meta={
+            "scopes": bundle.get("scopes") or [],
+            "expires_at": bundle.get("expiresAt"),
+            # Preserve the wizard login timestamp across refreshes — the
+            # ~30-day session-lifetime warning keys off it (providers/claude.py).
+            **(
+                {"connected_at": raw["connected_at"]}
+                if raw.get("connected_at")
+                else {}
+            ),
+        },
+        secret={_SECRET_KEY: bundle},
+        connected_at=raw.get("connected_at"),
     )
+    if expect_refresh_token is None:
+        store.save(record)
+        return True
+
+    def _holds_expected(current) -> bool:
+        current_bundle = (current.secret or {}).get(_SECRET_KEY) if current else None
+        return isinstance(current_bundle, dict) and current_bundle.get("refreshToken") == expect_refresh_token
+
+    return store.save_if(record, _holds_expected)
 
 
 def _expired(expires_at: int | None, *, buffer_ms: int = 0) -> bool:

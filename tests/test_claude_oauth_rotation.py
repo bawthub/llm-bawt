@@ -21,7 +21,7 @@ def owner(monkeypatch):
     state = {"accessToken": "a", "refreshToken": "refresh-a", "expiresAt": int(time.time() * 1000) + 3600000}
     rotations = []
     monkeypatch.setattr(oauth, "_load", lambda: ({}, dict(state)))
-    monkeypatch.setattr(oauth, "_save", lambda _raw, bundle: state.update(bundle))
+    monkeypatch.setattr(oauth, "_save", lambda _raw, bundle, **_: state.update(bundle) or True)
     monkeypatch.setattr(oauth, "_record_refresh_outcome", lambda _error: None)
 
     def refresh(bundle):

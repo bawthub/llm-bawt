@@ -327,6 +327,38 @@ class CredentialStore:
             return None
         return self._record(provider, value) if isinstance(value, dict) else None
 
+    def save_if(self, record: ConnectionRecord, matches: Any) -> bool:
+        """Save ``record`` only if ``matches(current_record_or_None)``; True when saved.
+
+        The row is read ``FOR UPDATE`` and replaced in one transaction, so a
+        concurrent save/delete of the same provider either lands first (and
+        ``matches`` sees it) or waits until this commits.
+        """
+        if not self.available:
+            raise RuntimeError("Runtime settings DB unavailable — cannot persist provider credential")
+        from sqlalchemy import select
+
+        from ...runtime_settings import RuntimeSetting
+
+        table = RuntimeSetting.__table__
+        with self._store.engine.begin() as conn:
+            raw = conn.execute(select(table.c.value_json).where(
+                table.c.scope_type == "global", table.c.scope_id == "*",
+                table.c.key == self._key(record.provider),
+            ).with_for_update()).scalar_one_or_none()
+            current = None
+            if raw is not None:
+                try:
+                    value = json.loads(raw)
+                except ValueError:
+                    value = None
+                if isinstance(value, dict):
+                    current = self._record(record.provider, value)
+            if not matches(current):
+                return False
+            self.save_in(conn, record)
+            return True
+
     def exists_in(self, conn: Any, provider: str) -> bool:
         """True when ANY row (any status, even undecodable) exists for ``provider``."""
         from sqlalchemy import select
