@@ -711,25 +711,33 @@ class MemoryClient(
         """
         self._ensure_initialized()
 
-        # For message search, we need direct database access
-        # Create a backend connection directly since this isn't routed through MCP
-        from ..memory.postgresql import PostgreSQLMemoryBackend
+        if self.server_url:
+            # TASK-2238: server mode has no local database contract; search
+            # this bot's history through the server, never a local backend.
+            results = self._call_server("messages_search_all", {
+                "query": query,
+                "n_results": n_results,
+                "role_filter": role_filter,
+                "since": since,
+                "until": until,
+                "bot_id": self.bot_id,
+            }) or []
+        else:
+            from ..memory.postgresql import PostgreSQLMemoryBackend
 
-        backend = PostgreSQLMemoryBackend(
-            self.config,
-            bot_id=self.bot_id,
-            provision_schema=False,
-        )
-
-        # Use the existing search_messages_by_text method
-        results = backend.search_messages_by_text(
-            query=query,
-            n_results=n_results,
-            exclude_recent_seconds=0,  # Don't exclude recent for explicit searches
-            role_filter=role_filter,
-            since=since,
-            until=until,
-        )
+            backend = PostgreSQLMemoryBackend(
+                self.config,
+                bot_id=self.bot_id,
+                provision_schema=False,
+            )
+            results = backend.search_messages_by_text(
+                query=query,
+                n_results=n_results,
+                exclude_recent_seconds=0,  # Don't exclude recent for explicit searches
+                role_filter=role_filter,
+                since=since,
+                until=until,
+            )
 
         return [
             MessageResult(
@@ -737,6 +745,7 @@ class MemoryClient(
                 role=r.get("role", ""),
                 content=r.get("content", ""),
                 bot_id=self.bot_id,
+                session_id=r.get("session_id"),
                 created_at=str(r.get("timestamp", "")),
             )
             for r in results

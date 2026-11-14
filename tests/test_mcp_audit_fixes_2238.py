@@ -43,6 +43,29 @@ def test_memory_search_keeps_explicit_zero_threshold(given: float | None, sent: 
     assert calls[0]["min_relevance"] == sent
 
 
+# Item 1: server-mode history search goes through the server, never a local DB.
+def test_server_mode_message_search_uses_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    import llm_bawt.memory.postgresql as pg
+    from llm_bawt.mcp_server.client import MemoryClient
+
+    def no_local_backend(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("server mode constructed a local database backend")
+
+    monkeypatch.setattr(pg, "PostgreSQLMemoryBackend", no_local_backend)
+    client = MemoryClient(SimpleNamespace(), bot_id="b", server_url="http://mcp.invalid")  # type: ignore[arg-type]
+    calls: list[tuple[str, dict[str, Any]]] = []
+    client._ensure_initialized = lambda: None  # type: ignore[method-assign]
+    row = {"id": "m1", "role": "user", "content": "hi", "timestamp": 12.5, "session_id": "s", "source": "b"}
+    client._call_server = lambda tool, args: calls.append((tool, args)) or [row]  # type: ignore[method-assign,assignment,func-returns-value]
+
+    results = client.search_messages("hi", n_results=3, role_filter="user", since=1.0, until=2.0)
+
+    assert calls == [("messages_search_all", {
+        "query": "hi", "n_results": 3, "role_filter": "user", "since": 1.0, "until": 2.0, "bot_id": "b"})]
+    assert [(r.id, r.role, r.content, r.bot_id, r.session_id, r.created_at) for r in results] == [
+        ("m1", "user", "hi", "b", "s", "12.5")]
+
+
 # Item 3: an extracted name candidate never changes the live display name.
 def test_extracted_name_candidate_leaves_display_name(monkeypatch: pytest.MonkeyPatch) -> None:
     from llm_bawt.mcp_server import extraction
