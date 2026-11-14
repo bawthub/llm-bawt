@@ -340,7 +340,8 @@ services:
       # for non-GitHub SSH targets). NOTE: tenant GitHub auth no longer relies on
       # a hand-made deploy key — it uses the provider-connect git credential
       # helper (device-flow GitHub App → auto-refreshing installation tokens over
-      # HTTPS). Wire it with `tenant.sh bridge-git-setup`. BRIDGE_SSH_DIR remains
+      # HTTPS), enabled with GIT_CONFIG_* env as in bawthub's tenant compose
+      # (deploy/compose/docker-compose.base.yml). BRIDGE_SSH_DIR remains
       # available for any non-GitHub SSH remotes a bridge still needs.
       - ${BRIDGE_SSH_DIR:-${HOME}/.ssh}:/home/bridge/.ssh:ro
       - ${HOME}/.config/claude-code-bridge/ssh_config:/etc/ssh/ssh_config:ro

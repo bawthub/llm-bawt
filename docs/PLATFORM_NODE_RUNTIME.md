@@ -64,7 +64,7 @@ its bridge were retired on 2026-10-28 (TASK-1439).
 Before any future rollback, recheck full image IDs and exact target configuration.
 Use ops where supported, obtain exact authorization, recreate only the affected
 service and verify health. Never restart the whole stack as a shortcut.
-Tenant host files `docker-compose.prod.yml` and `.env` in the tenant checkout have
+Tenant host files `docker-compose.prod.yml` (since retired from llm-bawt) and `.env` in the tenant checkout have
 mode-0600 `.task-1062-backup` copies. The compose frontend accepts `FRONTEND_IMAGE`
 and `.env` selects `bawthub-tenant-frontend:task-1062-node24`; application version and
 DB schema were not upgraded. These two host-file edits were made through SSH,

@@ -12,8 +12,9 @@ KEY SOURCE (in priority order):
      absent it is generated once and written, so restarts stay stable.
 
 IMPORTANT for tenants: the key MUST survive repaves or stored credentials become
-unreadable. ``tenant.sh`` bakes ``LLM_BAWT_SECRET_KEY`` into the generated
-``.env`` for exactly this reason — the file fallback only covers single-host dev.
+unreadable. The tenant installer (bawthub ``deploy/bootstrap.sh``) generates
+and persists ``LLM_BAWT_SECRET_KEY`` for exactly this reason — the file
+fallback only covers single-host dev.
 
 DERIVED SECRETS: :func:`derive_key` turns the same master key into
 domain-separated subkeys (HMAC-SHA256 keyed by the raw key, one label per use),

@@ -162,13 +162,13 @@ RUN mkdir -p /home/bridge/.codex /home/bridge/dev /home/bridge/.claude \
 
 # TASK-835: provider-connect git credential helper, baked instead of
 # hand-installed. It used to be `docker exec`'d into a running container by
-# `tenant.sh bridge-git-setup`, which meant every fresh tenant started with
-# broken git until someone SSH'd in. Shipping it in the image makes git auth
+# a host script, which meant every fresh tenant started with broken git until
+# someone SSH'd in. Shipping it in the image makes git auth
 # zero-touch.
 #
 # The script is INERT on its own — git only calls it once `credential.helper`
 # names it. The tenant stack turns it on via GIT_CONFIG_* env (see
-# docker-compose.prod.yml); dev bridges keep using their mounted SSH identity
+# bawthub deploy/compose/docker-compose.base.yml); dev bridges keep using their mounted SSH identity
 # and are unaffected by this layer.
 COPY docker/git-credential-bawthub /usr/local/bin/git-credential-bawthub
 RUN chmod 0755 /usr/local/bin/git-credential-bawthub

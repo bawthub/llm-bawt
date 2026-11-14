@@ -5,8 +5,7 @@ the admin surface has no equivalent for. Flow the wizard drives:
 
 1. ``POST /v1/setup/seed``: idempotent infrastructure seed (catalog schema,
    standard access paths, prompt defaults). Must run before anything that
-   reads the catalog on a fresh tenant. Also the installer / operator
-   fallback (``tenant.sh seed``).
+   reads the catalog on a fresh tenant. Also the operator fallback.
 2. ``GET  /v1/models/catalog/access-paths?agent_backend=claude-code``: the
    admin list of routes a ``claude-code`` agent can run on, each with its
    provider ``connection``.

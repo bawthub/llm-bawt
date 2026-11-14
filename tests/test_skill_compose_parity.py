@@ -56,7 +56,7 @@ def _backing(service: dict, path: str) -> tuple[str, bool]:
     return (source if rest == PurePosixPath(".") else f"{source}/{rest}"), read_only
 
 
-@pytest.mark.parametrize("compose", ["docker-compose.yml", "docker-compose.prod.yml"])
+@pytest.mark.parametrize("compose", ["docker-compose.yml"])
 def test_app_reads_the_bridge_skill_tree_at_the_bridge_path_read_only(compose):
     services = yaml.safe_load((ROOT / compose).read_text())["services"]
     app, bridge = services["app"], services["claude-code-bridge"]

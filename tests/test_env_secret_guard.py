@@ -123,8 +123,8 @@ def _shipped_secret_names() -> dict[str, set[str]]:
 
 
 def test_the_guard_scans_the_shipped_files():
-    assert {p.name for p in _compose_files()} >= {"docker-compose.yml", "docker-compose.prod.yml"}
-    assert {p.name for p in _env_templates()} >= {".env.docker", ".env.tenant.example"}
+    assert {p.name for p in _compose_files()} >= {"docker-compose.yml", "docker-compose.dev.yml"}
+    assert {p.name for p in _env_templates()} >= {".env.docker"}
 
 
 @pytest.mark.parametrize(("name", "shaped"), [

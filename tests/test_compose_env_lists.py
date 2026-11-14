@@ -28,10 +28,7 @@ from llm_bawt.env_import import SPECS
 ROOT = Path(__file__).resolve().parents[1]
 
 #: (compose file, service) -> the task that gives it an explicit list.
-EXEMPT: dict[tuple[str, str], str] = {
-    ("docker-compose.prod.yml", "app"): "TASK-1617: standalone stack gets explicit lists",
-    ("docker-compose.prod.yml", "claude-code-bridge"): "TASK-1617: standalone stack gets explicit lists",
-}
+EXEMPT: dict[tuple[str, str], str] = {}
 
 #: Adopted into records by env_import: the env line is deleted after the window.
 ADOPTED = frozenset(name for spec in SPECS for name in spec.env_names)
@@ -151,10 +148,10 @@ def test_no_service_receives_an_openclaw_name():
 
 
 def test_every_template_name_still_reaches_a_container():
-    dev_files = [p for p in _compose_files() if p.name != "docker-compose.prod.yml"]
+    dev_files = _compose_files()
     reached = {n for p in dev_files for s in _services(p).values() for n in _reached(s)}
     interpolated = {n for p in dev_files for n in _interpolated(p.read_text())}
-    exempt_wholesale = {service for (file, service) in EXEMPT if file != "docker-compose.prod.yml"}
+    exempt_wholesale = {service for (_file, service) in EXEMPT}
     assert not exempt_wholesale, "a dev service loads all of .env again: exempt its names below"
     template = ROOT / ".env.docker"
     missing = sorted(

@@ -514,15 +514,14 @@ def _split_volume(volume: str) -> list[str]:
 def _compose_app_destinations() -> dict[str, str]:
     """Container path -> first Compose file declaring it, for the ``app``
     service across every product Compose file the seed targets (short or long
-    volume form). docker-compose.prod.yml is a separate image-baked stack with
-    no source bind mounts, which this source-guarded seed never reconciles."""
+    volume form)."""
     from pathlib import Path
 
     import yaml
 
     found: dict[str, str] = {}
     root = Path(__file__).resolve().parents[1]
-    for path in sorted(p for p in root.glob("docker-compose*.yml") if p.name != "docker-compose.prod.yml"):
+    for path in sorted(root.glob("docker-compose*.yml")):
         app = ((yaml.safe_load(path.read_text()) or {}).get("services") or {}).get("app") or {}
         for volume in app.get("volumes") or ():
             if isinstance(volume, dict):

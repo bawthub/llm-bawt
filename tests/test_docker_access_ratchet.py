@@ -20,7 +20,7 @@ a subprocess argv, ``sh -c`` wrapper, shell string or container
 entrypoint/command that runs ``docker``; a compose service that mounts the
 socket or its parent directory (bind paths normalized) or sets
 ``DOCKER_HOST``. Host tooling outside ``src/`` (``scripts/``,
-``tenant.sh``, the Makefile) is not product runtime and is out of scope;
+the Makefile) is not product runtime and is out of scope;
 the compose files it ships are covered.
 """
 from __future__ import annotations
