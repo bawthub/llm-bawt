@@ -477,35 +477,6 @@ class ServiceClient:
         return [call for event in events if event.get("turn_id") == turn_id
                 for call in event.get("tool_calls") or []]
 
-    def chat_completion_full(
-        self,
-        messages: list[dict],
-        model: str | None = None,
-        bot_id: str | None = None,
-        user_id: str | None = None,
-        **kwargs,
-    ) -> str | None:
-        """
-        Get a complete chat response as a string.
-        
-        Convenience method that handles streaming internally.
-        
-        Returns:
-            The assistant's response content, or None if unavailable.
-        """
-        response = self.chat_completion(
-            messages=messages,
-            model=model,
-            bot_id=bot_id,
-            user_id=user_id,
-            stream=False,
-            **kwargs,
-        )
-        
-        if response and "choices" in response:
-            return response["choices"][0].get("message", {}).get("content")
-        return None
-
     def _request(
         self,
         method: str,
@@ -586,61 +557,6 @@ class ServiceClient:
                 raise
             return resp.json()
     
-    async def submit_task_async(self, task: Task) -> bool:
-        """
-        Submit a task to the background service asynchronously.
-        
-        Returns True if task was accepted, False if service unavailable.
-        Requires httpx to be installed.
-        """
-        if not self.is_available():
-            logger.debug("Background service unavailable, task not submitted")
-            return False
-        
-        if not HTTPX_AVAILABLE:
-            # Fall back to sync method
-            return self.submit_task(task)
-        
-        try:
-            await self._request_async("POST", "/v1/tasks", data=task.to_dict())
-            logger.debug(f"Submitted task {task.task_id} ({task.task_type.value})")
-            return True
-        except Exception as e:
-            logger.warning(f"Failed to submit task: {e}")
-            return False
-    
-    async def get_task_result_async(
-        self, task_id: str, wait: bool = False, timeout: float = 30.0
-    ) -> TaskResult | None:
-        """
-        Get the result of a submitted task asynchronously.
-        
-        Requires httpx to be installed.
-        """
-        if not self.is_available():
-            return None
-        
-        if not HTTPX_AVAILABLE:
-            # Fall back to sync method
-            return self.get_task_result(task_id, wait=wait, timeout=timeout)
-        
-        try:
-            params = {"wait": str(wait).lower(), "timeout": str(timeout)}
-            response = await self._request_async("GET", f"/v1/tasks/{task_id}", params=params)
-            
-            if response:
-                return TaskResult(
-                    task_id=response["task_id"],
-                    status=TaskStatus(response["status"]),
-                    result=response.get("result"),
-                    error=response.get("error"),
-                    processing_time_ms=response.get("processing_time_ms", 0),
-                )
-        except Exception as e:
-            logger.debug(f"Failed to get task result: {e}")
-        
-        return None
-
     def search_memories(
         self,
         query: str,

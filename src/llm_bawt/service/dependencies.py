@@ -139,15 +139,6 @@ def get_model_catalog_engine(config: Any):
 # the catalog.
 
 
-def get_prompt_template_store(config: Any):
-    """Process-wide ``PromptTemplateStore`` singleton."""
-    from ..prompt_registry import PromptTemplateStore
-
-    return _get_or_build_store(
-        "prompt_template_store", config, lambda: PromptTemplateStore(config)
-    )
-
-
 def get_media_asset_store(config: Any) -> "MediaAssetStore":
     """Process-wide ``MediaAssetStore`` singleton for a config generation."""
     from ..media.assets import MediaAssetStore

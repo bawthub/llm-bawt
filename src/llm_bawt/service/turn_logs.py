@@ -910,26 +910,6 @@ class TurnLogStore:
         from .changed_files_store import ChangedFilesStore
         return ChangedFilesStore(self.engine)
 
-    def save_changed_files(
-        self,
-        *,
-        turn_id: str,
-        bot_id: str | None,
-        user_id: str | None,
-        trigger_message_id: str | None,
-        files: list,
-    ) -> int:
-        """Persist a turn's changed files (list of ChangedFileInput). Returns count."""
-        if self.engine is None:
-            return 0
-        return self._changed_files_store().save_turn_files(
-            turn_id=turn_id,
-            bot_id=bot_id,
-            user_id=user_id,
-            trigger_message_id=trigger_message_id,
-            files=files,
-        )
-
     def changed_files_summary(self, turn_id: str) -> dict:
         if self.engine is None:
             from .changed_files_store import build_turn_summary
@@ -964,22 +944,6 @@ class TurnLogStore:
             bot_id=bot_id,
             user_id=user_id,
         )
-
-    def uncommitted_changed_files_summary(
-        self,
-        *,
-        session_id: str | None,
-        bot_id: str,
-        user_id: str,
-        anchor_turn_id: str | None = None,
-    ) -> tuple[str | None, dict]:
-        resolved, summary, _ = self.uncommitted_changed_files_summaries(
-            session_id=session_id,
-            anchor_turn_id=anchor_turn_id,
-            bot_id=bot_id,
-            user_id=user_id,
-        )
-        return resolved, summary
 
     def mark_changed_files_commit_requested(
         self,

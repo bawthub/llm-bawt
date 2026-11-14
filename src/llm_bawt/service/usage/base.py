@@ -20,7 +20,7 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 
 from .balance import BALANCE_ANCHOR
-from .canonical import ProviderUsage, STATUS_NOT_IMPLEMENTED
+from .canonical import ProviderUsage
 
 
 class UsageAdapter(ABC):
@@ -82,18 +82,3 @@ class UsageAdapter(ABC):
         return ProviderUsage(**fields)
 
 
-class NotImplementedAdapter(UsageAdapter):
-    """Registered-but-unimplemented provider.
-
-    Surfaces the backend in the all-providers view as a clearly-labeled
-    placeholder instead of silently dropping it. Subclass and set the three
-    identity attributes; the canonical model + UI wiring already handle it.
-    """
-
-    async def fetch(self) -> ProviderUsage:
-        return self._base(
-            available=False,
-            status=STATUS_NOT_IMPLEMENTED,
-            error="Usage reporting for this provider is not implemented yet.",
-            limits=[],
-        )

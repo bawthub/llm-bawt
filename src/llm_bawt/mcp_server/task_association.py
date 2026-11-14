@@ -95,10 +95,6 @@ def current_task_turn_context() -> TaskTurnContext:
     return open_task_turn_context(current_task_turn_capability())
 
 
-def task_turn_context_header_name() -> str:
-    return TASK_TURN_CONTEXT_HEADER
-
-
 def _header_from_asgi_scope(scope: dict[str, Any], header: bytes) -> str | None:
     for raw_name, raw_value in scope.get("headers") or []:
         if raw_name.lower() == header:

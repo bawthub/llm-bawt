@@ -305,11 +305,6 @@ def _run_history_search_route(
     )
 
 
-def _history_search_route_doc() -> str:
-    """Provide stable docs text without repeating long literals inline."""
-    return _search_history_docstring()
-
-
 def _history_search_limit_query() -> str:
     """Stable docs helper for per-bot search page size."""
     return _search_history_limit_description()
@@ -350,24 +345,6 @@ def _history_search_route(
 ) -> HistorySearchResponse:
     """Call the actual shared search implementation."""
     return _run_history_search_route(query, bot_id, limit, before, since, until)
-
-
-def _history_search_legacy(
-    query: str,
-    bot_id: str | None,
-    limit: int,
-) -> HistorySearchResponse:
-    """Legacy hook kept for any future callers needing pre-paging semantics."""
-    service = get_service()
-    effective_bot_id = _resolve_effective_bot_id(service, bot_id)
-    resolved_query = _resolve_search_query(query)
-    resolved_limit = _resolve_search_limit(limit)
-    return _search_history_messages_legacy(
-        service,
-        effective_bot_id,
-        resolved_query,
-        limit=resolved_limit,
-    )
 
 
 def _history_search_route_body(

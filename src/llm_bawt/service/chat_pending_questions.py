@@ -376,37 +376,6 @@ class PendingQuestionStore:
             logger.exception("Failed to fetch question for turn_id=%s", turn_id)
             return None
 
-    def abandon_for_turn(self, turn_id: str) -> int:
-        """Mark every awaiting question for a turn as abandoned.
-
-        Called from the turn-completion path when the originating turn ends
-        without an answer (timeout, abort, model bailed out, bridge crashed
-        and the app noticed via the turn-log status flip).  Returns the
-        number of rows changed.
-        """
-        if self.engine is None or not turn_id:
-            return 0
-        try:
-            with Session(self.engine) as session:
-                rows = session.exec(
-                    select(PendingQuestion)
-                    .where(PendingQuestion.turn_id == turn_id)
-                    .where(PendingQuestion.status == "awaiting")
-                ).all()
-                count = 0
-                now = datetime.now(timezone.utc)
-                for row in rows:
-                    row.status = "abandoned"
-                    row.answered_at = now
-                    session.add(row)
-                    count += 1
-                if count:
-                    session.commit()
-                return count
-        except Exception:
-            logger.exception("Failed to abandon questions for turn_id=%s", turn_id)
-            return 0
-
     # ----- reads -----
 
     def get(self, tool_use_id: str) -> PendingQuestion | None:

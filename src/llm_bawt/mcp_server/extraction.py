@@ -51,37 +51,6 @@ BLOCKED_PROFILE_PATTERNS = [
 ]
 
 
-def _extract_attribute_key(content: str) -> str | None:
-    """Best-effort profile attribute key extraction for compatibility.
-
-    Older debugging scripts import this private helper directly. Keep a
-    lightweight heuristic mapping so those scripts keep working even though
-    primary extraction now comes from LLM-provided ``profile_attribute``.
-    """
-    text = (content or "").strip().lower()
-    if not text:
-        return None
-
-    patterns: list[tuple[str, str]] = [
-        (r"\bname\b|\bcalled\b|\bnamed\b", "name"),
-        (r"\bage\b|\byears old\b", "age"),
-        (r"\blive\b|\blocation\b|\bbased in\b", "location"),
-        (r"\bwork\b|\bjob\b|\boccupation\b|\bemployer\b", "occupation"),
-        (r"\bpet\b|\bdog\b|\bcat\b", "pets"),
-        (r"\bhobby\b|\benjoy\b|\binterested in\b", "hobbies"),
-        (r"\bfavorite\b", "preferences_summary"),
-        (r"\blanguage\b", "languages"),
-        (r"\btimezone\b", "timezone"),
-        (r"\ballerg\b", "allergies"),
-    ]
-
-    for pattern, key in patterns:
-        if re.search(pattern, text):
-            return key if key in ALLOWED_PROFILE_KEYS else None
-
-    return None
-
-
 def extract_profile_attributes_from_fact(
     fact: ExtractedFact | dict,
     user_id: str,  # Required - must be passed explicitly

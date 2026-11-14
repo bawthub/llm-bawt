@@ -42,14 +42,6 @@ class StartupCheck(Protocol):
     async def run_at_startup(self) -> Any: ...
 
 
-class FollowUpCheck(StartupCheck, Protocol):
-    """Optional (TASK-1846): a check whose result can leave work for later."""
-
-    def follow_up_due(self, result: Any) -> bool: ...
-
-    async def follow_up(self) -> Any: ...
-
-
 class StartupRecoveryRunner:
     # How long dispatch waits for the startup check before it starts anyway.
     WAIT_SECONDS = 30.0

@@ -279,11 +279,6 @@ def generate_request_id() -> str:
     return uuid4().hex[:8]
 
 
-def set_request_id(request_id: str) -> None:
-    """Set the current request ID (for async context)."""
-    _request_id.set(request_id)
-
-
 def get_request_id() -> str | None:
     """Get the current request ID."""
     return _request_id.get()
@@ -531,63 +526,6 @@ class ServiceLogger:
         else:
             self._logger.warning(line)
 
-    def _log_mcp_params(self, operation: str, params: dict[str, Any]) -> None:
-        """Log MCP operation parameters in verbose mode - one line."""
-        # For store_memory, show the content prominently
-        if operation == "store_memory" and "content" in params:
-            content = params["content"]
-            # Show full content up to 200 chars
-            if len(content) > 200:
-                content = content[:200] + "..."
-            tags = params.get("tags", [])
-            importance = params.get("importance", 0.5)
-            self._console.print(f"  [dim]content:[/dim] [cyan]{content}[/cyan]")
-            self._console.print(f"  [dim]tags={tags} importance={importance:.1f}[/dim]")
-            return
-            
-        param_strs = []
-        for k, v in params.items():
-            if isinstance(v, str) and len(v) > 80:
-                param_strs.append(f"{k}={v[:80]}...")
-            else:
-                param_strs.append(f"{k}={v}")
-        self._console.print(f"  [dim]params: {', '.join(param_strs)}[/dim]")
-
-    def _log_mcp_result(self, operation: str, result: Any) -> None:
-        """Log MCP operation result in verbose mode.
-        
-        For history (get_messages), show condensed view.
-        For everything else (memory searches, etc.), show full data.
-        """
-        if result is None:
-            return
-        
-        # History can be condensed - it's usually long and just context
-        is_history = operation == "get_messages"
-        
-        if isinstance(result, list):
-            if len(result) == 0:
-                self._console.print("  [dim]result: (empty)[/dim]")
-            elif is_history:
-                # Very condensed for history: just first and last
-                if len(result) == 1:
-                    self._log_result_item(result[0], 0, condensed=True)
-                elif len(result) <= 3:
-                    for i, item in enumerate(result):
-                        self._log_result_item(item, i, condensed=True)
-                else:
-                    self._log_result_item(result[0], 0, condensed=True)
-                    self._console.print(f"  [dim]... ({len(result) - 2} more) ...[/dim]")
-                    self._log_result_item(result[-1], len(result) - 1, condensed=True)
-            else:
-                # Full output for memory searches, etc.
-                for i, item in enumerate(result):
-                    self._log_result_item(item, i, condensed=is_history)
-        elif isinstance(result, dict):
-            self._log_result_item(result, None, condensed=False)
-        else:
-            self._console.print(f"  [dim]result:[/dim] {result}")
-
     def _log_result_item(self, item: Any, index: int | None, condensed: bool = False) -> None:
         """Log a single result item - one line per item.
         
@@ -828,29 +766,6 @@ class ServiceLogger:
         
         # Show full response
         self._console.print("  response: " + response, markup=False)
-
-    def _log_payload(self, label: str, data: dict[str, Any], max_content_len: int = 500) -> None:
-        """Log a payload (for verbose mode)."""
-        # Deep copy and truncate long content
-        def truncate(obj: Any, depth: int = 0) -> Any:
-            if depth > 5:
-                return "..."
-            if isinstance(obj, dict):
-                return {k: truncate(v, depth + 1) for k, v in obj.items()}
-            if isinstance(obj, list):
-                return [truncate(item, depth + 1) for item in obj[:10]]  # Max 10 items
-            if isinstance(obj, str) and len(obj) > max_content_len:
-                return obj[:max_content_len] + "..."
-            return obj
-
-        truncated = truncate(data)
-        try:
-            formatted = json.dumps(truncated, indent=2, default=str)
-            self._console.print(f"[dim]{label}:[/dim]")
-            self._console.print(formatted, highlight=True)
-        except Exception:
-            self._logger.debug(f"{label}: {truncated}")
-
 
 # Module-level convenience function
 def get_service_logger(name: str) -> ServiceLogger:
