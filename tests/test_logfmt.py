@@ -8,7 +8,7 @@ import re
 
 import pytest
 
-from llm_bawt.shared import logfmt
+from agent_bridge import logfmt
 
 
 @pytest.fixture

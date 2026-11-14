@@ -138,10 +138,12 @@ def _redact(s: str | None, *, keep: int = 6) -> str:
 
 def main() -> None:
     log_level = os.getenv("CODEX_BRIDGE_LOG_LEVEL", "INFO")
-    logging.basicConfig(
+    from agent_bridge.logfmt import configure_logging
+
+    # The standard one-line format (TASK-2225); layout lives in logfmt.py.
+    configure_logging(
+        "bridge",
         level=getattr(logging, log_level.upper(), logging.INFO),
-        format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
         stream=sys.stdout,
     )
     logging.getLogger("httpx").setLevel(logging.WARNING)

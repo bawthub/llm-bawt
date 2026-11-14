@@ -181,7 +181,9 @@ def main():
     from .health_http import OpsHealthServer
     from .health_runtime import OpsHealthRuntime
 
-    logging.basicConfig(level=logging.INFO)
+    from ..shared.logfmt import configure_logging
+
+    configure_logging("ops")  # standard one-line format (TASK-2225)
     # Bound a connect to an unreachable database (no RST) so the storage
     # producer keeps publishing "down" instead of going silent for ~2 minutes
     # and tripping the wedge watchdog through an outage (TASK-1991).
