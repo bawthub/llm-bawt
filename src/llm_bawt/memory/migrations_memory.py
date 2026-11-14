@@ -96,17 +96,21 @@ def backfill_meaning_embeddings(
         Dict with migration statistics
     """
     from sqlalchemy import text
-    from .embeddings import generate_embedding
+    from .embeddings import generate_embedding, meaning_text
 
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
     updated = 0
     failed = 0
+    skipped = 0
 
     with backend.engine.connect() as conn:
         # Count total needing migration
         count_sql = text(f"""
             SELECT COUNT(*) FROM {backend._memories_table_name}
             WHERE meaning_embedding IS NULL
-              AND (intent IS NOT NULL OR stakes IS NOT NULL OR recurrence_keywords IS NOT NULL)
+              AND (intent IS NOT NULL OR stakes IS NOT NULL OR recurrence_keywords IS NOT NULL
+                   OR emotional_charge IS NOT NULL)
         """)
         total = conn.execute(count_sql).scalar() or 0
         logger.debug(f"Found {total} memories needing meaning embedding generation")
@@ -118,51 +122,77 @@ def backfill_meaning_embeddings(
             logger.debug(f"[DRY RUN] Would generate embeddings for {total} memories")
             return {"updated": 0, "failed": 0, "total": total, "dry_run": True}
 
-        # Process in batches
+        # Snapshot the pass boundary and advance even for empty/failed embeds.
+        # Otherwise an unchanged first page can be fetched forever.
+        upper_id = conn.execute(text(f"SELECT MAX(id) FROM {backend._memories_table_name}")).scalar()
+        conn.commit()
+        after_id = ""
         while True:
             fetch_sql = text(f"""
-                SELECT id, intent, stakes, recurrence_keywords FROM {backend._memories_table_name}
+                SELECT id, content, intent, stakes, emotional_charge, recurrence_keywords
+                FROM {backend._memories_table_name}
                 WHERE meaning_embedding IS NULL
-                  AND (intent IS NOT NULL OR stakes IS NOT NULL OR recurrence_keywords IS NOT NULL)
+                  AND (intent IS NOT NULL OR stakes IS NOT NULL OR recurrence_keywords IS NOT NULL
+                       OR emotional_charge IS NOT NULL)
+                  AND id > :after_id AND id <= :upper_id
+                ORDER BY id
                 LIMIT :limit
             """)
-            rows = conn.execute(fetch_sql, {"limit": batch_size}).fetchall()
+            rows = conn.execute(fetch_sql, {
+                "limit": batch_size, "after_id": after_id, "upper_id": upper_id,
+            }).fetchall()
+            conn.commit()  # No reader transaction spans the embedding request.
             if not rows:
                 break
+            after_id = rows[-1].id
 
             for row in rows:
                 try:
                     keywords = row.recurrence_keywords or []
                     if isinstance(keywords, str):
                         keywords = json.loads(keywords)
-                    parts = [row.intent or "", row.stakes or "", " ".join(keywords)]
-                    meaning_text = " | ".join([p for p in parts if p])
-                    if not meaning_text:
+                    body = meaning_text(row.content or "", row.intent, row.stakes,
+                                        row.emotional_charge, keywords)
+                    if not body:
+                        skipped += 1
                         continue
 
-                    emb = generate_embedding(meaning_text, backend.embedding_model)
+                    emb = generate_embedding(body, backend.embedding_model)
                     if emb:
                         update_sql = text(f"""
                             UPDATE {backend._memories_table_name}
                             SET meaning_embedding = :embedding,
                                 meaning_updated_at = CURRENT_TIMESTAMP,
                                 updated_at = CURRENT_TIMESTAMP
-                            WHERE id = :id
+                            WHERE id = :id AND meaning_embedding IS NULL
+                              AND content IS NOT DISTINCT FROM :old_content
+                              AND intent IS NOT DISTINCT FROM :old_intent
+                              AND stakes IS NOT DISTINCT FROM :old_stakes
+                              AND emotional_charge IS NOT DISTINCT FROM :old_emotion
+                              AND recurrence_keywords IS NOT DISTINCT FROM CAST(:old_keywords AS jsonb)
                         """)
-                        conn.execute(update_sql, {
+                        result = conn.execute(update_sql, {
                             "id": row.id,
+                            "old_content": row.content, "old_intent": row.intent,
+                            "old_stakes": row.stakes, "old_emotion": row.emotional_charge,
+                            "old_keywords": (json.dumps(row.recurrence_keywords)
+                                             if row.recurrence_keywords is not None else None),
                             "embedding": f"[{','.join(str(x) for x in emb)}]",
                         })
-                        updated += 1
+                        conn.commit()
+                        updated += result.rowcount
+                        skipped += int(result.rowcount == 0)
+                    else:
+                        failed += 1
                 except Exception as e:
+                    conn.rollback()
                     logger.warning(f"Failed to generate meaning embedding for {row.id}: {e}")
                     failed += 1
 
-            conn.commit()
             logger.debug(f"Generated embeddings for {updated}/{total} memories")
 
     logger.debug(f"Meaning embedding generation complete: {updated} updated, {failed} failed")
-    return {"updated": updated, "failed": failed, "total": total}
+    return {"updated": updated, "failed": failed, "skipped": skipped, "total": total}
 
 
 def add_recalled_history_column(backend: Any, dry_run: bool = False) -> dict:
@@ -239,52 +269,9 @@ def backfill_sessions(
     distinct_sessions = 0
 
     with backend.engine.connect() as conn:
-        # First, make sure the sessions table actually exists. If somebody
-        # runs this before any backend has called _ensure_tables_exist(),
-        # we still want a clean run rather than a SQL error.
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS sessions (
-                id VARCHAR(36) PRIMARY KEY,
-                bot_id VARCHAR(64) NOT NULL,
-                started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                ended_at TIMESTAMP,
-                archived_at TIMESTAMP,
-                status VARCHAR(16) NOT NULL DEFAULT 'active',
-                session_metadata JSONB
-            )
-        """))
-        # TASK-250 gap (caught in review): tables bootstrapped before the
-        # status-lifecycle migration lack archived_at (and pre-284, user_id).
-        conn.execute(text("""
-            ALTER TABLE sessions ADD COLUMN IF NOT EXISTS user_id VARCHAR(64)
-        """))
-        conn.execute(text("""
-            ALTER TABLE sessions ADD COLUMN IF NOT EXISTS archived_at TIMESTAMP
-        """))
-        # Idempotent legacy migration: retire pre-TASK-250 'completed' rows
-        # and stamp archived_at (from ended_at) on archived rows missing it.
-        conn.execute(text("""
-            UPDATE sessions
-            SET status = 'archived',
-                archived_at = COALESCE(archived_at, ended_at)
-            WHERE status = 'completed'
-        """))
-        conn.execute(text("""
-            UPDATE sessions
-            SET archived_at = ended_at
-            WHERE status = 'archived'
-              AND archived_at IS NULL
-              AND ended_at IS NOT NULL
-        """))
-        conn.execute(text("""
-            CREATE INDEX IF NOT EXISTS idx_sessions_bot_started
-            ON sessions(bot_id, started_at)
-        """))
-        conn.execute(text("""
-            CREATE INDEX IF NOT EXISTS idx_sessions_status
-            ON sessions(status)
-        """))
-        conn.commit()
+        # Preview must not create/alter tables or migrate existing sessions.
+        if not dry_run:
+            _prepare_sessions(conn)
 
         # Discover all *_messages tables. Excludes *_forgotten_messages by
         # requiring the suffix to be _messages exactly.
@@ -362,7 +349,8 @@ def backfill_sessions(
                 else:
                     skipped += 1
 
-            conn.commit()
+            if not dry_run:
+                conn.commit()
 
     return {
         "scanned_tables": len(tables) if 'tables' in locals() else 0,
@@ -371,3 +359,48 @@ def backfill_sessions(
         "skipped": skipped,
         "dry_run": dry_run,
     }
+
+
+def _prepare_sessions(conn) -> None:
+    """Bootstrap and migrate session schema only for an executing backfill."""
+    from sqlalchemy import text
+
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS sessions (
+            id VARCHAR(36) PRIMARY KEY,
+            bot_id VARCHAR(64) NOT NULL,
+            started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            ended_at TIMESTAMP,
+            archived_at TIMESTAMP,
+            status VARCHAR(16) NOT NULL DEFAULT 'active',
+            session_metadata JSONB
+        )
+    """))
+    conn.execute(text("""
+        ALTER TABLE sessions ADD COLUMN IF NOT EXISTS user_id VARCHAR(64)
+    """))
+    conn.execute(text("""
+        ALTER TABLE sessions ADD COLUMN IF NOT EXISTS archived_at TIMESTAMP
+    """))
+    conn.execute(text("""
+        UPDATE sessions
+        SET status = 'archived',
+            archived_at = COALESCE(archived_at, ended_at)
+        WHERE status = 'completed'
+    """))
+    conn.execute(text("""
+        UPDATE sessions
+        SET archived_at = ended_at
+        WHERE status = 'archived'
+          AND archived_at IS NULL
+          AND ended_at IS NOT NULL
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS idx_sessions_bot_started
+        ON sessions(bot_id, started_at)
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS idx_sessions_status
+        ON sessions(status)
+    """))
+    conn.commit()

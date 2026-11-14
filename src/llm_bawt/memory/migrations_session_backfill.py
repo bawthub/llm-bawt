@@ -48,6 +48,7 @@ import argparse
 import json
 import logging
 import sys
+import uuid
 from typing import Any
 
 from sqlalchemy import text
@@ -61,7 +62,7 @@ def _legacy_id(bot_id: str) -> str:
     """Deterministic legacy session id (<= 36 chars for varchar(36))."""
     sid = f"legacy-{bot_id}"
     if len(sid) > 36:
-        sid = sid[:36]
+        sid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"llm-bawt:legacy-session:{bot_id}"))
     return sid
 
 
@@ -99,6 +100,14 @@ def _upsert_legacy_session(conn, bot_id: str, user_id: str) -> str:
         ),
         {"sid": sid, "bot_id": bot_id, "user_id": user_id, "meta": LEGACY_METADATA},
     )
+    existing = conn.execute(text("""
+        SELECT bot_id, user_id, status, session_metadata
+        FROM sessions WHERE id = :sid FOR UPDATE
+    """), {"sid": sid}).one()
+    metadata = existing.session_metadata or {}
+    if (existing.bot_id != bot_id or existing.user_id != user_id
+            or existing.status != "archived" or metadata.get("legacy_backfill") is not True):
+        raise ValueError(f"Legacy session {sid} does not match the requested owner and legacy state")
     return sid
 
 
