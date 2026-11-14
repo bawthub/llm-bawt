@@ -9,6 +9,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_isolated_recall_pg.py::",
     "test_recall_ledger_pg.py::",
     "test_recall_tool_args_pg.py::",
+    "test_memory_consolidation_replacement_pg.py::",
     "test_bot_access_pg.py::",
     "test_bot_policy_refresh_pg.py::",
     "test_bot_policy_event_refresh_pg.py::",
