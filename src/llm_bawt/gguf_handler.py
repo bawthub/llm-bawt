@@ -41,7 +41,6 @@ def get_or_download_gguf_model(repo_id: str, filename: str, config: Config) -> s
             repo_id=repo_id,
             filename=filename,
             local_dir=str(model_repo_cache_dir),
-            local_dir_use_symlinks=False,
         )
         console.print("[green]Download complete[/green]")
         return downloaded_path
