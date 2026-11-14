@@ -777,6 +777,26 @@ def test_a_rearmed_row_that_already_ran_is_relinked_to_its_delivery(delivery_sto
     assert step["done"] == [] and step["ambiguous"] == []   # still QUEUED: keeps its place
 
 
+def test_a_started_attempt_whose_lease_expired_stays_in_attempt_history(delivery_store):  # noqa: F811
+    """TASK-1256: the re-arm resets the row to ``reserved``, so the next claim
+    records nothing; the started attempt must already be in ``attempts``."""
+    store, sender, target = delivery_store
+    delivery = _run_then_requeue(store, sender, target, "ran, lease expired")
+    turn = TurnLogStore(store.config).get_turn(delivery.turn_id)
+    payload = json.loads(turn.request_json)
+    assert turn.status == "reserved" and turn.ended_at is None   # still the queue-ordering fence
+    assert payload["inter_bot_delivery_id"] == delivery.id
+    [attempt] = payload["attempts"]
+    assert (attempt["n"], attempt["status"], attempt["end_reason"]) == (1, "aborted", "aborted")
+    assert attempt["started"] and attempt["ended"] and attempt["ended"] >= attempt["started"]
+    assert "lease expired" in attempt["error"]
+
+    claimed = store.claim_next(target, claim_owner="live-app", steer_capable=False, lease_seconds=60)
+    assert claimed and claimed.id == delivery.id
+    after = json.loads(TurnLogStore(store.config).get_turn(delivery.turn_id).request_json)
+    assert after["attempts"] == [attempt]   # survives the re-claim, not double-counted
+
+
 def _withdraw(store, delivery, *, linked=True):
     with store.engine.begin() as conn:
         if not linked:  # rows re-armed before the fix carry only the chat payload

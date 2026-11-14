@@ -173,13 +173,19 @@ class DeliveryLeaseRecovery:
                     # chat payload, not the reservation's delivery link. Re-stamp
                     # it so the reservation sweep can tie the re-armed row to
                     # this delivery and settle it if the delivery never runs again.
+                    # TASK-1256: a run that started before its lease expired is
+                    # its own attempt. Record it in ``attempts`` now, because the
+                    # next claim sees a ``reserved`` row and records nothing.
                     conn.execute(sa_text("""
                         UPDATE turn_logs SET status='reserved', ended_at=NULL,
                             end_reason=NULL, error_text=NULL,
-                            request_json=(COALESCE(CAST(request_json AS jsonb), '{}'::jsonb)
-                                || jsonb_build_object('inter_bot_delivery_id', CAST(:delivery_id AS text)))::text
+                            request_json=CAST(:request_json AS jsonb)::text
                         WHERE id=:turn_id AND ended_at IS NULL
-                    """), {"turn_id": row["turn_id"], "delivery_id": row["id"]})
+                    """), {
+                        "turn_id": row["turn_id"],
+                        "request_json": DeliveryLeaseRecovery._archived_rearm_payload(
+                            conn, row["turn_id"], row["id"]),
+                    })
                 recovered.append(DeliveryRecord.from_mapping(updated))
         from .service.turn_termination import reconcile_finished_tool_safely
         for turn_id in settled_turn_ids:
@@ -190,6 +196,34 @@ class DeliveryLeaseRecovery:
         from .inter_bot_delivery_retry import restart_retry_recovered
         recovered.extend(restart_retry_recovered(store))
         return recovered
+
+    @staticmethod
+    def _archived_rearm_payload(conn: Connection, turn_id: str, delivery_id: str) -> str:
+        """``request_json`` for re-arming an open turn row after a lease expiry.
+
+        A started attempt (status other than ``reserved``) is closed into
+        ``attempts`` through the shared history writer, as an ``aborted``
+        attempt ending now; per-attempt keys drop. A never-started reservation
+        keeps its payload. Either way the row stays tied to its delivery.
+        """
+        from .service.turn_termination import ATTEMPT_KEYS, rearm_request_payload, turn_payload
+        lock = " FOR NO KEY UPDATE" if conn.dialect.name == "postgresql" else ""
+        prior = conn.execute(sa_text(
+            "SELECT request_json, status, end_reason, error_text, created_at, ended_at"
+            " FROM turn_logs WHERE id=:id" + lock
+        ), {"id": turn_id}).mappings().first()
+        payload = turn_payload(prior["request_json"] if prior else None)
+        payload["inter_bot_delivery_id"] = str(delivery_id)
+        if prior is None or prior["status"] == "reserved":
+            return json.dumps(payload, ensure_ascii=False, default=str)
+        for key in ATTEMPT_KEYS:
+            payload.pop(key, None)
+        started = {
+            **dict(prior), "status": "aborted", "end_reason": "aborted",
+            "ended_at": datetime.now(timezone.utc),
+            "error_text": prior["error_text"] or "delivery lease expired before the attempt finished",
+        }
+        return rearm_request_payload(started, payload)
 
     @staticmethod
     def settle_withdrawn_turn(conn: Connection, turn_id: str | None, *, cause: str) -> bool:
