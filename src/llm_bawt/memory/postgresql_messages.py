@@ -10,7 +10,7 @@ import logging
 import time
 from typing import Any
 
-from sqlalchemy import select, text, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.orm import Session
 
 from ..message_authorship import AuthorReference
@@ -56,15 +56,39 @@ class PostgreSQLMessageMixin:
                if _native_selected_owner is not None else {}),
         )
 
-    def get_unprocessed_messages(self, limit: int = 100) -> list[dict]:
-        """Get messages that haven't been processed for memory extraction."""
+    def _unprocessed_owned(self):
+        from .postgresql import sessions_table
+
+        return (select(self.messages_table)
+                .join(sessions_table, sessions_table.c.id == self.messages_table.c.session_id)
+                .where(self.messages_table.c.processed.is_(False),
+                       sessions_table.c.bot_id == self.bot_id,
+                       sessions_table.c.status.in_(("active", "archived")),
+                       sessions_table.c.user_id.is_not(None),
+                       sessions_table.c.user_id.not_in(("", "system"))))
+
+    def get_unprocessed_message_users(self, limit: int = 10) -> list[str]:
+        """Discover proven owners, oldest pending batch first; never infer one."""
+        from .postgresql import sessions_table
+
+        stmt = (self._unprocessed_owned().with_only_columns(sessions_table.c.user_id)
+                .group_by(sessions_table.c.user_id)
+                .order_by(func.min(self.messages_table.c.timestamp), sessions_table.c.user_id)
+                .limit(limit))
         with Session(self.engine) as session:
-            stmt = (
-                select(self.messages_table)
-                .where(self.messages_table.c.processed == False)  # noqa: E712 - SQL comparison
-                .order_by(self.messages_table.c.timestamp.asc())
-                .limit(limit)
-            )
+            return list(session.execute(stmt).scalars())
+
+    def get_unprocessed_messages(self, limit: int = 100, *, user_id: str | None = None) -> list[dict]:
+        """Select one proven owner's messages before ordering or limiting."""
+        if not user_id or user_id == "system":
+            return []
+        from .postgresql import sessions_table
+
+        with Session(self.engine) as session:
+            stmt = (self._unprocessed_owned()
+                    .where(sessions_table.c.user_id == user_id)
+                    .order_by(self.messages_table.c.timestamp.asc(), self.messages_table.c.id)
+                    .limit(limit))
             rows = session.execute(stmt).fetchall()
             
             return [

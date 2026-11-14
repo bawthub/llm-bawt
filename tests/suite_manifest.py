@@ -23,6 +23,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_embedding_repair_pg.py::",
     "test_forget_message_state_pg.py::",
     "test_memory_update_pg.py::",
+    "test_memory_extraction_ownership_pg.py::",
     "test_bot_tag_api_pg.py::",
     "test_bot_grants_pg.py::",
     "test_house_tenancy_pg.py::",

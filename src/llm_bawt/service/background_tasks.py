@@ -566,22 +566,12 @@ class BackgroundTasksMixin:
         runs LLM-based fact extraction, stores resulting memories, and marks
         the source messages as processed.
         """
-        from ..memory.errors import MemoryUpdateDuplicateError
-        from ..memory.extraction.service import ExtractionFailed, MemoryAction, MemoryExtractionService
-
         bot_id = task.bot_id or self._default_bot
-        user_id = task.user_id
-        if not user_id or user_id == "system":
-            user_id = getattr(self.config, "DEFAULT_USER", None) or "system"
-        batch_size = int(task.payload.get("batch_size", 50))
+        batch_size = max(1, min(int(task.payload.get("batch_size", 50)), 1000))
 
         # Check config gate
         if not getattr(self.config, "MEMORY_EXTRACTION_ENABLED", True):
             return {"skipped": True, "reason": "Memory extraction disabled in config"}
-
-        memory_client = self.get_memory_client(bot_id, user_id)
-        if not memory_client:
-            return {"error": "Memory client unavailable", "bot_id": bot_id}
 
         # Get a PostgreSQL backend directly for message table access.
         # MemoryClient may be in MCP server mode where _get_storage() is
@@ -600,7 +590,31 @@ class BackgroundTasksMixin:
             return {"error": "Failed to create memory backend: " + client_error_text(
                 e, "Memory extraction backend failed", "Backend unavailable")}
 
-        unprocessed = backend.get_unprocessed_messages(limit=batch_size)
+        # A system job is discovery, not an owner. Each owner gets an isolated
+        # bounded batch and retry budget; one failure cannot starve the others.
+        explicit_user = task.user_id if task.user_id and task.user_id != "system" else None
+        owners = [explicit_user] if explicit_user else backend.get_unprocessed_message_users(limit=10)
+        results, failures = [], []
+        for owner in owners:
+            try:
+                results.append(self._extract_owned_memory_batch(task, backend, bot_id, owner, batch_size))
+            except Exception as exc:
+                failures.append(f"{owner}: {exc}")
+        if failures:
+            raise ExtractionBatchFailed("; ".join(failures))
+        if explicit_user and results:
+            return results[0]
+        return {"bot_id": bot_id, "owners_processed": len(results),
+                **{key: sum(result.get(key, 0) for result in results)
+                   for key in ("messages_found", "facts_extracted", "facts_stored")}}
+
+    def _extract_owned_memory_batch(self, task: Task, backend, bot_id: str,
+                                    user_id: str, batch_size: int) -> dict:
+        from ..memory.errors import MemoryUpdateDuplicateError
+        from ..memory.extraction.service import ExtractionFailed, MemoryAction, MemoryExtractionService
+        from ..memory.extraction.storage import ExtractionMemoryStore
+
+        unprocessed = backend.get_unprocessed_messages(limit=batch_size, user_id=user_id)
 
         if not unprocessed:
             return {
@@ -651,6 +665,8 @@ class BackgroundTasksMixin:
             if m.get("role") in ("user", "assistant") and m.get("content")
         ]
         message_ids = [m["id"] for m in unprocessed]
+        source_ids = set(message_ids)
+        memory_client = ExtractionMemoryStore(backend, bot_id, user_id)
 
         # TASK-2214: a failed batch stays unprocessed and is retried. Every
         # attempt is strict (an LLM failure or unparseable reply is a
@@ -683,8 +699,11 @@ class BackgroundTasksMixin:
                         messages=conversation, use_llm=False,
                     )
 
-                # Filter by importance
-                facts = [f for f in facts if f.importance >= min_importance]
+                # Never let a hallucinated or cross-owner source authorize a
+                # memory/profile write. Reject the whole unsupported fact.
+                facts = [f for f in facts if f.importance >= min_importance
+                         and f.source_message_ids
+                         and set(f.source_message_ids).issubset(source_ids)]
                 total_facts = len(facts)
 
                 if facts:
@@ -705,7 +724,8 @@ class BackgroundTasksMixin:
                     failed_writes: set[int] = set()
                     for action in actions:
                         fact = action.fact
-                        if not fact:
+                        if (not fact or not fact.source_message_ids
+                                or not set(fact.source_message_ids).issubset(source_ids)):
                             continue
                         try:
                             tag_str = ",".join(fact.tags)
@@ -729,13 +749,15 @@ class BackgroundTasksMixin:
                                     action.target_memory_id[:8],
                                     fact.content,
                                 )
-                                memory_client.update_memory(
+                                updated = memory_client.update_memory(
                                     memory_id=action.target_memory_id,
                                     content=fact.content,
                                     importance=fact.importance,
                                     tags=fact.tags,
                                     source_message_ids=fact.source_message_ids[:5],
                                 )
+                                if updated is None:
+                                    continue
                                 total_stored += 1
                             elif action.action == "DELETE" and action.target_memory_id:
                                 log.info(

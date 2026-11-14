@@ -42,6 +42,18 @@ class PostgreSQLSemanticMemoryMixin:
             """), {"partition": self._memories_table_name})
             yield conn
 
+    @staticmethod
+    def _validate_extraction_sources(conn, eligibility, source_message_ids):
+        if eligibility is None:
+            return
+        valid = conn.execute(text(f"""
+            SELECT 1 FROM (SELECT CAST(:source_ids AS jsonb) AS source_message_ids,
+                                  CAST(:authority_partition AS text) AS bot_id) mem
+            WHERE {eligibility.predicate}
+        """), {**eligibility.params, "source_ids": json.dumps(source_message_ids or [])}).first()
+        if valid is None:
+            raise ValueError("extraction memory sources do not belong to the owner")
+
     def add_memory(
         self,
         memory_id: str,
@@ -56,6 +68,8 @@ class PostgreSQLSemanticMemoryMixin:
         recurrence_keywords: list[str] | None = None,
         meaning_embedding: list[float] | None = None,
         meaning_updated_at: datetime | None = None,
+        *,
+        eligibility: MemoryProvenance | None = None,
     ) -> MemoryWriteOutcome:
         """Add a distilled memory to storage.
 
@@ -96,8 +110,11 @@ class PostgreSQLSemanticMemoryMixin:
         if meaning_embedding:
             meaning_updated_at = meaning_updated_at or datetime.now(timezone.utc)
 
+        guard = eligibility.predicate if eligibility else "TRUE"
+        scope_params = eligibility.params if eligibility else {}
         try:
             with self._memory_write_transaction() as conn:
+                self._validate_extraction_sources(conn, eligibility, source_message_ids)
                 # Check for duplicate/similar content BEFORE inserting
                 # Use embedding similarity if available, otherwise exact content match
                 # Threshold from config (default 0.85) - catches semantic duplicates
@@ -107,12 +124,13 @@ class PostgreSQLSemanticMemoryMixin:
                     # Vector similarity check - find most similar existing memory
                     dedup_sql = text(f"""
                         SELECT id, content, 1 - (embedding <=> :embedding) AS similarity
-                        FROM {self._memories_table_name}
-                        WHERE embedding IS NOT NULL
+                        FROM {self._memories_table_name} mem
+                        WHERE embedding IS NOT NULL AND {guard}
                         ORDER BY embedding <=> :embedding
                         LIMIT 1
                     """)
                     similar = conn.execute(dedup_sql, {
+                        **scope_params,
                         "embedding": f"[{','.join(str(x) for x in embedding)}]",
                     }).first()
                     
@@ -122,11 +140,11 @@ class PostgreSQLSemanticMemoryMixin:
                 else:
                     # Exact content match fallback
                     exact_sql = text(f"""
-                        SELECT id FROM {self._memories_table_name} 
-                        WHERE LOWER(content) = LOWER(:content)
+                        SELECT id FROM {self._memories_table_name} mem
+                        WHERE LOWER(content) = LOWER(:content) AND {guard}
                         LIMIT 1
                     """)
-                    exact_match = conn.execute(exact_sql, {"content": content}).first()
+                    exact_match = conn.execute(exact_sql, {**scope_params, "content": content}).first()
                     if exact_match:
                         logger.debug(f"Skipping exact duplicate memory: '{content[:50]}...'")
                         return MemoryWriteOutcome("duplicate", str(exact_match.id))
@@ -138,9 +156,14 @@ class PostgreSQLSemanticMemoryMixin:
                 existing = conn.execute(check_sql, {"id": memory_id}).first()
                 
                 if existing:
+                    if eligibility and conn.execute(text(f"""
+                        SELECT 1 FROM {self._memories_table_name} mem
+                        WHERE id = :id AND {guard}
+                    """), {**scope_params, "id": memory_id}).first() is None:
+                        raise ValueError("extraction cannot overwrite another owner's memory")
                     # Update existing
                     update_sql = text(f"""
-                        UPDATE {self._memories_table_name}
+                        UPDATE {self._memories_table_name} mem
                         SET content = :content,
                             tags = CAST(:tags AS jsonb),
                             importance = :importance,
@@ -168,9 +191,10 @@ class PostgreSQLSemanticMemoryMixin:
                                 THEN :meaning_updated_at
                                 ELSE COALESCE(:meaning_updated_at, meaning_updated_at) END,
                             updated_at = CURRENT_TIMESTAMP
-                        WHERE id = :id
+                        WHERE id = :id AND {guard}
                     """)
                     conn.execute(update_sql, {
+                        **scope_params,
                         "id": memory_id,
                         "content": content,
                         "tags": json.dumps(tags),
@@ -222,6 +246,7 @@ class PostgreSQLSemanticMemoryMixin:
         tags: list[str] | None = None,
         importance: float | None = None,
         source_message_ids: list[str] | None = None,
+        eligibility: MemoryProvenance | None = None,
     ) -> dict | None:
         """Patch an existing row, excluding itself from duplicate detection.
 
@@ -229,12 +254,14 @@ class PostgreSQLSemanticMemoryMixin:
         fails visibly instead of overwriting a newer edit or returning invented
         state. An unavailable embedder clears vectors only when content changes.
         """
+        guard = eligibility.predicate if eligibility else "TRUE"
+        scope_params = eligibility.params if eligibility else {}
         with self.engine.connect() as conn:
             original = conn.execute(text(f"""
                 SELECT content, intent, stakes, emotional_charge,
                        recurrence_keywords, updated_at
-                FROM {self._memories_table_name} WHERE id = :id
-            """), {"id": memory_id}).mappings().first()
+                FROM {self._memories_table_name} mem WHERE id = :id AND {guard}
+            """), {**scope_params, "id": memory_id}).mappings().first()
         if original is None:
             return None
 
@@ -263,6 +290,7 @@ class PostgreSQLSemanticMemoryMixin:
                 logger.warning("Could not regenerate meaning embedding: %s", exc)
 
         params = {
+            **scope_params,
             "id": memory_id, "old_content": original["content"],
             "old_updated_at": original["updated_at"],
             "content": content, "changed": changed,
@@ -278,20 +306,22 @@ class PostgreSQLSemanticMemoryMixin:
                                   if meaning_embedding else None),
         }
         with self._memory_write_transaction() as conn:
+            if source_message_ids is not None:
+                self._validate_extraction_sources(conn, eligibility, source_message_ids)
             if changed:
                 threshold = getattr(self.config, "MEMORY_DEDUP_SIMILARITY", 0.85)
                 # A prior embedding outage leaves NULL vectors. Exact matches
                 # still count even when this edit has a valid new embedding.
                 exact = conn.execute(text(f"""
-                    SELECT id FROM {self._memories_table_name}
-                    WHERE id <> :id AND LOWER(content) = LOWER(:content) LIMIT 1
+                    SELECT id FROM {self._memories_table_name} mem
+                    WHERE id <> :id AND LOWER(content) = LOWER(:content) AND {guard} LIMIT 1
                 """), params).first()
                 is_duplicate = exact is not None
                 if not is_duplicate and embedding:
                     similar = conn.execute(text(f"""
                         SELECT id, 1 - (embedding <=> :embedding) AS similarity
-                        FROM {self._memories_table_name}
-                        WHERE id <> :id AND embedding IS NOT NULL
+                        FROM {self._memories_table_name} mem
+                        WHERE id <> :id AND embedding IS NOT NULL AND {guard}
                         ORDER BY embedding <=> :embedding LIMIT 1
                     """), params).first()
                     is_duplicate = similar is not None and similar.similarity > threshold
@@ -299,7 +329,7 @@ class PostgreSQLSemanticMemoryMixin:
                     raise MemoryUpdateDuplicateError("memory update conflicts with another duplicate")
 
             updated = conn.execute(text(f"""
-                UPDATE {self._memories_table_name}
+                UPDATE {self._memories_table_name} mem
                 SET content = COALESCE(:content, content),
                     tags = CASE WHEN :tags_provided THEN CAST(:tags AS jsonb) ELSE tags END,
                     importance = COALESCE(:importance, importance),
@@ -313,7 +343,7 @@ class PostgreSQLSemanticMemoryMixin:
                                   ELSE CURRENT_TIMESTAMP END
                         ELSE meaning_updated_at END,
                     updated_at = CURRENT_TIMESTAMP
-                WHERE id = :id AND content = :old_content
+                WHERE id = :id AND content = :old_content AND {guard}
                   AND updated_at IS NOT DISTINCT FROM :old_updated_at
                 RETURNING id, content, tags, importance, source_message_ids,
                           access_count, created_at, last_accessed,
@@ -321,7 +351,7 @@ class PostgreSQLSemanticMemoryMixin:
             """), params).mappings().first()
             if updated is None:
                 exists = conn.execute(text(f"""
-                    SELECT 1 FROM {self._memories_table_name} WHERE id = :id
+                    SELECT 1 FROM {self._memories_table_name} mem WHERE id = :id AND {guard}
                 """), params).first()
                 if exists is not None:
                     raise MemoryUpdateConflictError("memory changed concurrently; retry the update")

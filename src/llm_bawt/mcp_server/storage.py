@@ -562,10 +562,12 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
         self,
         bot_id: str = "default",
         limit: int = 100,
+        *,
+        user_id: str | None = None,
     ) -> list[Message]:
-        """Get messages that haven't been processed for memory extraction."""
+        """Get one proven owner's unprocessed messages; unscoped calls return none."""
         backend = self._get_backend(bot_id)
-        results = backend.get_unprocessed_messages(limit=limit)
+        results = backend.get_unprocessed_messages(limit=limit, user_id=user_id)
         
         return [
             Message(

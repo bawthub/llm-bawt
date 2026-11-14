@@ -27,7 +27,7 @@ class _Backend:
         self.rows = rows
         self.processed: list[str] = []
 
-    def get_unprocessed_messages(self, limit: int = 50) -> list[dict[str, Any]]:
+    def get_unprocessed_messages(self, limit: int = 50, *, user_id: str) -> list[dict[str, Any]]:
         return [r for r in self.rows if r["id"] not in self.processed]
 
     def mark_messages_processed(self, ids: list[str]) -> None:
@@ -60,7 +60,7 @@ def _service(monkeypatch: pytest.MonkeyPatch, memory: _Memory) -> tuple[Backgrou
     service = BackgroundTasksMixin()
     service.config = SimpleNamespace(MEMORY_PROFILE_ATTRIBUTE_ENABLED=False)  # type: ignore[attr-defined]
     service._default_bot = "test"  # type: ignore[attr-defined]
-    service.get_memory_client = lambda *a: memory  # type: ignore[attr-defined]
+    monkeypatch.setattr("llm_bawt.memory.extraction.storage.ExtractionMemoryStore", lambda *a: memory)
     service._get_background_client = lambda **_kw: (object(), "mock-model")  # type: ignore[attr-defined]
     task = SimpleNamespace(bot_id="test", user_id="u", payload={})
     return service, backend, task

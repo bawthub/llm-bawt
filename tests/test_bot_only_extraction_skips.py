@@ -31,7 +31,7 @@ class _Backend:
     def __init__(self, rows):
         self.rows, self.processed = rows, []
 
-    def get_unprocessed_messages(self, limit=50):
+    def get_unprocessed_messages(self, limit=50, *, user_id):
         return list(self.rows)
 
     def mark_messages_processed(self, ids):
@@ -45,7 +45,8 @@ def _service(monkeypatch, rows):
     service = BackgroundTasksMixin()
     service.config = SimpleNamespace()
     service._default_bot = "test"
-    service.get_memory_client = lambda *a: SimpleNamespace(list_memories=lambda **k: [])
+    monkeypatch.setattr("llm_bawt.memory.extraction.storage.ExtractionMemoryStore",
+                        lambda *a: SimpleNamespace(list_memories=lambda **k: []))
     service._get_background_client = Mock(return_value=(None, None))
     task = SimpleNamespace(bot_id="test", user_id="u", payload={})
     return service, backend, task
