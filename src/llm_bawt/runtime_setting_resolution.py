@@ -1,4 +1,8 @@
-"""Specialized resolution helpers for database-backed runtime settings."""
+"""Specialized resolution helpers for database-backed runtime settings.
+
+Each call builds a fresh resolver, so its 5 s cache never applies: reads see
+the latest row, including ones written directly in this process.
+"""
 
 from __future__ import annotations
 
@@ -11,7 +15,9 @@ def resolve_global_runtime_setting(config: Any, key: str, fallback: Any = None) 
     from .setting_definitions import SETTING_DEFINITIONS
 
     definition = SETTING_DEFINITIONS.get(key)
-    default = definition.default if definition is not None else fallback
+    default = definition.default if definition is not None else None
+    if default is None:
+        default = fallback
     return RuntimeSettingsResolver(config=config, bot=None).resolve(key, fallback=default)
 
 
@@ -23,5 +29,7 @@ def resolve_bot_runtime_setting(
     from .setting_definitions import SETTING_DEFINITIONS
 
     definition = SETTING_DEFINITIONS.get(key)
-    default = definition.default if definition is not None else fallback
+    default = definition.default if definition is not None else None
+    if default is None:
+        default = fallback
     return RuntimeSettingsResolver(config=config, bot_id=bot_id).resolve(key, fallback=default)

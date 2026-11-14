@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Iterable, Literal, Mapping
 
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
+
+logger = logging.getLogger(__name__)
 
 EntityType = Literal["user", "bot", "system"]
 AuthorStatus = Literal["canonical", "legacy", "unknown"]
@@ -208,18 +211,17 @@ class LegacyAuthorResolver:
             return result
 
         unresolved_ids = [str(row.get("id") or "") for row in unresolved if row.get("id")]
-        delivery_authors = self._delivery_authors(unresolved_ids)
+        normalized_bot = normalize_entity_id(bot_id)
+        delivery_authors = self._delivery_authors(unresolved_ids, normalized_bot)
         session_users = self._session_users(
             [str(row.get("session_id")) for row in unresolved if row.get("session_id")]
         )
-        normalized_bot = normalize_entity_id(bot_id)
 
         for row in unresolved:
             message_id = str(row.get("id") or "")
             if message_id in delivery_authors:
-                result[message_id] = AuthorReference(
-                    "bot", delivery_authors[message_id], "legacy"
-                )
+                entity_type, entity_id = delivery_authors[message_id]
+                result[message_id] = AuthorReference(entity_type, entity_id, "legacy")
             elif row.get("role") == "assistant":
                 result[message_id] = AuthorReference("bot", normalized_bot, "legacy")
             elif row.get("role") == "user" and row.get("session_id") in session_users:
@@ -230,25 +232,29 @@ class LegacyAuthorResolver:
                 result[message_id] = AuthorReference.unknown()
         return result
 
-    def _delivery_authors(self, message_ids: list[str]) -> dict[str, str]:
+    def _delivery_authors(self, message_ids: list[str], target_bot_id: str) -> dict[str, tuple[str, str]]:
+        """Delivery-recorded authors, by the same rule as the backfill:
+        the delivery's ``author_entity_*`` for this target bot."""
         if not message_ids:
             return {}
         try:
             with self.engine.connect() as conn:
                 rows = conn.execute(
                     text(
-                        "SELECT user_message_id, sender_bot_id "
+                        "SELECT user_message_id, author_entity_type, author_entity_id "
                         "FROM inter_bot_deliveries "
-                        "WHERE user_message_id = ANY(:ids)"
+                        "WHERE user_message_id = ANY(:ids) AND target_bot_id = :target "
+                        "AND author_entity_type IN ('user', 'bot') AND author_entity_id <> ''"
                     ),
-                    {"ids": message_ids},
+                    {"ids": message_ids, "target": target_bot_id},
                 ).fetchall()
             return {
-                str(row.user_message_id): normalize_entity_id(row.sender_bot_id)
+                str(row.user_message_id): (row.author_entity_type, normalize_entity_id(row.author_entity_id))
                 for row in rows
-                if row.sender_bot_id
             }
         except Exception:
+            logger.warning("delivery author lookup failed; falling back to role/session",
+                           exc_info=True)
             return {}
 
     def _session_users(self, session_ids: list[str]) -> dict[str, str]:

@@ -370,8 +370,8 @@ class AgentBackendClient(LLMClient):
     def _with_turn_settings(self, config: dict[str, Any]) -> dict[str, Any]:
         """Apply per-turn runtime settings to this Claude Code turn's private config.
 
-        Resolved every turn (5s resolver cache) so a DB change lands on the next
-        turn without a restart.
+        Read from the DB every turn (a fresh resolver, so no cache) so a change
+        lands on the next turn without a restart.
         """
         if getattr(self, "_backend_name", None) != "claude-code":
             return config
