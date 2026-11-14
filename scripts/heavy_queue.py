@@ -15,6 +15,7 @@ import signal
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 import uuid
 
@@ -23,6 +24,7 @@ from scripts.heavy_slot import default_lock, heavy_slot, reserve_ticket
 MEMORY = 16 * 1024**3
 HEADROOM = 4 * 1024**3
 WALL_SECONDS = 1800
+CALLBACK_ATTEMPTS = 5
 DEFAULT_ROOT = Path(os.getenv("XDG_CACHE_HOME", Path.home() / ".cache")) / "bawt-heavy-queue"
 
 
@@ -92,6 +94,28 @@ def notify(job, receipt, *, opener=urllib.request.urlopen):
     if not isinstance(delivery_id, str) or not delivery_id:
         raise RuntimeError("callback response has no durable delivery ID")
     return delivery_id
+
+
+def notify_with_retry(job, receipt, receipt_path, *, attempts=CALLBACK_ATTEMPTS):
+    """Bound callback work, keeping the job result and manual retry recoverable."""
+    for attempt in range(1, attempts + 1):
+        permanent = False
+        receipt["callback_attempts"] = attempt
+        try:
+            receipt["callback_delivery_id"] = notify(job, receipt)
+            receipt.pop("callback_error", None)
+            save(receipt_path, receipt)
+            return True
+        except Exception as exc:
+            # Never retain HTTP bodies, URLs or arbitrary exception messages.
+            receipt["callback_error"] = type(exc).__name__
+            if isinstance(exc, urllib.error.HTTPError):
+                permanent = 400 <= exc.code < 500 and exc.code not in {408, 429}
+            save(receipt_path, receipt)
+        if permanent or attempt == attempts:
+            break
+        time.sleep(5 * attempt)
+    return False
 
 
 def remove_container(name):
@@ -212,20 +236,9 @@ def run_job(directory, ticket_fd):
         receipt["finished_at"] = stamp()
         receipt["interrupted"] = interrupted
         save(receipt_path, receipt)
-        # Retry enqueue with one idempotency key. A delivery already accepted
-        # before a lost response is replayed, never a second callback.
-        attempts = 0
-        while True:
-            try:
-                receipt["callback_delivery_id"] = notify(job, receipt)
-                receipt.pop("callback_error", None)
-                break
-            except Exception as exc:
-                attempts += 1
-                receipt["callback_error"] = type(exc).__name__
-            finally:
-                save(receipt_path, receipt)
-            time.sleep(min(60, 5 * attempts))
+        # Retry enqueue with one idempotency key, never re-execute the job.
+        # Permanent errors or the retry cap leave a durable manual-retry receipt.
+        notify_with_retry(job, receipt, receipt_path)
     return 0 if receipt["status"] == "PASSED" else 1
 
 
@@ -257,10 +270,7 @@ def main(argv=None):
         receipt = json.loads((args.directory / "receipt.json").read_text())
         if receipt["status"] in {"QUEUED", "RUNNING"}:
             parser.error("only terminal job results may be notified")
-        receipt["callback_delivery_id"] = notify(job, receipt)
-        receipt.pop("callback_error", None)
-        save(args.directory / "receipt.json", receipt)
-        return 0
+        return 0 if notify_with_retry(job, receipt, args.directory / "receipt.json", attempts=1) else 1
     if Path("/.dockerenv").exists() or Path("/run/.containerenv").exists():
         parser.error("run heavy-queue on the test host; never mount Docker into a bridge")
     if args.action == "_run":

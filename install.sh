@@ -199,12 +199,12 @@ if [ "$DEV_SYNC" = true ]; then
     if [ "$DEPS_ONLY" = true ]; then
         # Docker layer caching: install deps without the project (src/ not available yet)
         # Skip llama-cpp entirely - it will be installed in the next Docker layer
-        uv sync --inexact --no-install-project --extra mcp --extra service --extra search --extra memory --extra huggingface
+        uv sync --frozen --inexact --no-install-project --extra mcp --extra service --extra search --extra memory --extra huggingface
         echo -e "${GREEN}✓ Dependencies synced (deps-only mode)${NC}"
         exit 0
     fi
 
-    uv sync --inexact --extra mcp --extra service --extra search --extra memory --extra huggingface
+    uv sync --frozen --inexact --extra mcp --extra service --extra search --extra memory --extra huggingface
     echo -e "${GREEN}✓ Base extras synced${NC}"
 
     # Install llama-cpp-python with CUDA

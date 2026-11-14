@@ -28,10 +28,14 @@ The JSON response names the job directory and worker PID. The detached script
 continues after SSH disconnect. `heavy-queue status <job-directory>` reads the
 durable receipt. `run.log` contains check output; `worker.log` contains launcher
 diagnostics. The callback contains exit status and paths, **not arbitrary test
-output**. Enqueue retries with a stable idempotency key until accepted; HTTP calls
-have a 15-second timeout, with backoff capped at 60 seconds. If the host/worker
-is killed, inspect the receipt/container and use `heavy-queue notify <directory>`
-to retry notification. Never replay a job automatically after an uncertain exit.
+output**. Enqueue uses a stable idempotency key and at most five attempts; HTTP
+calls have a 15-second timeout, with 5, 10, 15 and 20 seconds of backoff. HTTP
+4xx responses other than 408/429 stop immediately. Exhausted or permanent
+failures leave `callback_error` and `callback_attempts` in the receipt without
+changing the job's result. After correcting the destination, or if the worker
+was killed, inspect the receipt/container and use `heavy-queue notify <directory>`
+for one manual notification attempt with the same idempotency key. Never replay
+a job automatically after an uncertain exit.
 
 ## Containment and admission
 

@@ -28,7 +28,7 @@ WORKDIR /app
 
 # Copy ONLY files needed for dependency installation first (for layer caching)
 # This ensures source code changes don't invalidate the venv cache
-COPY pyproject.toml install.sh ./
+COPY pyproject.toml uv.lock install.sh ./
 RUN chmod +x install.sh
 
 # Create virtual environment and install dependencies using install.sh
@@ -75,7 +75,7 @@ COPY docker/agent-bridge-constraints.txt ./docker/
 RUN chmod +x server.sh
 
 # Install the project itself (fast since deps + llama-cpp + vllm are cached)
-RUN uv sync --inexact --extra mcp --extra service --extra search --extra memory --extra huggingface --extra vllm
+RUN uv sync --frozen --inexact --extra mcp --extra service --extra search --extra memory --extra huggingface --extra vllm
 
 # Runtime stage
 FROM nvidia/cuda:12.9.1-runtime-ubuntu24.04 AS runtime

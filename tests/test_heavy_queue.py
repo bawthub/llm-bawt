@@ -170,7 +170,8 @@ def test_health_wait_and_persistent_cleanup_hold_fail_closed(tmp_path):
 
 
 @pytest.mark.parametrize("timeout,cleanup", [(False, True), (True, True), (False, False)])
-def test_job_terminal_receipt_timeout_cleanup_and_wakeup(monkeypatch, tmp_path, timeout, cleanup):
+@pytest.mark.parametrize("callback_fails", [False, True])
+def test_job_terminal_receipt_timeout_cleanup_and_wakeup(monkeypatch, tmp_path, timeout, cleanup, callback_fails):
     monkeypatch.setattr(heavy_slot.tempfile, "gettempdir", lambda: str(tmp_path))
     job = dict(id="abc", container="bawt-heavy-abc", cwd=str(tmp_path), image="prepared:test",
                binds=[], command=["fake-check"], submitted_at="now",
@@ -182,8 +183,14 @@ def test_job_terminal_receipt_timeout_cleanup_and_wakeup(monkeypatch, tmp_path, 
     monkeypatch.setattr(heavy_queue.signal, "signal", lambda *args: None)
     monkeypatch.setattr(heavy_queue, "remove_container", lambda name: cleanup)
     callbacks = []
-    monkeypatch.setattr(heavy_queue, "notify", lambda job, receipt:
-                        callbacks.append(dict(receipt)) or "delivery-abc")
+    def notify(job, receipt):
+        callbacks.append(dict(receipt))
+        if callback_fails:
+            raise heavy_queue.urllib.error.HTTPError("http://example.test", 404, "not found", {}, None)
+        return "delivery-abc"
+
+    monkeypatch.setattr(heavy_queue, "notify", notify)
+    monkeypatch.setattr(heavy_queue.time, "sleep", lambda *_: pytest.fail("permanent error retried"))
     timed_out = False
 
     class Child:
@@ -215,7 +222,9 @@ def test_job_terminal_receipt_timeout_cleanup_and_wakeup(monkeypatch, tmp_path, 
     receipt = json.loads((tmp_path / "receipt.json").read_text())
     assert receipt["status"] == ("CLEANUP_UNCERTAIN" if not cleanup else "TIMED_OUT" if timeout else "PASSED")
     assert receipt["memory_peak_bytes"] == 123456
-    assert receipt["callback_delivery_id"] == "delivery-abc"
+    assert receipt["callback_delivery_id"] == (None if callback_fails else "delivery-abc")
+    if callback_fails:
+        assert receipt["callback_error"] == "HTTPError"
     assert len(callbacks) == 1
     assert result == (0 if not timeout and cleanup else 1)
     if not cleanup:

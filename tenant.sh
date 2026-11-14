@@ -109,7 +109,15 @@ cmd_up()   { local IP; IP="$(vm_ip)"; $SSH "bawthub@$IP" 'docker compose -f dock
 cmd_stop() { local IP; IP="$(vm_ip)"; $SSH "bawthub@$IP" 'docker compose -f docker-compose.prod.yml down' || true; sudo systemctl stop "$FWD_UNIT" 2>/dev/null || true; echo "stopped."; }
 cmd_restart() { cmd_stop; cmd_up; }
 cmd_url()  { echo "http://${LAN_IP}:${FWD_PORT}"; }
-cmd_logs() { local IP; IP="$(vm_ip)"; $SSH "bawthub@$IP" "docker compose -f docker-compose.prod.yml logs -f --tail=100 ${4:-}"; }
+cmd_logs() {
+  local IP service command="docker compose -f docker-compose.prod.yml logs -f --tail=100"
+  IP="$(vm_ip)"
+  if [ -n "${1:-}" ]; then
+    printf -v service '%q' "$1"
+    command+=" $service"
+  fi
+  $SSH "bawthub@$IP" "$command"
+}
 cmd_seed() {
   local IP; IP="$(vm_ip)"
   [ -n "$IP" ] || { echo "VM not reachable"; exit 1; }
@@ -133,7 +141,7 @@ cmd_destroy() {
 
 case "${1:-status}" in
   new) cmd_new ;; up) cmd_up ;; stop) cmd_stop ;; restart) cmd_restart ;;
-  status) cmd_status ;; url) cmd_url ;; logs) cmd_logs ;; seed) cmd_seed ;; destroy) cmd_destroy ;;
+  status) cmd_status ;; url) cmd_url ;; logs) cmd_logs "${3:-}" ;; seed) cmd_seed ;; destroy) cmd_destroy ;;
   bridge-git-setup) cmd_bridge_git_setup ;;
   *) grep '^#' "$0" | sed 's/^# \{0,1\}//' | head -20 ;;
 esac
