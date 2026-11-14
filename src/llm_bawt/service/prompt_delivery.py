@@ -171,6 +171,7 @@ class PromptDeliveryWorker:
         skip and its notice commit together and a retry cannot send it twice.
         """
         from ..bot_identities import SYSTEM_BOT_ID
+        from ..message_authorship import AuthorReference
 
         creator = snapshot.get("creator_bot_id")
         dispatcher = getattr(self, "_dispatcher", None)
@@ -179,6 +180,7 @@ class PromptDeliveryWorker:
         message = skipped_notice(snapshot, run_id, reason)
         record, _ = dispatcher.store.enqueue(
             sender_bot_id=SYSTEM_BOT_ID, target_bot_id=creator, message=message,
+            author=AuthorReference.bot(SYSTEM_BOT_ID),
             idempotency_key=f"wakeup-skipped:{run_id}", message_kind="WAKEUP_SKIPPED",
             task_id=snapshot.get("task_id"),
             # A system notice: held behind a live gate, never refused by one.

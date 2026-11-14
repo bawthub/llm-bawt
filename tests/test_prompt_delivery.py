@@ -193,13 +193,13 @@ def test_stale_wakeup_skips_at_fire_time_with_its_reason(rig, monkeypatch, reaso
         # TASK-2294: the creator is told, once, with the reason and its prompt.
         with rig.engine.connect() as conn:
             rows = conn.execute(text(
-                "SELECT target_bot_id, sender_bot_id, task_id, message, idempotency_key"
+                "SELECT target_bot_id, sender_bot_id, message, idempotency_key"
                 " FROM inter_bot_deliveries"
             )).mappings().all()
         assert len(rows) == 1
         notice = rows[0]
-        assert (notice["target_bot_id"], notice["sender_bot_id"], notice["task_id"]) == (
-            BOT, "system", "TASK-9")
+        assert (notice["target_bot_id"], notice["sender_bot_id"]) == (BOT, "system")
+        assert rig.dispatcher.store.last_task_id == "TASK-9"
         assert notice["idempotency_key"] == f"wakeup-skipped:{run}"
         facts = json.loads(notice["message"].split("\n", 1)[1])
         assert facts["reason"] == reason and facts["prompt"] == "Literal saved prompt"
