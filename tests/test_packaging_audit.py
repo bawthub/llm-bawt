@@ -39,4 +39,3 @@ def test_gpu_docker_recipe_copies_lock_before_both_syncs():
     project_sync = recipe.index("RUN uv sync --frozen --inexact")
     assert copy < dependency_sync < project_sync
     assert (REPO / "uv.lock").is_file()
-
