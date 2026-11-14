@@ -208,6 +208,10 @@ class LogfmtFormatter(logging.Formatter):
         elif record.exc_info:
             e = record.exc_info[1]
             f["corr"]["exc"] = f"{type(e).__name__}: {e}" if e else "unknown"
+        # Redact raw strings before quoting/JSON escaping hides their shape.
+        f["corr"] = {k: redact(v) for k, v in f["corr"].items()}
+        if exc:
+            exc = redact(exc)
         if self.json_mode:
             out: dict[str, Any] = {"ts": f["ts"], "level": f["level"], "component": f["component"], "msg": f["msg"]}
             out.update(f["corr"])

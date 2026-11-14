@@ -165,3 +165,23 @@ def test_uvicorn_config_keeps_error_access_records_without_debug(capture, monkey
     logging.getLogger("uvicorn.access").info(
         '%s - "%s %s HTTP/%s" %d', "1.2.3.4:5", "GET", "/v1/campus", "1.1", 503)
     assert lines(capture)[-1].endswith("WARN http http_access method=GET path=/v1/campus status=503")
+
+
+@pytest.mark.parametrize("json_mode", [False, True])
+def test_redaction_of_quoted_secret_in_exception_summary(monkeypatch, json_mode):
+    root = logging.getLogger()
+    saved = (root.handlers[:], root.level)
+    buf = io.StringIO()
+    if json_mode:
+        monkeypatch.setenv("LOG_FORMAT", "json")
+    try:
+        logfmt.configure_logging("app", stream=buf)
+        try:
+            raise ValueError('api_key="SYNTHETIC_KEY_12345"')
+        except ValueError:
+            logging.getLogger("llm_bawt.x").warning("upstream", exc_info=True)
+            logging.getLogger("llm_bawt.x").error("upstream", exc_info=True)
+        assert "SYNTHETIC_KEY_12345" not in buf.getvalue()
+    finally:
+        root.handlers[:] = saved[0]
+        root.setLevel(saved[1])
