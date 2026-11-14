@@ -294,7 +294,12 @@ class ProfileManager:
             else:
                 from sqlalchemy.dialects.postgresql import insert
             inserted_id = session.execute(
-                insert(EntityProfile).values(entity_type=entity_type, entity_id=entity_id)
+                insert(EntityProfile).values(
+                    entity_type=entity_type,
+                    entity_id=entity_id,
+                    # Scheduled work uses this reserved user identity, not a human.
+                    is_service=entity_type == EntityType.USER and entity_id == "system",
+                )
                 .on_conflict_do_nothing(index_elements=["entity_type", "entity_id"])
                 .returning(EntityProfile.id)
             ).scalar_one_or_none()
