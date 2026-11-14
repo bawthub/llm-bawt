@@ -185,8 +185,8 @@ def _ensure_config_toml_entries(
             tomllib.loads(new_text)
         except tomllib.TOMLDecodeError as exc:
             logger.warning(
-                "Not updating %s: MCP server %s edit would produce invalid TOML (%s)",
-                config_path, name, exc,
+                "Not updating %s: marketplace %s edit would produce invalid TOML (%s)",
+                config_path, marketplace_name, exc,
             )
             return
 

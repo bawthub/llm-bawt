@@ -289,3 +289,22 @@ def test_crawl4ai_url_replaces_legacy_stdio_transport(monkeypatch, tmp_path: Pat
     assert "args =" not in contents
     assert "env =" not in contents
     assert "startup_timeout_sec = 30" in contents
+
+
+def test_marketplace_edit_that_breaks_valid_toml_is_skipped(tmp_path: Path, caplog):
+    """TASK-2274: a source path with a quote would make valid TOML invalid."""
+    from codex_bridge.local_plugins import _ensure_config_toml_entries
+
+    config_toml = tmp_path / "config.toml"
+    original = 'model = "gpt-5.4"\n'
+    config_toml.write_text(original)
+    with caplog.at_level(logging.WARNING):
+        _ensure_config_toml_entries(
+            config_path=config_toml,
+            marketplace_name="local-agent-skills",
+            marketplace_source=tmp_path / 'we"ird',
+            plugin_names=["agent-skills"],
+            logger=logging.getLogger("test.codex_local_plugins"),
+        )
+    assert config_toml.read_text() == original
+    assert "marketplace local-agent-skills edit would produce invalid TOML" in caplog.text
