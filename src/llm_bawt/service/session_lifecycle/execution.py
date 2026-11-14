@@ -6,6 +6,7 @@ thread, then resolves the exact successor for the provider command.
 """
 from __future__ import annotations
 
+import logging
 from copy import copy
 from dataclasses import dataclass
 from typing import Any
@@ -368,10 +369,20 @@ class NewSessionExecution:
                 {"thread_session_id": plan.predecessor_session_id}
                 if plan.predecessor_session_id else thread_binding
             )
-            service._maybe_summarize_on_new(
+            summarized = service._maybe_summarize_on_new(
                 llm_bawt, bot_id, "/new", thread_binding=predecessor,
                 history_scope=reset_scope,
             )
+            # TASK-1216: a summaries-only seed cannot carry the just-ended
+            # session until its summary lands. If the bounded summarize did not
+            # finish, seed that turn with raw recent turns too, so the session
+            # is never silently dropped. The bot's setting is untouched.
+            if summarized is False and reset_scope == "summaries":
+                logging.getLogger(__name__).warning(
+                    "/new summary not ready for bot=%s; seeding raw recent "
+                    "turns alongside summaries for this reset", bot_id,
+                )
+                reset_scope = "inline+summaries"
         from ..routes.history import build_context_seed, maybe_build_session_seed
 
         if prompt_record:

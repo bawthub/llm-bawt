@@ -123,12 +123,12 @@ def counting_llm(scope):
     return SimpleNamespace(config_resolver=SimpleNamespace(resolve_config_setting=resolve)), reads
 
 
-def prepare(monkeypatch, service, llm):
+def prepare(monkeypatch, service, llm, summarized=True):
     from llm_bawt.service.routes import history
 
     seed = Mock(return_value=[])
     monkeypatch.setattr(history, "maybe_build_session_seed", seed)
-    service._maybe_summarize_on_new = Mock()
+    service._maybe_summarize_on_new = Mock(return_value=summarized)
     request = SimpleNamespace(inter_bot_session_policy=None, inter_bot_typed_follow_up=False)
     prepared = NewSessionExecution.prepare_agent(
         service, llm, request, bot_id="fixture", user_prompt="/new", model_alias="m",
@@ -148,6 +148,56 @@ def test_prepare_agent_resolves_one_scope_for_summary_seed_and_receipt(monkeypat
     assert summary_scope == seed_scope == prepared.history_scope == expected
     # The bot setting is read at most once per reset, so an edit cannot split it.
     assert reads.count("history_scope") == (0 if continuity != "configured" else 1)
+
+
+@pytest.mark.parametrize("scope,summarized,seeded", [
+    ("summaries", False, "inline+summaries"),
+    ("summaries", True, "summaries"),
+    ("inline", False, "inline"),
+    ("none", False, "none"),
+])
+def test_slow_summary_seeds_raw_turns_for_summaries_only(monkeypatch, scope, summarized, seeded):
+    """TASK-1216: a summary still running past the bound must not drop the
+    just-ended session from a summaries-only seed."""
+    llm, _ = counting_llm(scope)
+    prepared, summary_scope, seed_scope = prepare(
+        monkeypatch, service_with({"new_session_intent": {"origin": "chat_command"}}), llm,
+        summarized=summarized)
+    assert summary_scope == scope
+    assert seed_scope == prepared.history_scope == seeded
+
+
+def test_bounded_summarize_reports_a_slow_summary(monkeypatch):
+    """The real gate returns False when the summary outlasts its bound."""
+    import threading, time
+    from llm_bawt.service.session_lifecycle.bridge_reset import BridgeSessionResetMixin
+    from llm_bawt.memory import summarization
+
+    release = threading.Event()
+
+    class Slow:
+        def __init__(self, *a, **k):
+            pass
+
+        def summarize_thread(self, *a, **k):
+            release.wait(5)
+            return {}
+
+    monkeypatch.setattr(summarization, "HistorySummarizer", Slow)
+    from llm_bawt.memory import summarization_limits
+    monkeypatch.setattr(summarization_limits, "resolve_summarization_limits", lambda *a: (1000, 100))
+    llm = SimpleNamespace(config_resolver=resolver("summaries"),
+                          history_manager=SimpleNamespace(_db_backend=object()))
+    svc = SimpleNamespace(config=None, _get_background_client=lambda **k: (None, None))
+    try:
+        started = time.monotonic()
+        ok = BridgeSessionResetMixin._maybe_summarize_on_new(
+            svc, llm, "fixture", "/new",
+            thread_binding={"thread_session_id": "old-thread"}, timeout_s=0.2,
+            history_scope="summaries")
+        assert ok is False and time.monotonic() - started < 2
+    finally:
+        release.set()
 
 
 def test_prepare_agent_ordinary_new_uses_the_bot_scope_once(monkeypatch):
