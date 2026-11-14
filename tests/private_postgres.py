@@ -217,6 +217,7 @@ def private_app_pg(private_pg, private_module_db):
     """Select the module's private DB, verify identity, then app-bootstrap."""
     from llm_bawt import prompt_registry
     from llm_bawt.memory.postgresql import PostgreSQLMemoryBackend
+    from llm_bawt.profiles import ProfileManager
     from llm_bawt.service.turn_logs import TurnLogStore
     from llm_bawt.utils import db
     from tests.pg_isolation import require_test_db_config
@@ -239,6 +240,9 @@ def private_app_pg(private_pg, private_module_db):
     try:
         config = require_test_db_config()
         # App-owned schema paths, never handcrafted DDL or shared test reset.
+        # Memory ownership predicates resolve human provenance through profiles,
+        # including SQL prepared for an otherwise unmarked legacy bot.
+        ProfileManager(config)
         PostgreSQLMemoryBackend(config, bot_id=f"pgaccept{uuid.uuid4().hex[:12]}")
         TurnLogStore(config)
         yield config

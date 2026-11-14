@@ -6,6 +6,7 @@ import pytest
 from sqlalchemy import text
 
 from llm_bawt.memory.extraction.storage import ExtractionMemoryStore
+from llm_bawt.profiles import EntityType, ProfileManager
 from tests.private_postgres import private_app_pg  # noqa: F401
 from tests.test_memory_update_pg import memory_rig  # noqa: F401
 
@@ -19,6 +20,10 @@ def owned_memory(memory_rig, monkeypatch):  # noqa: F811 - imported pytest fixtu
                              readable_bots=frozenset([bot]), assert_current=lambda: None)
     monkeypatch.setattr("llm_bawt.memory.extraction.storage.BotPolicyResolver",
                         lambda engine: SimpleNamespace(resolve_sync=lambda: policy))
+    # A session user string alone is not proof of a known non-service human.
+    profiles = ProfileManager(backend.config)
+    for owner in ("owner-a", "owner-b"):
+        profiles.get_or_create_profile(EntityType.USER, owner)
     sources = {}
     with backend.engine.begin() as conn:
         for owner in ("owner-a", "owner-b"):
