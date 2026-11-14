@@ -39,6 +39,17 @@ START_OPERATIONS = ("bawthub.start-moshi-stt", "bawthub.start-moshi-tts")
 #: The one ops operation that restarts TTS while voice owns the GPU (TASK-1171).
 TTS_RESTART_OPERATION = "bawthub.restart-tts"
 TTS_RESTART_KEY_PREFIX = "tts-restart:"
+#: TASK-1678: idle sleep and wake-on-use of Moshi TTS. Sleep is the existing
+#: TTS stop, wake the existing TTS start, each under its own fence. While TTS
+#: sleeps the GPU owner is ``asleep``: voice's, with TTS stopped and STT up.
+TTS_SLEEP_OPERATION = STOP_OPERATIONS[1]
+TTS_WAKE_OPERATION = START_OPERATIONS[1]
+TTS_SLEEP_KEY_PREFIX = "tts-sleep:"
+TTS_WAKE_KEY_PREFIX = "tts-wake:"
+ASLEEP_OWNER = "asleep"
+#: Phases that hold the TTS fence key (``tts_restart_key``) for one job.
+TTS_POWER_PHASES = {"tts_sleeping": TTS_SLEEP_OPERATION, "tts_waking": TTS_WAKE_OPERATION}
+TTS_FENCE_PHASES = frozenset({"tts_restarting", *TTS_POWER_PHASES})
 _START_ACTIONS = dict(zip(START_OPERATIONS, ("start_moshi_stt", "start_moshi_tts"), strict=True))
 _STOP_ACTIONS = dict(zip(STOP_OPERATIONS, ("stop_moshi_stt", "stop_moshi_tts"), strict=True))
 _video_jobs = Table(
@@ -84,7 +95,8 @@ _state = Table(
     Column("pending_action", String(128)),
     Column("last_job_id", String(128)),
     Column("last_error", Text),
-    # The ops idempotency key of the one TTS restart this fence admits.
+    # The ops idempotency key of the one TTS restart, sleep or wake
+    # (TASK-1678) this fence admits.
     Column("tts_restart_key", String(160)),
     # TASK-1844: the ops idempotency key of the one GPU-service reconcile this
     # reservation admits, held from job insert until a known outcome.
@@ -179,6 +191,12 @@ def _restart_admitted(row, key: str, operation_slug: str) -> bool:
             and row["tts_restart_key"] == key)
 
 
+def _power_admitted(row, key: str, operation_slug: str) -> bool:
+    """TASK-1678: the one TTS stop (sleep) or start (wake) its phase holds."""
+    return (TTS_POWER_PHASES.get(row["phase"]) == operation_slug
+            and row["tts_restart_key"] == key)
+
+
 class GpuHandoffFence:
     """Creation fence for an ops job that starts, restarts or stops a GPU voice service.
 
@@ -188,13 +206,23 @@ class GpuHandoffFence:
     """
 
     def __init__(self, kind: str, *, key: str, operation_slug: str):
-        if kind not in ("tts_restart", "voice_start", "voice_stop", "gpu_reconcile"):
+        if kind not in ("tts_restart", "voice_start", "voice_stop", "gpu_reconcile", "tts_sleep", "tts_wake"):
             raise ValueError(f"unknown GPU handoff fence {kind!r}")
         self.kind, self.key, self.operation_slug = kind, key, operation_slug
 
     @classmethod
     def tts_restart(cls, key: str) -> GpuHandoffFence:
         return cls("tts_restart", key=key, operation_slug=TTS_RESTART_OPERATION)
+
+    @classmethod
+    def tts_sleep(cls, key: str) -> GpuHandoffFence:
+        """TASK-1678: stop TTS while voice owns an idle GPU; ends ``asleep``."""
+        return cls("tts_sleep", key=key, operation_slug=TTS_SLEEP_OPERATION)
+
+    @classmethod
+    def tts_wake(cls, key: str) -> GpuHandoffFence:
+        """TASK-1678: start TTS while it sleeps; ends with voice owning the GPU."""
+        return cls("tts_wake", key=key, operation_slug=TTS_WAKE_OPERATION)
 
     @classmethod
     def gpu_reconcile(cls, key: str, operation_slug: str) -> GpuHandoffFence:
@@ -231,6 +259,13 @@ class GpuHandoffFence:
         if self.kind == "gpu_reconcile":
             self._reserve_reconcile(conn, row)
             return
+        if self.kind in ("tts_sleep", "tts_wake"):
+            self._reserve_power(conn, row)
+            return
+        if row["phase"] in TTS_POWER_PHASES:
+            raise HandoffConflict("A TTS sleep or wake is in progress", code="tts_power_in_progress")
+        if row["owner"] == ASLEEP_OWNER:
+            raise HandoffConflict("TTS is asleep; wake it instead of restarting", code="tts_asleep")
         if row["phase"] == "tts_restarting":
             if row["tts_restart_key"] == self.key:
                 return  # Same request: the unique key replays the existing job.
@@ -242,6 +277,25 @@ class GpuHandoffFence:
         _changed(conn)
         conn.execute(_state.update().where(_state.c.id == 1).values(
             phase="tts_restarting", generation=row["generation"] + 1, tts_restart_key=self.key))
+
+    def _reserve_power(self, conn, row) -> None:
+        phase = "tts_sleeping" if self.kind == "tts_sleep" else "tts_waking"
+        if row["phase"] == phase and row["tts_restart_key"] == self.key:
+            return  # Same request: the unique key replays the existing job.
+        if row["phase"] in TTS_FENCE_PHASES:
+            raise HandoffConflict("A TTS restart, sleep or wake is already in progress",
+                                  code="tts_power_in_progress")
+        if self.kind == "tts_wake" and (row["owner"] != ASLEEP_OWNER or row["phase"] != "idle"):
+            raise HandoffConflict("TTS wakes only while it is asleep", code="tts_not_asleep")
+        if self.kind == "tts_sleep" and row["owner"] == ASLEEP_OWNER:
+            raise HandoffConflict("TTS is already asleep", code="tts_asleep")
+        if self.kind == "tts_sleep" and (row["owner"] != "voice" or row["phase"] != "idle"):
+            raise HandoffConflict("TTS sleeps only while voice owns an idle GPU", code="gpu_not_voice")
+        if conn.execute(select(_video_jobs.c.id).limit(1)).first() is not None:
+            raise HandoffConflict("Video render claims are still open", code="active_video_claims")
+        _changed(conn)
+        conn.execute(_state.update().where(_state.c.id == 1).values(
+            phase=phase, generation=row["generation"] + 1, tts_restart_key=self.key))
 
     def _reserve_reconcile(self, conn, row) -> None:
         if row["phase"] == RECONCILE_PHASE:
@@ -297,7 +351,8 @@ class GpuHandoffStore:
         with self.engine.begin() as conn:
             row = _lock_state(conn)
             return (_start_admitted(row, key, operation_slug) or _stop_admitted(row, key, operation_slug)
-                    or _restart_admitted(row, key, operation_slug) or _reconcile_admitted(row, key))
+                    or _restart_admitted(row, key, operation_slug) or _power_admitted(row, key, operation_slug)
+                    or _reconcile_admitted(row, key))
 
     def release_gpu_reconcile(self, key: str, *, error: str | None = None) -> bool:
         """Return a held reconcile reservation to idle. Idempotent and
@@ -333,6 +388,22 @@ class GpuHandoffStore:
             _changed(conn)
             conn.execute(_state.update().where(_state.c.id == 1).values(
                 phase="idle", generation=row["generation"] + 1, tts_restart_key=None))
+            return self._view(_lock_state(conn))
+
+    def release_tts_power(self, key: str, *, owner: str, error: str | None = None) -> HandoffState:
+        """CAS a TTS sleep/wake fence to idle under ``owner``: ``asleep`` after a
+        proven stop, ``voice`` after a proven start, or back to the source owner
+        when the job never ran. The caller proves that outcome first."""
+        if owner not in ("voice", ASLEEP_OWNER):
+            raise ValueError("A TTS sleep or wake ends with voice or asleep")
+        with self.engine.begin() as conn:
+            row = _lock_state(conn)
+            if row["phase"] not in TTS_POWER_PHASES or row["tts_restart_key"] != key:
+                raise HandoffConflict("TTS sleep/wake fence is no longer this request's", code="fence_changed")
+            _changed(conn)
+            conn.execute(_state.update().where(_state.c.id == 1).values(
+                owner=owner, phase="idle", generation=row["generation"] + 1, tts_restart_key=None,
+                last_error=error))
             return self._view(_lock_state(conn))
 
     def status(self) -> HandoffState:

@@ -102,6 +102,13 @@ class FakeAdapter(HandoffAdapter):
     async def dispatch_tts_restart(self, snapshot, *, key):
         raise AssertionError("a forward/restore handoff never dispatches a TTS restart")
 
+    # TTS idle sleep/wake (TASK-1678): exercised in test_gpu_tts_power.py.
+    async def prepare_tts_power(self, action):
+        raise AssertionError("a forward/restore handoff never prepares a TTS sleep or wake")
+
+    async def dispatch_tts_power(self, action, snapshot, *, key):
+        raise AssertionError("a forward/restore handoff never dispatches a TTS sleep or wake")
+
     async def job_by_key(self, key):
         return None
 

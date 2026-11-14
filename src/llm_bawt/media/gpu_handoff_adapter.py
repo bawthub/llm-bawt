@@ -17,7 +17,8 @@ from agent_bridge.approval import PolicyAction, evaluate
 from llm_bawt.integrations.home_audio import HomeAudioSettings
 
 from .gpu_handoff import START_OPERATIONS, STOP_OPERATIONS, HandoffAdapter
-from .gpu_handoff_store import TTS_RESTART_OPERATION, GpuHandoffFence, HandoffConflict
+from .gpu_handoff_store import (TTS_RESTART_OPERATION, TTS_SLEEP_OPERATION, TTS_WAKE_OPERATION,
+                                 GpuHandoffFence, HandoffConflict)
 
 
 log = logging.getLogger(__name__)
@@ -202,19 +203,29 @@ class LocalHandoffAdapter(HandoffAdapter):
         )
 
     async def prepare_tts_restart(self):
-        snapshot = await asyncio.to_thread(self.ops.prepare_invocation, TTS_RESTART_OPERATION, {})
-        expected = {"action": "restart", "compose_project": VOICE_PROJECT, "compose_service": "tts"}
-        if (snapshot["operation"]["slug"] != TTS_RESTART_OPERATION or snapshot["spec"] != expected
+        return await self._prepare_tts_operation(TTS_RESTART_OPERATION, "restart")
+
+    async def prepare_tts_power(self, action):
+        """TASK-1678: sleep is the exact TTS stop, wake the exact TTS start."""
+        if action == "sleep":
+            return await self._prepare_tts_operation(TTS_SLEEP_OPERATION, "stop")
+        if action == "wake":
+            return await self._prepare_tts_operation(TTS_WAKE_OPERATION, "start")
+        raise HandoffConflict("action must be sleep or wake", code="args_invalid")
+
+    async def _prepare_tts_operation(self, slug, action):
+        snapshot = await asyncio.to_thread(self.ops.prepare_invocation, slug, {})
+        expected = {"action": action, "compose_project": VOICE_PROJECT, "compose_service": "tts"}
+        if (snapshot["operation"]["slug"] != slug or snapshot["spec"] != expected
                 or snapshot["resolved_args"] != {} or snapshot["input_args"] != {}
                 or snapshot["execution"]["executor_kind"] != "docker"
                 or snapshot["execution"]["target_host"] != ""):
-            raise HandoffConflict("Catalog operation is not the exact local TTS restart",
+            raise HandoffConflict(f"Catalog operation is not the exact local TTS {action}",
                                   code="snapshot_invalid")
         bundle = await asyncio.to_thread(self.policies.compile_bundle)
-        decision = evaluate(bundle.policies, "http-operator", "ops_run",
-                            {"operation": TTS_RESTART_OPERATION, "args": {}})
+        decision = evaluate(bundle.policies, "http-operator", "ops_run", {"operation": slug, "args": {}})
         if decision.action is PolicyAction.DENY:
-            raise HandoffConflict("TTS restart denied by existing ops policy", code="policy_denied")
+            raise HandoffConflict(f"TTS {action} denied by existing ops policy", code="policy_denied")
         return snapshot
 
     async def dispatch_tts_restart(self, snapshot, *, key):
@@ -223,6 +234,14 @@ class LocalHandoffAdapter(HandoffAdapter):
             approved_snapshot=snapshot, idempotency_key=key,
             caller_actor="bawthub-tts-admin", caller_backend="http-operator",
             create_fence=GpuHandoffFence.tts_restart(key),
+        )
+
+    async def dispatch_tts_power(self, action, snapshot, *, key):
+        fence = GpuHandoffFence.tts_sleep(key) if action == "sleep" else GpuHandoffFence.tts_wake(key)
+        return await asyncio.to_thread(
+            self.ops.dispatch_job, operation_slug=fence.operation_slug, args={},
+            approved_snapshot=snapshot, idempotency_key=key,
+            caller_actor="bawthub-tts-idle", caller_backend="http-operator", create_fence=fence,
         )
 
     async def job_by_key(self, key):

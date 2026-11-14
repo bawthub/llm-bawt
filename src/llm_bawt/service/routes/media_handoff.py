@@ -185,4 +185,31 @@ async def tts_restart_status(request_id: str):
     return await _run("tts_restart_status", coded=True, request_id=request_id)
 
 
+# ── TTS idle sleep and wake (TASK-1678) ─────────────────────────────────────
+# The voice backend's idle timer and wake-on-use. Service-bearer only, like the
+# restart: each takes the GPU fence for one TTS stop or start.
+power_router = APIRouter(prefix="/tts-power", dependencies=[Depends(require_service_token)])
+
+
+class TtsPowerRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    action: Literal["sleep", "wake"]
+    request_id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9._-]+$")
+
+
+@power_router.post("")
+async def tts_power(request: Request):
+    """Sleep (stop) or wake (start) TTS once; a replayed ``request_id`` reads the same job."""
+    body = await read_body(request, TtsPowerRequest)
+    return await _run("tts_power", coded=True, action=body.action, request_id=body.request_id)
+
+
+@power_router.get("/{action}/{request_id}")
+async def tts_power_status(action: Literal["sleep", "wake"], request_id: str):
+    """``outcome``: in_progress | held | released | refused, plus the GPU ``owner``.
+    Reading it is what releases the fence."""
+    return await _run("tts_power_status", coded=True, action=action, request_id=request_id)
+
+
 router.include_router(tts_router)
+router.include_router(power_router)

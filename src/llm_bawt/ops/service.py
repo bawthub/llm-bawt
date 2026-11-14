@@ -695,8 +695,9 @@ class OpsService:
                 f"this operation starts or recreates the GPU voice service {service!r}; "
                 "only a GPU handoff can run it"))
         if stopped is not None and not (isinstance(create_fence, GpuHandoffFence)
-                                        and create_fence.kind == "voice_stop"):
+                                        and create_fence.kind in ("voice_stop", "tts_sleep")):
             # TASK-1707: only a handoff can start it again, so only a handoff stops it.
+            # TASK-1678: a TTS sleep is such a stop; its wake is the handoff's start.
             raise OpsDispatchError("gpu_handoff_required", (
                 f"this operation stops the GPU voice service {stopped!r}; only a GPU handoff "
                 "can run it, because only a handoff can start it again"))

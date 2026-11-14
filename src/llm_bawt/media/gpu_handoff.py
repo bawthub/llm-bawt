@@ -16,8 +16,9 @@ import logging
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime
 
-from .gpu_handoff_store import (OPS_ACTIONS, START_OPERATIONS, STOP_OPERATIONS, TTS_RESTART_KEY_PREFIX,
-                                 GpuHandoffStore, HandoffConflict)
+from .gpu_handoff_store import (ASLEEP_OWNER, OPS_ACTIONS, START_OPERATIONS, STOP_OPERATIONS,
+                                 TTS_POWER_PHASES, TTS_RESTART_KEY_PREFIX, TTS_SLEEP_KEY_PREFIX,
+                                 TTS_WAKE_KEY_PREFIX, GpuHandoffStore, HandoffConflict)
 from .gpu_profile import CALIBRATION_PROFILE
 
 ACTIONS = ("park_voice", "stop_moshi_stt", "stop_moshi_tts", "verify_video_capacity")
@@ -70,6 +71,13 @@ class HandoffAdapter(ABC):
 
     @abstractmethod
     async def dispatch_tts_restart(self, snapshot: dict, *, key: str) -> dict: ...
+
+    @abstractmethod
+    async def prepare_tts_power(self, action: str) -> dict:
+        """TASK-1678: the exact, policy-checked TTS stop (sleep) or start (wake) snapshot."""
+
+    @abstractmethod
+    async def dispatch_tts_power(self, action: str, snapshot: dict, *, key: str) -> dict: ...
 
     @abstractmethod
     async def job_by_key(self, key: str) -> dict | None:
@@ -127,12 +135,21 @@ class GpuHandoff:
         if len(stopped) == 2 and (free < total - 2048 or (original and free <= original["gpu"]["free_mib"])):
             raise HandoffConflict("GPU memory was not sufficiently released for isolated calibration")
 
+    @staticmethod
+    def _refuse_tts_fence(state) -> None:
+        """A TTS restart, sleep or wake holds the GPU; an asleep TTS wakes first."""
+        if state.phase == "tts_restarting":
+            raise HandoffConflict("A TTS restart holds the GPU for voice", code="tts_restart_in_progress")
+        if state.phase in TTS_POWER_PHASES:
+            raise HandoffConflict("A TTS sleep or wake holds the GPU for voice", code="tts_power_in_progress")
+        if state.owner == ASLEEP_OWNER:
+            raise HandoffConflict("TTS is asleep; wake it before switching the GPU", code="tts_asleep")
+
     async def offer(self, *, user: str, expected_generation: int, calibration: bool) -> dict:
         if calibration is not True:
             raise HandoffConflict("Ordinary video needs a measured profile; explicitly request first-render calibration")
         state = await asyncio.to_thread(self.store.status)
-        if state.phase == "tts_restarting":
-            raise HandoffConflict("A TTS restart holds the GPU for voice", code="tts_restart_in_progress")
+        self._refuse_tts_fence(state)
         if state.owner not in ("unknown", "voice") or state.phase not in ("idle", "offered"):
             raise HandoffConflict("GPU ownership requires reconciliation")
         if await asyncio.to_thread(self.store.active_video_jobs):
@@ -366,8 +383,7 @@ class GpuHandoff:
 
     async def offer_restore(self, *, user: str, expected_generation: int) -> dict:
         state = await asyncio.to_thread(self.store.status)
-        if state.phase == "tts_restarting":
-            raise HandoffConflict("A TTS restart holds the GPU for voice", code="tts_restart_in_progress")
+        self._refuse_tts_fence(state)
         if state.phase in ("transitioning", "draining"):
             raise HandoffConflict("A GPU switch is already running")
         observed = await self.adapter.observe()
@@ -561,7 +577,87 @@ class GpuHandoff:
             pass  # A concurrent status read released it first.
         return {"outcome": "released", "restart": restart}
 
-    async def _start_evidence(self, restart: dict, dispatched_at: str) -> str | None:
+    # ── TTS idle sleep and wake (TASK-1678) ─────────────────────────────────
+    _POWER = {"sleep": (TTS_SLEEP_KEY_PREFIX, "tts_sleeping", "voice", ASLEEP_OWNER),
+              "wake": (TTS_WAKE_KEY_PREFIX, "tts_waking", ASLEEP_OWNER, "voice")}
+
+    def _power_key(self, action: str, request_id: str) -> str:
+        if action not in self._POWER:
+            raise HandoffConflict("action must be sleep or wake", code="args_invalid")
+        return self._POWER[action][0] + self._restart_key(request_id)[len(TTS_RESTART_KEY_PREFIX):]
+
+    async def tts_power(self, *, action: str, request_id: str) -> dict:
+        """Stop (sleep) or start (wake) TTS once under its own fence. The fence
+        and the job commit together; a replay of ``request_id`` reads the same job."""
+        key = self._power_key(action, request_id)
+        snapshot = await self.adapter.prepare_tts_power(action)
+        await self.adapter.dispatch_tts_power(action, snapshot, key=key)
+        return await self.tts_power_status(action=action, request_id=request_id)
+
+    async def tts_power_status(self, *, action: str, request_id: str) -> dict:
+        """Idempotent, and the only releaser of a TTS sleep/wake fence.
+
+        A never-dispatched job returns the GPU to its source owner. Otherwise
+        only container evidence moves it: TTS stopped → ``asleep``; one fresh,
+        API-started TTS instance → ``voice``. Readiness of the model itself is
+        the voice backend's to prove (Moshi's own listener, not Docker health).
+        Anything else holds; no timeout releases it.
+        """
+        key = self._power_key(action, request_id)
+        _, phase, source, target = self._POWER[action]
+        job = await self.adapter.job_by_key(key)
+        state = await asyncio.to_thread(self.store.status)
+        held = state.phase == phase and state.tts_restart_key == key
+        power = {"action": action, "request_id": request_id, "job_id": None, "job_state": None,
+                 "dispatched_at": None, "observed_started_at": None, "observed_restart_count": None,
+                 "reason": None}
+        if job is None:
+            power["reason"] = "awaiting_job" if held else "no_job"
+            return {"outcome": "in_progress" if held else "refused", "owner": state.owner, "power": power}
+        power.update(job_id=job["id"], job_state=job["state"], dispatched_at=job["dispatched_at"])
+        if not held:
+            return {"outcome": "released" if job["terminal"] else "in_progress", "owner": state.owner,
+                    "power": power}
+        if not job["terminal"]:
+            power["reason"] = "awaiting_job"
+            return {"outcome": "in_progress", "owner": state.owner, "power": power}
+        owner = source
+        if not (job["state"] == "failed" and job["dispatched_at"] is None):
+            if job["state"] == "succeeded" and job["exit_code"] != 0 or (
+                    job["state"] != "succeeded" and job["state"] not in _UNCERTAIN_STATES):
+                power["reason"] = "awaiting_evidence"
+                return {"outcome": "held", "owner": state.owner, "power": power}
+            power["reason"] = await (self._stop_evidence(power) if action == "sleep"
+                                     else self._wake_evidence(power, job["dispatched_at"]))
+            if power["reason"] is not None:
+                return {"outcome": "held", "owner": state.owner, "power": power}
+            owner = target
+        try:
+            state = await asyncio.to_thread(self.store.release_tts_power, key, owner=owner)
+        except HandoffConflict:
+            state = await asyncio.to_thread(self.store.status)  # A concurrent read released it first.
+        return {"outcome": "released", "owner": state.owner, "power": power}
+
+    async def _stop_evidence(self, power: dict) -> str | None:
+        """None when the one TTS instance is stopped; else the hold reason."""
+        try:
+            observed = await self.adapter.observe_service("tts")
+        except HandoffConflict as exc:
+            return "ambiguous_instances" if exc.code == "ambiguous_instances" else "observation_unavailable"
+        power.update(observed_started_at=observed.get("started_at"),
+                     observed_restart_count=observed.get("restart_count"))
+        if observed.get("running") is not False or observed.get("status") not in ("exited", "created"):
+            return "awaiting_stop_evidence"
+        return None
+
+    async def _wake_evidence(self, power: dict, dispatched_at: str) -> str | None:
+        """Like :meth:`_start_evidence`, but a Docker health of ``starting`` is
+        enough: the voice backend waits for Moshi itself, and the health
+        interval would add up to 30s to every wake."""
+        return await self._start_evidence(power, dispatched_at, healthy=("healthy", "starting", None))
+
+    async def _start_evidence(self, restart: dict, dispatched_at: str, *,
+                              healthy: tuple = ("healthy",)) -> str | None:
         """None when exactly one fresh TTS instance started after the job's
         dispatch by an API start (restart count reset to 0); else the hold reason."""
         try:
@@ -570,7 +666,7 @@ class GpuHandoff:
             return "ambiguous_instances" if exc.code == "ambiguous_instances" else "observation_unavailable"
         restart.update(observed_started_at=observed.get("started_at"),
                        observed_restart_count=observed.get("restart_count"))
-        if observed.get("running") is not True or observed.get("health") != "healthy":
+        if observed.get("running") is not True or observed.get("health") not in healthy:
             return "unhealthy"
         count = observed.get("restart_count")
         if type(count) is not int:
