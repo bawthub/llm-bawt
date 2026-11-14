@@ -31,7 +31,7 @@ def stored(monkeypatch):
             return {key: json.loads(value) for key, value in conn.execute(select(table.c.key, table.c.value_json))}
 
     store = object.__new__(base.CredentialStore)
-    store._store = SimpleNamespace(engine=engine, get_scope_settings=settings)
+    store._store = SimpleNamespace(engine=engine, get_value=lambda _scope, _id, key: settings().get(key))
     record = base.ConnectionRecord(provider="example-api", status="connected", auth_method="api_key",
                                    secret={"api_key": "test-key"}, meta={"unrelated": "kept"})
     payload = store._payload(record)

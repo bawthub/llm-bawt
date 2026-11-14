@@ -47,7 +47,7 @@ HEALTH_PROBE_FAILED_DETAIL = "Health check failed; see service logs"
 # Adapter classes keyed by provider id. Extend here as providers are added.
 # TASK-635: the single `claude` adapter supersedes the old claude-sub +
 # claude-usage dual flow (ClaudeSubAdapter remains as its unregistered base).
-# TASK-637: `codex` is status-only (health/expiry) until TASK-636 phase 2.
+# `codex` supports device-code login and stores its token bundle encrypted.
 # TASK-825: xai / openai-api / anthropic-api are the raw API-key adapters —
 # clients resolve keys DB-first via providers.api_key.resolve_api_key.
 _ADAPTER_CLASSES: dict[str, type[ProviderAdapter]] = {

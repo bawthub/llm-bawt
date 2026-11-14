@@ -26,6 +26,9 @@ def store(monkeypatch):
         def get_scope_settings(self, *_args):
             return dict(self.values)
 
+        def get_value(self, _scope, _id, key):
+            return self.values.get(key)
+
         def set_value(self, _scope, _id, key, value):
             self.values[key] = value
 

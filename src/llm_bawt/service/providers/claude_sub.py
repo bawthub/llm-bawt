@@ -5,8 +5,7 @@ CLI (bundled with the Agent SDK) to log in with the user's Claude subscription.
 `setup-token` performs the standard authorize-code + PKCE OAuth against the
 first-party Claude Code client, then on success:
 
-  * writes the ``claudeAiOauth`` bundle to ``<config_dir>/.credentials.json`` —
-    exactly what ``claude_code_bridge`` already consumes + refreshes, and
+  * writes the ``claudeAiOauth`` bundle to ``<config_dir>/.credentials.json``, and
   * prints a long-lived (1y, ``scope=user:inference``) token.
 
 This is NOT the banned path: we are authenticating the official Claude Code
@@ -20,11 +19,14 @@ alive between ``start_cli_login`` (capture URL) and ``complete_cli_login``
 (inject the pasted code). Live sessions live in a module-level registry keyed by
 an opaque session id, reaped on a TTL.
 
-Cross-container placement: ``setup-token`` writes to the config dir resolved from
-``CLAUDE_CONFIG_DIR`` (default ``~/.claude``). For a tenant, point env
-``CLAUDE_LOGIN_CONFIG_DIR`` at the directory the claude-code bridge mounts as its
-``~/.claude`` so the bundle lands where the bridge reads it. When the app and
-bridge are separate containers, that directory must be a shared volume.
+Credential ownership: this base class only captures the CLI's output file. The
+registered subclass, :class:`~.claude.ClaudeAdapter`, logs in inside a throwaway
+config dir and installs the bundle in the encrypted CredentialStore row. That
+row is the production source of truth: the app refreshes it, and the
+claude-code bridge reads it through the token broker endpoint, with no shared
+credential mount. The file-based behaviour below (``CLAUDE_LOGIN_CONFIG_DIR``,
+writing and stripping ``.credentials.json``) applies only to this unregistered
+base class.
 """
 
 from __future__ import annotations
@@ -352,8 +354,9 @@ class ClaudeSubAdapter(ProviderAdapter):
                 "expires_at": expires_at,
             },
         )
-        # The .credentials.json bundle is the bridge's source of truth; we keep
-        # the printed long-lived token only as an encrypted fallback (env path).
+        # Base-class path only: the bundle stays in the CLI's file and the
+        # printed long-lived token is kept as an encrypted fallback. The
+        # registered ClaudeAdapter overrides this to install the DB record.
         if token:
             record.secret = {"oauth_token": token}
         return record

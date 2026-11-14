@@ -189,8 +189,7 @@ class CredentialStore:
     def load(self, provider: str) -> ConnectionRecord | None:
         if not self.available:
             return None
-        settings = self._store.get_scope_settings("global", "*")
-        raw = settings.get(self._key(provider))
+        raw = self._store.get_value("global", "*", self._key(provider))
         if not isinstance(raw, dict):
             return None
         return self._record(provider, raw)

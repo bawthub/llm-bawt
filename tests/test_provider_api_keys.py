@@ -231,7 +231,8 @@ def test_required_api_key_health_and_route_eligibility(monkeypatch, caplog, prov
 
     store = object.__new__(base.CredentialStore)
     store._store = SimpleNamespace(
-        engine=object(), get_scope_settings=lambda *_: {store._key(provider_id): raw},
+        engine=object(),
+        get_value=lambda _scope, _id, key: {store._key(provider_id): raw}.get(key),
     )
     monkeypatch.setattr(base.crypto, "decrypt", decrypt)
     monkeypatch.setattr(base, "CredentialStore", lambda _config: store)

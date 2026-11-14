@@ -845,6 +845,31 @@ class RuntimeSettingsStore:
                 )
         return out
 
+    def get_value(self, scope_type: str, scope_id: str, key: str) -> Any | None:
+        """Return one setting's decoded value, or None when absent or invalid."""
+        if self.engine is None:
+            return None
+        with Session(self.engine) as session:
+            row = session.exec(
+                select(RuntimeSetting).where(
+                    RuntimeSetting.scope_type == scope_type,
+                    RuntimeSetting.scope_id == scope_id,
+                    RuntimeSetting.key == key,
+                )
+            ).first()
+        if row is None:
+            return None
+        try:
+            return json.loads(row.value_json)
+        except Exception:
+            logger.warning(
+                "Invalid runtime setting JSON for %s/%s key=%s",
+                scope_type,
+                scope_id,
+                key,
+            )
+            return None
+
     def set_value(self, scope_type: str, scope_id: str, key: str, value: Any) -> None:
         """Upsert setting value."""
         self.set_values([(scope_type, scope_id, key, value)])
