@@ -5,6 +5,7 @@ import json
 import time
 from sqlalchemy import bindparam, text
 from agent_bridge.continuity import continuity_digest
+from llm_bawt.utils.bot_partition import sanitize_table_name
 
 # Every app-authored /new receipt starts with this (agent_bridge.continuity).
 _RESET_RECEIPT_PREFIX = "Session reset."
@@ -124,12 +125,14 @@ class SessionContinuity:
         if valid_ids:
             query = text("""
                 SELECT m.id, m.role, m.content, m.timestamp, m.session_id
-                FROM messages m JOIN sessions s ON s.id=m.session_id AND s.bot_id=m.bot_id
-                WHERE m.bot_id=:bot AND s.user_id=:user AND s.status <> 'deleted'
+                FROM messages m JOIN sessions s ON s.id=m.session_id AND s.bot_id=:bot
+                WHERE m.bot_id=:partition AND s.user_id=:user AND s.status <> 'deleted'
                   AND m.id IN :ids
             """).bindparams(bindparam("ids", expanding=True))
             with self.engine.connect() as conn:
-                rows = {r["id"]: dict(r) for r in conn.execute(query, {"bot": bot_id, "user": user_id, "ids": valid_ids}).mappings()}
+                params = {"bot": bot_id, "partition": sanitize_table_name(bot_id),
+                          "user": user_id, "ids": valid_ids}
+                rows = {r["id"]: dict(r) for r in conn.execute(query, params).mappings()}
         shortened = set(manifest.get("shortened_indices") or [])
         return {
             "messages": [

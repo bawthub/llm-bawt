@@ -6,6 +6,7 @@ from sqlalchemy import text
 
 from ...mcp_server.storage import get_storage
 from ...memory.session_continuity import SessionContinuity
+from ...utils.bot_partition import sanitize_table_name
 from ..dependencies import get_effective_bot_id
 from .sessions import _first_messages, _owned_session_or_404, _resolve_user, _to_info
 
@@ -46,9 +47,11 @@ async def get_message_session_details(
     bot, owner = get_effective_bot_id(bot_id), _resolve_user(user)
     with get_storage().engine.connect() as conn:
         session_id = conn.execute(text("""
-            SELECT s.id FROM sessions s JOIN messages m ON m.session_id=s.id AND m.bot_id=s.bot_id
-            WHERE m.id=:message AND m.bot_id=:bot AND s.user_id=:user AND s.status <> 'deleted'
-        """), {"message": message_id, "bot": bot, "user": owner}).scalar()
+            SELECT s.id FROM sessions s JOIN messages m ON m.session_id=s.id
+            WHERE m.id=:message AND m.bot_id=:partition AND s.bot_id=:bot
+              AND s.user_id=:user AND s.status <> 'deleted'
+        """), {"message": message_id, "bot": bot, "partition": sanitize_table_name(bot),
+               "user": owner}).scalar()
     if not session_id:
         raise HTTPException(404, "Session not found for this message")
     return await session_details(session_id, bot, owner, offset, limit)

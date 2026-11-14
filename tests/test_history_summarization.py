@@ -1,6 +1,9 @@
 """Tests for history summarization helpers."""
 
 import time
+from unittest.mock import Mock
+
+import pytest
 
 from llm_bawt.memory.summarization import (
     HistorySummarizer,
@@ -167,6 +170,54 @@ def test_prioritize_summarizable_sessions_orders_by_estimated_savings() -> None:
 
     prioritized = prioritize_summarizable_sessions([short_session, long_session])
     assert prioritized[0].start_timestamp == long_session.start_timestamp
+
+
+@pytest.mark.parametrize("allow_fallback", [False, True])
+def test_partial_batch_respects_heuristic_fallback_policy(monkeypatch, allow_fallback):
+    sessions = [_session(i, i + 1, [_msg(str(i), "user", "synthetic", i)])
+                for i in (1, 3)]
+    summarizer = HistorySummarizer.__new__(HistorySummarizer)
+    summarizer._setting = lambda _key, default: default
+    summarizer._summarize_batch_fn = lambda _sessions: {1: "First model summary"}
+    summarizer.summarize_session = Mock(return_value={"success": True})
+    heuristic = Mock(return_value="Synthetic heuristic")
+    monkeypatch.setattr("llm_bawt.memory.summarization.summarize_session_heuristic", heuristic)
+
+    results, errors, created, messages, _replaced = summarizer._summarize_sessions_batch(
+        sessions, use_heuristic_fallback=allow_fallback, replace_existing=False)
+
+    assert len(results) == created == messages == (2 if allow_fallback else 1)
+    if allow_fallback:
+        assert errors == []
+        heuristic.assert_called_once_with(sessions[1])
+    else:
+        assert errors == ["Session 2: missing summary in batch output"]
+        heuristic.assert_not_called()
+        summarizer.summarize_session.assert_called_once()
+
+
+@pytest.mark.parametrize("limit,expected", [(1, {30}), (2, {20, 30}), (0, {10, 20, 30})])
+def test_rebuild_recent_selects_newest_before_savings_priority(monkeypatch, limit, expected):
+    sessions = [_session(stamp, stamp + 1, [_msg(str(stamp), "user", "x" * size, stamp)])
+                for stamp, size in ((10, 100), (20, 5000), (30, 1000))]
+    monkeypatch.setattr("llm_bawt.memory.summarization.find_budget_overflow_sessions",
+                        lambda *_args, **_kwargs: sessions)
+    summarizer = HistorySummarizer.__new__(HistorySummarizer)
+    summarizer.session_gap_seconds = 3600
+    summarizer.max_context_tokens = 100
+    summarizer.protected_recent_turns = 0
+    summarizer.min_messages_per_session = 1
+    summarizer._get_all_messages = lambda: []
+    summarizer._summarize_batch_fn = None
+    summarizer.summarize_session = Mock(return_value={"success": True})
+
+    result = summarizer.rebuild_recent_sessions(session_limit=limit, max_tokens_per_chunk=0)
+
+    targeted = [call.args[0].start_timestamp for call in summarizer.summarize_session.call_args_list]
+    assert set(targeted) == expected
+    assert result["sessions_targeted"] == len(expected)
+    if limit == 2:
+        assert targeted == [20, 30]  # Savings still orders work, not membership.
 
 
 def test_summarization_prompt_includes_intent_and_tone_sections() -> None:

@@ -1542,7 +1542,7 @@ class HistorySummarizer:
         # expensive per-session LLM calls.  This avoids N extra API round-trips
         # for sessions the model chose to skip or that failed quality checks.
         missing_indices = [i for i in range(1, len(sessions) + 1) if i not in covered_indices]
-        if missing_indices:
+        if missing_indices and use_heuristic_fallback:
             logger.info(
                 "Batch output missing %s/%s sessions; using heuristic for indices: %s",
                 len(missing_indices),
@@ -1979,8 +1979,6 @@ class HistorySummarizer:
             protected_recent_turns=self.protected_recent_turns,
             min_messages_per_session=self.min_messages_per_session,
         )
-        eligible = prioritize_summarizable_sessions(eligible)
-
         if start_timestamp is not None or end_timestamp is not None:
             eligible = [
                 s
@@ -1990,7 +1988,10 @@ class HistorySummarizer:
             ]
 
         if session_limit > 0:
-            eligible = eligible[-session_limit:]
+            eligible = sorted(eligible, key=lambda session: session.end_timestamp)[-session_limit:]
+        # Recency decides membership; savings only decides which selected
+        # session to process first.
+        eligible = prioritize_summarizable_sessions(eligible)
 
         # Purge runs only after replacements exist (see end of method).
         purged_count = 0

@@ -718,7 +718,7 @@ class PostgreSQLSemanticMemoryMixin:
                     # Convert Decimal types to float for calculations
                     similarity = float(row.similarity) if row.similarity else 0.0
                     meaning_similarity = float(row.meaning_similarity) if meaning_embedding and row.meaning_similarity is not None else None
-                    importance = float(row.importance) if row.importance else 0.5
+                    importance = float(row.importance) if row.importance is not None else 0.5
                     age_days = float(row.age_days) if row.age_days else 0.0
                     access_count = int(row.access_count) if row.access_count else 0
                     

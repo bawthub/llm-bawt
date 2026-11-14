@@ -55,17 +55,22 @@ def resolve_summarization_limits(
     if context_window <= 0:
         return UNKNOWN_MODEL_LIMITS
 
-    safety_margin = max(
-        _MIN_SAFETY_MARGIN_TOKENS, int(context_window * _SAFETY_MARGIN_FRACTION)
+    # Keep the usual margin on larger windows, but do not reserve an entire
+    # small model's window (or replace its real limit with unknown-model defaults).
+    safety_margin = min(
+        max(_MIN_SAFETY_MARGIN_TOKENS, int(context_window * _SAFETY_MARGIN_FRACTION)),
+        context_window // 4,
     )
-    max_prompt_tokens = max(
-        6000, context_window - _RESPONSE_BUDGET_TOKENS - safety_margin
-    )
+    max_prompt_tokens = context_window - _RESPONSE_BUDGET_TOKENS - safety_margin
+    if max_prompt_tokens <= 0:
+        raise ValueError("Model context window cannot fit summarization output and safety margin")
     max_prompt_tokens = min(max_prompt_tokens, MAX_SUMMARIZATION_PROMPT_TOKENS)
 
     if context_window >= _NO_CHUNK_CONTEXT_WINDOW:
         max_chunk_tokens = 0
     else:
-        max_chunk_tokens = max(4000, min(64_000, int(max_prompt_tokens * 0.7)))
+        # Zero means *disable* chunking, so a positive prompt budget must have
+        # a positive chunk budget even for tiny windows.
+        max_chunk_tokens = max(1, min(64_000, int(max_prompt_tokens * 0.7)))
 
     return (max_prompt_tokens, max_chunk_tokens)

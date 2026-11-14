@@ -59,11 +59,18 @@ def test_small_local_window_reserves_output_and_margin():
     assert 0 < max_chunk <= max_prompt
 
 
-@pytest.mark.parametrize("window", [1_000, 6_000, 8_192])
-def test_tiny_windows_never_drop_below_the_floor(window):
-    """max() floor keeps the budget usable rather than negative/zero."""
-    max_prompt, _ = resolve_summarization_limits(_config(window), "tiny")
-    assert max_prompt >= 6000
+@pytest.mark.parametrize("window", [1_000, 2_048, 6_000, 8_192])
+def test_known_small_windows_fit_prompt_and_output_without_a_floor(window):
+    """Unknown-model defaults must never override a known smaller window."""
+    max_prompt, max_chunk = resolve_summarization_limits(_config(window), "tiny")
+    assert 0 < max_chunk <= max_prompt
+    assert max_prompt + 512 < window
+
+
+@pytest.mark.parametrize("window", [1, 256, 512])
+def test_window_without_room_for_summary_output_is_rejected(window):
+    with pytest.raises(ValueError, match="context window"):
+        resolve_summarization_limits(_config(window), "impossible")
 
 
 def test_chunking_boundary_at_200k():

@@ -68,14 +68,17 @@ def database():
             {"id": "foreign", "bot": "test-bot", "user": "someone-else", "status": "archived"},
             {"id": "other-bot", "bot": "other-bot", "user": "owner", "status": "active"},
             {"id": "deleted", "bot": "test-bot", "user": "owner", "status": "deleted"},
+            {"id": "alias", "bot": "testbot", "user": "owner", "status": "archived"},
         ])
         conn.execute(text("INSERT INTO messages VALUES (:id,:bot,:session,:role,:content,1)"), [
-            {"id": "summary", "bot": "test-bot", "session": "source", "role": "summary", "content": "original summary"},
-            {"id": "message", "bot": "test-bot", "session": "source", "role": "user", "content": "CURRENT source body"},
-            {"id": "private", "bot": "test-bot", "session": "foreign", "role": "user", "content": "private body"},
-            {"id": "other", "bot": "other-bot", "session": "other-bot", "role": "user", "content": "other bot body"},
-            {"id": "gone", "bot": "test-bot", "session": "deleted", "role": "user", "content": "deleted body"},
-            {"id": "receipt", "bot": "test-bot", "session": "dest", "role": "assistant", "content": "Session reset."},
+            # Message storage uses sanitized identities; sessions keep raw slugs.
+            {"id": "summary", "bot": "testbot", "session": "source", "role": "summary", "content": "original summary"},
+            {"id": "message", "bot": "testbot", "session": "source", "role": "user", "content": "CURRENT source body"},
+            {"id": "private", "bot": "testbot", "session": "foreign", "role": "user", "content": "private body"},
+            {"id": "other", "bot": "otherbot", "session": "other-bot", "role": "user", "content": "other bot body"},
+            {"id": "gone", "bot": "testbot", "session": "deleted", "role": "user", "content": "deleted body"},
+            {"id": "receipt", "bot": "testbot", "session": "dest", "role": "assistant", "content": "Session reset."},
+            {"id": "alias-message", "bot": "testbot", "session": "alias", "role": "user", "content": "Same partition, different raw bot"},
         ])
     yield engine
     engine.dispose()
@@ -93,6 +96,15 @@ def test_resolve_order_pagination_and_ownership(database):
     assert all(not m["available"] and "content" not in m for m in remainder["messages"])
     assert not remainder["has_more"]
     assert repo.resolve({}, bot_id="test-bot", user_id="owner", offset=0, limit=50)["messages"] == []
+
+
+def test_shared_storage_identity_does_not_authorize_another_raw_bot(database):
+    manifest = {"source_message_ids": ["alias-message", "message"]}
+    repo = SessionContinuity(database)
+    own = repo.resolve(manifest, bot_id="test-bot", user_id="owner", offset=0, limit=10)
+    assert [row["available"] for row in own["messages"]] == [False, True]
+    alias = repo.resolve(manifest, bot_id="testbot", user_id="owner", offset=0, limit=10)
+    assert [row["available"] for row in alias["messages"]] == [True, False]
 
 
 @pytest.fixture
@@ -138,6 +150,8 @@ def test_details_legacy_by_message_and_scoping(client):
     for path in ["dest", "by-message/receipt"]:
         assert client.get(f"/v1/sessions/{path}/details?bot_id=test-bot&user=someone-else").status_code == 404
         assert client.get(f"/v1/sessions/{path}/details?bot_id=other-bot&user=owner").status_code == 404
+    assert client.get("/v1/sessions/by-message/alias-message/details?bot_id=test-bot&user=owner").status_code == 404
+    assert client.get("/v1/sessions/by-message/receipt/details?bot_id=testbot&user=owner").status_code == 404
     assert client.get("/v1/sessions/deleted/details?bot_id=test-bot&user=owner").status_code == 410
     assert client.get("/v1/sessions/dest/details?bot_id=test-bot&limit=101").status_code == 422
 
