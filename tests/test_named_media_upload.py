@@ -128,5 +128,7 @@ def test_gc_excludes_named_slots():
     from llm_bawt.service.jobs.media_gc import _find_orphan_assets
     conn = Mock()
     conn.execute.return_value.mappings.return_value.all.return_value = []
-    _find_orphan_assets(conn, [], 7)
-    assert "WHERE a.storage_key IS NULL AND (" in str(conn.execute.call_args.args[0])
+    _find_orphan_assets(conn, frozenset(), 7)
+    sql = " ".join(str(conn.execute.call_args.args[0]).split())
+    # Named slots are excluded unconditionally, ahead of every other filter.
+    assert "WHERE a.storage_key IS NULL AND " in sql
