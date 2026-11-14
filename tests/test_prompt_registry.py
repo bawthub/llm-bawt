@@ -131,7 +131,12 @@ def test_chat_system_prompt_refine_instruction_is_registered_and_seeded() -> Non
 def test_agent_global_prompt_explains_playwright_artifact_workflow() -> None:
     assert "browser_take_screenshot` without `filename`" in AGENT_GLOBAL_PROMPT
     assert "returned `original`, `preview`, or `thumb` URL" in AGENT_GLOBAL_PROMPT
-    assert "suppresses the inline-image/Garage attachment path" in AGENT_GLOBAL_PROMPT
+    assert "suppresses the inline-image attachment path" in AGENT_GLOBAL_PROMPT
+
+
+def test_agent_global_prompt_fallback_names_no_deployment_tools() -> None:
+    assert "Garage" not in AGENT_GLOBAL_PROMPT
+    assert "bawt-upload" not in AGENT_GLOBAL_PROMPT
 
 
 def test_agent_global_prompt_requires_durable_manager_callbacks() -> None:

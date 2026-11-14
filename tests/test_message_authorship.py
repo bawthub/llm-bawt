@@ -33,9 +33,10 @@ class StubLegacyResolver(LegacyAuthorResolver):
     def __init__(self) -> None:
         pass
 
-    def _delivery_authors(self, message_ids: list[str]) -> dict[str, str]:
+    def _delivery_authors(self, message_ids: list[str], target_bot_id: str) -> dict[str, tuple[str, str]]:
         assert message_ids == ["delivery", "human", "assistant", "unknown"]
-        return {"delivery": "snark"}
+        assert target_bot_id == "loopy"
+        return {"delivery": ("bot", "snark")}
 
     def _session_users(self, session_ids: list[str]) -> dict[str, str]:
         assert session_ids == ["thread-human", "thread-assistant"]
