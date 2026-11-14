@@ -154,10 +154,9 @@ services:
       - TRANSFORMERS_NO_ADVISORY_WARNINGS
       - TRANSFORMERS_VERBOSITY
       # Remaining legacy credentials are tracked in PENDING_RETIREMENT
-      # (tests/test_env_secret_guard.py). Migrated OpenAI/xAI and HA readers
-      # are store-only and no longer receive their former env credentials.
+      # (tests/test_env_secret_guard.py). Migrated OpenAI/xAI, HA and Claude
+      # subscription readers are store-only and no longer receive env credentials.
       - ANTHROPIC_API_KEY
-      - CLAUDE_CODE_OAUTH_TOKEN
       - LLM_BAWT_REDDIT_CLIENT_SECRET
       - LLM_BAWT_TALK_PROVISIONER_TOKEN
     ports:
@@ -267,7 +266,6 @@ services:
     # TASK-1476: no env_file (see the app). z.ai and Kimi keys come from the
     # app broker (records); their env names are no longer passed.
     environment:
-      - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}
       # TASK-636: the bridge consumes Claude tokens via the broker endpoint
       # (GET /v1/providers/claude/token) with an in-memory cache. No
       # credential bind mount — the DB row is the single source of truth.
@@ -294,10 +292,8 @@ services:
       # from the app's broker endpoint (GET /v1/providers/openai_chatgpt/token).
       # Z.AI (Zhipu GLM) — native Anthropic Messages API passthrough.
       # Powers bots whose model_id is namespaced "zai/<glm-model>".
-      # xAI (Grok) — standard OpenAI Responses API via the proxy's default
-      # call path. Powers bots whose model_id is namespaced "xai/<grok-model>"
-      # (e.g. xai/grok-4.5). LLM_BAWT_XAI_API_KEY accepted as an alias.
-      - XAI_API_KEY=${XAI_API_KEY:-${LLM_BAWT_XAI_API_KEY:-}}
+      # xAI (Grok), OpenAI API and Claude keys come from the app broker
+      # (GET /v1/providers/<id>/token); no env credential is passed (TASK-1681).
       # Kimi For Coding subscription — Chat Completions-only coding surface.
       # Keep separate from Moonshot OpenPlatform: different endpoint + billing.
       # Local inference (Ollama / llama-server on the LAN) — native Anthropic
@@ -323,8 +319,6 @@ services:
       - LLM_BAWT_REDIS_URL
       # Credentials still read from env (PENDING_RETIREMENT).
       - ANTHROPIC_API_KEY
-      - OPENAI_API_KEY
-      - LLM_BAWT_XAI_API_KEY
     extra_hosts:
       - "host.docker.internal:host-gateway"
       # The LAN host's names and address are deployment data (.env); see .env.docker.

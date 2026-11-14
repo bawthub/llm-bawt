@@ -43,13 +43,7 @@ BOOTSTRAP = frozenset({
 
 #: Credentials that still ship through env, each with why. Shrink only.
 PENDING_RETIREMENT: dict[str, str] = {
-    # App OpenAI/xAI readers are store-only; bridge declarations remain until
-    # the already-planned bridge restart and its live credential acceptance.
-    "XAI_API_KEY": "TASK-1681: retained only for bridge activation follow-through",
-    "LLM_BAWT_XAI_API_KEY": "TASK-1681: retained only for bridge activation follow-through",
-    "OPENAI_API_KEY": "TASK-1681: retained only for bridge activation follow-through",
     "ANTHROPIC_API_KEY": "TASK-1476: anthropic-api connection is DB-first; env is the legacy fallback",
-    "CLAUDE_CODE_OAUTH_TOKEN": "TASK-1681: held until planned bridge restart live credential check",
     # Still env-only; each needs a DB home first.
     "LLM_BAWT_REDDIT_CLIENT_SECRET": "TASK-1476: Reddit search credentials have no connection yet",
     "LLM_BAWT_TALK_PROVISIONER_TOKEN": "TASK-1476: talk provisioner token has no connection yet",
