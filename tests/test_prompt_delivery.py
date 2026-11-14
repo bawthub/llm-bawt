@@ -190,6 +190,22 @@ def test_stale_wakeup_skips_at_fire_time_with_its_reason(rig, monkeypatch, reaso
         assert (row.state, row.last_error, row.delivery_id) == ("skipped", reason, None)
         with Session(rig.engine) as session:
             assert session.get(JobRun, run).error_message == reason
+        # TASK-2294: the creator is told, once, with the reason and its prompt.
+        with rig.engine.connect() as conn:
+            rows = conn.execute(text(
+                "SELECT target_bot_id, sender_bot_id, task_id, message, idempotency_key"
+                " FROM inter_bot_deliveries"
+            )).mappings().all()
+        assert len(rows) == 1
+        notice = rows[0]
+        assert (notice["target_bot_id"], notice["sender_bot_id"], notice["task_id"]) == (
+            BOT, "system", "TASK-9")
+        assert notice["idempotency_key"] == f"wakeup-skipped:{run}"
+        facts = json.loads(notice["message"].split("\n", 1)[1])
+        assert facts["reason"] == reason and facts["prompt"] == "Literal saved prompt"
+        rig.worker._sweep(rig.dispatcher)
+        with rig.engine.connect() as conn:
+            assert conn.execute(text("SELECT count(*) FROM inter_bot_deliveries")).scalar() == 1
     else:
         assert row.state == "queued" and row.delivery_id
 

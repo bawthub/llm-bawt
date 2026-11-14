@@ -243,6 +243,12 @@ def load_ops_quiesce_resume() -> str:
     return DEFAULT_RESUME
 
 
+def load_schedule_wakeup_skipped() -> str:
+    from .service.wakeup_staleness import DEFAULT_SKIPPED_NOTICE
+
+    return DEFAULT_SKIPPED_NOTICE
+
+
 def load_ops_quiesce_resume_blocked() -> str:
     from .ops.quiesce_prompts import DEFAULT_RESUME_BLOCKED
 

@@ -8,6 +8,10 @@ creator bot and a task are checked.
 
 Task state lives in BawtHub, so it is read outside the outbox locks. Any
 lookup failure fails open: the wake-up fires as before.
+
+A skipped wake-up is not silent (TASK-2294): its creator bot gets one system
+notice with the reason and the original prompt, so work the wake-up was also
+carrying (a window, a follow-up) is not stranded.
 """
 from __future__ import annotations
 
@@ -21,6 +25,14 @@ from ..bawthub_auth import service_auth
 logger = logging.getLogger(__name__)
 
 _LOOKUP_TIMEOUT_S = 3.0
+SKIPPED_NOTICE_KEY = "schedule.wakeup_skipped"
+DEFAULT_SKIPPED_NOTICE = (
+    "[Wake-up skipped: a one-time wake-up you scheduled did not run because its "
+    "task moved on. The JSON below gives the reason, the task and the prompt it "
+    "would have sent. If that prompt still carries work that isn't finished or "
+    "handed off, do it now or reschedule it untagged; otherwise no action or "
+    "reply is needed.]"
+)
 _DONE = {"COMPLETED": "completed", "CANCELLED": "cancelled", "REVIEW": "in REVIEW"}
 
 
@@ -75,3 +87,29 @@ def wakeup_stale_reason(snapshot: dict, kind: str) -> str | None:
     if not checked(snapshot, kind):
         return None
     return stale_reason(snapshot, fetch_task(str(snapshot["task_id"])))
+
+
+def skipped_notice(snapshot: dict, run_id: str, reason: str) -> str:
+    """The notice body for the creator of a skipped wake-up."""
+    import json
+
+    body = DEFAULT_SKIPPED_NOTICE
+    creator = snapshot.get("creator_bot_id")
+    try:
+        from ..prompt_registry import get_prompt_resolver
+
+        resolved = get_prompt_resolver().resolve(
+            SKIPPED_NOTICE_KEY, scope_type="bot", scope_id=creator,
+        )
+        if resolved and (resolved.body or "").strip():
+            body = resolved.body
+    except Exception as error:  # a registry failure must not drop the notice
+        logger.warning("Prompt %s resolve failed, using seed: %s", SKIPPED_NOTICE_KEY, error)
+    facts = {
+        "reason": reason,
+        "task_id": snapshot.get("task_id"),
+        "occurrence_id": run_id,
+        "scheduled_for": snapshot.get("scheduled_for"),
+        "prompt": snapshot.get("prompt"),
+    }
+    return body + "\n" + json.dumps(facts, ensure_ascii=False, sort_keys=True, default=str)

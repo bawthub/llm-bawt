@@ -17,7 +17,7 @@ from .prompt_delivery_state import gate_reason, receipt, schedule_author, transi
 from .prompt_schedule_models import NONTERMINAL, PromptOccurrence, PromptSchedule
 from .prompt_schedule_store import PromptScheduleStore
 from .scheduler import ScheduledJob, JobRun
-from .wakeup_staleness import wakeup_stale_reason
+from .wakeup_staleness import skipped_notice, wakeup_stale_reason
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +47,8 @@ class PromptDeliveryWorker:
     def _sweep(self, dispatcher):
         now = datetime.now(timezone.utc)
         records = []
+        self._dispatcher = dispatcher
+        self._notices = []
         if self._last_retention is None or (now - self._last_retention).total_seconds() >= 3600:
             from .prompt_retention import prune_prompt_runs
             prune_prompt_runs(self.engine, now)
@@ -81,7 +83,7 @@ class PromptDeliveryWorker:
             except Exception as exc:
                 logger.exception("Prompt outbox enqueue failed for %s", occurrence.run_id)
                 self._enqueue_error(occurrence.run_id, str(exc), now)
-        return records
+        return records + self._notices
 
     def _enqueue(self, run_id, prepared, dispatcher, now):
         snapshot, session_id, model, job_id, key = prepared
@@ -161,6 +163,36 @@ class PromptDeliveryWorker:
             rows[2].delivery_id = record.id
             transition(session, *rows, "queued", now, evidence=self._evidence(record))
             return record
+
+    def _notify_skipped(self, session, snapshot, run_id, reason):
+        """Tell the creator a stale wake-up was skipped (TASK-2294).
+
+        Enqueued in the skip's own transaction with a per-occurrence key, so the
+        skip and its notice commit together and a retry cannot send it twice.
+        """
+        from ..bot_identities import SYSTEM_BOT_ID
+
+        creator = snapshot.get("creator_bot_id")
+        dispatcher = getattr(self, "_dispatcher", None)
+        if not creator or dispatcher is None:
+            return
+        message = skipped_notice(snapshot, run_id, reason)
+        record, _ = dispatcher.store.enqueue(
+            sender_bot_id=SYSTEM_BOT_ID, target_bot_id=creator, message=message,
+            idempotency_key=f"wakeup-skipped:{run_id}", message_kind="WAKEUP_SKIPPED",
+            task_id=snapshot.get("task_id"),
+            # A system notice: held behind a live gate, never refused by one.
+            on_gate="hold",
+            metadata={"prompt_schedule_skipped": {"occurrence_id": run_id}},
+            payload={
+                "bot_id": creator, "user": snapshot["owner_user_id"], "session_id": None,
+                "messages": [{"role": "user", "content": message}],
+                "prefer_steer": False, "reply_mode": "async",
+                "extract_memory": False, "augment_memory": False, "stream": True,
+            },
+            connection=session.connection(),
+        )
+        self._notices.append(record)
 
     def _rows(self, session, run_id):
         job_id = session.exec(select(PromptOccurrence.job_id).where(
@@ -253,9 +285,12 @@ class PromptDeliveryWorker:
             # Once enqueue may have happened, recover by key before consulting
             # mutable capability/lifecycle. An accepted delivery must not be lost.
             if occurrence.enqueue_attempts == 0:
-                reason = gate_reason(*rows, now) or (("skipped", stale) if stale else None)
+                gated = gate_reason(*rows, now)
+                reason = gated or (("skipped", stale) if stale else None)
                 if reason:
                     transition(session, *rows, reason[0], now, error=reason[1])
+                    if not gated:
+                        self._notify_skipped(session, snapshot, run_id, stale)
                     return None
                 try:
                     model = resolve_prompt_target(self.service, snapshot["bot_id"],
