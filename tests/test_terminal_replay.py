@@ -48,6 +48,10 @@ def done(identity, **overrides):
     return RunTerminal(**values).to_fields()
 
 
+# These cases launch the same private Redis process/container as
+# TestAtomicRedisPublication; keep them in the local integration partition.
+@pytest.mark.integration
+@pytest.mark.offline_integration
 @pytest.mark.parametrize("decode", [True, False])
 def test_complete_replay_preserves_events_without_mutation(replay_case, decode):
     async def scenario(client, identity, key):
@@ -64,6 +68,8 @@ def test_complete_replay_preserves_events_without_mutation(replay_case, decode):
     replay_case(scenario, decode=decode)
 
 
+@pytest.mark.integration
+@pytest.mark.offline_integration
 def test_missing_is_distinct_from_active_stream(replay_case):
     async def scenario(client, identity, key):
         assert (await read_retained_run(client, **identity)).disposition is ReplayDisposition.MISSING
@@ -73,6 +79,8 @@ def test_missing_is_distinct_from_active_stream(replay_case):
     replay_case(scenario)
 
 
+@pytest.mark.integration
+@pytest.mark.offline_integration
 @pytest.mark.parametrize("deletion", ["head", "middle", "all"])
 def test_trim_and_delete_never_prove_complete(replay_case, deletion):
     async def scenario(client, identity, key):
@@ -90,6 +98,8 @@ def test_trim_and_delete_never_prove_complete(replay_case, deletion):
     replay_case(scenario)
 
 
+@pytest.mark.integration
+@pytest.mark.offline_integration
 @pytest.mark.parametrize("fault", ["bare_done", "wrong_request", "wrong_boot", "wrong_backend", "bad_done", "after_done",
                                    "unknown_kind", "wrong_session", "bad_json", "duplicate_event", "forged_terminal"])
 def test_invalid_stream_falls_back_instead_of_inventing_success(replay_case, fault):
@@ -124,6 +134,8 @@ def test_invalid_stream_falls_back_instead_of_inventing_success(replay_case, fau
     replay_case(scenario)
 
 
+@pytest.mark.integration
+@pytest.mark.offline_integration
 @pytest.mark.parametrize("limit", [{"max_entries": 1}, {"max_payload_bytes": 1}])
 def test_size_limits_are_explicit_not_truncated_success(replay_case, limit):
     async def scenario(client, identity, key):
@@ -134,6 +146,8 @@ def test_size_limits_are_explicit_not_truncated_success(replay_case, limit):
     replay_case(scenario)
 
 
+@pytest.mark.integration
+@pytest.mark.offline_integration
 def test_acceptance_and_terminal_boot_must_match_even_without_pinned_boot(replay_case):
     async def scenario(client, identity, key):
         await client.xadd(key, {"payload": json.dumps(event(kind=AgentEventKind.RUN_ACCEPTED,
@@ -156,6 +170,8 @@ def test_transport_failure_is_not_stream_absence():
     client.pipeline.assert_called_once_with(transaction=True)
 
 
+@pytest.mark.integration
+@pytest.mark.offline_integration
 def test_wrong_key_type_is_not_stream_absence(replay_case):
     async def scenario(client, identity, key):
         await client.set(key, "wrong-type")
