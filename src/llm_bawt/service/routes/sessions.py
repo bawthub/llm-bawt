@@ -547,23 +547,26 @@ async def update_session(
     )
     storage = get_storage()
 
+    # Validate every field before mutating any, so a 422 never leaves a
+    # partial update behind.
+    if body.status is not None and body.status not in ("archived", "deleted"):
+        raise HTTPException(
+            status_code=422,
+            detail="status must be 'archived' or 'deleted' "
+            "(use POST /v1/sessions/{id}/activate to reactivate)",
+        )
+    title = body.title.strip() if body.title is not None else None
+    if title is not None and not title:
+        raise HTTPException(status_code=422, detail="title must be non-empty")
+
     if body.status is not None:
-        if body.status not in ("archived", "deleted"):
-            raise HTTPException(
-                status_code=422,
-                detail="status must be 'archived' or 'deleted' "
-                "(use POST /v1/sessions/{id}/activate to reactivate)",
-            )
         ok = await storage.set_session_status(
             session_id, body.status, bot_id=effective_bot
         )
         if not ok:
             raise HTTPException(status_code=500, detail="Status update failed")
 
-    if body.title is not None:
-        title = body.title.strip()
-        if not title:
-            raise HTTPException(status_code=422, detail="title must be non-empty")
+    if title is not None:
         await storage.update_session_metadata(
             session_id,
             {"title": title, "title_source": "user"},

@@ -186,7 +186,8 @@ class MemoryItem(BaseModel):
 class MemorySearchRequest(BaseModel):
     """Request for memory search."""
     query: str
-    method: str = "all"  # text, embedding, high-importance, all
+    # No text mode: it was advertised but never searched (always empty).
+    method: Literal["embedding", "high-importance", "all"] = "all"
     limit: int = 10
     min_importance: float = 0.0
     bot_id: str | None = None

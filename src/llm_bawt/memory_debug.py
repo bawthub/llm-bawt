@@ -1266,7 +1266,7 @@ Examples:
     gen_group.add_argument("--stats", action="store_true", help="Show memory and message statistics")
     # Memory operations (extracted facts)
     mem_group = parser.add_argument_group("Memories (extracted facts)")
-    mem_group.add_argument("--method", "-m", choices=["text", "embedding", "high-importance", "all"],
+    mem_group.add_argument("--method", "-m", choices=["embedding", "high-importance", "all"],
                            default="all", help="Memory search method")
     mem_group.add_argument("--min-importance", type=float, default=0.0, help="Min importance filter")
     mem_group.add_argument("--list-memories", "-l", action="store_true", help="List memories by importance")

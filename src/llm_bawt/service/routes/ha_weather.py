@@ -12,8 +12,8 @@ from ..dependencies import get_service
 
 router = APIRouter()
 
-_cache: dict[str, Any] = {}
-_cache_ts: float = 0.0
+# entity_id -> (fetched_at monotonic, result); expiry is per entity.
+_cache: dict[str, tuple[float, Any]] = {}
 _CACHE_TTL = 900  # 15 minutes
 
 
@@ -28,12 +28,11 @@ def _ha_credentials(config: Any) -> tuple[str | None, str | None]:
 @router.get("/v1/ha/weather", tags=["Home Assistant"])
 async def get_ha_weather(entity_id: str = Query(default="weather.home")):
     """Fetch current weather state from Home Assistant."""
-    global _cache, _cache_ts
-
     now = time.monotonic()
     cache_key = entity_id
-    if cache_key in _cache and (now - _cache_ts) < _CACHE_TTL:
-        return _cache[cache_key]
+    cached = _cache.get(cache_key)
+    if cached is not None and (now - cached[0]) < _CACHE_TTL:
+        return cached[1]
 
     service = get_service()
     try:
@@ -68,6 +67,5 @@ async def get_ha_weather(entity_id: str = Query(default="weather.home")):
         "friendly_name": attrs.get("friendly_name", entity_id),
     }
 
-    _cache[cache_key] = result
-    _cache_ts = now
+    _cache[cache_key] = (now, result)
     return result
