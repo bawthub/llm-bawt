@@ -180,7 +180,7 @@ async def test_now_steer_then_new_start_invalidates_without_spending_boundary():
 
 
 @pytest.mark.anyio
-async def test_held_interrupt_boundary_can_drain_while_sibling_still_queued():
+async def test_held_interrupt_boundary_waits_for_queued_sibling_to_start():
     c = await Consumer().start()
     try:
         await _next(c.run, "A", CMD)
@@ -189,8 +189,17 @@ async def test_held_interrupt_boundary_can_drain_while_sibling_still_queued():
         await c.run.steer("redirect", priority="now", origin="user", framed_message="NOW[redirect]")
         await c.send(_lifecycle(CMD, "completed"))
         assert c.run._commands[CMD2] == "queued"
+        assert c.run._withheld_result is not None
+        assert (c.run._expected_interrupt_results, c.run._pending_now_interrupts) == (1, 1)
+        await c.send(_lifecycle(CMD2, "started"))
+        assert c.run._withheld_result is None
+        assert (c.run._expected_interrupt_results, c.run._pending_now_interrupts) == (1, 1)
+        interrupted = {**_result("interrupted sibling"), "subtype": "error_during_execution", "is_error": True}
+        await c.send(interrupted)
         assert (c.run._expected_interrupt_results, c.run._pending_now_interrupts) == (0, 0)
-        await c.send(_lifecycle(CMD2, "started"), _result("replacement answer"))
-        assert await c.finish(_lifecycle(CMD2, "completed")) == ["replacement answer"]
+        await c.send(_lifecycle(CMD2, "completed"))
+        assert await c.finish(_result("replacement answer")) == ["interrupted sibling", "replacement answer"]
+        assert c.client.replacements == ["NOW[redirect]"]
+        assert [frame["uuid"] for frame in c.client.written] == [CMD, CMD2]
     finally:
         await c.close()

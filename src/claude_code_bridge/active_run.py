@@ -851,12 +851,10 @@ class ClaudeActiveRun:
         return result
 
     def _held_boundary_ready(self) -> bool:
-        # Consuming an old interrupt boundary is not finalization. A queued
-        # sibling need not complete first, but captured running work must.
-        return self._expected_interrupt_results > 0 and not any(
-            self._commands.get(cmd) == "started" and self._held.get(cmd) is held
-            for cmd, held in self._withheld_started_commands.items()
-        )
+        # A queued sibling can start before the interrupt lands. Preserve the
+        # boundary until all accepted work settles, or that start invalidates
+        # this candidate and its interrupted result consumes the boundary.
+        return self._expected_interrupt_results > 0 and self._terminal_ready()
 
     async def messages(self) -> AsyncIterator[Any]:
         """Yield parsed SDK messages, handling ``next``-steer turn boundaries.
