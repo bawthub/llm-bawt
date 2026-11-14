@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import httpx
@@ -23,6 +24,9 @@ class _Store:
 
     def save(self, record):
         self.records[record.provider] = record
+
+    def save_in(self, conn, record):
+        self.save(record)
 
     def delete(self, provider):
         return self.records.pop(provider, None) is not None
@@ -56,7 +60,8 @@ def _fresh_health_cache():
 def path_url(monkeypatch):
     state = {"url": None}
     monkeypatch.setattr(ollama, "_stored_path_url", lambda _config: state["url"])
-    monkeypatch.setattr(ollama, "_write_path_url", lambda _config, url: state.__setitem__("url", url))
+    monkeypatch.setattr(ollama, "_write_path_url", lambda _conn, url: state.__setitem__("url", url))
+    monkeypatch.setattr(ollama, "_catalog_engine", lambda _config: SimpleNamespace(begin=lambda: nullcontext(None)))
     return state
 
 
@@ -65,6 +70,95 @@ def _adapter():
     adapter.config = SimpleNamespace(OLLAMA_URL="http://localhost:11434")
     adapter.store = _Store()
     return adapter
+
+
+@pytest.fixture
+def transactional_adapter(monkeypatch):
+    """Real transactions, but only an isolated in-memory SQLite database."""
+    from sqlalchemy import create_engine, text
+
+    from llm_bawt.runtime_settings import RuntimeSetting
+    from llm_bawt.service.providers import base
+
+    engine = create_engine("sqlite://")
+    RuntimeSetting.__table__.create(engine)
+    with engine.begin() as conn:
+        conn.execute(text("CREATE UNIQUE INDEX idx_runtime_settings_scope_key "
+                          "ON runtime_settings (scope_type, scope_id, key)"))
+        conn.execute(text("CREATE TABLE access_paths (key TEXT PRIMARY KEY, base_url TEXT, updated_at TEXT)"))
+        conn.execute(text("INSERT INTO access_paths (key, base_url) VALUES ('ollama', 'http://old:11434/v1')"))
+    monkeypatch.setattr(base.crypto, "encrypt", lambda value: value)
+    monkeypatch.setattr(base.crypto, "decrypt", lambda value: value)
+    monkeypatch.setattr("llm_bawt.service.health_changes.publish", lambda *_: None)
+    monkeypatch.setattr(ollama, "_catalog_engine", lambda _config: engine)
+    monkeypatch.setattr(ollama, "probe", lambda *_: ("1", None))
+    adapter = _adapter()
+    adapter.store = object.__new__(base.CredentialStore)
+    adapter.store._store = SimpleNamespace(engine=engine)
+    with engine.begin() as conn:
+        adapter.store.save_in(conn, ConnectionRecord(
+            provider="ollama", status=STATUS_CONNECTED, auth_method=ollama.AUTH_ENDPOINT,
+            meta={"base_url": "http://old:11434"}, secret={"api_key": "old-key"},
+        ))
+    yield adapter, engine
+    engine.dispose()
+
+
+@pytest.mark.parametrize("failure", ["encryption", "upsert"])
+def test_connect_failure_rolls_back_url_and_key(monkeypatch, transactional_adapter, failure):
+    from sqlalchemy import text
+
+    from llm_bawt.service.providers import base
+
+    adapter, engine = transactional_adapter
+    save_in = adapter.store.save_in
+
+    def fail(*_args):
+        raise RuntimeError("offline persistence failure")
+
+    def fail_after_upsert(conn, record):
+        save_in(conn, record)
+        fail()
+
+    if failure == "encryption":
+        monkeypatch.setattr(base.crypto, "encrypt", fail)
+    else:
+        monkeypatch.setattr(adapter.store, "save_in", fail_after_upsert)
+    cleared = []
+    monkeypatch.setattr(ollama, "clear_health_cache", lambda: cleared.append(True))
+    with pytest.raises(RuntimeError, match="offline persistence failure"):
+        adapter.connect_endpoint("http://new:11434", "new-key")
+    with engine.connect() as conn:
+        assert conn.execute(text("SELECT base_url FROM access_paths")).scalar_one() == "http://old:11434/v1"
+        record = adapter.store.load_in(conn, "ollama")
+        assert record.secret == {"api_key": "old-key"}
+        assert record.meta == {"base_url": "http://old:11434"}
+    assert not cleared
+
+
+@pytest.mark.parametrize("key", ["new-key", None])
+def test_connect_commits_url_and_optional_key_together(transactional_adapter, key):
+    from sqlalchemy import text
+
+    adapter, engine = transactional_adapter
+    assert adapter.connect_endpoint("http://new:11434", key).ok
+    with engine.connect() as conn:
+        assert conn.execute(text("SELECT base_url FROM access_paths")).scalar_one() == "http://new:11434/v1"
+        record = adapter.store.load_in(conn, "ollama")
+        assert record.meta["base_url"] == "http://new:11434"
+        assert record.secret == ({"api_key": key} if key else {})
+
+
+def test_missing_access_path_does_not_replace_key(transactional_adapter):
+    from sqlalchemy import text
+
+    adapter, engine = transactional_adapter
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM access_paths"))
+    with pytest.raises(RuntimeError, match="ollama access path is missing"):
+        adapter.connect_endpoint("http://new:11434", "new-key")
+    with engine.connect() as conn:
+        assert adapter.store.load_in(conn, "ollama").secret == {"api_key": "old-key"}
 
 
 def test_registered_without_owning_route_eligibility():

@@ -94,7 +94,7 @@ def test_the_command_carries_codex_transport_only_when_set():
 
 def test_the_backend_passes_the_bot_codex_transport(monkeypatch):
     sent = []
-    root = SimpleNamespace(_redis=SimpleNamespace(connection_pool=SimpleNamespace(connection_kwargs={})))
+    root = SimpleNamespace(_redis_url="redis://fixture.invalid/0", _redis=SimpleNamespace(connection_pool=SimpleNamespace(connection_kwargs={})))
     monkeypatch.setattr(agent_bridge, "get_agent_subscriber", lambda: root)
 
     class Subscriber:

@@ -121,7 +121,7 @@ def _execution(turn="turn-1") -> TurnExecution:
 
 def _bridge(monkeypatch, redis, *, close_gate: threading.Event | None = None, name="claude-code"):
     calls = SimpleNamespace(commands=[], rpcs=[], closed=0)
-    root = SimpleNamespace(_redis=SimpleNamespace(connection_pool=SimpleNamespace(connection_kwargs={})))
+    root = SimpleNamespace(_redis_url="redis://fixture.invalid/0", _redis=SimpleNamespace(connection_pool=SimpleNamespace(connection_kwargs={})))
     monkeypatch.setattr(agent_bridge, "get_agent_subscriber", lambda: root)
 
     class Subscriber(RedisSubscriber):

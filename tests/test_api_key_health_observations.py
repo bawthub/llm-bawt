@@ -58,7 +58,7 @@ def test_unknown_expiry_is_not_invented(text):
 def test_any_api_key_provider_uses_expiry_health(days, state):
     expiry = int(datetime.now(timezone.utc).timestamp() * 1000) + days * 86_400_000
     record = base.ConnectionRecord(provider="example-api", status="connected", auth_method="api_key",
-                                   meta={"expires_at": expiry})
+                                   secret={"api_key": "test-key"}, meta={"expires_at": expiry})
     adapter = object.__new__(base.ProviderAdapter)
     adapter.store = SimpleNamespace(load=lambda _: record)
     block = adapter.health()

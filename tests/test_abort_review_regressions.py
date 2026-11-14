@@ -178,7 +178,7 @@ def test_pre_output_abort_and_overlapping_streams_keep_own_identity(store, monke
         release[params["requestId"][-1]].set()
         return {"ok": True, "cancelled": True}
 
-    root = SimpleNamespace(send_rpc=rpc, _redis=SimpleNamespace(connection_pool=SimpleNamespace(connection_kwargs={})))
+    root = SimpleNamespace(send_rpc=rpc, _redis_url="redis://fixture.invalid/0", _redis=SimpleNamespace(connection_pool=SimpleNamespace(connection_kwargs={})))
     monkeypatch.setattr(agent_bridge, "get_agent_subscriber", lambda: root)
 
     class Subscriber:
@@ -249,7 +249,7 @@ def test_abort_during_command_publication_is_sent_after_chat_send(store, monkeyp
     monkeypatch.setattr(turn_abort, "WORKER_FINALIZE_GRACE_SECONDS", 0.0)
     owner = execution(store)
     order = []
-    root = SimpleNamespace(_redis=SimpleNamespace(connection_pool=SimpleNamespace(connection_kwargs={})))
+    root = SimpleNamespace(_redis_url="redis://fixture.invalid/0", _redis=SimpleNamespace(connection_pool=SimpleNamespace(connection_kwargs={})))
     monkeypatch.setattr(agent_bridge, "get_agent_subscriber", lambda: root)
 
     class Subscriber:

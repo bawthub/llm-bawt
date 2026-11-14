@@ -121,7 +121,7 @@ def test_app_timeout_cancels_only_supported_request_and_preserves_error(monkeypa
     tree = ast.parse(source.read_text())
     method = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "stream_raw")
     module = ast.fix_missing_locations(ast.Module(body=[method], type_ignores=[]))
-    subscriber = SimpleNamespace(_redis=SimpleNamespace(connection_pool=SimpleNamespace(
+    subscriber = SimpleNamespace(_redis_url="redis://fixture.invalid/0", _redis=SimpleNamespace(connection_pool=SimpleNamespace(
         connection_kwargs={"url": "redis://test.invalid"},
     )))
     scope = {

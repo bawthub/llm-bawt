@@ -256,7 +256,7 @@ def _app_publishes(monkeypatch, bot_config: dict) -> dict[str, str]:
         async def close(self):
             return None
 
-    root = SimpleNamespace(_redis=SimpleNamespace(connection_pool=SimpleNamespace(
+    root = SimpleNamespace(_redis_url="redis://fixture.invalid/0", _redis=SimpleNamespace(connection_pool=SimpleNamespace(
         connection_kwargs={"url": "redis://localhost:6379/0"})))
     monkeypatch.setattr(module, "get_agent_subscriber", lambda: root)
     monkeypatch.setattr("agent_bridge.subscriber.RedisSubscriber", Subscriber)

@@ -86,6 +86,7 @@ class XaiManagementAdapter(ProviderAdapter):
     label = "xAI management (balance reporting)"
     auth_methods = (AUTH_API_KEY,)
     access_path_keys = ()
+    api_key_secret_field = "management_key"
 
     def descriptor(self) -> dict:
         result = super().descriptor()

@@ -176,17 +176,14 @@ def _stored_path_url(config: Any) -> str | None:
     return str(value).strip() or None if value else None
 
 
-def _write_path_url(config: Any, base_url: str | None) -> None:
+def _write_path_url(conn: Any, base_url: str | None) -> None:
+    """Update the server URL inside the credential writer's transaction."""
     from sqlalchemy import text  # noqa: PLC0415
 
-    engine = _catalog_engine(config)
-    if engine is None:
-        raise RuntimeError("Model catalog database unavailable")
-    with engine.begin() as conn:
-        updated = conn.execute(
-            text("UPDATE access_paths SET base_url = :url, updated_at = now() WHERE key = :key"),
-            {"url": base_url, "key": ACCESS_PATH_KEY},
-        ).rowcount
+    updated = conn.execute(
+        text("UPDATE access_paths SET base_url = :url, updated_at = CURRENT_TIMESTAMP WHERE key = :key"),
+        {"url": base_url, "key": ACCESS_PATH_KEY},
+    ).rowcount
     if updated != 1:
         raise RuntimeError("The ollama access path is missing from the model catalog")
 
@@ -273,16 +270,23 @@ class OllamaAdapter(ProviderAdapter):
         version, detail = probe(root, key)
         if version is None:
             return ValidateResult(ok=False, detail=detail)
-        _write_path_url(self.config, f"{root}/v1")
         account = f"Ollama {version} · {root}"
-        self.store.save(ConnectionRecord(
+        record = ConnectionRecord(
             provider=self.id,
             status=STATUS_CONNECTED,
             auth_method=AUTH_ENDPOINT,
             account=account,
             meta={"base_url": root, "version": version},
             secret={_SECRET_FIELD: key} if key else {},
-        ))
+        )
+        engine = _catalog_engine(self.config)
+        if engine is None:
+            raise RuntimeError("Model catalog database unavailable")
+        # The route and its bearer key must change together, including when
+        # encryption or the credential upsert fails.
+        with engine.begin() as conn:
+            _write_path_url(conn, f"{root}/v1")
+            self.store.save_in(conn, record)
         logger.info("Ollama server configured (%s)", account)
         clear_health_cache()
         return ValidateResult(ok=True, account=account)

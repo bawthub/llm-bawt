@@ -24,6 +24,7 @@ class AnthropicAdminAdapter(ProviderAdapter):
     label = "Usage reporting key (Admin)"
     auth_methods = (AUTH_API_KEY,)
     access_path_keys = ()  # NEVER an inference credential
+    api_key_secret_field = "admin_key"
 
     def descriptor(self) -> dict:
         result = super().descriptor()

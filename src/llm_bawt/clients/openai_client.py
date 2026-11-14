@@ -412,7 +412,8 @@ class OpenAIClient(LLMClient):
                             self.model,
                             fallback_err,
                         )
-                return
+                        raise
+                raise
             logger.error(f"Error during OpenAI streaming with tools: {e}")
             raise
 
@@ -588,12 +589,14 @@ class OpenAIClient(LLMClient):
                 if content:
                     yield content
         except OpenAIError as e:
+            if self._is_stream_disconnect_error(e):
+                raise
             logger.error(f"\nError during OpenAI stream processing: {e}")
             yield f"\nERROR: OpenAI API Error - {_api_error_text(e)}"
         except Exception as e:
             if self._is_stream_disconnect_error(e):
                 logger.warning("Streaming disconnected for model '%s': %s", self.model, e)
-                return
+                raise
             logger.error(f"\nUnexpected error during OpenAI stream iteration: {e}")
             yield f"\nERROR: Unexpected error - {e}"
 

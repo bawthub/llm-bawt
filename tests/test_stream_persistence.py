@@ -422,7 +422,7 @@ def test_post_done_usage_survives_nonstream_backend_and_turn_finalization(monkey
             pass
 
     monkeypatch.setattr(bridge_module, "get_agent_subscriber", lambda: SimpleNamespace(
-        _redis=SimpleNamespace(connection_pool=SimpleNamespace(
+        _redis_url="redis://fixture.invalid/0", _redis=SimpleNamespace(connection_pool=SimpleNamespace(
             connection_kwargs={"url": "redis://localhost:6379/0"}))))
     monkeypatch.setattr("agent_bridge.subscriber.RedisSubscriber", FakeRedisSubscriber)
     backend = bridge_module.AgentBridgeBackend()

@@ -68,7 +68,7 @@ def test_app_run_consumer_persists_without_ui_callback(store, monkeypatch):
             yield event
     monkeypatch.setattr("agent_bridge.subscriber.RedisSubscriber", lambda *a: Subscriber())
     monkeypatch.setattr(backend_module, "get_agent_subscriber", lambda: SimpleNamespace(
-        _redis=SimpleNamespace(connection_pool=SimpleNamespace(connection_kwargs={"url": "redis://invalid"}))))
+        _redis_url="redis://fixture.invalid/0", _redis=SimpleNamespace(connection_pool=SimpleNamespace(connection_kwargs={"url": "redis://invalid"}))))
     backend = backend_module.AgentBridgeBackend.__new__(backend_module.AgentBridgeBackend)
     import threading
     backend._thread_local = threading.local()

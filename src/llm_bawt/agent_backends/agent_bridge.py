@@ -286,20 +286,11 @@ class AgentBridgeBackend(AgentBackend):
             def _run_in_thread():
                 async def _worker():
                     from agent_bridge.events import AgentEventKind
-                    # Create a fresh async Redis client for this thread's loop
-                    redis_url = subscriber._redis.connection_pool.connection_kwargs.get(
-                        "url", None
-                    )
-                    if redis_url is None:
-                        # Reconstruct URL from connection kwargs
-                        ck = subscriber._redis.connection_pool.connection_kwargs
-                        host = ck.get("host", "localhost")
-                        port = ck.get("port", 6379)
-                        db = ck.get("db", 0)
-                        redis_url = f"redis://{host}:{port}/{db}"
-
+                    # Reuse the original URL for this loop's fresh client. Parsed
+                    # pool kwargs do not retain it, and rebuilding host/port/db
+                    # loses authentication, TLS and URL query options.
                     from agent_bridge.subscriber import RedisSubscriber
-                    local_sub = RedisSubscriber(redis_url)
+                    local_sub = RedisSubscriber(subscriber._redis_url)
                     await local_sub.connect()
                     pending_error: RuntimeError | None = None
                     try:

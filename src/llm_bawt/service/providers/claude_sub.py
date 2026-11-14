@@ -43,6 +43,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from typing import Callable
 
 from ...utils.config import Config
 from .base import (
@@ -124,6 +125,9 @@ class _LoginSession:
         self.config_dir = config_dir
         self.created = time.monotonic()
         self.buf = bytearray()
+        # Completed OAuth exchanges can retry persistence without reusing the code.
+        self.record: ConnectionRecord | None = None
+        self.cleanup: Callable[[Path], None] | None = None
 
     def pump(self, timeout: float = 0.3) -> None:
         try:
@@ -165,8 +169,11 @@ def _reap() -> None:
     now = time.monotonic()
     with _LOCK:
         stale = [sid for sid, s in _SESSIONS.items() if now - s.created > _SESSION_TTL_S]
-        for sid in stale:
-            _SESSIONS.pop(sid).close()
+        expired = [_SESSIONS.pop(sid) for sid in stale]
+    for session in expired:
+        session.close()
+        if session.cleanup is not None:
+            session.cleanup(session.config_dir)
 
 
 class ClaudeSubAdapter(ProviderAdapter):
@@ -187,7 +194,7 @@ class ClaudeSubAdapter(ProviderAdapter):
         return _target_config_dir()
 
     def _cleanup_login_dir(self, config_dir: Path) -> None:
-        """Called when a login session ends in error. No-op for the shared dir."""
+        """Called after persistence or a failed exchange. No-op for the shared dir."""
 
     # --- cli oauth ----------------------------------------------------------
     def start_cli_login(self) -> CliLoginStart:
@@ -216,6 +223,7 @@ class ClaudeSubAdapter(ProviderAdapter):
             pass
 
         session = _LoginSession(session_id, pid, fd, config_dir)
+        session.cleanup = self._cleanup_login_dir
         deadline = time.monotonic() + _URL_WAIT_S
         url: str | None = None
         while time.monotonic() < deadline:
@@ -242,6 +250,9 @@ class ClaudeSubAdapter(ProviderAdapter):
             session = _SESSIONS.get(session_id)
         if session is None:
             return CliLoginResult(status="error", detail="unknown or expired login session")
+
+        if session.record is not None:
+            return self._persist_login(session)
 
         creds_path = session.config_dir / ".credentials.json"
         try:
@@ -293,17 +304,30 @@ class ClaudeSubAdapter(ProviderAdapter):
                 detail="login did not complete — no credentials written (bad code or timeout)",
             )
 
-        self._drop(session_id)
-
         try:
-            record = self._build_record(bundle, token, creds_path)
+            session.record = self._build_record(bundle, token, creds_path)
         except Exception as e:  # noqa: BLE001
+            self._drop(session_id)
             self._cleanup_login_dir(session.config_dir)
             return CliLoginResult(status="error", detail=str(e))
+        return self._persist_login(session)
+
+    def _persist_login(self, session: _LoginSession) -> CliLoginResult:
+        record = session.record
+        assert record is not None
         try:
             self.store.save(record)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("Claude login succeeded but failed to persist status record: %s", e)
+        except Exception:  # noqa: BLE001 — DB/encryption errors may contain secrets
+            logger.warning("Failed to persist Claude login credential")
+            # Retain the completed session and bundle for retry/recovery. Never
+            # resubmit the already-exchanged OAuth code on a persistence retry.
+            return CliLoginResult(
+                status="error",
+                detail="Could not save Claude credential. Retry completing this login.",
+            )
+        self._drop(session.session_id)
+        self._cleanup_login_dir(session.config_dir)
+        logger.info("Persisted Claude login credential")
         return CliLoginResult(status="connected", record=record)
 
     def _build_record(

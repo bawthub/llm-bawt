@@ -97,11 +97,8 @@ class ClaudeAdapter(ClaudeSubAdapter):
                 "it could not serve both inference and usage; not installing"
             )
 
-        self._cleanup_login_dir(creds_path.parent)
-        # TASK-636: the bundle goes into the encrypted CredentialStore row —
-        # the DB is the single source of truth. The caller's save() persists
-        # both the record and the secret (Fernet at rest).
-        logger.info("Installed fresh Claude credential into the encrypted DB store")
+        # Keep the temporary bundle until the caller's save() succeeds. It is
+        # the recovery copy if encrypted persistence is unavailable.
 
         return ConnectionRecord(
             provider=self.id,

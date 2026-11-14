@@ -248,7 +248,7 @@ def test_the_run_stream_settles_only_bot_steers_and_publishes_every_one(monkeypa
         async def close(self):
             return None
 
-    root = SimpleNamespace(_redis=SimpleNamespace(connection_pool=SimpleNamespace(
+    root = SimpleNamespace(_redis_url="redis://fixture.invalid/0", _redis=SimpleNamespace(connection_pool=SimpleNamespace(
         connection_kwargs={"url": "redis://localhost:6379/0"})))
     monkeypatch.setattr(module, "get_agent_subscriber", lambda: root)
     monkeypatch.setattr("agent_bridge.subscriber.RedisSubscriber", Subscriber)

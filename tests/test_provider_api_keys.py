@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -197,6 +199,59 @@ def test_model_discovery_uses_credential_store_key(monkeypatch) -> None:
 
     assert provider.fetch() == [{"id": "model-1", "description": "Model One"}]
     assert seen == ["stored-key"]
+
+
+@pytest.mark.parametrize("provider_id,field", [
+    ("anthropic-api", "api_key"), ("openrouter", "api_key"), ("anthropic-admin", "admin_key"),
+    ("xai-management", "management_key"),  # preserve the other reporting-only slot
+])
+@pytest.mark.parametrize("secret_case", [
+    "decrypt_failure", "invalid_json", "non_object", "missing", "empty", "wrong_field", "valid",
+])
+def test_required_api_key_health_and_route_eligibility(monkeypatch, caplog, provider_id, field, secret_case):
+    from llm_bawt.service.providers import base, registry
+
+    raw = {"status": "connected", "auth_method": "api_key", "secret_enc": "offline-ciphertext"}
+    secret = {field: "offline-secret-key"}
+    if secret_case == "empty":
+        secret = {field: " \t "}
+    elif secret_case == "wrong_field":
+        secret = {"api_key" if field == "admin_key" else "admin_key": "offline-secret-key"}
+    elif secret_case == "missing":
+        raw.pop("secret_enc")
+
+    def decrypt(_ciphertext):
+        if secret_case == "decrypt_failure":
+            raise RuntimeError("decrypt failed: offline-secret-key")
+        if secret_case == "invalid_json":
+            return "offline-secret-key is not JSON"
+        if secret_case == "non_object":
+            return '["offline-secret-key"]'
+        return json.dumps(secret)
+
+    store = object.__new__(base.CredentialStore)
+    store._store = SimpleNamespace(
+        engine=object(), get_scope_settings=lambda *_: {store._key(provider_id): raw},
+    )
+    monkeypatch.setattr(base.crypto, "decrypt", decrypt)
+    monkeypatch.setattr(base, "CredentialStore", lambda _config: store)
+    config = SimpleNamespace()
+    adapter = registry.get_adapter(config, provider_id)
+    block = adapter.health()
+    usable = secret_case == "valid"
+    assert block["state"] == ("ok" if usable else "broken")
+    assert block["fix"] == (None if usable else "reconnect")
+    assert "offline-secret-key" not in json.dumps(block)
+    assert "offline-secret-key" not in caplog.text
+    paths = adapter.access_path_keys
+    connections = registry.access_path_connections(config, paths)
+    for path in paths:
+        assert connections[path]["connected"] is usable
+        assert registry.route_eligibility(path, "api_key", connections[path])["eligible"] is usable
+    if provider_id in {"anthropic-admin", "xai-management"}:
+        assert paths == ()  # reporting-only credentials never own inference routes
+    else:
+        assert paths
 
 
 def test_providers_health_does_not_echo_a_probe_error(monkeypatch) -> None:

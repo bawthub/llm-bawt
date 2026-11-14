@@ -202,9 +202,12 @@ class CredentialStore:
         enc = raw.get("secret_enc")
         if enc:
             try:
-                secret = json.loads(crypto.decrypt(enc))
-            except Exception as e:  # noqa: BLE001
-                logger.warning("Failed to decrypt secret for provider %s: %s", provider, e)
+                decoded = json.loads(crypto.decrypt(enc))
+                if not isinstance(decoded, dict):
+                    raise ValueError("credential secret must be an object")
+                secret = decoded
+            except Exception:  # noqa: BLE001 — exception text may contain secret material
+                logger.warning("Failed to decode secret for provider %s", provider)
         return ConnectionRecord(
             provider=provider,
             status=raw.get("status", STATUS_DISCONNECTED),
@@ -406,6 +409,8 @@ class ProviderAdapter:
     #: Credentials only the installation operator uses (e.g. release/deploy
     #: tooling). Tenant-facing surfaces such as the setup wizard hide them.
     operator_only: bool = False
+    #: Required secret for API-key health; reporting-only adapters may differ.
+    api_key_secret_field: str = "api_key"
 
     def __init__(self, config: Config):
         self.config = config
@@ -445,6 +450,13 @@ class ProviderAdapter:
         if rec.auth_method == AUTH_API_KEY:
             from .api_key_health import api_key_health
 
+            key = rec.secret.get(self.api_key_secret_field)
+            if not isinstance(key, str) or not key.strip():
+                return health_block(
+                    HEALTH_BROKEN,
+                    detail="Required API key is missing or unreadable; reconnect.",
+                    fix="reconnect",
+                )
             return api_key_health(rec)
         return health_block(HEALTH_OK)
 

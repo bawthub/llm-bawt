@@ -267,6 +267,10 @@ class ResponsesClient(LLMClient):
 
             for event in stream:
                 etype = getattr(event, "type", "")
+                if etype in {"response.failed", "response.incomplete", "error"}:
+                    # Never release accumulated tool calls from a failed response.
+                    # Keep provider error payloads out of the raised message.
+                    raise RuntimeError(f"Responses stream ended with {etype}")
 
                 if logger.isEnabledFor(logging.DEBUG) and (
                     etype.startswith("response.function_call") or etype in (

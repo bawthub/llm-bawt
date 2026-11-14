@@ -151,7 +151,7 @@ class TestTransport:
                 return None
 
         root_subscriber = SimpleNamespace(
-            _redis=SimpleNamespace(
+            _redis_url="redis://fixture.invalid/0", _redis=SimpleNamespace(
                 connection_pool=SimpleNamespace(
                     connection_kwargs={"url": "redis://localhost:6379/0"}
                 )
@@ -216,7 +216,7 @@ class TestTransport:
                 return None
 
         root_subscriber = SimpleNamespace(
-            _redis=SimpleNamespace(
+            _redis_url="redis://fixture.invalid/0", _redis=SimpleNamespace(
                 connection_pool=SimpleNamespace(
                     connection_kwargs={"url": "redis://localhost:6379/0"}
                 )
@@ -280,7 +280,7 @@ class TestTransport:
                 return None
 
         root_subscriber = SimpleNamespace(
-            _redis=SimpleNamespace(
+            _redis_url="redis://fixture.invalid/0", _redis=SimpleNamespace(
                 connection_pool=SimpleNamespace(
                     connection_kwargs={"url": "redis://localhost:6379/0"}
                 )
@@ -335,7 +335,7 @@ class TestTransport:
                 return None
 
         root_subscriber = SimpleNamespace(
-            _redis=SimpleNamespace(
+            _redis_url="redis://fixture.invalid/0", _redis=SimpleNamespace(
                 connection_pool=SimpleNamespace(
                     connection_kwargs={"url": "redis://localhost:6379/0"}
                 )
@@ -390,7 +390,7 @@ class TestTransport:
                 return None
 
         root_subscriber = SimpleNamespace(
-            _redis=SimpleNamespace(
+            _redis_url="redis://fixture.invalid/0", _redis=SimpleNamespace(
                 connection_pool=SimpleNamespace(
                     connection_kwargs={"url": "redis://localhost:6379/0"}
                 )

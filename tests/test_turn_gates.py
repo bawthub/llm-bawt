@@ -326,7 +326,7 @@ def test_the_bridge_client_hands_the_run_terminal_to_its_execution(monkeypatch):
             yield AgentEvent(event_id=f"{request_id}:terminal", session_key="", run_id=request_id,
                              kind=AgentEventKind.RUN_TERMINAL, origin="system", raw=terminal)
 
-    root = SimpleNamespace(_redis=SimpleNamespace(connection_pool=SimpleNamespace(connection_kwargs={})))
+    root = SimpleNamespace(_redis_url="redis://fixture.invalid/0", _redis=SimpleNamespace(connection_pool=SimpleNamespace(connection_kwargs={})))
     monkeypatch.setattr(agent_bridge, "get_agent_subscriber", lambda: root)
     monkeypatch.setattr("agent_bridge.subscriber.RedisSubscriber", Subscriber)
     list(agent_bridge.AgentBridgeBackend().stream_raw("hello", {
