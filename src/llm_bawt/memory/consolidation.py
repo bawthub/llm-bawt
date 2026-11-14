@@ -600,7 +600,11 @@ class LLMServiceClient:
     
     def __init__(self, service_url: str):
         self.service_url = service_url.rstrip("/")
-    
+
+    def stream_raw(self, messages):
+        """Match the consolidation client's Message-based generation contract."""
+        yield self.query([message.to_api_format() for message in messages])
+
     def query(self, messages: list[dict], max_tokens: int = 500, temperature: float = 0.7) -> str:
         """Query the LLM via the service's raw completion endpoint."""
         import urllib.request
