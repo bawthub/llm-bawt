@@ -460,7 +460,8 @@ async def test_abort_snapshot_turn_complete_carries_the_committed_balance(monkey
     from llm_bawt.service.usage import balance as balance_module
 
     row = SimpleNamespace(id="T", bot_id="b", user_id="u", trigger_message_id=None, assistant_message_id=None,
-                          status="aborted", end_reason="aborted", response_text="", token_usage_json="{usage}")
+                          status="aborted", end_reason="aborted", response_text="", token_usage_json="{usage}",
+                          terminal_protocol_state=None)
     store = SimpleNamespace(engine="db", get_turn=lambda _t: row, changed_files_summary=lambda _t: None)
     subscriber = SimpleNamespace(publish_tool_event=AsyncMock(return_value="1-0"))
     monkeypatch.setattr(balance_module, "balance_update_for_turn",

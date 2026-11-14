@@ -288,6 +288,7 @@ def test_spoofed_delivery_correlation_is_rejected_before_turn_start():
 
     service = BackgroundService.__new__(BackgroundService)
     service._default_bot = "snark"
+    service._turn_log_store = MagicMock(spec=[])
     service._inter_bot_dispatcher = SimpleNamespace(
         store=SimpleNamespace(validate_claim=lambda **_kwargs: False)
     )
@@ -307,6 +308,7 @@ def test_spoofed_delivery_correlation_is_rejected_before_turn_start():
         assert "invalid or stale" in str(exc)
     else:
         raise AssertionError("spoofed delivery claim was accepted")
+    assert service._turn_log_store.mock_calls == []
 
 
 def test_spoofed_delivery_correlation_is_rejected_on_stream_path():
@@ -315,6 +317,7 @@ def test_spoofed_delivery_correlation_is_rejected_on_stream_path():
 
     service = BackgroundService.__new__(BackgroundService)
     service._default_bot = "snark"
+    service._turn_log_store = MagicMock(spec=[])
     service._inter_bot_dispatcher = SimpleNamespace(
         store=SimpleNamespace(validate_claim=lambda **_kwargs: False)
     )
@@ -340,6 +343,7 @@ def test_spoofed_delivery_correlation_is_rejected_on_stream_path():
         assert "invalid or stale" in str(exc)
     else:
         raise AssertionError("spoofed streaming delivery claim was accepted")
+    assert service._turn_log_store.mock_calls == []
 
 
 def test_durable_dispatch_drains_stream_and_uses_persisted_outcome():

@@ -301,6 +301,9 @@ def test_client_owner_gets_explicit_grant_failure_not_success(client, store):
 
 
 class SessionService:
+    # These legacy continuation cases do not opt into protocol admission.
+    config = SimpleNamespace(REDIS_URL=None)
+
     def __getattr__(self, name):
         # Per-instance fenced admission store unless a test class defines one.
         if name == "_turn_log_store":
