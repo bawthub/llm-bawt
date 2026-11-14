@@ -492,7 +492,7 @@ def _defer_restart_retry(store: InterBotDeliveryStore, delivery_id: str) -> None
                     || jsonb_build_object(
                         '{_DEFER_COUNT}', COALESCE((metadata_json->>'{_DEFER_COUNT}')::int, 0) + 1,
                         '{_DEFER_UNTIL}', to_jsonb(now() + LEAST(
-                            interval '30 seconds' * power(2, COALESCE((metadata_json->>'{_DEFER_COUNT}')::int, 0)),
+                            interval '30 seconds' * power(2, LEAST(COALESCE((metadata_json->>'{_DEFER_COUNT}')::int, 0), 7)),
                             interval '1 hour')))
                 WHERE id=:id
             """), {"id": delivery_id})

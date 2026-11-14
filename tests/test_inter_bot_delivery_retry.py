@@ -679,3 +679,26 @@ def test_lease_expiry_never_restart_retries_other_endings(delivery, turn_cleanup
     assert store.get(original.id).status in {"FAILED", "CANCELLED"}
     assert not _children(store, original.id)
     assert RESTART_RETRY_PENDING not in store.get(original.id).metadata
+
+
+def test_restart_retry_backoff_stays_capped_at_high_counts(delivery, turn_cleanup):
+    """Codex TASK-2285: the exponent is clamped, so a long-failing row still
+    gets a one-hour deferral instead of an interval overflow."""
+    from llm_bawt import inter_bot_delivery_retry as retry
+
+    store, slug = delivery
+    original = submit(store, slug)
+    with store.engine.begin() as conn:
+        conn.execute(text(
+            "UPDATE inter_bot_deliveries SET metadata_json = metadata_json || "
+            "'{\"restart_retry_deferrals\": 50}'::jsonb WHERE id=:id"
+        ), {"id": original.id})
+    retry._defer_restart_retry(store, original.id)
+    with store.engine.connect() as conn:
+        count, remaining = conn.execute(text(
+            "SELECT (metadata_json->>'restart_retry_deferrals')::int, "
+            "EXTRACT(EPOCH FROM (metadata_json->>'restart_retry_deferred_until')::timestamptz - now()) "
+            "FROM inter_bot_deliveries WHERE id=:id"
+        ), {"id": original.id}).one()
+    assert count == 51
+    assert 3500 < remaining <= 3600
