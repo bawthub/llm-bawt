@@ -210,6 +210,86 @@ def test_manual_owner_is_immutable_and_can_delete_own_prefix(owned_clients):
     assert a.delete_memory(first.id[:8]) is True
 
 
+def _prefix_collision_rows(backend, sources, *, active, foreign=False):
+    import json
+
+    from llm_bawt.memory.ownership_migration import ACTIVATIONS
+
+    ids = ("1234abcd-0000-4000-8000-000000000001", "1234abcd-0000-4000-8000-000000000002")
+    with backend.engine.begin() as conn:
+        if not active:
+            conn.execute(text(f"DELETE FROM {ACTIVATIONS} WHERE bot_id=:bot"), {"bot": backend.bot_id_sanitized})
+        for index, memory_id in enumerate(ids):
+            owner = "owner-b" if foreign and index else "owner-a"
+            conn.execute(text(f"""
+                INSERT INTO {backend._memories_table_name}
+                    (id, content, importance, tags, source_message_ids, owner_user_id)
+                VALUES (:id, :content, 0.5, '["misc"]'::jsonb, CAST(:sources AS jsonb), :owner)
+            """), {"id": memory_id, "content": f"Prefix fixture {index}",
+                   "sources": json.dumps([sources[owner]]), "owner": owner if active else None})
+    return ids
+
+
+@pytest.mark.parametrize("mode", ["operator", "personal", "legacy"])
+def test_memory_prefix_delete_refuses_ambiguity_then_deletes_only_one(owned_clients, mode):
+    from llm_bawt.memory.ownership import OPERATOR_MEMORY_AUTHORITY
+
+    backend, a, _b, sources = owned_clients
+    ids = _prefix_collision_rows(backend, sources, active=mode != "legacy")
+    delete = (lambda ref: backend.delete_memory(ref, authority=OPERATOR_MEMORY_AUTHORITY)
+              ) if mode == "operator" else a.delete_memory
+    assert delete("1234abcd") is False
+    with backend.engine.connect() as conn:
+        assert {row.id for row in conn.execute(text(f"SELECT id FROM {backend._memories_table_name}"))} == set(ids)
+    assert delete(ids[0]) is True
+    assert delete("1234abcd") is True
+    assert delete("1234abcd") is False
+    with backend.engine.connect() as conn:
+        assert conn.execute(text(f"SELECT count(*) FROM {backend._memories_table_name}")).scalar_one() == 0
+
+
+@pytest.mark.parametrize("active", [False, True])
+def test_personal_prefix_ambiguity_counts_only_authorized_rows(owned_clients, active):
+    backend, a, _b, sources = owned_clients
+    ids = _prefix_collision_rows(backend, sources, active=active, foreign=True)
+    assert a.delete_memory("1234abcd") is True
+    with backend.engine.connect() as conn:
+        assert [row.id for row in conn.execute(text(f"SELECT id FROM {backend._memories_table_name}"))] == [ids[1]]
+
+
+def test_full_length_delete_id_is_literal_even_with_a_wildcard_character(owned_clients):
+    backend, a, _b, _sources = owned_clients
+    exact, sibling = "a" * 35 + "%", "a" * 35 + "b"
+    with backend.engine.begin() as conn:
+        for memory_id in (exact, sibling):
+            conn.execute(text(f"""
+                INSERT INTO {backend._memories_table_name} (id, content, owner_user_id)
+                VALUES (:id, 'Literal ID fixture', 'owner-a')
+            """), {"id": memory_id})
+    assert a.delete_memory(exact) is True
+    with backend.engine.connect() as conn:
+        assert [row.id for row in conn.execute(text(f"SELECT id FROM {backend._memories_table_name}"))] == [sibling]
+
+
+@pytest.mark.parametrize("ref", [None, "", "a", "1234567", " " * 8, "1234%abc", "1234_abc", "1234\\abc"])
+@pytest.mark.parametrize("personal", [False, True])
+def test_short_or_wildcard_delete_refuses_before_write_transaction(owned_clients, monkeypatch, ref, personal):
+    from llm_bawt.memory.ownership import OPERATOR_MEMORY_AUTHORITY
+
+    backend, a, _b, _sources = owned_clients
+
+    def forbidden():
+        pytest.fail("invalid memory delete must not open a write transaction")
+
+    monkeypatch.setattr(backend, "_memory_write_transaction", forbidden)
+    if personal:
+        assert a.delete_memory(ref) is False
+    else:
+        assert backend.delete_memory(ref, authority=OPERATOR_MEMORY_AUTHORITY) is False
+    with pytest.raises(ValueError, match="nonblank"):
+        backend._delete_owned_memory("1234abcd", " ")
+
+
 def test_forged_sources_are_refused_without_mutating_original(owned_clients):
     backend, a, _b, sources = owned_clients
     with pytest.raises(RuntimeError, match="sources do not belong"):

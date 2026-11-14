@@ -408,7 +408,7 @@ class PostgreSQLSemanticMemoryMixin:
 
     def delete_memory(self, memory_id: str, *, user_id: str | None = None,
                       authority: MemoryAuthority | None = None) -> bool:
-        """Delete by ID/prefix, preserving the optional scoped-delete API.
+        """Delete one eligible ID or unambiguous prefix of at least eight chars.
 
         The existing internal API defines user_id=None as operator. Unbound
         entry points must pass NO_MEMORY_AUTHORITY rather than use that legacy
@@ -424,14 +424,31 @@ class PostgreSQLSemanticMemoryMixin:
         if authority is not None and authority.user_id is not None:
             return self._delete_owned_memory(memory_id, authority.user_id)
         ownership = self._ownership(authority)
-        match = "id LIKE :mid" if len(memory_id) < 36 else "id = :mid"
-        params = {**ownership.params, "mid": f"{memory_id}%" if len(memory_id) < 36 else memory_id}
+        return self._delete_matching_memory(memory_id, ownership.mutation_predicate, ownership.params)
+
+    def _delete_matching_memory(self, memory_id: str, guard: str, params: dict) -> bool:
+        """Resolve at most two guarded candidates, then delete one exact ID."""
+        if not isinstance(memory_id, str) or len(memory_id) < 8 or not memory_id.strip():
+            return False
+        prefix = len(memory_id) < 36
+        if prefix and any(char in memory_id for char in ("%", "_", "\\")):
+            return False
+        match = "id LIKE :mid" if prefix else "id = :mid"
+        params = {**params, "mid": f"{memory_id}%" if prefix else memory_id}
         try:
             with self._memory_write_transaction() as conn:
+                candidates = conn.execute(text(f"""
+                    SELECT id FROM {self._memories_table_name} mem
+                    WHERE {match} AND ({guard}) ORDER BY id LIMIT 2
+                """), params).all()
+                if len(candidates) != 1:
+                    if candidates:
+                        logger.debug("Refusing ambiguous memory ID prefix")
+                    return False
                 return conn.execute(text(f"""
                     DELETE FROM {self._memories_table_name} mem
-                    WHERE {match} AND {ownership.mutation_predicate}
-                """), params).rowcount > 0
+                    WHERE id = :selected_id AND ({guard})
+                """), {**params, "selected_id": candidates[0].id}).rowcount == 1
         except Exception as e:
             logger.error(f"Failed to delete memory {memory_id}: {e}")
             return False
@@ -444,15 +461,9 @@ class PostgreSQLSemanticMemoryMixin:
         ownership = self._ownership(MemoryAuthority(user_id=user_id))
         params = ownership.params
         owner = history_owner_clause(params, bot_id=self.bot_id, user_id=user_id)
-        if len(memory_id) < 36:
-            match, params["mid"] = "id LIKE :mid", f"{memory_id}%"
-        else:
-            match, params["mid"] = "id = :mid", memory_id
         # Owned: at least one source, and every source is one of the user's
         # messages, live or forgotten.
-        sql = text(f"""
-            DELETE FROM {self._memories_table_name} mem
-            WHERE {match} AND (
+        guard = f"""
               ({ownership.active} AND {ownership.owned_predicate}) OR
               (NOT ({ownership.active})
               AND jsonb_typeof(mem.source_message_ids::jsonb) = 'array'
@@ -465,14 +476,8 @@ class PostgreSQLSemanticMemoryMixin:
                     SELECT id FROM {self._forgotten_table_name} WHERE {owner}
                 )
               ))
-            )
-        """)
-        try:
-            with self._memory_write_transaction() as conn:
-                return conn.execute(sql, params).rowcount > 0
-        except Exception as e:
-            logger.error(f"Failed to delete memory {memory_id}: {e}")
-            return False
+        """
+        return self._delete_matching_memory(memory_id, guard, params)
 
     def delete_memories_by_source_message_ids(self, message_ids: list[str], *,
                                              authority: MemoryAuthority | None = None) -> int:
