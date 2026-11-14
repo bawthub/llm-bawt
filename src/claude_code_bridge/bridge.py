@@ -129,7 +129,6 @@ class ClaudeCodeBridge(
         self._approval_fail_closed: bool = os.getenv(
             "CLAUDE_CODE_APPROVAL_FAIL_CLOSED", ""
         ).strip().lower() in ("1", "true", "yes")
-        self._approval_grants: dict[str, float] = {}  # grant_key -> expiry (monotonic)
         self._approval_reload_task: asyncio.Task | None = None
         # Tracks whether the last bundle fetch reached the app. Only consulted
         # when fail-closed is on: a failing fetch then denies all tools.
