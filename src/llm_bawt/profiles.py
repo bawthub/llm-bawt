@@ -463,9 +463,10 @@ class ProfileManager:
     ) -> ProfileAttribute:
         """Record an unreviewed fact; it isn't rendered until curation promotes it.
 
-        ``idempotent`` returns an existing row for the same key and source
-        message (or the same value when there's no source message) instead of
-        adding another, so a retried extraction batch doesn't duplicate it.
+        ``idempotent`` returns an existing row with the same key, source
+        message and value instead of adding another, so a retried extraction
+        batch doesn't duplicate a fact; distinct facts from one message stay
+        separate.
         """
         entity_id = entity_id.lower().strip()
         category = category.lower().strip()
@@ -482,7 +483,7 @@ class ProfileManager:
                     ProfileAttribute.source_message_id == source_message_id,
                 )).all()
                 for row in existing:
-                    if source_message_id is not None or row.value == value:
+                    if row.value == value:
                         return row
             attr = ProfileAttribute(
                 entity_type=entity_type, entity_id=entity_id,

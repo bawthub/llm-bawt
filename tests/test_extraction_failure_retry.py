@@ -266,18 +266,69 @@ def test_idempotent_candidate_is_not_duplicated() -> None:
 
     first = pm.add_candidate(value="Nick has a dog named Biscuit", source_message_id="h1", **kw)
     again = pm.add_candidate(value="Nick has a dog named Biscuit", source_message_id="h1", idempotent=True, **kw)
-    reworded = pm.add_candidate(value="Nick owns a dog, Biscuit", source_message_id="h1", idempotent=True, **kw)
-    unsourced = pm.add_candidate(value="Nick has a cat", **kw)
-    unsourced_again = pm.add_candidate(value="Nick has a cat", idempotent=True, **kw)
-    other_unsourced = pm.add_candidate(value="Nick has a parrot", idempotent=True, **kw)
+    # A second fact from the same message under the same key stays distinct.
+    cat = pm.add_candidate(value="Nick has a cat named Miso", source_message_id="h1", idempotent=True, **kw)
+    unsourced = pm.add_candidate(value="Nick has a parrot", **kw)
+    unsourced_again = pm.add_candidate(value="Nick has a parrot", idempotent=True, **kw)
     plain = pm.add_candidate(value="Nick has a dog named Biscuit", source_message_id="h1", **kw)
 
-    assert again.id == reworded.id == first.id
+    assert again.id == first.id
+    assert cat.id != first.id and cat.value == "Nick has a cat named Miso"
     assert unsourced_again.id == unsourced.id
-    assert other_unsourced.id != unsourced.id
     assert plain.id != first.id  # default behavior unchanged
     with Session(engine) as session:
         assert len(session.exec(select(ProfileAttribute)).all()) == 4
+
+
+def test_two_facts_one_message_partial_profile_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Dog and cat from h1 under one key: dog's profile lands, cat's fails; the
+    retry must add cat without duplicating dog (real ProfileManager)."""
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import Session, SQLModel, create_engine, select
+
+    from llm_bawt.profiles import EntityProfile, ProfileAttribute, ProfileManager
+
+    engine = create_engine("sqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(engine, tables=[ProfileAttribute.__table__, EntityProfile.__table__])
+    pm = ProfileManager.__new__(ProfileManager)
+    pm.engine = engine
+    real_add = pm.add_candidate
+    fail_once = {"cat": True}
+
+    def add_candidate(**kw: Any) -> Any:
+        if "cat" in kw["value"] and fail_once["cat"]:
+            fail_once["cat"] = False
+            raise RuntimeError("profile store blip")
+        return real_add(**kw)
+
+    pm.add_candidate = add_candidate  # type: ignore[method-assign]
+    monkeypatch.setattr("llm_bawt.mcp_server.server._get_profile_manager", lambda: pm)
+
+    class _StoredMemory(_Memory):
+        def list_memories(self, **_kw: Any) -> list[dict[str, Any]]:
+            return [{"id": f"m{i}", "content": c, "importance": 0.9} for i, c in enumerate(self.added)]
+
+    memory = _StoredMemory()
+    service, backend, task = _service(monkeypatch, memory)
+    service.config = SimpleNamespace(MEMORY_PROFILE_ATTRIBUTE_ENABLED=True)  # type: ignore[attr-defined]
+    attr = {"category": "fact", "key": "pets"}
+    dog = ExtractedFact(content="Nick has a dog named Biscuit", tags=["pets"], importance=0.9,
+                        source_message_ids=["h1"], profile_attribute=attr)
+    cat = ExtractedFact(content="Nick has a cat named Miso", tags=["pets"], importance=0.9,
+                        source_message_ids=["h1"], profile_attribute=attr)
+    _extract_script(monkeypatch, [[dog, cat], [dog, cat]])
+    monkeypatch.setattr(MemoryExtractionService, "determine_memory_actions",
+                        MemoryExtractionService._determine_actions_with_heuristics)
+    monkeypatch.setattr("llm_bawt.mcp_server.extraction.ALLOWED_PROFILE_KEYS", {"pets"})
+
+    with pytest.raises(ExtractionBatchFailed, match="attempt 1/3"):
+        service._process_memory_extraction(task)
+    service._process_memory_extraction(task)
+
+    assert backend.processed == ["h1", "r1"]
+    with Session(engine) as session:
+        values = sorted(r.value for r in session.exec(select(ProfileAttribute)).all())
+    assert values == ["Nick has a cat named Miso", "Nick has a dog named Biscuit"]
 
 
 def test_failure_marks_run_failed(monkeypatch: pytest.MonkeyPatch) -> None:
