@@ -125,7 +125,7 @@ class TaskSource(SourceProvider):
         found = tuple(row.get("id") if isinstance(row, dict) else None for row in payload["results"])
         if any(not isinstance(ref, str) or not TASK_REF.fullmatch(ref) for ref in found):
             raise RecallError("source_unavailable")
-        return named + found, payload["mode"]
+        return tuple(dict.fromkeys(named + found)), payload["mode"]
 
     async def search_with(self, reader, query: str, scope: RecallScope,
                           task_ids: tuple[str, ...]) -> EvidenceBatch:
@@ -140,14 +140,22 @@ class TaskSource(SourceProvider):
         result = EvidenceBatch(search_mode=mode)
         ranked: list[Ranked] = []
         seen: set[str] = set()
+        checked: set[str] = set()
         for ref in refs:
             if len(seen) >= MAX_TASKS:
                 break
+            if ref in checked:
+                continue
+            checked.add(ref)
             try:
                 row = await self.authorized_task(reader, ref, scope)
                 if row is None:
                     result.withheld += 1
                     continue
+                # Memoize both identities only AFTER authorization succeeded.
+                # A question's TASK-N and semantic search's CUID must share one
+                # bounded provenance traversal. Never persist across searches.
+                checked.update((row["id"], row["shortId"]))
                 if row["id"] in seen:
                     continue
                 seen.add(row["id"])

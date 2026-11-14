@@ -167,6 +167,47 @@ async def test_tasks_named_in_the_question_are_candidates_before_semantic_matche
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("provider_type", [TaskSource, TaskDetailSource])
+async def test_task_aliases_do_not_spend_authority_budget_twice(provider_type):
+    rows = [task(number, steps=[{"orderIndex": 1, "title": "retry decision", "status": "DONE"}])
+            for number in (1, 2, 3)]
+    limit = 1 + 3 * (4 if provider_type is TaskDetailSource else 3)
+
+    class LimitedReader(Reader):
+        async def json(self, method, url, **kwargs):
+            if len(self.calls) >= limit:
+                raise RecallError("retrieval_budget")
+            return await super().json(method, url, **kwargs)
+
+    reader = LimitedReader(*rows, semantic=tuple(row["id"] for row in rows))
+    result = await provider_type().search_with(reader, "TASK-1 TASK-2 retry decision", SCOPE, ())
+    assert {item.id.split("#")[0] for item in result} == {"TASK-1", "TASK-2", "TASK-3"}
+    assert result.withheld == 0
+    assert len(reader.calls) == limit
+    assert not urls(reader, "/" + rows[0]["id"])
+    assert not urls(reader, "/" + rows[1]["id"])
+
+
+@pytest.mark.asyncio
+async def test_duplicate_denied_reference_is_withheld_once():
+    reader = Reader(owner="excluded")
+    result = await TaskSource().search_with(reader, "retry", SCOPE, ("TASK-42", "TASK-42"))
+    assert result == [] and result.withheld == 1
+    assert len(urls(reader, "/TASK-42")) == 1
+
+
+@pytest.mark.asyncio
+async def test_task_authority_alias_cache_is_not_reused_across_searches():
+    source, reader = TaskSource(), Reader()
+    first = await source.search_with(reader, "retry", SCOPE, ("TASK-42",))
+    assert len(first) == 1
+    reader.owner = "excluded"
+    second = await source.search_with(reader, "retry", SCOPE, ("TASK-42",))
+    assert second == [] and second.withheld == 1
+    assert len(urls(reader, "/TASK-42")) == 2
+
+
+@pytest.mark.asyncio
 async def test_discovery_failure_is_unavailable_never_an_empty_search():
     class Failing(Reader):
         async def json(self, method, url, **kwargs):
