@@ -56,9 +56,10 @@ RUN if [ "$WITH_CUDA" = "true" ]; then \
         uv pip install "llama-cpp-python @ git+https://github.com/abetlen/llama-cpp-python.git"; \
     fi
 
-# Install vLLM with CUDA (separate cached layer)
+# Install vLLM with CUDA (separate cached layer). Pinned to the uv.lock version
+# so this layer never fetches a newer vllm that the frozen sync then replaces.
 RUN if [ "$WITH_CUDA" = "true" ]; then \
-        uv pip install vllm; \
+        uv pip install "vllm==0.29.0"; \
     else \
         echo "Skipping vLLM install (requires CUDA)"; \
     fi
