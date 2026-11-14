@@ -302,7 +302,7 @@ async def test_manual_mode_survives_without_management_and_anchor_is_live(offlin
     rows = [BalanceRow("xai", Decimal(100), now, Decimal(3), 0, now)]
 
     class Counter:
-        def read(self, _provider):
+        def recount(self, _provider):
             return rows[0]
 
         def daily_spend(self, *_args, **_kwargs):

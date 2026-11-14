@@ -46,6 +46,10 @@ class UsageAdapter(ABC):
         """When the billed credential was last connected; an older anchor is void."""
         return None
 
+    def anchored_balance_row(self, store):
+        """Read the live anchor; dual-source adapters may reconcile ledger gaps."""
+        return store.read(self.provider)
+
     def capabilities(self) -> dict[str, bool]:
         """Balance capability flags every report of this adapter carries."""
         return {"balance_supported": bool(self.balance_mode),

@@ -14,6 +14,7 @@ mapper; until then the raw payload is preserved so nothing is lost.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 
@@ -180,7 +181,7 @@ class ClaudeUsageAdapter(UsageAdapter):
     access_path_keys = ("anthropic-oauth",)
 
     async def fetch(self) -> ProviderUsage:
-        cred = load_usage_token()
+        cred = await asyncio.to_thread(load_usage_token)
         if cred.state == "missing":
             return self._base(
                 available=False,

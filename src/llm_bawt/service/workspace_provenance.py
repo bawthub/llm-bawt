@@ -171,12 +171,16 @@ def _repo_matches(current: CurrentWorkspaceFile, snapshot: SnapshotLocation) -> 
 def _path_matches(current: CurrentWorkspaceFile, snapshot: SnapshotLocation) -> bool:
     target = normalize_path(current.path)
     stored = normalize_path(snapshot.path)
-    if stored == target or stored.endswith(f"/{target}"):
+    if stored == target:
         return True
+    # Only an absolute capture path may carry an unknown host prefix, and its
+    # repo component must precede the entire relative path (not just basename).
+    capture_path = snapshot.path.replace(chr(92), "/")
+    absolute = capture_path.startswith("/") or capture_path[1:3] == ":/"
     return any(
-        stored == normalize_path(f"{alias}/{current.path}")
-        for alias in current.repo_aliases
-        if alias
+        stored == rooted or (absolute and stored.endswith(f"/{rooted}"))
+        for alias in (current.repo_key, *current.repo_aliases) if alias
+        for rooted in [normalize_path(f"{alias}/{current.path}")]
     )
 
 

@@ -177,6 +177,53 @@ def test_report_decimal_cents_convert_without_rounding_error(report):
     assert month == Decimal("1.61")
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("now,prior", [(datetime(2026, 11, 2, 12, tzinfo=timezone.utc), "2026-10-31"),
+                                      (datetime(2027, 1, 2, 12, tzinfo=timezone.utc), "2026-12-31")])
+async def test_admin_seven_day_report_includes_previous_month(monkeypatch, now, prior):
+    from llm_bawt.service.usage.adapters import anthropic_api
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+    monkeypatch.setattr(anthropic_api, "datetime", Clock)
+    adapter = AnthropicApiUsageAdapter()
+    monkeypatch.setattr(adapter, "_admin_key", lambda: "fixture-admin-key")
+    async def get(_client, url, *, params, headers):
+        assert params["starting_at"] == (now.replace(hour=0) - timedelta(days=6)).isoformat()
+        return httpx.Response(200, request=httpx.Request("GET", url), json={
+            "data": [{"starting_at": prior + "T00:00:00Z",
+                      "results": [{"amount": "500", "currency": "USD"}]}],
+            "has_more": False,
+        })
+    monkeypatch.setattr(httpx.AsyncClient, "get", get)
+    snap = await adapter.fetch()
+    assert snap.spend.seven_day_usd == 5 and snap.spend.month_usd == 0
+
+
+def test_claude_credential_loading_is_not_on_event_loop(monkeypatch):
+    import asyncio
+    import threading
+    from types import SimpleNamespace
+    from llm_bawt.service.usage.adapters import claude
+    main_thread = threading.get_ident()
+    def load():
+        assert threading.get_ident() != main_thread
+        return SimpleNamespace(state="missing")
+    monkeypatch.setattr(claude, "load_usage_token", load)
+    monkeypatch.setattr(claude, "usage_credentials_path", lambda: "fixture")
+    assert asyncio.run(claude.ClaudeUsageAdapter().fetch()).status == "unauthorized"
+
+
+def test_moonshot_spend_is_floored_at_connected_credential(monkeypatch):
+    from types import SimpleNamespace
+    adapter = MoonshotUsageAdapter()
+    monkeypatch.setattr(adapter, "_connection", lambda: SimpleNamespace(connected_at=NOW.isoformat()))
+    assert adapter.credential_connected_at() == NOW
+    monkeypatch.setattr(adapter, "_connection", lambda: None)
+    assert adapter.credential_connected_at() is None
+
+
 def test_inference_probe_rejects_admin_key_without_network(monkeypatch):
     def no_http(*_args, **_kwargs):
         raise AssertionError("admin key must not reach the inference endpoint")

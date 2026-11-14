@@ -140,6 +140,21 @@ def test_empty_stream_still_commits_explicit_terminal(protocol, stream_case, can
     assert frozen["completion"]["status"] == ("cancelled" if cancelled else "timeout")
 
 
+@pytest.mark.parametrize("reason", ["question", "approval"])
+def test_textless_deferral_is_completed_not_timeout(protocol, stream_case, reason):
+    ctx, finalizer, project, _, _ = stream_case
+    ctx.full_response_holder[0] = ""
+    getattr(ctx, f"{reason}_id_holder")[0] = "deferred-id"
+    ctx.svc._pending_question_store = SimpleNamespace(get=lambda _id: None)
+    finalizer.finalize(prepared_messages=[])
+    frozen = snapshot(protocol, ctx)
+    assert frozen["response_text"] == ""
+    assert frozen["completion"]["status"] == "completed"
+    assert frozen["completion"]["end_reason"] == reason
+    assert frozen["completion"][f"{reason}_id"] == "deferred-id"
+    project.assert_called_once()
+
+
 def test_projection_failure_never_changes_or_republishes_the_committed_candidate(protocol, stream_case):
     ctx, finalizer, project, _, direct = stream_case
     project.side_effect = ConnectionError("Redis unavailable")

@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import Column, Float, MetaData, String, Table, Text, bindparam, select, text
 
+from ..utils.bot_partition import sanitize_table_name
 from ..utils.schema import SchemaBootstrapGuard
 
 _metadata = MetaData()
@@ -94,9 +95,10 @@ def record(conn, *, bot_id: str, user_id: str, turn_id: str,
         SELECT s.started_at, s.session_metadata FROM sessions s
         WHERE s.id=:session AND s.bot_id=:bot AND s.user_id=:user AND s.status <> 'deleted'
           AND EXISTS (SELECT 1 FROM messages m
-                      WHERE m.bot_id=:bot AND m.session_id=s.id
+                      WHERE m.bot_id=:storage_bot AND m.session_id=s.id
                         AND m.id <> :trigger AND m.role IN ('user', 'assistant'))
-    """), {"session": session_id, "bot": bot_id, "user": user_id, "trigger": trigger_message_id}).mappings().one_or_none()
+    """), {"session": session_id, "bot": bot_id, "storage_bot": sanitize_table_name(bot_id),
+             "user": user_id, "trigger": trigger_message_id}).mappings().one_or_none()
     if target is None:
         return None
     metadata = target["session_metadata"] or {}
@@ -128,7 +130,7 @@ def event(receipt: dict, *, bot_id: str, user_id: str, trigger_message_id: str) 
 
 _PAGE = text("""
     SELECT r.* FROM session_resumption_receipts r
-    JOIN messages m ON m.bot_id=r.bot_id AND m.id=r.trigger_message_id
+    JOIN messages m ON m.bot_id=:storage_bot AND m.id=r.trigger_message_id
                    AND m.session_id=r.session_id AND m.role='user'
     JOIN sessions s ON s.id=r.session_id AND s.bot_id=r.bot_id AND s.user_id=r.user_id
     WHERE r.bot_id=:bot AND r.trigger_message_id IN :ids AND s.status <> 'deleted'
@@ -143,6 +145,6 @@ def for_messages(engine, *, bot_id: str, messages: list[dict], user_id: str | No
     with engine.connect() as conn:
         for start in range(0, len(ids), 500):
             for row in conn.execute(_PAGE, {"bot": bot_id, "ids": ids[start:start + 500],
-                                            "owner": user_id}).mappings():
+                                            "owner": user_id, "storage_bot": sanitize_table_name(bot_id)}).mappings():
                 result[str(row["trigger_message_id"])] = payload(row)
     return result

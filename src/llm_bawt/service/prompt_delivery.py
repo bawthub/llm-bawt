@@ -171,6 +171,43 @@ class PromptDeliveryWorker:
             ScheduledJob.id == job_id).with_for_update()).one()
         return job, session.get(PromptSchedule, job_id), session.get(PromptOccurrence, run_id), session.get(JobRun, run_id)
 
+    @staticmethod
+    def _session_for_scope(conn, schedule, occurrence, snapshot, scope):
+        """Choose under the target lock; never move or revive a user's thread."""
+        default_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"llm-bawt:prompt:{scope}"))
+        if occurrence.session_id:
+            return occurrence.session_id, None
+        if snapshot["clear_context"]:
+            return default_id, None
+
+        def owned(row):
+            if row is None:
+                return False
+            meta = row["session_metadata"] or {}
+            if isinstance(meta, str):
+                meta = json.loads(meta)
+            return (row["bot_id"] == snapshot["bot_id"]
+                    and row["user_id"] == snapshot["owner_user_id"]
+                    and meta.get("origin") == "automation"
+                    and meta.get("schedule_id") == schedule.job_id
+                    and (meta.get("prompt_scope") == scope or row["id"] == default_id))
+
+        def read(session_id):
+            return conn.execute(text("""
+                SELECT id, bot_id, user_id, status, session_metadata
+                FROM sessions WHERE id=:id
+            """), {"id": session_id}).mappings().one_or_none()
+
+        row = read(schedule.dedicated_session_id) if schedule.dedicated_session_id else None
+        if not owned(row):
+            row = read(default_id)
+        if row is None:
+            return default_id, None
+        if owned(row) and row["status"] == "archived":
+            return row["id"], None
+        reason = "Persistent schedule context was replaced because its previous thread is no longer an available automation thread."
+        return str(uuid.uuid4()), reason
+
     def _prepare(self, run_id, now, stale=None):
         from ..memory.postgresql_short_term import PostgreSQLShortTermManager
 
@@ -226,13 +263,22 @@ class PromptDeliveryWorker:
                     scope = (f"occurrence:{run_id}" if snapshot["clear_context"] else
                              f"schedule:{job.id}:bot:{snapshot['bot_id']}:owner:{snapshot['owner_user_id']}"
                              + (f":model:{model}" if snapshot.get("target_mode") == "auto" else ""))
-                    session_id = occurrence.session_id or str(uuid.uuid5(uuid.NAMESPACE_URL, f"llm-bawt:prompt:{scope}"))
+                    from .turn_admission import lock_target
+
+                    lock_target(session.connection(), snapshot["bot_id"])
+                    session_id, replacement_reason = self._session_for_scope(
+                        session.connection(), schedule, occurrence, snapshot, scope,
+                    )
+                    if replacement_reason:
+                        snapshot["context_reset_reason"] = replacement_reason
+                        occurrence.snapshot_json = snapshot
+                        result["context_reset_reason"] = replacement_reason
                     PostgreSQLShortTermManager.create_inactive_session_row(
                         session.connection(), session_id=session_id,
                         bot_id=snapshot["bot_id"], user_id=snapshot["owner_user_id"],
                         session_metadata={"created_inactive": True, "origin": "automation",
                                           "schedule_id": job.id, "title": snapshot["name"],
-                                          "title_source": "automation"},
+                                          "title_source": "automation", "prompt_scope": scope},
                     )
                 except ValueError as exc:
                     transition(session, *rows, "failed", now, error=str(exc))

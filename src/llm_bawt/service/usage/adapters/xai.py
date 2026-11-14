@@ -54,6 +54,12 @@ class XaiUsageAdapter(ApiKeyBalanceAdapter):
         return ("management", record.status, record.meta.get("team_id"), record.updated_at,
                 hashlib.sha256(key.encode()).hexdigest())
 
+    def anchored_balance_row(self, store):
+        # Provider-mode ledger charges did not advance the manual counter.
+        # Reconcile before every anchor read, including cached report overlays;
+        # an unavailable recount must never resurrect overstated credit.
+        return store.recount(self.provider)
+
     def _unavailable(self, status: str, error: str):
         if status != STATUS_RATE_LIMITED:
             from .. import invalidate_cache
@@ -69,7 +75,6 @@ class XaiUsageAdapter(ApiKeyBalanceAdapter):
         except Exception:
             return self._unavailable(STATUS_ERROR, "xAI reporting connection unavailable")
         if record is None:
-            # The existing explicitly labeled manual balance contract is intact.
             return await super().fetch()
         native = {"manual_balance_supported": False}
         key = record.secret.get("management_key")

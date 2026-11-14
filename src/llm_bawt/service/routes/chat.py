@@ -171,6 +171,7 @@ def _persist_interrupt_anchor(
         return False
 
     from sqlalchemy import text
+    from ...utils.bot_partition import sanitize_table_name
 
     with engine.begin() as conn:
         result = conn.execute(
@@ -181,7 +182,7 @@ def _persist_interrupt_anchor(
                 "WHERE bot_id=:bot_id AND id=:message_id"
             ),
             {
-                "bot_id": bot_id,
+                "bot_id": sanitize_table_name(bot_id),
                 "message_id": message_id,
                 "source_message_id": source_message_id,
                 "content_offset": content_offset,

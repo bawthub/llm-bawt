@@ -226,6 +226,20 @@ def test_upstream_error_speech_retains_failure_marker_and_offsets(store, monkeyp
         assert "Last sentence." in text
 
 
+@pytest.mark.parametrize("reason", ["question", "approval"])
+def test_legacy_textless_deferral_keeps_successful_terminal(store, monkeypatch, reason):
+    ctx = finalizer_context(store, monkeypatch, partial="")
+    getattr(ctx, f"{reason}_id_holder")[0] = "deferred-id"
+    ctx.svc._pending_question_store = SimpleNamespace(get=lambda _: None)
+    events = []
+    TurnStreamFinalizer(ctx, publish_event_direct=events.append,
+                        enrich_attachment_refs=lambda refs: refs).finalize(prepared_messages=[])
+    row = store.get_turn("turn")
+    assert row.status == "ok" and row.end_reason == reason
+    assert events[-1]["status"] == "completed" and events[-1]["end_reason"] == reason
+    assert events[-1][f"{reason}_id"] == "deferred-id"
+
+
 @pytest.mark.parametrize("partial", ["", "partial"])
 def test_finalizer_race_preserves_partial_and_cancelled_outcome(store, monkeypatch, partial):
     ctx = finalizer_context(store, monkeypatch, partial=partial)

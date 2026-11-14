@@ -41,6 +41,8 @@ def completion_notice(occurrence, record, turn, state, now):
         "scheduled_for": snapshot.get("scheduled_for"),
         "finished_at": (getattr(turn, "ended_at", None) or now).isoformat(),
         "state": state, "reply_excerpt": reply[:REPLY_CHARS],
+        **({"context_reset_reason": snapshot["context_reset_reason"]}
+           if snapshot.get("context_reset_reason") else {}),
         "reply_truncated": len(reply) > REPLY_CHARS,
         "error": str(getattr(turn, "error_text", None) or "")[:240],
         "user_message_id": record.user_message_id,

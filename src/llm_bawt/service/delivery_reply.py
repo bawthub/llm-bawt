@@ -148,13 +148,14 @@ def _receipt(
     if (
         turn is None
         or turn.ended_at is None
-        or turn.status not in {"ok", "completed"}
-        or turn.error_text
         or turn.bot_id != bot_id
         or turn.user_id != user_id
         or turn.trigger_message_id != user_message_id
     ):
         receipt["status"] = "UNRESOLVED"
+        return receipt
+    if turn.status not in {"ok", "completed"} or turn.error_text:
+        receipt.update(status="FAILED", error="Turn ended without a verified answer")
         return receipt
     receipt["response_text"] = turn.response_text or ""
     return receipt

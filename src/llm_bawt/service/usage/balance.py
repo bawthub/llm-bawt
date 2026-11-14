@@ -342,6 +342,14 @@ class ApiBalanceStore:
             return conn.execute(text("DELETE FROM api_balances WHERE provider=:p"),
                                 {"p": provider}).rowcount > 0
 
+    def recount(self, provider: str) -> BalanceRow | None:
+        """Refresh an anchor from the ledger, including provider-reported periods."""
+        with self.engine.begin() as conn:
+            _lock_provider(conn, provider)
+            _recount(conn, provider)
+            row = self._select(conn, provider)
+            return BalanceRow(*row) if row is not None else None
+
     def repair(self, provider: str) -> BalanceRow | None:
         """Re-ledger turns since the anchor from turn logs, then recount (repair/tests only)."""
         with self.engine.begin() as conn:

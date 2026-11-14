@@ -37,7 +37,7 @@ import httpx
 
 from ..balance import BALANCE_PROVIDER
 from ...providers.bridge_keys import MoonshotKeyAdapter
-from ..base import UsageAdapter
+from .api_key_balance import ApiKeyBalanceAdapter
 from .stored_key import stored_api_key
 from ..canonical import (
     STATUS_ERROR,
@@ -60,10 +60,11 @@ _DEFAULT_LOW_BALANCE = 5.0
 _TIMEOUT = httpx.Timeout(connect=10.0, read=15.0, write=10.0, pool=10.0)
 
 
-class MoonshotUsageAdapter(UsageAdapter):
+class MoonshotUsageAdapter(ApiKeyBalanceAdapter):
     """Prepaid Kimi credit, surfaced as remaining account balance."""
 
     provider = "moonshot"
+    connection_id = "moonshot"
     display_name = "Moonshot · Kimi"
     backend = "claude-code"  # reached via the claude-code bridge proxy
     access_path_keys = ("moonshot-anthropic",)

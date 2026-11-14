@@ -69,6 +69,22 @@ def test_atomic_accept_before_user_insert_and_reload_without_turn_logs(db):
     assert wire["_type"] == "session_resumed" and wire["ts"] == result["accepted_at"]
 
 
+def test_hyphenated_slug_retains_receipt_through_history_reload(db):
+    with db.begin() as conn:
+        conn.exec_driver_sql("UPDATE bot_profiles SET slug='fixture-agent' WHERE slug='fixture'")
+        conn.exec_driver_sql("UPDATE sessions SET bot_id='fixture-agent' WHERE bot_id='fixture'")
+        conn.exec_driver_sql("UPDATE turn_logs SET bot_id='fixture-agent'")
+        conn.exec_driver_sql("UPDATE messages SET bot_id='fixtureagent'")
+    result = accept(db, bot_id="fixture-agent")
+    assert result and result["session_id"] == "old"
+    with db.begin() as conn:
+        conn.exec_driver_sql("INSERT INTO messages VALUES ('prompt','fixtureagent','old','user')")
+    assert receipts.for_messages(db, bot_id="fixture-agent", user_id="owner",
+                                 messages=[{"id": "prompt", "role": "user"}]) == {"prompt": result}
+    assert receipts.for_messages(db, bot_id="fixtureagent", user_id="owner",
+                                 messages=[{"id": "prompt", "role": "user"}]) == {}
+
+
 def test_accept_replay_is_idempotent_and_does_not_retimestamp(db):
     first = accept(db)
     assert accept(db) == first

@@ -84,13 +84,21 @@ def test_pending_and_failed_deliveries_never_expose_reply(status):
 
 
 @pytest.mark.parametrize("field,value", [
-    ("ended_at", None), ("status", "aborted"), ("error_text", "failure"),
+    ("ended_at", None),
     ("bot_id", "other"), ("user_id", "other"),
     ("trigger_message_id", "other"),
 ])
 def test_delivered_without_matching_finished_turn_is_unresolved(field, value):
     result = lookup(delivery("DELIVERED"), turn(**{field: value}))
     assert result["status"] == "UNRESOLVED"
+    assert "response_text" not in result
+
+
+@pytest.mark.parametrize("changes", [{"status": "aborted"}, {"status": "error"},
+                                     {"error_text": "failure"}])
+def test_delivered_terminal_failure_is_not_left_polling(changes):
+    result = lookup(delivery("DELIVERED"), turn(**changes))
+    assert result["status"] == "FAILED"
     assert "response_text" not in result
 
 

@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool
 
 from llm_bawt.service.routes import chat
@@ -61,6 +61,28 @@ def test_same_session_and_omitted_intent_return_canonical_durable_session(rig, e
     assert rig.sub.send_steer.await_args.kwargs["session_key"] == "target:nick"
     assert rig.sub.send_steer.await_args.kwargs["target_request_id"] == "req-A"
     assert rig.memory.add_message.call_args.args[2] == "durable-A"
+
+
+def test_hyphenated_bot_uses_storage_partition_without_relaxing_session_owner(rig):
+    with rig.engine.begin() as conn:
+        conn.exec_driver_sql("UPDATE sessions SET bot_id='fixture-agent'")
+        conn.exec_driver_sql("UPDATE turn_logs SET bot_id='fixture-agent'")
+        conn.exec_driver_sql("UPDATE messages SET bot_id='fixtureagent'")
+    rig.turn.bot_id = "fixture-agent"
+    result = run(rig, bot_id="fixture-agent")
+    assert result.ok and result.session_id == "durable-A"
+    from llm_bawt.service.steer_session import voice_steer_target_ready
+    with rig.engine.begin() as conn:
+        assert voice_steer_target_ready(conn, vars(rig.turn), bot_id="fixture-agent",
+                                        user_id="nick", session_id="durable-A")
+        assert not voice_steer_target_ready(conn, vars(rig.turn), bot_id="fixture-agent",
+                                            user_id="nick", session_id="other")
+        conn.exec_driver_sql("UPDATE messages SET bot_id='foreign'")
+        assert not voice_steer_target_ready(conn, vars(rig.turn), bot_id="fixture-agent",
+                                            user_id="nick", session_id="durable-A")
+    with pytest.raises(HTTPException) as caught:
+        run(rig, bot_id="fixture-agent")
+    assert caught.value.detail == "session_unavailable"
 
 
 @pytest.mark.parametrize("maintenance", [False, True])

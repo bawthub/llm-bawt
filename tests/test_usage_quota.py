@@ -35,6 +35,15 @@ def test_ok_fresh_and_under_every_window_is_available():
     assert (quota.state, quota.checked_at) == ("available", NOW - 60)
 
 
+def test_exhausted_zai_tool_pool_does_not_exhaust_inference():
+    from llm_bawt.service.usage.adapters.zai import _from_limit_item as zai_limit
+    tool = zai_limit({"type": "TIME_LIMIT", "percentage": 100}, 0)
+    model = zai_limit({"type": "TOKENS_LIMIT", "percentage": 25}, 1)
+    assert tool.model_scope == []
+    assert _state(_snap(tool, model), "glm-5") == "available"
+    assert _state(_snap(tool), "glm-5") == "unknown"
+
+
 def test_a_maxed_unscoped_window_is_exhausted():
     assert _state(_snap(_limit(10), _limit(100, resets=NOW + 60))) == "exhausted"
     assert _state(_snap(_limit(100.0))) == "exhausted"

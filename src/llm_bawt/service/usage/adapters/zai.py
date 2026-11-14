@@ -105,6 +105,7 @@ def _from_limit_item(item: dict, idx: int) -> UsageLimit | None:
             used=float(used) if isinstance(used, (int, float)) else None,
             limit=float(total) if isinstance(total, (int, float)) else None,
             unit="calls",
+            model_scope=[],  # Tool-only pool: applies to no inference model.
         )
     if typ == "TOKENS_LIMIT":
         cid, label, window = _token_window(item)

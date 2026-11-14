@@ -26,6 +26,7 @@ import logging
 import os
 import time
 
+from llm_bawt.shared.chatgpt_usage import account_scope, snapshot_key
 from ..base import UsageAdapter
 from ..canonical import (
     ProviderUsage,
@@ -38,7 +39,6 @@ from ..canonical import (
 logger = logging.getLogger(__name__)
 
 # Shared contract with the bridge-side writer. Keep both in lockstep.
-REDIS_KEY = "llm_bawt:usage:openai_chatgpt:snapshot"
 _TTL_SECONDS = 7 * 24 * 3600
 _SNAPSHOT_MAX_AGE_SECONDS = 60
 _USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
@@ -179,7 +179,21 @@ class OpenAIChatGPTUsageAdapter(UsageAdapter):
     backend = "claude-code"
     access_path_keys = ("openai-oauth",)
 
+    def report_identity(self):
+        """Read the connected account without refreshing or exposing tokens."""
+        from ...dependencies import get_service
+        from ...providers.base import CredentialStore, STATUS_CONNECTED
+
+        record = CredentialStore(get_service().config).load(self.provider)
+        if record is None or record.status != STATUS_CONNECTED:
+            return None
+        bundle = record.secret.get("codex_auth") or {}
+        return account_scope(record.meta.get("account_id") or (bundle.get("tokens") or {}).get("account_id"))
+
     async def _read_snapshot(self) -> dict | None:
+        scope = await asyncio.to_thread(self.report_identity)
+        if not scope:
+            return None
         url = (
             os.getenv("LLM_BAWT_REDIS_URL")
             or os.getenv("REDIS_URL")
@@ -195,7 +209,7 @@ class OpenAIChatGPTUsageAdapter(UsageAdapter):
                 socket_connect_timeout=2,
             )
             try:
-                raw = await client.get(REDIS_KEY)
+                raw = await client.get(snapshot_key(scope))
             finally:
                 await client.aclose()
         except Exception as e:  # noqa: BLE001
@@ -205,11 +219,14 @@ class OpenAIChatGPTUsageAdapter(UsageAdapter):
             return None
         try:
             data = json.loads(raw)
-            return data if isinstance(data, dict) else None
+            return data if isinstance(data, dict) and data.get("account_scope") == scope else None
         except (ValueError, TypeError):
             return None
 
     async def _write_snapshot(self, snap: dict) -> None:
+        scope = snap.get("account_scope")
+        if not scope:
+            return
         url = (
             os.getenv("LLM_BAWT_REDIS_URL")
             or os.getenv("REDIS_URL")
@@ -226,7 +243,7 @@ class OpenAIChatGPTUsageAdapter(UsageAdapter):
                 socket_connect_timeout=2,
             )
             try:
-                await client.set(REDIS_KEY, json.dumps(snap), ex=_TTL_SECONDS)
+                await client.set(snapshot_key(scope), json.dumps(snap), ex=_TTL_SECONDS)
             finally:
                 await client.aclose()
         except Exception as e:  # noqa: BLE001
@@ -292,6 +309,7 @@ class OpenAIChatGPTUsageAdapter(UsageAdapter):
         if snap is None:
             logger.warning("codex usage endpoint returned no usable limit windows")
             return None, resp.status_code
+        snap["account_scope"] = account_scope(result.account_id)
         await self._write_snapshot(snap)
         return snap, resp.status_code
 
@@ -318,11 +336,17 @@ class OpenAIChatGPTUsageAdapter(UsageAdapter):
             return None
 
     async def fetch(self) -> ProviderUsage:
+        scope = await asyncio.to_thread(self.report_identity)
+        if not scope:
+            return self._base(available=False, status=STATUS_ERROR, error="No connected ChatGPT account for usage")
         passive_snap = await self._read_snapshot()
         snap = await self._fetch_live_snapshot()
         live = snap is not None
         if snap is None:
             snap = passive_snap
+        if (snap is not None and (snap.get("account_scope") != scope
+                or await asyncio.to_thread(self.report_identity) != scope)):
+            snap = None
         if snap is None:
             return self._base(
                 available=False,

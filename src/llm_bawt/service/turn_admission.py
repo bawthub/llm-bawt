@@ -376,6 +376,8 @@ def write_reservation(
         )
         ON CONFLICT (id) DO UPDATE SET
             status='reserved', ended_at=NULL, error_text=NULL, created_at=EXCLUDED.created_at,
+            end_reason=NULL, question_id=NULL, reasoning=NULL, quota_snapshot_json=NULL,
+            task_ref=NULL, task_attribution_source=NULL, response_text='',
             request_json=EXCLUDED.request_json, user_prompt=EXCLUDED.user_prompt
     """ + guard), {
         "turn_id": turn_id,

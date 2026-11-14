@@ -218,7 +218,7 @@ class TurnStreamFinalizer:
                     end_reason="upstream_error",
                     assistant_message_id=ctx.assistant_message_id,
                 )
-            elif ctx.full_response_holder[0]:
+            elif ctx.full_response_holder[0] or ctx.question_id_holder[0] or ctx.approval_id_holder[0]:
                 # Commit the real outcome on the first terminal write; later
                 # enrichment cannot rewrite a provisional "stop" outcome.
                 deferred_reason = (
@@ -284,7 +284,7 @@ class TurnStreamFinalizer:
             status = "cancelled"
         elif upstream_error:
             status = "error"
-        elif ctx.full_response_holder[0]:
+        elif ctx.full_response_holder[0] or ctx.question_id_holder[0] or ctx.approval_id_holder[0]:
             status = "completed"
         else:
             status = "timeout"
@@ -501,29 +501,27 @@ class TurnStreamFinalizer:
             _, error_text = self._turn_has_upstream_error()
         suffix = ""
         response = ctx.full_response_holder[0] or ""
+        question = ctx.question_id_holder[0]
+        if question:
+            row = ctx.svc._pending_question_store.get(question)
+            if row is not None and row.live_deadline and row.status in ("answered", "skipped"):
+                question = None
         if cancelled:
             status, reason = "aborted", "aborted"
         elif error_text:
             status, reason = "error", "upstream_error"
             suffix = turn_failure_suffix(response, error_text)
             response = response.rstrip() + suffix
-        elif response:
+        elif response or question or ctx.approval_id_holder[0]:
             status = "ok"
             reason = (
-                "question" if ctx.question_id_holder[0] else
+                "question" if question else
                 "approval" if ctx.approval_id_holder[0] else
                 "approval_persist_failed" if ctx.approval_persist_failed_holder[0] else "stop"
             )
         else:
             status, reason = "timeout", "error"
 
-        question = ctx.question_id_holder[0]
-        if question:
-            row = ctx.svc._pending_question_store.get(question)
-            if row is not None and row.live_deadline and row.status in ("answered", "skipped"):
-                question = None
-                if reason == "question":
-                    reason = "stop"
         content = prepare_terminal_content(
             ctx.svc, ctx.llm_bawt, response_text=response,
             tool_context=ctx.tool_context_holder[0], tool_call_details=ctx.tool_call_details_holder,

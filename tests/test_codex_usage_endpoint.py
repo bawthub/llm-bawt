@@ -174,7 +174,9 @@ def test_fetch_401_gives_up_when_refresh_yields_no_token(monkeypatch) -> None:
 
 def test_fetch_uses_stale_passive_snapshot_without_claiming_bad_credential(monkeypatch) -> None:
     adapter = mod.OpenAIChatGPTUsageAdapter()
+    monkeypatch.setattr(adapter, "report_identity", lambda: mod.account_scope("acct-fixture"))
     passive = {
+        "account_scope": mod.account_scope("acct-fixture"),
         "captured_at": int(time.time()) - 120,
         "plan_type": "plus",
         "primary": {"used_percent": 40, "window_minutes": 300, "reset_at": None},
@@ -197,6 +199,74 @@ def test_fetch_uses_stale_passive_snapshot_without_claiming_bad_credential(monke
     assert result.cached is True
     assert "Credential health is checked separately" in (result.error or "")
     assert [limit.used_pct for limit in result.limits] == [40.0, 60.0]
+
+
+def test_account_switch_rejects_old_passive_and_process_cache(monkeypatch):
+    from unittest.mock import AsyncMock
+    from llm_bawt.service import usage
+
+    adapter = usage.get_adapter("openai_chatgpt")
+    scope_a, scope_b = mod.account_scope("account-A"), mod.account_scope("account-B")
+    monkeypatch.setattr(adapter, "report_identity", lambda: scope_b)
+    monkeypatch.setattr(adapter, "_read_snapshot", AsyncMock(return_value={
+        "account_scope": scope_a, "captured_at": int(time.time()),
+        "primary": {"used_percent": 99, "window_minutes": 300},
+    }))
+    monkeypatch.setattr(adapter, "_fetch_live_snapshot", AsyncMock(return_value=None))
+    old = adapter._base(available=True, status="ok")
+    monkeypatch.setitem(usage._cache, adapter.provider, (time.monotonic(), old))
+    monkeypatch.setitem(usage._cache_identities, adapter.provider, scope_a)
+    assert usage.get_cached(adapter.provider) is None
+    result = asyncio.run(adapter.fetch())
+    assert not result.available and not result.limits
+
+
+def test_passive_snapshots_are_separate_and_late_old_writer_cannot_clobber_new(monkeypatch):
+    import json
+    import httpx
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from claude_code_bridge.proxy import usage_capture
+
+    rows = {}
+    async def put(key, value, **_kwargs):
+        rows[key] = value
+    client = SimpleNamespace(set=AsyncMock(side_effect=put),
+                             get=AsyncMock(side_effect=lambda key: rows.get(key)), aclose=AsyncMock())
+    monkeypatch.setattr(usage_capture, "_client", lambda: client)
+    monkeypatch.setattr("redis.asyncio.from_url", lambda *_a, **_kw: client)
+    adapter = mod.OpenAIChatGPTUsageAdapter()
+    scope_b = mod.account_scope("account-B")
+    monkeypatch.setattr(adapter, "report_identity", lambda: scope_b)
+
+    async def run():
+        for account, percent in [("account-B", "20"), ("account-A", "99")]:
+            response = httpx.Response(200, headers={"x-codex-primary-used-percent": percent},
+                request=httpx.Request("POST", "https://fixture.invalid/responses",
+                                      headers={"ChatGPT-Account-Id": account}))
+            usage_capture.schedule_capture(SimpleNamespace(response=response))
+            await asyncio.gather(*usage_capture._tasks)
+        snap = await adapter._read_snapshot()
+        assert snap["account_scope"] == scope_b and snap["primary"]["used_percent"] == 20
+        assert len(rows) == 2
+        assert all("account-A" not in key and "account-B" not in key for key in rows)
+        # Legacy snapshots and a mismatched payload are never trusted.
+        rows[mod.snapshot_key(scope_b)] = json.dumps({"account_scope": mod.account_scope("account-A")})
+        assert await adapter._read_snapshot() is None
+    asyncio.run(run())
+
+
+def test_account_changed_during_live_fetch_is_not_published(monkeypatch):
+    from unittest.mock import AsyncMock
+    adapter = mod.OpenAIChatGPTUsageAdapter()
+    identities = iter([mod.account_scope("A"), mod.account_scope("B")])
+    monkeypatch.setattr(adapter, "report_identity", lambda: next(identities))
+    monkeypatch.setattr(adapter, "_read_snapshot", AsyncMock(return_value=None))
+    monkeypatch.setattr(adapter, "_fetch_live_snapshot", AsyncMock(return_value={
+        "account_scope": mod.account_scope("A"), "captured_at": int(time.time()),
+        "primary": {"used_percent": 30, "window_minutes": 300},
+    }))
+    assert not asyncio.run(adapter.fetch()).available
 
 
 def test_save_with_connected_at_does_not_crash(monkeypatch) -> None:

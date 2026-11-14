@@ -79,7 +79,15 @@ def usage_adapter_for_access_path(key: str | None) -> UsageAdapter | None:
 def get_cached(provider: str) -> ProviderUsage | None:
     """Read last authoritative snapshot without fetching or refreshing upstream."""
     hit = _cache.get(provider)
-    return _cached_copy(hit[1]) if hit else None
+    adapter = _REGISTRY.get(provider)
+    if not hit or adapter is None:
+        return None
+    try:
+        if _cache_identities.get(provider) != adapter.report_identity():
+            return None
+    except Exception:
+        return None
+    return _cached_copy(hit[1])
 
 
 def invalidate_cache(provider: str) -> None:
@@ -137,7 +145,7 @@ def _with_anchored_balance(adapter: UsageAdapter, snap: ProviderUsage) -> Provid
 
     out = snap.model_copy(deep=True)
     try:
-        balance, reason = anchored_balance(_balance_store().read(adapter.provider),
+        balance, reason = anchored_balance(adapter.anchored_balance_row(_balance_store()),
                                            adapter.credential_connected_at())
     except Exception as exc:  # noqa: BLE001 — unknown credit is shown as unknown, never as zero
         logger.warning("Balance read failed for %s: %s", adapter.provider, type(exc).__name__)

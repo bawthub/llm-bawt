@@ -23,10 +23,11 @@ import logging
 import os
 import time
 
+# Shared contract with the app-side usage adapter. Keep both in lockstep.
+from llm_bawt.shared.chatgpt_usage import account_scope, snapshot_key
+
 logger = logging.getLogger(__name__)
 
-# Shared contract with the app-side usage adapter. Keep both in lockstep.
-REDIS_KEY = "llm_bawt:usage:openai_chatgpt:snapshot"
 _TTL_SECONDS = 7 * 24 * 3600  # drop the snapshot if no codex turn for a week
 
 _redis = None
@@ -103,7 +104,10 @@ def _snapshot_from_headers(headers) -> dict | None:
 
 async def _publish(snap: dict) -> None:
     try:
-        await _client().set(REDIS_KEY, json.dumps(snap), ex=_TTL_SECONDS)
+        scope = snap.get("account_scope")
+        if not scope:
+            return
+        await _client().set(snapshot_key(scope), json.dumps(snap), ex=_TTL_SECONDS)
     except Exception as e:  # noqa: BLE001
         logger.debug("codex usage snapshot publish skipped: %s", e)
 
@@ -118,6 +122,12 @@ def schedule_capture(stream) -> None:
         snap = _snapshot_from_headers(resp.headers)
         if snap is None:
             return
+        # Bind to the request that produced these headers, never credentials
+        # that may have changed while its stream was running.
+        scope = account_scope(resp.request.headers.get("ChatGPT-Account-Id"))
+        if not scope:
+            return
+        snap["account_scope"] = scope
         task = asyncio.create_task(_publish(snap))
         _tasks.add(task)
         task.add_done_callback(_tasks.discard)

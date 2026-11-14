@@ -939,13 +939,20 @@ def test_delivery_retry_still_rearms_its_ended_turn(pg_turns):
     turn_id = _open(store, bot)
     with store.engine.begin() as conn:
         conn.execute(sa_text(
-            "UPDATE turn_logs SET status='error', ended_at=now() WHERE id=:id"), {"id": turn_id})
+            """UPDATE turn_logs SET status='error', ended_at=now(), end_reason='question',
+               question_id='old-question', reasoning='old reasoning', response_text='old response',
+               quota_snapshot_json='{}', task_ref='TASK-1', task_attribution_source='explicit'
+               WHERE id=:id"""), {"id": turn_id})
         assert write_reservation(
             conn, turn_id=turn_id, bot_id=bot, user_id="nick", user_prompt="retry",
             request_json={}, trigger_message_id=None,
         )
     turn = store.get_turn(turn_id)
     assert turn.status == "reserved" and turn.ended_at is None
+    assert turn.response_text == ""
+    for field in ("end_reason", "question_id", "reasoning", "quota_snapshot_json",
+                  "task_ref", "task_attribution_source"):
+        assert getattr(turn, field) is None, field
 
 
 @pytest.fixture

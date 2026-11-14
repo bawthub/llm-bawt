@@ -4,11 +4,14 @@ from __future__ import annotations
 from fastapi import HTTPException
 from sqlalchemy import bindparam, text
 
+from ..utils.bot_partition import sanitize_table_name
+
 
 _OWNED = text("""
-    SELECT t.id, t.bot_id, t.user_id, t.trigger_message_id, s.id AS session_id
+    SELECT t.id, t.bot_id, t.user_id, t.trigger_message_id, s.id AS session_id,
+           m.bot_id AS storage_bot
     FROM turn_logs t
-    JOIN messages m ON m.bot_id=t.bot_id AND m.id=t.trigger_message_id
+    JOIN messages m ON m.id=t.trigger_message_id
     JOIN sessions s ON s.id=m.session_id AND s.bot_id=t.bot_id AND s.user_id=t.user_id
     WHERE t.id IN :ids AND s.status <> 'deleted'
 """).bindparams(bindparam("ids", expanding=True))
@@ -27,7 +30,8 @@ def owned_turn_sessions(engine, turns) -> dict[str, str]:
     with engine.connect() as conn:
         return {row["id"]: str(row["session_id"])
                 for row in conn.execute(_OWNED, {"ids": list(expected)}).mappings()
-                if expected[row["id"]] == (row["bot_id"], row["user_id"], row["trigger_message_id"])}
+                if expected[row["id"]] == (row["bot_id"], row["user_id"], row["trigger_message_id"])
+                and row["storage_bot"] == sanitize_table_name(row["bot_id"])}
 
 
 def voice_steer_target_ready(conn, active, *, bot_id: str, user_id: str, session_id: str | None) -> bool:
@@ -45,9 +49,10 @@ def voice_steer_target_ready(conn, active, *, bot_id: str, user_id: str, session
             or not active.get("agent_backend")
             or NEXT not in run_steer_caps(backend=active["agent_backend"], caps=active.get("agent_steer_caps"))):
         return False
-    owned = conn.execute(_OWNED, {"ids": [active["id"]]}).mappings().first()
-    return bool(owned and owned["bot_id"] == bot_id and owned["user_id"] == user_id
-                and (session_id is None or session_id.strip() == str(owned["session_id"])))
+    return any(owned["bot_id"] == bot_id and owned["user_id"] == user_id
+               and owned["storage_bot"] == sanitize_table_name(bot_id)
+               and (session_id is None or session_id.strip() == str(owned["session_id"]))
+               for owned in conn.execute(_OWNED, {"ids": [active["id"]]}).mappings())
 
 
 def require_steer_session(service, request, turn, *, expected_session: str | None = None) -> str:

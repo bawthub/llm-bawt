@@ -109,6 +109,25 @@ def test_finalize_charges_once_and_a_revision_charges_only_the_difference(rig):
     assert reason is None and balance.remaining_usd == pytest.approx(96.89999999)
 
 
+def test_xai_manual_anchor_recounts_charges_from_provider_mode(rig, monkeypatch):
+    from llm_bawt.service import usage
+    from types import SimpleNamespace
+
+    adapter = usage.get_adapter("xai")
+    monkeypatch.setattr(adapter, "_management_connection", lambda: None)
+    rig[1].set_anchor("xai", Decimal("100"))
+    monkeypatch.setattr(adapter, "_management_connection", lambda: SimpleNamespace())
+    _turn(rig, _usage(7, path={"key": "xai-chat"}))
+    _turn(rig, _usage(None, path={"key": "xai-responses"}))
+    assert rig[1].read("xai").spent_usd == 0
+    monkeypatch.setattr(adapter, "_management_connection", lambda: None)
+    first = adapter.anchored_balance_row(rig[1])
+    second = adapter.anchored_balance_row(rig[1])
+    assert (first.spent_usd, first.unpriced_turns) == (Decimal(7), 1)
+    assert (second.spent_usd, second.unpriced_turns) == (Decimal(7), 1)
+    assert anchored_balance(second, None)[0].remaining_usd == 93
+
+
 def test_open_turn_usage_is_not_charged_until_the_turn_ends(rig):
     rig[1].set_anchor(PROVIDER, Decimal("100"))
     turn = _open_turn(rig)

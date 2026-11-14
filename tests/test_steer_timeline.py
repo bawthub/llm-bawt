@@ -10,7 +10,9 @@ from sqlalchemy.pool import StaticPool
 from llm_bawt.entity_presentation import EntityPresentationResolver
 from llm_bawt.message_authorship import AuthorReference
 from llm_bawt.service.steer_timeline import SteerTimeline
-from tests.steer_session_fixture import steer_store_factory  # noqa: F401
+from tests.steer_session_fixture import steer_store_factory
+
+__all__ = ["steer_store_factory"]
 
 
 @pytest.fixture
@@ -53,6 +55,30 @@ def test_delivery_retry_cannot_move_existing_anchor(timeline):
     subscriber = SimpleNamespace(turn_text_offset=AsyncMock())
     assert asyncio.run(timeline.content_offset(subscriber, 999)) == 12
     subscriber.turn_text_offset.assert_not_awaited()
+
+
+def test_hyphenated_timeline_retry_publication_and_fallback_anchor(timeline, monkeypatch):
+    from llm_bawt.service.routes.chat import _persist_interrupt_anchor
+    persist(timeline, offset=12)
+    with timeline.engine.begin() as conn:
+        conn.exec_driver_sql("UPDATE messages SET bot_id='fixtureagent'")
+    timeline.bot_id = "fixture-agent"
+    subscriber = SimpleNamespace(turn_text_offset=AsyncMock(), publish_tool_event=AsyncMock())
+    assert asyncio.run(timeline.content_offset(subscriber, 999)) == 12
+    subscriber.turn_text_offset.assert_not_awaited()
+    monkeypatch.setattr(EntityPresentationResolver, "resolve_many_safe", lambda *_: {("bot", "sender"): {}})
+    asyncio.run(timeline.publish(subscriber))
+    args = subscriber.publish_tool_event.await_args.args
+    assert args[:2] == ("fixture-agent", "nick")
+    assert args[2]["bot_id"] == "fixture-agent"
+    service = SimpleNamespace(get_memory_client=lambda _: None,
+                              _turn_log_store=SimpleNamespace(engine=timeline.engine))
+    assert _persist_interrupt_anchor(service, bot_id="fixture-agent", message_id="message-steer",
+                                     source_message_id="new-trigger", content_offset=27)
+    assert timeline._message()["interrupt_content_offset"] == 27
+    assert not _persist_interrupt_anchor(service, bot_id="other", message_id="message-steer",
+                                         source_message_id="bad-trigger", content_offset=99)
+    assert timeline._message()["interrupt_source_message_id"] == "new-trigger"
 
 
 def test_unknown_turn_position_never_invents_an_anchor(timeline):

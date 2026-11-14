@@ -8,6 +8,7 @@ from sqlalchemy import text
 
 from ..entity_presentation import EntityPresentationResolver
 from ..message_authorship import AuthorReference
+from ..utils.bot_partition import sanitize_table_name
 
 log = logging.getLogger(__name__)
 
@@ -31,7 +32,7 @@ class SteerTimeline:
                     "interrupt_source_message_id, interrupt_content_offset "
                     "FROM messages WHERE bot_id=:bot_id AND id=:message_id"
                 ),
-                {"bot_id": self.bot_id, "message_id": self.message_id},
+                {"bot_id": sanitize_table_name(self.bot_id), "message_id": self.message_id},
             ).mappings().first()
         return dict(row) if row is not None else None
 

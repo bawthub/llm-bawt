@@ -262,6 +262,180 @@ def test_end_to_end_two_occurrences_sessions_model_authorship_and_completion(rig
     assert rig.bot.default_model == "first" and rig.bot.endpoint_id == 1
 
 
+def finish_schedule_occurrence(rig, run, record, now):
+    rig.turns[record.turn_id] = SimpleNamespace(
+        ended_at=now, status="ok", error_text=None,
+        response_text="done", model="second@anthropic-api",
+    )
+    rig.delivery.update(record.id, status="DELIVERED", transport_accepted_at=now.isoformat())
+    rig.worker._reconcile(run, now)
+    assert occurrence(rig, run).state == "succeeded"
+
+
+@pytest.mark.parametrize("status", ["deleted", "active"])
+def test_persistent_schedule_replaces_unavailable_session_and_reuses_replacement(rig, status):
+    job, first = reserve(rig, clear=False)
+    first_record = enqueue(rig, first)
+    original_id = occurrence(rig, first).session_id
+    finish_schedule_occurrence(rig, first, first_record, NOW + timedelta(seconds=10))
+    with rig.engine.begin() as conn:
+        if status == "active":
+            # Model a user's activation without leaving two active threads.
+            conn.execute(text("UPDATE sessions SET status='archived' WHERE id='personal'"))
+        conn.execute(text("UPDATE sessions SET status=:status WHERE id=:id"),
+                     {"status": status, "id": original_id})
+        before = dict(conn.execute(text("SELECT * FROM sessions WHERE id=:id"),
+                                   {"id": original_id}).mappings().one())
+        personal_before = dict(conn.execute(text("SELECT * FROM sessions WHERE id='personal'"))
+                               .mappings().one())
+
+    second_time = NOW + timedelta(seconds=61)
+    second = rig.worker.store.reserve_due(second_time)[0]
+    second_record = enqueue(rig, second, second_time)
+    replacement = occurrence(rig, second)
+    assert replacement.session_id not in {original_id, "personal"}
+    assert rig.delivery.payload(second_record.id)["session_id"] == replacement.session_id
+    reason = replacement.snapshot_json["context_reset_reason"]
+    assert reason and "replaced" in reason.lower()
+    with Session(rig.engine) as session:
+        assert session.get(PromptSchedule, job).dedicated_session_id == replacement.session_id
+        assert receipt(session.get(JobRun, second))["context_reset_reason"] == reason
+    with rig.engine.connect() as conn:
+        assert dict(conn.execute(text("SELECT * FROM sessions WHERE id=:id"),
+                                 {"id": original_id}).mappings().one()) == before
+        assert dict(conn.execute(text("SELECT * FROM sessions WHERE id='personal'"))
+                    .mappings().one()) == personal_before
+        new_session = conn.execute(text("SELECT * FROM sessions WHERE id=:id"),
+                                   {"id": replacement.session_id}).mappings().one()
+        assert (new_session["bot_id"], new_session["user_id"], new_session["status"]) == (
+            BOT, OWNER, "archived",
+        )
+        metadata = json.loads(new_session["session_metadata"])
+        assert metadata["origin"] == "automation" and metadata["schedule_id"] == job
+        assert metadata["prompt_scope"] == f"schedule:{job}:bot:{BOT}:owner:{OWNER}"
+
+    finish_schedule_occurrence(rig, second, second_record, second_time + timedelta(seconds=10))
+    # A new worker must recover the random replacement from the persisted schedule,
+    # rather than returning to the unavailable deterministic session on each tick.
+    rig.worker = PromptDeliveryWorker(rig.engine, rig.service)
+    third_time = NOW + timedelta(seconds=121)
+    third = rig.worker.store.reserve_due(third_time)[0]
+    third_record = enqueue(rig, third, third_time)
+    assert occurrence(rig, third).session_id == replacement.session_id
+    assert rig.delivery.payload(third_record.id)["session_id"] == replacement.session_id
+    assert "context_reset_reason" not in occurrence(rig, third).snapshot_json
+    with Session(rig.engine) as session:
+        assert session.get(PromptSchedule, job).dedicated_session_id == replacement.session_id
+        assert "context_reset_reason" not in receipt(session.get(JobRun, third))
+    with rig.engine.connect() as conn:
+        assert conn.execute(text("SELECT count(*) FROM sessions")).scalar_one() == 3
+
+
+@pytest.mark.parametrize("status", ["deleted", "active"])
+@pytest.mark.parametrize("fault", ["before", "after"])
+def test_persistent_schedule_enqueue_retry_retains_original_session(rig, status, fault):
+    job, run = reserve(rig, clear=False)
+    prepared = rig.worker._prepare(run, NOW)
+    original_id = occurrence(rig, run).session_id
+    assert occurrence(rig, run).enqueue_attempts == 1
+    rig.delivery.failure = fault
+    with pytest.raises(RuntimeError, match="injected"):
+        rig.worker._enqueue(run, prepared, rig.dispatcher, NOW)
+    with rig.engine.begin() as conn:
+        conn.execute(text("UPDATE sessions SET status=:status WHERE id=:id"),
+                     {"status": status, "id": original_id})
+        before = dict(conn.execute(text("SELECT * FROM sessions WHERE id=:id"),
+                                   {"id": original_id}).mappings().one())
+
+    rig.worker = PromptDeliveryWorker(rig.engine, rig.service)
+    rig.delivery.failure = None
+    retry_time = NOW + timedelta(seconds=2)
+    retry = rig.worker._prepare(run, retry_time)
+    assert retry == prepared
+    assert occurrence(rig, run).enqueue_attempts == 2
+    record = rig.worker._enqueue(run, retry, rig.dispatcher, retry_time)
+    assert record is not None
+    assert rig.delivery.payload(record.id)["session_id"] == original_id
+    assert occurrence(rig, run).session_id == original_id
+    assert "context_reset_reason" not in occurrence(rig, run).snapshot_json
+    with Session(rig.engine) as session:
+        assert session.get(PromptSchedule, job).dedicated_session_id == original_id
+        assert "context_reset_reason" not in receipt(session.get(JobRun, run))
+    with rig.engine.connect() as conn:
+        assert dict(conn.execute(text("SELECT * FROM sessions WHERE id=:id"),
+                                 {"id": original_id}).mappings().one()) == before
+        assert conn.execute(text("SELECT count(*) FROM sessions")).scalar_one() == 2
+        assert conn.execute(text("SELECT count(*) FROM inter_bot_deliveries")).scalar_one() == 1
+    assert rig.delivery.calls == (1 if fault == "after" else 2)
+
+
+def test_auto_schedule_target_switch_keeps_dedicated_sessions_scoped(rig, monkeypatch):
+    import copy
+    import llm_bawt.bots as bots
+    from llm_bawt.service import message_routing
+
+    other_id = "disposable-schedule-bot-two"
+    other_bot = copy.copy(rig.bot)
+    other_bot.slug = other_id
+    monkeypatch.setattr(bots.BotManager, "get_bot",
+                        lambda self, slug: {BOT: rig.bot, other_id: other_bot}.get(slug))
+    selected = [BOT]
+    selections = []
+
+    def preview(self, request):
+        selections.append(selected[0])
+        assert request.user_id == OWNER and request.scope == "schedule"
+        return {
+            "selected_bot_id": selected[0], "reason": "Hermetic target selection",
+            "candidates": [{"bot_id": bot_id, "last_message_at": None,
+                            "available": True, "pending_routes": 0, "eligible": True}
+                           for bot_id in (BOT, other_id)],
+        }
+
+    monkeypatch.setattr(message_routing.MessageRouter, "_ensure_schema", lambda self: None)
+    monkeypatch.setattr(message_routing.MessageRouter, "preview", preview)
+    monkeypatch.setattr(message_routing, "route_opted_in", lambda *args: True)
+    job = rig.worker.store.create(
+        owner=OWNER, bot_id=BOT, name="Automatic automation", prompt="Literal saved prompt",
+        now=NOW, timing=PromptTiming(kind="interval", interval_seconds=60,
+                                   anchor_at=NOW + timedelta(seconds=1)),
+        clear_context=False, requested_model="second",
+    )
+    with Session(rig.engine) as session:
+        schedule = session.get(PromptSchedule, job)
+        schedule.target_mode = "auto"
+        schedule.candidate_bot_ids = [BOT, other_id]
+        session.add(schedule)
+        session.commit()
+    session_ids = []
+    for index, target in enumerate((BOT, other_id, BOT)):
+        selected[0] = target
+        now = NOW + timedelta(seconds=1 + 60 * index)
+        run = rig.worker.store.reserve_due(now)[0]
+        record = enqueue(rig, run, now)
+        row = occurrence(rig, run)
+        session_ids.append(row.session_id)
+        assert row.snapshot_json["bot_id"] == record.target_bot_id == target
+        assert "context_reset_reason" not in row.snapshot_json
+        assert rig.delivery.payload(record.id)["session_id"] == row.session_id
+        with Session(rig.engine) as session:
+            assert session.get(PromptSchedule, job).dedicated_session_id == row.session_id
+        with rig.engine.connect() as conn:
+            stored = conn.execute(text("SELECT * FROM sessions WHERE id=:id"),
+                                  {"id": row.session_id}).mappings().one()
+            assert (stored["bot_id"], stored["user_id"], stored["status"]) == (target, OWNER, "archived")
+            assert json.loads(stored["session_metadata"])["prompt_scope"] == (
+                f"schedule:{job}:bot:{target}:owner:{OWNER}:model:second@anthropic-api"
+            )
+        finish_schedule_occurrence(rig, run, record, now + timedelta(seconds=10))
+    assert selections == [BOT, other_id, BOT]
+    assert session_ids[0] != session_ids[1]
+    assert session_ids[0] == session_ids[2]
+    with rig.engine.connect() as conn:
+        assert conn.execute(text("SELECT count(*) FROM sessions")).scalar_one() == 3
+        assert conn.execute(text("SELECT status FROM sessions WHERE id='personal'")).scalar_one() == "active"
+
+
 @pytest.mark.parametrize("fault", ["before", "after"])
 def test_restart_after_enqueue_fault_is_bounded_and_never_duplicates(rig, fault):
     job, run = reserve(rig, once=True, grace=60)

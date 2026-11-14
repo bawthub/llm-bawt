@@ -130,10 +130,10 @@ class AnthropicApiUsageAdapter(ApiKeyBalanceAdapter):
             return self._base(available=False, status=STATUS_ERROR,
                               error="Anthropic API spend or connection time unavailable")
         try:
-            _, _, month_start = _windows(now)
+            _, seven_start, month_start = _windows(now)
             async with httpx.AsyncClient(timeout=15.0) as client:
                 cost = await _pages(client, COST_URL, key, {
-                    "starting_at": month_start.isoformat(), "group_by[]": "description",
+                    "starting_at": min(seven_start, month_start).isoformat(), "group_by[]": "description",
                     "bucket_width": "1d", "limit": "31",
                 })
         except httpx.HTTPStatusError as exc:

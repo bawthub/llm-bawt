@@ -53,6 +53,22 @@ def snapshot(
     )
 
 
+def test_suffix_collisions_do_not_claim_another_workspace_file() -> None:
+    from llm_bawt.service.workspace_provenance import matches_snapshot_location
+
+    file = current("before", "after")
+    for path in ("other/src/example.ts", "/repos/foreign/src/example.ts",
+                 "bawthub/packages/other/src/example.ts"):
+        captured = snapshot("turn", "before", "after",
+                            created_at=datetime(2026, 8, 4, tzinfo=timezone.utc), path=path)
+        assert not matches_snapshot_location(file, captured), path
+    for path in ("src/example.ts", "bawthub/src/example.ts", "/repos/bawthub/src/example.ts",
+                 "/host/dev/bawthub/src/example.ts"):
+        captured = snapshot("turn", "before", "after",
+                            created_at=datetime(2026, 8, 4, tzinfo=timezone.utc), path=path)
+        assert matches_snapshot_location(file, captured), path
+
+
 def test_exact_transition_is_owned() -> None:
     before = "one\ntwo\n"
     after = "one\nchanged\n"
