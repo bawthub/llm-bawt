@@ -144,10 +144,14 @@ collisions before reserving dev1..N. Do not overwrite another tenant's hostname.
 
 ## Verification and removal
 
-`pytest` uses `/opt/house-tests` with full CPU-only app/test dependencies, separate
-from the pinned bridge Python. The house also inherits Node/pnpm/git/uv/dev tools.
-Use task-local mutable test environments where a project requires its own lock.
-Do not run concurrent full gates merely because pytest is now available.
+`pytest` uses `/opt/house-tests`, separate from the pinned bridge Python. It holds
+the app with its `dev,service,mcp,search` extras, installed from `pyproject.toml`
+rather than the frozen lock, which is enough for focused tests. It is not a
+full-unit or full-gate environment: no memory extra, offline tokenizer cache,
+local Redis or private PostgreSQL. The house also inherits Node/pnpm/git/uv/dev
+tools. Use task-local mutable test environments where a project requires its own
+lock. A full pre-check is the integrator's solo host `make gate`, whose
+exact-SHA receipt is reused for publication (see `HEAVY_QUEUE.md`).
 
 Verify both harness startup commands, identical mounts/session visibility,
 healthy bridge, per-container limit/init, and later the aggregate slice. Final

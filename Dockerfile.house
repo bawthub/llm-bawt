@@ -5,7 +5,8 @@ FROM ${AGENT_BRIDGE_IMAGE}
 
 USER root
 # Do not change the lean harness environment or its pinned SDKs. pytest and the
-# full CPU-only application/test dependencies live in a separate environment.
+# app's dev/service/mcp/search extras live in a separate environment for focused
+# tests; it is not a full-unit or full-gate environment (see docs/HEAVY_QUEUE.md).
 COPY pyproject.toml README.md LICENSE /app/
 RUN uv venv /opt/house-tests \
     && uv pip install --python /opt/house-tests/bin/python -e "/app[dev,service,mcp,search]" \

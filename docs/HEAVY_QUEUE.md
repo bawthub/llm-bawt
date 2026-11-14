@@ -61,10 +61,28 @@ to retry notification. Never replay a job automatically after an uncertain exit.
 
 **Private-PG limitation:** the exhaustive llm-bawt suite's private PostgreSQL
 fixtures need host Docker. Do not mount that socket into a queue container.
-`make gate` / the typed exact-SHA batch gate remain the exhaustive private-PG
-paths; the generic queue can run the unit/local portions with a prepared image.
-The frontend PG gate likewise retains its own throwaway-DB provisioning. The
-queue never repoints a profile or runs a migration against a shared database.
+The integrator's host `make gate` is the only exhaustive private-PG path (the
+typed batch-gate operation is retired). The frontend PG gate likewise retains its
+own throwaway-DB provisioning. The queue never repoints a profile or runs a
+migration against a shared database.
+
+## What the queue can and cannot run
+
+The queue runs prepared, self-contained checks: focused or broad test subsets,
+frontend tests, project-wide typechecks and lint, with dependencies already in
+the image or task-local, and nothing that needs the network or an external
+service. It is not a full-unit or full-gate environment. The stock house image
+in particular lacks the frozen project lock and memory extra, the offline
+tokenizer cache, a local `redis-server` and a worktree's Git common directory,
+so the whole llm-bawt unit partition fails there for environment reasons. Do not
+read such a run as a product verdict, and do not patch images per task to chase
+parity.
+
+When an owner genuinely needs a full pre-check, the integrator runs one solo
+host `make gate` on the reviewed tip. A passing receipt for that exact SHA
+(`make gate-receipt REV=<sha>`) is reused for publication; nobody reruns the full
+suite for the same SHA. A changed integration tip needs its own gate, and a
+queue or base receipt never stands in for it.
 
 ## Gate integration and failure recovery
 
