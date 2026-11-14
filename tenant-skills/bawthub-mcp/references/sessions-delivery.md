@@ -61,7 +61,15 @@ contradicts it is rejected, so family bots can omit it. Without a signed turn:
 
 `bots_list_available(tag=None, include_state=true)` lists visible targets.
 Private and inactive bots never appear. `tag` filters (e.g. `reviewer`); an
-unknown tag is an error, not an empty list. Each bot's `state` holds:
+unknown tag is an error, not an empty list. The default `detail="compact"`
+returns one flat row per bot: slug, tags, capabilities, provider, known
+quota, `turn` {kind, task, started_at}, `last_turn` {ended_at, task},
+`queued` count, `gated`/`gate` only when held or unreadable,
+`pending_approvals`, `location`, `prompt_stale` and `unavailable`; null and
+empty fields are left out, except `gated: null`, which means the gate
+couldn't be read (never "not gated"). `location` is the house slug when its
+lease is live, else e.g. `house (h1 down)` or `house (h1 lease unknown)`. `detail="full"` returns every route field and the
+whole `state`, which holds:
 
 - `turn` {kind, turn_id, started_at}: kind is idle / reserved / executing /
   ambiguous, from the same classifier that admits a send, so it is what a send
@@ -134,8 +142,8 @@ except for deliberate authorized edits.
 `self_model(bot_id=<self>)` shows your current endpoint/model/harness and the
 compatible endpoints. Despite the name, it also works on **another bot**
 (`bot_id=<slug>`, caller is recorded): use it to move a sibling to a different
-model instead of hand-PATCHing profiles or querying the DB. A protected bot is
-refused unless it is the trusted caller. Endpoint access-path labels are unreliable for
+model instead of hand-PATCHing profiles or querying the DB. Mira is refused
+unless she is the trusted caller. Endpoint access-path labels are unreliable for
 billing: native claude-code turns authenticate with the bridge's OAuth
 subscription token even on endpoints labelled `anthropic-api`. action="switch" with endpoint_id persists the change
 through the same profile PATCH as the chat model picker: the server validates
@@ -153,7 +161,7 @@ switch without it and tell the user. The switch is not rolled back if queueing
 itself fails; check result.continue.queued. Codex sessions are model-bound, so
 a Codex switch starts a fresh provider session. Only switch when the user asked
 for it, and say what you switched to (cost and context window differ by
-endpoint). A protected bot is refused unless it is the caller. Switching another bot
+endpoint). Mira is refused unless she is the caller. Switching another bot
 sends the continuation as from you.
 
 ## Editing another bot's profile or tags

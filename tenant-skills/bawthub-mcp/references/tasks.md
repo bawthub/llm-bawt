@@ -18,13 +18,13 @@ architecture. MCP names below are stable; harnesses may prefix `mcp__bawthub__`.
    commit, and test/live-check receipts in `response`; set `outcome` to the
    plain-language change. Verify objective UI acceptance yourself on dev
    (Playwright, phone and desktop width), record it and attach the screenshots
-   (`add_image_urls=[<asset_id>, ...]` from each screenshot result); the coordinator closes
+   (`add_image_urls=[<asset_id>, ...]` from each screenshot result); Snark or Rook closes
    that as `COMPLETED`. Only when the user must judge it himself (subjective
    look/feel, his device/account, a product call), submit `REVIEW`
    with `check_links` ("Where to look", required for bots): the pages to open,
    each `{label, path, steps}` with an app-relative path ("/tools/approvals",
    no host) and 1-4 plain steps saying what to check. Open every link yourself
-   first and confirm the named controls are on the page. Otherwise the coordinator
+   first and confirm the named controls are on the page. Otherwise Snark or Rook
    checks receipts and closes complete backend/infra/tooling/skill work as
    `COMPLETED`, including their own reviewed work; no extra closure reviewer.
    Incomplete work stays open. Agents cannot leave `BUG` (human-only transition).
@@ -62,7 +62,7 @@ do not create the task again to repair a link.
   origin the reader is on, so for dev-only changes add a step saying to open it
   on the dev site. For backend, infra,
   tooling and skill work, record the review, pushed commit and verification;
-  The coordinator closes `COMPLETED` after checking the receipts. Do not park
+  Snark or Rook closes `COMPLETED` after checking the receipts. Do not park
   non-visual work, or UI a bot can verify, in REVIEW for the user.
 - Priority: URGENT, HIGH, MEDIUM, LOW, NONE.
 - `tasks_update` patches provided non-null fields; do not assume null clears a
@@ -137,7 +137,8 @@ Any bot or user may change these; BawtHub records who did.
   (`1h|6h|24h|48h|7d|30d|all`, default `7d`), `bot`, `q`, `project`,
   `priority`, plus `limit` rows per lane (default 20, 1-50) and `rows`.
   Each lane gives `shown` and `older` (left out by `updated`) counts,
-  `active`, and compact rows (no descriptions); a drawer lane names its
+  `active`, and compact rows (no descriptions; null and empty fields left
+  out, `waitingReason` cut to about 120 characters); a drawer lane names its
   column in `in`. Every column is returned, including ones the page hides by
   default. Without `q`, `rows` defaults to `active`: only the open columns
   (Blocked, To do, Doing, Review) carry cards, while Backlog, Done and
@@ -194,6 +195,33 @@ severities, verdict meaning, re-review) is the `peer-review` skill.
   `nextCursor` for older pages.
 - Recording a review does not notify the author. Call back with
   `bots_send_message`.
+
+## Initiative state
+
+`initiative_state(task_id, action)` keeps a recurring task's checkpoint with
+one expiring owner, so a fresh session or a callback resumes instead of racing.
+Writes use the trusted turn identity; private or inactive bots are refused.
+
+- `get` returns the snapshot plus the latest 50 events. 404 just means no
+  run has started on that task.
+- `acquire(snapshot, lease_seconds=900)` takes the lease (60–3600 s) and
+  returns `leaseToken` and `state.runId`, which every later write needs. It
+  returns 409 while another run's lease is live, and an expired lease can be
+  taken over. Pass `expected_generation` to make sure you resume the state
+  you read.
+- `checkpoint(snapshot, run_id, lease_token, expected_generation, event?,
+  release_lease?)` replaces the snapshot and bumps `generation`. A stale
+  generation, a wrong token or an expired lease all return 409; re-read and
+  reacquire rather than retrying. `release_lease=true` ends the run.
+- `snapshot` needs `mandateVersion`, `objective`, `acceptanceCriteria`,
+  `currentTaskRef` and `nextAction` (strings). Optional fields:
+  `completedEvidence`, `blockers`, `operationIds` and `pendingCallbacks`
+  (arrays), and `unresolvedUncertainty`. A missing field returns 400.
+- `event` is `{kind, operationKey?, operationId?, outcome?, detail?}`.
+  Before a side effect, record its intent under a stable `operationKey`;
+  record the result under the same key afterwards. A successor that finds
+  an intent with no result must check what actually happened before it
+  retries. This is not exactly-once.
 
 ## Projects and other actions
 

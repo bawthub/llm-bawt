@@ -7,6 +7,8 @@ description: Review code or maintenance procedures against their actual scope, r
 
 Read the diff or executable operation, trace the affected paths, and check the evidence. Run targeted checks when they resolve a concrete concern; reuse valid receipts. Keep the review proportional to the actual scope.
 
+Apply the [reviewer selection and provider fallback policy](../peer-review/SKILL.md): do not decline or hold an independent review solely because you share the author's provider when another provider is unavailable. Record the availability fallback with your verdict; do not require a user exception.
+
 Use `BLOCKER` for a concrete failure in supported conditions: explain the state, wrong result, and evidence. Use `SHOULD_FIX`, `NIT`, `QUESTION`, or `PRE_EXISTING` for findings that do not prevent this change from working. Future generality and unrelated cleanup are follow-ups.
 
 Record `APPROVE`, `APPROVE_WITH_CHANGES`, or `REQUEST_CHANGES` with `tasks_reviews_add`, pinned to the reviewed revision. State what you checked and any material limit. For a recheck, focus on outstanding blockers and regressions introduced by the fix. Preserve review history using supported recheck or linked-review records; do not invent resolved evidence.

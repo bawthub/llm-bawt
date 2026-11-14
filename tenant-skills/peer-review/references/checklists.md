@@ -40,7 +40,7 @@ evidence (file:line, query, test), not a box to tick.
 - Is there a dry-run count first and a reviewed write set?
 - Updates idempotent (`WHERE` still unset), an audit table written in the same
   transaction, reversible by batch id?
-- Protected bots' partitions excluded. DB access only through `pgq`; no inline secrets.
+- Mira's partition excluded. DB access only through `pgq`; no inline secrets.
 - Migrations: reversible? Lock duration on big tables? Batched backfill? A
   verification query afterwards that should return zero rows?
 - Irreversible or destructive writes are the user's call, whatever the review
@@ -59,7 +59,7 @@ evidence (file:line, query, test), not a box to tick.
 - **No hardcoded model, provider, bot or endpoint** as a feature preference;
   use the DB-backed settings and catalog.
 - **No bot-slug literals in code; behaviour comes from bot tags/data.** A
-  `slug == "<bot>"` check or a set of slugs is a Blocker; read the tag resolver
+  `slug == "mira"` check or a set of slugs is a Blocker; read the tag resolver
   (llm-bawt `bot_tags`, BawtHub `src/lib/botTags.ts`) instead. The guard tests
   (llm-bawt `tests/test_no_bot_slug_literals.py`, BawtHub
   `src/lib/noBotSlugLiterals.test.ts`) pass without growing their allowlists
@@ -78,7 +78,7 @@ evidence (file:line, query, test), not a box to tick.
   silently?
 - **Docs and skills:** architecture docs and skills that describe the old
   behavior are updated in the same change.
-- **Protected:** no reads, writes or tests against protected bots. No secrets in code,
+- **Protected:** no reads, writes or tests against Mira. No secrets in code,
   logs, commands or the review body.
 
 ## Timing (any diff touching tests/)

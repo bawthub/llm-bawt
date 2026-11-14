@@ -56,6 +56,12 @@ repo `docs/INTER_BOT_COMMUNICATION.md` § "Steer priority".
 APIs: `POST|GET /v1/inter-bot-deliveries`, GET by ID, POST `/{id}/cancel`; MCP:
 `bots_delivery_get`, `bots_deliveries_list`, `bots_delivery_cancel`.
 
+Automated service notices use the existing `user/system` author
+(`author_entity_type: "user"`, `author_entity_id: "system"`), not a new user per
+service or a fictitious bot. Keep the service identifier in `sender_bot_id` and
+provenance metadata. Real bot messages remain bot-authored; human messages keep
+their human author.
+
 **User Stop holds the queue (TASK-1327).** A user Stop (`/v1/chat/abort` with
 `source` `chat_stop` or `bot_list_stop`) opens or extends a per-bot hold gate
 (`owner_id=user_stop:<bot>`, global setting `user_stop_queue_hold_seconds`,

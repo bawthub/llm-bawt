@@ -129,12 +129,19 @@ inline pickers into one Filters menu, search to an icon, tabs into a picker),
 and once every fold step is spent the row scrolls sideways.
 
 Rules:
+- **Tabs read as menus.** Every tab-style menu has a visibly darker, recessed
+  track, not a transparent row of labels. `globals.css` applies the shared
+  `--tab-track` treatment to `[role="tablist"]`; segmented menus without tab
+  semantics use `tab-menu-track`. Keep selected tabs visibly raised/contrasting,
+  focus rings visible, and narrow tab rows intentionally scrollable.
 - **No page-level toolbar in the page body.** Don't put a filter row,
   search box or view toggle above the content, in a `PageHeader` action slot,
   or as a separate phone-only filter panel. Register the page's controls in
   its section's toolbar map instead (`TasksToolbar.tsx` `TOOLBARS`:
   `{ label, Controls, foldSteps }`). Controls inside one card, row or pane
-  stay with that card, row or pane.
+  stay with that card, row or pane. Exception: a page migrated to the
+  three-layer model (below) puts its views and actions in `ViewBar` at the top
+  of its content.
 - **State the bar can reach.** The layout renders the bar, so page-option
   state lives in the URL or a small store shared with the page, never in the
   page component's local state (Board: URL + prefs; All Tasks:
@@ -149,6 +156,35 @@ Rules:
 - **Examples:** `/tasks` (Relay), `/tasks/board`, `/tasks/all`, Repos
   (`RepoWorkspaceChrome`). Tools has no page-controls hook yet, so Tools
   pages that still have in-page toolbars are tracked as follow-up cards.
+
+### Three layers and the fold rule (TASK-2173)
+
+Navigation has three layers, one component each:
+
+1. **Sections**: the app top bar (`AppMainNav`).
+2. **Pages**: the section bar (`SecondaryNav` via `MainMenuSubNav`).
+3. **Views** of one page: `ViewTabs` (`lib/ui/ViewTabs.tsx`). It sits in its
+   own row at the top of the page content, on the shared tab track, and is never
+   put in the section bar.
+
+Page actions such as refresh and new go in `PageToolbar`
+(`lib/ui/PageToolbar.tsx`). It sits to the right of the views; `ViewBar` lays
+out both, and on a phone the toolbar takes its own row.
+
+**Fold rule:** only the toolbar folds, first from labels to icons, then into one
+"⋯" menu. Views never become a dropdown. A narrow view row scrolls sideways,
+fades its clipped edge and keeps the active view in sight.
+
+Rules:
+- `ViewTabs` is real ARIA tabs over one `ViewTabPanel`. Arrow keys, Home and End
+  move focus; Enter or Space opens the view. Views that are separate routes keep
+  link semantics, not tabs.
+- Hold the view in the URL with `useUrlView(param, keys, fallback, { clear })`
+  (`lib/useUrlView.ts`), so Back, Forward, reload and deep links all work.
+  `clear` drops params that belong to the previous view.
+- Proof page: `/tools/approvals` (`?tab=`). Other pages still put their views in
+  the section bar until they migrate. Don't change the look of the top bar or
+  the section bar for this.
 
 ### Floating glass surfaces — reuse, do not recreate
 

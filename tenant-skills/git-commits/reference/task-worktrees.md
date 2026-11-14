@@ -81,7 +81,7 @@ tree (an integrator reading a REVIEW tree) associates that task first or locks
 the tree. Work outside a bot turn that must keep a tree (a long-lived server, a
 manual hold) uses `git worktree lock`; locked trees are never reaped. Run
 `git worktree` commands from the same path alias the tree was registered under
-(the host's dev root vs the bridge's shared dev root); `reap` does this itself. Never remove
+(the host's dev root vs `/home/bridge/dev`); `reap` does this itself. Never remove
 review-held/unmerged/dirty work or a branch/ref by hand to make room.
 
 ### Orphan cache trimming (TASK-2132, Nick24h)
@@ -95,7 +95,7 @@ trees continue through the existing rules above, not this orphan path.
 An orphan requires positively absent repository `.git/worktrees/<name>` admin
 metadata. Git-command failure alone is not evidence: existing metadata, permission
 errors, unsafe/unknown pointers and inaccessible alternate aliases are retained.
-The helper recognizes the bridge's and host's shared dev-root aliases
+The helper recognizes `/home/bridge/dev` and the host's dev root as shared aliases
 and checks the corresponding local admin path too. It never repairs metadata.
 
 **Nick24h is a separate, stricter rule:** the task must be `COMPLETED` **or**
@@ -106,7 +106,7 @@ No arbitrary live-turn TTL is applied; the existing task-bound/taskless live-tur
 query and protection semantics are unchanged.
 
 Only known regenerable **ignored directories** may be trimmed: `node_modules`,
-`.venv`, `.venv-host`, `.next`, `coverage`, `__pycache__`, `.pytest_cache`,
+`.venv`, `.venv-host`, `.venv-bridge`, `.next`, `coverage`, `__pycache__`, `.pytest_cache`,
 `.ruff_cache`, `.mypy_cache`, `.vite` and `.turbo`. The orphan's ignore rules are
 checked using the canonical Git admin/index, without creating orphan metadata;
 canonical tracked paths veto deletion. Symlinked ignore files cannot supply

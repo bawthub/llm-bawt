@@ -55,7 +55,11 @@ and idle context reset were checked against this rule for TASK-1358.
 
 The schedule is data. Read the live set instead of trusting this snapshot:
 `pgq llm-bawt -c "select job_type, bot_id, enabled, interval_minutes, next_run_at from scheduled_jobs order by 1,2"`.
-Each run is recorded in `job_runs`. Snapshot 2026-10-22: `IDLE_CONTEXT_RESET` (all bots, every 5 min: resets idle agent sessions, which is the `/new` from `system` in delivery lists), `HISTORY_SUMMARIZATION`, `MEMORY_EXTRACTION` and `PROFILE_MAINTENANCE` (all bots, every 30 min), `MEDIA_GC` and `TOOL_RESULT_GC` (daily), `SEND_PROMPT` (one bot, disabled). `bot_id='*'` expands to every bot at run time.
+Each run is recorded in `job_runs`. Snapshot 2026-10-22: `IDLE_CONTEXT_RESET` (all bots, every 5 min: resets idle agent sessions, which is the `/new` from `system` in delivery lists), `HISTORY_SUMMARIZATION`, `MEMORY_EXTRACTION` and `PROFILE_MAINTENANCE` (all bots, every 30 min), `MEDIA_GC` and `TOOL_RESULT_GC` (daily), `SEND_PROMPT` (snark, disabled). `bot_id='*'` expands to every bot at run time.
+
+| Job | Cadence / owner | Writes and fences | Code |
+|---|---|---|---|
+| `IDLE_CONTEXT_RESET` prompt-staleness trigger (TASK-1771; pending publication and app restart) | Existing DB job and cadence, no second timer | Opt-in `reset_when_prompt_stale=false` by default; `prompt_stale_settle_minutes=10` waits after the last observed render change. A settled `sessions.session_metadata.system_prompt_stale` marker can replace only the resident-size criterion. Completed-turn identity, accepted session/owner, idle threshold, private/inactive/protected exclusions, active/reserved/queued-work fences and claim-time rechecks still apply. Uses the existing session lifecycle, receipt and `job_runs` audit; the reset key includes the marker's last-change timestamp. Detection runs on kept-pin turns, not a global prompt sweep. Health/live-state expose `prompt_stale` with timestamps and changed section names, never prompt bodies. Verified adoption or rollback to a verified pin clears the marker; unverified fallback promotion does not. Code delivery does not enable the live job option. | `service/prompt_stale.py`, `service/system_prompt_pin.py`, `service/jobs/idle_context_candidates.py`, `service/jobs/idle_context_reset.py`, `service/session_lifecycle/lifecycle.py` |
 
 ### Not timers, but they write on their own
 
@@ -83,8 +87,8 @@ Each run is recorded in `job_runs`. Snapshot 2026-10-22: `IDLE_CONTEXT_RESET` (a
   - `unresolved_tools`: marks open tool calls on ended turns as interrupted.
   - `post_check`: read-only.
   - `purge_ops`: only on an explicit `run(purge_ops=True)`, never at startup.
-- **Status:** committed `4adb798` on llm-bawt master, local and not pushed (reviewed by two same-provider reviewers). The first run is the next app restart; an app process started before that commit doesn't have it. Check with `docker compose logs app | grep "startup recovery check"`. No admin route exists.
-- **First mutating run:** `unresolved_tools` backfills every historical open tool call: 745 calls on 438 turns, June to September 2026, no protected-bot rows (as of 2026-10-22).
+- **Status:** committed `4adb798` on llm-bawt master, local and not pushed (reviewed by Loopy and Vex, same provider). The first run is the next app restart; an app process started before that commit doesn't have it. Check with `docker compose logs app | grep "startup recovery check"`. No admin route exists.
+- **First mutating run:** `unresolved_tools` backfills every historical open tool call: 745 calls on 438 turns, June to September 2026, no Mira rows (as of 2026-10-22).
 
 ## How to answer "what is it doing right now"
 

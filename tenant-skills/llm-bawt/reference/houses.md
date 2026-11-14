@@ -7,7 +7,7 @@ pool, preview launcher) and `docs/HEAVY_QUEUE.md` (queue containment).
 ## What a house is
 
 A house is a capped bridge container for one harness (`claude-code` or
-`codex`) on the configured shared dev filesystem. Worktrees, sessions and
+`codex`) on the shared `/home/bridge/dev` filesystem. Worktrees, sessions and
 skills are the same files the mansion sees; nothing persistent lives in the
 container. The mansion is the shared Claude bridge, which runs Anthropic and
 proxy-routed GPT bots. The separate native Codex mansion service is retired;
@@ -42,12 +42,25 @@ each house's status (`free`, `occupied`, `unconfigured`, `incompatible`,
 `move_out` leaves its own. Only a free house in the configured pool is
 claimable; occupied is always refused, and a bot housed
 elsewhere moves out first. Self-moves never pin. The move applies from the
-next turn. Codex/native and chat bots are refused for now.
+next turn. Codex/native and chat bots are refused for now. `list` and
+`move_in` also return each house's `preview_host` and current `preview`
+(branch, commit, `up`). House IDs and preview hosts need not share a number;
+always take the URL from `preview_host`.
 
-Bots never patch another bot's `house`. Assigning someone else or setting a
-pin is a coordinator's or the user's call, via the profile API
-(`PATCH /v1/bots/<slug>/profile`, between that bot's turns). Every `house`
-write shares one lock, so it cannot race a self-move.
+Only coordinators assign another bot or set a pin: `bots_profile_patch` with
+`house` (id or null) and `house_pinned`, which needs the coordinate capability
+(runtime setting `bots_house_assign_capability` overrides it). Other bots never
+patch another bot's `house`, and nobody uses that tool on their own house.
+Every `house` write shares one lock, so it cannot race a self-move.
+
+## UI work goes in a house
+
+A coder on BawtHub UI work moves into a free house (`self_house move_in`), or
+its coordinator pins it there, and puts the house's `preview_host` on the card
+so the user can give live feedback before review and publish. The preview serves
+the occupant's most recently used `.wt-bawthub-<bot>-TASK-N` worktree by
+itself; `house-preview <worktree>/frontend` picks a different one. No house
+free: say so on the card and continue; this is not a gate.
 
 Lifecycle: `/new` and the idle janitor vacate unpinned tenants (unless the
 reset asked to keep the house); a pinned tenant stays until it moves out,
@@ -61,9 +74,9 @@ empty; delete the bots and their retained rows afterwards.
 
 | Work | Where |
 |---|---|
-| Focused tests (named files/nodes), lint on changed files | In place, in your task worktree, from your bridge or house. Houses have pytest (`/opt/house-tests`) and Node/pnpm. |
-| Full suites, project-wide `tsc`, mypy, broad pytest/vitest | The heavy queue (`heavy-queue submit … -- <cmd>`), which runs one capped job at a time and calls you back. Bridge guards refuse these locally. |
-| Exhaustive gate with private PostgreSQL | The integrator's `make gate` / exact-SHA batch gate. Not the queue. |
+| Focused tests (named files/nodes), lint on changed files | In place, in your task worktree: pytest in a house (`/opt/house-tests`), or `make test-target NODES=…` on the host from a bridge (see testing.md). Node/pnpm in either. |
+| Broad pytest/vitest subsets, project-wide `tsc`, mypy, repo-wide lint | The heavy queue (`heavy-queue submit … -- <cmd>`), which runs one capped job at a time and calls you back. Only prepared, self-contained checks: no network, PostgreSQL or other external service. Bridge guards refuse these locally. |
+| Full llm-bawt unit suite or full gate | Not the queue and not a house: neither is a full-unit or full-gate environment. If you genuinely need a full pre-check, ask the integrator for one solo host `make gate` on your reviewed tip. Its passing exact-SHA receipt is reused for publication, never rerun. |
 | Live UI for your change | Your house preview: `house-preview <worktree>/frontend`, then the house's HTTPS origin with real sign-in. Shared `<dev-host>` shows integrated `main`, not branch work. |
 | Browser checks and screenshots | Playwright MCP against the house origin or the deployed dev surface, at phone and desktop width. |
 
@@ -71,7 +84,8 @@ Rules:
 
 - Focused means real filenames. Globs, directories and whole-suite lists are
   heavy and go through the queue.
-- Do not ssh to the host to run suites, and do not start a per-house Python
+- Do not ssh to the host to run suites or broad pytest (focused
+  `make test-target` is the only host run), and do not start a per-house Python
   backend or shared schema change from a preview. App, router, voice,
   schedulers and the database stay shared.
 - Mutable test environments stay task-local; do not borrow another task's.

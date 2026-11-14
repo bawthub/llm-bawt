@@ -11,6 +11,8 @@ Use [git-commits](../git-commits/SKILL.md) for isolated worktrees and publicatio
 
 Configuration lives in the DB. Bots resolve pinned endpoint IDs and tags/capabilities. Agent prompts are pinned per session; edits take effect at the next supported boundary. The app owns OAuth refresh; do not add another refresher. Read the specific subsystem reference before changing a sensitive boundary.
 
+Prompt DB edits are tenant overrides, not automatic product releases. For default inheritance, reset, selected approved fixture export and drift, use [product defaults](reference/product-defaults.md); never hand-maintain a second prompt body.
+
 Keep changes bounded and verify the actual behavior. Routine design details belong to the owner. Refactoring is justified by the change, not a file-size threshold.
 
 ## Technical references
@@ -25,6 +27,7 @@ Keep changes bounded and verify the actual behavior. Routine design details belo
 | Anthropic-compat proxy (`claude_code_bridge/proxy/`), adapters, ChatGPT-OAuth 401/400s | `reference/anthropic-proxy.md` |
 | Claude credentials, `/v1/usage`, Reconnect | `reference/claude-credentials-usage.md` |
 | Personas / `prompt_override_id` | `reference/personas.md` |
+| Prompt product defaults vs tenant overrides, promotion, seeding and drift | `reference/product-defaults.md` |
 | Task capability, non-activating sessions, MCP task tools, `/v1/turn-changed-files*` | `reference/task-conversation.md` (cross-stack: `agent-system/task-conversation-architecture.md`) |
 | `bots_send_message`, deliveries, `agent_context_*` | `reference/inter-bot-deliveries.md` |
 | Agent persona loss, prompt change not taking effect, cache cost, `agents.global_prompt` edits | `reference/agent-system-prompt.md` |

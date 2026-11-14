@@ -86,6 +86,14 @@ Read the returned image before deciding whether to iterate. Reuse its asset_id
 as reference_asset_id with a change prompt; use returned URLs for links.
 Inspect error payloads rather than claiming an image was generated.
 
+## Playground
+
+`playground_send(bot_id, title, note=None, asset_id=None | content=..., format="html"|"markdown"|"text")`
+sends the user one artifact for Bots → Playground (`/bots/playground`): an existing `ma_…` asset (any
+media; bytes are copied) or inline content up to 1 MB. The user can view it once;
+closing it deletes it. Signed caller only, sent as that bot. A bell entry links to
+the page. Use it for something worth looking at, not routine results.
+
 ## Speech and home audio
 
 `home_audio_devices()` lists allowlisted Home Assistant targets and a voice-catalog

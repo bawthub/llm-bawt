@@ -41,7 +41,7 @@ messages array (`agent_backends/agent_bridge.py` send_command ~L191).
 ## 2. The CLI DOES freeze the system prompt per session (TASK-1318)
 
 TASK-288 concluded the opposite from source reading; a wire probe proved it wrong
-on CLI 2.1.283 / SDK 0.2.160 (2026-10-23). The CLI writes a
+on CLI 2.1.283 / SDK 0.2.160 (Snark, 2026-10-23). The CLI writes a
 `prompt_snapshot` attachment into the session transcript and, on resume, sends
 **that** snapshot, ignoring a changed `--system-prompt`:
 
@@ -231,7 +231,7 @@ to route around the §2 myth and is **superseded** — do not implement it.
     transcript that has no prompt snapshot, so the next turn's bytes become the
     snapshot. The marker counts only once that turn resumes a different SDK
     session id (the reset really ran). It is dropped if the resume id is
-    unchanged, and cleared when a pin move is confirmed (TASK-1318, the coordinator's
+    unchanged, and cleared when a pin move is confirmed (TASK-1318, Snark's
     live `/new` finding);
   - `compaction`: the first turn after a `/compact` turn in this session whose
     usage recorded `context_action=compact`, `outcome=success`. It beats every
@@ -282,4 +282,4 @@ adopt their current render on the first turn after deploy (`legacy_adopt`).
 
 **→ `reference/agent-system-prompt.md`** before debugging persona loss, "why isn't my prompt change taking effect," or cache cost on agent bots. Key facts: agents get NO history from llm-bawt (only current message + system prompt; continuity = the CLI's on-disk transcript via `resume=`); the system prompt is **pinned per session** (TASK-1318; committed in `9e874dc`, live only after the app and agent-bridge restarts — check the reference's status line). The CLI freezes the prompt at session start, so llm-bawt sends the pinned bytes on every pin-enabled, session-backed turn whose pin resolves (resets, session-less turns and pin-store errors send the fresh render), and an edit lands only at the session's next boundary: `/new`, reset, model switch, first run, or the first turn after a manual `/compact`. The pinned bytes are also the cacheable prefix, so keep the prompt byte-stable (stable prefix ≈ 10% cost).
 
-**Shared agent rules ("## Shared agent operating rules", every agent bot) = prompt key `agents.global_prompt`**, one global row in `prompt_templates`, gated by the global runtime setting `agent_global_prompt_enabled` (chat bots never see it). Not in source or skills, so don't grep for it. To edit: `GET http://app:8642/v1/prompts/agents.global_prompt?scope_type=global`, splice the change into the full `body`, then `PUT` the same URL with the full body + `title`/`category`/`format`/`metadata` from the GET, `updated_by` (your bot id) and `change_note`. Each write adds a row to `prompt_template_versions`; revert = PUT the previous version's body. The user's UI is the BawtHub Prompt Registry. An edit reaches each agent at that agent's next session boundary (`/new`, reset, model switch, first run, or the first turn after a manual `/compact`), not on its next turn. Each boundary then pays one cache rebuild, so batch edits; don't drip them.
+**Shared agent rules ("## Shared agent operating rules", every agent bot) = prompt key `agents.global_prompt`**, gated by the global runtime setting `agent_global_prompt_enabled` (chat bots never see it). Effective text comes from the prompt registry: a tenant override or the current packaged product default. Edit the live registry body through its API or BawtHub Prompt Registry; each ordinary save is an explicit override and creates a version-history entry. Reverting a saved body is still an override; reset resumes following the product. Approved portable edits can be exported once into the canonical source fixture, never manually maintained in both places; see [product defaults](product-defaults.md). An edit reaches each agent at that agent's next session boundary (`/new`, reset, model switch, first run, or the first turn after a manual `/compact`), not on its next turn. Each boundary then pays one cache rebuild, so batch edits; don't drip them.

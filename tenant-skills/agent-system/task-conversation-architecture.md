@@ -261,7 +261,7 @@ Ownership verification is out-of-band, via llm-bawt:
 `GET /v1/sessions/:id?bot_id=<hint>&user=<callerUserId>`. The response
 `bot_id` becomes authoritative for the association write; the client body's
 `botId` is a hint only. A `null user_id` on the session is treated as
-**not owned** (fail closed — TASK-705 fix). Foreign-owned and nonexistent
+**not owned** (fail closed — TASK-705 al fix). Foreign-owned and nonexistent
 sessions both collapse to a uniform 404 so a caller cannot enumerate.
 
 | Method | Route | Default source |

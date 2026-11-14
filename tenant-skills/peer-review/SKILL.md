@@ -9,6 +9,8 @@ Use a self-check for wording, documentation, and simple low-risk changes. Conseq
 
 Choose an available bot with the `review` capability who did not author the change. Give the reviewer the exact revision or executable maintenance plan, scope, relevant evidence, and remaining uncertainty.
 
+Prefer a different provider when one is available. If the other provider's subscription, quota, authentication or service is unavailable, use an available independent reviewer on the same provider immediately. Record the fallback reason with the verdict; no exception request, provider retry/probe, model switch or wait for subscription recovery is needed. This applies to code, design and operational/maintenance reviews. Provider diversity is a preference, not a blocking gate; non-author independence, technical findings and required operation approvals still apply.
+
 Review the requested outcome under its stated operating conditions. Do not make hypothetical future capabilities prerequisites. A blocker needs a concrete failure scenario; questions, preferences, and unrelated pre-existing defects are not blockers.
 
 Record the verdict on the task with `tasks_reviews_add`. Send a callback only to the requester and anyone whose next action changes. No acknowledgment chain is needed.

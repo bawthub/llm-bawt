@@ -10,6 +10,8 @@ An account that sets `git config bawthub.requireTurnIdentity true` (with `bawthu
 
 To commit as another account, add `--ssh <account>@<host> --remote-helper <absolute commit-slice path> --repo <remote repo>`; paths are relative to that repo. The context, argv, message and patch contents travel in a bounded stdin envelope, never on a command line.
 
+After a signed commit, the helper reports its full SHA and Git object to `/v1/git/commits` from that same local/remote side. The app binds it to the signed turn; review author models come only from this receipt and that turn's log. If reporting fails, the commit still succeeded and attribution is explicitly unresolved—do not repeat the commit. Raw/manual commits, old commits and unrecorded cherry-picks remain unresolved. Review revisions should use full SHAs (at least 10 characters); a trailing ` on SHA` marks the base, and every target in a pair must resolve and agree. See llm-bawt `docs/COMMIT_AUTHORSHIP.md` for record, retry and activation details.
+
 An account's post-commit hook can call `python3 <agent-skills>/scripts/bawt_git_identity.py warn-head` to flag raw Git commits made with a turn context but a non-bot author. Install it without replacing existing hooks. It is a local advisory check, not signature validation or a same-user plumbing barrier; manual commits with no turn context are not flagged.
 
 Keep unrelated tasks separate. A routine local correction does not need arbitration; involve the affected owner or integrator for genuine overlapping ownership. Preserve work rather than discarding it to make a checkout clean.

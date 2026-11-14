@@ -14,7 +14,7 @@ Source of truth in the BawtHub repo:
 1. Confirm these files and the installer are present on the dev working surface.
    This is **dev-only** (`import.meta.env.DEV`), not enabled by a production URL.
 2. Give the user a direct link to his affected chat with `viewportTrace=1` appended:
-   `https://<dev-host>/chat/<bot>?viewportTrace=1` (example; preserve an existing
+   `https://<dev-host>/chat/al?viewportTrace=1` (example; preserve an existing
    query with `&viewportTrace=1`). Use the affected, permitted bot; never test a
    protected personal bot. No console, cable, developer mode, or broad logging
    switch is required on the phone.
