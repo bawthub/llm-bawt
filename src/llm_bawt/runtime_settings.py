@@ -29,6 +29,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _is_global_only(key: str) -> bool:
+    """A bot-scope row for a global-only setting is ignored (TASK-2284)."""
+    from .setting_definitions import is_global_only_runtime_setting
+
+    return is_global_only_runtime_setting(key)
+
+
 class RuntimeSetting(SQLModel, table=True):
     """DB-backed runtime setting."""
 
@@ -934,7 +941,7 @@ class RuntimeSettingsResolver:
             return request_overrides[key], "request_override"
 
         self._refresh_cache_if_needed()
-        if key in self._bot_cache:
+        if key in self._bot_cache and not _is_global_only(key):
             return self._bot_cache[key], "bot_override"
         if key in self._global_cache:
             return self._global_cache[key], "global_override"

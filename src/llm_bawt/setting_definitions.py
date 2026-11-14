@@ -230,7 +230,7 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
         key="skills_skill_token_cap",
         type="int",
         default=12000,
-        applies_to=("agent",),
+        applies_to=(),  # GLOBAL-ONLY: read from the global scope; bot rows ignored.
         storage=STORAGE_RUNTIME_SETTING,
         label="Injected skill token cap (per skill)",
         help=(
@@ -307,7 +307,7 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
         key="skills_total_token_cap",
         type="int",
         default=25000,
-        applies_to=("agent",),
+        applies_to=(),  # GLOBAL-ONLY: read from the global scope; bot rows ignored.
         storage=STORAGE_RUNTIME_SETTING,
         label="Injected skills token cap (per bot)",
         help=(
@@ -325,7 +325,7 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
             "EnterWorktree",
             "ExitWorktree",
         ],
-        applies_to=("agent",),
+        applies_to=(),  # GLOBAL-ONLY: read from the global scope; bot rows ignored.
         storage=STORAGE_RUNTIME_SETTING,
         label="Claude Code disabled SDK tools",
         help=(
@@ -491,7 +491,7 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
         key="maintenance_model",
         type="str",
         default="dolphin-qwen-3b",
-        applies_to=BOT_TYPES_ALL,
+        applies_to=(),  # GLOBAL-ONLY: read from the global scope; bot rows ignored.
         storage=STORAGE_RUNTIME_SETTING,
         label="Default job model (all jobs)",
         help="Default model for every background job. Each job (summarization, "
@@ -508,7 +508,7 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
         key="extraction_model",
         type="str",
         default=None,
-        applies_to=BOT_TYPES_ALL,
+        applies_to=(),  # GLOBAL-ONLY: read from the global scope; bot rows ignored.
         storage=STORAGE_RUNTIME_SETTING,
         label="Memory extraction model",
         help="Model the memory-extraction job runs. Unset = inherit the default "
@@ -532,7 +532,7 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
         key="profile_maintenance_model",
         type="str",
         default=None,
-        applies_to=BOT_TYPES_ALL,
+        applies_to=(),  # GLOBAL-ONLY: read from the global scope; bot rows ignored.
         storage=STORAGE_RUNTIME_SETTING,
         label="Profile maintenance model",
         help="Model the profile-maintenance job runs. Unset = inherit the "
@@ -546,7 +546,7 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
         key="maintenance_model_fallback",
         type="str",
         default=None,
-        applies_to=BOT_TYPES_ALL,
+        applies_to=(),  # GLOBAL-ONLY: read from the global scope; bot rows ignored.
         storage=STORAGE_RUNTIME_SETTING,
         label="Backup job model (on spending limit)",
         help="Used only when a background job's provider reports a spending "
@@ -560,7 +560,7 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
         key="maintenance_reasoning_effort",
         type="str",
         default=None,
-        applies_to=BOT_TYPES_ALL,
+        applies_to=(),  # GLOBAL-ONLY: read from the global scope; bot rows ignored.
         storage=STORAGE_RUNTIME_SETTING,
         label="Background job reasoning effort",
         help="Reasoning effort sent with background job calls (summaries, "
@@ -572,7 +572,7 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
         key="maintenance_fallback_cooldown_seconds",
         type="int",
         default=3600,
-        applies_to=BOT_TYPES_ALL,
+        applies_to=(),  # GLOBAL-ONLY: read from the global scope; bot rows ignored.
         storage=STORAGE_RUNTIME_SETTING,
         label="Backup job model cooldown (seconds)",
         help="How long jobs stay on the backup before one call retries the "
@@ -614,7 +614,7 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
         key="model_context_window_default",
         type="int",
         default=128000,
-        applies_to=BOT_TYPES_ALL,
+        applies_to=(),  # GLOBAL-ONLY: read from the global scope; bot rows ignored.
         storage=STORAGE_RUNTIME_SETTING,
         label="Default model context window",
         help=(
@@ -662,7 +662,7 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
         key="max_output_tokens",
         type="int",
         default=4096,
-        applies_to=BOT_TYPES_ALL,
+        applies_to=(),  # GLOBAL-ONLY: read from the global scope; bot rows ignored.
         storage=STORAGE_RUNTIME_SETTING,
         label="Max output tokens",
         help=(
@@ -750,6 +750,16 @@ def applies_to_bot_type(key: str, bot_type: str) -> bool:
     permissive — an undeclared setting is not something we should hide)."""
     d = SETTING_DEFINITIONS.get(key)
     return True if d is None else (bot_type in d.applies_to)
+
+
+def is_global_only_runtime_setting(key: str) -> bool:
+    """Whether a runtime setting is read only from the global scope (TASK-2284).
+
+    Declared with ``applies_to=()``: no bot type consumes a bot-scope row, so a
+    stale bot row must not be reported (or resolved) as the effective value.
+    Unknown keys are not global-only."""
+    d = SETTING_DEFINITIONS.get(key)
+    return d is not None and d.storage == STORAGE_RUNTIME_SETTING and not d.applies_to
 
 
 def setting_default(key: str, fallback: object = None) -> object:
