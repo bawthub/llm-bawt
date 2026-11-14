@@ -297,6 +297,8 @@ class RetryBudgetRegistry:
     def __init__(self, *, max_entries: int = 4096) -> None:
         self.max_entries = max_entries
         self._entries: dict[tuple[str, str], _BudgetEntry] = {}
+        self._tool_recovered: set[str] = set()
+        self._terminal_tool_failures: dict[str, str] = {}
         self._generation = 0
         self._lock = threading.Lock()
 
@@ -317,6 +319,8 @@ class RetryBudgetRegistry:
         """Reject duplicate sampling or a spent budget atomically."""
         key = (request_id, fingerprint)
         with self._lock:
+            if cause := self._terminal_tool_failures.get(request_id):
+                raise ReplayRefusedError(cause)
             entry = self._entries.get(key)
             if entry is None:
                 if len(self._entries) >= self.max_entries:
@@ -371,9 +375,24 @@ class RetryBudgetRegistry:
             if entry.successful and not entry.tool_committed and not entry.auth_recovery_used:
                 self._entries.pop(lease._key)
 
+    def claim_tool_recovery(self, request_id: str) -> bool:
+        """One carrier per bridge turn, including SDK continuation-body changes."""
+        with self._lock:
+            if request_id in self._tool_recovered:
+                return False
+            self._tool_recovered.add(request_id)
+            return True
+
+    def fail_tool_request(self, request_id: str, cause: str) -> None:
+        """A terminal tool-generation failure cannot be fixed by empty continuations."""
+        with self._lock:
+            self._terminal_tool_failures.setdefault(request_id, cause)
+
     def clear_request(self, request_id: str) -> None:
         """Drop this turn's side-effect/recovery tombstones and spent policies."""
         with self._lock:
+            self._tool_recovered.discard(request_id)
+            self._terminal_tool_failures.pop(request_id, None)
             for key in [key for key in self._entries if key[0] == request_id]:
                 del self._entries[key]
 

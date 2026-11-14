@@ -1030,6 +1030,7 @@ class ClaudeSendMixin(
                     e,
                     direct_anthropic=claude_subscription_auth,
                     proxy_provider=proxy_provider,
+                    proxy_tool_error=getattr(self, "_proxy_tool_errors", {}).get(request_id),
                 )
                 seq += 1
                 self._publish_event(
@@ -1047,6 +1048,7 @@ class ClaudeSendMixin(
                 self._clear_proxy_sampling_cancel(request_id)
                 self._discard_changed_file_request(request_id)
                 self._proxy_request_sessions.pop(request_id, None)
+                getattr(self, "_proxy_tool_errors", {}).pop(request_id, None)
                 self._turn_phase_trackers.pop(request_id, None)
                 self._trigger_message_ids.pop(request_id, None)
                 await async_redis.xack(COMMANDS_STREAM, "claude-code-bridge", msg_id)

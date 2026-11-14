@@ -89,6 +89,7 @@ class ClaudeCodeBridge(
         # Proxy status callbacks run in-process and resolve request_id back to
         # the active Redis run without exposing the session key in HTTP headers.
         self._proxy_request_sessions: dict[str, str] = {}
+        self._proxy_tool_errors: dict[str, str] = {}
         # request_id -> live TurnPhaseTracker (TASK-1074). Proxy statuses route
         # through it so one owner decides the transient turn phase.
         self._turn_phase_trackers: dict[str, Any] = {}

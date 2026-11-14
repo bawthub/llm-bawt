@@ -122,6 +122,7 @@ def classify_terminal_error(
     *,
     direct_anthropic: bool = True,
     proxy_provider: str | None = None,
+    proxy_tool_error: str | None = None,
 ) -> tuple[str, dict | None]:
     """Build the stable bridge ERROR contract consumed by BawtHub.
 
@@ -130,6 +131,8 @@ def classify_terminal_error(
     failures get tagged with the provider whose token actually died instead
     of defaulting BawtHub's recovery UI to the Claude reconnect.
     """
+    if not direct_anthropic and proxy_tool_error:
+        return proxy_tool_error, {"error_code": "upstream_tool_arguments", "provider": proxy_provider}
     text = str(exc)
     is_credential_failure = (
         isinstance(exc, TerminalSDKResultError) and exc.credential_error

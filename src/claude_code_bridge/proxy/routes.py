@@ -28,6 +28,7 @@ from .retry import (
     BrokerAuthorizationError, ReplayRefusedError, RetryAdmissionError, RetryBudgetRegistry,
 )
 from .heartbeat import DEFAULT_INTERVAL, with_heartbeat
+from .tool_recovery import ToolArgumentGenerationError, carrier_allowed, recovery_frames
 from .observability import OBSERVABILITY
 from .request_context import (
     BOT_HEADER,
@@ -211,6 +212,7 @@ async def _proxy_iter(
         pending = b""
         saw_error = False
         saw_message_stop = False
+        context.recover_incomplete_tools = True
         adapter_stream = adapter.call(body, upstream_model, context)
         heartbeat_stream = with_heartbeat(adapter_stream, interval=_PING_INTERVAL)
         async for chunk in heartbeat_stream:
@@ -245,6 +247,31 @@ async def _proxy_iter(
             lease.mark_success()
         if saw_error:
             status_code = 500
+    except ToolArgumentGenerationError as e:
+        slot = guard.replacement_slot()
+        allowed = (e.incomplete and slot is not None and carrier_allowed(body)
+                   and (lease is None or budgets.claim_tool_recovery(context.request_id)))
+        if allowed:
+            guard.close()
+            index, call_id = slot
+            logger.warning("proxy_tool_argument_recovery request_id=%s cause=%s", context.request_id, e)
+            for frame in recovery_frames(e, index=index, call_id=call_id,
+                                         output_tokens=context.output_tokens):
+                yield frame
+            if lease is not None:
+                lease.mark_success()
+            status_code = 200
+        else:
+            # Pin the actual cause across SDK resends/changed continuation bodies.
+            # Never let generic output-cap failures obscure an argument stall.
+            cause = f"{e}; incomplete-tool recovery unavailable or already used"
+            if lease is not None:
+                budgets.fail_tool_request(context.request_id, cause)
+            context.report_status({"state": "failed", "provider": provider,
+                                   "terminal_tool_error": cause, "message": cause})
+            logger.warning("proxy_tool_argument_terminal request_id=%s cause=%s", context.request_id, cause)
+            status_code = 400
+            yield final_error_frame("invalid_request_error", cause)
     except RetryAdmissionError as e:
         status_code = 400 if isinstance(e, ReplayRefusedError) else 500
         context.report_status({"state": "failed", "provider": provider})

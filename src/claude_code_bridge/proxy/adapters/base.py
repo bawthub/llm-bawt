@@ -618,6 +618,24 @@ class ProviderAdapter(ABC):
                 await asyncio.sleep(decision.backoff_s)
                 continue
 
+            # The route's dispatch guard can replace one withheld, incomplete
+            # ordinary tool with a non-executable error carrier. No resampling.
+            if (context is not None and getattr(context, "recover_incomplete_tools", False)
+                    and state.open_block is not None and state.open_block.get("kind") == "tool"
+                    and (getattr(stream_exc, "phase", None) == "whitespace"
+                         or isinstance(stream_exc, RepetitionLoopError))):
+                from ..tool_recovery import ToolArgumentGenerationError
+                name, chars, parses = _held_tool_fields(state.open_block)
+                discard_stream = getattr(upstream_stream, "discard", None)
+                if discard_stream is not None:
+                    await discard_stream()
+                cause = ("upstream whitespace stall" if getattr(stream_exc, "phase", None) == "whitespace"
+                         else "upstream argument repetition")
+                raise ToolArgumentGenerationError(
+                    name, int(chars), f"{type(stream_exc).__name__}: {cause}",
+                    incomplete=_is_unflushed_tool(state.open_block) and parses == "no",
+                )
+
             # Terminal — emit the state-appropriate final error type. On
             # TEXT/TOOL_COMMITTED phases, the decision returns api_error (not
             # overloaded_error) so the CLI does NOT retry from scratch — this

@@ -311,6 +311,11 @@ class ClaudeEventMixin:
                 "Dropping proxy status for inactive request_id=%s", request_id
             )
             return
+        cause = status.get("terminal_tool_error")
+        if isinstance(cause, str) and cause:
+            if not hasattr(self, "_proxy_tool_errors"):
+                self._proxy_tool_errors = {}
+            self._proxy_tool_errors[request_id] = cause
         # TASK-1074: the request's phase tracker is the single owner of turn
         # phase; it dedups and stamps phase/since on the same event kind.
         tracker = getattr(self, "_turn_phase_trackers", {}).get(request_id)

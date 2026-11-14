@@ -20,6 +20,13 @@ class ToolCallGuard:
     def __init__(self) -> None:
         self._held = None
         self._stop_reason: str | None = None
+        self._tool_starts: list[tuple[int, str]] = []
+
+    def replacement_slot(self) -> tuple[int, str] | None:
+        """Only one still-withheld tool is eligible; never drop completed siblings."""
+        if self._held is not None and len(self._tool_starts) == 1:
+            return self._tool_starts[0]
+        return None
 
     def feed(self, frame: bytes, *, tool_start: bool) -> Iterator[bytes]:
         data = b"\n".join(line[5:].lstrip() for line in frame.splitlines()
@@ -38,6 +45,8 @@ class ToolCallGuard:
             reason = (payload.get("delta") or {}).get("stop_reason")
             if reason:
                 self._stop_reason = reason
+        if tool_start:
+            self._tool_starts.append((payload["index"], payload["content_block"]["id"]))
         if tool_start and self._held is None:
             # Spill large, legitimate code/file arguments to an anonymous file;
             # the threshold bounds RAM, NOT accepted argument/response size.
