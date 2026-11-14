@@ -28,7 +28,7 @@ from __future__ import annotations
 import logging
 import re
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, field_validator
 
@@ -36,7 +36,8 @@ from ...prompt_registry import get_prompt_resolver
 from ...seeding import FIRST_BOT_AGENT_BACKEND, seed_tenant
 from ..agent_runtime import check_agent_runtime
 from ..dependencies import get_runtime_settings_store, get_service
-from .settings import _persist_bot_profile
+from ... import bot_profile_changes as profile_changes
+from .settings import _USER_ID_QUERY, _persist_bot_profile, profile_actor
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -155,7 +156,8 @@ async def get_first_bot_defaults():
 
 
 @router.post("/v1/setup/first-bot", tags=["Setup"])
-async def create_first_bot(body: FirstBotRequest):
+async def create_first_bot(body: FirstBotRequest, http_request: Request,
+                           user_id: str | None = _USER_ID_QUERY):
     """Create the tenant's first agent.
 
     Refuses with 503 unless the agent runtime answers a ping. Then the admin
@@ -187,6 +189,7 @@ async def create_first_bot(body: FirstBotRequest):
                 # The writer heals this to ``claude-proxy`` for non-Anthropic endpoints.
                 "harness": FIRST_BOT_AGENT_BACKEND,
                 "endpoint_id": body.endpoint_id,
+                profile_changes.CHANGED_BY: profile_actor(http_request, user_id),
             },
             create_only=True,
         )

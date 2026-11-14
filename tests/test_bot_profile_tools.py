@@ -639,3 +639,32 @@ def test_the_house_capability_defaults_to_coordinate_and_follows_the_setting(mon
                         lambda: {tools.HOUSE_ASSIGN_CAPABILITY_SETTING: "fixture-cap"})
     tools._may_assign_houses(CALLER)
     assert asked == ["coordinate", "fixture-cap"]
+
+
+def test_the_app_call_forwards_the_signed_turn_so_the_route_records_the_bot(monkeypatch):
+    """TASK-1610: the route derives ``bot:<id>`` from this header, not the body."""
+    import httpx
+
+    from llm_bawt.mcp_server import task_association
+    from llm_bawt.task_turn_context import TASK_TURN_CONTEXT_HEADER
+
+    sent = {}
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        async def request(self, method, url, **kwargs):
+            sent.update(kwargs)
+            return "ok"
+
+    monkeypatch.setattr(httpx, "AsyncClient", Client)
+    binding = task_association.set_current_task_turn_capability("fixture-capability")
+    try:
+        assert asyncio.run(tools._app("PATCH", "fixture-bot", {"description": "x"})) == "ok"
+    finally:
+        task_association.reset_current_task_turn_capability(binding)
+    assert sent["headers"] == {TASK_TURN_CONTEXT_HEADER: "fixture-capability"}

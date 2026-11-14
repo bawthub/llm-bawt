@@ -391,3 +391,14 @@ def test_failed_bot_create_stores_no_preferences():
         response = _client().post("/v1/setup/first-bot", json={**_FIRST_BOT, "exposure": "private"})
     assert response.status_code == 422
     store.set_value.assert_not_called()
+
+
+def test_first_bot_audit_names_the_proxy_bound_user():
+    """TASK-1610: the wizard's create records who ran it, not ``api``."""
+    from llm_bawt.bot_profile_changes import CHANGED_BY
+
+    with _first_bot_env() as env:
+        response = _client().post("/v1/setup/first-bot?user_id=fixture-user", json=_FIRST_BOT)
+
+    assert response.status_code == 200, response.text
+    assert env.persist.call_args.args[0][CHANGED_BY] == "fixture-user"

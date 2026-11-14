@@ -309,10 +309,14 @@ def test_a_route_missing_from_the_snapshot_is_refused_not_probed_under_the_lock(
         gate.check(conn, None, row)  # a credential-free route needs no snapshot
 
 
+#: A direct route call with no turn capability or bound user (TASK-1610).
+_UNSIGNED = SimpleNamespace(headers={})
+
+
 def _put(rig, slug, *, name="Changed"):
     return asyncio.run(settings.upsert_bot_profile(slug, BotProfileUpsertRequest(
         name=name, system_prompt="Fixture persona", **rig.route("local"),
-    )))
+    ), _UNSIGNED, None))
 
 
 def test_legacy_put_refuses_missing_profile_without_creating_any_data(rig):
@@ -368,7 +372,7 @@ def _create(rig, slug, *, tags=None, runtime_settings=None, **fields):
         tags=[] if tags is None else tags,
         runtime_settings={} if runtime_settings is None else runtime_settings,
         **rig.route("local"), **fields,
-    )))
+    ), _UNSIGNED, None))
 
 
 def test_complete_create_commits_profile_tags_and_only_explicit_settings(rig):
@@ -615,7 +619,7 @@ def test_create_requires_compatible_real_endpoint(rig, monkeypatch, route_fields
     with pytest.raises(HTTPException) as refused:
         asyncio.run(settings.create_bot(BotCreateRequest(
             slug=slug, name="New", system_prompt="Fixture persona", tags=[], **kwargs,
-        )))
+        ), _UNSIGNED, None))
     assert refused.value.status_code == 422
     assert rig.store.get(slug) is None
 

@@ -184,3 +184,73 @@ def test_cli_color_is_validated_normalized_and_clearable(api, monkeypatch):  # n
 
     assert api.patch(BOT, cli_color="").status_code == 200
     assert api.store.get(BOT).cli_color is None
+
+
+# --- TASK-1610: the audit records the verified caller ------------------------
+
+
+@pytest.fixture
+def signed(monkeypatch):
+    import uuid
+
+    from cryptography.fernet import Fernet
+
+    from llm_bawt import task_turn_context as codec
+
+    signer = Fernet(Fernet.generate_key())
+    monkeypatch.setattr(codec, "_get_fernet", lambda: signer)
+    return lambda bot: codec.mint_task_turn_context(
+        session_id=str(uuid.uuid4()), turn_id="turn-" + uuid.uuid4().hex,
+        trigger_message_id=str(uuid.uuid4()), bot_id=bot, user_id="fixture-user")
+
+
+def test_patch_records_the_proxy_bound_user_over_the_body_claim(api):  # noqa: F811
+    response = api.client.patch(f"/v1/bots/{BOT}/profile?user_id=fixture-user",
+                                json={"description": "ui save", "tags": ["inactive"],
+                                      "updated_by": "someone-else"})
+    assert response.status_code == 200, response.text
+    assert _changes(api)[-1]["changed_by"] == "fixture-user"
+    assert api.assigned(BOT)["inactive"][0] == "fixture-user"
+
+
+def test_patch_records_a_signed_bot_turn_as_the_bot(api, signed):  # noqa: F811
+    response = api.client.patch(
+        f"/v1/bots/{BOT}/profile", json={"description": "bot save", "updated_by": "bot:spoof"},
+        headers={settings.TASK_TURN_CONTEXT_HEADER: signed("fixture-caller")})
+    assert response.status_code == 200, response.text
+    assert _changes(api)[-1]["changed_by"] == "bot:fixture-caller"
+
+
+def test_a_bad_turn_capability_is_refused_and_writes_nothing(api, signed):  # noqa: F811
+    before = _changes(api)
+    response = api.client.patch(f"/v1/bots/{BOT}/profile", json={"description": "x"},
+                                headers={settings.TASK_TURN_CONTEXT_HEADER: "not-a-capability"})
+    assert response.status_code == 403
+    assert _changes(api) == before
+
+
+def test_put_records_the_proxy_bound_user(api):  # noqa: F811
+    response = api.client.put(f"/v1/bots/{BOT}/profile?user_id=fixture-user",
+                              json={"name": "Fixture", "system_prompt": "changed by put"})
+    assert response.status_code == 200, response.text
+    assert _changes(api)[-1]["changed_by"] == "fixture-user"
+
+
+def test_create_records_the_proxy_bound_user_on_the_row_and_its_tags(api, monkeypatch):  # noqa: F811
+    # Creation also writes runtime settings this fixture has no store for, so
+    # stop at the writer and check the payload it was handed.
+    seen = {}
+
+    async def persist(payload, **_kwargs):
+        seen.update(payload)
+        return {"slug": payload["slug"]}
+
+    monkeypatch.setattr(settings, "_persist_bot_profile", persist)
+    from fastapi.testclient import TestClient
+
+    # The stub's reply isn't a full profile response; only the payload matters.
+    TestClient(api.client.app, raise_server_exceptions=False).post(
+        "/v1/bots?user_id=fixture-user",
+        json={"slug": "fixture-new", "name": "New", "system_prompt": "p", "tags": ["inactive"]})
+    assert seen[settings.profile_changes.CHANGED_BY] == "fixture-user"
+    assert seen["tags_assigned_by"] == "fixture-user"

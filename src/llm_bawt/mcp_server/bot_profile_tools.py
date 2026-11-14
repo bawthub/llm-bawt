@@ -48,10 +48,10 @@ from typing import Any
 
 from llm_bawt.bot_access import BotAccessError, BotPolicyResolver
 from llm_bawt.bot_tags import BehaviorTag
-from llm_bawt.task_turn_context import TaskTurnContextError
+from llm_bawt.task_turn_context import TASK_TURN_CONTEXT_HEADER, TaskTurnContextError
 
 from .registry import mcp
-from .task_association import current_task_turn_context
+from .task_association import current_task_turn_capability, current_task_turn_context
 
 logger = logging.getLogger(__name__)
 
@@ -233,8 +233,12 @@ async def _app(method: str, slug: str, body: dict[str, Any] | None = None):
     import httpx
 
     async with httpx.AsyncClient() as client:
+        # The signed turn capability lets the route record ``bot:<id>`` as a
+        # verified caller (TASK-1610) rather than trusting the body.
+        capability = current_task_turn_capability()
+        headers = {TASK_TURN_CONTEXT_HEADER: capability} if capability else None
         return await client.request(method, f"{_APP_BASE_URL}/v1/bots/{slug}/profile",
-                                    json=body, timeout=_TIMEOUT_S)
+                                    json=body, headers=headers, timeout=_TIMEOUT_S)
 
 
 def _validate(changes: Any, reason: Any, expected: Any) -> str | None:

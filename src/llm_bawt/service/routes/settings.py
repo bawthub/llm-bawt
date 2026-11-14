@@ -6,7 +6,7 @@ import logging
 from sqlalchemy import func
 from sqlmodel import Session, select
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
 from ... import bot_profile_changes as profile_changes
@@ -16,6 +16,7 @@ from ...bot_tags.errors import BotTagError, GrantLocked, TagSetChanged
 from ...bot_tags.store import BotTagStore
 from ...bot_tags.vocabulary import API_ASSIGNER
 from ...bot_types import normalize_bot_type
+from ...task_turn_context import TASK_TURN_CONTEXT_HEADER, TaskTurnContextError, open_task_turn_context
 from ...runtime_settings import BotAlreadyExists, BotProfileNotFound, RuntimeSetting, cleanup_orphaned_bot_data
 from ...bot_create_transaction import BotCreateTransaction
 from ...orphan_partitions import PartitionExecutionHalted
@@ -689,10 +690,43 @@ def list_bot_profiles(
     )
 
 
+#: The signed-in person BawtHub's proxy binds on profile writes (TASK-1337 contract).
+_USER_ID_QUERY = Query(None, max_length=128,
+                       description="The signed-in user making this change; recorded as changed_by.")
+
+
+def profile_actor(http_request: Request, user_id: str | None, claimed: str | None = None) -> str:
+    """Who is changing a bot profile, for the audit row (TASK-1610).
+
+    A bot's signed turn capability names ``bot:<id>``; otherwise the user
+    BawtHub's proxy bound; otherwise the body's ``updated_by`` or ``api`` for
+    unauthenticated local callers. A verified identity always beats the claim.
+    """
+    capability = http_request.headers.get(TASK_TURN_CONTEXT_HEADER)
+    if capability:
+        try:
+            bot_id = open_task_turn_context(capability).bot_id.strip().lower()
+        except TaskTurnContextError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        return f"bot:{bot_id}"
+    if user_id and user_id.strip():
+        return user_id.strip()
+    return claimed or API_ASSIGNER
+
+
+def _stamp_actor(payload: dict[str, object], actor: str) -> dict[str, object]:
+    payload[profile_changes.CHANGED_BY] = actor
+    if "tags" in payload:
+        payload["tags_assigned_by"] = actor
+    return payload
+
+
 @router.post("/v1/bots", response_model=BotProfileResponse, tags=["System"])
-async def create_bot(request: BotCreateRequest):
+async def create_bot(request: BotCreateRequest, http_request: Request,
+                     user_id: str | None = _USER_ID_QUERY):
     """Create a new bot profile. Returns 409 when slug already exists."""
-    payload = _request_to_profile_payload(request.slug, request)
+    payload = _stamp_actor(_request_to_profile_payload(request.slug, request),
+                           profile_actor(http_request, user_id))
     return await _persist_bot_profile(payload, create_only=True,
                                       runtime_settings=request.runtime_settings)
 
@@ -713,14 +747,17 @@ def get_bot_profile(slug: str):
 
 
 @router.put("/v1/bots/{slug}/profile", response_model=BotProfileResponse, tags=["System"])
-async def upsert_bot_profile(slug: str, request: BotProfileUpsertRequest):
+async def upsert_bot_profile(slug: str, request: BotProfileUpsertRequest, http_request: Request,
+                             user_id: str | None = _USER_ID_QUERY):
     """Update an existing bot personality profile; POST owns creation."""
-    payload = _request_to_profile_payload(slug, request)
+    payload = _stamp_actor(_request_to_profile_payload(slug, request),
+                           profile_actor(http_request, user_id))
     return await _persist_bot_profile(payload, create_only=False, require_existing=True)
 
 
 @router.patch("/v1/bots/{slug}/profile", response_model=BotProfileResponse, tags=["System"])
-async def patch_bot_profile(slug: str, request: BotProfilePatchRequest):
+async def patch_bot_profile(slug: str, request: BotProfilePatchRequest, http_request: Request,
+                            user_id: str | None = _USER_ID_QUERY):
     """Partially update a bot profile. Only provided fields are changed.
 
     The store gets the whole merged row, so the merge is pinned to the row it
@@ -732,11 +769,12 @@ async def patch_bot_profile(slug: str, request: BotProfilePatchRequest):
     if store.engine is None:
         raise HTTPException(status_code=503, detail="Bot profiles DB unavailable")
 
+    actor = profile_actor(http_request, user_id, request.updated_by)
     for attempt in range(1, _PATCH_ATTEMPTS + 1):
         existing = store.get(slug.strip().lower())
         if not existing:
             raise HTTPException(status_code=404, detail=f"Bot '{slug}' not found")
-        payload = _patch_payload(existing, request)
+        payload = _patch_payload(existing, request, actor)
         try:
             return await _persist_bot_profile(payload, create_only=False)
         except ProfileRowChanged as stale:
@@ -752,7 +790,8 @@ async def patch_bot_profile(slug: str, request: BotProfilePatchRequest):
 _PATCH_ATTEMPTS = 3
 
 
-def _patch_payload(existing, request: BotProfilePatchRequest) -> dict[str, object]:
+def _patch_payload(existing, request: BotProfilePatchRequest,
+                   actor: str | None = None) -> dict[str, object]:
     """The stored row with the request's explicitly-set fields merged over it."""
     # Build payload from existing + only the fields that were explicitly set
     payload: dict[str, object] = {
@@ -787,6 +826,7 @@ def _patch_payload(existing, request: BotProfilePatchRequest) -> dict[str, objec
     }
     for field_name in request.model_fields_set - {"updated_by"}:
         payload[field_name] = getattr(request, field_name)
+    actor = actor or request.updated_by or API_ASSIGNER
     if "tags" in request.model_fields_set:
         # A full-set replace (BOT_TAGS.md §8). The legacy flag mirrors
         # ``not private``, so naming both is only allowed when they agree.
@@ -796,8 +836,8 @@ def _patch_payload(existing, request: BotProfilePatchRequest) -> dict[str, objec
             raise HTTPException(status_code=422, detail=(
                 "include_in_global_search must equal 'private' not in tags when both are sent; "
                 "send tags alone"))
-        payload["tags_assigned_by"] = request.updated_by or API_ASSIGNER
-    payload[profile_changes.CHANGED_BY] = request.updated_by or API_ASSIGNER
+        payload["tags_assigned_by"] = actor
+    payload[profile_changes.CHANGED_BY] = actor
     payload[profile_changes.ROW_VERSION] = existing.updated_at
 
     # bot_type is DERIVED from agent_backend (the single source of truth), not
