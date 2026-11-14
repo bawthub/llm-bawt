@@ -67,6 +67,7 @@ def _bridge(loader):
     bridge._trigger_message_ids = {}
     bridge._run_workers = {}
     bridge._model_lock = asyncio.Lock()
+    bridge._stop_task = None
     return bridge
 
 
@@ -136,3 +137,24 @@ def test_stop_unloads_on_the_worker_when_idle():
     loader, bridge = asyncio.run(run())
     assert loader.unloads == ["B"]
     assert bridge._model_lock.locked()  # no send can load after stop
+
+
+def test_repeated_and_concurrent_stop_share_one_shutdown(caplog):
+    async def run():
+        loader = _Loader()
+        loader.current = _Client("B")
+        bridge = _bridge(loader)
+        bridge.SHUTDOWN_UNLOAD_WAIT = 5.0
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        await asyncio.gather(bridge.stop(), bridge.stop())  # run_forever finally + __main__
+        await bridge.stop()  # a later caller
+        return loader, bridge, loop.time() - start
+
+    with caplog.at_level("WARNING"):
+        loader, bridge, elapsed = asyncio.run(run())
+    assert loader.unloads == ["B"]
+    assert elapsed < 1.0  # no caller waits out the retained lock
+    assert "Generation still running" not in caplog.text
+    assert bridge._model_lock.locked()
+    assert bridge._publisher.close.call_count == 1

@@ -81,6 +81,7 @@ class LocalModelBridge:
         # stops, and by shutdown around its unload, so no load or unload runs
         # between a send's load and its generation.
         self._model_lock = asyncio.Lock()
+        self._stop_task: asyncio.Future | None = None
         # request_id -> originating frontend user-message UUID (stamped on every
         # emitted event); cleared when the send finalizes.
         self._trigger_message_ids: dict[str, str] = {}
@@ -101,6 +102,14 @@ class LocalModelBridge:
         logger.info("LocalModelBridge started (backend=%s)", self._backend_name)
 
     async def stop(self) -> None:
+        # Idempotent: the first call owns shutdown (and keeps the model lock);
+        # later or concurrent calls wait for that same shutdown instead of
+        # contending for the retained lock.
+        if self._stop_task is None:
+            self._stop_task = asyncio.ensure_future(self._stop_once())
+        await asyncio.shield(self._stop_task)
+
+    async def _stop_once(self) -> None:
         if self._command_task:
             self._command_task.cancel()
             try:

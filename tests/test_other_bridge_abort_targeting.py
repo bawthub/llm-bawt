@@ -29,6 +29,7 @@ def make_bridge(kind):
         bridge._run_workers = {}
         bridge._request_timeout = LocalModelBridge.DEFAULT_REQUEST_TIMEOUT
         bridge._model_lock = asyncio.Lock()
+        bridge._stop_task = None
     else:
         raise ValueError(f"no test bridge for {kind!r}")
     bridge._session_queue = SessionQueue()
