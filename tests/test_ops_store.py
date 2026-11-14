@@ -397,3 +397,26 @@ if __name__ == "__main__":
             traceback.print_exc()
     print(f"\n{passed} passed, {failed} failed ({len(fns)} total)")
     sys.exit(1 if failed else 0)
+
+
+def _seed(slug):
+    return dict(next(seed for seed in SEEDS if seed["slug"] == slug))
+
+
+def test_seed_inherits_install_interpolation_env_from_sibling_row():
+    """TASK-2305: new rows for a Compose service take the install's HOME."""
+    store = _store()
+    sibling = _seed("llm-bawt.reconcile-local-model-bridge-config")
+    spec = json.loads(sibling["command_script"])
+    spec["compose_config"]["interpolation_env"] = {"HOME": "/home/operator"}
+    store.seed_operation_if_missing({**sibling, "command_script": json.dumps(spec)})
+    for slug in ("llm-bawt.deploy-local-model-bridge-image", "llm-bawt.rollback-local-model-bridge-image"):
+        row = store.seed_operation_if_missing(_seed(slug))
+        assert json.loads(row.command_script)["compose_config"]["interpolation_env"] == {"HOME": "/home/operator"}
+
+
+def test_seed_without_sibling_env_is_unchanged():
+    store = _store()
+    seed = _seed("llm-bawt.deploy-local-model-bridge-image")
+    row = store.seed_operation_if_missing(seed)
+    assert row.command_script == seed["command_script"]

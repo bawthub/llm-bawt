@@ -52,6 +52,15 @@ JOB_CREATED_CHANNEL = "ops_job_created"
 CATALOG_CHANGED_CHANNEL = "ops_catalog_changed"
 
 
+def _json_spec(script):
+    """A Docker JSON spec as a dict, or None for anything else (shell scripts)."""
+    try:
+        spec = json.loads(script or "")
+    except ValueError:
+        return None
+    return spec if isinstance(spec, dict) else None
+
+
 def _utcnow():
     return datetime.now(timezone.utc)
 
@@ -466,7 +475,28 @@ class OpsStore:
     def seed_operation_if_missing(self, data, *, actor="system-seed"):
         if self.engine is None or self.get_operation_by_slug(data.get("slug")):
             return None
-        return self.create_operation(data, actor=actor)
+        return self.create_operation(self._inherit_interpolation_env(data), actor=actor)
+
+    def _inherit_interpolation_env(self, data):
+        """TASK-2305: a seeded row for a Compose service takes the install's
+        ``compose_config.interpolation_env`` (e.g. ``HOME``) from an existing
+        row for the same project and service. Product seeds cannot carry
+        per-install paths, and without them the first run refuses with
+        ``unset_compose_variable``. Seeds that declare their own value, or
+        that have no sibling, are unchanged."""
+        spec = _json_spec(data.get("command_script"))
+        config = spec.get("compose_config") if spec else None
+        if not isinstance(config, dict) or "interpolation_env" in config or not spec.get("compose_service"):
+            return data
+        key = (spec.get("compose_project"), spec["compose_service"])
+        for row in self.list_operations(include_disabled=True):
+            other = _json_spec(row.command_script)
+            env = (other or {}).get("compose_config", {}).get("interpolation_env") if other else None
+            if env and (other.get("compose_project"), other.get("compose_service")) == key:
+                inherited = {**spec, "compose_config": {**config, "interpolation_env": dict(env)}}
+                logger.info("ops seed %s inherits interpolation_env from %s", data.get("slug"), row.slug)
+                return {**data, "command_script": json.dumps(inherited)}
+        return data
 
     def get_job_by_key(self, key):
         if self.engine is None:
