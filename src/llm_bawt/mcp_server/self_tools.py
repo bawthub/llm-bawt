@@ -49,8 +49,9 @@ def _format_bubbles(messages: list[dict]) -> tuple[str, int, bool]:
         lines.append(f"{header}\n{content}")
 
     truncated = False
-    # Trim from the oldest end until under the cap.
-    while lines and sum(len(x) for x in lines) > _MAX_TAIL_CHARS:
+    # Trim from the oldest end until the joined transcript (separators
+    # included) fits the cap. Callers keep the newest ``used_count`` messages.
+    while lines and sum(len(x) for x in lines) + 2 * (len(lines) - 1) > _MAX_TAIL_CHARS:
         lines.pop(0)
         truncated = True
 
@@ -118,6 +119,9 @@ async def self_tail(
     tail, total_available = await _tail_bubbles(bot_id, count)
 
     transcript, used_count, truncated = _format_bubbles(tail)
+    # The formatter drops oldest first, so the retained set is the newest
+    # ``used_count`` messages; keep both representations to that same set.
+    kept = tail[len(tail) - used_count:]
     return {
         "messages": [
             {
@@ -125,7 +129,7 @@ async def self_tail(
                 "content": m.get("content"),
                 "timestamp": m.get("timestamp"),
             }
-            for m in tail
+            for m in kept
         ],
         "transcript": transcript,
         "count_returned": used_count,

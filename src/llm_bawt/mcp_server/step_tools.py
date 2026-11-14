@@ -14,6 +14,7 @@ from .server import mcp
 from .task_step_types import (
     StepStatus,
     TaskStepInput,
+    normalize_step_inputs,
     step_status_error,
     validate_step_inputs,
     validate_step_updates,
@@ -254,7 +255,7 @@ async def add_steps(
     try:
         result = await _api_post(
             f"/tasks/{task_id}/steps",
-            json=steps,
+            json=normalize_step_inputs(steps),
             headers=_headers(bot_id),
         )
     except httpx.HTTPStatusError as e:
@@ -305,7 +306,7 @@ async def set_steps(
     try:
         result = await _api_put(
             f"/tasks/{task_id}/steps",
-            json=steps,
+            json=normalize_step_inputs(steps),
             headers=_headers(bot_id),
         )
     except httpx.HTTPStatusError as e:

@@ -291,7 +291,9 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
             results = backend.search_memories_by_embedding(
                 embedding=query_embedding,
                 n_results=n_results,
-                min_importance=min_relevance,
+                # Relevance is similarity, filtered below; it is not an
+                # importance floor, so the backend gets none.
+                min_importance=0.0,
                 tags=tags,
                 authority=authority,
             )
@@ -300,7 +302,7 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
             results = backend.search_memories_by_text(
                 query=query,
                 n_results=n_results,
-                min_importance=min_relevance,
+                min_importance=0.0,
                 tags=tags,
                 authority=authority,
             )
@@ -665,7 +667,8 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
                     since_minutes=since_seconds, user_id=user_id,
                 )
                 if limit is not None and limit >= 0:
-                    messages = messages[-limit:]
+                    # [-0:] is the whole list; zero means none.
+                    messages = messages[-limit:] if limit else []
 
                 rows = [
                     {
@@ -751,7 +754,7 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
                 for r in rows
             ]
             if limit is not None and limit >= 0:
-                out = out[-limit:]
+                out = out[-limit:] if limit else []
             return self.hydrate_message_authors(out, bot_id=bot_id)
         except Exception as e:
             logger.error("Failed to get raw messages: %s", e)
@@ -800,7 +803,7 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
                 for r in rows
             ]
             if limit is not None and limit >= 0:
-                out = out[-limit:]
+                out = out[-limit:] if limit else []
             return self.hydrate_message_authors(out, bot_id=bot_id)
         except Exception as e:
             logger.error("Failed to get summary husks: %s", e)

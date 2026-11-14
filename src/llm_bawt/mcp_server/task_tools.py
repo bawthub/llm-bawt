@@ -38,6 +38,7 @@ from .task_step_types import (
     CheckLinkInput,
     TaskStepInput,
     WaitingOn,
+    normalize_step_inputs,
     validate_step_inputs,
 )
 from .task_api import (
@@ -563,6 +564,10 @@ async def update_task(
     if error := _outcome_error(outcome):
         return error
     logger.debug("MCP tool invoked: tools/update_task id=%s status=%s", task_id, status)
+    if status is not None:
+        # The backend accepts any casing; normalize here too so the REVIEW
+        # owner fallback below sees the same status the backend will apply.
+        status = status.strip().upper()
     body: dict[str, Any] = {}
     if status is not None:
         body["status"] = status
@@ -661,11 +666,13 @@ async def update_task(
                 try:
                     task_ref = str(updated.get("shortId") or task_id)
                     result["currentTurnAssociation"] = await associate_current_task(task_ref)
-                except (httpx.HTTPStatusError, ValueError) as error:
+                except (httpx.HTTPError, ValueError) as error:
+                    # The update is committed; a transport failure here must
+                    # still return its receipt (HTTPError covers both).
                     result["currentTurnAssociation"] = (
                         _http_error(error)
                         if isinstance(error, httpx.HTTPStatusError)
-                        else {"error": str(error)}
+                        else {"error": str(error) or type(error).__name__}
                     )
             return _turn_images(result, turn_attached, turn_error)
         return updated
@@ -907,6 +914,7 @@ async def create_task(
     waiting_reason: str | None = None,
     image_urls: list[str] | None = None,
     attach_turn_images: bool = True,
+    check_links: list[CheckLinkInput] | None = None,
 ) -> dict:
     """Create a new agent task.
 
@@ -949,6 +957,7 @@ async def create_task(
         attach_turn_images: With associate_current_turn, also attach the
                     images on the message that started this turn (default
                     True; listed in turnImagesAttached). False opts out.
+        check_links: As in tasks_update; required for a REVIEW create.
 
     Returns:
         Created task with generated shortId and, when requested, an association result.
@@ -975,11 +984,14 @@ async def create_task(
         body["waitingReason"] = waiting_reason
     if agent_bot_id:
         body["agentBotId"] = agent_bot_id
+    if check_links is not None:
+        # A bot-created REVIEW task requires them; the backend validates.
+        body["checkLinks"] = check_links
     if steps is not None:
         validation_error = validate_step_inputs(steps)
         if validation_error:
             return {"error": validation_error}
-        body["steps"] = steps
+        body["steps"] = normalize_step_inputs(steps)
     try:
         explicit = await resolve_image_refs(image_urls or [])
     except ImageRefError as error:
@@ -1003,11 +1015,13 @@ async def create_task(
             }
         try:
             association = await associate_current_task(task_ref)
-        except (httpx.HTTPStatusError, ValueError) as error:
+        except (httpx.HTTPError, ValueError) as error:
+            # The task is created; a transport failure here must still return
+            # it, or a retry would create a duplicate.
             association = (
                 _http_error(error)
                 if isinstance(error, httpx.HTTPStatusError)
-                else {"error": str(error)}
+                else {"error": str(error) or type(error).__name__}
             )
         return _turn_images({"task": created, "currentTurnAssociation": association}, turn_attached, turn_error)
     except httpx.HTTPStatusError as e:

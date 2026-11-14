@@ -145,6 +145,22 @@ def validate_step_inputs(steps: list[TaskStepInput]) -> str | None:
     return None
 
 
+def normalize_step_inputs(steps: list[TaskStepInput]) -> list[dict]:
+    """Map the accepted ``file_path`` alias to the ``filePath`` BawtHub stores.
+
+    BawtHub persists only ``filePath``; a forwarded ``file_path`` was silently
+    dropped. ``file_path`` wins when both are given, as in steps_update.
+    """
+    out: list[dict] = []
+    for step in steps:
+        entry = {key: value for key, value in step.items() if key not in ("file_path", "filePath")}
+        file_path = step.get("file_path", step.get("filePath"))
+        if file_path is not None:
+            entry["filePath"] = file_path
+        out.append(entry)
+    return out
+
+
 def validate_step_updates(updates: list[dict]) -> str | None:
     """Validate steps_update batch entries the same way as step inputs."""
     for index, update in enumerate(updates):

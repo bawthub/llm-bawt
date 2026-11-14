@@ -102,4 +102,6 @@ def test_every_known_step_field_still_reaches_bawthub(monkeypatch: pytest.Monkey
 
     mcp_call("steps_add", {"task_id": "TASK-1663", "steps": [step]})
 
-    assert sent == [[step]]
+    # TASK-2238: the file_path alias is sent as the filePath BawtHub stores.
+    expected = {key: value for key, value in step.items() if key != "file_path"}
+    assert sent == [[expected]]

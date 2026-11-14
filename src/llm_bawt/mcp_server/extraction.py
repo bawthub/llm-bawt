@@ -183,41 +183,9 @@ def extract_profile_attributes_from_fact(
             idempotent=idempotent,
         )
         
-        # If this is a name attribute, also set display_name on the profile
-        if key.lower() == "name":
-            # Try to extract just the name from content like "User's name is Alex"
-            # (re is already imported at module level)
-            name_match = re.search(r"(?:name\s+is\s+|named\s+|I'?m\s+|call\s+me\s+)([A-Z][a-z]+)", content, re.IGNORECASE)
-            if name_match:
-                name = name_match.group(1)
-            else:
-                # Fallback: use the content directly if it looks like a name
-                name = content.strip()
-                if len(name) > 30 or " is " in name.lower():
-                    # Too long or still a sentence - extract first capitalized word
-                    words = [w for w in name.split() if w[0].isupper()]
-                    name = words[-1] if words else None  # Last capitalized word is often the name
-            
-            if name:
-                # Don't set display_name to a bot name — extraction sometimes
-                # confuses the bot's name with the user's name from conversation context
-                from llm_bawt.bots import load_bots
-                try:
-                    loaded_bots = load_bots()
-                    bot_names = {b.get("name", "").lower() for b in loaded_bots.values()}
-                    bot_names |= set(loaded_bots.keys())  # also slug names
-                except Exception:
-                    # No hard-coded identities: an unavailable registry is not
-                    # evidence that an unregistered fallback bot exists.
-                    bot_names = set()
-                
-                if name.lower() in bot_names:
-                    logger.warning(
-                        f"[Profile] Skipping display_name update: '{name}' matches a bot name"
-                    )
-                else:
-                    manager.set_display_name(EntityType.USER, user_id, name)
-                    logger.info(f"[Profile] ✓ Set display_name to '{name}' for user {user_id}")
+        # A candidate name never touches the live display name: like every
+        # other candidate it waits for curation, and a promoted name renders
+        # through the live attributes.
 
         # Determine if this was a create or update based on timestamps
         is_new = attr.created_at == attr.updated_at

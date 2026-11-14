@@ -217,7 +217,10 @@ class MemoryClient(
         self._ensure_initialized()
         
         n_results = n_results or self.config.MEMORY_N_RESULTS
-        min_relevance = min_relevance or self.config.MEMORY_MIN_RELEVANCE
+        if min_relevance is None:
+            # An explicit 0.0 disables filtering; only an omitted threshold
+            # takes the configured default.
+            min_relevance = self.config.MEMORY_MIN_RELEVANCE
         
         if self.server_url:
             results = self._call_server("memory_search", {

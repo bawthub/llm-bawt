@@ -568,7 +568,9 @@ async def media_pipeline_status(query: str, kind: str = "auto") -> dict:
         out["errors"]["sabnzbd"] = str(e)
 
     # 4) recent history hits
-    hist = await media_history(kind=kind, limit=50)  # type: ignore[misc]
+    # media_history only knows series/movie/all; "auto" means search both.
+    history_kind = "all" if kind == "auto" else kind
+    hist = await media_history(kind=history_kind, limit=50)  # type: ignore[misc]
     if hist.get("sonarr"):
         out["recent_history"].extend(
             {"source": "sonarr", **h}

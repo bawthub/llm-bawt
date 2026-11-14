@@ -333,7 +333,9 @@ async def test_catalog_token_budgets():
     # in one owner-scoped transaction (optional session_id): 18,997 (+128).
     # TASK-2279: optional user_id on memory_delete, messages_ignore_by_id and
     # messages_restore_ignored so a pinned owner scopes them: 19,060 (+63).
-    assert total <= 19060, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-2238: tasks_create check_links (a bot-created REVIEW task requires
+    # them, so creating one was impossible): 19,167 (+107).
+    assert total <= 19167, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 
