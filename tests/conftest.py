@@ -27,6 +27,7 @@ from _pytest.runner import runtestprotocol
 from collections import defaultdict
 from pathlib import Path
 from scripts.heavy_guard import guard_pytest
+from tests import git_env_guard
 from tests import pg_connection_guard
 from tests import time_budget
 from tests.suite_manifest import PG_ACCEPTANCE_SUITES
@@ -39,6 +40,7 @@ _RETIMED: dict[str, tuple[float, float]] = {}  # nodeid -> (first run, retry) af
 # pytest_configure hook would be too late for their import-time side effects.
 # Plugins loaded before this root conftest remain outside this boundary.
 pg_connection_guard.install()
+git_env_guard.install()
 
 pytest_plugins = ("tests.private_postgres", "tests.session_lifecycle_pg_fixtures")
 
