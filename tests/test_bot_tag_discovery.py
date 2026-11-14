@@ -95,7 +95,7 @@ def policy(monkeypatch):
 
 
 def test_discovery_lists_only_public_and_quiet_bots_with_their_tags(policy):
-    listed = asyncio.run(tools.list_available_bots(include_state=False))
+    listed = asyncio.run(tools.list_available_bots(include_state=False, detail="full"))
 
     assert [bot["slug"] for bot in listed] == ["fixture-public", "fixture-quiet"]
     assert listed[0] == {"slug": "fixture-public", "name": "Fixture-Public", "bot_type": "agent",
@@ -108,11 +108,11 @@ def test_discovery_lists_only_public_and_quiet_bots_with_their_tags(policy):
     assert policy["order"] == ["policy", "capabilities", "profiles", "routes"]
     assert policy["state_reads"] == []
     assert policy["caller_args"] == {"tag": None, "capability": None, "include_state": False,
-                                     "location": None}
+                                     "location": None, "detail": "full"}
 
 
 def test_state_is_read_once_for_the_visible_bots_only(policy):
-    listed = asyncio.run(tools.list_available_bots())
+    listed = asyncio.run(tools.list_available_bots(detail="full"))
 
     assert policy["order"] == ["policy", "capabilities", "profiles", "routes", "state"]
     assert policy["state_reads"] == [["fixture-public", "fixture-quiet"]]
@@ -214,7 +214,7 @@ def test_a_signed_caller_is_left_out_and_compared_by_provider(policy):
     policy["caller"] = ("fixture-public", "turn-1")
     policy["caller_provider"] = "vendor-a"
 
-    listed = asyncio.run(tools.list_available_bots(include_state=False))
+    listed = asyncio.run(tools.list_available_bots(include_state=False, detail="full"))
 
     assert [b["slug"] for b in listed] == ["fixture-quiet"]
     assert listed[0]["same_provider_as_caller"] is False
@@ -236,7 +236,7 @@ def test_one_provider_for_everyone_marks_every_row_same_and_still_lists_them(pol
     policy["caller"] = ("fixture-column", None)
     policy["caller_provider"] = "vendor-a"
 
-    listed = asyncio.run(tools.list_available_bots(capability="review", include_state=False))
+    listed = asyncio.run(tools.list_available_bots(capability="review", include_state=False, detail="full"))
 
     assert [(b["slug"], b["same_provider_as_caller"]) for b in listed] == [("fixture-public", True)]
 
@@ -252,7 +252,7 @@ def test_same_provider_is_null_unless_both_sides_are_known(policy, caller, calle
     policy["caller"] = caller
     policy["caller_provider"] = caller_provider
 
-    listed = asyncio.run(tools.list_available_bots(include_state=False))
+    listed = asyncio.run(tools.list_available_bots(include_state=False, detail="full"))
 
     assert listed[0]["same_provider_as_caller"] is None
 

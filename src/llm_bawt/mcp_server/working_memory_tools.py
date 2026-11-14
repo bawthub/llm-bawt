@@ -66,10 +66,21 @@ async def _call(operation) -> str:
         return _dump({"error": "unavailable", "message": "working memory unavailable"})
 
 
+def _without_empty(listing: Any) -> Any:
+    """TASK-2249: items leave out null and empty fields; a missing field is null."""
+    if isinstance(listing, dict) and isinstance(listing.get("items"), list):
+        listing = {**listing, "items": [
+            {k: v for k, v in item.items() if v not in (None, "", [], {})} if isinstance(item, dict) else item
+            for item in listing["items"]
+        ]}
+    return listing
+
+
 @mcp.tool(name="working_memory_list")
 async def working_memory_list(include_archived: bool = False) -> str:
-    """List your working-memory items for this user; open items unless include_archived."""
-    return await _call(lambda service, context: service.bot_list(context, include_archived=include_archived))
+    """List your working-memory items for this user; open items unless include_archived. Null/empty fields are omitted."""
+    return await _call(lambda service, context: _without_empty(
+        service.bot_list(context, include_archived=include_archived)))
 
 
 @mcp.tool(name="working_memory_create")

@@ -248,7 +248,8 @@ async def tasks_board(
         (left out by the time filter) and compact rows (shortId, title,
         status, priority, agentBotId, focusRank, archivedAt, updatedAt,
         blockedReason; WAITING rows add waitingOn, waitingReason and
-        waitingSince).
+        waitingSince). Null and empty row fields are omitted; waitingReason
+        is cut to about 120 chars (tasks_get has it whole).
         Use tasks_get_context for one task's description and steps.
     """
     rows_scope = rows or "active"
@@ -279,6 +280,32 @@ async def tasks_board(
     if rows_scope == "active" and reply.get("rows") != rows_scope:
         # A BawtHub build before TASK-1555 ignores rows and sends every card.
         reply["note"] = f"this BawtHub build ignores rows={rows_scope}; every lane's cards are included."
+    return _compact_board(reply)
+
+
+BOARD_WAITING_REASON_CHARS = 120
+
+
+def _compact_row(row: Any) -> Any:
+    if not isinstance(row, dict):
+        return row
+    out = {k: v for k, v in row.items() if v not in (None, "", [], {})}
+    reason = out.get("waitingReason")
+    if isinstance(reason, str) and len(reason) > BOARD_WAITING_REASON_CHARS:
+        out["waitingReason"] = reason[:BOARD_WAITING_REASON_CHARS - 1].rstrip() + "…"
+    return out
+
+
+def _compact_board(reply: dict) -> dict:
+    """TASK-2249: board rows drop null/empty fields and cap waitingReason."""
+    lanes = reply.get("lanes")
+    if not isinstance(lanes, list):
+        return reply
+    reply["lanes"] = [
+        {**lane, "rows": [_compact_row(r) for r in lane["rows"]]}
+        if isinstance(lane, dict) and isinstance(lane.get("rows"), list) else lane
+        for lane in lanes
+    ]
     return reply
 
 

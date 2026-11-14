@@ -35,6 +35,20 @@ BOARD = {
 }
 
 
+# TASK-2249: what the tool returns for BOARD's lanes: row nulls left out.
+COMPACT_LANES = [
+    {**BOARD["lanes"][0], "rows": [{
+        "shortId": "TASK-1", "title": "First", "status": "QUEUED", "priority": "HIGH",
+        "agentBotId": "alpha", "focusRank": 1, "updatedAt": "2026-10-25T15:00:00.000Z",
+    }]},
+    BOARD["lanes"][1],
+]
+
+
+def _compact(board: dict) -> dict:
+    return {**board, "lanes": COMPACT_LANES}
+
+
 def _echo(request: httpx.Request) -> dict:
     """BOARD as a BawtHub that applies every param it was sent."""
     applied = {key: request.url.params[key] for key in ("view", "updated", "rows") if key in request.url.params}
@@ -64,7 +78,7 @@ def test_forwards_the_board_params_and_returns_the_reply(monkeypatch: pytest.Mon
         view="status", updated="24h", bot="alpha", q="board", project="none", priority="HIGH", limit=5,
     ))
 
-    assert result == {**BOARD, "view": "status", "updated": "24h", "rows": "active"}
+    assert result == _compact({**BOARD, "view": "status", "updated": "24h", "rows": "active"})
     [request] = requests
     assert request.method == "GET"
     assert request.url.path == "/api/tasks/board"
@@ -79,7 +93,7 @@ def test_defaults_send_the_row_limit_and_active_rows(monkeypatch: pytest.MonkeyP
     # backlog, Done and Archived drawers; their counts still come back.
     requests = _stub(monkeypatch)
 
-    assert _run(task_tools.tasks_board()) == BOARD
+    assert _run(task_tools.tasks_board()) == _compact(BOARD)
     assert dict(requests[0].url.params) == {"limit": "5", "rows": "active"}
 
 
@@ -116,7 +130,7 @@ def test_waiting_filter_is_forwarded_and_must_be_applied(monkeypatch: pytest.Mon
     # (a build before WAITING) would return every task, so that is an error.
     applied = {**BOARD, "filters": {**BOARD["filters"], "waiting": "RESTART"}}
     requests = _stub(monkeypatch, body=applied)
-    assert _run(task_tools.tasks_board(waiting="RESTART")) == applied
+    assert _run(task_tools.tasks_board(waiting="RESTART")) == _compact(applied)
     assert requests[0].url.params["waiting"] == "RESTART"
 
     _stub(monkeypatch)
@@ -130,7 +144,7 @@ def test_a_board_without_the_rows_filter_says_so(monkeypatch: pytest.MonkeyPatch
 
     result = _run(task_tools.tasks_board())
 
-    assert result == {**old, "note": "this BawtHub build ignores rows=active; every lane's cards are included."}
+    assert result == {**_compact(old), "note": "this BawtHub build ignores rows=active; every lane's cards are included."}
 
 
 def test_the_schema_rejects_an_unknown_window(monkeypatch: pytest.MonkeyPatch) -> None:

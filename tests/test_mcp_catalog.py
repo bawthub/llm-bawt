@@ -326,7 +326,9 @@ async def test_catalog_token_budgets():
     # TASK-2190: playground_send (two exclusive sources, typed format enum;
     # lengths checked in code, not schema): 18,808 (+168).
     # TASK-1534: activity_get cursor argument for stable history paging: 18,829 (+21).
-    assert total <= 18829, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-2249: bots_list_available detail enum (compact default) and the
+    # trimmed-row notes on tasks_board/working_memory_list: 18,869 (+40).
+    assert total <= 18869, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 

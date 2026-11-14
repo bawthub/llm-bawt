@@ -6,7 +6,7 @@ import asyncio
 import logging
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import httpx
 from pydantic import Field
@@ -904,6 +904,53 @@ def _route_facts(profiles: list, caller: str | None, turn_id: str | None
     return facts, caller_endpoint.model.vendor if caller_endpoint else None
 
 
+def _task_ref(turn: Any) -> str | None:
+    task = turn.get("task") if isinstance(turn, dict) else None
+    return task.get("task_ref") if isinstance(task, dict) else None
+
+
+def _compact_bot(entry: dict) -> dict:
+    """One short discovery row (TASK-2249); ``detail="full"`` keeps the rest."""
+    row: dict[str, Any] = {"slug": entry["slug"], "tags": entry["tags"],
+                           "capabilities": entry["capabilities"]}
+    if entry.get("provider"):
+        row["provider"] = entry["provider"]
+    if entry.get("quota") not in (None, "unknown"):
+        row["quota"] = entry["quota"]
+    state = entry.get("state")
+    if not isinstance(state, dict):
+        return row
+    turn = state.get("turn")
+    if isinstance(turn, dict):
+        row["turn"] = {k: v for k, v in (("kind", turn.get("kind")), ("task", _task_ref(turn)),
+                                         ("started_at", turn.get("started_at"))) if v is not None}
+    last = state.get("last_turn")
+    if isinstance(last, dict):
+        row["last_turn"] = {k: v for k, v in (("ended_at", last.get("ended_at")),
+                                              ("task", _task_ref(last))) if v is not None}
+    queued = state.get("queued_deliveries")
+    if isinstance(queued, dict) and queued.get("count"):
+        row["queued"] = queued["count"]
+    if state.get("gated") is not False:  # true, or null when unreadable
+        row["gated"] = state.get("gated")
+        gate = state.get("gate")
+        if isinstance(gate, dict):
+            row["gate"] = {k: v for k, v in gate.items() if k != "id" and v is not None}
+    if state.get("pending_approvals"):
+        row["pending_approvals"] = state["pending_approvals"]
+    location = state.get("location")
+    if isinstance(location, dict):
+        row["location"] = location.get("house") or location.get("runtime")
+        if location.get("house_live") is False:
+            row["location"] = f'{location.get("runtime")} ({location["house"]} down)'
+    session = state.get("session")
+    if isinstance(session, dict) and session.get("prompt_stale"):
+        row["prompt_stale"] = True
+    if state.get("unavailable"):
+        row["unavailable"] = state["unavailable"]
+    return row
+
+
 @mcp.tool(name="bots_list_available")
 async def list_available_bots(
     tag: Annotated[str | None, Field(description="Only bots with this tag.")] = None,
@@ -916,6 +963,9 @@ async def list_available_bots(
     location: Annotated[str | None, Field(
         description="Only bots running on: claude-code-bridge, codex-bridge, house, hN or app."
     )] = None,
+    detail: Annotated[Literal["compact", "full"], Field(
+        description='"compact" (default): one short row per bot. "full": every route and state field.'
+    )] = "compact",
 ) -> list[dict]:
     """List bots available as inter-bot message targets, each with its tags.
 
@@ -945,12 +995,18 @@ async def list_available_bots(
     ``state.location`` (TASK-2116): where the bot's new turns run, resolved like
     the dispatcher (house lease, then the backend's bridge), never from the
     model; see ``llm_bawt.bot_location``. ``location`` filters on it.
+
+    ``detail`` (TASK-2249): "compact" (default) projects each bot to
+    ``_compact_bot`` (slug, tags, capabilities, provider, non-unknown quota,
+    turn/last turn kind, task ref and time, queued, gated/gate, approvals,
+    location, prompt_stale, unavailable); empty and null fields are left out.
+    "full" returns every field above.
     """
     from llm_bawt.bot_location import location_runtimes, read_locations
 
     caller, turn_id = _discovery_caller(
         {"tag": tag, "capability": capability, "include_state": include_state,
-         "location": location})
+         "location": location, "detail": detail})
     # Policy first: a profile created after the snapshot is unknown, so hidden.
     access = await _policy_resolver().resolve()
     wanted = None
@@ -1005,5 +1061,5 @@ async def list_available_bots(
         }
         if include_state:
             entry["state"] = {**states[row.slug], "location": locations[row.slug]}
-        listed.append(entry)
+        listed.append(entry if detail == "full" else _compact_bot(entry))
     return listed
