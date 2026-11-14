@@ -301,12 +301,14 @@ class RecallService:
         follow_ons: list[Evidence] = []
         seen = set()
         clipped = False
+        admission_limited = False
 
         def admit(candidate: Evidence) -> None:
-            nonlocal clipped
+            nonlocal clipped, admission_limited
             if (len(evidence) >= MAX_RECORDS
                     or input_tokens(system, question, [*evidence, candidate]) > MAX_INPUT_TOKENS):
                 clipped = True
+                admission_limited = True
                 return
             evidence.append(candidate)
 
@@ -479,7 +481,8 @@ class RecallService:
             if answers.rejected and not answers.answers and not answers.omitted:
                 raise RecallError("ungrounded_synthesis")
         findings = answers.findings()
-        incomplete = bool(evidence) or unavailable or any(item["status"] == "partial" for item in coverage.values())
+        incomplete = (bool(evidence) or unavailable or admission_limited
+                      or any(item["status"] == "partial" for item in coverage.values()))
         packet = {
             # A found answer stays ok when cut to fit; the cut is marked, never hidden.
             "status": "ok" if findings else ("insufficient_evidence" if incomplete else "no_match"),

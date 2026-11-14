@@ -93,6 +93,21 @@ async def test_failure_distinct_from_no_match_and_irrelevant_evidence():
 
 
 @pytest.mark.asyncio
+async def test_fixed_prompt_leaves_no_evidence_room_is_not_no_match():
+    class LargePromptModel(Model):
+        def system_prompt(self, bot_id):
+            return "fixed " * 6001
+
+    model = LargePromptModel()
+    result = await RecallService([Source()], model).recall(request(), SCOPE)
+    assert result["status"] == "insufficient_evidence"
+    assert result["coverage"]["messages"] == {"status": "ok", "records": 1}
+    assert result["truncated"] and result["metrics"]["model_calls"] == 0
+    assert not model.calls
+    assert not result["findings"]
+
+
+@pytest.mark.asyncio
 async def test_provider_error_codes_are_not_a_data_channel():
     result = await RecallService([Source(error=RecallError("SECRET"))], Model()).recall(request(), SCOPE)
     assert result["error_code"] == "source_unavailable"
