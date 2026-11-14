@@ -144,17 +144,16 @@ def test_repeated_and_concurrent_stop_share_one_shutdown(caplog):
         loader = _Loader()
         loader.current = _Client("B")
         bridge = _bridge(loader)
-        bridge.SHUTDOWN_UNLOAD_WAIT = 5.0
-        loop = asyncio.get_running_loop()
-        start = loop.time()
+        # Short wait: a caller contending for the retained lock would time out
+        # and log the running-generation warning instead of sharing shutdown.
+        bridge.SHUTDOWN_UNLOAD_WAIT = 0.05
         await asyncio.gather(bridge.stop(), bridge.stop())  # run_forever finally + __main__
         await bridge.stop()  # a later caller
-        return loader, bridge, loop.time() - start
+        return loader, bridge
 
     with caplog.at_level("WARNING"):
-        loader, bridge, elapsed = asyncio.run(run())
+        loader, bridge = asyncio.run(run())
     assert loader.unloads == ["B"]
-    assert elapsed < 1.0  # no caller waits out the retained lock
     assert "Generation still running" not in caplog.text
     assert bridge._model_lock.locked()
     assert bridge._publisher.close.call_count == 1
