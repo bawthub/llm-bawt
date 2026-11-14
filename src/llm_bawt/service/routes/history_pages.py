@@ -1,5 +1,6 @@
 """Message paging, hydration, and mutation routes for conversation history."""
 
+from dataclasses import dataclass
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -288,16 +289,34 @@ def _hydrate_reasoning_for_page(
         log.warning("Failed to load reasoning for history page: %s", e)
         return {mid: None for mid in message_ids}
 
+@dataclass(frozen=True)
+class _HistoryCursor:
+    timestamp: float
+    message_id: str | None = None
+
+    def includes(self, message: dict, *, after: bool = False) -> bool:
+        """Compare the same (timestamp, id) order used by visible history.
+
+        Timestamp-only cursors retain their legacy strict time boundary.
+        A message-ID cursor also includes peers on its requested side of a tie.
+        """
+        timestamp = float(message.get("timestamp") or 0.0)
+        if self.message_id is None or timestamp != self.timestamp:
+            return timestamp > self.timestamp if after else timestamp < self.timestamp
+        message_id = str(message.get("id") or "")
+        return message_id > self.message_id if after else message_id < self.message_id
+
+
 def _resolve_cursor(
     raw: str,
     visible_messages: list[dict],
-) -> float | None:
-    """Resolve a `before`/`after` cursor to a unix-timestamp cutoff.
+) -> _HistoryCursor | None:
+    """Resolve a `before`/`after` cursor without losing the ID tie-breaker.
 
     Accepts:
       1) a numeric unix timestamp (``"1717891234.567"``)
       2) an ISO-8601 timestamp (``"2026-06-06T14:00:00Z"``)
-      3) a message ID — looked up in ``visible_messages`` for its timestamp
+      3) a message ID — looked up in ``visible_messages`` for (timestamp, id)
 
     Returns ``None`` if the raw string is empty after stripping. Raises
     ``HTTPException(400)`` only for the message-ID branch when the ID
@@ -312,14 +331,14 @@ def _resolve_cursor(
 
     # 1) Numeric unix timestamp
     try:
-        return float(trimmed)
+        return _HistoryCursor(float(trimmed))
     except ValueError:
         pass
 
     # 2) ISO timestamp
     iso_candidate = trimmed.replace("Z", "+00:00")
     try:
-        return datetime.fromisoformat(iso_candidate).timestamp()
+        return _HistoryCursor(datetime.fromisoformat(iso_candidate).timestamp())
     except ValueError:
         pass
 
@@ -330,7 +349,7 @@ def _resolve_cursor(
     )
     if cursor_msg is None:
         raise HTTPException(status_code=400, detail="Invalid cursor")
-    return float(cursor_msg.get("timestamp") or 0.0)
+    return _HistoryCursor(float(cursor_msg.get("timestamp") or 0.0), trimmed)
 
 
 def _load_sorted_visible_messages(
@@ -618,7 +637,9 @@ def get_history(
       messages strictly newer than the cursor. Used to extend a deep-link
       window forward as the user scrolls down past it.
 
-    Cursors accept unix timestamps, ISO-8601 strings, or message IDs.
+    Cursors accept unix timestamps, ISO-8601 strings, or message IDs. Use the
+    first/last returned message ID to retain peers sharing its timestamp;
+    timestamp-only cursors keep their strict time boundary.
     Passing both ``before`` and ``after`` is rejected (400).
 
     ``session_id`` (TASK-251) scopes the page to one thread; cursors work
@@ -638,14 +659,14 @@ def get_history(
             service, effective_bot_id, session_id=session_id, user_id=user_id
         )
 
-        before_ts = _resolve_cursor(before, visible_messages) if before else None
-        after_ts = _resolve_cursor(after, visible_messages) if after else None
+        before_cursor = _resolve_cursor(before, visible_messages) if before else None
+        after_cursor = _resolve_cursor(after, visible_messages) if after else None
 
-        if after_ts is not None:
+        if after_cursor is not None:
             # Forward page: oldest `limit` messages strictly newer than the cursor.
             candidate_messages = [
                 m for m in visible_messages
-                if float(m.get("timestamp") or 0.0) > after_ts
+                if after_cursor.includes(m, after=True)
             ]
             page_messages = candidate_messages[:limit] if limit > 0 else candidate_messages
             # In the forward direction `has_more` semantically means
@@ -654,10 +675,10 @@ def get_history(
             has_newer = bool(candidate_messages and len(candidate_messages) > len(page_messages))
         else:
             # Backward page (default): newest `limit` strictly older than the cursor.
-            if before_ts is not None:
+            if before_cursor is not None:
                 candidate_messages = [
                     m for m in visible_messages
-                    if float(m.get("timestamp") or 0.0) < before_ts
+                    if before_cursor.includes(m)
                 ]
             else:
                 candidate_messages = visible_messages
@@ -707,10 +728,9 @@ def get_history_around(
     with ``has_older`` / ``has_newer`` flags so the frontend knows whether
     further pagination in either direction is possible.
 
-    The returned ``oldest_timestamp`` and ``newest_timestamp`` are valid
-    cursors for ``/v1/history?before=...`` and ``/v1/history?after=...``
-    respectively, so continued scrolling stays on the standard paging
-    surface — no separate "extend window" endpoint needed.
+    Continue with the first returned message ID as ``/v1/history?before=...``
+    or the last returned ID as ``/v1/history?after=...`` so timestamp peers
+    are not skipped. The timestamp fields remain valid legacy time cutoffs.
     """
     service = get_service()
 

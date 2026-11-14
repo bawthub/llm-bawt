@@ -12,6 +12,7 @@ from ..schemas import (
     HistorySearchResponse,
 )
 from .history_pages import (
+    _HistoryCursor,
     _hydrate_attachments_for_page,
     _hydrate_reasoning_for_page,
     _hydrate_turn_meta_for_page,
@@ -110,13 +111,13 @@ def _build_history_search_response(
 def _page_messages_before_cursor(
     messages: list[dict],
     *,
-    before_ts: float | None,
+    before_cursor: _HistoryCursor | None,
     limit: int,
 ) -> tuple[list[dict], bool]:
     """Return the newest page of messages older than an optional cursor."""
     candidate_messages = [
         m for m in messages
-        if before_ts is None or float(m.get("timestamp") or 0.0) < before_ts
+        if before_cursor is None or before_cursor.includes(m)
     ]
     if limit > 0 and len(candidate_messages) > limit:
         return candidate_messages[-limit:], True
@@ -126,7 +127,7 @@ def _page_messages_before_cursor(
 def _resolve_cursor_against_messages(
     before: str | None,
     messages: list[dict],
-) -> float | None:
+) -> _HistoryCursor | None:
     """Resolve an optional cursor against an already-filtered message set."""
     if not before:
         return None
@@ -136,11 +137,11 @@ def _resolve_cursor_against_messages(
 def _slice_history_search_matches(
     matches: list[dict],
     *,
-    before_ts: float | None,
+    before_cursor: _HistoryCursor | None,
     limit: int,
 ) -> tuple[list[dict], bool]:
     """Return a paged history-search slice plus whether older matches remain."""
-    return _page_messages_before_cursor(matches, before_ts=before_ts, limit=limit)
+    return _page_messages_before_cursor(matches, before_cursor=before_cursor, limit=limit)
 
 
 def _search_history_messages(
@@ -161,10 +162,10 @@ def _search_history_messages(
         until=until,
     )
     matches = _search_visible_messages(bounded_messages, query)
-    before_ts = _resolve_cursor_against_messages(before, matches)
+    before_cursor = _resolve_cursor_against_messages(before, matches)
     page_messages, has_older = _slice_history_search_matches(
         matches,
-        before_ts=before_ts,
+        before_cursor=before_cursor,
         limit=limit,
     )
     return _build_history_search_response(
@@ -203,7 +204,10 @@ def _search_history_time_bounds_description() -> str:
 
 def _search_history_before_description() -> str:
     """Human-readable docs fragment for paged per-bot history search."""
-    return "Cursor for older search-result pages (ISO timestamp, unix timestamp, or message ID)."
+    return (
+        "Cursor for older search-result pages (ISO timestamp, unix timestamp, or message ID). "
+        "Use the first returned message ID to preserve messages sharing a timestamp."
+    )
 
 
 def _search_history_limit_description() -> str:
