@@ -21,6 +21,8 @@ here's how."
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from _pytest.runner import runtestprotocol
 
@@ -35,6 +37,7 @@ from tests.suite_manifest import PG_ACCEPTANCE_SUITES
 _DURATIONS = defaultdict(float)
 _REAL_PROCESS: set[str] = set()  # nodeids marked real_process; judged on their own budget
 _RETIMED: dict[str, tuple[float, float]] = {}  # nodeid -> (first run, retry) after a slow first run
+_FAILED: set[str] = set()  # nodeids with a failed phase; never reported as a duration
 
 # Root conftest is imported before nested conftests and test modules; a
 # pytest_configure hook would be too late for their import-time side effects.
@@ -54,6 +57,9 @@ def pytest_addoption(parser):
                      help="the same bound for tests marked real_process (default: the unit budget)")
     parser.addoption("--require-no-skips", action="store_true", default=False,
                      help="fail when any selected test skips or xfails")
+    parser.addoption(time_budget.REPORT_OPTION, default=None,
+                     help="internal (TASK-2303): write passing cases' durations as JSON here; "
+                          "marks the isolated serial rerun of budget breaches")
 
 
 def _require_pg_acceptance(config):
@@ -72,6 +78,7 @@ def pytest_configure(config):
     _DURATIONS.clear()
     _REAL_PROCESS.clear()
     _RETIMED.clear()
+    _FAILED.clear()
     config._task1189_durations = _DURATIONS
 
 
@@ -131,6 +138,8 @@ def pytest_runtest_protocol(item, nextitem):
 def pytest_runtest_logreport(report):
     if report.when in {"setup", "call", "teardown"}:
         _DURATIONS[report.nodeid] += report.duration
+        if getattr(report, "failed", False):
+            _FAILED.add(report.nodeid)
         # keywords travel with an xdist report, so the controller sees the marker too.
         if time_budget.REAL_PROCESS in getattr(report, "keywords", {}):
             _REAL_PROCESS.add(report.nodeid)
@@ -167,12 +176,34 @@ def pytest_sessionfinish(session, exitstatus):
                       f"(budget {budget if process_budget is None else process_budget}s)")
             for nodeid, (first, retry) in sorted(_RETIMED.items()):
                 print(f"Re-timed after a slow first run: {first:.3f}s then {retry:.3f}s {nodeid}")
+            report_path = config.getoption(time_budget.REPORT_OPTION)
+            if report_path:
+                _write_durations(report_path)
             found = time_budget.breaches(config._task1189_durations, _REAL_PROCESS, budget, process_budget)
+            if found and not report_path:
+                found = _rerun_isolated(config, found, budget, process_budget)
             if found:
                 session.exitstatus = pytest.ExitCode.TESTS_FAILED
                 for breach in found:
                     print("\n".join(breach.lines()))
     pg_connection_guard.uninstall()
+
+
+def _write_durations(path):
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump({nodeid: duration for nodeid, duration in _DURATIONS.items() if nodeid not in _FAILED}, handle)
+
+
+def _rerun_isolated(config, found, budget, process_budget):
+    """Judge budget breaches on a serial run after the loaded run (TASK-2303)."""
+    loaded = config._task1189_durations
+    nodeids = sorted({nodeid for breach in found for nodeid, _ in breach.slow})
+    alone = time_budget.isolated_durations(nodeids, budget, process_budget, str(config.rootpath))
+    for nodeid in nodeids:
+        print(f"Isolated serial rerun: {loaded[nodeid]:.3f}s under load, {alone[nodeid]:.3f}s alone {nodeid}")
+    # A case that failed or never reported alone keeps its loaded time, which already breached.
+    judged = {**loaded, **{nodeid: t for nodeid, t in alone.items() if t != float("inf")}}
+    return time_budget.breaches(judged, _REAL_PROCESS, budget, process_budget)
 
 
 def pytest_terminal_summary(terminalreporter, exitstatus, config):

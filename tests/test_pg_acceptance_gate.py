@@ -1,9 +1,12 @@
 """Gate contracts: an absent DB or zero executed private tests cannot turn green."""
 
 from collections import defaultdict
+import json
 import math
+from pathlib import Path
+import subprocess
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import ANY, Mock
 
 import pytest
 
@@ -46,21 +49,27 @@ def test_xdist_worker_leaves_whole_run_gates_to_the_controller(monkeypatch):
     uninstall.assert_called_once()
 
 
-def _judge(monkeypatch, cases, unit_budget, real_process_budget=None):
+def _judge(monkeypatch, cases, unit_budget, real_process_budget=None, alone=None, report_path=None):
     """Feed setup/call/teardown reports through the real hooks and finish the session.
 
-    ``cases`` maps a nodeid to (keywords, [(when, duration), ...]).
+    ``cases`` maps a nodeid to (keywords, [(when, duration), ...]). ``alone`` is what
+    the isolated serial rerun measures per nodeid; by default every case stays slow.
     """
+    isolated = Mock(side_effect=lambda nodeids, *_: {
+        nodeid: (alone or {}).get(nodeid, math.inf) for nodeid in nodeids})
+    monkeypatch.setattr(time_budget, "isolated_durations", isolated)
     monkeypatch.setattr(conftest.pg_connection_guard, "uninstall", Mock())
     monkeypatch.setattr(conftest, "_DURATIONS", type(conftest._DURATIONS)(float))
     monkeypatch.setattr(conftest, "_REAL_PROCESS", set())
     monkeypatch.setattr(conftest, "_RETIMED", {})
+    monkeypatch.setattr(conftest, "_FAILED", set())
     config = _controller_config()
     config.getoption.side_effect = lambda key: {
         "--require-pg-acceptance": False,
         "--require-no-skips": False,
         "--unit-time-budget": unit_budget,
         "--real-process-time-budget": real_process_budget,
+        time_budget.REPORT_OPTION: report_path,
     }[key]
     config.pluginmanager.get_plugin.return_value.stats = {"passed": [object()]}
     config._task1189_durations = conftest._DURATIONS
@@ -127,6 +136,56 @@ def test_a_breach_that_repeats_still_fails(monkeypatch, capsys, retry):
     cases = {"tests/a.py::test_launcher": (REAL_PROCESS, [("call", 8.0)], retry)}
     assert _judge(monkeypatch, cases, 3.0, 7.0) == pytest.ExitCode.TESTS_FAILED
     assert "Real-process time budget exceeded (7.0s" in capsys.readouterr().out
+
+
+def test_a_breach_under_load_is_judged_on_an_isolated_serial_rerun(monkeypatch, capsys):
+    # TASK-2303: gate 20261114T171807Z-gavel-ccb4ea, both breached twice under load.
+    unit = "tests/test_no_person_literals.py::test_src_has_no_person_or_deployment_infrastructure"
+    process = "tests/test_infrastructure_error_text.py::test_sanitizer_imports_without_the_web_stack"
+    cases = {unit: ({}, [("call", 1.328)], 1.169), process: (REAL_PROCESS, [("call", 1.623)], 1.558)}
+    assert _judge(monkeypatch, cases, 1.0, 1.5, alone={unit: 0.4, process: 0.9}) is None
+    out = capsys.readouterr().out
+    assert f"Isolated serial rerun: 1.169s under load, 0.400s alone {unit}" in out
+    assert f"Isolated serial rerun: 1.558s under load, 0.900s alone {process}" in out
+    assert "time budget exceeded" not in out
+    time_budget.isolated_durations.assert_called_once_with([process, unit], 1.0, 1.5, ANY)
+
+
+@pytest.mark.parametrize("alone", [1.2, math.inf], ids=["slow-alone", "failed-alone"])
+def test_a_case_slow_when_alone_still_fails(monkeypatch, capsys, alone):
+    nodeid = "tests/a.py::test_slow"
+    assert _judge(monkeypatch, {nodeid: ({}, [("call", 1.3)], 1.25)}, 1.0, alone={nodeid: alone}) \
+        == pytest.ExitCode.TESTS_FAILED
+    out = capsys.readouterr().out
+    assert "Unit time budget exceeded (1.0s" in out and f"s {nodeid}" in out
+
+
+def test_the_isolated_run_reports_instead_of_rerunning_again(monkeypatch, tmp_path):
+    report = tmp_path / "durations.json"
+    cases = {"tests/a.py::test_slow": ({}, [("call", 1.3)]), "tests/a.py::test_ok": ({}, [("call", 0.1)])}
+    assert _judge(monkeypatch, cases, 1.0, report_path=str(report)) == pytest.ExitCode.TESTS_FAILED
+    time_budget.isolated_durations.assert_not_called()
+    assert json.loads(report.read_text()) == {"tests/a.py::test_slow": 1.3, "tests/a.py::test_ok": 0.1}
+
+
+def test_isolated_durations_runs_only_those_cases_serially(tmp_path):
+    def fake_run(cmd, **kwargs):
+        path = cmd[cmd.index(time_budget.REPORT_OPTION) + 1]
+        Path(path).write_text(json.dumps({"tests/a.py::test_fast": 0.2}))
+        calls.append((cmd, kwargs))
+    calls = []
+    got = time_budget.isolated_durations(["tests/a.py::test_fast", "tests/a.py::test_failed"], 1.0, 1.5,
+                                         str(tmp_path), run=fake_run)
+    assert got == {"tests/a.py::test_fast": 0.2, "tests/a.py::test_failed": math.inf}
+    cmd, kwargs = calls[0]
+    assert cmd[-2:] == ["tests/a.py::test_fast", "tests/a.py::test_failed"]
+    assert "no:xdist" in cmd and "--real-process-time-budget" in cmd and kwargs["cwd"] == str(tmp_path)
+
+
+def test_isolated_durations_treats_a_crashed_run_as_still_slow(tmp_path):
+    def crash(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, 1)
+    assert time_budget.isolated_durations(["t::x"], 1.0, None, str(tmp_path), run=crash) == {"t::x": math.inf}
 
 
 def test_a_unit_case_gets_the_same_retime(monkeypatch):

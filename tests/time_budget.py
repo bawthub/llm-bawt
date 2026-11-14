@@ -11,16 +11,30 @@ faster run (TASK-1650). A hang, a fixed sleep or a real slowdown repeats and
 still fails; a one-off stall of the runner (a cold node start once took 8s on
 a hosted runner whose usual worst case is under 1.5s) does not. The retry
 never changes a test's outcome, only which duration the budget sees.
+
+That retry still runs while every other worker is busy, so a case slowed by
+gate load can breach twice (TASK-2303). A case still over budget at the end is
+run once more in a serial pytest after the loaded run has finished, and judged
+on that time. A real slowdown is slow alone too and still fails; the log shows
+both timings.
 """
 
 from __future__ import annotations
 
+import json
 import math
+import os
+import subprocess
+import sys
+import tempfile
 from typing import Iterable, Mapping, NamedTuple, Sequence
 
 REAL_PROCESS = "real_process"
 # user_properties key on a case's teardown report; travels with xdist reports.
 RETIME = "time_budget_retime"
+# Set on the isolated serial run; it reports durations instead of rerunning again.
+REPORT_OPTION = "--time-budget-report"
+ISOLATED_TIMEOUT = 600
 
 
 def case_budget(unit_budget: float | None, real_process_budget: float | None,
@@ -77,3 +91,22 @@ def slowest_real_process(durations: Mapping[str, float], real_process: Iterable[
     """The slowest marked case, printed every gated run so the budget can be set from data."""
     marked = [(nodeid, durations[nodeid]) for nodeid in set(real_process) if nodeid in durations]
     return max(marked, key=lambda pair: pair[1]) if marked else None
+
+
+def isolated_durations(nodeids: Sequence[str], unit_budget: float,
+                       real_process_budget: float | None, cwd: str,
+                       run=subprocess.run) -> dict[str, float]:
+    """Each case's time in a serial pytest run of just these cases; inf if it failed or didn't report."""
+    with tempfile.TemporaryDirectory(prefix="time-budget-") as tmp:
+        report = os.path.join(tmp, "durations.json")
+        cmd = [sys.executable, "-m", "pytest", "-q", "-p", "no:xdist", "-p", "no:cacheprovider",
+               "--unit-time-budget", str(unit_budget), REPORT_OPTION, report]
+        if real_process_budget is not None:
+            cmd += ["--real-process-time-budget", str(real_process_budget)]
+        try:
+            run([*cmd, *nodeids], cwd=cwd, timeout=ISOLATED_TIMEOUT, check=False)
+            with open(report, encoding="utf-8") as handle:
+                measured = json.load(handle)
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            measured = {}
+    return {nodeid: float(measured.get(nodeid, math.inf)) for nodeid in nodeids}
