@@ -328,59 +328,17 @@ class PostgreSQLMessageMixin:
         
         Returns the number of messages actually forgotten.
         """
-        with self.engine.connect() as conn:
-            try:
-                # Get IDs of last N messages
-                select_sql = text(f"""
-                    SELECT id, role, content, timestamp, session_id, processed, created_at,
-                           author_entity_type, author_entity_id
-                    FROM {self._messages_table_name}
-                    ORDER BY timestamp DESC
-                    LIMIT :count
-                """)
-                rows = conn.execute(select_sql, {"count": count}).fetchall()
-                
-                if not rows:
-                    return 0
-                
-                ids_to_forget = [row.id for row in rows]
-                
-                # Insert into forgotten table
-                for row in rows:
-                    insert_sql = text(f"""
-                        INSERT INTO {self._forgotten_table_name}
-                        (id, role, content, timestamp, session_id, processed, created_at,
-                         author_entity_type, author_entity_id, forgotten_at)
-                        VALUES (:id, :role, :content, :timestamp, :session_id, :processed, :created_at,
-                                :author_entity_type, :author_entity_id, CURRENT_TIMESTAMP)
-                        ON CONFLICT (bot_id, id) DO NOTHING
-                    """)
-                    conn.execute(insert_sql, {
-                        "id": row.id,
-                        "role": row.role,
-                        "content": row.content,
-                        "timestamp": row.timestamp,
-                        "session_id": row.session_id,
-                        "processed": row.processed,
-                        "created_at": row.created_at,
-                        "author_entity_type": row.author_entity_type,
-                        "author_entity_id": row.author_entity_id,
-                    })
-                
-                # Delete from messages table
-                delete_sql = text(f"""
-                    DELETE FROM {self._messages_table_name}
-                    WHERE id = ANY(:ids)
-                """)
-                conn.execute(delete_sql, {"ids": ids_to_forget})
-                conn.commit()
-                
-                logger.debug(f"Forgot {len(ids_to_forget)} messages")
-                return len(ids_to_forget)
-            except Exception as e:
-                conn.rollback()
-                logger.error(f"Failed to forget messages: {e}")
-                return 0
+        try:
+            forgotten = self._forget_where(
+                f"id IN (SELECT id FROM {self._messages_table_name} "
+                "ORDER BY timestamp DESC LIMIT :count)",
+                {"count": count},
+            )
+        except Exception as e:
+            logger.error(f"Failed to forget messages: {e}")
+            return 0
+        logger.debug(f"Forgot {forgotten} messages")
+        return forgotten
 
     def ignore_messages_since_minutes(self, minutes: int) -> int:
         """Move all messages from the last N minutes to the forgotten table.
@@ -388,59 +346,40 @@ class PostgreSQLMessageMixin:
         Returns the number of messages actually forgotten.
         """
         cutoff = time.time() - (minutes * 60)
-        with self.engine.connect() as conn:
-            try:
-                # Get messages to forget
-                select_sql = text(f"""
-                    SELECT id, role, content, timestamp, session_id, processed, created_at,
-                           author_entity_type, author_entity_id
-                    FROM {self._messages_table_name}
-                    WHERE timestamp >= :cutoff
-                    ORDER BY timestamp ASC
-                """)
-                rows = conn.execute(select_sql, {"cutoff": cutoff}).fetchall()
-                
-                if not rows:
-                    return 0
-                
-                ids_to_forget = [row.id for row in rows]
-                
-                # Insert into forgotten table
-                for row in rows:
-                    insert_sql = text(f"""
-                        INSERT INTO {self._forgotten_table_name}
-                        (id, role, content, timestamp, session_id, processed, created_at,
-                         author_entity_type, author_entity_id, forgotten_at)
-                        VALUES (:id, :role, :content, :timestamp, :session_id, :processed, :created_at,
-                                :author_entity_type, :author_entity_id, CURRENT_TIMESTAMP)
-                        ON CONFLICT (bot_id, id) DO NOTHING
-                    """)
-                    conn.execute(insert_sql, {
-                        "id": row.id,
-                        "role": row.role,
-                        "content": row.content,
-                        "timestamp": row.timestamp,
-                        "session_id": row.session_id,
-                        "processed": row.processed,
-                        "created_at": row.created_at,
-                        "author_entity_type": row.author_entity_type,
-                        "author_entity_id": row.author_entity_id,
-                    })
-                
-                # Delete from messages table
-                delete_sql = text(f"""
-                    DELETE FROM {self._messages_table_name}
-                    WHERE id = ANY(:ids)
-                """)
-                conn.execute(delete_sql, {"ids": ids_to_forget})
-                conn.commit()
-                
-                logger.debug(f"Forgot {len(ids_to_forget)} messages from last {minutes} minutes")
-                return len(ids_to_forget)
-            except Exception as e:
-                conn.rollback()
-                logger.error(f"Failed to forget messages: {e}")
-                return 0
+        try:
+            forgotten = self._forget_where("timestamp >= :cutoff", {"cutoff": cutoff})
+        except Exception as e:
+            logger.error(f"Failed to forget messages: {e}")
+            return 0
+        logger.debug(f"Forgot {forgotten} messages from last {minutes} minutes")
+        return forgotten
+
+    def _forget_where(self, where_sql: str, params: dict[str, Any]) -> int:
+        """Move matching canonical messages, with all durable state, to forgotten storage.
+
+        One statement deletes and copies, so a failure leaves both tables as
+        they were. Re-forgetting an id refreshes its forgotten copy instead of
+        discarding the canonical row.
+        """
+        from .message_store import MESSAGE_STATE_COLUMNS
+
+        cols = ", ".join(MESSAGE_STATE_COLUMNS)
+        refresh = ", ".join(
+            f"{c} = EXCLUDED.{c}" for c in (*MESSAGE_STATE_COLUMNS[1:], "forgotten_at")
+        )
+        sql = text(f"""
+            WITH moved AS (
+                DELETE FROM {self._messages_table_name}
+                WHERE {where_sql}
+                RETURNING {cols}
+            )
+            INSERT INTO {self._forgotten_table_name} ({cols}, forgotten_at)
+            SELECT {cols}, CURRENT_TIMESTAMP FROM moved
+            ON CONFLICT (bot_id, id) DO UPDATE SET {refresh}
+            RETURNING id
+        """)
+        with self.engine.begin() as conn:
+            return len(conn.execute(sql, params).fetchall())
 
     def get_message_by_id(
         self,
@@ -551,133 +490,64 @@ class PostgreSQLMessageMixin:
         Supports both full UUID and prefix matching (first 8 chars).
         Returns True if a message was forgotten, False otherwise.
         """
-        with self.engine.connect() as conn:
-            try:
-                # Find the message (support prefix matching)
-                if len(message_id) < 36:
-                    select_sql = text(f"""
-                        SELECT id, role, content, timestamp, session_id, processed, created_at,
-                           interrupt_source_message_id, interrupt_content_offset,
-                           author_entity_type, author_entity_id
-                        FROM {self._messages_table_name}
-                        WHERE id LIKE :id_pattern
-                        LIMIT 1
-                    """)
-                    row = conn.execute(select_sql, {"id_pattern": f"{message_id}%"}).fetchone()
-                else:
-                    select_sql = text(f"""
-                        SELECT id, role, content, timestamp, session_id, processed, created_at,
-                           interrupt_source_message_id, interrupt_content_offset,
-                           author_entity_type, author_entity_id
-                        FROM {self._messages_table_name}
-                        WHERE id = :id
-                    """)
-                    row = conn.execute(select_sql, {"id": message_id}).fetchone()
-                
-                if not row:
-                    logger.debug(f"Message {message_id} not found")
-                    return False
-                
-                # Insert into forgotten table, preserving canonical authorship.
-                insert_sql = text(f"""
-                    INSERT INTO {self._forgotten_table_name}
-                    (id, role, content, timestamp, session_id, processed, created_at,
-                     interrupt_source_message_id, interrupt_content_offset,
-                     author_entity_type, author_entity_id, forgotten_at)
-                    VALUES (:id, :role, :content, :timestamp, :session_id, :processed, :created_at,
-                            :interrupt_source_message_id, :interrupt_content_offset,
-                            :author_entity_type, :author_entity_id, CURRENT_TIMESTAMP)
-                    ON CONFLICT (bot_id, id) DO NOTHING
-                """)
-                conn.execute(insert_sql, {
-                    "id": row.id,
-                    "role": row.role,
-                    "content": row.content,
-                    "timestamp": row.timestamp,
-                    "session_id": row.session_id,
-                    "processed": row.processed,
-                    "created_at": row.created_at,
-                    "interrupt_source_message_id": row.interrupt_source_message_id,
-                    "interrupt_content_offset": row.interrupt_content_offset,
-                    "author_entity_type": row.author_entity_type,
-                    "author_entity_id": row.author_entity_id,
-                })
-                
-                # Delete from messages table
-                delete_sql = text(f"""
-                    DELETE FROM {self._messages_table_name}
-                    WHERE id = :id
-                """)
-                conn.execute(delete_sql, {"id": row.id})
-                conn.commit()
-                
-                logger.debug(f"Forgot message {row.id}")
-                return True
-            except Exception as e:
-                conn.rollback()
-                logger.error(f"Failed to forget message {message_id}: {e}")
-                return False
+        # Supports prefix matching; a prefix forgets its first match, as before.
+        if len(message_id) < 36:
+            where, params = (
+                f"id = (SELECT id FROM {self._messages_table_name} "
+                "WHERE id LIKE :id_pattern LIMIT 1)",
+                {"id_pattern": f"{message_id}%"},
+            )
+        else:
+            where, params = "id = :id", {"id": message_id}
+        try:
+            forgotten = self._forget_where(where, params)
+        except Exception as e:
+            logger.error(f"Failed to forget message {message_id}: {e}")
+            return False
+        if not forgotten:
+            logger.debug(f"Message {message_id} not found")
+            return False
+        logger.debug(f"Forgot message {message_id}")
+        return True
 
     def restore_ignored_messages(self) -> int:
         """Restore all forgotten messages back to the messages table.
         
         Returns the number of messages restored.
         """
-        with self.engine.connect() as conn:
-            try:
-                # Get all forgotten messages
-                select_sql = text(f"""
-                    SELECT id, role, content, timestamp, session_id, processed, created_at,
-                           interrupt_source_message_id, interrupt_content_offset,
-                           author_entity_type, author_entity_id
-                    FROM {self._forgotten_table_name}
-                    ORDER BY timestamp ASC
-                """)
-                rows = conn.execute(select_sql).fetchall()
-                
-                if not rows:
-                    return 0
-                
-                ids_to_restore = [row.id for row in rows]
-                
-                # Insert back into messages table with the original author.
-                for row in rows:
-                    insert_sql = text(f"""
-                        INSERT INTO {self._messages_table_name}
-                        (id, role, content, timestamp, session_id, processed, created_at,
-                         interrupt_source_message_id, interrupt_content_offset,
-                         author_entity_type, author_entity_id)
-                        VALUES (:id, :role, :content, :timestamp, :session_id, :processed, :created_at,
-                                :interrupt_source_message_id, :interrupt_content_offset,
-                                :author_entity_type, :author_entity_id)
-                        ON CONFLICT (bot_id, id) DO NOTHING
-                    """)
-                    conn.execute(insert_sql, {
-                        "id": row.id,
-                        "role": row.role,
-                        "content": row.content,
-                        "timestamp": row.timestamp,
-                        "session_id": row.session_id,
-                        "processed": row.processed,
-                        "created_at": row.created_at,
-                        "author_entity_type": row.author_entity_type,
-                        "author_entity_id": row.author_entity_id,
-                    })
-                
-                # Delete from forgotten table
-                delete_sql = text(f"""
-                    DELETE FROM {self._forgotten_table_name}
-                    WHERE id = ANY(:ids)
-                """)
-                conn.execute(delete_sql, {"ids": ids_to_restore})
-                conn.commit()
-                
-                logger.debug(f"Restored {len(ids_to_restore)} forgotten messages")
-                return len(ids_to_restore)
-            except Exception as e:
-                conn.rollback()
-                logger.error(f"Failed to restore messages: {e}")
-                return 0
+        from .message_store import MESSAGE_STATE_COLUMNS
+
+        cols = ", ".join(MESSAGE_STATE_COLUMNS)
+        # One statement moves every column back. A forgotten copy whose id is
+        # already canonical stays put rather than being dropped; a concurrent
+        # insert of the same id fails the statement and changes nothing.
+        sql = text(f"""
+            WITH moved AS (
+                DELETE FROM {self._forgotten_table_name} f
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM {self._messages_table_name} m WHERE m.id = f.id
+                )
+                RETURNING {cols}
+            )
+            INSERT INTO {self._messages_table_name} ({cols})
+            SELECT {cols} FROM moved
+            RETURNING id
+        """)
+        try:
+            with self.engine.begin() as conn:
+                restored = len(conn.execute(sql).fetchall())
+                kept = conn.execute(
+                    text(f"SELECT COUNT(*) FROM {self._forgotten_table_name}")
+                ).scalar() or 0
+        except Exception as e:
+            logger.error(f"Failed to restore messages: {e}")
+            return 0
+        if kept:
+            logger.warning(
+                f"Kept {kept} forgotten messages whose ids are already in history"
+            )
+        logger.debug(f"Restored {restored} forgotten messages")
+        return restored
 
     def get_ignored_count(self) -> int:
         """Get the count of currently forgotten messages."""

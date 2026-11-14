@@ -47,6 +47,54 @@ FORGOTTEN_PARENT = "forgotten_messages"
 _message_table_cache: dict[str, Table] = {}
 _forgotten_table_cache: dict[str, Table] = {}
 
+# Durable state of one message. Forget and restore move exactly these columns
+# between the canonical and forgotten tables (TASK-2251); a new durable message
+# column belongs here and in both table definitions.
+MESSAGE_STATE_COLUMNS: tuple[str, ...] = (
+    "id",
+    "role",
+    "content",
+    "timestamp",
+    "session_id",
+    "processed",
+    "summarized",
+    "summary_metadata",
+    "recalled_history",
+    "attachments",
+    "reasoning",
+    "interrupt_source_message_id",
+    "interrupt_content_offset",
+    "author_entity_type",
+    "author_entity_id",
+    "created_at",
+)
+
+# Added to existing forgotten parents (TASK-2251). Constant defaults keep each
+# ADD COLUMN a catalog-only change.
+_FORGOTTEN_STATE_COLUMN_DDL: tuple[tuple[str, str], ...] = (
+    ("summarized", "BOOLEAN DEFAULT FALSE"),
+    ("summary_metadata", "JSONB"),
+    ("recalled_history", "BOOLEAN DEFAULT FALSE"),
+    ("attachments", "JSONB NOT NULL DEFAULT '[]'::jsonb"),
+    ("reasoning", "TEXT"),
+)
+
+
+def _ensure_forgotten_message_state_columns(conn) -> None:
+    """Add missing durable-state columns to the forgotten parent.
+
+    Probes the catalog first so an up-to-date schema takes no DDL lock.
+    """
+    present = set(conn.execute(text(
+        "SELECT attname FROM pg_attribute "
+        "WHERE attrelid = to_regclass(:name) AND attnum > 0 AND NOT attisdropped"
+    ), {"name": FORGOTTEN_PARENT}).scalars())
+    for name, ddl in _FORGOTTEN_STATE_COLUMN_DDL:
+        if name not in present:
+            conn.execute(text(
+                f"ALTER TABLE {FORGOTTEN_PARENT} ADD COLUMN IF NOT EXISTS {name} {ddl}"
+            ))
+
 
 def ensure_message_parent_tables(conn) -> None:
     """Create the canonical and forgotten partitioned message parents."""
@@ -85,6 +133,11 @@ def ensure_message_parent_tables(conn) -> None:
             timestamp DOUBLE PRECISION NOT NULL,
             session_id VARCHAR(36),
             processed BOOLEAN DEFAULT FALSE,
+            summarized BOOLEAN DEFAULT FALSE,
+            summary_metadata JSONB,
+            recalled_history BOOLEAN DEFAULT FALSE,
+            attachments JSONB NOT NULL DEFAULT '[]'::jsonb,
+            reasoning TEXT,
             interrupt_source_message_id VARCHAR(36),
             interrupt_content_offset INTEGER,
             author_entity_type VARCHAR(16),
@@ -111,6 +164,7 @@ def ensure_message_parent_tables(conn) -> None:
             f"ALTER TABLE {table_name} "
             "ADD COLUMN IF NOT EXISTS interrupt_content_offset INTEGER"
         ))
+    _ensure_forgotten_message_state_columns(conn)
     # TASK-1323: stored content_tsv for FTS. Built only on a new parent; an
     # existing one needs the reviewed online upgrade (logged, never blocking).
     ensure_message_tsv(conn, table_was_new=messages_was_new)
@@ -185,6 +239,17 @@ def get_forgotten_message_table(
         Column("timestamp", Float, nullable=False),
         Column("session_id", String(36), nullable=True),
         Column("processed", Boolean, default=False),
+        Column("summarized", Boolean, default=False),
+        Column("recalled_history", Boolean, default=False),
+        Column("summary_metadata", JSON, nullable=True),
+        Column(
+            "attachments",
+            JSON,
+            nullable=False,
+            server_default=text("'[]'::jsonb"),
+            default=list,
+        ),
+        Column("reasoning", Text, nullable=True),
         Column("interrupt_source_message_id", String(36), nullable=True),
         Column("interrupt_content_offset", Integer, nullable=True),
         Column("author_entity_type", String(16), nullable=True),
