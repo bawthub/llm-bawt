@@ -8,6 +8,7 @@ maintenance, history summarization, and memory extraction.
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -16,6 +17,44 @@ from .logging import get_service_logger
 from .tasks import Task, TaskResult, TaskStatus, TaskType
 
 log = get_service_logger(__name__)
+
+#: A failed extraction batch is retried this many times in total; the last
+#: attempt falls back to heuristics and closes the batch either way, so one
+#: poison batch can't hold a bot's extraction forever (TASK-2214).
+MAX_EXTRACTION_ATTEMPTS = 3
+
+
+class ExtractionBatchFailed(RuntimeError):
+    """A batch failed and was left unprocessed for the next run."""
+
+
+class _ExtractionAttempts:
+    """Failed-attempt counts per (bot, user, oldest unprocessed message).
+
+    Unprocessed messages are fetched oldest first, so a batch that keeps
+    failing keeps the same head id. Counts live in process memory: a restart
+    resets them, which costs at most another bounded round of retries.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._counts: dict[tuple[str, str, str], int] = {}
+
+    def prior(self, key: tuple[str, str, str]) -> int:
+        with self._lock:
+            return self._counts.get(key, 0)
+
+    def record_failure(self, key: tuple[str, str, str]) -> int:
+        with self._lock:
+            self._counts[key] = self._counts.get(key, 0) + 1
+            return self._counts[key]
+
+    def clear(self, key: tuple[str, str, str]) -> None:
+        with self._lock:
+            self._counts.pop(key, None)
+
+
+_extraction_attempts = _ExtractionAttempts()
 
 
 class BackgroundTasksMixin:
@@ -612,6 +651,16 @@ class BackgroundTasksMixin:
         ]
         message_ids = [m["id"] for m in unprocessed]
 
+        # TASK-2214: a failed batch stays unprocessed and is retried. Earlier
+        # attempts are strict (an LLM failure or unparseable reply is a
+        # failure); the last one keeps the old lenient behaviour and closes
+        # the batch whatever happens.
+        attempt_key = (bot_id, str(user_id), str(message_ids[0]))
+        attempt = _extraction_attempts.prior(attempt_key) + 1
+        final_attempt = attempt >= MAX_EXTRACTION_ATTEMPTS
+        failure: str | None = None
+        failed_actions = 0
+
         total_facts = 0
         total_stored = 0
 
@@ -622,6 +671,7 @@ class BackgroundTasksMixin:
                 facts = extraction_service.extract_from_conversation(
                     messages=conversation,
                     use_llm=use_llm and extraction_service.llm_client is not None,
+                    strict=not final_attempt,
                 )
 
                 # Filter by importance
@@ -697,6 +747,7 @@ class BackgroundTasksMixin:
                                     config=self.config,
                                 )
                         except Exception as e:
+                            failed_actions += 1
                             log.warning(
                                 "[MemExtract] Failed action %s: %s",
                                 action.action,
@@ -704,11 +755,35 @@ class BackgroundTasksMixin:
                             )
 
             except Exception as e:
+                failure = f"extraction failed: {e}"
                 log.error("[MemExtract] Extraction failed for %s: %s", bot_id, e)
 
-        # Mark messages as processed regardless of extraction outcome
-        # so they aren't re-processed on the next run
+        if failure is None and failed_actions:
+            failure = f"{failed_actions} memory write(s) failed"
+
+        if failure is not None and not final_attempt:
+            # Leave the batch unprocessed. A retry re-runs dedup against the
+            # memories that did get written, so partial writes aren't doubled.
+            _extraction_attempts.record_failure(attempt_key)
+            raise ExtractionBatchFailed(
+                f"memory extraction for {bot_id} failed on attempt {attempt}/"
+                f"{MAX_EXTRACTION_ATTEMPTS}; {len(message_ids)} message(s) left "
+                f"unprocessed for retry: {failure}"
+            )
+
         backend.mark_messages_processed(message_ids)
+        _extraction_attempts.clear(attempt_key)
+
+        if failure is not None:
+            log.error(
+                "[MemExtract] %s: giving up after %d attempts; %d message(s) closed "
+                "without full extraction (first %s): %s",
+                bot_id, attempt, len(message_ids), message_ids[0], failure,
+            )
+            raise ExtractionBatchFailed(
+                f"memory extraction for {bot_id} gave up after {attempt} attempts; "
+                f"{len(message_ids)} message(s) closed without full extraction: {failure}"
+            )
 
         log.info(
             "[MemExtract] %s: %d messages processed, %d facts extracted, %d stored",

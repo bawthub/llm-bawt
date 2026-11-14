@@ -23,6 +23,10 @@ from .prompts import (
 logger = logging.getLogger(__name__)
 
 
+class ExtractionFailed(RuntimeError):
+    """Strict extraction could not get a usable answer from the model."""
+
+
 class EmptyCompletionError(RuntimeError):
     """The model answered 200 with no text (e.g. reasoning used the whole cap)."""
 
@@ -128,14 +132,19 @@ class MemoryExtractionService:
         self,
         messages: list[dict],
         use_llm: bool = True,
+        *,
+        strict: bool = False,
     ) -> list[ExtractedFact]:
         """
         Extract important facts from a conversation.
-        
+
         Args:
             messages: List of message dicts with 'role', 'content', and optionally 'id'
             use_llm: Whether to use LLM for extraction (falls back to heuristics if False)
-            
+            strict: Raise :class:`ExtractionFailed` when the LLM call fails or
+                its reply can't be parsed, instead of falling back to
+                heuristics or returning no facts (TASK-2214).
+
         Returns:
             List of ExtractedFact objects
         """
@@ -165,8 +174,12 @@ class MemoryExtractionService:
 
         if use_llm and self.llm_client:
             try:
-                return self._extract_with_llm(conversation_text, eligible_ids)
+                return self._extract_with_llm(conversation_text, eligible_ids, strict=strict)
             except Exception as e:
+                if strict:
+                    if isinstance(e, ExtractionFailed):
+                        raise
+                    raise ExtractionFailed(f"LLM extraction failed: {e}") from e
                 logger.warning(f"LLM extraction failed, falling back to heuristics: {e}")
                 return self._extract_with_heuristics(messages)
         return self._extract_with_heuristics(messages)
@@ -303,6 +316,8 @@ class MemoryExtractionService:
         self,
         conversation_text: str,
         eligible_ids: set[str],
+        *,
+        strict: bool = False,
     ) -> list[ExtractedFact]:
         """Use LLM to extract facts from the conversation."""
         from ...models.message import Message
@@ -325,7 +340,7 @@ class MemoryExtractionService:
         )
         
         # Parse JSON response
-        facts = self._parse_extraction_response(response, [], eligible_ids=eligible_ids)
+        facts = self._parse_extraction_response(response, [], eligible_ids=eligible_ids, strict=strict)
         return [self._enrich_meaning(f) for f in facts]
 
     def _parse_extraction_response(
@@ -334,6 +349,7 @@ class MemoryExtractionService:
         message_ids: list[str],
         *,
         eligible_ids: set[str] | None = None,
+        strict: bool = False,
     ) -> list[ExtractedFact]:
         """Parse the LLM response into ExtractedFact objects."""
         _require_completion(response)
@@ -352,6 +368,8 @@ class MemoryExtractionService:
                 json_match = re.search(r'\[[\s\S]*\]', response)
             if not json_match:
                 logger.debug(f"No JSON found in extraction response. Response was: {response[:200]}...")
+                if strict:
+                    raise ExtractionFailed("no JSON in extraction response")
                 return facts
             json_str = json_match.group()
         
@@ -426,9 +444,13 @@ class MemoryExtractionService:
             logger.warning(f"Failed to parse extraction JSON: {e}")
             logger.debug(f"JSON string was: {json_str[:500] if json_str else 'empty'}...")
             logger.debug(f"Fixed JSON was: {fixed_json[:500] if fixed_json else 'empty'}...")
+            if strict:
+                raise ExtractionFailed(f"unparseable extraction JSON: {e}") from e
         except Exception as e:
             logger.warning(f"Error processing extraction response: {e}")
-        
+            if strict:
+                raise ExtractionFailed(f"bad extraction response: {e}") from e
+
         return facts
     
     def _fix_json(self, json_str: str) -> str:
