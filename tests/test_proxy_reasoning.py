@@ -6,6 +6,7 @@ from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock
 
 import httpx
+import httpx2
 import pytest
 from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
@@ -51,10 +52,11 @@ def native_events(item, *, added=True, summary=True):
 
 async def parse_sdk_message(frames):
     """Use the real Anthropic streaming parser, not a homemade block merger."""
-    transport = httpx.MockTransport(lambda _: httpx.Response(
+    # anthropic 1.x runs on httpx2.
+    transport = httpx2.MockTransport(lambda _: httpx2.Response(
         200, headers={"content-type": "text/event-stream"}, content=b"".join(frames),
     ))
-    async with AsyncAnthropic(api_key="test", http_client=httpx.AsyncClient(transport=transport)) as client:
+    async with AsyncAnthropic(api_key="test", http_client=httpx2.AsyncClient(transport=transport)) as client:
         async with client.messages.stream(model="test", max_tokens=10, messages=[
             {"role": "user", "content": "hello"},
         ]) as stream:

@@ -6,6 +6,7 @@ from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock
 
 import httpx
+import httpx2
 import pytest
 from anthropic import AsyncAnthropic
 # Warm the SDK's lazy fallback type import before starting millisecond test clocks.
@@ -136,10 +137,11 @@ class Harness:
 
 
 async def parse_message(frames):
-    transport = httpx.MockTransport(lambda _: httpx.Response(
+    # anthropic 1.x runs on httpx2.
+    transport = httpx2.MockTransport(lambda _: httpx2.Response(
         200, headers={"content-type": "text/event-stream"}, content=b"".join(frames),
     ))
-    async with AsyncAnthropic(api_key="fixture", http_client=httpx.AsyncClient(transport=transport)) as client:
+    async with AsyncAnthropic(api_key="fixture", http_client=httpx2.AsyncClient(transport=transport)) as client:
         async with client.messages.stream(model="fixture", max_tokens=100, messages=[
             {"role": "user", "content": "fixture"},
         ]) as stream:
