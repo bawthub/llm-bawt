@@ -405,7 +405,7 @@ class BraveSearchClient(SearchClient):
         return self._web_results(data, extra_snippets=False)[:max_results], summary
 
     def _normalize_score(self, raw: dict) -> float | None:
-        """Normalize Brave ranking to a 0.0-1.0 score."""
+        """Return no score: Brave does not expose a comparable relevance score."""
         return None
 
     def is_available(self) -> bool:

@@ -1161,11 +1161,6 @@ class HistorySummarizer:
 
         return list(dict.fromkeys(replace_ids))
 
-    def detect_all_sessions(self) -> list[Session]:
-        """Detect all conversation sessions."""
-        messages = self._get_all_messages()
-        return detect_sessions(messages, self.session_gap_seconds)
-
     def preview_summarizable_sessions(self) -> list[Session]:
         """Preview sessions that would be summarized (dry run).
 
@@ -2192,13 +2187,3 @@ class HistorySummarizer:
             "summary_id": full_id,
             "messages_restored": rows_unmarked,
         }
-
-    def get_summary_count(self) -> int:
-        """Get the count of existing summaries."""
-        with self._backend.engine.connect() as conn:
-            from sqlalchemy import text
-            sql = text(f"""
-                SELECT COUNT(*) FROM {self._backend._messages_table_name}
-                WHERE role = 'summary'
-            """)
-            return conn.execute(sql).scalar() or 0

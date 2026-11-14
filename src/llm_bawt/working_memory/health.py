@@ -97,7 +97,11 @@ def bot_report(conn, policy: WorkingMemoryPolicy, bot_id: str) -> dict[str, Any]
 
 
 def health_report(engine) -> dict[str, Any]:
-    """The whole report in one read-only transaction; storage failures surface as ``unavailable``."""
+    """Ensure schema, then collect the report on one connection.
+
+    Storage exceptions propagate; the HTTP route maps failures to a 503
+    ``unavailable`` response. No read-only or snapshot isolation is requested.
+    """
     WorkingMemoryStore(engine).ensure_schema()
     policy = WorkingMemoryPolicy(engine)
     with engine.connect() as conn:

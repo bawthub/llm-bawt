@@ -4,7 +4,8 @@ Runs periodic maintenance tasks on the memory system:
 1. Consolidation: merge semantically similar memories
 2. Recurrence detection: identify repeating themes, add 'recurring' tag
 3. Decay pruning: archive stale low-importance memories
-4. Orphan cleanup: remove orphaned embeddings or metadata
+
+The legacy orphan-cleanup flag is accepted for compatibility but performs no work.
 
 Usage (background service):
     from llm_bawt.memory.maintenance import MemoryMaintenance
@@ -25,8 +26,6 @@ from typing import Any
 
 from llm_bawt.memory.ownership import MemoryAuthority, MemoryOwnership, NO_MEMORY_AUTHORITY
 from llm_bawt.utils.error_text import safe_error_text
-
-from ..prompt_registry import get_prompt_resolver
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +109,7 @@ class MemoryMaintenance:
         run_orphan_cleanup: bool = False,
         dry_run: bool = False,
     ) -> MaintenanceResult:
-        """Execute selected maintenance operations."""
+        """Execute selected operations; run_orphan_cleanup is a compatibility no-op."""
         result = MaintenanceResult(dry_run=dry_run)
 
         if run_consolidation:
@@ -288,10 +287,10 @@ class MemoryMaintenance:
         return {"archived": archived}
 
     # ------------------------------------------------------------------
-    # Orphan cleanup: placeholder for future implementation
+    # Orphan cleanup: retained compatibility no-op, not a supported operation
     # ------------------------------------------------------------------
     def _run_orphan_cleanup(self, dry_run: bool) -> dict:
-        # Currently no orphan cleanup implemented
+        # Keep the public flag and zero-count result stable for existing callers.
         return {"cleaned": 0}
 
 
@@ -390,244 +389,3 @@ def update_memory_meaning(
             WHERE id = :id {guard} AND {ownership.mutation_predicate}
         """), params)
         return result.rowcount > 0
-
-
-def backfill_meaning_fields(backend: Any, batch_size: int = 100) -> dict:
-    """Backfill heuristic meaning fields for existing memories.
-    
-    Only populates stakes, emotional_charge, recurrence_keywords, and meaning_embedding.
-    Does NOT populate intent - that requires conversation context and LLM inference.
-    
-    Returns:
-        dict with 'updated' count and any 'errors'
-    """
-    import re
-    from sqlalchemy import text
-    from .embeddings import generate_embedding, meaning_text
-
-    updated = 0
-    errors = []
-    
-    def infer_stakes(importance: float) -> str:
-        if importance >= 0.8:
-            return "critical to remember; forgetting would harm trust or outcomes"
-        if importance >= 0.6:
-            return "important context for smooth interactions"
-        return "nice-to-know; low stakes"
-    
-    def infer_emotion(content: str, importance: float) -> float:
-        text_lower = content.lower()
-        charge = 0.2 + 0.6 * importance
-        keywords_high = ["love", "hate", "angry", "excited", "anxious", "worried", "sad"]
-        if any(k in text_lower for k in keywords_high):
-            charge = max(charge, 0.8)
-        return min(1.0, max(0.0, charge))
-    
-    def infer_recurrence(content: str, tags: list[str]) -> list[str]:
-        tag_list = [t for t in tags if t]
-        words = re.findall(r"[a-zA-Z]{4,}", content.lower())
-        return list(set(tag_list + words[:3]))
-
-    with backend.engine.connect() as conn:
-        # Fetch memories missing meaning fields (check stakes as proxy)
-        sql = text(f"""
-            SELECT id, content, tags, importance, intent
-            FROM {backend._memories_table_name}
-            WHERE stakes IS NULL
-            LIMIT :limit
-        """)
-        rows = conn.execute(sql, {"limit": batch_size}).fetchall()
-        conn.commit()  # Do not hold a transaction across embedding calls.
-
-        for row in rows:
-            try:
-                tags = row.tags if isinstance(row.tags, list) else (json.loads(row.tags) if row.tags else ["misc"])
-                importance = float(row.importance) if row.importance else 0.5
-                content = row.content or ""
-                existing_intent = row.intent  # Preserve any existing LLM-inferred intent
-                
-                # Only heuristic fields - intent stays as-is (NULL or LLM-provided)
-                stakes = infer_stakes(importance)
-                emotional_charge = infer_emotion(content, importance)
-                recurrence_keywords = infer_recurrence(content, tags)
-                
-                body = meaning_text(
-                    content, existing_intent, stakes, emotional_charge, recurrence_keywords,
-                )
-                try:
-                    meaning_emb = generate_embedding(body, backend.embedding_model)
-                except Exception as exc:
-                    logger.warning("Could not backfill meaning embedding: %s", exc)
-                    meaning_emb = None
-
-                # A failed embed must leave NULL, not the vector for old fields.
-                result = conn.execute(text(f"""
-                    UPDATE {backend._memories_table_name}
-                    SET stakes = :stakes,
-                        emotional_charge = :emotional_charge,
-                        recurrence_keywords = CAST(:recurrence_keywords AS jsonb),
-                        meaning_embedding = :meaning_embedding,
-                        meaning_updated_at = CASE WHEN :meaning_embedding IS NULL
-                            THEN NULL ELSE CURRENT_TIMESTAMP END,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE id = :id AND content = :old_content
-                      AND intent IS NOT DISTINCT FROM :old_intent AND stakes IS NULL
-                """), {
-                    "id": row.id, "old_content": row.content,
-                    "old_intent": existing_intent, "stakes": stakes,
-                    "emotional_charge": emotional_charge,
-                    "recurrence_keywords": json.dumps(recurrence_keywords),
-                    "meaning_embedding": (f"[{','.join(str(x) for x in meaning_emb)}]"
-                                          if meaning_emb else None),
-                })
-                updated += result.rowcount
-                conn.commit()
-            except Exception as e:
-                conn.rollback()
-                errors.append(f"{row.id}: {e}")
-    
-    return {"updated": updated, "errors": errors, "remaining": len(rows) == batch_size}
-
-
-def backfill_intent_with_llm(
-    backend: Any,
-    llm_client: Any,
-    batch_size: int = 10,
-) -> dict:
-    """Backfill intent for memories by fetching original conversation and using LLM.
-    
-    This is an expensive operation - requires LLM calls for each memory.
-    Uses source_message_ids to reconstruct the original conversation context.
-    Memories whose source messages no longer exist are deleted (orphaned).
-    
-    Args:
-        backend: PostgreSQLMemoryBackend instance
-        llm_client: LLM client for intent inference
-        batch_size: Number of memories to process per batch (keep small due to LLM cost)
-    
-    Returns:
-        dict with 'updated', 'deleted', 'skipped' counts, and any 'errors'
-    """
-    from sqlalchemy import text
-    
-    updated = 0
-    deleted = 0
-    skipped = 0
-    errors = []
-    
-    messages_table = backend._messages_table_name
-    
-    with backend.engine.connect() as conn:
-        # First, delete orphaned memories (source messages no longer exist)
-        orphan_sql = text(f"""
-            WITH orphaned AS (
-                SELECT m.id
-                FROM {backend._memories_table_name} m
-                WHERE m.intent IS NULL
-                  AND m.source_message_ids IS NOT NULL
-                  AND jsonb_array_length(m.source_message_ids) > 0
-                  AND NOT EXISTS (
-                      SELECT 1 FROM {messages_table} msg
-                      WHERE msg.id = ANY(
-                          SELECT jsonb_array_elements_text(m.source_message_ids)
-                      )
-                  )
-            )
-            DELETE FROM {backend._memories_table_name}
-            WHERE id IN (SELECT id FROM orphaned)
-            RETURNING id
-        """)
-        deleted_rows = conn.execute(orphan_sql).fetchall()
-        deleted = len(deleted_rows)
-        if deleted > 0:
-            logger.debug(f"Deleted {deleted} orphaned memories (source messages no longer exist)")
-        
-        # Fetch all memories missing intent (with or without source_message_ids)
-        sql = text(f"""
-            SELECT m.id, m.content, m.source_message_ids
-            FROM {backend._memories_table_name} m
-            WHERE m.intent IS NULL
-            LIMIT :limit
-        """)
-        rows = conn.execute(sql, {"limit": batch_size}).fetchall()
-        
-        for row in rows:
-            try:
-                # Parse source message IDs if present
-                source_ids = row.source_message_ids
-                if source_ids and isinstance(source_ids, str):
-                    source_ids = json.loads(source_ids)
-                
-                # Fetch the original messages if we have source IDs
-                messages = []
-                if source_ids:
-                    msg_sql = text(f"""
-                        SELECT role, content
-                        FROM {messages_table}
-                        WHERE id = ANY(:ids)
-                        ORDER BY timestamp ASC
-                    """)
-                    messages = conn.execute(msg_sql, {"ids": source_ids}).fetchall()
-                
-                # Format conversation if messages exist, otherwise use content-only
-                if messages:
-                    conversation = "\n".join([
-                        f"{msg.role.capitalize()}: {msg.content}"
-                        for msg in messages
-                    ])
-                    prompt = get_prompt_resolver().render(
-                        key="memory.maintenance.intent_with_context",
-                        variables={
-                            "conversation": conversation[:2000],
-                            "fact": row.content,
-                        },
-                    )
-                else:
-                    # Fallback to content-only inference
-                    prompt = get_prompt_resolver().render(
-                        key="memory.maintenance.intent_content_only",
-                        variables={"fact": row.content},
-                    )
-                
-                # Query LLM for intent
-                from ..models.message import Message
-                
-                system_msg = Message(
-                    role="system",
-                    content=get_prompt_resolver().render(
-                        key="memory.maintenance.intent_system", variables={},
-                    ),
-                )
-                user_msg = Message(role="user", content=prompt)
-                
-                response = llm_client.query(
-                    messages=[system_msg, user_msg],
-                    plaintext_output=True,
-                    stream=False,
-                )
-                
-                # Clean up response
-                intent = response.strip().strip('"').strip("'").lower()
-                if len(intent) > 50:  # Sanity check
-                    intent = intent[:50]
-                
-                # The old meaning vector describes the old intent. Leave it
-                # NULL for the bounded repair, never searchable as stale data.
-                update_sql = text(f"""
-                    UPDATE {backend._memories_table_name}
-                    SET intent = :intent, meaning_embedding = NULL,
-                        meaning_updated_at = NULL, updated_at = CURRENT_TIMESTAMP
-                    WHERE id = :id AND intent IS NULL AND content = :old_content
-                """)
-                result = conn.execute(update_sql, {
-                    "id": row.id, "intent": intent, "old_content": row.content,
-                })
-                updated += result.rowcount
-                
-            except Exception as e:
-                errors.append(f"{row.id}: {e}")
-        
-        conn.commit()
-    
-    remaining = len(rows) == batch_size
-    return {"updated": updated, "deleted": deleted, "skipped": skipped, "errors": errors, "remaining": remaining}

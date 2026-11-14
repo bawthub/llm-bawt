@@ -12,7 +12,6 @@ from typing import Optional, Protocol
 
 from ..speaker_attribution import extraction_input, human_user_turns_present
 from .prompts import (
-    MEMORY_TAGS,
     get_extraction_system_prompt,
     get_fact_extraction_prompt,
     get_memory_update_prompt,
@@ -406,12 +405,7 @@ class MemoryExtractionService:
                 tags = [t.strip().lower() for t in raw_tags if t and isinstance(t, str)]
                 if not tags:
                     tags = ["misc"]
-                # Normalize known tags
-                normalized = []
-                for tag in tags:
-                    normalized.append(tag if tag in MEMORY_TAGS else tag)
-                tags = normalized
-                
+
                 importance = float(raw_fact.get("importance", 0.5))
                 importance = max(0.0, min(1.0, importance))  # Clamp to 0-1
                 

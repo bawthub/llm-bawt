@@ -28,9 +28,10 @@ Modes (mutually exclusive):
 
 ``--execute`` (requires ``--yes``)
     Per bot, in its own transaction: upsert the legacy session, UPDATE the
-    bot's NULL-session messages onto it, assert parity, commit. Safe to run
-    live (does not stop the app) — it only writes ``session_id`` on rows that
-    had none and never rewrites a valid link.
+    bot's NULL-session messages onto it, record count parity, and commit.
+    A count mismatch makes the final report unsuccessful but does not roll
+    back committed bots. It only writes ``session_id`` on rows that had none
+    and never rewrites a valid link.
 
 ``--verify``
     Reports remaining NULL-session messages (target: 0) and FK-readiness:

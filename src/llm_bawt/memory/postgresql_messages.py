@@ -667,12 +667,6 @@ class PostgreSQLMessageMixin:
         logger.debug(f"Restored {restored} forgotten messages")
         return restored
 
-    def get_ignored_count(self) -> int:
-        """Get the count of currently forgotten messages."""
-        with self.engine.connect() as conn:
-            result = conn.execute(text(f"SELECT COUNT(*) FROM {self._forgotten_table_name}"))
-            return result.scalar() or 0
-
     def _preview_owned(self, **selection: Any) -> list[dict]:
         selected, params = self._owned_selection(**selection)
         with self.engine.connect() as conn:

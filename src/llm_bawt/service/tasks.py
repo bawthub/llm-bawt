@@ -140,7 +140,7 @@ def create_maintenance_task(
     - consolidation: merge similar memories
     - recurrence_detection: identify and tag recurring themes
     - decay_pruning: archive low-importance old memories
-    - orphan_cleanup: remove orphaned embeddings/metadata
+    - orphan_cleanup: legacy compatibility flag; no work is performed
     """
     return Task(
         task_type=TaskType.MEMORY_MAINTENANCE,

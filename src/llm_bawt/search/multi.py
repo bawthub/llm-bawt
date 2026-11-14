@@ -88,18 +88,6 @@ class SearchOutcome:
     fallbacks: dict[str, list[str]] = field(default_factory=dict)
 
 
-async def search_all(
-    config: "Config",
-    query: str,
-    *,
-    max_results: int = 5,
-    providers: list[SearchProvider | str] | None = None,
-) -> tuple[list[SearchResult], list[str]]:
-    """``(results, providers_answered)`` from :func:`search_all_detailed`."""
-    outcome = await search_all_detailed(config, query, max_results=max_results, providers=providers)
-    return outcome.results, outcome.providers
-
-
 async def search_all_detailed(
     config: "Config",
     query: str,

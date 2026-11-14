@@ -20,13 +20,6 @@ MEMORY_TAGS = [
   "misc",            # Anything that doesn't fit above
 ]
 
-# Profile attribute categories for persistent user traits
-PROFILE_ATTRIBUTE_CATEGORIES = [
-  "preference",      # User preferences (communication style, UI, etc.)
-  "fact",            # Persistent facts (age, name, location)
-  "interest",        # Hobbies, interests
-]
-
 # Note: Use get_fact_extraction_prompt(conversation) to get the formatted prompt
 FACT_EXTRACTION_PROMPT_TEMPLATE = """You are a Personal Information Organizer. Your task is to extract ONLY persistent, meaningful facts about the USER that would be valuable to remember in future conversations.
 

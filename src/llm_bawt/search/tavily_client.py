@@ -36,7 +36,8 @@ class TavilyClient(SearchClient):
     - Fast response times (~180ms p50)
     - Clean, structured responses
     
-    Configure via LLM_BAWT_TAVILY_API_KEY in the app .env.
+    Configure the API key through a stored Tavily connection.
+    LLM_BAWT_TAVILY_API_KEY is a deprecated environment fallback.
     """
     
     PROVIDER = SearchProvider.TAVILY
@@ -191,53 +192,6 @@ class TavilyClient(SearchClient):
         except Exception as e:
             logger.error("Tavily news search failed (%s)", type(e).__name__)
             raise SearchError(self.PROVIDER, f"Tavily news search failed ({type(e).__name__}).") from None
-    
-    def search_with_answer(self, query: str, max_results: int | None = None) -> tuple[list[SearchResult], str | None]:
-        """Search and get an AI-generated answer summary.
-        
-        This is Tavily's killer feature for LLM agents - it can provide
-        a pre-summarized answer along with source results.
-        
-        Args:
-            query: Search query
-            max_results: Max results
-            
-        Returns:
-            Tuple of (results, answer_string or None)
-        """
-        if not is_tavily_available() or not self._api_key:
-            return [], None
-        
-        max_results = max_results or self.max_results
-        
-        try:
-            client = self._get_client()
-            
-            response = client.search(
-                query=query,
-                max_results=max_results,
-                search_depth=self._search_depth,
-                include_answer=True,
-            )
-            
-            results = []
-            for raw in response.get("results", []):
-                results.append(SearchResult(
-                    title=raw.get("title", ""),
-                    url=raw.get("url", ""),
-                    snippet=raw.get("content", ""),
-                    score=raw.get("score"),
-                    source=self.PROVIDER,
-                    raw=raw,
-                ))
-            
-            answer = response.get("answer")
-            
-            return results, answer
-            
-        except Exception as e:
-            logger.error(f"Tavily search with answer failed: {e}")
-            return [], None
     
     def is_available(self) -> bool:
         """Check if Tavily is properly configured."""
