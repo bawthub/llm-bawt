@@ -178,6 +178,14 @@ def enable_operation(slug: str, body: EnableRequest | None = None):
     return row.to_api(include_script=False)
 
 
+@router.get("/v1/ops/catalog-drift", tags=["Ops"])
+def catalog_drift():
+    """Where live catalog rows differ from the code seeds. Read-only (TASK-1861)."""
+    from ...ops.catalog_drift import report
+
+    return report(_store())
+
+
 @router.post("/v1/ops/seed-defaults", tags=["Ops"])
 def seed_defaults():
     """Insert every canonical seed row that isn't already present.
