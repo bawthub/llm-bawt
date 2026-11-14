@@ -617,8 +617,8 @@ class ToolExecutor:
 
         When context assembly substitutes a summary for older raw messages,
         the bot can call this to get the full conversation for that session.
-        The raw messages are stored in-memory (HistoryManager) and also in
-        the database, so this is a lookup — no regeneration needed.
+        Use the stored provenance even when a HistoryManager is present.
+        Nearby in-memory messages need not belong to the summarized session.
         """
         summary_id = tool_call.arguments.get("summary_id", "")
         if not summary_id:
@@ -629,68 +629,33 @@ class ToolExecutor:
             )
 
         try:
-            # Find the summary message in the in-memory history
-            if not hasattr(self, '_history_manager') or not self._history_manager:
-                # Fall back to memory_client for DB access
-                if hasattr(self.memory_client, 'get_short_term_manager'):
-                    stm = self.memory_client.get_short_term_manager()
-                    if stm and hasattr(stm, 'get_messages_for_summary'):
-                        raw_messages = stm.get_messages_for_summary(summary_id)
-                        if raw_messages:
-                            lines = [f"Recalled {len(raw_messages)} messages from summarized session:"]
-                            for i, msg in enumerate(raw_messages, 1):
-                                content = msg.content if hasattr(msg, 'content') else msg.get('content', '')
-                                role = msg.role if hasattr(msg, 'role') else msg.get('role', 'unknown')
-                                lines.append(f"{i}. [{role}] {content}")
-                            return format_tool_result(tool_call.name, "\n".join(lines))
-
-                return format_tool_result(
-                    tool_call.name,
-                    None,
-                    error="Could not find the summarized session. The summary may be too old or the history manager is unavailable."
-                )
-
-            # Search in-memory history for the summary by db_id
-            summary_msg = None
-            for msg in self._history_manager.messages:
-                if hasattr(msg, 'db_id') and msg.db_id == summary_id:
-                    summary_msg = msg
-                    break
-
-            if not summary_msg or summary_msg.role != "summary":
-                return format_tool_result(
-                    tool_call.name,
-                    None,
-                    error=f"No summary found with id '{summary_id}'. Check the summary_id and try again."
-                )
-
-            # Find raw messages near the summary's timestamp
-            # Summaries cover a session block — find messages from the same timeframe
-            summary_ts = summary_msg.timestamp
-            raw_messages = [
-                msg for msg in self._history_manager.messages
-                if msg.role in ("user", "assistant")
-                and msg.db_id != summary_id
-                and abs(msg.timestamp - summary_ts) < 7200  # Within 2 hours of summary
-            ]
+            raw_messages = []
+            if callable(getattr(self.memory_client, "get_messages_for_summary", None)):
+                raw_messages = self.memory_client.get_messages_for_summary(summary_id)
+            elif hasattr(self.memory_client, "get_short_term_manager"):
+                stm = self.memory_client.get_short_term_manager()
+                if stm and hasattr(stm, "get_messages_for_summary"):
+                    raw_messages = stm.get_messages_for_summary(summary_id, user_id=self.user_id)
 
             if not raw_messages:
                 return format_tool_result(
                     tool_call.name,
-                    "No raw messages found for this summary. The original messages may have been from a previous session."
+                    "No original messages with verified session provenance were found for this summary."
                 )
 
             # Format the recalled messages
             lines = [f"Recalled {len(raw_messages)} messages from summarized session:"]
             for i, msg in enumerate(raw_messages, 1):
-                from datetime import datetime
-                ts = datetime.fromtimestamp(msg.timestamp).strftime("%Y-%m-%d %H:%M")
-                content = msg.content
-                lines.append(f"{i}. [{msg.role} @ {ts}] {content}")
+                content = msg.content if hasattr(msg, "content") else msg.get("content", "")
+                role = msg.role if hasattr(msg, "role") else msg.get("role", "unknown")
+                lines.append(f"{i}. [{role}] {content}")
 
             # Mark these messages as recalled in the database
             if hasattr(self.memory_client, 'mark_messages_recalled'):
-                recalled_ids = [msg.db_id for msg in raw_messages if msg.db_id]
+                recalled_ids = [
+                    ident for msg in raw_messages
+                    if (ident := getattr(msg, "db_id", None) if not isinstance(msg, dict) else msg.get("id"))
+                ]
                 if recalled_ids:
                     try:
                         self.memory_client.mark_messages_recalled(recalled_ids)

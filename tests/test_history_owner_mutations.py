@@ -16,7 +16,8 @@ from tests.test_bot_access_service_self import service_call
 pytestmark = pytest.mark.usefixtures("signer")
 
 HANDLERS = {"messages_get": tools.get_messages, "messages_clear": tools.clear_messages,
-            "messages_remove_last_partial": tools.remove_last_message_if_partial}
+            "messages_remove_last_partial": tools.remove_last_message_if_partial,
+            "messages_get_for_summary": tools.get_messages_for_summary}
 
 
 @pytest.fixture
@@ -39,9 +40,14 @@ def history_catalog(monkeypatch):
         calls.append(("partial", kwargs))
         return True
 
+    async def expand_summary(**kwargs):
+        calls.append(("summary", kwargs))
+        return []
+
     monkeypatch.setattr(tools, "_get_storage", lambda: SimpleNamespace(
         get_messages=get_messages, clear_messages=clear_messages,
-        clear_all_messages=clear_all_messages, remove_last_message_if_partial=remove_partial))
+        clear_all_messages=clear_all_messages, remove_last_message_if_partial=remove_partial,
+        get_messages_for_summary=expand_summary))
     server = CatalogFastMCP("history-owners", bot_policy_resolver=Resolver())
     for name, handler in HANDLERS.items():
         server.add_tool(handler, name=name)

@@ -208,6 +208,8 @@ class _MCPShortTermManager:
                 timestamp=row.get("timestamp", 0.0),
                 db_id=row.get("id"),
                 session_id=row.get("session_id"),  # TASK-284: preserve thread id
+                author_entity_type=row.get("author_entity_type"),
+                author_entity_id=row.get("author_entity_id"),
             )
             for row in rows
         ]

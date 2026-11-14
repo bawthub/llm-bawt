@@ -750,48 +750,89 @@ class PostgreSQLShortTermManager(ShortTermMessageReadsMixin, ShortTermMessageMut
 
         return mid
     
-    def get_messages_for_summary(self, summary_id: str) -> list:
+    def get_messages_for_summary(self, summary_id: str, *, user_id: str | None = None) -> list:
         """Get the original raw messages that a summary covers.
 
-        Finds the summary by ID, extracts its timestamp range from
-        summary_metadata, and returns all user/assistant messages in
-        that range.
-
-        Args:
-            summary_id: Database ID of the summary row.
-
-        Returns:
-            List of Message objects, or empty list if not found.
+        Exact source IDs win over timestamps. Legacy ranges require explicit
+        bounds AND durable session provenance; missing or malformed provenance
+        never widens into a guess around the summary's timestamp.
         """
+        import math
+
         from ..models.message import Message
 
+        owner = self.user_id if user_id is None else user_id
+        if owner is not None and not owner.strip():
+            return []
+        table = self._backend._messages_table_name
         with self._backend.engine.connect() as conn:
-            # Get the summary row
             sql = text(f"""
-                SELECT id, timestamp, summary_metadata
-                FROM {self._backend._messages_table_name}
+                SELECT id, session_id, summary_metadata
+                FROM {table}
                 WHERE id = :id AND role = 'summary'
             """)
             row = conn.execute(sql, {"id": summary_id}).fetchone()
             if not row:
                 return []
 
-            # Determine the time range from metadata or estimate from surrounding summaries
             meta = row.summary_metadata or {}
-            start_ts = meta.get("start_timestamp", row.timestamp - 7200)
-            end_ts = meta.get("end_timestamp", row.timestamp)
+            if not isinstance(meta, dict):
+                return []
+            session_ids = [row.session_id] if row.session_id else meta.get("source_session_ids")
+            if not isinstance(session_ids, list) or not session_ids or any(
+                not isinstance(ident, str) or not ident.strip() for ident in session_ids
+            ):
+                return []
+            session_ids = list(dict.fromkeys(session_ids))
+            params = {"sessions": session_ids, "bot": self.bot_id, "owner": owner}
+            # Authorize the summary's complete owning-session provenance before
+            # reading children. A foreign summary is denied as a whole.
+            owned = conn.execute(text("""
+                SELECT id FROM sessions
+                WHERE id = ANY(:sessions) AND bot_id = :bot
+                  AND (:owner IS NULL OR user_id = :owner)
+            """), params).scalars().all()
+            if set(owned) != set(session_ids):
+                return []
 
-            # Fetch raw messages in this time range
+            if "message_ids" in meta:
+                source_ids = meta["message_ids"]
+                if not isinstance(source_ids, list) or not source_ids or any(
+                    not isinstance(ident, str) or not ident.strip() for ident in source_ids
+                ):
+                    return []
+                source_clause = "m.id = ANY(:source_ids)"
+                params["source_ids"] = list(dict.fromkeys(source_ids))
+            else:
+                start = meta.get("session_start", meta.get("start_timestamp"))
+                end = meta.get("session_end", meta.get("end_timestamp"))
+                if isinstance(start, bool) or isinstance(end, bool):
+                    return []
+                try:
+                    start, end = float(start), float(end)
+                except (TypeError, ValueError, OverflowError):
+                    return []
+                if not math.isfinite(start) or not math.isfinite(end) or start > end:
+                    return []
+                source_clause = "m.timestamp >= :start AND m.timestamp <= :end"
+                params.update(start=start, end=end)
+
+            # Recheck session ownership at the final read as well. Session IDs
+            # come from the summary, not a time-adjacent in-memory transcript.
             msgs_sql = text(f"""
-                SELECT id, role, content, timestamp
-                FROM {self._backend._messages_table_name}
-                WHERE role IN ('user', 'assistant')
-                  AND timestamp >= :start AND timestamp <= :end
-                ORDER BY timestamp ASC
+                SELECT m.id, m.role, m.content, m.timestamp, m.session_id,
+                       m.author_entity_type, m.author_entity_id
+                FROM {table} m JOIN sessions s ON s.id = m.session_id
+                WHERE m.role IN ('user', 'assistant')
+                  AND m.session_id = ANY(:sessions) AND {source_clause}
+                  AND s.bot_id = :bot AND (:owner IS NULL OR s.user_id = :owner)
+                ORDER BY m.timestamp ASC, m.id ASC
             """)
-            rows = conn.execute(msgs_sql, {"start": start_ts, "end": end_ts}).fetchall()
+            rows = conn.execute(msgs_sql, params).fetchall()
             return [
-                Message(role=r.role, content=r.content, timestamp=r.timestamp, db_id=r.id)
+                Message(role=r.role, content=r.content, timestamp=r.timestamp, db_id=r.id,
+                        session_id=r.session_id, author_entity_type=r.author_entity_type,
+                        author_entity_id=r.author_entity_id)
                 for r in rows
             ]
 

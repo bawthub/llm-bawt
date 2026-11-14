@@ -704,10 +704,13 @@ async def restore_ignored_messages(bot_id: str = "default", user_id: str | None 
 
 
 @mcp.tool(name="messages_get_for_summary")
-async def get_messages_for_summary(bot_id: str = "default", summary_id: str = "") -> list[dict]:
+async def get_messages_for_summary(
+    bot_id: str = "default", summary_id: str = "", user_id: str | None = None,
+) -> list[dict]:
     """Get raw user/assistant messages referenced by a summary row."""
+    user_id = history_caller_user(bot_id, user_id, operator=True)
     storage = _get_storage()
-    return await storage.get_messages_for_summary(bot_id=bot_id, summary_id=summary_id)
+    return await storage.get_messages_for_summary(bot_id=bot_id, summary_id=summary_id, user_id=user_id)
 
 
 @mcp.tool(name="messages_mark_recalled")

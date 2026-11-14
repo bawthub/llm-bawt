@@ -5,6 +5,7 @@
 PG_ACCEPTANCE_SUITES = (
     "test_session_search_pg.py::",
     "test_session_listing_stats_pg.py::",
+    "test_summary_expansion_pg.py::",
     "test_history_timeline_summaries_pg.py::",
     "test_generated_title_pg.py::",
     "test_isolated_recall_pg.py::",

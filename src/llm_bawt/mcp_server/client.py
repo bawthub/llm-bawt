@@ -494,6 +494,7 @@ class MemoryClient(
 
     def get_messages_for_summary(self, summary_id: str) -> list[dict[str, Any]]:
         """Get raw messages referenced by a summary row."""
+        user_id = self._history_user(None)
         self._ensure_initialized()
         if self.server_url:
             result = self._call_server(
@@ -503,7 +504,8 @@ class MemoryClient(
             return result if isinstance(result, list) else []
 
         storage = self._get_storage()
-        return _run_async(storage.get_messages_for_summary(bot_id=self.bot_id, summary_id=summary_id))
+        return _run_async(storage.get_messages_for_summary(
+            bot_id=self.bot_id, summary_id=summary_id, user_id=user_id))
 
     def mark_messages_recalled(self, message_ids: list[str]) -> int:
         """Mark summary-recalled messages in storage."""

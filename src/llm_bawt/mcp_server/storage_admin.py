@@ -101,9 +101,11 @@ class StorageAdminMixin:
         backend = self._get_backend(bot_id, provision_schema=True)
         return backend.restore_ignored_messages(user_id=user_id)
 
-    async def get_messages_for_summary(self, bot_id: str = "default", summary_id: str = "") -> list[dict[str, Any]]:
+    async def get_messages_for_summary(
+        self, bot_id: str = "default", summary_id: str = "", user_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         manager = self.get_short_term_manager(bot_id)
-        rows = manager.get_messages_for_summary(summary_id)
+        rows = manager.get_messages_for_summary(summary_id, user_id=user_id)
         results: list[dict[str, Any]] = []
         for row in rows:
             results.append(
@@ -112,6 +114,9 @@ class StorageAdminMixin:
                     "role": getattr(row, "role", ""),
                     "content": getattr(row, "content", ""),
                     "timestamp": getattr(row, "timestamp", 0.0),
+                    "session_id": getattr(row, "session_id", None),
+                    "author_entity_type": getattr(row, "author_entity_type", None),
+                    "author_entity_id": getattr(row, "author_entity_id", None),
                 }
             )
         return results
