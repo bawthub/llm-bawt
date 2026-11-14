@@ -24,9 +24,12 @@ USAGE = {"input_tokens": 10, "output_tokens": 5, "access_path": {"key": PATH}}
 @pytest.fixture
 def cached(monkeypatch):
     """One adapter owning PATH; tests fill or leave its cache slot."""
-    adapter = SimpleNamespace(provider="test-provider")
+    adapter = SimpleNamespace(provider="test-provider", account_scope="fixture-account")
+    adapter.report_identity = lambda: adapter.account_scope
     monkeypatch.setattr(usage, "_ACCESS_PATH_ADAPTERS", {PATH: adapter})
+    monkeypatch.setattr(usage, "_REGISTRY", {adapter.provider: adapter})
     monkeypatch.setattr(usage, "_cache", {})
+    monkeypatch.setattr(usage, "_cache_identities", {})
 
     def put(**overrides):
         fields = dict(
@@ -36,7 +39,9 @@ def cached(monkeypatch):
         )
         snap = ProviderUsage(**{**fields, **overrides})
         usage._cache["test-provider"] = (0.0, snap)
+        usage._cache_identities[adapter.provider] = adapter.report_identity()
         return snap
+    put.adapter = adapter
     return put
 
 
@@ -68,6 +73,12 @@ def test_cached_report_is_stored_on_the_terminal_write(cached):
     assert stored["limits"][0]["used_pct"] == 42.0 and stored["limits"][0]["resets_at"] == 1793003600
     assert stored["balance"]["remaining_usd"] == 3.5
     assert "raw" not in stored  # provider-native payloads stay out of history
+
+
+def test_account_change_never_stamps_the_previous_accounts_quota(cached):
+    cached()
+    cached.adapter.account_scope = "replacement-account"
+    assert _finish(_store(), "t-other-account").quota_snapshot_json is None
 
 
 def test_no_cached_report_stores_null(cached):
