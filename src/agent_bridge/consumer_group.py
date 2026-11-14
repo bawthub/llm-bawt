@@ -80,16 +80,19 @@ class GroupReader:
         self._last_ids: dict[str, str] = {}
         self.recreations = 0
 
-    async def ensure(self) -> None:
+    async def ensure(self, *, strict: bool = False) -> None:
         """Startup creation; an existing group keeps its own position.
 
-        Best-effort like the code it replaces: a failure here is logged, and
-        the first read's missing-group recovery creates the group instead.
+        Best-effort by default. Startup retry owners use ``strict=True`` so
+        failed creation retries with initial_id rather than skipping backlog
+        via the steady-state missing-group fallback.
         """
         for stream in self.streams:
             try:
                 await ensure_group(self._redis, stream, self.group, start_id=self._initial_id)
             except Exception:
+                if strict:
+                    raise
                 logger.warning("Could not create consumer group %s on %s", self.group, stream,
                                exc_info=True)
                 continue

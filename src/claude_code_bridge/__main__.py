@@ -20,7 +20,23 @@ from .proxy import ProxyServer
 
 async def _health_server(bridge: ClaudeCodeBridge, publisher: RedisPublisher, port: int) -> None:
     """Internal health and bridge-owned workspace HTTP surface."""
-    await serve_health(publisher, port)
+    await serve_health(publisher, port, consumer_ready=lambda: bridge.command_consumer_ready)
+
+
+async def _wait_for_shutdown(bridge_task: asyncio.Task, shutdown_event: asyncio.Event) -> None:
+    """A dead consumer must terminate the process, not just its background task."""
+    shutdown_task = asyncio.create_task(shutdown_event.wait())
+    try:
+        done, _ = await asyncio.wait(
+            (bridge_task, shutdown_task), return_when=asyncio.FIRST_COMPLETED,
+        )
+        if bridge_task in done:
+            if not bridge_task.cancelled():
+                bridge_task.result()
+            raise RuntimeError("Bridge command supervisor exited unexpectedly")
+    finally:
+        shutdown_task.cancel()
+        await asyncio.gather(shutdown_task, return_exceptions=True)
 
 
 def main() -> None:
@@ -140,14 +156,16 @@ def main() -> None:
         )
         bridge_task = asyncio.create_task(bridge.run_forever())
 
-        await shutdown_event.wait()
-        logger.info("Shutting down...")
-
-        bridge_task.cancel()
-        health_task.cancel()
-        await bridge.stop()
-        if proxy_server is not None:
-            await proxy_server.stop()
+        try:
+            await _wait_for_shutdown(bridge_task, shutdown_event)
+        finally:
+            logger.info("Shutting down...")
+            bridge_task.cancel()
+            health_task.cancel()
+            await bridge.stop()
+            await asyncio.gather(bridge_task, health_task, return_exceptions=True)
+            if proxy_server is not None:
+                await proxy_server.stop()
 
     try:
         asyncio.run(_run())

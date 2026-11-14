@@ -253,7 +253,17 @@ class ClaudeCodeBridge(
 
 
 
+    @property
+    def command_consumer_ready(self) -> bool:
+        task = self._command_task
+        return bool(
+            getattr(self, "_command_ready", False)
+            and task is not None and not task.done()
+            and not getattr(self, "_stopping", None)
+        )
+
     async def start(self) -> None:
+        self._command_ready = False
         self._command_task = asyncio.create_task(self._command_listener())
         self._cleanup_task = asyncio.create_task(self._periodic_cache_cleanup())
         logger.info(
@@ -336,10 +346,12 @@ class ClaudeCodeBridge(
     async def run_forever(self) -> None:
         await self.start()
         try:
-            while True:
-                await asyncio.sleep(3600)
+            await self._command_task
+            raise RuntimeError("Command listener exited unexpectedly")
         except asyncio.CancelledError:
-            pass
+            # A cancelled listener must not strand the process either. Normal
+            # shutdown cancels this supervisor and is handled by __main__.
+            raise
         finally:
             await self.stop()
 

@@ -53,20 +53,37 @@ class ClaudeCommandMixin:
             socket_timeout=None,
             socket_connect_timeout=5,
         )
-        await async_redis.ping()
-        self._redis = async_redis
+        self._command_ready = False
+        try:
+            await self._consume_commands(async_redis, host, port, db)
+        finally:
+            self._command_ready = False
+            await async_redis.aclose()
 
+    async def _consume_commands(self, async_redis, host, port, db) -> None:
         reader = GroupReader(
             async_redis, "claude-code-bridge", "worker-0", [COMMANDS_STREAM], initial_id="0",
         )
-        await reader.ensure()
-
-        logger.info("Command listener started on %s (group=claude-code-bridge)", COMMANDS_STREAM)
-
-        # TASK-2077: a house bridge holds its lease; the mansion slot is inert.
+        # Configuration errors are fatal; transient Redis initialization errors
+        # recover on this same client (also used by the house heartbeat).
         if getattr(self, "_house_slot", None) is None:
             self._house_slot = HouseSlot(house_from_env(), self._backend_name, self._session_queue)
-        await self._house_slot.start(async_redis)
+        delay = 2
+        while True:
+            try:
+                await async_redis.ping()
+                await reader.ensure(strict=True)
+                await self._house_slot.start(async_redis)
+                break
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Command listener startup failed; retrying in %ss", delay)
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 30)
+        self._redis = async_redis
+        self._command_ready = True
+        logger.info("Command listener started on %s (group=claude-code-bridge)", COMMANDS_STREAM)
 
         # TASK-291: subscribe to approval-policy reload broadcasts so admin
         # edits drop the cached bundle without a restart. Best-effort.
@@ -79,6 +96,7 @@ class ClaudeCommandMixin:
         while True:
             try:
                 results = await reader.read(count=1, block=5000)
+                self._command_ready = True
                 if not results:
                     continue
 
@@ -141,9 +159,9 @@ class ClaudeCommandMixin:
                             await async_redis.xack(COMMANDS_STREAM, "claude-code-bridge", msg_id)
 
             except asyncio.CancelledError:
-                await async_redis.aclose()
                 raise
             except Exception:
+                self._command_ready = False
                 logger.exception("Command listener error")
                 await asyncio.sleep(2)
 
