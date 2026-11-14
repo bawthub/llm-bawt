@@ -31,8 +31,22 @@ MARKER_PREFIX = "claude-skills-loaded-"
 #: Skills that carry the git rules for a repo this harness commits to.
 GIT_SKILLS = frozenset({"git-commits", "skill-creation", "llm-bawt", "bawthub"})
 #: Mutating git subcommands. Read-only ones (status/diff/log/show) pass.
-_MUTATING_GIT = re.compile(
-    r"(^|\s)git(\s.*)?\s(commit|push|reset|rebase|merge|stash|cherry-pick|revert)(\s|$)")
+MUTATING_GIT_SUBCOMMANDS = frozenset({
+    "commit", "push", "pull", "am", "reset", "rebase", "merge", "stash",
+    "cherry-pick", "revert"})
+#: Git global options that consume the following word as their value.
+_GIT_OPTS_WITH_ARG = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace",
+                                "--super-prefix", "--config-env", "--list-cmds"})
+#: Words that run the rest of a segment as a command.
+_COMMAND_PREFIXES = frozenset({"sudo", "env", "command", "exec", "nohup", "time", "nice",
+                               "builtin", "xargs"})
+_SHELLS = frozenset({"sh", "bash", "zsh", "dash"})
+_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+#: Fallback when the command does not tokenize (unbalanced quotes): any
+#: mutating subcommand word anywhere after a ``git`` word.
+_FALLBACK = re.compile(
+    r"(?:^|[^\w-])git\b.*?(?<![\w-])(" + "|".join(sorted(MUTATING_GIT_SUBCOMMANDS))
+    + r")(?![\w-])", re.S)
 _SESSION_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
 GATE_DENY_REASON = (
@@ -116,11 +130,77 @@ def _deny(reason: str) -> dict:
                                    "permissionDecisionReason": reason}}
 
 
+def _segments(command: str) -> list[list[str]]:
+    """Split a shell command into simple-command word lists.
+
+    Separators (``;``, ``&``, ``|``, newlines, parentheses for subshells and
+    ``$(...)``) end a segment. Quoted words stay whole. Raises ``ValueError``
+    when the command does not tokenize.
+    """
+    import shlex
+
+    text = command.replace("`", " ; ").replace("\n", " ; ")
+    lexer = shlex.shlex(text, posix=True, punctuation_chars=";&|()<>")
+    lexer.whitespace_split = True
+    segments: list[list[str]] = [[]]
+    for token in lexer:
+        if token and set(token) <= set(";&|()"):
+            segments.append([])
+        elif token != "$":
+            segments[-1].append(token)
+    return [seg for seg in segments if seg]
+
+
+def _git_subcommand(words: list[str]) -> str | None:
+    """The subcommand of ``git [global options] <sub>``, or None."""
+    i = 1
+    while i < len(words):
+        word = words[i]
+        if word in _GIT_OPTS_WITH_ARG:
+            i += 2
+        elif word.startswith("-"):
+            i += 1
+        else:
+            return word
+    return None
+
+
+def _segment_mutates(words: list[str], depth: int) -> bool:
+    i = 0
+    while i < len(words) and _ASSIGNMENT.match(words[i]):
+        i += 1
+    if i < len(words) and words[i] in _COMMAND_PREFIXES:
+        # Prefix options may take values (``sudo -u x``): run from the first
+        # git or shell word after the prefix.
+        rest = [j for j in range(i + 1, len(words))
+                if words[j].rsplit("/", 1)[-1] in _SHELLS | {"git"}]
+        i = rest[0] if rest else len(words)
+    words = words[i:]
+    if not words:
+        return False
+    program = words[0].rsplit("/", 1)[-1]
+    if program in _SHELLS and depth < 3:
+        for j, word in enumerate(words[1:-1], start=1):
+            if word.startswith("-") and not word.startswith("--") and "c" in word:
+                return _command_mutates(words[j + 1], depth + 1)
+        return False
+    return program == "git" and _git_subcommand(words) in MUTATING_GIT_SUBCOMMANDS
+
+
+def _command_mutates(command: str, depth: int = 0) -> bool:
+    """Whether a shell command runs a mutating git subcommand (TASK-2272/2286)."""
+    try:
+        segments = _segments(command)
+    except ValueError:
+        return bool(_FALLBACK.search(command))
+    return any(_segment_mutates(seg, depth) for seg in segments)
+
+
 def git_gate(data: Mapping, env: Mapping[str, str]) -> dict | None:
     from agent_bridge.room_freeze import GIT_LOCKED_STATES, ROOM_FREEZE_ENV
 
     command = (data.get("tool_input") or {}).get("command")
-    if not isinstance(command, str) or not _MUTATING_GIT.search(command):
+    if not isinstance(command, str) or not _command_mutates(command):
         return None
     if env.get(ROOM_FREEZE_ENV) in GIT_LOCKED_STATES:
         return _deny(ROOM_FREEZE_DENY_REASON)
@@ -146,7 +226,9 @@ HOOKS = {"record": record, "git-gate": git_gate, "resume-reminder": resume_remin
 #: (event, matcher, ``if`` rule, hook name) for each settings entry we own.
 _ENTRIES = (
     ("PostToolUse", "Skill", None, "record"),
-    ("PreToolUse", "Bash", "Bash(git *)", "git-gate"),
+    # No ``if`` rule: git also runs inside subshells, ``cd x && git ...`` and
+    # ``bash -c``; the gate parses every Bash command itself.
+    ("PreToolUse", "Bash", None, "git-gate"),
     ("SessionStart", None, None, "resume-reminder"),
 )
 #: The untracked host scripts these hooks replace; their entries are removed.

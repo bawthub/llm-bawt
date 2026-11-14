@@ -17,6 +17,7 @@ from claude_code_bridge.skill_hooks import (
     main,
     record,
     resume_reminder,
+    room_freeze_env,
 )
 
 @pytest.fixture(autouse=True)
@@ -83,6 +84,51 @@ def test_gate_passes_read_only_git():
     assert git_gate({"session_id": "s1", "tool_input": {"command": "git status"}}, {}) is None
 
 
+def _cmd(command):
+    return {"session_id": "s1", "tool_input": {"command": command}}
+
+
+@pytest.mark.parametrize("command", [
+    "git log --grep merge --oneline",
+    "git show HEAD:README.md | grep commit",
+    "git log --format='%s' -- push.py",
+    "git diff origin/master -- src/reset.py",
+    "echo 'git push' > notes.txt",
+    "grep -r 'git commit' docs/",
+    "git -C /r status && echo merge",
+    "git branch --merged master",
+    "ls; cat push.log",
+])
+def test_gate_passes_read_only_commands_mentioning_mutation_words(command):
+    """TASK-2272: operands and other commands are not git subcommands."""
+    frozen = room_freeze_env("locked")
+    assert git_gate(_cmd(command), frozen) is None
+
+
+@pytest.mark.parametrize("command", [
+    "git push origin abc:master",
+    "(cd /r && git push)",
+    "git push;",
+    "git stash&&git pull",
+    "/usr/bin/git commit -m x",
+    "git pull --rebase",
+    "git am < patch.mbox",
+    "git -C /r -c user.name=x commit -m y",
+    "git --no-pager --git-dir /r/.git rebase master",
+    "GIT_EDITOR=true git merge topic",
+    "cd /r\ngit reset --hard",
+    "echo $(git cherry-pick abc)",
+    "bash -c 'cd /r && git revert HEAD'",
+    "sudo -u x git push",
+    "git status | cat || git push",
+    "git commit -m 'unbalanced",
+])
+def test_gate_denies_mutating_git_in_any_shell_position(command):
+    """TASK-2286: subshells, adjacency, paths, pull/am and shells are caught."""
+    assert git_gate(_cmd(command), room_freeze_env("locked")) is not None
+    assert git_gate(_cmd(command), {}) is not None
+
+
 def test_reminder_names_injected_skills_as_still_in_context():
     text = resume_reminder({"source": "compact"}, {INJECTED_SKILLS_ENV: "git-commits,llm-bawt"})
     context = text["hookSpecificOutput"]["additionalContext"]
@@ -124,8 +170,7 @@ def test_install_replaces_legacy_scripts_and_keeps_other_hooks():
     assert not any(".claude/hooks/" in c for c in commands)
     assert hooks["PreToolUse"][0]["hooks"] == [guard]
     assert hooks["PreToolUse"][1] == {"matcher": "Bash", "hooks": [
-        {"type": "command", "command": hook_command("git-gate"), "timeout": 10,
-         "if": "Bash(git *)"}]}
+        {"type": "command", "command": hook_command("git-gate"), "timeout": 10}]}
     assert hooks["PostToolUse"] == [{"matcher": "Skill", "hooks": [
         {"type": "command", "command": hook_command("record"), "timeout": 10}]}]
     assert hooks["SessionStart"][-1]["hooks"][0]["command"] == hook_command("resume-reminder")
