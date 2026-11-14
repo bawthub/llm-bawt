@@ -108,6 +108,25 @@ def test_provenance_precedes_both_limits_and_denied_access_writes(rig, decay):
 
 
 @pytest.mark.parametrize("decay", [True, False])
+def test_time_window_precedes_the_limit(rig, decay):
+    """TASK-2238: an older, better match must not hide an in-window one."""
+    import time
+    add_message(rig)
+    add_memory(rig, "old_top", ["good"])
+    add_memory(rig, "new_second", ["good"], vector="[0.9,0.1,0]")
+    with rig.engine.begin() as conn:
+        conn.execute(text("UPDATE memories SET created_at = now() - interval '30 days' WHERE id='old_top'"))
+    backend = Backend(rig.engine, decay)
+    since = time.time() - 86400
+    rows = backend.search_memories_by_embedding(
+        [1, 0, 0], n_results=1, eligibility=eligibility(rig), created_since=since)
+    assert [row["id"] for row in rows] == ["new_second"]
+    rows = backend.search_memories_by_embedding(
+        [1, 0, 0], n_results=1, eligibility=eligibility(rig), created_until=since)
+    assert [row["id"] for row in rows] == ["old_top"]
+
+
+@pytest.mark.parametrize("decay", [True, False])
 def test_active_ownership_composes_with_existing_author_provenance(rig, decay):
     from llm_bawt.memory.ownership_migration import ACTIVATIONS
     add_message(rig)

@@ -252,8 +252,9 @@ class StorageSearchMixin:
         temporal decay, access boost, diversity sampling), then merges and
         ranks across all sources.
 
-        * ``since`` / ``until`` — Unix seconds.  Post-filters results by
-          ``created_at``.  Either can be omitted.
+        * ``since`` / ``until`` — Unix seconds.  Bound ``created_at`` in the
+          backend query, before its limit, and again on the merged rows.
+          Either can be omitted.
         * ``bot_id`` — restrict to a single bot's memory store.
         """
         from llm_bawt.memory.embeddings import generate_embedding
@@ -282,6 +283,9 @@ class StorageSearchMixin:
                     eligibility=MemoryProvenance(
                         ScopedMessageAuthority.for_partition(scope, bot_id)
                     ),
+                    # TASK-2238: bound the window before the backend's limit.
+                    **({"created_since": since} if since is not None else {}),
+                    **({"created_until": until} if until is not None else {}),
                 )
                 for r in results:
                     relevance = r.get("similarity") or r.get("relevance", 0.0)

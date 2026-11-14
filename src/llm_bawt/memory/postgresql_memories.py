@@ -595,9 +595,16 @@ class PostgreSQLSemanticMemoryMixin:
         *,
         eligibility: MemoryProvenance | None = None,
         authority: MemoryAuthority | None = None,
+        created_since: float | None = None,
+        created_until: float | None = None,
     ) -> list[dict]:
         """Search memories using vector similarity with temporal decay and diversity.
-        
+
+        ``created_since``/``created_until`` (Unix seconds, inclusive) bound
+        ``created_at`` before ranking and the result limit, so a window never
+        loses an eligible match to an older, higher-ranked one (TASK-2238).
+        Rows without ``created_at`` stay eligible.
+
         The effective score combines:
         - Semantic similarity (cosine distance)
         - Base importance
@@ -633,7 +640,15 @@ class PostgreSQLSemanticMemoryMixin:
                 tag_filter = ""
                 if tags:
                     tag_filter = "AND tags ?| CAST(:filter_tags AS text[])"
-                
+                # created_at is naive UTC; convert the bound explicitly so the
+                # session time zone never shifts the window.
+                if created_since is not None:
+                    tag_filter += (" AND (created_at IS NULL OR created_at >= "
+                                   "(to_timestamp(:created_since) AT TIME ZONE 'UTC'))")
+                if created_until is not None:
+                    tag_filter += (" AND (created_at IS NULL OR created_at <= "
+                                   "(to_timestamp(:created_until) AT TIME ZONE 'UTC'))")
+
                 if decay_enabled:
                     # Fetch more candidates for post-processing with decay + diversity
                     fetch_limit = n_results * 4 if diversity_enabled else n_results * 2
@@ -682,6 +697,8 @@ class PostgreSQLSemanticMemoryMixin:
                     "min_importance": min_importance,
                     "limit": fetch_limit,
                     "filter_tags": tags,
+                    "created_since": created_since,
+                    "created_until": created_until,
                     **(eligibility.params if eligibility is not None else {}),
                 }).fetchall()
                 # Do not retain the reader's locks while reinforcing via a
