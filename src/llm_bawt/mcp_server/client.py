@@ -556,7 +556,7 @@ class MemoryClient(
         )
         return MemoryResult.from_dict(result.to_dict()) if result else None
     
-    def delete_memory(self, memory_id: str) -> bool:
+    def delete_memory(self, memory_id: str, *, user_id: str | None = None) -> bool:
         """Delete a memory by ID.
         
         Args:
@@ -565,13 +565,14 @@ class MemoryClient(
         Returns:
             True if deleted, False if not found.
         """
+        user_id = self._history_user(user_id)
         self._ensure_initialized()
         
         if self.server_url:
-            return self._call_server("memory_delete", {
-                "memory_id": memory_id,
-                "bot_id": self.bot_id,
-            })
+            args = {"memory_id": memory_id, "bot_id": self.bot_id}
+            if user_id is not None:
+                args["user_id"] = user_id
+            return self._call_server("memory_delete", args)
         
         # Embedded mode
         storage = self._get_storage()
@@ -579,6 +580,7 @@ class MemoryClient(
             storage.delete_memory(
                 memory_id=memory_id,
                 bot_id=self.bot_id,
+                user_id=user_id,
             )
         )
     

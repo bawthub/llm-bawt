@@ -358,11 +358,16 @@ class PostgreSQLSemanticMemoryMixin:
                 return None
             return dict(updated)
 
-    def delete_memory(self, memory_id: str) -> bool:
+    def delete_memory(self, memory_id: str, *, user_id: str | None = None) -> bool:
         """Delete a specific memory.
         
         Supports both full UUID and prefix matching (first 8 chars).
+        With ``user_id`` (TASK-2279), only a memory sourced entirely from that
+        user's messages matches; sourceless memories are bot-wide, so only the
+        operator (no ``user_id``) can delete them.
         """
+        if user_id is not None:
+            return self._delete_owned_memory(memory_id, user_id)
         with Session(self.engine) as session:
             try:
                 # If it's a short ID (prefix), use LIKE matching
@@ -381,6 +386,40 @@ class PostgreSQLSemanticMemoryMixin:
                 session.rollback()
                 logger.error(f"Failed to delete memory {memory_id}: {e}")
                 return False
+
+    def _delete_owned_memory(self, memory_id: str, user_id: str) -> bool:
+        if not str(user_id).strip():
+            raise ValueError("user_id must be nonblank")
+        from .short_term_message_reads import history_owner_clause
+
+        params: dict = {}
+        owner = history_owner_clause(params, bot_id=self.bot_id, user_id=user_id)
+        if len(memory_id) < 36:
+            match, params["mid"] = "id LIKE :mid", f"{memory_id}%"
+        else:
+            match, params["mid"] = "id = :mid", memory_id
+        # Owned: at least one source, and every source is one of the user's
+        # messages, live or forgotten.
+        sql = text(f"""
+            DELETE FROM {self._memories_table_name} mem
+            WHERE {match}
+              AND jsonb_typeof(mem.source_message_ids::jsonb) = 'array'
+              AND jsonb_array_length(mem.source_message_ids::jsonb) > 0
+              AND NOT EXISTS (
+                SELECT 1 FROM jsonb_array_elements_text(mem.source_message_ids::jsonb) src(source_id)
+                WHERE src.source_id NOT IN (
+                    SELECT id FROM {self._messages_table_name} WHERE {owner}
+                    UNION ALL
+                    SELECT id FROM {self._forgotten_table_name} WHERE {owner}
+                )
+              )
+        """)
+        try:
+            with self.engine.begin() as conn:
+                return conn.execute(sql, params).rowcount > 0
+        except Exception as e:
+            logger.error(f"Failed to delete memory {memory_id}: {e}")
+            return False
 
     def delete_memories_by_source_message_ids(self, message_ids: list[str]) -> int:
         """Delete all memories whose source_message_ids contain any of the given message IDs.

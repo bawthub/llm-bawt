@@ -331,7 +331,9 @@ async def test_catalog_token_budgets():
     # trimmed-row notes on tasks_board/working_memory_list: 18,869 (+40).
     # TASK-2279: messages_forget selects, ignores and deletes sourced memories
     # in one owner-scoped transaction (optional session_id): 18,997 (+128).
-    assert total <= 18997, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-2279: optional user_id on memory_delete, messages_ignore_by_id and
+    # messages_restore_ignored so a pinned owner scopes them: 19,060 (+63).
+    assert total <= 19060, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 

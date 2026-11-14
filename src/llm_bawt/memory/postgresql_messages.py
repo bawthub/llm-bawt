@@ -580,21 +580,24 @@ class PostgreSQLMessageMixin:
                 logger.error(f"Failed to get message {message_id}: {e}")
                 return None
 
-    def ignore_message_by_id(self, message_id: str) -> bool:
+    def ignore_message_by_id(self, message_id: str, *, user_id: str | None = None) -> bool:
         """Move a specific message to the forgotten table by its ID.
         
         Supports both full UUID and prefix matching (first 8 chars).
+        With ``user_id``, only that user's message matches (TASK-2279).
         Returns True if a message was forgotten, False otherwise.
         """
+        owner, params = self._owner_predicate(user_id)
         # Supports prefix matching; a prefix forgets its first match, as before.
         if len(message_id) < 36:
-            where, params = (
+            where = (
                 f"id = (SELECT id FROM {self._messages_table_name} "
-                "WHERE id LIKE :id_pattern LIMIT 1)",
-                {"id_pattern": f"{message_id}%"},
+                f"WHERE id LIKE :id_pattern{owner} LIMIT 1)"
             )
+            params["id_pattern"] = f"{message_id}%"
         else:
-            where, params = "id = :id", {"id": message_id}
+            where = f"id = :id{owner}"
+            params["id"] = message_id
         try:
             forgotten = self._forget_where(where, params)
         except Exception as e:
@@ -606,12 +609,26 @@ class PostgreSQLMessageMixin:
         logger.debug(f"Forgot message {message_id}")
         return True
 
-    def restore_ignored_messages(self) -> int:
-        """Restore all forgotten messages back to the messages table.
+    def _owner_predicate(self, user_id: str | None) -> tuple[str, dict[str, Any]]:
+        """`` AND <owner clause>`` for one user, or nothing for the operator."""
+        params: dict[str, Any] = {}
+        if user_id is None:
+            return "", params
+        if not str(user_id).strip():
+            raise ValueError("user_id must be nonblank")
+        from .short_term_message_reads import history_owner_clause
+
+        return " AND " + history_owner_clause(params, bot_id=self.bot_id, user_id=user_id), params
+
+    def restore_ignored_messages(self, *, user_id: str | None = None) -> int:
+        """Restore forgotten messages back to the messages table.
         
+        With ``user_id``, only that user's forgotten messages (TASK-2279).
         Returns the number of messages restored.
         """
         from .message_store import MESSAGE_STATE_COLUMNS
+
+        owner, params = self._owner_predicate(user_id)
 
         cols = ", ".join(MESSAGE_STATE_COLUMNS)
         # One statement moves every column back. A forgotten copy whose id is
@@ -622,7 +639,7 @@ class PostgreSQLMessageMixin:
                 DELETE FROM {self._forgotten_table_name} f
                 WHERE NOT EXISTS (
                     SELECT 1 FROM {self._messages_table_name} m WHERE m.id = f.id
-                )
+                ){owner}
                 RETURNING {cols}
             )
             INSERT INTO {self._messages_table_name} ({cols})
@@ -631,9 +648,10 @@ class PostgreSQLMessageMixin:
         """)
         try:
             with self.engine.begin() as conn:
-                restored = len(conn.execute(sql).fetchall())
+                restored = len(conn.execute(sql, params).fetchall())
                 kept = conn.execute(
-                    text(f"SELECT COUNT(*) FROM {self._forgotten_table_name}")
+                    text(f"SELECT COUNT(*) FROM {self._forgotten_table_name} WHERE TRUE{owner}"),
+                    params,
                 ).scalar() or 0
         except Exception as e:
             logger.error(f"Failed to restore messages: {e}")

@@ -25,7 +25,7 @@ def service(monkeypatch):
 def test_count_forget_without_owner_is_refused(service):
     svc, _ = service
     with pytest.raises(HTTPException) as err:
-        routes.forget_messages(MemoryForgetRequest(count=3), bot_id="b", client=Mock())
+        routes.forget_messages(MemoryForgetRequest(count=3), bot_id="b")
     assert err.value.status_code == 400
     svc.get_memory_client.assert_not_called()
 
@@ -34,7 +34,7 @@ def test_count_forget_uses_the_owner_bound_client_and_thread(service):
     svc, owner_client = service
     shared = Mock()
     resp = routes.forget_messages(
-        MemoryForgetRequest(count=3, user_id="alice", session_id="t1"), bot_id="b", client=shared)
+        MemoryForgetRequest(count=3, user_id="alice", session_id="t1"), bot_id="b")
     svc.get_memory_client.assert_called_once_with("b", "alice")
     owner_client.forget_recent_messages.assert_called_once_with(3, session_id="t1")
     shared.forget_recent_messages.assert_not_called()

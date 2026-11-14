@@ -16,6 +16,11 @@ def _wire(scope: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in scope.items() if k != "user_id"}
 
 
+def _owner_arg(user_id: str | None) -> dict[str, Any]:
+    """An explicit owner for by-ID mutations, as ``messages_clear`` sends."""
+    return {} if user_id is None else {"user_id": user_id}
+
+
 class MemoryClientAdminMixin:
     """Stats, previews, forget/ignore, consolidation and maintenance."""
 
@@ -124,24 +129,26 @@ class MemoryClientAdminMixin:
         backend = storage.get_backend(self.bot_id)
         return backend.get_message_by_id(message_id)
 
-    def ignore_message_by_id(self, message_id: str) -> bool:
+    def ignore_message_by_id(self, message_id: str, *, user_id: str | None = None) -> bool:
         """Move a specific message to the forgotten table by ID."""
+        user_id = self._history_user(user_id)
         self._ensure_initialized()
         if self.server_url:
-            return bool(
-                self._call_server("messages_ignore_by_id", {"bot_id": self.bot_id, "message_id": message_id})
-            )
+            return bool(self._call_server("messages_ignore_by_id", {
+                "bot_id": self.bot_id, "message_id": message_id, **_owner_arg(user_id)}))
         storage = self._get_storage()
         backend = storage.get_backend(self.bot_id, provision_schema=True)
-        return bool(backend.ignore_message_by_id(message_id))
+        return bool(backend.ignore_message_by_id(message_id, user_id=user_id))
 
-    def restore_ignored_messages(self) -> int:
+    def restore_ignored_messages(self, *, user_id: str | None = None) -> int:
+        user_id = self._history_user(user_id)
         self._ensure_initialized()
         if self.server_url:
-            return int(self._call_server("messages_restore_ignored", {"bot_id": self.bot_id}))
+            return int(self._call_server("messages_restore_ignored", {
+                "bot_id": self.bot_id, **_owner_arg(user_id)}))
         storage = self._get_storage()
         backend = storage.get_backend(self.bot_id, provision_schema=True)
-        return int(backend.restore_ignored_messages())
+        return int(backend.restore_ignored_messages(user_id=user_id))
 
     def delete_memories_by_source_message_ids(self, message_ids: list[str]) -> int:
         self._ensure_initialized()

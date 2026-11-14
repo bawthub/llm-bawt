@@ -83,6 +83,13 @@ def check_service_available() -> bool:
         return False
 
 
+def _service_auth():
+    """The service bearer, when this process has it (mutation routes need it)."""
+    from llm_bawt.bawthub_auth import service_auth
+
+    return service_auth()
+
+
 def api_get(endpoint: str, params: dict | None = None, timeout: float = DEFAULT_TIMEOUT) -> dict | None:
     """Make a GET request to the service API."""
     try:
@@ -106,6 +113,7 @@ def api_post(endpoint: str, json_data: dict | None = None, params: dict | None =
     try:
         response = httpx.post(
             f"{get_service_url()}{endpoint}",
+            auth=_service_auth(),
             json=json_data or {},
             params=params,
             timeout=timeout,
@@ -125,6 +133,7 @@ def api_delete(endpoint: str, params: dict | None = None, timeout: float = DEFAU
     try:
         response = httpx.delete(
             f"{get_service_url()}{endpoint}",
+            auth=_service_auth(),
             params=params,
             timeout=timeout,
         )

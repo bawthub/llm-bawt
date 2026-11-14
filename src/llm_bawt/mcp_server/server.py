@@ -498,6 +498,7 @@ async def update_memory(
 async def delete_memory(
     memory_id: str,
     bot_id: str = "default",
+    user_id: str | None = None,
 ) -> bool:
     """Delete a memory.
 
@@ -510,9 +511,12 @@ async def delete_memory(
     """
     logger.debug("MCP tool invoked: tools/delete_memory bot_id=%s memory_id=%s", bot_id, memory_id)
     storage = _get_storage()
+    if user_id is not None:
+        user_id = history_caller_user(bot_id, user_id, operator=True)
     result = await storage.delete_memory(
         memory_id=memory_id,
         bot_id=bot_id,
+        user_id=user_id,
     )
     return result
 
@@ -663,16 +667,22 @@ async def get_message_by_id(
 
 
 @mcp.tool(name="messages_ignore_by_id")
-async def ignore_message_by_id(bot_id: str = "default", message_id: str = "") -> bool:
+async def ignore_message_by_id(
+    bot_id: str = "default", message_id: str = "", user_id: str | None = None,
+) -> bool:
     """Move a specific message to the forgotten table by ID (soft delete)."""
+    if user_id is not None:
+        user_id = history_caller_user(bot_id, user_id, operator=True)
     storage = _get_storage()
-    return await storage.ignore_message_by_id(bot_id=bot_id, message_id=message_id)
+    return await storage.ignore_message_by_id(bot_id=bot_id, message_id=message_id, user_id=user_id)
 
 
 @mcp.tool(name="messages_restore_ignored")
-async def restore_ignored_messages(bot_id: str = "default") -> int:
+async def restore_ignored_messages(bot_id: str = "default", user_id: str | None = None) -> int:
+    if user_id is not None:
+        user_id = history_caller_user(bot_id, user_id, operator=True)
     storage = _get_storage()
-    return await storage.restore_ignored_messages(bot_id=bot_id)
+    return await storage.restore_ignored_messages(bot_id=bot_id, user_id=user_id)
 
 
 @mcp.tool(name="messages_get_for_summary")

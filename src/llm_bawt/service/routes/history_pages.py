@@ -1,17 +1,21 @@
 """Message paging, hydration, and mutation routes for conversation history."""
 
-from fastapi import APIRouter, HTTPException, Query
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from ..dependencies import get_media_asset_store, get_service
 from ..logging import get_service_logger
 from ..http_errors import internal_error
 from ..schemas import HistoryClearResponse, HistoryMessage, HistoryResponse
+from .service_auth import require_service_token
 from .history_scheduler import hydrate_scheduler_for_page
 from .history_approval_notice import hydrate_approver_notices_for_page
 from .history_resumption import hydrate_resumptions_for_page
 
 read_router = APIRouter()
-mutation_router = APIRouter()
+# TASK-2279: history mutations need the service credential (BawtHub's server).
+mutation_router = APIRouter(dependencies=[Depends(require_service_token)])
 log = get_service_logger(__name__)
 
 def _fetch_attachments_via_shared_engine(
@@ -740,11 +744,14 @@ def get_history_around(
 @mutation_router.delete("/v1/history", response_model=HistoryClearResponse, tags=["History"])
 def clear_history(
     bot_id: str = Query(None, description="Bot ID (uses default if not specified)"),
+    user_id: Annotated[str | None, Query(description="Clear only this user's threads")] = None,
 ):
-    """Clear conversation history for a bot."""
+    """Clear conversation history for a bot, or one user's threads of it."""
     service = get_service()
 
     effective_bot_id = bot_id or service._default_bot
+    if user_id is not None:
+        return _clear_user_history(service, effective_bot_id, user_id)
 
     try:
         # Try the fast path through the service-owned memory client (no model
@@ -770,6 +777,32 @@ def clear_history(
         raise
     except Exception as e:
         raise internal_error(e, "Failed to clear history") from e
+
+
+def _clear_user_history(service, bot_id: str, user_id: str) -> HistoryClearResponse:
+    """Clear one user's threads (messages and rolling summaries) of a bot.
+
+    Distilled memories are bot-wide and stay, as with the user-bound
+    ``messages_clear`` contract (TASK-2279).
+    """
+    owner = user_id.strip()
+    if not owner:
+        raise HTTPException(status_code=400, detail="user_id must be nonblank")
+    try:
+        client = service.get_memory_client(bot_id, owner)
+        if client is None:
+            raise RuntimeError("Memory service unavailable")
+        deleted = client.clear_messages(user_id=owner)
+        service.invalidate_bot_instances(bot_id)
+        return HistoryClearResponse(
+            success=True,
+            message=f"History cleared for user '{owner}' on bot '{bot_id}'",
+            deleted_count=int(deleted),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise internal_error(e, "Failed to clear user history") from e
 
 
 def _clear_history_direct(client, bot_id: str) -> bool:
@@ -803,6 +836,7 @@ def _clear_history_direct(client, bot_id: str) -> bool:
 def delete_message(
     message_id: str,
     bot_id: str = Query(None, description="Bot ID (uses default if not specified)"),
+    user_id: Annotated[str | None, Query(description="Only delete this user's message")] = None,
 ):
     """Delete (forget) a single message by its ID.
 
@@ -820,10 +854,15 @@ def delete_message(
     effective_bot_id = bot_id or service._default_bot
 
     try:
-        client = service.get_memory_client(effective_bot_id)
+        if user_id is not None and not user_id.strip():
+            raise HTTPException(status_code=400, detail="user_id must be nonblank")
+        owner = user_id.strip() if user_id else None
+        client = (service.get_memory_client(effective_bot_id, owner) if owner
+                  else service.get_memory_client(effective_bot_id))
         if client is None:
             raise RuntimeError("Memory service unavailable")
-        forgotten = client.ignore_message_by_id(message_id)
+        forgotten = (client.ignore_message_by_id(message_id, user_id=owner) if owner
+                     else client.ignore_message_by_id(message_id))
 
         if not forgotten:
             raise HTTPException(

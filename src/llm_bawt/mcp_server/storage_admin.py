@@ -87,13 +87,15 @@ class StorageAdminMixin:
             }
         return self.hydrate_message_authors([result], bot_id=bot_id)[0]
 
-    async def ignore_message_by_id(self, bot_id: str = "default", message_id: str = "") -> bool:
+    async def ignore_message_by_id(
+        self, bot_id: str = "default", message_id: str = "", user_id: str | None = None,
+    ) -> bool:
         backend = self._get_backend(bot_id, provision_schema=True)
-        return backend.ignore_message_by_id(message_id)
+        return backend.ignore_message_by_id(message_id, user_id=user_id)
 
-    async def restore_ignored_messages(self, bot_id: str = "default") -> int:
+    async def restore_ignored_messages(self, bot_id: str = "default", user_id: str | None = None) -> int:
         backend = self._get_backend(bot_id, provision_schema=True)
-        return backend.restore_ignored_messages()
+        return backend.restore_ignored_messages(user_id=user_id)
 
     async def get_messages_for_summary(self, bot_id: str = "default", summary_id: str = "") -> list[dict[str, Any]]:
         manager = self.get_short_term_manager(bot_id)

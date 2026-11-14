@@ -384,9 +384,12 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
         self,
         memory_id: str,
         bot_id: str = "default",
+        user_id: str | None = None,
     ) -> bool:
-        """Delete a memory."""
+        """Delete a memory; with ``user_id``, only one that user owns."""
         backend = self._get_backend(bot_id, provision_schema=True)
+        if user_id is not None:
+            return backend.delete_memory(memory_id, user_id=user_id)
         
         try:
             if hasattr(backend, 'delete_memory'):

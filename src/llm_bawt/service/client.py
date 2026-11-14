@@ -528,6 +528,14 @@ class ServiceClient:
             url += "?" + urllib.parse.urlencode(params)
         
         headers = {"Content-Type": "application/json"}
+        if method in ("POST", "DELETE", "PATCH", "PUT"):
+            # Mutation routes need the service bearer (TASK-2279); sent only
+            # when this process has it, so bots' calls stay as they were.
+            from llm_bawt.bawthub_auth import service_token_source
+
+            token = service_token_source().read()
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
         body = json.dumps(data).encode() if data else None
         
         req = urllib.request.Request(url, data=body, headers=headers, method=method)

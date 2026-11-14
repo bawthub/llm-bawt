@@ -1,10 +1,13 @@
 """Memory management routes."""
 
+from typing import Annotated
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from llm_bawt.memory.errors import MemoryUpdateConflictError, MemoryUpdateDuplicateError
 
 from ..dependencies import get_effective_bot_id, get_service, require_memory_client
+from .service_auth import require_service_token
 from ..logging import get_service_logger
 from ..http_errors import internal_error
 from ..schemas import (
@@ -37,6 +40,18 @@ def _owner_client(bot_id: str, user_id: str | None):
     if not user_id or not user_id.strip():
         raise HTTPException(status_code=400, detail="user_id is required to select messages by count or minutes")
     return _require_memory_client_for_bot(bot_id, user_id.strip())
+
+
+def _scoped_client(bot_id: str, user_id: str | None):
+    """User-bound client when the caller pins an owner; the operator's otherwise."""
+    if user_id is not None and not user_id.strip():
+        raise HTTPException(status_code=400, detail="user_id must be nonblank")
+    return _require_memory_client_for_bot(bot_id, user_id.strip() if user_id else None)
+
+
+# TASK-2279: mutations need the service credential (BawtHub's server, never a
+# bot); a pinned user_id narrows them to that user's own rows.
+_SERVICE_ONLY = [Depends(require_service_token)]
 
 
 def _build_preview_response(bot_id: str, messages: list[dict]) -> MessagesPreviewResponse:
@@ -184,15 +199,17 @@ def get_message_by_id(
         raise internal_error(e, f"Failed to get message for bot '{bot_id}'") from e
 
 
-@router.delete("/v1/memory/{memory_id}", response_model=MemoryDeleteResponse, tags=["Memory"])
+@router.delete("/v1/memory/{memory_id}", response_model=MemoryDeleteResponse, tags=["Memory"],
+               dependencies=_SERVICE_ONLY)
 def delete_memory(
     memory_id: str,
+    user_id: Annotated[str | None, Query(description="Only delete a memory sourced entirely from this user's messages")] = None,
     bot_id: str = Depends(get_effective_bot_id),
-    client=Depends(require_memory_client),
 ):
     """Delete a specific memory by ID."""
     try:
-        success = client.delete_memory(memory_id)
+        client = _scoped_client(bot_id, user_id)
+        success = client.delete_memory(memory_id, user_id=user_id.strip()) if user_id else client.delete_memory(memory_id)
         if success:
             return MemoryDeleteResponse(
                 success=True,
@@ -245,16 +262,16 @@ def update_memory(
         raise internal_error(e, f"Failed to update memory for bot '{bot_id}'") from e
 
 
-@router.post("/v1/memory/forget", response_model=MemoryForgetResponse, tags=["Memory"])
+@router.post("/v1/memory/forget", response_model=MemoryForgetResponse, tags=["Memory"],
+             dependencies=_SERVICE_ONLY)
 def forget_messages(
     request: MemoryForgetRequest,
     bot_id: str = Depends(get_effective_bot_id),
-    client=Depends(require_memory_client),
 ):
     """Forget recent messages (soft delete)."""
     try:
         if request.message_id:
-            success = client.ignore_message_by_id(request.message_id)
+            success = _scoped_client(bot_id, request.user_id).ignore_message_by_id(request.message_id)
             if success:
                 return MemoryForgetResponse(
                     success=True,
@@ -288,14 +305,15 @@ def forget_messages(
         raise internal_error(e, f"Failed to forget messages for bot '{bot_id}'") from e
 
 
-@router.post("/v1/memory/restore", response_model=MemoryRestoreResponse, tags=["Memory"])
+@router.post("/v1/memory/restore", response_model=MemoryRestoreResponse, tags=["Memory"],
+             dependencies=_SERVICE_ONLY)
 def restore_messages(
+    user_id: Annotated[str | None, Query(description="Only restore this user's forgotten messages")] = None,
     bot_id: str = Depends(get_effective_bot_id),
-    client=Depends(require_memory_client),
 ):
     """Restore ignored messages."""
     try:
-        restored = client.restore_ignored_messages()
+        restored = _scoped_client(bot_id, user_id).restore_ignored_messages()
         return MemoryRestoreResponse(
             success=True,
             messages_restored=restored,
