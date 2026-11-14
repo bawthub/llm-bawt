@@ -65,8 +65,8 @@ def main() -> None:
 
     # Check for OAuth token (broker endpoint or legacy file). The
     # Anthropic subscription token is still required for the default
-    # (api.anthropic.com) path; the proxy path uses ChatGPT OAuth from
-    # ~/.codex/auth.json but the SDK still needs *some* ANTHROPIC_AUTH_TOKEN
+    # (api.anthropic.com) path; the proxy path gets ChatGPT OAuth from the
+    # app's token broker, but the SDK still needs *some* ANTHROPIC_AUTH_TOKEN
     # to send (the proxy ignores its value).
     from .bridge import _get_fresh_oauth_token
     if not _get_fresh_oauth_token():

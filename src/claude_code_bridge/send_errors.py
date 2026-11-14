@@ -7,7 +7,8 @@ from dataclasses import dataclass
 
 CLAUDE_CREDENTIAL_ERROR_MARKER = "[credential_expired:claude]"
 
-# ChatGPT-subscription OAuth (the ~/.codex/auth.json bundle) rides the bridge's
+# ChatGPT-subscription OAuth (an app-owned bundle served by the app's token
+# broker) rides the bridge's
 # Anthropic-compat proxy under the ``openai_chatgpt`` provider prefix. BawtHub's
 # established recovery contract for that bundle is the codex marker → its
 # "Reconnect ChatGPT" flow — reuse it so proxy 401s open the RIGHT reconnect.

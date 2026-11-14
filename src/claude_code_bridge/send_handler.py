@@ -315,8 +315,8 @@ class ClaudeSendMixin(
 
                     # TASK-270: route this turn to the in-process Anthropic-compat
                     # proxy when the model name carries a known provider prefix
-                    # (e.g. "openai_chatgpt/gpt-5.4"). The proxy reads ChatGPT
-                    # OAuth from ~/.codex/auth.json and forwards to OpenAI's
+                    # (e.g. "openai_chatgpt/gpt-5.4"). The proxy fetches ChatGPT
+                    # OAuth from the app's token broker and forwards to OpenAI's
                     # Responses API. Otherwise fall through to Anthropic-direct.
                     use_proxy = (
                         self._proxy_base_url is not None
