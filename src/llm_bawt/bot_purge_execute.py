@@ -112,8 +112,9 @@ def evict_partition_caches(slug: str) -> None:
     """Drop cached partition Table objects so a later write re-resolves them."""
     storage = re.sub(r"[^a-z0-9_]", "", slug) or "default"
     try:
-        from .memory.postgresql import _forgotten_table_cache, _memory_table_cache, _message_table_cache
-    except Exception:  # pragma: no cover - memory backend not importable
+        from .memory.postgresql import _memory_table_cache
+        from .memory.message_store import _forgotten_table_cache, _message_table_cache
+    except ImportError:  # pragma: no cover - memory backend not importable
         return
     keys = {f"messages_p_{storage}", f"memories_p_{storage}", f"forgotten_messages_p_{storage}"}
     for cache in (_memory_table_cache, _message_table_cache, _forgotten_table_cache):

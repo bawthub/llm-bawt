@@ -1009,7 +1009,7 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
         key="agents.injected_skills.entry",
         title="Injected Skills: Entry",
         category="agent_execution",
-        required_vars=("body",),
+        required_vars=("ref", "base_dir", "body"),
         loader=load_injected_skills_entry,
         metadata={"notes": (
             "One injected skill (TASK-1309). Variables: {ref} (skill name), "

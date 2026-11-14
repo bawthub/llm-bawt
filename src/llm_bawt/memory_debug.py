@@ -42,12 +42,14 @@ Usage:
 import argparse
 import sys
 from datetime import datetime
+from uuid import UUID
 
 import httpx
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
 
+from llm_bawt.default_user import default_user_id
 from llm_bawt.utils.config import config
 
 console = Console()
@@ -336,45 +338,56 @@ def search_memories(bot_id: str, query: str, method: str, limit: int, min_import
 
 def handle_delete_memory(bot_id: str, memory_id: str, skip_confirm: bool):
     """Delete a specific memory by ID."""
-    # First, try to find the memory to show what will be deleted
-    data = api_post("/v1/memory/search", {
-        "query": "",
-        "method": "embedding",
-        "limit": 100,
-        "bot_id": bot_id,
-    })
+    try:
+        full_id = str(UUID(memory_id))
+    except ValueError:
+        full_id = None
 
-    matching = None
-    if data and data.get("results"):
-        for mem in data["results"]:
-            if mem.get("id", "").startswith(memory_id):
-                matching = mem
-                break
+    if full_id is not None:
+        # A complete ID is authoritative; a top-100 search cannot establish
+        # whether a lower-ranked memory exists. The DELETE endpoint checks it.
+        console.print("[bold]Memory to delete:[/bold]")
+        console.print(f"  ID: [dim]{full_id}[/dim]")
+        console.print(f"  Bot: {bot_id}")
+        console.print("[dim]Content preview unavailable for direct UUID deletion.[/dim]")
+    else:
+        data = api_post("/v1/memory/search", {
+            "query": "",
+            "method": "embedding",
+            "limit": 100,
+            "bot_id": bot_id,
+        })
 
-    if not matching:
-        # Try listing all memories
-        data = api_get("/v1/memory", {"bot_id": bot_id, "limit": 100})
+        matching = None
         if data and data.get("results"):
             for mem in data["results"]:
                 if mem.get("id", "").startswith(memory_id):
                     matching = mem
                     break
 
-    if not matching:
-        console.print(f"[red]Memory '{memory_id}' not found[/red]")
-        return
+        if not matching:
+            data = api_get("/v1/memory", {"bot_id": bot_id, "limit": 100})
+            if data and data.get("results"):
+                for mem in data["results"]:
+                    if mem.get("id", "").startswith(memory_id):
+                        matching = mem
+                        break
 
-    full_id = matching.get("id", memory_id)
-    content = matching.get("content", "")
-    if not isinstance(content, str):
-        import json
-        content = json.dumps(content, indent=2, ensure_ascii=False)
-    tags = matching.get("tags", [])
+        if not matching:
+            console.print(f"[red]Memory '{memory_id}' not found[/red]")
+            return
 
-    console.print("[bold]Memory to delete:[/bold]")
-    console.print(f"  ID: [dim]{full_id}[/dim]")
-    console.print(f"  Tags: [magenta]{', '.join(tags) if tags else 'none'}[/magenta]")
-    console.print(f"  Content: {content}")
+        full_id = matching.get("id", memory_id)
+        content = matching.get("content", "")
+        if not isinstance(content, str):
+            import json
+            content = json.dumps(content, indent=2, ensure_ascii=False)
+        tags = matching.get("tags", [])
+
+        console.print("[bold]Memory to delete:[/bold]")
+        console.print(f"  ID: [dim]{full_id}[/dim]")
+        console.print(f"  Tags: [magenta]{', '.join(tags) if tags else 'none'}[/magenta]")
+        console.print(f"  Content: {content}")
     console.print()
 
     if not skip_confirm:
@@ -591,7 +604,29 @@ def handle_list_profiles():
 
 
 def handle_delete_attribute(attribute_id: int, skip_confirm: bool):
-    """Delete a user profile attribute by ID."""
+    """Preview and confirm deletion of a profile attribute by ID."""
+    # There is no GET-by-ID route; use the paginated attribute listing.
+    offset = 0
+    attribute = None
+    while attribute is None:
+        data = api_get("/v1/profiles/attribute", {"limit": 500, "offset": offset})
+        if not data:
+            console.print(f"[red]Unable to preview attribute {attribute_id}; not deleted.[/red]")
+            return
+        attributes = data.get("attributes", [])
+        attribute = next((attr for attr in attributes if attr.get("id") == attribute_id), None)
+        offset += len(attributes)
+        if attribute is None and (not attributes or offset >= data.get("total_count", offset)):
+            console.print(f"[red]Attribute {attribute_id} not found; not deleted.[/red]")
+            return
+
+    console.print("[bold]Attribute to delete:[/bold]")
+    console.print(f"  ID: {attribute_id}")
+    console.print(f"  {attribute.get('category', '?')}.{attribute.get('key', '?')} = {attribute.get('value', '?')}")
+    if not skip_confirm and not _confirm("[bold yellow]Delete this attribute? (y/N):[/bold yellow] "):
+        console.print("[dim]Cancelled[/dim]")
+        return
+
     result = api_delete(f"/v1/profiles/attribute/{attribute_id}")
 
     if not result:
@@ -700,11 +735,12 @@ def handle_msg_forget(bot_id: str, count: int, skip_confirm: bool):
     console.print(f"[bold]Messages to forget ({len(messages)}):[/bold]\n")
     display_messages_preview(messages)
 
+    console.print("[yellow]Derived memories will be permanently deleted. --msg-restore restores messages only.[/yellow]")
     if skip_confirm or _confirm("\n[bold yellow]Forget these messages? (y/N):[/bold yellow] "):
         result = api_post("/v1/memory/forget", {"count": count}, {"bot_id": bot_id})
         if result:
             console.print(f"[green]{result.get('message', 'Done')}[/green]")
-            console.print("[dim]Use --msg-restore to undo[/dim]")
+            console.print("[dim]Derived memories are permanently deleted. --msg-restore restores messages only.[/dim]")
     else:
         console.print("[dim]Cancelled[/dim]")
 
@@ -721,11 +757,12 @@ def handle_msg_forget_since(bot_id: str, minutes: int, skip_confirm: bool):
     console.print(f"[bold]Messages from last {minutes} minutes to forget ({len(messages)}):[/bold]\n")
     display_messages_preview(messages)
 
+    console.print("[yellow]Derived memories will be permanently deleted. --msg-restore restores messages only.[/yellow]")
     if skip_confirm or _confirm("\n[bold yellow]Forget these messages? (y/N):[/bold yellow] "):
         result = api_post("/v1/memory/forget", {"minutes": minutes}, {"bot_id": bot_id})
         if result:
             console.print(f"[green]{result.get('message', 'Done')}[/green]")
-            console.print("[dim]Use --msg-restore to undo[/dim]")
+            console.print("[dim]Derived memories are permanently deleted. --msg-restore restores messages only.[/dim]")
     else:
         console.print("[dim]Cancelled[/dim]")
 
@@ -1242,8 +1279,8 @@ Examples:
     profile_group = parser.add_argument_group("Entity Profiles")
     profile_group.add_argument("--list-profiles", action="store_true",
                                help="List all profiles (users and bots) with attribute counts")
-    profile_group.add_argument("--list-attrs", metavar="ENTITY", nargs="?", const="user",
-                               help="List profile attributes (auto-detects if user or bot)")
+    profile_group.add_argument("--list-attrs", metavar="ENTITY", nargs="?", const="",
+                               help="List profile attributes (defaults to the configured user)")
     profile_group.add_argument("--delete-attr", metavar="ID", type=int,
                                help="Delete a profile attribute by ID")
 
@@ -1251,7 +1288,7 @@ Examples:
     msg_group = parser.add_argument_group("Message History (conversation logs)")
     msg_group.add_argument("--msg", action="store_true", help="Show recent messages")
     msg_group.add_argument("--msg-search", metavar="QUERY", help="Search message history")
-    msg_group.add_argument("--msg-forget", type=int, metavar="N", help="Forget last N messages (reversible)")
+    msg_group.add_argument("--msg-forget", type=int, metavar="N", help="Forget last N messages; permanently delete derived memories")
     msg_group.add_argument("--msg-forget-since", type=int, metavar="MIN", help="Forget messages from last N minutes")
     msg_group.add_argument("--msg-get", metavar="ID", help="Get a message by ID (supports prefix match)")
     msg_group.add_argument("--msg-forget-id", metavar="ID", help="Forget a specific message by ID")
@@ -1284,8 +1321,12 @@ Examples:
         handle_list_profiles()
         return
 
-    if args.list_attrs:
-        handle_list_attrs(args.list_attrs)
+    if args.list_attrs is not None:
+        entity_id = args.list_attrs or default_user_id()
+        if not entity_id:
+            console.print("[red]Pass --list-attrs <entity_id> or configure LLM_BAWT_DEFAULT_USER.[/red]")
+            sys.exit(1)
+        handle_list_attrs(entity_id)
         return
 
     if args.delete_attr:

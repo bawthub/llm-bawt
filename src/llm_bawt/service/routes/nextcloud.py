@@ -4,7 +4,7 @@ import asyncio
 
 from fastapi import APIRouter, HTTPException, Request
 
-from ..dependencies import get_service
+from ..dependencies import get_bot_profile_store, get_service
 from ..logging import get_service_logger
 from ..http_errors import internal_error
 from ..schemas import NextcloudProvisionRequest, NextcloudProvisionResponse
@@ -28,6 +28,12 @@ async def provision_nextcloud_talk(request: NextcloudProvisionRequest):
     from llm_bawt.integrations.nextcloud.provisioner import get_provisioner_client
     from llm_bawt.integrations.nextcloud.manager import get_nextcloud_manager
 
+    # Reject a typo or purged identity before creating any remote resources.
+    config = get_service().config
+    profile = await asyncio.to_thread(
+        lambda: get_bot_profile_store(config).get(request.bot_id.strip().lower()))
+    if profile is None:
+        raise HTTPException(status_code=404, detail=f"Bot profile not found: {request.bot_id}")
     manager = get_nextcloud_manager()
 
     # Check if already configured

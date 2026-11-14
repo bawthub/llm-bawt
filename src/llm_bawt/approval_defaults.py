@@ -167,17 +167,90 @@ _OPS_DEFAULT_POLICIES: list[dict[str, Any]] = [
 ]
 
 
+# Match literal shell words as units, so separators/flags inside quoted data do
+# not become command positions. Possessive repetition prevents splitting a word
+# (or exponential backtracking) when a later command does not match.
+_SHELL_WORD = r"""(?:[^\s'"\\;&|()<>#]|'[^']*'|"(?:\\.|[^"\\])*"|\\[^\n])++"""
+_COMMAND_SEPARATOR = r"(?:&&|\|\||[;|&\n])"
+_BIN_PATH = r"(?:/(?:usr/)?bin/)?"
+_SSH = (
+    rf"{_BIN_PATH}ssh[ \t]+"
+    r"(?:(?:-[46AaCfGgKkMNnqsTtVvXxYy]+|-[BbcDEeFIiJLlmOopQRSWw][ \t]*[^\s'\";&|]+)[ \t]+)*"
+    r"[^\s'\"\\;&|()\-][^\s'\"\\;&|()]*[ \t]+"
+)
+_WRAPPER = (
+    rf"(?:{_BIN_PATH}(?:command(?:[ \t]+--)?|exec)[ \t]+|"
+    rf"{_BIN_PATH}env[ \t]+(?:[A-Za-z_][A-Za-z_0-9]*={_SHELL_WORD}[ \t]+)*|"
+    rf"{_BIN_PATH}sudo[ \t]+(?:(?:-[nEHPS]+|-[ug][ \t]+{_SHELL_WORD})[ \t]+)*|{_SSH})"
+)
+
+
+def _shell_command_pattern(command: str) -> str:
+    """Anchor the two starter rules at literal commands, not arbitrary text.
+
+    Supports command lists, common transparent wrappers and literal SSH/sh -c
+    payloads. This is deliberately not a general shell parser (expansions,
+    heredocs and dynamically constructed commands are outside this grammar).
+    """
+    def prefix(word: str) -> str:
+        preceding = rf"{word}(?:[ \t]+{word})*[ \t]*{_COMMAND_SEPARATOR}[ \t]*"
+        assignment = rf"[A-Za-z_][A-Za-z_0-9]*=(?:{word})?[ \t]+"
+        # These programs execute a following argv. Consume only their options,
+        # not arbitrary arguments (which would turn echo/grep data into code).
+        xargs_option = (
+            rf"(?:--(?:arg-file|delimiter|eof|max-lines|max-args|max-procs|replace|max-chars)"
+            rf"(?:=|[ \t]+){word}|--[a-z-]+|-[adEILnPs](?:[ \t]*{word})|-[0oprtx]+)"
+        )
+        timeout_option = rf"(?:--(?:signal|kill-after)(?:=|[ \t]+){word}|-[sk][ \t]*{word}|--[a-z-]+|-[v]+)"
+        argv_wrapper = (
+            rf"{_BIN_PATH}(?:"
+            rf"xargs[ \t]+(?:{xargs_option}[ \t]+)*(?:--[ \t]+)?|"
+            rf"timeout[ \t]+(?:{timeout_option}[ \t]+)*(?:--[ \t]+)?[0-9]+(?:\.[0-9]+)?[smhd]?[ \t]+|"
+            rf"nice[ \t]+(?:(?:-n[ \t]*[+-]?[0-9]+|--adjustment(?:=|[ \t]+)[+-]?[0-9]+|-[0-9]+)[ \t]+)?(?:--[ \t]+)?|"
+            rf"(?:nohup|time)[ \t]+(?:-p[ \t]+)?(?:--[ \t]+)?|"
+            rf"stdbuf[ \t]+(?:(?:-[ioe][ \t]*{word}|--(?:input|output|error)(?:=|[ \t]+){word})[ \t]+)+(?:--[ \t]+)?"
+            rf")"
+        )
+        find_exec = rf"{_BIN_PATH}find[ \t]+(?:{word}[ \t]+)*?-(?:exec|execdir)[ \t]+"
+        syntax = r"(?:\([ \t]*|\{[ \t]+|(?:do|then|else|elif)[ \t]+)"
+        return rf"[ \t]*(?:{preceding}|{_WRAPPER}|{assignment}|{argv_wrapper}|{find_exec}|{syntax})*"
+
+    def body(word: str, end: str) -> str:
+        return prefix(word) + command.format(word=word, end=end)
+
+    end = rf"(?=[ \t]|{_COMMAND_SEPARATOR}|\Z)"
+    direct = body(_SHELL_WORD, end)
+    # A quoted remote payload is shell code; a quoted echo/grep argument isn't.
+    # Only literal payloads are handled here, without escaped outer quotes.
+    remote = rf"(?:{_SSH}|{_BIN_PATH}(?:ba)?sh[ \t]+-[a-z]*c[ \t]+)"
+    quoted = []
+    for quote in ("'", '"'):
+        other = '"' if quote == "'" else "'"
+        word = rf"""(?:[^\s'"\\;&|()<>#]|{other}[^{other}{quote}]*{other})++"""
+        quoted.append(remote + quote + body(word, rf"(?=[ \t]|{_COMMAND_SEPARATOR}|{quote})"))
+    # The same command-list/wrapper prefix applies before the quoted wrapper.
+    return rf"\A(?:{direct}|{prefix(_SHELL_WORD)}(?:{'|'.join(quoted)}))"
+
+
+_RM_OPTION = r"(?:-[a-zA-Z]*[rRf][a-zA-Z]*|--recursive|--force)"
+
+
 _DEFAULT_POLICIES: list[dict[str, Any]] = [
     {
         "backend_scope": "*", "tool_name": "Bash", "matcher_type": "regex",
-        "pattern": r"\brm\b\s+(-[a-zA-Z]*\s+)*-[a-zA-Z]*[rRf][a-zA-Z]*",
+        "pattern": _shell_command_pattern(
+            rf"{_BIN_PATH}rm[ \t]+"
+            r"(?:(?!(?:--|'--'|\"--\"){end}){word}[ \t]+)*"
+            rf"(?:{_RM_OPTION}|'{_RM_OPTION}'|\"{_RM_OPTION}\"){{end}}"
+        ),
         "action": "require_approval", "severity": "high", "category": "filesystem",
         "approval_prompt": "This will recursively/forcibly delete files. Approve?",
         "order": 10,
     },
     {
-        "backend_scope": "*", "tool_name": "Bash", "matcher_type": "prefix",
-        "pattern": "sudo ", "action": "require_approval", "severity": "high",
+        "backend_scope": "*", "tool_name": "Bash", "matcher_type": "regex",
+        "pattern": _shell_command_pattern(rf"{_BIN_PATH}sudo{{end}}"),
+        "action": "require_approval", "severity": "high",
         "category": "privilege", "order": 20,
     },
     {

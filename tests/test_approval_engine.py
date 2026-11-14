@@ -482,6 +482,85 @@ def test_ambiguous_or_executable_heredocs_are_never_trimmed():
         assert evaluate(_live_bash_rules(), "claude-code", "Bash", {"command": command}).requires_approval, command
 
 
+def _starter_policy(category: str) -> ApprovalPolicy:
+    from llm_bawt.approval_defaults import _DEFAULT_POLICIES
+
+    row = next(row for row in _DEFAULT_POLICIES if row["category"] == category)
+    return ApprovalPolicy.from_dict({"id": f"starter-{category}", **row})
+
+
+def test_starter_rm_gates_recursive_or_force_options():
+    policy = _starter_policy("filesystem")
+    for command in (
+        "rm -rf /x", "rm -fr /x", "rm -R /x", "rm -f /x",
+        "rm --recursive --force /x", "rm --recursive /x", "rm --force /x",
+        "rm /x -rf", "rm /x /y --force", "rm /x --recursive --force",
+        "rm -v /x -R", "rm -rf -- /x", "rm '/x y' --force",
+        "rm /x '-rf'", 'rm "--recursive" /x',
+        "cd /x && rm /y -rf", "true;rm /x --force", "pwd\nrm /x -r",
+        "/bin/rm /x -rf", "/usr/bin/rm --recursive /x",
+        "ssh host rm /x -rf", "ssh -p 22 host rm --recursive /x",
+        "ssh host 'cd /x && rm /y -rf'", 'ssh host "rm /x --force"',
+        "bash -c 'rm /x -rf'", "sudo -u root rm /x -rf",
+        "env MODE=test command rm /x -rf",
+    ):
+        decision = evaluate([policy], "claude-code", "Bash", {"command": command})
+        assert decision.requires_approval, command
+        assert decision.subject == command
+        assert decision.grant_key == grant_key("claude-code", "Bash", command)
+
+
+def test_starter_rm_only_gates_option_tokens_before_double_dash():
+    policy = _starter_policy("filesystem")
+    for command in (
+        "rm /x", "rm -v /x", "rm -- /x -rf", "rm /x -- --recursive --force",
+        "rm '--' -rf", 'rm "--" --force', "rm /tmp/-rf",
+        "rm /tmp/--recursive", "rm /x-rf", "rm --forceful /x",
+        "rm -rf.txt", "rm 'a -rf'", 'rm "a --force"',
+        "rm /x; echo -rf", "rm /x && printf '%s' --force",
+        "echo rm -rf /x", "echo 'cd /x && rm /y -rf'",
+        'printf "%s" "rm --recursive --force /x"',
+        "grep 'rm /x -rf' notes", "env grep 'rm --force /x' notes",
+        "printf '%s' /tmp/rm -rf", "/tmp/not-rm -rf /x",
+        "ssh host 'echo rm -rf /x'", r'ssh host "echo \"rm -rf /x\""',
+        "bash -c 'echo rm -rf /x'",
+    ):
+        assert evaluate([policy], "claude-code", "Bash", {"command": command}).is_allowed, command
+
+
+def test_starter_sudo_gates_command_positions_and_wrappers():
+    policy = _starter_policy("privilege")
+    for command in (
+        "sudo id", "  sudo\tid", "sudo", "cd /x && sudo id",
+        "false || sudo id", "pwd;sudo id", "pwd\nsudo id", "true | sudo id",
+        "/usr/bin/sudo id", "/bin/sudo id", "ssh host sudo id",
+        "ssh -p 22 -o BatchMode=yes host sudo id",
+        "ssh -p22 host sudo id", "ssh user@host-1 sudo id", "ssh host 'sudo id'",
+        'ssh host "cd /x && sudo id"', "cd /x && ssh host 'sudo id'",
+        "bash -c 'sudo id'", "sh -lc 'cd /x && sudo id'",
+        "ssh host 'echo \"literal; sudo\" && sudo id'",
+        'ssh host "echo \'literal; sudo\' && sudo id"',
+        "env MODE=test sudo id", "command sudo id", "exec sudo id",
+        "echo 'sudo is literal'; sudo id", "grep 'sudo' notes && sudo id",
+    ):
+        assert evaluate([policy], "claude-code", "Bash", {"command": command}).requires_approval, command
+
+
+def test_starter_sudo_does_not_gate_literal_data_or_substrings():
+    policy = _starter_policy("privilege")
+    for command in (
+        "echo sudo id", "echo 'cd /x && sudo id'", 'echo "sudo id; sudo id"',
+        "printf '%s' sudo", "grep sudo notes", "rg 'sudo id' notes",
+        "env grep 'sudo id' notes", "cat /tmp/sudo", "/tmp/not-sudo id",
+        "sudoedit /x", "echo /usr/bin/sudo", "ssh sudo hostname",
+        "ssh -o sudo host hostname", "ssh host echo sudo id",
+        "ssh host 'echo sudo id'", 'ssh host "echo \'sudo id; sudo id\'"',
+        "bash -c 'echo sudo id'", "echo 'x && sudo id'; true",
+        "printf '%s' 'a\nsudo id'", r"echo x\;sudo id",
+    ):
+        assert evaluate([policy], "claude-code", "Bash", {"command": command}).is_allowed, command
+
+
 if __name__ == "__main__":
     # Standalone runner for environments without pytest.
     import sys

@@ -28,6 +28,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -37,6 +38,7 @@ PREVIEW_RE = re.compile(r"^agent:house:([a-z0-9][a-z0-9-]{0,30}):preview$")
 #: K keyspace channel, $ string commands (SET), g generic (DEL), x expired.
 REQUIRED_FLAGS = "K$gx"
 RECONNECT_SECONDS = 5.0
+RECREATE_TIMEOUT_SECONDS = 60.0
 
 UP, DOWN, RECREATING, UNKNOWN = "up", "down", "recreating", "unknown"
 
@@ -56,12 +58,17 @@ class HouseStates:
     def __init__(self) -> None:
         self.epochs: dict[str, dict[str, str]] = {}
         self.state: dict[str, str] = {}
+        self.recreating_since: dict[str, float] = {}
 
     def _set_state(self, house: str, new: str) -> list[tuple[str, str | None, str]]:
         old = self.state.get(house)
         if old == new:
             return []
         self.state[house] = new
+        if new == RECREATING:
+            self.recreating_since[house] = time.monotonic()
+        else:
+            self.recreating_since.pop(house, None)
         return [(house, old, new)]
 
     def on_set(self, house: str, backend: str, epoch: str | None) -> list:
@@ -87,7 +94,7 @@ class HouseStates:
         out: list = []
         live = {house for house, _ in leases}
         for house in list(self.state):
-            if house not in live and self.state[house] == UP:
+            if house not in live and self.state[house] != DOWN:
                 self.epochs.pop(house, None)
                 out += self._set_state(house, DOWN)
         for (house, backend), epoch in sorted(leases.items()):
@@ -258,6 +265,37 @@ class HouseWatcher:
             return
         await self._emit(transitions)
 
+    async def reconcile_recreating(self, client: Any) -> None:
+        """Bound a release with no replacement, even without a reconnect."""
+        now = time.monotonic()
+        due = {house: since for house, since in self.states.recreating_since.items()
+               if now - since >= RECREATE_TIMEOUT_SECONDS}
+        if not due:
+            return
+        leases = await self._read_leases(client)
+        transitions = []
+        for house, since in due.items():
+            # A newer event may have arrived during the snapshot read.
+            if self.states.recreating_since.get(house) != since:
+                continue
+            live = [(backend, epoch) for (h, backend), epoch in leases.items() if h == house]
+            if live:
+                for backend, epoch in live:
+                    transitions += self.states.on_set(house, backend, epoch)
+            else:
+                self.states.epochs.pop(house, None)
+                transitions += self.states._set_state(house, DOWN)
+        await self._emit(transitions)
+
+    async def _watch_recreating(self, client: Any) -> None:
+        while True:
+            await asyncio.sleep(RECONNECT_SECONDS)
+            try:
+                await self.reconcile_recreating(client)
+            except Exception:
+                # A failed lease read is not evidence that a house is down.
+                log.warning("house recreation reconciliation failed", exc_info=True)
+
     async def run(self) -> None:
         import redis.asyncio as aioredis
 
@@ -268,6 +306,7 @@ class HouseWatcher:
         while True:
             client = aioredis.from_url(url, decode_responses=True)
             pubsub = client.pubsub()
+            recreation_watch = asyncio.create_task(self._watch_recreating(client))
             try:
                 db = client.connection_pool.connection_kwargs.get("db", 0)
                 await pubsub.psubscribe(f"__keyspace@{db}__:agent:house:*:lease:*",
@@ -300,6 +339,8 @@ class HouseWatcher:
             except Exception:
                 log.warning("house watcher disconnected; resubscribing", exc_info=True)
             finally:
+                recreation_watch.cancel()
+                await asyncio.gather(recreation_watch, return_exceptions=True)
                 try:
                     await pubsub.aclose()
                     await client.aclose()

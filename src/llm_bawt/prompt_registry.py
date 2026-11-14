@@ -812,6 +812,9 @@ def get_prompt_resolver(config: Config | None = None) -> PromptResolver:
     global _DEFAULT_PROMPT_RESOLVER
     if config is None:
         if _DEFAULT_PROMPT_RESOLVER is None:
-            _DEFAULT_PROMPT_RESOLVER = PromptResolver()
+            resolver = PromptResolver()
+            if resolver.store.engine is not None:
+                _DEFAULT_PROMPT_RESOLVER = resolver
+            return resolver
         return _DEFAULT_PROMPT_RESOLVER
     return PromptResolver(config)

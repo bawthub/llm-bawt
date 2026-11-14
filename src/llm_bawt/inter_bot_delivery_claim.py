@@ -236,7 +236,7 @@ class DeliveryClaim:
                         jumper = load_steer_jumper(conn, head, store.config)
                         if jumper is None or jumper["status"] != QUEUED:
                             return None
-                        head, jumped = jumper, True
+                        head, jumped, exempt_owner = jumper, True, None
                         continue
                     if not can_steer or not prefer_steer:
                         return None

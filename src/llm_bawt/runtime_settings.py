@@ -954,9 +954,9 @@ class RuntimeSettingsResolver:
             return request_overrides[key], "request_override"
 
         self._refresh_cache_if_needed()
-        if key in self._bot_cache and not _is_global_only(key):
+        if self._bot_cache.get(key) is not None and not _is_global_only(key):
             return self._bot_cache[key], "bot_override"
-        if key in self._global_cache:
+        if self._global_cache.get(key) is not None:
             return self._global_cache[key], "global_override"
 
         if fallback is not None:

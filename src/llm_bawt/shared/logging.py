@@ -9,6 +9,7 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
+from copy import copy
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum, auto
@@ -243,17 +244,19 @@ class LogConfig:
         console_level = logging.INFO if (verbose or debug) else logging.WARNING
         root_level = logging.DEBUG if debug else console_level
         log_file_name = f"{log_prefix}.debug.log" if log_prefix else "llm-bawt.debug.log"
-        class _PrefixFilter(logging.Filter):
-            def filter(self, record: logging.LogRecord) -> bool:
-                if not log_prefix:
-                    return True
-                # Format the message first if there are args, then prepend prefix
-                if record.args:
-                    record.msg = record.msg % record.args
-                    record.args = ()
-                # Escape [ for Rich markup
-                record.msg = f"\\[{log_prefix}] {record.msg}"
-                return True
+        class _PrefixFormatter(logging.Formatter):
+            def __init__(self, *args, markup=False, **kwargs):
+                super().__init__(*args, **kwargs)
+                from rich.markup import escape
+                self.prefix = escape(f"[{log_prefix}]") if markup else f"[{log_prefix}]"
+
+            def format(self, record: logging.LogRecord) -> str:
+                # Each handler owns its formatting; never mutate the shared record.
+                local = copy(record)
+                if log_prefix:
+                    local.msg = f"{self.prefix} {record.getMessage()}"
+                    local.args = ()
+                return super().format(local)
 
         def _add_debug_file_handler() -> None:
             os.makedirs(log_dir, exist_ok=True)
@@ -275,11 +278,10 @@ class LogConfig:
                 encoding="utf-8",
             )
             handler.setLevel(logging.DEBUG)
-            handler.setFormatter(logging.Formatter(
+            handler.setFormatter(_PrefixFormatter(
                 "%(asctime)s | %(name)s | %(levelname)s | %(message)s",
                 datefmt="%Y-%m-%d %H:%M:%S",
             ))
-            handler.addFilter(_PrefixFilter())
             root.addHandler(handler)
         
         # Create a Rich console that renders even when backgrounded
@@ -295,7 +297,7 @@ class LogConfig:
                 rich_tracebacks=True,
                 markup=True,
             )
-            handler.addFilter(_PrefixFilter())
+            handler.setFormatter(_PrefixFormatter(markup=True))
             handler.setLevel(console_level)
             root.addHandler(handler)
             root.setLevel(root_level)
@@ -313,7 +315,7 @@ class LogConfig:
                 rich_tracebacks=True,
                 markup=True,
             )
-            handler.addFilter(_PrefixFilter())
+            handler.setFormatter(_PrefixFormatter(markup=True))
             root.addHandler(handler)
             root.setLevel(root_level)
             logging.getLogger("llm_bawt").setLevel(logging.INFO)
@@ -328,7 +330,7 @@ class LogConfig:
             rich_tracebacks=True,
             markup=True,
         )
-        handler.addFilter(_PrefixFilter())
+        handler.setFormatter(_PrefixFormatter(markup=True))
         root.addHandler(handler)
         root.setLevel(root_level)
 

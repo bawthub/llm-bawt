@@ -409,6 +409,8 @@ def test_provision_route_reports_an_unusable_record_as_400(monkeypatch, code):
     monkeypatch.setenv("LLM_BAWT_TALK_PROVISIONER_TOKEN", "env-token")
     stub_integrations(monkeypatch, {"talk-provisioner": ConnectionUnavailable(code)})
     monkeypatch.setattr(routes, "get_service", lambda: SimpleNamespace(config=_config()))
+    monkeypatch.setattr(routes, "get_bot_profile_store",
+                        lambda config: SimpleNamespace(get=lambda slug: SimpleNamespace(slug=slug)))
     monkeypatch.setattr(nextcloud_manager, "get_nextcloud_manager",
                         lambda: SimpleNamespace(get_bot=lambda _bot: None))
     app = FastAPI()

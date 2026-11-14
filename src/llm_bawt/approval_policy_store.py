@@ -430,7 +430,11 @@ class ToolApprovalPolicyStore(ApprovalRequestStoreMixin):
         if self.engine is None:
             raise RuntimeError("Tool approval policies DB unavailable")
         seeded = 0
-        if not self.list_all():
+        with Session(self.engine) as session:
+            has_revisions = session.exec(select(ToolApprovalPolicyRevision.id).limit(1)).first() is not None
+        # Random-id legacy defaults must not resurrect a deliberately emptied
+        # policy set. Pre-revision databases retain their one-time bootstrap.
+        if not self.list_all() and not has_revisions:
             for default in _DEFAULT_POLICIES:
                 self.create(default, actor="seed")
                 seeded += 1

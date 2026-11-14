@@ -145,7 +145,7 @@ def _rig(monkeypatch, *, store, others=(), intent=None, cached="h1"):
                         lambda config: store)
     monkeypatch.setattr(house_lease, "tenants", lambda config, house: list(others))
     monkeypatch.setattr(house_lease, "request_recycle",
-                        lambda config, house: calls.recycled.append(house))
+                        lambda config, house: calls.recycled.append(house) if not others else None)
     monkeypatch.setattr(house_lease, "_publish",
                         lambda config, action: calls.published.append(action))
     monkeypatch.setattr("llm_bawt.bots.invalidate_bots_cache", lambda: None)
@@ -207,6 +207,20 @@ def test_pin_landing_after_the_read_keeps_the_tenancy(monkeypatch):
     assert store.writes[0]["expected_fields"]["house_pinned"] is False
     assert llm.client._bot_config["house"] == "h1"
     assert calls.recycled == [] and calls.invalidated == [] and calls.published == []
+
+
+def test_tenancy_read_failure_after_eviction_does_not_fail_reset(monkeypatch):
+    recycle = house_lease.request_recycle
+    store = Store()
+    service, llm, calls = _rig(monkeypatch, store=store)
+    monkeypatch.setattr(house_lease, "request_recycle", recycle)
+    def fail(*args):
+        raise RuntimeError("database unavailable")
+    monkeypatch.setattr(house_lease, "tenants", fail)
+    monkeypatch.setattr("llm_bawt.utils.db.get_shared_engine", fail)
+    assert house_lease.evict_for_reset(service, llm, "b", delivery_id=None) == "h1"
+    assert store.writes and calls.recycled == []
+    assert "house" not in llm.client._bot_config
 
 
 def test_failed_eviction_never_fails_the_reset(monkeypatch):

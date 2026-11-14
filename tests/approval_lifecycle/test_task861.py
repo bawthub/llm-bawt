@@ -102,6 +102,7 @@ def test_unavailable_is_not_an_empty_bundle():
     {"matcher_type": "prefix", "pattern": ""},
     {"matcher_type": "bogus"}, {"action": "bogus"}, {"severity": "bogus"},
     {"tool_name": " "}, {"pattern": "x\x00"}, {"order": 1, "order_index": 2},
+    {"category": "x" * 65}, {"category": "x\x00"},
 ])
 def test_invalid_create_is_rejected(client, payload):
     response = client.post("/v1/tool-approval-policies", json=payload)
@@ -141,6 +142,30 @@ def test_revisions_reconstruct_create_update_delete(client, store):
     assert [r["change"] for r in response["revisions"]] == ["delete", "update", "create"]
     assert response["revisions"][-1]["policy"]["pattern"] == "a"
     assert response["revisions"][1]["actor"] == "second"
+
+
+def test_empty_policy_set_with_revision_tombstones_is_not_reseeded(store):
+    assert store.seed_defaults() > 0
+    for policy in store.list_all():
+        assert store.delete(policy.id)
+    assert store.list_all() == []
+    assert store.seed_defaults() == 0
+    assert store.seed_defaults() == 0
+    assert store.list_all() == []
+
+
+def test_category_length_is_validated_on_update_and_preview(client, store):
+    policy = store.create({"matcher_type": "always", "category": None})
+    assert client.patch(f"/v1/tool-approval-policies/{policy.id}",
+                        json={"category": "x" * 64}).status_code == 200
+    assert client.patch(f"/v1/tool-approval-policies/{policy.id}",
+                        json={"category": "x" * 65}).status_code == 422
+    assert store.get(policy.id).category == "x" * 64
+    response = client.post("/v1/tool-approval-policies/preview", json={
+        "backend": "claude-code", "tool_name": "Bash", "tool_input": {"command": "true"},
+        "policies": [{"matcher_type": "always", "category": "x" * 65}],
+    })
+    assert response.status_code == 422
 
 
 def test_deleted_seed_is_not_resurrected(store):

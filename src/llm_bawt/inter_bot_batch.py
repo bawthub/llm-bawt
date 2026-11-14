@@ -52,17 +52,20 @@ def enabled(conn, target: str) -> bool:
     """
     if conn.execute(sa_text("SELECT to_regclass('runtime_settings')")).scalar() is None:
         return False
-    row = conn.execute(sa_text("""
+    rows = conn.execute(sa_text("""
         SELECT value_json FROM runtime_settings
-        WHERE scope_type='bot' AND scope_id=:target AND key=:key
-        ORDER BY id DESC LIMIT 1
-    """), {"target": target, "key": SETTING_KEY}).first()
-    if row is None:
-        return False
-    try:
-        return json.loads(row[0]) is True
-    except (TypeError, ValueError):
-        return False
+        WHERE key=:key AND ((scope_type='bot' AND scope_id=:target)
+                            OR (scope_type='global' AND scope_id='*'))
+        ORDER BY CASE WHEN scope_type='bot' THEN 0 ELSE 1 END, id DESC
+    """), {"target": target, "key": SETTING_KEY})
+    for row in rows:
+        try:
+            value = json.loads(row[0])
+        except (TypeError, ValueError):
+            return False
+        if value is not None:
+            return value is True
+    return False
 
 
 def _as_dict(value: Any) -> dict[str, Any]:

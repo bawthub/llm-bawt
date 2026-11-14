@@ -15,7 +15,7 @@ from enum import Enum
 from typing import Any
 
 from pydantic import ConfigDict
-from sqlalchemy import Column, JSON, String, Text, text
+from sqlalchemy import Column, Index, JSON, String, Text, text
 from sqlmodel import Field, Session, SQLModel, select
 from .utils.schema import SchemaBootstrapGuard
 
@@ -84,6 +84,7 @@ class EntityProfile(SQLModel, table=True):
     """
     
     __tablename__ = "entity_profiles"  # type: ignore[assignment]
+    __table_args__ = (Index("idx_entity_profile_unique", "entity_type", "entity_id", unique=True),)
     
     id: int | None = Field(default=None, primary_key=True)
     entity_type: EntityType = Field(index=True)
@@ -288,22 +289,19 @@ class ProfileManager:
                 EntityProfile.entity_type == entity_type,
                 EntityProfile.entity_id == entity_id
             )
-            profile = session.exec(statement).first()
-            
-            if profile:
-                return profile, False
-            
-            # Create new profile
-            profile = EntityProfile(
-                entity_type=entity_type,
-                entity_id=entity_id,
-            )
-            session.add(profile)
+            if self.engine.dialect.name == "sqlite":
+                from sqlalchemy.dialects.sqlite import insert
+            else:
+                from sqlalchemy.dialects.postgresql import insert
+            inserted_id = session.execute(
+                insert(EntityProfile).values(entity_type=entity_type, entity_id=entity_id)
+                .on_conflict_do_nothing(index_elements=["entity_type", "entity_id"])
+                .returning(EntityProfile.id)
+            ).scalar_one_or_none()
+            profile = session.exec(statement).one()
             session.commit()
             session.refresh(profile)
-            logger.debug(f"Created new {entity_type} profile: {entity_id}")
-            
-            return profile, True
+            return profile, inserted_id is not None
     
     def update_profile(
         self,
@@ -613,6 +611,16 @@ class ProfileManager:
             ).order_by(ProfileAttribute.category, ProfileAttribute.key)
             return list(session.exec(statement).all())
     
+    @staticmethod
+    def _invalidate_summary(session, entity_type, entity_id):
+        profile = session.exec(select(EntityProfile).where(
+            EntityProfile.entity_type == entity_type,
+            EntityProfile.entity_id == entity_id,
+        )).first()
+        if profile and profile.summary:
+            profile.summary = None
+            session.add(profile)
+
     def search_and_delete_attributes(
         self,
         entity_type: EntityType,
@@ -635,10 +643,11 @@ class ProfileManager:
         query_lower = query.lower().strip()
         
         with Session(self.engine) as session:
-            # Get all attributes for this entity
+            # Only facts visible to callers count as deletable matches.
             statement = select(ProfileAttribute).where(
                 ProfileAttribute.entity_type == entity_type,
                 ProfileAttribute.entity_id == entity_id,
+                ProfileAttribute.status == STATUS_LIVE,
             )
             if category:
                 statement = statement.where(ProfileAttribute.category == category.lower().strip())
@@ -657,16 +666,7 @@ class ProfileManager:
                     logger.debug(f"Deleted attribute {entity_type}/{entity_id}: {desc}")
             
             if deleted:
-                # Invalidate cached summary so profile regenerates on next request
-                profile_stmt = select(EntityProfile).where(
-                    EntityProfile.entity_type == entity_type,
-                    EntityProfile.entity_id == entity_id
-                )
-                profile = session.exec(profile_stmt).first()
-                if profile and profile.summary:
-                    profile.summary = None
-                    session.add(profile)
-                    logger.debug(f"Invalidated profile summary for {entity_type}/{entity_id}")
+                self._invalidate_summary(session, entity_type, entity_id)
                 session.commit()
             
             return len(deleted), deleted
@@ -689,20 +689,13 @@ class ProfileManager:
                 ProfileAttribute.entity_id == entity_id,
                 ProfileAttribute.category == category,
                 ProfileAttribute.key == key,
+                ProfileAttribute.status == STATUS_LIVE,
             )
             attr = session.exec(statement).first()
-            
+
             if attr:
                 session.delete(attr)
-                # Invalidate cached summary
-                profile_stmt = select(EntityProfile).where(
-                    EntityProfile.entity_type == entity_type,
-                    EntityProfile.entity_id == entity_id
-                )
-                profile = session.exec(profile_stmt).first()
-                if profile and profile.summary:
-                    profile.summary = None
-                    session.add(profile)
+                self._invalidate_summary(session, entity_type, entity_id)
                 session.commit()
                 logger.debug(f"Deleted attribute {entity_type}/{entity_id}: {category}.{key}")
                 return True
@@ -726,6 +719,7 @@ class ProfileManager:
             if attr:
                 desc = f"{attr.entity_type}/{attr.entity_id}: {attr.category}.{attr.key}"
                 session.delete(attr)
+                self._invalidate_summary(session, attr.entity_type, attr.entity_id)
                 session.commit()
                 logger.debug(f"Deleted attribute by ID {attribute_id}: {desc}")
                 return True

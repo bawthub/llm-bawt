@@ -33,6 +33,9 @@ def validate_policy(data: dict[str, Any]) -> dict[str, Any]:
         if key in ("tool_name", "backend_scope") and not value.strip():
             raise ValueError(f"{key} cannot be blank")
         out[key] = value
+    category = out.get("category")
+    if category is not None and (not isinstance(category, str) or len(category) > 64 or "\x00" in category):
+        raise ValueError("category must be null or a string of at most 64 characters without NUL")
     if out["matcher_type"] != "always" and not out["pattern"]:
         raise ValueError("pattern is required unless matcher_type is always")
     if out["matcher_type"] == "regex":

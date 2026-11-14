@@ -93,9 +93,8 @@ def evict_for_reset(service: Any, llm_bawt: Any, bot_id: str, *,
         return None
     logger.info("bot %s vacated house %s on a new session", slug, house)
     _refresh_bot(service, llm_bawt, slug)
-    if tenants(service.config, house):
-        logger.info("house %s still has tenants; not recycling", house)
-        return house
+    # request_recycle verifies vacancy under its lock and treats DB failures
+    # as a reason not to recycle, never as a failed session reset.
     request_recycle(service.config, house)
     return house
 

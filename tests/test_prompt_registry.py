@@ -15,6 +15,26 @@ from llm_bawt.prompt_registry import (
 )
 
 
+def test_default_resolver_retries_after_initial_database_outage(monkeypatch):
+    from types import SimpleNamespace
+    from llm_bawt import prompt_registry
+    offline = SimpleNamespace(store=SimpleNamespace(engine=None))
+    recovered = SimpleNamespace(store=SimpleNamespace(engine=object()))
+    builds = iter([offline, recovered])
+    monkeypatch.setattr(prompt_registry, "_DEFAULT_PROMPT_RESOLVER", None)
+    monkeypatch.setattr(prompt_registry, "PromptResolver", lambda: next(builds))
+    assert prompt_registry.get_prompt_resolver() is offline
+    assert prompt_registry.get_prompt_resolver() is recovered
+    assert prompt_registry.get_prompt_resolver() is recovered
+
+
+def test_injected_skill_default_validates_with_all_declared_placeholders():
+    resolver = PromptResolver()
+    key = "agents.injected_skills.entry"
+    definition = resolver.definition_for(key)
+    assert resolver.validate(key=key, body=definition.default_body())["valid"]
+
+
 def test_extract_placeholders_ignores_escaped_braces() -> None:
     body = "JSON example: {{\"ok\": true}} {messages}"
     assert extract_placeholders(body) == ["messages"]

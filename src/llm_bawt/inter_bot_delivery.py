@@ -768,7 +768,7 @@ class InterBotDeliveryStore:
                 UPDATE inter_bot_deliveries SET status='FAILED',
                     lease_expires_at=NULL, claim_token=NULL, claim_owner=NULL, next_retry_at=NULL,
                     last_error=:error, updated_at=now()
-                WHERE id=:id AND status != 'DELIVERED' RETURNING *
+                WHERE id=:id AND status = 'QUEUED' RETURNING *
             """), {"id": delivery_id, "error": error[:4000]}).mappings().first()
             DeliveryTransitionEvents.stage(conn, row)
             if row:

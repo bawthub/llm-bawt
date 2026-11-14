@@ -249,12 +249,6 @@ def _load_db_bot_profiles() -> dict[str, dict[str, Any]]:
         raise
     except Exception as e:
         raise BotRegistryUnavailable(f"could not read bot profiles: {e}") from e
-    finally:
-        if store is not None and getattr(store, "engine", None) is not None:
-            try:
-                store.engine.dispose()
-            except Exception:
-                pass
 
 
 def _load_bot_tags(engine) -> dict[str, list[str]] | None:
@@ -399,44 +393,11 @@ def save_user_bot_config(slug: str, section: str, data: dict) -> None:
     if profile_store.engine is None:
         raise RuntimeError("Bot profiles DB unavailable")
 
-    profile = profile_store.get(normalized_slug)
-    if profile is None:
-        source = get_raw_bot_data(normalized_slug) or {}
-        profile_payload = {
-            "slug": normalized_slug,
-            "name": source.get("name", normalized_slug.title()),
-            "description": source.get("description", ""),
-            "system_prompt": source.get("system_prompt", "You are a helpful assistant."),
-            "requires_memory": source.get("requires_memory", True),
-            "voice_optimized": source.get("voice_optimized", False),
-            "tts_mode": source.get("tts_mode", False),
-            "include_summaries": source.get("include_summaries", True),
-            "include_in_global_search": source.get("include_in_global_search", True),
-            "default_model": source.get("default_model"),
-            "uses_tools": source.get("uses_tools", False),
-            "uses_search": source.get("uses_search", False),
-            "uses_home_assistant": source.get("uses_home_assistant", False),
-            "nextcloud_config": data,
-        }
-    else:
-        profile_payload = {
-            "slug": profile.slug,
-            "name": profile.name,
-            "description": profile.description,
-            "system_prompt": profile.system_prompt,
-            "requires_memory": profile.requires_memory,
-            "voice_optimized": profile.voice_optimized,
-            "tts_mode": profile.tts_mode,
-            "include_summaries": profile.include_summaries,
-            "include_in_global_search": profile.include_in_global_search,
-            "default_model": profile.default_model,
-            "uses_tools": profile.uses_tools,
-            "uses_search": profile.uses_search,
-            "uses_home_assistant": profile.uses_home_assistant,
-            "nextcloud_config": data,
-        }
-
-    profile_store.upsert(profile_payload)
+    if profile_store.get(normalized_slug) is None:
+        raise ValueError(f"Bot profile not found: {normalized_slug}")
+    # A section update is never an alternate bot creation path; recheck under
+    # the store's write lock if the profile is removed after the read above.
+    profile_store.upsert({"slug": normalized_slug, "nextcloud_config": data}, require_existing=True)
     _load_bots_config()
 
 
@@ -465,27 +426,15 @@ def remove_user_bot_section(slug: str, section: str) -> bool:
     if profile is None or profile.nextcloud_config is None:
         return False
 
-    profile_store.upsert(
-        {
-            "slug": profile.slug,
-            "name": profile.name,
-            "description": profile.description,
-            "system_prompt": profile.system_prompt,
-            "requires_memory": profile.requires_memory,
-            "voice_optimized": profile.voice_optimized,
-            "tts_mode": profile.tts_mode,
-            "include_summaries": profile.include_summaries,
-            "include_in_global_search": profile.include_in_global_search,
-            "default_model": profile.default_model,
-            "uses_tools": profile.uses_tools,
-            "uses_search": profile.uses_search,
-            "uses_home_assistant": profile.uses_home_assistant,
-            "nextcloud_config": None,
-        }
-    )
+    from sqlalchemy import text
 
-    _load_bots_config()
-    return True
+    with profile_store.engine.begin() as conn:
+        cleared = conn.execute(text("""
+            UPDATE bot_profiles SET nextcloud_config=NULL, updated_at=CURRENT_TIMESTAMP
+            WHERE slug=:slug AND nextcloud_config IS NOT NULL
+        """), {"slug": normalized_slug}).rowcount > 0
+    invalidate_bots_cache()
+    return cleared
 
 
 def get_system_prompt(name: str) -> str | None:
@@ -678,10 +627,10 @@ def strip_emotes(text: str) -> str:
 
     # Remove *action* patterns (asterisk-wrapped)
     # Matches: *smiles warmly*, *pauses*, etc.
-    text = re.sub(r'\*[^*]+\*', '', text)
+    text = re.sub(r'(?<!\*)\*(?=\S)[^*\r\n]*\S\*(?!\*)', '', text)
 
     # Remove ::action:: patterns (colon-wrapped, less common)
-    text = re.sub(r'::[^:]+::', '', text)
+    text = re.sub(r'(?<!\S)::(?=\S)[^:\r\n]*\S::', '', text)
 
     # Remove standalone (action) patterns (parentheses on their own)
     # Only remove if it's the whole line or at sentence boundaries

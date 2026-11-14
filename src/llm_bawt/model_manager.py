@@ -402,9 +402,14 @@ class ModelManager:
     def _entry_matches_provider(model_info: dict[str, Any], provider_type: str) -> bool:
         if provider_type == PROVIDER_CODEX:
             return (
-                str(model_info.get("type") or "").lower() == PROVIDER_AGENT_BACKEND
-                and str(model_info.get("backend") or "").lower() == PROVIDER_CODEX
+                str(model_info.get("access_path") or "").lower() == "openai-oauth"
+                or (
+                    str(model_info.get("type") or "").lower() == PROVIDER_AGENT_BACKEND
+                    and str(model_info.get("backend") or "").lower() == PROVIDER_CODEX
+                )
             )
+        if provider_type == PROVIDER_OPENAI and model_info.get("access_path") == "openai-oauth":
+            return False
         return str(model_info.get("type") or "").lower() == provider_type
 
     def _update_existing_descriptions(self, provider_type: str, api_models: List[Dict[str, Any]], existing_map: Dict[str, str]) -> int:
@@ -490,6 +495,29 @@ class ModelManager:
             if alias in existing:
                 console.print(f"[yellow]Alias '{alias}' already exists, using '{default_alias}'.[/yellow]")
                 alias = default_alias
+            context_window = m.get("context_length") or m.get("context_window")
+            if type(context_window) is not int or context_window <= 0:
+                context_window = None
+                # Catalog writes require an explicit window; discovery does not
+                # provide one for every provider. Never invent a token limit.
+                while self.service_client:
+                    answer = Prompt.ask(
+                        f"Context window (tokens) for {m['id']}, or Enter to skip",
+                        default="",
+                    ).strip()
+                    if not answer:
+                        break
+                    try:
+                        context_window = int(answer)
+                    except ValueError:
+                        context_window = None
+                    if context_window is not None and context_window > 0:
+                        break
+                    context_window = None
+                    console.print("[yellow]Enter a positive integer.[/yellow]")
+                if self.service_client and context_window is None:
+                    console.print(f"[dim]Skipped '{alias}': context window is required.[/dim]")
+                    continue
             existing.add(alias)
             if provider_type == PROVIDER_CODEX:
                 entry = {
@@ -504,6 +532,8 @@ class ModelManager:
                 label = 'Created' if provider_type in (PROVIDER_OPENAI, PROVIDER_GROK) else 'Modified'
                 desc = f"{m['id']} ({label}: {ts})"
                 entry = {'type': provider_type, 'model_id': m['id'], 'description': desc}
+            if context_window is not None:
+                entry["context_window"] = context_window
             self.models_data['models'][alias] = entry
             self._changed_aliases.add(alias)
             count += 1
@@ -576,7 +606,7 @@ class ModelManager:
                 raw_id_str = mid # Keep raw ID for matching
             if processed_desc and raw_id_str and raw_id_str in processed_desc:
                 escaped_raw_id = re.escape(raw_id_str)
-                final_desc = re.sub(rf'\\b{escaped_raw_id}\\b', formatted_id_str, processed_desc, count=1)
+                final_desc = re.sub(rf'\b{escaped_raw_id}\b', formatted_id_str, processed_desc, count=1)
                 parts = [final_desc]
             else:
                 if mid:
@@ -965,31 +995,38 @@ def delete_model(alias: str, config: Config, service_client=None) -> bool:
     model_info = manager.models_data.get('models', {}).get(alias)
 
     delete_ok = manager.delete_model_alias(alias)
-    if delete_ok:
-        # Avoid probing Ollama during unrelated operations.
-        # Ollama connectivity/model checks happen only when explicitly refreshing Ollama models.
-        
-        # If the model is a GGUF model, check if we should delete the model files as well
+    # Cancellation is a successful no-op in delete_model_alias. Do not offer
+    # file deletion unless the alias was actually removed.
+    remaining_models = manager.models_data.get('models', {})
+    if delete_ok and alias not in remaining_models:
         if model_info and model_info.get('type') == PROVIDER_GGUF:
             repo_id = model_info.get('repo_id')
-            if repo_id:
-                from pathlib import Path
-                import shutil
-                
-                # Get the entire repo directory path
-                repo_dir = Path(config.MODEL_CACHE_DIR) / repo_id
-                
-                if repo_dir.exists():
-                    console.print(f"\nFound model directory at: [cyan]{repo_dir}[/cyan]")
-                    confirm = Confirm.ask("Do you want to delete the entire model directory?", default=False)
-                    if confirm:
+            filename = model_info.get('filename')
+            if repo_id and filename:
+                cache_dir = Path(config.MODEL_CACHE_DIR).resolve()
+                model_file = cache_dir / repo_id / filename
+                resolved_file = model_file.resolve()
+                shared = any(
+                    info.get('type') == PROVIDER_GGUF
+                    and info.get('repo_id') and info.get('filename')
+                    and (cache_dir / info['repo_id'] / info['filename']).resolve() == resolved_file
+                    for info in remaining_models.values()
+                )
+                if shared:
+                    console.print("[dim]Keeping model file: another alias uses it.[/dim]")
+                elif not resolved_file.is_relative_to(cache_dir):
+                    console.print("[yellow]Keeping model file outside the model cache.[/yellow]")
+                elif model_file.is_file():
+                    console.print(f"\nFound model file at: [cyan]{model_file}[/cyan]")
+                    if Confirm.ask("Do you want to delete this model file?", default=False):
                         try:
-                            # Delete the entire directory tree
-                            shutil.rmtree(repo_dir)
-                            console.print(f"[green]Successfully deleted model directory: {repo_dir}[/green]")
-                        except Exception as e:
-                            console.print(f"[bold red]Error deleting model directory:[/bold red] {e}")
-    
+                            # Only unlink this alias's file, never its repository
+                            # directory or other quantizations downloaded there.
+                            model_file.unlink()
+                            console.print(f"[green]Successfully deleted model file: {model_file}[/green]")
+                        except OSError as e:
+                            console.print(f"[bold red]Error deleting model file:[/bold red] {e}")
+
     return delete_ok
 
 def update_models_interactive(config: Config, provider: Optional[str] = None, service_client=None):
