@@ -588,6 +588,15 @@ def test_lease_expiry_restart_retries_a_host_shutdown_turn(delivery, turn_cleanu
     assert _children(store, original.id) == [child_id]
 
 
+def _expire_restart_retry_backoff(store, delivery_id):
+    """Simulate the backoff elapsing: move the deferral into the past."""
+    with store.engine.begin() as conn:
+        conn.execute(text(
+            "UPDATE inter_bot_deliveries SET metadata_json = jsonb_set(metadata_json, "
+            "'{restart_retry_deferred_until}', to_jsonb(now() - interval '1 second')) WHERE id=:id"
+        ), {"id": delivery_id})
+
+
 def test_an_interrupted_lease_expiry_retry_is_finished_by_the_next_sweep(delivery, turn_cleanup, monkeypatch):
     """Codex TASK-1258 SHOULD_FIX: FAILED commits before the retry transaction.
     A DB error there leaves the pending marker, and the next sweep retries."""
@@ -610,7 +619,11 @@ def test_an_interrupted_lease_expiry_retry_is_finished_by_the_next_sweep(deliver
     assert failed.metadata[RESTART_RETRY_PENDING] is True
     assert not _children(store, original.id)
 
+    assert failed.metadata["restart_retry_deferrals"] == 1
     monkeypatch.setattr(turn_admission, "lock_target", real_lock_target)
+    store.recover_expired()
+    assert not _children(store, original.id)  # still backing off
+    _expire_restart_retry_backoff(store, original.id)
     recovered = store.recover_expired()
 
     [child_id] = _children(store, original.id)
@@ -640,7 +653,9 @@ def test_a_transient_error_inside_the_retry_keeps_it_pending(delivery, turn_clea
     assert RESTART_RETRY_OUTCOME not in failed.metadata
     assert not _children(store, original.id)
 
+    assert failed.metadata["restart_retry_deferrals"] == 1
     monkeypatch.setattr(retry, "_turn_row", real_turn_row)
+    _expire_restart_retry_backoff(store, original.id)
     store.recover_expired()
 
     [child_id] = _children(store, original.id)
