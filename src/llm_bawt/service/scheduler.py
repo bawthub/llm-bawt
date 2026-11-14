@@ -237,10 +237,10 @@ class JobScheduler:
                 JobRun.job_id.in_(maintenance_jobs),
             ).with_for_update(skip_locked=True)).all()
             for run in stale:
-                started = run.started_at if run.started_at.tzinfo else run.started_at.replace(tzinfo=timezone.utc)
+                # Real duration is unknown (the process died); elapsed wall time
+                # would also overflow the INTEGER column after ~24.9 days.
                 run.status = JobStatus.FAILED
                 run.finished_at = now
-                run.duration_ms = int((now - started).total_seconds() * 1000)
                 run.error_message = "interrupted: process exited before the run finished"
                 session.add(run)
             session.commit()
@@ -252,7 +252,10 @@ class JobScheduler:
     async def _check_and_run_due_jobs(self) -> None:
         """Check for due jobs and enqueue them."""
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, self._reap_orphaned_runs)
+        try:
+            await loop.run_in_executor(None, self._reap_orphaned_runs)
+        except Exception:
+            logger.exception("Orphaned scheduler run reap failed; continuing with due jobs")
 
         def get_due_jobs():
             with Session(self.engine) as session:

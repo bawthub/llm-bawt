@@ -52,7 +52,7 @@ def test_reaps_only_stale_maintenance_runs_without_refiring():
         assert got["stale"].status == JobStatus.FAILED
         assert got["stale"].finished_at is not None
         assert got["stale"].error_message.startswith("interrupted")
-        assert got["stale"].duration_ms >= 3 * 3600 * 1000 - 1000
+        assert got["stale"].duration_ms is None
         assert got["live"].status == JobStatus.RUNNING
         assert got["prompt"].status == JobStatus.RUNNING
         assert got["done"].status == JobStatus.SUCCESS
