@@ -122,6 +122,10 @@ class ClaudeSessionMixin:
         )
         if isinstance(seed_stats, dict) and seed_stats.get("reason") and not seed_stats.get("clean_start"):
             raise RuntimeError(f"new-session seed failed: {seed_stats['reason']}")
+        # No turn follows a bare /new to persist the session again, so an
+        # unbound seed must not be acknowledged as the thread's session.
+        if isinstance(seed_stats, dict) and seed_stats.get("persisted") is False:
+            raise RuntimeError("new-session seed failed: thread session not persisted")
         self._publish_event(
             request_id, session_key, 1,
             kind=AgentEventKind.ASSISTANT_DONE,
@@ -159,7 +163,7 @@ class ClaudeSessionMixin:
                 "No API URL — thread session not persisted for %s/%s",
                 bot_id, thread_session_id,
             )
-            return
+            return False
         try:
             async with httpx.AsyncClient(timeout=5) as client:
                 resp = await client.put(
@@ -181,6 +185,8 @@ class ClaudeSessionMixin:
                 "Failed to persist thread session for %s/%s: %s",
                 bot_id, thread_session_id, e,
             )
+            return False
+        return True
 
     async def _get_mcp_tool_context(self, bot_slug: str, user_id: str = "") -> str:
         """Return the MCP tool context block for a bot (TASK-490).
@@ -200,6 +206,7 @@ class ClaudeSessionMixin:
             return cache[cache_key]
 
         body = _MCP_TOOL_CONTEXT_FALLBACK
+        fetched_ok = False
         if self._app_api_url:
             try:
                 async with httpx.AsyncClient(timeout=5) as client:
@@ -211,6 +218,7 @@ class ClaudeSessionMixin:
                     fetched = (resp.json() or {}).get("body")
                     if fetched:
                         body = fetched
+                    fetched_ok = True
             except Exception as e:
                 logger.warning(
                     "MCP tool context fetch failed for %s (%s); using local fallback",
@@ -218,7 +226,10 @@ class ClaudeSessionMixin:
                 )
         # Bridge-side substitution (robust against stray braces in overrides).
         rendered = body.replace("{bot_slug}", bot_slug).replace("{user_id}", user_id or "the user")
-        cache[cache_key] = rendered
+        # TASK-2286: cache only an answered fetch, so one app blip at a cold
+        # start does not pin the local fallback for the process lifetime.
+        if fetched_ok:
+            cache[cache_key] = rendered
         return rendered
 
     def _project_slug(self, cwd: str) -> str:
@@ -342,11 +353,14 @@ class ClaudeSessionMixin:
         try:
             session_id = str(uuid.uuid4())
             self._write_seed_transcript(session_id, messages, framing)
-            # Persist the minted SDK session id onto the thread.
+            # Persist the minted SDK session id onto the thread. A failed
+            # persist is reported, not swallowed (TASK-2286): the caller
+            # persists again once the turn runs, or fails a bare /new.
+            persisted = True
             if thread_session_id:
-                await self._set_thread_session(
+                persisted = await self._set_thread_session(
                     thread_session_id, bot_id, session_id, model,
-                )
+                ) is not False
         except Exception as e:
             logger.warning("Seed write/persist failed for %s: %s", bot_id, e)
             await self._record_continuity_receipt(thread_session_id, bot_id, messages, restored=False)
@@ -356,6 +370,7 @@ class ClaudeSessionMixin:
         stats["seeded"] = True
         stats["clean_start"] = False
         stats["session_id"] = session_id
+        stats["persisted"] = persisted
         return stats
 
     @staticmethod

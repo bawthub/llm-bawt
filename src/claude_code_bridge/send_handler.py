@@ -211,6 +211,10 @@ class ClaudeSendMixin(
                 # SDK session id (model-checked). None → cold-start.
                 resume_id = None if reset_requested else req.thread_resume_id
                 session_start: str | None = None
+                # TASK-2286: a seed whose thread binding failed is persisted
+                # again at this turn's init.
+                seed_unpersisted = False
+                cold_seeded = False
                 if resume_id:
                     logger.info(
                         "Resuming thread: thread=%s resume=%s",
@@ -241,6 +245,8 @@ class ClaudeSendMixin(
                         raise RuntimeError(f"new-session seed failed: {cold_seed['reason']}")
                     if cold_seed and cold_seed.get("seeded"):
                         resume_id = cold_seed["session_id"]
+                        cold_seeded = True
+                        seed_unpersisted = cold_seed.get("persisted") is False
                         logger.info(
                             "Cold-start seeded session for %s: %s (%s summaries, %s msgs)",
                             bot_slug, resume_id,
@@ -481,7 +487,16 @@ class ClaudeSendMixin(
                     # Retry safety is based on model/tool side effects only.
                     model_side_effects = False
 
-                    def _publish_partial(text: str, *, attachments=None) -> None:
+                    def _reset_ack() -> dict | None:
+                        if not (req.bridge_reset_action == "reset_follow_up"
+                                and thread_session_id and turn_session_id):
+                            return None
+                        return {"thread_session_id": thread_session_id,
+                                "provider_session_id": turn_session_id,
+                                "clean_start": False,
+                                **seed_receipt(inject_messages)}
+
+                    def _publish_partial(text: str, *, attachments=None, reset_ack=None) -> None:
                         nonlocal seq, interrupted_usage, assistant_done_emitted
                         if assistant_done_emitted:
                             return
@@ -500,7 +515,11 @@ class ClaudeSendMixin(
                             request_id, session_key, seq, kind=AgentEventKind.ASSISTANT_DONE,
                             text=text, model=actual_model, token_usage=live_usage.with_totals(interrupted_usage),
                             attachments=attachments or turn_screenshot_assets or None,
-                            extra_raw=_cancelled_raw() if cancelled else None,
+                            extra_raw=(
+                                _cancelled_raw() if cancelled
+                                else {"new_session_ack": reset_ack} if reset_ack
+                                else None
+                            ),
                         )
                         assistant_done_emitted = True
 
@@ -600,7 +619,7 @@ class ClaudeSendMixin(
                                         live_usage.actual_model = actual_model
                                         phase_tracker.model = actual_model
                                         logger.info("Actual model: %s", actual_model)
-                                    if not resume_id:
+                                    if not resume_id or seed_unpersisted:
                                         sid = data.get("session_id")
                                         if sid and thread_session_id:
                                             await self._set_thread_session(
@@ -608,6 +627,7 @@ class ClaudeSendMixin(
                                                 bot_slug or session_key,
                                                 sid, model,
                                             )
+                                        seed_unpersisted = False
                                     session_persisted = True
                                 # Track the session_id for this turn regardless of
                                 # resume state — used to read the compaction result
@@ -835,14 +855,7 @@ class ClaudeSendMixin(
                                     compact_error_msg=compact_error_msg,
                                     turn_session_id=turn_session_id,
                                     turn_screenshot_assets=turn_screenshot_assets,
-                                    reset_ack=(
-                                        {"thread_session_id": thread_session_id,
-                                         "provider_session_id": turn_session_id,
-                                         "clean_start": False,
-                                         **seed_receipt(inject_messages)}
-                                        if req.bridge_reset_action == "reset_follow_up"
-                                        and thread_session_id and turn_session_id else None
-                                    ),
+                                    reset_ack=_reset_ack(),
                                 )
                                 assistant_done_emitted = True
                                 terminal_event_published = True
@@ -879,8 +892,10 @@ class ClaudeSendMixin(
                             # Always publish — even if full_text is empty.
                             # An empty ASSISTANT_DONE is far better than no
                             # DONE at all, which causes timeout + vanishing bubble.
+                            # TASK-2286: a successful EOF turn still binds its reset.
                             _publish_partial(
                                 full_text, attachments=turn_screenshot_assets or None,
+                                reset_ack=_reset_ack(),
                             )
                             logger.info(
                                 "EOF fallback ASSISTANT_DONE: chars=%d request_id=%s session=%s",
@@ -983,6 +998,23 @@ class ClaudeSendMixin(
                             # persists its replacement to the same durable thread.
                             resume_id = None
                             session_start = "clean"
+                            if cold_seeded:
+                                # TASK-2286: re-seed so the retry keeps the
+                                # continuity its reset ack reports.
+                                reseed = await self._seed_new_session(
+                                    bot_slug, model, injected=inject_messages,
+                                    thread_session_id=thread_session_id,
+                                    framing=req.inject_seed_framing,
+                                )
+                                if reseed and reseed.get("seeded"):
+                                    resume_id = reseed["session_id"]
+                                    session_start = "seeded"
+                                    seed_unpersisted = reseed.get("persisted") is False
+                                elif req.bridge_reset_action == "reset_follow_up":
+                                    raise RuntimeError(
+                                        "new-session seed failed on retry: "
+                                        f"{(reseed or {}).get('reason')}"
+                                    )
                             continue
 
                         raise

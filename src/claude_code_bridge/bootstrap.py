@@ -84,13 +84,11 @@ def _normalize_mcp_settings(settings: dict) -> dict:
         "type": "http",
         "url": bawthub_url,
     }
-    mcp_servers.setdefault(
-        "playwright",
-        {
-            "type": "http",
-            "url": playwright_url,
-        },
-    )
+    # Overwritten each boot like the others so the env var stays authoritative.
+    mcp_servers["playwright"] = {
+        "type": "http",
+        "url": playwright_url,
+    }
 
     # Crawl4AI exposes its native MCP server over SSE transport.
     crawl4ai_config: dict = {

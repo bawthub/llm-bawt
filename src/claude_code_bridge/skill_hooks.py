@@ -95,8 +95,14 @@ def injected_skills(env: Mapping[str, str]) -> tuple[str, ...]:
 
 
 def _marker(data: Mapping) -> Path:
+    """Per-context marker: a Task sub-agent shares its parent's session_id but
+    has its own context, so key by ``agent_id`` too (TASK-2286)."""
     sid = str(data.get("session_id") or "")
-    return MARKER_DIR / f"{MARKER_PREFIX}{sid if _SESSION_ID.fullmatch(sid) else 'nosession'}"
+    name = sid if _SESSION_ID.fullmatch(sid) else "nosession"
+    agent = str(data.get("agent_id") or "")
+    if agent:
+        name += f"-agent-{agent if _SESSION_ID.fullmatch(agent) else 'unknown'}"
+    return MARKER_DIR / f"{MARKER_PREFIX}{name}"
 
 
 def record(data: Mapping, env: Mapping[str, str]) -> dict | None:
