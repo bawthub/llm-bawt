@@ -149,6 +149,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_state_events_pg.py::",
     "test_utility_usage_pg.py::",
     "test_playground_pg.py::",
+    "test_media_gc_pg.py::",
 )
 
 PG_SELECTORS = tuple("tests/" + suite.removesuffix("::") for suite in PG_ACCEPTANCE_SUITES)
