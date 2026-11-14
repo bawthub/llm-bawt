@@ -86,8 +86,13 @@ def extract_profile_attributes_from_fact(
     fact: ExtractedFact | dict,
     user_id: str,  # Required - must be passed explicitly
     config: Config | None = None,
+    *,
+    raise_errors: bool = False,
 ) -> bool:
     """Extract profile attributes from a fact if the LLM identified it as one.
+
+    ``raise_errors`` re-raises a failed write instead of returning False, so
+    a caller that retries on failure can tell it from "nothing to store".
     
     The LLM extraction prompt now includes profile_attribute classification.
     This function reads that classification and stores the attribute.
@@ -218,6 +223,8 @@ def extract_profile_attributes_from_fact(
         
     except Exception as e:
         logger.exception(f"[Profile] Failed to create profile attribute: {e}")
+        if raise_errors:
+            raise
         return False
 
 

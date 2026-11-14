@@ -566,7 +566,8 @@ class BackgroundTasksMixin:
         runs LLM-based fact extraction, stores resulting memories, and marks
         the source messages as processed.
         """
-        from ..memory.extraction.service import MemoryExtractionService, MemoryAction
+        from ..memory.errors import MemoryUpdateDuplicateError
+        from ..memory.extraction.service import ExtractionFailed, MemoryAction, MemoryExtractionService
 
         bot_id = task.bot_id or self._default_bot
         user_id = task.user_id
@@ -651,10 +652,10 @@ class BackgroundTasksMixin:
         ]
         message_ids = [m["id"] for m in unprocessed]
 
-        # TASK-2214: a failed batch stays unprocessed and is retried. Earlier
-        # attempts are strict (an LLM failure or unparseable reply is a
-        # failure); the last one keeps the old lenient behaviour and closes
-        # the batch whatever happens.
+        # TASK-2214: a failed batch stays unprocessed and is retried. Every
+        # attempt is strict (an LLM failure or unparseable reply is a
+        # failure). The last one salvages what heuristics can find, closes
+        # the batch and still reports the failure.
         attempt_key = (bot_id, str(user_id), str(message_ids[0]))
         attempt = _extraction_attempts.prior(attempt_key) + 1
         final_attempt = attempt >= MAX_EXTRACTION_ATTEMPTS
@@ -668,11 +669,19 @@ class BackgroundTasksMixin:
             try:
                 # Remote API call — already on the bounded bg pool via
                 # process_task (TASK-283), off the default pool (TASK-274).
-                facts = extraction_service.extract_from_conversation(
-                    messages=conversation,
-                    use_llm=use_llm and extraction_service.llm_client is not None,
-                    strict=not final_attempt,
-                )
+                try:
+                    facts = extraction_service.extract_from_conversation(
+                        messages=conversation,
+                        use_llm=use_llm and extraction_service.llm_client is not None,
+                        strict=True,
+                    )
+                except ExtractionFailed as e:
+                    if not final_attempt:
+                        raise
+                    failure = f"LLM extraction failed, heuristics used: {e}"
+                    facts = extraction_service.extract_from_conversation(
+                        messages=conversation, use_llm=False,
+                    )
 
                 # Filter by importance
                 facts = [f for f in facts if f.importance >= min_importance]
@@ -745,7 +754,11 @@ class BackgroundTasksMixin:
                                     fact=fact,
                                     user_id=user_id,
                                     config=self.config,
+                                    raise_errors=True,
                                 )
+                        except MemoryUpdateDuplicateError as e:
+                            # Dedup, not a failed write: the fact already exists.
+                            log.info("[MemExtract] UPDATE folded into a duplicate: %s", e)
                         except Exception as e:
                             failed_actions += 1
                             log.warning(
@@ -758,8 +771,9 @@ class BackgroundTasksMixin:
                 failure = f"extraction failed: {e}"
                 log.error("[MemExtract] Extraction failed for %s: %s", bot_id, e)
 
-        if failure is None and failed_actions:
-            failure = f"{failed_actions} memory write(s) failed"
+        if failed_actions:
+            writes = f"{failed_actions} memory write(s) failed"
+            failure = f"{failure}; {writes}" if failure else writes
 
         if failure is not None and not final_attempt:
             # Leave the batch unprocessed. A retry re-runs dedup against the

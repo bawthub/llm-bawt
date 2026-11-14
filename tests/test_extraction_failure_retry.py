@@ -113,22 +113,102 @@ def test_failed_memory_write_leaves_batch_for_retry(monkeypatch: pytest.MonkeyPa
 
 
 def test_poison_batch_is_closed_after_bounded_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Real service, LLM times out every time: retried, then closed as a visible failure."""
     memory = _Memory()
     service, backend, task = _service(monkeypatch, memory)
-    strict_seen = _extract_script(
-        monkeypatch, [ExtractionFailed("bad reply")] * MAX_EXTRACTION_ATTEMPTS
-    )
+    client = _Client(TimeoutError("synthetic timeout"))
+    service._get_background_client = lambda **_kw: (client, "mock-model")  # type: ignore[attr-defined]
 
     for attempt in range(1, MAX_EXTRACTION_ATTEMPTS):
         with pytest.raises(ExtractionBatchFailed, match=f"attempt {attempt}/"):
             service._process_memory_extraction(task)
         assert backend.processed == []
 
-    with pytest.raises(ExtractionBatchFailed, match="gave up"):
+    with pytest.raises(ExtractionBatchFailed, match="gave up.*heuristics used"):
         service._process_memory_extraction(task)
     assert backend.processed == ["h1", "r1"]
-    # Earlier attempts are strict; the last allows the heuristic fallback.
-    assert strict_seen == [True] * (MAX_EXTRACTION_ATTEMPTS - 1) + [False]
+
+
+def test_final_attempt_that_recovers_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    memory = _Memory()
+    service, backend, task = _service(monkeypatch, memory)
+    reply = '{"facts": [{"content": "Nick has a dog named Biscuit", "tags": ["pets"], "importance": 0.9, "source_message_ids": ["h1"]}]}'
+    replies: list[Any] = [TimeoutError("t1"), TimeoutError("t2"), reply]
+
+    class _Flaky:
+        def query(self, **_kw: Any) -> Any:
+            r = replies.pop(0)
+            if isinstance(r, BaseException):
+                raise r
+            return r
+
+    service._get_background_client = lambda **_kw: (_Flaky(), "mock-model")  # type: ignore[attr-defined]
+    for _ in range(MAX_EXTRACTION_ATTEMPTS - 1):
+        with pytest.raises(ExtractionBatchFailed):
+            service._process_memory_extraction(task)
+
+    result = service._process_memory_extraction(task)
+    assert result["facts_stored"] == 1
+    assert backend.processed == ["h1", "r1"]
+
+
+def test_real_storage_write_failure_leaves_batch_for_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Through MemoryStorage.store_memory and the PostgreSQL writer with a failed transaction.
+
+    Relies on the storage contract from TASK-2246 (store_memory raises when
+    the write isn't persisted).
+    """
+    import asyncio
+
+    import llm_bawt.mcp_server.storage as storage_mod
+    from llm_bawt.mcp_server.storage import MemoryStorage
+    from llm_bawt.memory.postgresql_memories import PostgreSQLSemanticMemoryMixin
+
+    class _Writer(PostgreSQLSemanticMemoryMixin):
+        config = SimpleNamespace()
+        embedding_model = "none"
+        _memories_table_name = "memories_p_test"
+
+        def ensure_schema(self) -> None:
+            pass
+
+        def _memory_write_transaction(self) -> Any:
+            raise RuntimeError("synthetic database write outage")
+
+    monkeypatch.setattr(storage_mod, "generate_embedding", lambda *a, **k: [0.1, 0.2])
+    monkeypatch.setattr("llm_bawt.memory.embeddings.generate_embedding", lambda *a, **k: None)
+    storage = object.__new__(MemoryStorage)
+    storage.config = SimpleNamespace(MEMORY_EMBEDDING_MODEL="none", VERBOSE=False)  # type: ignore[assignment]
+    writer = _Writer()
+    monkeypatch.setattr(storage, "_get_backend", lambda *a, **k: writer, raising=False)
+
+    def add_memory(content: str, tags: Any = None, importance: float = 0.5, source_message_ids: Any = None) -> str:
+        return asyncio.run(storage.store_memory(content=content, bot_id="test", tags=tags,
+                                                importance=importance, source_message_ids=source_message_ids)).id
+
+    memory = _Memory()
+    memory.add_memory = add_memory  # type: ignore[method-assign,assignment]
+    service, backend, task = _service(monkeypatch, memory)
+    _extract_script(monkeypatch, [[FACT]])
+
+    with pytest.raises(ExtractionBatchFailed, match="memory write"):
+        service._process_memory_extraction(task)
+    assert backend.processed == []
+
+
+def test_profile_write_failure_is_raised_when_asked(monkeypatch: pytest.MonkeyPatch) -> None:
+    from llm_bawt.mcp_server import extraction as profile_mod
+
+    def boom() -> Any:
+        raise RuntimeError("profile store down")
+
+    monkeypatch.setattr("llm_bawt.mcp_server.server._get_profile_manager", boom)
+    fact = ExtractedFact(content="Nick has a dog named Biscuit", tags=["pets"], importance=0.9,
+                         source_message_ids=["h1"], profile_attribute={"category": "fact", "key": "pets"})
+    config = SimpleNamespace(MEMORY_PROFILE_ATTRIBUTE_ENABLED=True)
+    assert profile_mod.extract_profile_attributes_from_fact(fact, "u", config) is False  # type: ignore[arg-type]
+    with pytest.raises(RuntimeError, match="profile store down"):
+        profile_mod.extract_profile_attributes_from_fact(fact, "u", config, raise_errors=True)  # type: ignore[arg-type]
 
 
 def test_failure_marks_run_failed(monkeypatch: pytest.MonkeyPatch) -> None:
