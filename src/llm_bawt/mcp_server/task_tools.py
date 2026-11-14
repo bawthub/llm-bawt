@@ -413,16 +413,6 @@ async def associate_task_to_current_turn(task_id: str) -> dict:
         return {"error": str(error)}
 
 
-async def _task_is_unowned(task_id: str) -> bool:
-    """True only when the task is confirmed to have no owner (fail closed)."""
-    try:
-        current = await _api_get(f"/tasks/{task_id}")
-    except (httpx.HTTPError, ValueError) as error:
-        logger.warning("tasks_update: owner lookup for %s failed: %s", task_id, error)
-        return False
-    return isinstance(current, dict) and not current.get("agentBotId")
-
-
 @mcp.tool(name="tasks_update")
 @_task_status_docs
 async def update_task(
@@ -610,15 +600,10 @@ async def update_task(
     if archived is not None:
         body["archived"] = archived
 
-    # REVIEW requires the task to have an owner (server guard
-    # reviewTransitionMissingBot). When the task has NO owner, the submitting
-    # bot (bot_id) fills it so the caller needn't know the internal rule.
-    # TASK-1015: bot_id is the ACTOR, never an ownership claim — it must not
-    # reassign a task that already has an owner (TASK-1013 changed owner when
-    # another bot passed its own bot_id). Reassignment requires explicit agent_bot_id.
+    # TASK-2244: ownership is decided under the backend row lock, not from
+    # a racy GET. Keep a conditional fallback distinct from explicit reassignment.
     if status == "REVIEW" and agent_bot_id is None and bot_id:
-        if await _task_is_unowned(task_id):
-            body["agentBotId"] = bot_id
+        body["fallbackAgentBotId"] = bot_id
 
     turn_urls, turn_error = await linked_turn_images(associate_current_turn, attach_turn_images)
     edit = None

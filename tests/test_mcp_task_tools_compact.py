@@ -193,17 +193,16 @@ def test_tasks_update_returns_compact_task(monkeypatch: pytest.MonkeyPatch) -> N
         )
     )
 
-    # Moving to REVIEW auto-assigns the caller (bot_id) as owner, so agentBotId
-    # is added to the PATCH body without the caller passing it explicitly.
+    # The backend applies the REVIEW owner fallback under its row lock.
     assert calls == [
         {
             "path": "/tasks/TASK-266",
-            "json": {"status": "REVIEW", "response": GIANT_TEXT, "agentBotId": "snark"},
+            "json": {"status": "REVIEW", "response": GIANT_TEXT, "fallbackAgentBotId": "snark"},
             "headers": {"X-Agent-Bot-Id": "snark"},
         }
     ]
     assert result["ok"] is True
-    assert result["updated"] == ["agentBotId", "response", "status"]
+    assert result["updated"] == ["fallbackAgentBotId", "response", "status"]
     assert result["task"]["shortId"] == "TASK-266"
     assert result["task"]["descriptionChars"] == 20_000
     assert "description" not in result["task"]
@@ -309,8 +308,8 @@ def test_review_autofills_owner_from_bot_id(monkeypatch: pytest.MonkeyPatch) -> 
     result = _run(task_tools.update_task("TASK-1", status="REVIEW", bot_id="byte"))
 
     # The guard requires an owner; bot_id supplies it without the caller knowing.
-    assert calls[0]["json"] == {"status": "REVIEW", "agentBotId": "byte"}
-    assert result["updated"] == ["agentBotId", "status"]
+    assert calls[0]["json"] == {"status": "REVIEW", "fallbackAgentBotId": "byte"}
+    assert result["updated"] == ["fallbackAgentBotId", "status"]
 
 
 def test_review_actor_bot_id_never_reassigns_owned_task(
@@ -321,23 +320,50 @@ def test_review_actor_bot_id_never_reassigns_owned_task(
 
     result = _run(task_tools.update_task("TASK-1013", status="REVIEW", bot_id="al"))
 
-    assert calls[0]["json"] == {"status": "REVIEW"}
+    assert calls[0]["json"] == {"status": "REVIEW", "fallbackAgentBotId": "al"}
     assert calls[0]["headers"] == {"X-Agent-Bot-Id": "al"}  # still attributed
-    assert result["updated"] == ["status"]
+    assert result["updated"] == ["fallbackAgentBotId", "status"]
 
 
-def test_review_owner_lookup_failure_does_not_guess(
+def test_review_needs_no_client_owner_lookup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = _capture_patch(monkeypatch)
 
     async def broken_get(_path: str, params: dict | None = None) -> dict[str, Any]:
-        raise task_tools.httpx.ConnectError("down")
+        pytest.fail("REVIEW fallback must not read ownership before PATCH")
 
     monkeypatch.setattr(task_tools, "_api_get", broken_get)
     _run(task_tools.update_task("TASK-1", status="REVIEW", bot_id="byte"))
-    # Fail closed: the server's own REVIEW guard reports a missing owner.
-    assert calls[0]["json"] == {"status": "REVIEW"}
+    assert calls[0]["json"] == {"status": "REVIEW", "fallbackAgentBotId": "byte"}
+
+
+def test_review_fallback_preserves_assignment_between_read_and_patch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = None
+
+    async def read_then_assign(_path: str, params: dict | None = None) -> dict[str, Any]:
+        nonlocal owner
+        observed = owner
+        owner = "bot-b"
+        return {"agentBotId": observed}
+
+    async def patch_after_assignment(path: str, json: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+        nonlocal owner
+        # A competing assignment wins before this PATCH takes the row lock.
+        owner = "bot-b"
+        if "agentBotId" in json:
+            owner = json["agentBotId"]
+        elif not owner:
+            owner = json.get("fallbackAgentBotId")
+        return {**_full_task(), "agentBotId": owner}
+
+    monkeypatch.setattr(task_tools, "_api_get", read_then_assign)
+    monkeypatch.setattr(task_tools, "_api_patch", patch_after_assignment)
+    result = _run(task_tools.update_task("TASK-1", status="REVIEW", bot_id="bot-a"))
+    assert result["ok"] is True
+    assert owner == "bot-b"
 
 
 def test_review_explicit_agent_bot_id_wins(monkeypatch: pytest.MonkeyPatch) -> None:
