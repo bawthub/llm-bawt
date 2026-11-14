@@ -42,11 +42,12 @@ class _Memory:
     def list_memories(self, **_kw: Any) -> list[dict[str, Any]]:
         return []
 
-    def add_memory(self, content: str, **_kw: Any) -> None:
+    def add_memory(self, content: str, **_kw: Any) -> str:
         if self.fail_adds:
             self.fail_adds -= 1
             raise RuntimeError("memory store unavailable")
         self.added.append(content)
+        return f"m{len(self.added)}"
 
 
 @pytest.fixture(autouse=True)

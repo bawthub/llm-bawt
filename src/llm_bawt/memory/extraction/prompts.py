@@ -193,6 +193,9 @@ Rules:
 2. Use DELETE when information is explicitly contradicted (e.g., "moved from X to Y" deletes "lives in X")
 3. Similar but not identical facts should both be kept (ADD, not UPDATE)
 4. When updating, preserve the higher importance score unless the update is more significant
+5. Every action must include the original new fact's zero-based fact_index. ADD/UPDATE may rewrite content, but must not invent source IDs or metadata.
+6. For an obsolete memory, emit its replacement ADD/UPDATE and a DELETE with the same fact_index. DELETE alone cannot remove a memory. Use only exact IDs from existing memories; never DELETE an UPDATE target.
+7. Emit at most one ADD or UPDATE per fact_index. Fact tags, importance, sources and profile metadata remain those of the original extracted fact.
 
 Examples:
 
@@ -204,8 +207,8 @@ Existing memories:
 
 New facts:
 [
-  {{"content": "User recently moved to Seattle", "tags": ["fact"], "importance": 0.8}},
-  {{"content": "User works on machine learning projects", "tags": ["professional"], "importance": 0.7}}
+  {{"fact_index": 0, "content": "User recently moved to Seattle", "tags": ["fact"], "importance": 0.8}},
+  {{"fact_index": 1, "content": "User works on machine learning projects", "tags": ["professional"], "importance": 0.7}}
 ]
 
 Output:
@@ -214,11 +217,13 @@ Output:
   "actions": [
     {{
       "action": "DELETE",
+      "fact_index": 0,
       "target_memory_id": "mem_001",
       "reason": "User moved from San Francisco to Seattle"
     }},
     {{
       "action": "ADD",
+      "fact_index": 0,
       "fact": {{
         "content": "User lives in Seattle",
         "tags": ["fact"],
@@ -228,6 +233,7 @@ Output:
     }},
     {{
       "action": "ADD",
+      "fact_index": 1,
       "fact": {{
         "content": "User works on machine learning projects",
         "tags": ["professional"],

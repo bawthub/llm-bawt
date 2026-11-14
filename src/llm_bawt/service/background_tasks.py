@@ -345,9 +345,17 @@ class BackgroundTasksMixin:
                 else:
                     actions = [MemoryAction(action="ADD", fact=f) for f in facts]
 
+                target_ids = {m["id"] for m in existing_memories}
+                updated_ids = {a.target_memory_id for a in actions if a.action == "UPDATE"}
+                written_sources: set[int] = set()
+                persisted_ids: set[str] = set()
                 for action in actions:
+                    if action.action == "DELETE":
+                        continue  # Deferred until its replacement actually persists.
                     fact = action.fact
                     if not fact:
+                        continue
+                    if action.action == "UPDATE" and action.target_memory_id not in target_ids:
                         continue
 
                     try:
@@ -357,33 +365,35 @@ class BackgroundTasksMixin:
                                 f"[Extraction] ADD: '{fact.content}' "
                                 f"[{tag_str}] importance={fact.importance:.2f}"
                             )
-                            memory_client.add_memory(
+                            stored = memory_client.add_memory(
                                 content=fact.content,
                                 tags=fact.tags,
                                 importance=fact.importance,
                                 source_message_ids=fact.source_message_ids,
                             )
+                            if stored is None:
+                                raise RuntimeError("extraction memory was not stored")
+                            persisted_ids.add(stored if isinstance(stored, str) else stored.id)
                             total_stored += 1
                         elif action.action == "UPDATE" and action.target_memory_id:
                             log.info(
                                 f"[Extraction] UPDATE ({action.target_memory_id[:8]}): "
                                 f"'{fact.content}' [{tag_str}] importance={fact.importance:.2f}"
                             )
-                            memory_client.update_memory(
+                            updated = memory_client.update_memory(
                                 memory_id=action.target_memory_id,
                                 content=fact.content,
                                 importance=fact.importance,
                                 tags=fact.tags,
+                                source_message_ids=fact.source_message_ids,
                             )
+                            if updated is None:
+                                continue
                             total_stored += 1
-                        elif action.action == "DELETE" and action.target_memory_id:
-                            log.info(
-                                f"[Extraction] DELETE: {action.target_memory_id[:8]} "
-                                f"reason='{action.reason}'"
-                            )
-                            memory_client.delete_memory(memory_id=action.target_memory_id)
 
                         # Profile attribute extraction
+                        if action.action in ("ADD", "UPDATE"):
+                            written_sources.add(id(action.source_fact or fact))
                         if action.action in ("ADD", "UPDATE") and profile_enabled:
                             from ..mcp_server.extraction import extract_profile_attributes_from_fact
                             extract_profile_attributes_from_fact(
@@ -393,6 +403,17 @@ class BackgroundTasksMixin:
                             )
                     except Exception as e:
                         log.warning(f"Failed to process memory action {action.action}: {e}")
+
+                for action in actions:
+                    if (action.action != "DELETE" or action.target_memory_id not in target_ids
+                            or action.target_memory_id in updated_ids
+                            or action.target_memory_id in persisted_ids
+                            or id(action.source_fact) not in written_sources):
+                        continue
+                    try:
+                        memory_client.delete_memory(memory_id=action.target_memory_id)
+                    except Exception as e:
+                        log.warning(f"Failed to delete obsolete memory: {e}")
 
                 # Mark summary as extracted (crash recovery marker)
                 self._mark_summary_extracted(bot_id, summary_id)
@@ -722,10 +743,18 @@ class BackgroundTasksMixin:
 
                     written: list = []
                     failed_writes: set[int] = set()
+                    target_ids = {m["id"] for m in existing_memories}
+                    updated_ids = {a.target_memory_id for a in actions if a.action == "UPDATE"}
+                    written_sources: set[int] = set()
+                    persisted_ids: set[str] = set()
                     for action in actions:
+                        if action.action == "DELETE":
+                            continue  # Never delete before its replacement write.
                         fact = action.fact
                         if (not fact or not fact.source_message_ids
                                 or not set(fact.source_message_ids).issubset(source_ids)):
+                            continue
+                        if action.action == "UPDATE" and action.target_memory_id not in target_ids:
                             continue
                         try:
                             tag_str = ",".join(fact.tags)
@@ -736,12 +765,15 @@ class BackgroundTasksMixin:
                                     tag_str,
                                     fact.importance,
                                 )
-                                memory_client.add_memory(
+                                stored = memory_client.add_memory(
                                     content=fact.content,
                                     tags=fact.tags,
                                     importance=fact.importance,
                                     source_message_ids=fact.source_message_ids[:5],
                                 )
+                                if stored is None:
+                                    raise RuntimeError("extraction memory was not stored")
+                                persisted_ids.add(stored if isinstance(stored, str) else stored.id)
                                 total_stored += 1
                             elif action.action == "UPDATE" and action.target_memory_id:
                                 log.info(
@@ -757,30 +789,35 @@ class BackgroundTasksMixin:
                                     source_message_ids=fact.source_message_ids[:5],
                                 )
                                 if updated is None:
+                                    failed_writes.add(id(action.source_fact or fact))
                                     continue
                                 total_stored += 1
-                            elif action.action == "DELETE" and action.target_memory_id:
-                                log.info(
-                                    "[MemExtract] DELETE: %s reason='%s'",
-                                    action.target_memory_id[:8],
-                                    action.reason,
-                                )
-                                memory_client.delete_memory(
-                                    memory_id=action.target_memory_id,
-                                )
                             if action.action in ("ADD", "UPDATE"):
                                 written.append(fact)
+                                written_sources.add(id(action.source_fact or fact))
                         except MemoryUpdateDuplicateError as e:
                             # Dedup, not a failed write: the fact already exists.
                             log.info("[MemExtract] UPDATE folded into a duplicate: %s", e)
                         except Exception as e:
                             failed_actions += 1
-                            failed_writes.add(id(fact))
+                            failed_writes.add(id(action.source_fact or fact))
                             log.warning(
                                 "[MemExtract] Failed action %s: %s",
                                 action.action,
                                 e,
                             )
+
+                    for action in actions:
+                        if (action.action != "DELETE" or action.target_memory_id not in target_ids
+                                or action.target_memory_id in updated_ids
+                                or action.target_memory_id in persisted_ids
+                                or id(action.source_fact) not in written_sources):
+                            continue
+                        try:
+                            memory_client.delete_memory(memory_id=action.target_memory_id)
+                        except Exception as e:
+                            failed_actions += 1
+                            log.warning("[MemExtract] Failed deferred DELETE: %s", e)
 
                     # Profile candidates. A retry can't rely on the memory
                     # actions: a fact whose memory landed on an earlier

@@ -120,3 +120,60 @@ def test_source_ownership_change_during_embedding_refuses_update(owned_memory, m
     with backend.engine.connect() as conn:
         assert conn.execute(text(f"SELECT content FROM {backend._memories_table_name} WHERE id=:id"),
                             {"id": memory}).scalar_one() == "Original"
+
+
+@pytest.mark.parametrize("path", ["raw", "summary"])
+@pytest.mark.parametrize("kind", ["ADD_DELETE", "UPDATE"])
+def test_rewritten_actions_persist_for_owner_in_both_consumers(owned_memory, monkeypatch, path, kind):
+    import json
+
+    from llm_bawt.memory.extraction import service as extraction
+    from llm_bawt.memory.extraction.prompts import MEMORY_UPDATE_PROMPT_TEMPLATE
+    from llm_bawt.service.background_tasks import BackgroundTasksMixin
+
+    backend, a, b, sources = owned_memory
+    monkeypatch.setattr("llm_bawt.memory.embeddings.generate_embedding", lambda *a, **kw: None)
+    old = a.add_memory(content="User lives in San Francisco", source_message_ids=[sources["owner-a"]])
+    foreign = b.add_memory(content="Other user's city", source_message_ids=[sources["owner-b"]])
+    fact = extraction.ExtractedFact(
+        content="User recently moved to Seattle", tags=["fact"], importance=.9,
+        source_message_ids=[sources["owner-a"]],
+    )
+    actions = [{
+        "action": "DELETE", "fact_index": 0, "target_memory_id": old,
+    }, {
+        "action": "ADD" if kind == "ADD_DELETE" else "UPDATE",
+        "fact_index": 0, "target_memory_id": old,
+        "fact": {"content": "User lives in Seattle", "source_message_ids": [sources["owner-b"]]},
+    }, {
+        "action": "DELETE", "fact_index": 0, "target_memory_id": foreign,
+    }]
+    client = SimpleNamespace(query=lambda **kw: json.dumps({"actions": actions}))
+    monkeypatch.setattr(extraction, "get_memory_update_prompt",
+                        lambda existing, facts: MEMORY_UPDATE_PROMPT_TEMPLATE.format(
+                            existing_memories=existing, new_facts=facts))
+    monkeypatch.setattr(extraction, "get_extraction_system_prompt", lambda _: "system")
+    monkeypatch.setattr("llm_bawt.memory.postgresql.PostgreSQLMemoryBackend", lambda *a, **kw: backend)
+    monkeypatch.setattr(extraction.MemoryExtractionService, "extract_from_conversation", lambda *a, **kw: [fact])
+    monkeypatch.setattr(extraction.MemoryExtractionService, "extract_from_summary", lambda *a, **kw: [fact])
+    service = BackgroundTasksMixin()
+    service.config = SimpleNamespace(MEMORY_PROFILE_ATTRIBUTE_ENABLED=False)
+    service._get_background_client = lambda **kw: (client, "mock")
+    if path == "raw":
+        result = service._process_memory_extraction(SimpleNamespace(bot_id=backend.bot_id, user_id="owner-a", payload={}))
+    else:
+        monkeypatch.setattr("llm_bawt.memory.summary_extraction_policy.summary_allows_extraction", lambda *a: True)
+        monkeypatch.setattr("llm_bawt.memory.summary_extraction_policy.summary_has_human_source", lambda *a: True)
+        service.get_memory_client = lambda *a: a_store
+        a_store = a
+        service._mark_summary_extracted = lambda *a: None
+        result = service._extract_from_summaries(
+            [{"created": True, "summary_id": "synthetic", "summary_text": fact.content}],
+            backend.bot_id, "owner-a",
+        )
+    assert result["facts_stored"] == 1
+    own, = a.list_memories()
+    assert own["content"] == "User lives in Seattle"
+    assert own["source_message_ids"] == [sources["owner-a"]]
+    assert (own["id"] == old) is (kind == "UPDATE")
+    assert [row["id"] for row in b.list_memories()] == [foreign]

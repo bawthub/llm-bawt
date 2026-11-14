@@ -6,7 +6,7 @@ Uses LLM to extract facts and handle memory updates/conflicts.
 import json
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Optional, Protocol
 
@@ -106,6 +106,7 @@ class MemoryAction:
     fact: ExtractedFact | None = None
     target_memory_id: str | None = None
     reason: str = ""
+    source_fact: ExtractedFact | None = None  # Trusted original, never model metadata
 
 
 class MemoryExtractionService:
@@ -629,7 +630,10 @@ class MemoryExtractionService:
             for m in existing_memories
         ], indent=2)
         
-        new_facts_json = json.dumps([f.to_dict() for f in new_facts], indent=2)
+        new_facts_json = json.dumps([
+            {**fact.to_dict(), "fact_index": index}
+            for index, fact in enumerate(new_facts)
+        ], indent=2)
         
         prompt = get_memory_update_prompt(existing_json, new_facts_json)
         
@@ -648,29 +652,32 @@ class MemoryExtractionService:
             stream=False,
         )
         
-        return self._parse_action_response(response, new_facts)
+        return self._parse_action_response(response, new_facts, existing_memories)
     
     def _parse_action_response(
         self,
         response: str,
         new_facts: list[ExtractedFact],
+        existing_memories: list[dict] | None = None,
     ) -> list[MemoryAction]:
-        """Parse the LLM response into MemoryAction objects.
-        
-        When possible, matches parsed facts back to original facts to preserve
-        meaning fields (intent, etc.) that were extracted with conversation context.
-        """
+        """Bind rewrites to extracted facts, never to model-supplied provenance."""
         _require_completion(response)
         actions = []
-        
-        # Build lookup for matching back to original facts
-        def find_original_fact(content: str) -> ExtractedFact | None:
-            """Find original fact by content similarity."""
-            content_lower = content.lower().strip()
-            for fact in new_facts:
-                if fact.content.lower().strip() == content_lower:
-                    return fact
-            return None
+        targets = {m["id"] for m in existing_memories or []
+                   if isinstance(m.get("id"), str)}
+        used_facts: set[int] = set()
+
+        def find_original_index(raw_action: dict, content: str) -> int | None:
+            if "fact_index" in raw_action:
+                index = raw_action["fact_index"]
+                if type(index) is int and 0 <= index < len(new_facts):
+                    return index
+                return None
+            # Compatibility for older prompt overrides: exact, unique wording
+            # is still a valid link. An invalid explicit index never falls back.
+            matches = [index for index, fact in enumerate(new_facts)
+                       if fact.content.lower().strip() == content.lower().strip()]
+            return matches[0] if len(matches) == 1 else None
         
         # Try to extract JSON from the response (look for code blocks first)
         code_block_match = re.search(r'```(?:json)?\s*(\{[\s\S]*?\})\s*```', response)
@@ -690,50 +697,46 @@ class MemoryExtractionService:
             raw_actions = data.get("actions", [])
             
             for raw_action in raw_actions:
-                action_type = raw_action.get("action", "NONE").upper()
-                
-                if action_type == "ADD":
-                    fact_data = raw_action.get("fact", {})
-                    content = fact_data.get("content", "")
-                    
-                    # Try to match back to original fact (preserves intent from extraction)
-                    original = find_original_fact(content)
-                    if original is None:
-                        # The action model cannot create a fact with invented
-                        # source IDs; it may only act on an extracted fact.
+                if not isinstance(raw_action, dict):
+                    continue
+                action_type = str(raw_action.get("action", "NONE")).upper()
+                if action_type not in {"ADD", "UPDATE", "DELETE"}:
+                    continue
+                target = raw_action.get("target_memory_id")
+                if action_type != "ADD" and (
+                    not isinstance(target, str) or target not in targets
+                ):
+                    continue
+                fact_data = raw_action.get("fact", {})
+                content = fact_data.get("content", "") if isinstance(fact_data, dict) else ""
+                if not isinstance(content, str):
+                    continue
+                index = find_original_index(raw_action, content)
+                if index is None:
+                    continue
+                original = new_facts[index]
+                if action_type == "DELETE":
+                    # Consumers require a persisted replacement linked to this
+                    # same original before executing the deferred deletion.
+                    fact = None
+                else:
+                    if not content.strip() or index in used_facts:
                         continue
-                    fact = original
-
-                    actions.append(MemoryAction(
-                        action="ADD",
-                        fact=fact,
-                        reason=raw_action.get("reason", ""),
-                    ))
-                    
-                elif action_type == "UPDATE":
-                    fact_data = raw_action.get("fact", {})
-                    content = fact_data.get("content", "")
-                    
-                    # Try to match back to original fact (preserves intent from extraction)
-                    original = find_original_fact(content)
-                    if original is None:
-                        continue
-                    fact = original
-
-                    actions.append(MemoryAction(
-                        action="UPDATE",
-                        fact=fact,
-                        target_memory_id=raw_action.get("target_memory_id"),
-                        reason=raw_action.get("reason", ""),
-                    ))
-                    
-                elif action_type == "DELETE":
-                    actions.append(MemoryAction(
-                        action="DELETE",
-                        target_memory_id=raw_action.get("target_memory_id"),
-                        reason=raw_action.get("reason", ""),
-                    ))
-                # NONE actions are ignored
+                    used_facts.add(index)
+                    fact = original if content == original.content else replace(
+                        original, content=content,
+                    )
+                actions.append(MemoryAction(
+                    action=action_type,
+                    fact=fact,
+                    target_memory_id=target if action_type != "ADD" else None,
+                    reason=raw_action.get("reason", ""),
+                    source_fact=original,
+                ))
+            # Updating and then deleting the same row cannot preserve a fact.
+            updated = {a.target_memory_id for a in actions if a.action == "UPDATE"}
+            actions = [a for a in actions
+                       if a.action != "DELETE" or a.target_memory_id not in updated]
                 
         except json.JSONDecodeError as e:
             logger.debug(f"Failed to parse action JSON: {e}")

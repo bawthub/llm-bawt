@@ -64,7 +64,7 @@ def test_two_users_extract_only_their_own_session_messages(monkeypatch, task_use
     monkeypatch.setattr("llm_bawt.memory.extraction.storage.ExtractionMemoryStore",
                         lambda backend, bot, user: SimpleNamespace(
                             list_memories=lambda **kw: [],
-                            add_memory=lambda **kw: stored.append((user, kw["content"])),
+                            add_memory=lambda **kw: stored.append((user, kw["content"])) or "stored",
                         ))
     try:
         for user in task_users:
