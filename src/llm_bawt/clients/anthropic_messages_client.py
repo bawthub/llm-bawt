@@ -13,6 +13,7 @@ behavior (ignore tools, return text).
 from __future__ import annotations
 
 import base64
+import inspect
 import logging
 from typing import Any, List
 
@@ -132,6 +133,22 @@ class AnthropicMessagesClient(LLMClient):
         payload.update(optional)
         return payload
 
+    @staticmethod
+    def _sdk_kwargs(create: Any, payload: dict[str, Any]) -> dict[str, Any]:
+        """Keep the fields the installed SDK's ``create`` declares as typed
+        kwargs and send the rest as ``extra_body``. anthropic 1.x dropped
+        ``temperature`` from ``Messages.create`` while endpoints still accept it
+        on the wire; a typed kwarg the SDK lacks raises ``TypeError`` before any
+        request leaves (TASK-2298)."""
+        params = inspect.signature(create).parameters
+        if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+            return dict(payload)
+        typed = {k: v for k, v in payload.items() if k in params}
+        extra = {k: v for k, v in payload.items() if k not in params}
+        if extra:
+            typed["extra_body"] = {**(typed.get("extra_body") or {}), **extra}
+        return typed
+
     def job_request_options(self, job: str, *, reasoning_effort: str | None = None) -> dict[str, Any]:
         """Reasoning effort ``none`` → Messages ``thinking: disabled`` (TASK-1726).
 
@@ -179,8 +196,8 @@ class AnthropicMessagesClient(LLMClient):
         sent = {k: v for k, v in optional.items() if k not in self._rejected_fields}
         while True:
             try:
-                response = sdk.messages.create(
-                    **self._payload(messages, max_tokens=max_tokens, optional=sent))
+                response = sdk.messages.create(**self._sdk_kwargs(
+                    sdk.messages.create, self._payload(messages, max_tokens=max_tokens, optional=sent)))
                 break
             except BadRequestError as error:
                 field = self._rejected_field(error, sent)
