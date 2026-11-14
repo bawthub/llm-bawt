@@ -98,6 +98,8 @@ def _cmd(command):
     "git -C /r status && echo merge",
     "git branch --merged master",
     "ls; cat push.log",
+    "if git diff --quiet; then echo then git push; fi",
+    "{ git status; echo do git commit; }",
 ])
 def test_gate_passes_read_only_commands_mentioning_mutation_words(command):
     """TASK-2272: operands and other commands are not git subcommands."""
@@ -122,6 +124,12 @@ def test_gate_passes_read_only_commands_mentioning_mutation_words(command):
     "sudo -u x git push",
     "git status | cat || git push",
     "git commit -m 'unbalanced",
+    "if test -d .git; then git push origin HEAD; fi",
+    "git status && { git push origin HEAD; }",
+    "for b in a; do git push origin $b; done",
+    "! git push",
+    'echo "$(git push origin HEAD)"',
+    'echo "`git push`"',
 ])
 def test_gate_denies_mutating_git_in_any_shell_position(command):
     """TASK-2286: subshells, adjacency, paths, pull/am and shells are caught."""

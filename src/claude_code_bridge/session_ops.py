@@ -150,7 +150,7 @@ class ClaudeSessionMixin:
 
     async def _set_thread_session(
         self, thread_session_id: str, bot_id: str, sdk_session_id: str, model: str,
-    ) -> None:
+    ) -> bool:
         """Persist an SDK session id onto its bawthub thread.
 
         Writes to ``sessions.session_metadata.agent_session_keys`` via the

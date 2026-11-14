@@ -171,9 +171,22 @@ def _git_subcommand(words: list[str]) -> str | None:
     return None
 
 
+#: Shell reserved words that can precede a command in the same segment.
+_RESERVED_PREFIXES = frozenset(
+    {"if", "then", "else", "elif", "do", "while", "until", "!", "{", "}", "time"}
+)
+
+
 def _segment_mutates(words: list[str], depth: int) -> bool:
+    if depth < 3:
+        # Command substitution inside a quoted word ("$(git push)" or a
+        # backtick) still executes; scan those words as commands too.
+        for word in words:
+            if "$(" in word or " ; " in word:
+                if _command_mutates(word.replace("$(", " ; "), depth + 1):
+                    return True
     i = 0
-    while i < len(words) and _ASSIGNMENT.match(words[i]):
+    while i < len(words) and (_ASSIGNMENT.match(words[i]) or words[i] in _RESERVED_PREFIXES):
         i += 1
     if i < len(words) and words[i] in _COMMAND_PREFIXES:
         # Prefix options may take values (``sudo -u x``): run from the first
