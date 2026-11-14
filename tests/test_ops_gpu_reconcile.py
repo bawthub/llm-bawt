@@ -170,8 +170,18 @@ def test_tts_wake_refused_while_reconciling_asleep(store):
     with pytest.raises(HandoffConflict) as err:
         with Session(store.engine) as session, session.begin():
             GpuHandoffFence.tts_wake("w1")(session)
-    assert err.value.code == "tts_not_asleep"
+    # Not tts_not_asleep: BawtHub reads that as "already awake" (Codex, TASK-2297).
+    assert err.value.code == "gpu_reconcile_in_progress"
     assert (store.status().phase, store.status().owner) == ("gpu_reconciling", "asleep")
+
+
+def test_tts_sleep_refused_while_reconciling_voice(store):
+    reserve(store)
+    with pytest.raises(HandoffConflict) as err:
+        with Session(store.engine) as session, session.begin():
+            GpuHandoffFence.tts_sleep("s1")(session)
+    assert err.value.code == "gpu_reconcile_in_progress"
+    assert (store.status().phase, store.status().owner) == ("gpu_reconciling", "voice")
 
 
 @pytest.mark.parametrize("phase", ["tts_sleeping", "tts_waking"])

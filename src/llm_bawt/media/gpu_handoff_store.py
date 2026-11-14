@@ -285,6 +285,11 @@ class GpuHandoffFence:
         if row["phase"] in TTS_FENCE_PHASES:
             raise HandoffConflict("A TTS restart, sleep or wake is already in progress",
                                   code="tts_power_in_progress")
+        if row["phase"] == RECONCILE_PHASE:
+            # TASK-2297: transient, and checked first: a reconcile can hold an asleep
+            # TTS, and clients read tts_not_asleep as "already awake".
+            raise HandoffConflict("A GPU service reconcile holds the GPU; retry after it",
+                                  code="gpu_reconcile_in_progress")
         if self.kind == "tts_wake" and (row["owner"] != ASLEEP_OWNER or row["phase"] != "idle"):
             raise HandoffConflict("TTS wakes only while it is asleep", code="tts_not_asleep")
         if self.kind == "tts_sleep" and row["owner"] == ASLEEP_OWNER:
