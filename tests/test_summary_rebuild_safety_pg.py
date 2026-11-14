@@ -29,7 +29,8 @@ def engine(private_pg, private_module_db):
     with engine.begin() as conn:
         conn.execute(text(
             f"CREATE TABLE {TABLE} (id text PRIMARY KEY, role text, content text, "
-            "timestamp float8, summarized boolean DEFAULT FALSE, summary_metadata jsonb)"
+            "timestamp float8, summarized boolean DEFAULT FALSE, summary_metadata jsonb, "
+            "session_id text, created_at timestamp)"
         ))
     yield engine
     engine.dispose()
@@ -189,3 +190,33 @@ def test_purge_keeps_legacy_summary_without_sources(db, rebuild_rig):
 
     assert purged == 0
     assert _summaries(db) == {"old", "legacy"}
+
+
+def test_chunked_rebuild_of_unchunked_summary_restores_failed_chunk_sources(db, monkeypatch):
+    # Codex review cmwfyukz: one old summary covers m1..m4; the rebuild splits
+    # it into two chunks, the first fails and the second (real
+    # summarize_session) replaces the old row by overlap.
+    for mid, ts in (("m1", 100), ("m2", 200), ("m3", 300), ("m4", 400)):
+        _source(db, mid, ts)
+    _summary(db, "old", 400, ["m1", "m2", "m3", "m4"], session_start=100, session_end=400)
+    summarizer = _summarizer(db)
+    calls = {"n": 0}
+
+    def generate(_session):
+        calls["n"] += 1
+        return None if calls["n"] == 1 else "[HISTORICAL SUMMARY]\nSummary: second half"
+
+    summarizer._summarize_fn = generate
+    monkeypatch.setattr(summarizer, "_get_all_messages", lambda: [])
+    monkeypatch.setattr(summarization, "prioritize_summarizable_sessions", lambda s: s)
+    monkeypatch.setattr(summarization, "find_budget_overflow_sessions",
+                        lambda *_a, **_k: [_session(["m1", "m2", "m3", "m4"], 100, 400)])
+    monkeypatch.setattr(summarization, "split_session_into_chunks", lambda _s, _n: [
+        _session(["m1", "m2"], 100, 200), _session(["m3", "m4"], 300, 400)])
+
+    result = summarizer.rebuild_recent_sessions(
+        purge_existing=True, use_heuristic_fallback=False, session_limit=0)
+
+    assert result["sessions_summarized"] == 1
+    assert "old" not in _summaries(db)
+    assert _summarized(db) == {"m1": False, "m2": False, "m3": True, "m4": True}

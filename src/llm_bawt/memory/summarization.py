@@ -1268,6 +1268,7 @@ class HistorySummarizer:
             if replace_existing:
                 replace_ids = self._find_replaceable_summary_ids(conn, session)
                 if replace_ids:
+                    deleted_sources = self._summary_source_ids(conn, replace_ids)
                     delete_sql = text(
                         f"""
                         DELETE FROM {self._backend._messages_table_name}
@@ -1276,6 +1277,21 @@ class HistorySummarizer:
                     )
                     conn.execute(delete_sql, {"ids": replace_ids})
                     replaced_existing = len(replace_ids)
+                    # A replaced summary can cover more than this chunk (an
+                    # unchunked original rebuilt in chunks). Sources it covered
+                    # that neither this chunk nor another summary covers become
+                    # eligible again, in this same transaction.
+                    uncovered = deleted_sources - set(map(str, session.message_ids))
+                    if uncovered:
+                        uncovered -= self._summary_source_ids(conn, None)
+                    if uncovered:
+                        conn.execute(
+                            text(
+                                f"UPDATE {self._backend._messages_table_name} "
+                                "SET summarized = FALSE WHERE id = ANY(:ids)"
+                            ),
+                            {"ids": sorted(uncovered)},
+                        )
 
             # Mark source messages as summarized, but keep them in place.
             if session.message_ids:
@@ -1564,6 +1580,33 @@ class HistorySummarizer:
                     errors.append(f"Session {idx}: {fallback_result.get('error', 'Fallback store failed')}")
 
         return (results, errors, created_count, total_messages, replaced_count)
+
+    def _summary_source_ids(self, conn, summary_ids: list[str] | None) -> set[str]:
+        """Source message IDs recorded by the given summaries (all when None)."""
+        from sqlalchemy import text
+
+        table = self._backend._messages_table_name
+        if summary_ids is None:
+            rows = conn.execute(
+                text(f"SELECT summary_metadata FROM {table} WHERE role = 'summary'")
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                text(f"SELECT summary_metadata FROM {table} WHERE id = ANY(:ids)"),
+                {"ids": list(summary_ids)},
+            ).fetchall()
+        sources: set[str] = set()
+        for row in rows:
+            meta = row.summary_metadata or {}
+            if isinstance(meta, str):
+                try:
+                    meta = json.loads(meta)
+                except Exception:
+                    meta = {}
+            ids = meta.get("message_ids") if isinstance(meta, dict) else None
+            if isinstance(ids, list):
+                sources.update(str(i) for i in ids)
+        return sources
 
     def _purge_historical_summaries(
         self,
