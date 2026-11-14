@@ -195,7 +195,8 @@ class ProviderAdapter(ABC):
     async def authorize(self) -> tuple[str, str]:
         """Return ``(bearer_token, base_url)``.
 
-        Refresh credentials in-place when needed. ``base_url`` is the API
+        Return current credentials from their owner (for example the app's
+        token broker); do not add another refresher here. ``base_url`` is the API
         root (e.g. ``https://api.openai.com/v1``), passed straight to the
         ``openai`` client.
         """

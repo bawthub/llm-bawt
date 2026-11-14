@@ -483,10 +483,10 @@ async def responses_to_anthropic_sse(
                     pass
                 else:
                     # Server-side tool calls (web_search, code_interpreter, mcp,
-                    # image_generation, file_search). The Claude Agent SDK drives
-                    # this proxy with function tools only, so these are not
-                    # reachable in practice — but keep the stream alive and log
-                    # if a provider ever emits one so we notice.
+                    # image_generation, file_search). The SDK sends function
+                    # tools only, but adapters can inject provider-native tools
+                    # (xAI adds web_search by default), so these do arrive.
+                    # Keep the stream alive and log them.
                     if state is not None:
                         state.committed_output.blocked = True
                     logger.debug("Unhandled output item type=%r — keepalive", itype)

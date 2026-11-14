@@ -398,8 +398,9 @@ class ChatGPTStream:
             if not self.event_seen
             else self.last_transport_activity_at + self.owner.idle_timeout
         )
-        # Do not cap total duration: large tool arguments can legitimately
-        # take minutes to stream. Only absence of progress is a stall.
+        # No overall duration cap: large tool arguments can take minutes to
+        # stream, so the idle budgets watch for missing progress. The one
+        # deliberate duration limit is argument_stream_timeout per tool call.
         candidates = [
             (transport_deadline, "first" if not self.event_seen else "next"),
             (
