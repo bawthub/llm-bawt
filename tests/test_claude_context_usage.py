@@ -478,3 +478,22 @@ def test_post_done_failed_read_marks_reason_and_compact_skips_read():
     )) == 1
     assert not harness.events
     assert calls == [True, True]
+
+
+def test_fully_cached_final_request_keeps_zero_fresh_input():
+    """TASK-2272: fresh=0 with cached input is valid, not a placeholder."""
+    harness = _Harness()
+    msg = SimpleNamespace(
+        usage={"input_tokens": 5_000, "cache_read_input_tokens": 30_000,
+               "cache_creation_input_tokens": 0, "output_tokens": 20},
+        model_usage={"openai_chatgpt/gpt": {"contextWindow": 372000, "maxOutputTokens": 4096}},
+        total_cost_usd=0.1,
+    )
+    usage, _, _ = harness._compute_result_usage(
+        msg, actual_model="openai_chatgpt/gpt", model="openai_chatgpt/gpt",
+        bot_context_window=372000, latest_assistant_usage=None,
+        latest_stream_usage={"input_tokens": 0, "cache_read_input_tokens": 10_000,
+                             "cache_creation_input_tokens": 0, "output_tokens": 5},
+        cost_baseline_usd=0.0,
+    )
+    assert usage["resident_tokens"] == 10_000

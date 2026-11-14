@@ -436,16 +436,19 @@ class ClaudeUsageMixin:
                 # where iter_usage.input_tokens is already >0 (its
                 # message_delta sends explicit 0s that updateUsage ignores).
                 _input_tokens = int(iter_usage.get("input_tokens", 0) or 0)
-                if _input_tokens == 0:
-                    _input_tokens = int(
-                        cumulative_usage.get("input_tokens", 0) or 0
-                    )
                 _cache_read = int(
                     iter_usage.get("cache_read_input_tokens", 0) or 0
                 )
                 _cache_create = int(
                     iter_usage.get("cache_creation_input_tokens", 0) or 0
                 )
+                # TASK-2272: zero fresh input with cached input is a valid,
+                # fully cached final request; only an all-zero snapshot is a
+                # placeholder that needs the cumulative fallback.
+                if _input_tokens == 0 and _cache_read == 0 and _cache_create == 0:
+                    _input_tokens = int(
+                        cumulative_usage.get("input_tokens", 0) or 0
+                    )
                 # If the chosen snapshot still has zero total input but
                 # cumulative does not, take cache fields from cumulative too.
                 if (
