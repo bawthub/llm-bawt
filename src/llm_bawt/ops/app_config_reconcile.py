@@ -28,6 +28,7 @@ restart.
 from __future__ import annotations
 
 import json
+import math
 import re
 from urllib.parse import urlencode
 
@@ -123,6 +124,35 @@ IMAGE_SWAP_LABEL = "llm-bawt.ops.gpu-image-swap"
 IMAGE_ID_RE = re.compile(r"sha256:[0-9a-f]{64}")
 JOB_ID_RE = re.compile(r"[0-9a-f]{32}")
 _SWAP_KEYS = frozenset({"mode", "target_image_id", "from_image_id", "deploy_job_id"})
+# Before an image swap commits, the new bridge must embed a fixed text: health
+# only proves the model object loaded, not that encode works on the new stack.
+# Fixed argv, bounded so a hung model cannot hold the GPU reservation; any
+# failure takes the restore-previous-container path.
+EMBED_PROBE_TIMEOUT_SECONDS = 90
+EMBED_PROBE_DIM = 384
+EMBED_PROBE_ARGV = ["curl", "-fsS", "--max-time", str(EMBED_PROBE_TIMEOUT_SECONDS),
+                    "-H", "Content-Type: application/json",
+                    "-d", '{"texts": ["llm-bawt ops image swap embedding probe"], "model": "all-MiniLM-L6-v2"}',
+                    "http://127.0.0.1:8684/embed"]
+
+
+def check_embed_probe(code, out) -> None:
+    """Raise StepError unless the probe returned one finite 384-value vector.
+    Messages name only fixed facts, never the response body."""
+    if code != 0:
+        raise StepError(f"embedding_probe_failed: in-container /embed request exited {code}")
+    try:
+        payload = json.loads(out)
+    except ValueError:
+        raise StepError("embedding_probe_failed: /embed response is not JSON") from None
+    vectors = payload.get("embeddings") if isinstance(payload, dict) else None
+    if not isinstance(vectors, list) or len(vectors) != 1 or not isinstance(vectors[0], list):
+        raise StepError("embedding_probe_failed: /embed did not return one vector")
+    vector = vectors[0]
+    if len(vector) != EMBED_PROBE_DIM:
+        raise StepError(f"embedding_probe_failed: vector dimension {len(vector)}, expected {EMBED_PROBE_DIM}")
+    if not all(type(v) in (int, float) and math.isfinite(v) for v in vector):
+        raise StepError("embedding_probe_failed: vector has non-finite or non-numeric values")
 
 
 def image_swap_mode(spec: dict) -> str | None:
@@ -495,6 +525,16 @@ class AppConfigReconciler(SourceGuardedReconciler):
         target = self._swap_target(old, swap)
         self._approved_image_id = target["Id"]
         self._replace(old, image, target, target["Id"], None)
+
+    def _verify_release(self, container_id, expect):
+        """Health first; for an image swap, then the embedding probe. Raised
+        inside the swap, so a failure restores the previous container."""
+        health = super()._verify_release(container_id, expect)
+        if image_swap_mode(self.spec) is not None:
+            self._phase("embedding-probe")
+            check_embed_probe(*self._exec(container_id, EMBED_PROBE_ARGV))
+            health["embedding_probe"] = {"status": "ok", "dim": EMBED_PROBE_DIM}
+        return health
 
     def _swap_target(self, old, swap):
         """TASK-2299: the approved local image, re-read under the target lock.

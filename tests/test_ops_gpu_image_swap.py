@@ -3,6 +3,7 @@ to a deploy's recorded previous image (rollback). No live Docker or network."""
 from __future__ import annotations
 
 import json
+import struct
 from types import SimpleNamespace
 
 import pytest
@@ -56,8 +57,35 @@ def swap_snapshot(api, spec=DEPLOY_SPEC, *, target=NEW_ID, job=None):
                            "deploy_job_id": job}}
 
 
+GOOD_VECTOR = [0.01 * (i % 7) - 0.03 for i in range(384)]
+
+
+class EmbedDocker(AppDocker):
+    """AppDocker plus the bridge's in-container /embed probe answer."""
+
+    def __init__(self, *, embed=None, embed_exit=0, **kwargs):
+        super().__init__(**kwargs)
+        self.embed_body = json.dumps({"embeddings": [GOOD_VECTOR]}) if embed is None else embed
+        self.embed_exit = embed_exit
+        self.embed_calls = 0
+
+    def request(self, method, path, *, body=None, headers=None, raw=False):
+        if method == "POST" and path.endswith("/exec") and "http://127.0.0.1:8684/embed" in body["Cmd"]:
+            self.calls.append((method, path))
+            self.exec_cmds.append(body["Cmd"])
+            self.embed_calls += 1
+            return {"Id": "embed1"}
+        if path.startswith("/exec/embed1/"):
+            self.calls.append((method, path))
+            if path.endswith("/start"):
+                payload = self.embed_body.encode()
+                return struct.pack(">BxxxI", 1, len(payload)) + payload
+            return {"ExitCode": self.embed_exit}
+        return super().request(method, path, body=body, headers=headers, raw=raw)
+
+
 def gpu_api(**kwargs):
-    api = AppDocker(**kwargs)
+    api = EmbedDocker(**kwargs)
     api.images[NEW_ID] = _image(NEW_ID, [TAG])
     return api
 
@@ -219,3 +247,47 @@ def test_worker_label_constant_is_baked_into_the_worker_image():
     from pathlib import Path
     dockerfile = (Path(__file__).resolve().parents[1] / "docker" / "Dockerfile.ops-worker").read_text()
     assert f'LABEL {IMAGE_SWAP_LABEL}="1"' in dockerfile
+
+
+# ── embedding probe before commit ──────────────────────────────────────────
+
+def test_swap_commits_only_after_a_finite_384_vector(tmp_path):
+    api = gpu_api()
+    result = json.loads(reconciler(api, tmp_path, swap_snapshot(api)).run())
+    assert api.embed_calls == 1 and result["health"]["embedding_probe"] == {"status": "ok", "dim": 384}
+    argv = next(c for c in api.exec_cmds if "http://127.0.0.1:8684/embed" in c)
+    assert argv[:4] == ["curl", "-fsS", "--max-time", "90"]
+
+
+@pytest.mark.parametrize("kwargs, text", [
+    ({"embed_exit": 22}, "/embed request exited 22"),                    # loaded but encode fails: HTTP 500
+    ({"embed_exit": 28}, "/embed request exited 28"),                    # curl timeout
+    ({"embed": "<html>"}, "not JSON"),
+    ({"embed": json.dumps({"embeddings": []})}, "did not return one vector"),
+    ({"embed": json.dumps({"embeddings": [[0.1] * 768]})}, "dimension 768"),
+    ({"embed": json.dumps({"embeddings": [[0.1] * 383 + [float("nan")]]})}, "non-finite"),
+    ({"embed": json.dumps({"embeddings": [[0.1] * 383 + ["x"]]})}, "non-finite"),
+])
+@pytest.mark.parametrize("mode", ["deploy", "rollback"])
+def test_broken_embeddings_restore_the_previous_container(tmp_path, kwargs, text, mode):
+    api = gpu_api(**kwargs)
+    if mode == "deploy":
+        snap = swap_snapshot(api)
+    else:
+        running = api.by_name(APP_NAME)
+        running["Image"] = running["Config"]["Image"] = NEW_ID
+        snap = swap_snapshot(api, ROLLBACK_SPEC, target=APP_ID, job=DEPLOY_JOB)
+    old_image = api.by_name(APP_NAME)["Image"]
+    with pytest.raises(DeployFailed) as caught:
+        reconciler(api, tmp_path, snap).run()
+    assert caught.value.outcome_known and caught.value.detail["restored"]
+    assert "embedding_probe_failed" in str(caught.value) and text in str(caught.value)
+    assert caught.value.detail["failed_phase"] == "embedding-probe"
+    assert api.by_name(APP_NAME)["Id"] == api.old_id and api.by_name(APP_NAME)["Image"] == old_image
+
+
+def test_plain_reconcile_runs_no_embedding_probe(tmp_path):
+    from tests.test_ops_app_config_reconcile import snapshot
+    api = gpu_api()
+    reconciler(api, tmp_path, snapshot(api)).run()
+    assert api.embed_calls == 0
