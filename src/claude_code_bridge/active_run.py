@@ -251,8 +251,10 @@ class ClaudeActiveRun:
     _escalated_pending: dict[str, None] = field(default_factory=dict)
     _cli_capabilities: set[str] = field(default_factory=set)
     on_command_lifecycle: Callable[[dict[str, Any]], None] | None = None
-    _deferred_result: Any = None
-    _pending_user_result: Any = None
+    _withheld_result: Any = None
+    # Capture send identity, not just UUID: an explicitly re-sent command is
+    # new work even if it reuses the UUID of an earlier rejected send.
+    _withheld_started_commands: dict[str, HeldCommand] = field(default_factory=dict)
     lifecycle_supported: bool = False
     maintenance: bool = False
     # Once steering may have reached the CLI, replaying the original prompt
@@ -828,6 +830,34 @@ class ClaudeActiveRun:
         """True while an injected ``next`` command has not drained into a turn."""
         return any(state in _UNSTARTED for state in self._commands.values())
 
+    def _terminal_ready(self, *, eof: bool = False) -> bool:
+        """No accepted work may be cut off by a terminal result, any origin.
+
+        At EOF no queued command can start; teardown settles those as uncertain.
+        A started command still needs its completion, even at EOF.
+        """
+        return not any(state == "started" or (not eof and state in _UNSTARTED)
+                       for state in self._commands.values())
+
+    def _hold_result(self, result: Any) -> None:
+        self._withheld_result = result
+        self._withheld_started_commands = {
+            cmd: self._held[cmd] for cmd in self._started_ever if cmd in self._held
+        }
+
+    def _take_held_result(self) -> Any:
+        result, self._withheld_result = self._withheld_result, None
+        self._withheld_started_commands = {}
+        return result
+
+    def _held_boundary_ready(self) -> bool:
+        # Consuming an old interrupt boundary is not finalization. A queued
+        # sibling need not complete first, but captured running work must.
+        return self._expected_interrupt_results > 0 and not any(
+            self._commands.get(cmd) == "started" and self._held.get(cmd) is held
+            for cmd, held in self._withheld_started_commands.items()
+        )
+
     async def messages(self) -> AsyncIterator[Any]:
         """Yield parsed SDK messages, handling ``next``-steer turn boundaries.
 
@@ -881,30 +911,21 @@ class ClaudeActiveRun:
                 elif data.get("subtype") == "task_notification":
                     self._injected_notification_active = True
             if isinstance(data, dict) and data.get("type") == "command_lifecycle":
-                self.note_lifecycle(
-                    str(data.get("command_uuid") or ""), str(data.get("state") or "")
-                )
-                deferred = self._deferred_result
-                if deferred is not None and not self.has_unstarted_command():
-                    self._deferred_result = None
-                    if data.get("state") in _REJECTED:
-                        # An escalation consumes the aborted turn's result;
-                        # ordinary rejection releases the withheld result.
-                        if self._expected_interrupt_results > 0:
-                            self._consume_expected_boundary()
-                        else:
-                            yield self._finish(deferred)
-                    # Otherwise it started a follow-up turn whose own
-                    # ResultMessage will end the run; drop the stale one.
-                if self._pending_user_result is not None and not any(
-                    self._commands.get(cmd) == "started" for cmd in self._user_commands
-                ):
-                    result = self._pending_user_result
-                    self._pending_user_result = None
-                    if self._expected_interrupt_results > 0:
+                command = str(data.get("command_uuid") or "")
+                state = str(data.get("state") or "")
+                self.note_lifecycle(command, state)
+                if self._withheld_result is not None:
+                    if (command in self._held and state in _STARTED
+                            and self._withheld_started_commands.get(command) is not self._held[command]):
+                        # This answer predates a new follow-up. Its later result,
+                        # not the old candidate, must finish the run. Invalidation
+                        # is never evidence of an interrupt boundary.
+                        self._take_held_result()
+                    elif self._held_boundary_ready():
+                        self._take_held_result()
                         self._consume_expected_boundary()
-                    else:
-                        yield self._finish(result)
+                    elif self._terminal_ready():
+                        yield self._finish(self._take_held_result())
                 continue
             msg = parse_message(data)
             if msg is None:
@@ -916,6 +937,7 @@ class ClaudeActiveRun:
                     if stale_kind == "task-notification":
                         self._injected_notification_active = False
                     if boundary:
+                        self._take_held_result()
                         yield msg  # the response consumer drains this boundary
                     else:
                         logger.info(
@@ -925,25 +947,26 @@ class ClaudeActiveRun:
                     continue
             if isinstance(msg, UserMessage) and self._expected_interrupt_results > 0:
                 _relabel_interrupted_tool_results(msg)
-            if isinstance(msg, ResultMessage) and self._expected_interrupt_results <= 0:
-                if self.has_unstarted_command():
-                    logger.info(
-                        "Holding result for queued next-steer follow-up: request=%s",
-                        self.request_id,
-                    )
-                    self._deferred_result = msg
-                    continue
-                if any(self._commands.get(cmd) == "started" for cmd in self._user_commands):
-                    # A late follow-up can emit its ResultMessage before its
-                    # completed lifecycle. The send handler stops at result, so
-                    # retain it until the lifecycle is published on the run.
-                    self._pending_user_result = msg
-                    continue
-                msg = self._finish(msg)
+            if isinstance(msg, ResultMessage):
+                # A new result supersedes any older candidate, including an
+                # interrupt result that the consumer will drain exactly once.
+                self._take_held_result()
+                if self._expected_interrupt_results <= 0:
+                    if not self._terminal_ready():
+                        logger.info("Holding result for unfinished next-steers: request=%s", self.request_id)
+                        self._hold_result(msg)
+                        continue
+                    msg = self._finish(msg)
             yield msg
-        if self._pending_user_result is not None:
-            result, self._pending_user_result = self._pending_user_result, None
-            yield self._finish(result)
+        if self._withheld_result is not None:
+            if self._held_boundary_ready():
+                self._take_held_result()
+                self._consume_expected_boundary()
+            elif self._terminal_ready(eof=True):
+                yield self._finish(self._take_held_result())
+            else:
+                self._take_held_result()
+                raise RuntimeError("sdk_stream_ended_with_started_steers")
 
     async def _steer_now(self, replacement_prompt: str, *, images: tuple = ()) -> None:
         """Interrupt current work and inject ``replacement_prompt`` into the run.

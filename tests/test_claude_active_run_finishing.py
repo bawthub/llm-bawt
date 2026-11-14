@@ -262,7 +262,7 @@ async def test_stale_result_does_not_consume_interrupt_boundary_or_queued_steer(
     assert _results(yielded) == ["interrupted", "replacement answer"]
     assert not run.has_unstarted_command()
     assert run._expected_interrupt_results == 0
-    assert run._deferred_result is None
+    assert run._withheld_result is None
 
 
 @pytest.mark.anyio
@@ -281,7 +281,7 @@ async def test_stale_result_cannot_be_released_by_a_rejected_queued_steer():
 
     yielded = await asyncio.wait_for(consumer, 1)
     assert _results(yielded) == ["own answer"]
-    assert run._deferred_result is None
+    assert run._withheld_result is None
     assert run._finishing is True
 
 
@@ -590,7 +590,7 @@ async def test_now_steer_during_deferred_result_is_spent_with_that_boundary():
     await _next(run, "queued note", CMD, origin="bot")
     client._query.frames.put_nowait(_result("held answer"))
     await asyncio.sleep(0.05)
-    assert run._deferred_result is not None
+    assert run._withheld_result is not None
     await run.steer("redirect", priority="now", origin="user", framed_message="NOW[redirect]")
     assert (run._expected_interrupt_results, run._pending_now_interrupts) == (1, 1)
     client._query.frames.put_nowait(_lifecycle(CMD, "discarded"))
@@ -616,7 +616,7 @@ async def test_now_steer_during_pending_user_result_is_spent_with_that_boundary(
     client._query.frames.put_nowait(_lifecycle(CMD, "started"))
     client._query.frames.put_nowait(_result("early follow-up answer"))
     await asyncio.sleep(0.05)
-    assert run._pending_user_result is not None
+    assert run._withheld_result is not None
     await run.steer("redirect", priority="now", origin="user", framed_message="NOW[redirect]")
     client._query.frames.put_nowait(_lifecycle(CMD, "completed"))
     await asyncio.sleep(0.05)
