@@ -118,9 +118,18 @@ def _neighbor(row: dict, focus: tuple[str, ...], width: int) -> dict:
 
 def _anchor_text(content: str, offset: int, budget: int) -> tuple[str, int | None]:
     """The anchor's text from ``offset``, at most ``budget`` serialized chars."""
-    piece = content[offset:offset + budget]
-    while piece and len(serialize(piece)) > budget:
-        piece = piece[:len(piece) - max(1, len(serialize(piece)) - budget)]
+    # Serialized expansion is not one character per source character. Find the
+    # longest fitting prefix without overshooting to an empty, repeating page.
+    low, high = 0, min(len(content) - offset, max(0, budget))
+    while low < high:
+        middle = (low + high + 1) // 2
+        if len(serialize(content[offset:offset + middle])) <= budget:
+            low = middle
+        else:
+            high = middle - 1
+    piece = content[offset:offset + low]
+    if len(serialize(piece)) > budget or (not piece and offset < len(content)):
+        raise FindError("response_overflow")
     end = offset + len(piece)
     return piece, (end if end < len(content) else None)
 

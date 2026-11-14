@@ -361,11 +361,9 @@ class MemoryExtractionService:
         if code_block_match:
             json_str = code_block_match.group(1)
         else:
-            # Fall back to finding raw JSON - try object first, then array
-            json_match = re.search(r'\{[\s\S]*\}', response)
-            if not json_match:
-                # Maybe it's an array?
-                json_match = re.search(r'\[[\s\S]*\]', response)
+            # Start with the outermost container, not the first object's braces
+            # inside a raw array. Both wrapped objects and direct arrays are valid.
+            json_match = re.search(r'\[[\s\S]*\]|\{[\s\S]*\}', response)
             if not json_match:
                 logger.debug(f"No JSON found in extraction response. Response was: {response[:200]}...")
                 if strict:
@@ -512,12 +510,12 @@ class MemoryExtractionService:
             
             for tag, type_patterns in patterns.items():
                 for pattern in type_patterns:
-                    matches = re.findall(pattern, content, re.IGNORECASE)
+                    matches = re.finditer(pattern, content, re.IGNORECASE)
                     for match in matches:
-                        if isinstance(match, tuple):
-                            match = match[0]
-                        
-                        fact_content = f"User {match.strip()}"
+                        # Keep the full assertion, including preference polarity,
+                        # negation, and the relation to its subject. A captured
+                        # object alone turns both love/hate into "User peanuts".
+                        fact_content = f"User said: {match.group(0).strip()}"
                         importance = estimate_importance(content)
                         
                         facts.append(ExtractedFact(

@@ -146,6 +146,11 @@ class TavilyClient(SearchClient):
         Returns:
             List of SearchResult objects
         """
+        ranges = {"d": "day", "w": "week", "m": "month", "y": "year"}
+        if time_range is not None and time_range not in ranges:
+            raise ValueError("time_range must be one of d, w, m, y")
+        time_filter = {"time_range": ranges[time_range]} if time_range is not None else {}
+
         if not is_tavily_available():
             logger.error("tavily-python not installed")
             return []
@@ -165,6 +170,7 @@ class TavilyClient(SearchClient):
                 max_results=max_results,
                 search_depth=self._search_depth,
                 topic="news",  # Tavily supports topic filtering
+                **time_filter,
             )
             
             results = []

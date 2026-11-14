@@ -18,6 +18,7 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit, urlunsplit
 
 from .base import SearchError, SearchProvider, SearchResult
 from .credentials import reddit_credentials, search_key
@@ -60,8 +61,15 @@ def available_providers(config: "Config") -> list[SearchProvider]:
 def _dedupe_key(url: str) -> str:
     """Normalize a URL for cross-provider dedup (drop trailing slash / fragment)."""
     u = (url or "").strip()
-    u = u.split("#", 1)[0]
-    return u.rstrip("/").lower()
+    try:
+        parts = urlsplit(u)
+    except ValueError:
+        # Keep malformed provider URLs distinct without failing the fan-out.
+        return u.split("#", 1)[0].rstrip("/")
+    userinfo, separator, hostport = parts.netloc.rpartition("@")
+    authority = userinfo + separator + hostport.lower()
+    return urlunsplit((parts.scheme.lower(), authority,
+                       parts.path.rstrip("/"), parts.query, ""))
 
 
 @dataclass

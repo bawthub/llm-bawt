@@ -115,7 +115,7 @@ def render_items(items: list[dict[str, Any]], session_id: str | None, now: datet
     used = 0
     full = 0
     omitted = 0
-    for item in items:
+    for index, item in enumerate(items):
         if omitted:
             omitted += 1
             continue
@@ -123,10 +123,14 @@ def render_items(items: list[dict[str, Any]], session_id: str | None, now: datet
         if item["status"] in FULL_STATUSES and full < MAX_FULL:
             candidates.append((full_line(item, session_id, now), True))
         candidates.append((title_line(item, session_id, now), False))
+        remaining = len(items) - index - 1
+        # If a later item does not fit, its omission count and separator must.
+        reserve = 1 + len(_line({"omitted": remaining})) if remaining else 0
         for text, is_full in candidates:
-            if used + len(text) + 1 <= CHAR_BUDGET:
+            size = used + len(text) + int(bool(lines))
+            if size + reserve <= CHAR_BUDGET:
                 lines.append(text)
-                used += len(text) + 1
+                used = size
                 full += int(is_full)
                 break
         else:

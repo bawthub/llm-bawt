@@ -4,6 +4,8 @@ These prompts are used to distill important facts from conversations
 and handle memory updates/conflicts.
 """
 
+import re
+
 from ...prompt_registry import get_prompt_resolver
 
 # Canonical tags for categorization (extensible)
@@ -372,21 +374,21 @@ def estimate_importance(text: str) -> float:
     Estimate importance score based on keyword heuristics.
     This is a fallback when LLM scoring is not available.
     """
-    text_lower = text.lower()
-    
+    words = set(re.findall(r"\b\w+\b", text.lower()))
+
     # Check for high importance keywords
     for keyword in IMPORTANCE_KEYWORDS["high"]:
-        if keyword in text_lower:
+        if keyword in words:
             return 0.85
     
     # Check for medium importance keywords
     for keyword in IMPORTANCE_KEYWORDS["medium"]:
-        if keyword in text_lower:
+        if keyword in words:
             return 0.6
     
     # Check for low importance keywords
     for keyword in IMPORTANCE_KEYWORDS["low"]:
-        if keyword in text_lower:
+        if keyword in words:
             return 0.35
     
     # Default to medium-low importance
