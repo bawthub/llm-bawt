@@ -45,6 +45,11 @@ def approval_text(snapshot: dict, prefix: str | None) -> str:
              "One approval and terminal callback; quiesce held for the entire sequence.",
              "Stop on first failure. Earlier successful restarts are not undone.",
              "Interrupted mutations are reported for inspection, NEVER automatically retried."]
+    from .execution_mode import runtime_card_lines
+
+    if any((item["snapshot"].get("runtime_source") or {}).get("allow_dirty")
+           for item in snapshot["sequence"]["steps"]):
+        lines.append("BREAK-GLASS / UNTESTED: a step below restarts with allow_dirty=true.")
     for index, item in enumerate(snapshot["sequence"]["steps"], 1):
         child, target = item["snapshot"], item["target"]
         lines.append(f"[{index}] {child['operation']['slug']} args={json.dumps(item['display_args'], sort_keys=True)}"
@@ -58,4 +63,5 @@ def approval_text(snapshot: dict, prefix: str | None) -> str:
             from .tagged_config_reconcile import approval_text as tagged_text
 
             lines.append(tagged_text(child["spec"], child["config"], None))
+        lines.extend(f"    {line}" for line in runtime_card_lines(child.get("runtime_source")))
     return "\n".join(lines)

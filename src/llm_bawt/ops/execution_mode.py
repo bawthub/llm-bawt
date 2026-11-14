@@ -88,7 +88,13 @@ def card_lines(snapshot: Mapping[str, Any], *, self_target: bool = False) -> lis
     lines = [_CARD_LINES[snapshot_execution_mode(snapshot)]]
     if self_target:
         lines.append(SELF_TARGET_CARD_LINE)
-    runtime = snapshot.get("runtime_source")
+    lines.extend(runtime_card_lines(snapshot.get("runtime_source")))
+    return lines
+
+
+def runtime_card_lines(runtime: Mapping[str, Any] | None) -> list[str]:
+    """A guarded restart's source disclosure, for its own card or a sequence step (TASK-1800)."""
+    lines: list[str] = []
     if runtime:
         if runtime.get("allow_dirty"):
             lines.append("BREAK-GLASS / UNTESTED: allow_dirty=true; approved actual runtime bytes, "

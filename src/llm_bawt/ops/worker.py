@@ -322,7 +322,8 @@ def execute_sequence(api, snapshot, job_id, *, lock_root, receipt, checkpoint, s
             container = api.resolve_target(child["spec"], child["resolved_args"])
             if container["Id"] != target["id"] or container["Name"].lstrip("/") != target["name"]:
                 raise RuntimeError("sequence target changed since approval")
-            if "runtime_source" in child["spec"]:
+            # An explicit null classification exempts the selected target (TASK-1800).
+            if selected_runtime_spec(child["spec"], child["resolved_args"]) is not None:
                 verify_runtime_source(api, child, container,
                                       tag="sq" + hashlib.sha256((job_id + target["id"]).encode()).hexdigest()[:20])
         else:
