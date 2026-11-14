@@ -348,10 +348,27 @@ def lifecycle(monkeypatch):
 
 
 def test_selecting_current_model_cancels_pending_switch(lifecycle):
+    # Unscoped (admin) request keeps the global same-model shortcut.
+    lifecycle.switch_model("B")
+    ok, msg = lifecycle.switch_model("A")
+    assert ok and "Already using" in msg
+    assert lifecycle.clear_pending_switch() is None
+
+
+def test_scoped_reselect_replaces_owner_pending_switch(lifecycle):
     owner = ("bot", "nick")
     lifecycle.switch_model("B", owner=owner)
     lifecycle.switch_model("A", owner=owner)
-    assert lifecycle.clear_pending_switch(owner=owner) is None
+    assert lifecycle.clear_pending_switch(owner=owner) == "A"
+
+
+def test_scoped_switch_ignores_other_owners_global_model(lifecycle):
+    # Owner A runs cached model A; owner B registered B last (global alias).
+    lifecycle._current_model_alias = "B"
+    owner_a = ("bot-a", "nick")
+    ok, msg = lifecycle.switch_model("B", owner=owner_a)
+    assert ok and "Already using" not in msg
+    assert lifecycle.clear_pending_switch(owner=owner_a) == "B"
 
 
 def test_pending_switch_only_reaches_its_owner(lifecycle):

@@ -245,8 +245,11 @@ class ModelLifecycleManager:
                 available = self.get_available_models()
                 return False, f"Model '{new_alias}' not found. Available: {', '.join(available)}"
             
-            # Already using this model?
-            if self._current_model_alias == normalized_alias:
+            # Already using this model? The global alias is only the last
+            # registered client, not a scoped owner's cached model, so the
+            # shortcut applies to unscoped (admin) requests only; a scoped
+            # request is always recorded and resolved on the owner's next turn.
+            if owner is None and self._current_model_alias == normalized_alias:
                 # Choosing the current model cancels this owner's pending switch.
                 self._pending_model_switches.pop(owner, None)
                 return True, f"Already using model '{normalized_alias}'"
