@@ -22,6 +22,8 @@ PG_ACCEPTANCE_SUITES = (
     "test_bot_tags_pg.py::",
     "test_embedding_repair_pg.py::",
     "test_forget_message_state_pg.py::",
+    "test_forget_owner_scope_pg.py::",
+    "test_by_id_owner_scope_pg.py::",
     "test_memory_update_pg.py::",
     "test_memory_crud_owner_pg.py::",
     "test_memory_maintenance_owner_pg.py::",
