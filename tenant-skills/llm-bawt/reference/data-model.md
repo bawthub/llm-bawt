@@ -173,7 +173,7 @@ pgq llm-bawt -c "SELECT slug, harness, default_model, endpoint_id FROM bot_profi
 ```bash
 pgq llm-bawt -c "\d sessions"                 # or \d messages / \d messages_p_loopy / \d turn_logs / \d tool_call_records
 pgq llm-bawt -tAc "SELECT count(*) FROM information_schema.table_constraints WHERE constraint_type='FOREIGN KEY' AND table_schema='public';"  # → 4
-pgq llm-bawt -tAc "SELECT role, count(*) FROM messages WHERE bot_id='loopy' GROUP BY role;"   # user/assistant/summary/system only
+pgq llm-bawt -tAc "SELECT role, count(*) FROM messages WHERE bot_id='<bot>' GROUP BY role;"   # user/assistant/summary/system only
 ```
 
 ## Summary formerly in the parent SKILL.md (TASK-1640)

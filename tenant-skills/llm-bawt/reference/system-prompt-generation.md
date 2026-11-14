@@ -235,7 +235,7 @@ their memory). Summaries/history reach them via the **session seed**: on
 `history_scope`. So an agent set to `summaries` gets a dense summary-only seed;
 `none` gets a cold session. No separate agent flag.
 
-**The old "Nova finding" is obsolete:** it described summaries failing to reach an
+**The old summary-delivery finding is obsolete:** it described summaries failing to reach an
 agent because `include_summaries` was inert and `seed_summary_on_new_session` was
 absent. That whole split is gone — a single `history_scope` now drives delivery
 for every bot, verified end-to-end (seed endpoint + turn logs, TASK-518).

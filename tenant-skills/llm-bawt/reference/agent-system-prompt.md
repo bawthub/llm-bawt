@@ -41,7 +41,7 @@ messages array (`agent_backends/agent_bridge.py` send_command ~L191).
 ## 2. The CLI DOES freeze the system prompt per session (TASK-1318)
 
 TASK-288 concluded the opposite from source reading; a wire probe proved it wrong
-on CLI 2.1.283 / SDK 0.2.160 (Snark, 2026-10-23). The CLI writes a
+on CLI 2.1.283 / SDK 0.2.160 (2026-10-23). The CLI writes a
 `prompt_snapshot` attachment into the session transcript and, on resume, sends
 **that** snapshot, ignoring a changed `--system-prompt`:
 
@@ -231,7 +231,7 @@ to route around the §2 myth and is **superseded** — do not implement it.
     transcript that has no prompt snapshot, so the next turn's bytes become the
     snapshot. The marker counts only once that turn resumes a different SDK
     session id (the reset really ran). It is dropped if the resume id is
-    unchanged, and cleared when a pin move is confirmed (TASK-1318, Snark's
+    unchanged, and cleared when a pin move is confirmed (TASK-1318, the coordinator's
     live `/new` finding);
   - `compaction`: the first turn after a `/compact` turn in this session whose
     usage recorded `context_action=compact`, `outcome=success`. It beats every

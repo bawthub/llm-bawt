@@ -18,13 +18,13 @@ architecture. MCP names below are stable; harnesses may prefix `mcp__bawthub__`.
    commit, and test/live-check receipts in `response`; set `outcome` to the
    plain-language change. Verify objective UI acceptance yourself on dev
    (Playwright, phone and desktop width), record it and attach the screenshots
-   (`add_image_urls=[<asset_id>, ...]` from each screenshot result); Snark or Rook closes
+   (`add_image_urls=[<asset_id>, ...]` from each screenshot result); the coordinator closes
    that as `COMPLETED`. Only when the user must judge it himself (subjective
    look/feel, his device/account, a product call), submit `REVIEW`
    with `check_links` ("Where to look", required for bots): the pages to open,
    each `{label, path, steps}` with an app-relative path ("/tools/approvals",
    no host) and 1-4 plain steps saying what to check. Open every link yourself
-   first and confirm the named controls are on the page. Otherwise Snark or Rook
+   first and confirm the named controls are on the page. Otherwise the coordinator
    checks receipts and closes complete backend/infra/tooling/skill work as
    `COMPLETED`, including their own reviewed work; no extra closure reviewer.
    Incomplete work stays open. Agents cannot leave `BUG` (human-only transition).
@@ -62,7 +62,7 @@ do not create the task again to repair a link.
   origin the reader is on, so for dev-only changes add a step saying to open it
   on the dev site. For backend, infra,
   tooling and skill work, record the review, pushed commit and verification;
-  Snark or Rook closes `COMPLETED` after checking the receipts. Do not park
+  The coordinator closes `COMPLETED` after checking the receipts. Do not park
   non-visual work, or UI a bot can verify, in REVIEW for the user.
 - Priority: URGENT, HIGH, MEDIUM, LOW, NONE.
 - `tasks_update` patches provided non-null fields; do not assume null clears a

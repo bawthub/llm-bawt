@@ -3,7 +3,7 @@
 > Part of the llm-bawt skill. Read before creating/switching personas or debugging persona/system-prompt override behavior.
 
 A bot can swap its base system prompt for a **persona** on the fly (e.g. make
-`nova` a therapist) without ever mutating its stored prompt.
+`helper` a therapist) without ever mutating its stored prompt.
 
 - **Storage:** personas are rows in the **prompt registry** (`prompt_templates`,
   `src/llm_bawt/prompt_registry.py`) with `category='persona'`,
@@ -39,11 +39,11 @@ A bot can swap its base system prompt for a **persona** on the fly (e.g. make
 
 ```bash
 # Create a persona, then point a bot at it with the MCP tool
-# bots_profile_patch(bot_id="nova", changes={"prompt_override_id": 21}, reason="...")
+# bots_profile_patch(bot_id="helper", changes={"prompt_override_id": 21}, reason="...")
 curl -s -X POST http://app:8642/v1/personas -H 'Content-Type: application/json' \
   --data @/tmp/persona.json          # {"title":"Therapist","body":"..."}
 curl -s -X POST http://app:8642/v1/admin/reload-bots
-curl -s -X POST http://app:8642/v1/chat/session/reset -d '{"bot_id":"nova"}'
+curl -s -X POST http://app:8642/v1/chat/session/reset -d '{"bot_id":"helper"}'
 ```
 
 ## Summary formerly in the parent SKILL.md (TASK-1640)
