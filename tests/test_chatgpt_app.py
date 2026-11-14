@@ -24,6 +24,8 @@ from tests.stored_provider_keys import real_credential_store
 
 _REAL_CLIENT = httpx.Client
 
+from authlib.integrations.httpx_client._compat import httpx2 as _authlib_httpx  # noqa: E402
+
 
 @pytest.fixture(scope="module")
 def signing_key():
@@ -36,41 +38,47 @@ def upstream(monkeypatch, signing_key):
     jwk = json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(signing_key.public_key()))
     jwk.update(kid="test-key", use="sig", alg="RS256")
 
-    def handler(request):
-        state["calls"].append(request)
-        if str(request.url) == auth.JWKS:
-            return httpx.Response(200, json={"keys": [jwk]})
-        if str(request.url) == f"{auth.ISSUER}/.well-known/openid-configuration":
-            return httpx.Response(200, json={"revocation_endpoint": f"{auth.ISSUER}/api/accounts/oauth/revoke"})
-        if request.url.path.endswith("/revoke"):
-            return httpx.Response(200)
-        assert str(request.url) == auth.TOKEN
-        body = parse_qs(request.content.decode())
-        assert body["client_id"] == ["oaiapp_test"]
-        assert body["resource"] == [auth.RESOURCE]
-        if body["grant_type"] == ["authorization_code"]:
-            assert body["redirect_uri"] == [auth.REDIRECT_URI]
-            assert body["code_verifier"] == [state["pending"].verifier]
-            assert body["code"] == ["synthetic-code"]
-        else:
-            assert body["grant_type"] == ["refresh_token"]
-            state["refreshes"] += 1
-        if state["status"] != 200:
-            return httpx.Response(state["status"], json=state.get("error", {"error": "server_error"}))
-        claims = {"iss": auth.ISSUER, "sub": "subject-a", "aud": "oaiapp_test",
-                  "iat": int(time.time()), "exp": int(time.time()) + 3600,
-                  "nonce": state["pending"].nonce, "email": "user@example.test", **state["claims"]}
-        id_token = jwt.encode(claims, state.get("signing_key", signing_key), algorithm="RS256", headers={"kid": "test-key"})
-        return httpx.Response(200, json={
-            "access_token": f"synthetic-access-{state['refreshes']}",
-            "refresh_token": f"synthetic-refresh-{state['refreshes']}",
-            "id_token": id_token, "token_type": "Bearer", "expires_in": 3600,
-            "scope": auth.SCOPE, **state["token"],
-        })
+    def make_handler(hx):
+        def handler(request):
+            state["calls"].append(request)
+            if str(request.url) == auth.JWKS:
+                return hx.Response(200, json={"keys": [jwk]})
+            if str(request.url) == f"{auth.ISSUER}/.well-known/openid-configuration":
+                return hx.Response(200, json={"revocation_endpoint": f"{auth.ISSUER}/api/accounts/oauth/revoke"})
+            if request.url.path.endswith("/revoke"):
+                return hx.Response(200)
+            assert str(request.url) == auth.TOKEN
+            body = parse_qs(request.content.decode())
+            assert body["client_id"] == ["oaiapp_test"]
+            assert body["resource"] == [auth.RESOURCE]
+            if body["grant_type"] == ["authorization_code"]:
+                assert body["redirect_uri"] == [auth.REDIRECT_URI]
+                assert body["code_verifier"] == [state["pending"].verifier]
+                assert body["code"] == ["synthetic-code"]
+            else:
+                assert body["grant_type"] == ["refresh_token"]
+                state["refreshes"] += 1
+            if state["status"] != 200:
+                return hx.Response(state["status"], json=state.get("error", {"error": "server_error"}))
+            claims = {"iss": auth.ISSUER, "sub": "subject-a", "aud": "oaiapp_test",
+                      "iat": int(time.time()), "exp": int(time.time()) + 3600,
+                      "nonce": state["pending"].nonce, "email": "user@example.test", **state["claims"]}
+            id_token = jwt.encode(claims, state.get("signing_key", signing_key), algorithm="RS256", headers={"kid": "test-key"})
+            return hx.Response(200, json={
+                "access_token": f"synthetic-access-{state['refreshes']}",
+                "refresh_token": f"synthetic-refresh-{state['refreshes']}",
+                "id_token": id_token, "token_type": "Bearer", "expires_in": 3600,
+                "scope": auth.SCOPE, **state["token"],
+            })
 
-    transport = httpx.MockTransport(handler)
+        return handler
+
+    # authlib uses httpx2 when it is installed (mcp 2 brings it in); its
+    # OAuth2Client needs a transport from that module, metadata_client stays httpx.
+    oauth_transport = _authlib_httpx.MockTransport(make_handler(_authlib_httpx))
+    transport = httpx.MockTransport(make_handler(httpx))
     real_oauth = auth.client
-    monkeypatch.setattr(auth, "client", lambda client_id, **kw: real_oauth(client_id, transport=transport, **kw))
+    monkeypatch.setattr(auth, "client", lambda client_id, **kw: real_oauth(client_id, transport=oauth_transport, **kw))
     monkeypatch.setattr(auth, "metadata_client", lambda: _REAL_CLIENT(transport=transport))
     return state
 

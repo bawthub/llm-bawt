@@ -11,6 +11,7 @@ import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import httpx
 import openai
 import pytest
 from fastapi import FastAPI
@@ -89,9 +90,20 @@ def harness(monkeypatch):
     app.include_router(chat.router)
     http = TestClient(app)
 
+    # Starlette 1.x TestClient subclasses httpx2.Client, which openai's
+    # httpx.Client isinstance check rejects; route an httpx.Client through it.
+    class _Bridge(httpx.BaseTransport):
+        def handle_request(self, request: httpx.Request) -> httpx.Response:
+            resp = http.request(request.method, str(request.url),
+                                headers=list(request.headers.multi_items()),
+                                content=request.read())
+            return httpx.Response(resp.status_code, headers=list(resp.headers.multi_items()),
+                                  content=resp.content, request=request)
+
     def sdk(headers: dict[str, str]) -> openai.OpenAI:
         return openai.OpenAI(base_url="http://testserver/v1", api_key="x",
-                             http_client=http, default_headers=headers, max_retries=0)
+                             http_client=httpx.Client(transport=_Bridge()),
+                             default_headers=headers, max_retries=0)
 
     with http:
         yield SimpleNamespace(service=service, sdk=sdk, seen=seen)
