@@ -30,8 +30,8 @@ class CodexEventMixin:
     async def _iter_events(self, streamed):
         """Async-iterate ``streamed.events`` with a per-event timeout.
 
-        TimeoutError surfaces so the retry-on-session-error path can clear
-        a stuck thread and retry fresh (TASK-206 acceptance criteria).
+        TimeoutError surfaces as a failed send. Exec already has the input,
+        so missing events cannot prove that replay would avoid duplicate tools.
         """
         agen = streamed.events.__aiter__()
         while True:
@@ -185,6 +185,10 @@ class CodexEventMixin:
         ``usage`` is non-None only on ``turn.completed``.
         """
         et = getattr(event, "type", None) or self._dig(event, "type") or ""
+        # Silence is not inactivity: tools can run before assistant text. The
+        # synthetic app-server thread.started still precedes input submission.
+        if et and et != "thread.started":
+            item_buffers["__replay_unsafe__"] = True
         # Structured reset proof is terminal exactly once. Drain trailing SDK
         # events, but never turn an error into success or duplicate its receipt.
         if reset_evidence is not None and item_buffers.get("__done_emitted__"):

@@ -155,6 +155,9 @@ class CodexAppServerMixin:
             session_persisted = session_persisted or persisted
 
             run = CodexAppServerRun(client, request_id=request_id, thread_id=thread_id)
+            # The server may execute input even if its reply is lost. Only
+            # thread open/resume failures before this boundary are replay-safe.
+            item_buffers["__replay_unsafe__"] = True
             started = await client.request(
                 "turn/start", {"threadId": thread_id, "input": app_server_input(prompt_input)},
                 timeout=self._request_timeout,
@@ -244,8 +247,8 @@ class CodexAppServerMixin:
         """The next notification, ``None`` once app-server is gone, or
         ``_CANCELLED`` when the send's cooperative cancel is raised.
 
-        Raises ``TimeoutError`` after ``_request_timeout`` without one, as the
-        exec event stream does, so the send's stuck-thread retry applies.
+        Raises ``TimeoutError`` after ``_request_timeout`` without one. Once
+        turn/start has been sent, the send must fail rather than replay input.
         """
         if cancel_event is not None and cancel_event.is_set():
             return _CANCELLED

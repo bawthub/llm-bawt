@@ -601,13 +601,17 @@ class CodexCommandMixin(CodexAppServerMixin):
                             )
                             return
 
-                        # Recoverable session error → retry once with fresh thread.
-                        # A seeded thread is never silently replaced by a blank one.
+                        # Retry only before the turn may have done work. Exec
+                        # already has input, so even a timeout with no events is
+                        # ambiguous. App-server can safely retry a pre-input
+                        # thread open/resume timeout. Never replace a seeded thread.
                         if (
                             reset_evidence is None
                             and seeded_id is None
                             and not fresh_session_retry
                             and not text_parts
+                            and not item_buffers.get("__replay_unsafe__")
+                            and not (isinstance(e, TimeoutError) and not wants_app_server(fields))
                             and _is_codex_session_error(e)
                         ):
                             fresh_session_retry = True
