@@ -77,6 +77,13 @@ _last_refresh_ok_at: int | None = None  # epoch ms
 _last_refresh_error: str | None = None
 _last_refresh_error_at: int | None = None
 
+# A rotated bundle whose DB save failed (TASK-2267). The provider has already
+# consumed the refresh token still in the DB, so this bundle is the only valid
+# one: it is used in place of the DB bundle and its save is retried, while the
+# DB row still holds the refresh token it replaced (a reconnect or disconnect
+# meanwhile drops it). Process memory only; not crash-proof.
+_pending: tuple[str, dict] | None = None  # (consumed refresh token, rotated bundle)
+
 # Migration import runs at most once per process.
 _migrated = False
 
@@ -186,6 +193,53 @@ def _read_file_bundle() -> dict | None:
 
 
 def _load() -> tuple[dict, dict | None]:
+    """Return (raw_record_json, oauth_bundle), preferring an unsaved rotation."""
+    global _pending
+    raw, bundle = _load_db()
+    pending = _pending
+    if pending is None:
+        return raw, bundle
+    consumed, rotated = pending
+    if bundle and bundle.get("refreshToken") == consumed:
+        return raw, rotated
+    # The DB row changed (reconnect, disconnect, or the save landed).
+    if _pending is pending:
+        _pending = None
+    return raw, bundle
+
+
+def _persist_rotated(raw: dict, consumed: str | None, rotated: dict) -> bool:
+    """Save a rotated bundle; on failure keep it pending and report degraded.
+
+    Caller holds _REFRESH_LOCK.
+    """
+    global _pending
+    try:
+        _save(raw, rotated)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Refreshed Claude token but could not persist to DB; keeping it in memory and retrying: %s", e)
+        if consumed:
+            _pending = (consumed, rotated)
+        _record_refresh_outcome(f"rotated token not yet saved: {e}")
+        return False
+    _pending = None
+    _record_refresh_outcome(None)
+    return True
+
+
+def _retry_pending_save() -> bool:
+    """Retry saving an unsaved rotation. Returns True when nothing is pending."""
+    with _REFRESH_LOCK:
+        pending = _pending
+        if pending is None:
+            return True
+        raw, bundle = _load()
+        if _pending is None or bundle is not pending[1]:
+            return True
+        return _persist_rotated(raw, pending[0], pending[1])
+
+
+def _load_db() -> tuple[dict, dict | None]:
     """Return (raw_record_json, oauth_bundle). bundle is None if absent.
 
     Source of truth is the DB row; the first load imports the legacy file
@@ -313,18 +367,19 @@ def _refresh_serialized(
             ).hexdigest()
             if current_hash != rejected_token_sha256:
                 force = False
+        if _pending is not None and bundle is _pending[1]:
+            # Still unsaved: retry the save before anything else.
+            _persist_rotated(raw, _pending[0], bundle)
         if not force and not _expired(bundle.get("expiresAt"), buffer_ms=buffer_ms):
             return bundle  # someone else refreshed while we waited
+        consumed = _pending[0] if _pending is not None and bundle is _pending[1] else bundle.get("refreshToken")
         try:
             refreshed = _refresh_upstream(bundle)
         except Exception as e:  # noqa: BLE001 — record then re-raise for callers
             _record_refresh_outcome(str(e))
             raise
-        _record_refresh_outcome(None)
-        try:
-            _save(raw, refreshed)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("Refreshed Claude token but could not persist to DB: %s", e)
+        # Health stays degraded until the rotated bundle is saved.
+        _persist_rotated(raw, consumed, refreshed)
         logger.info("Refreshed Claude OAuth token")
         return refreshed
 
@@ -392,6 +447,7 @@ async def proactive_refresh_loop() -> None:
     logger.info("Claude credential proactive refresh loop started (DB store)")
     while True:
         try:
+            await asyncio.to_thread(_retry_pending_save)
             _, bundle = _load()
             if bundle and _expired(bundle.get("expiresAt"), buffer_ms=_PROACTIVE_BUFFER_MS):
                 await asyncio.to_thread(

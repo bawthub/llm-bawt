@@ -55,6 +55,18 @@ _SECRET_KEY = "codex_auth"
 # Single-writer lock — the refresh token rotates on use.
 _refresh_lock = threading.Lock()
 
+# A rotated bundle whose DB save failed (TASK-2267). The provider has already
+# consumed the refresh token still in the DB, so this bundle is the only valid
+# one: it is used in place of the DB bundle and its save is retried, while the
+# DB row still holds the refresh token it replaced (a reconnect or disconnect
+# meanwhile drops it). Process memory only; not crash-proof.
+_pending: tuple[str, dict] | None = None  # (DB refresh token, rotated bundle)
+
+
+def _refresh_token_of(bundle: dict | None) -> str | None:
+    tokens = (bundle or {}).get("tokens") or {}
+    return tokens.get("refresh_token") if isinstance(tokens, dict) else None
+
 # Health reporting (mirrors claude_oauth).
 _last_refresh_ok_at: int | None = None
 _last_refresh_error: str | None = None
@@ -186,6 +198,53 @@ def _expires_soon(bundle: dict, *, buffer_s: float = _REFRESH_BUFFER_S) -> bool:
 
 
 def _load() -> tuple[dict, dict | None]:
+    """Return (raw_record_json, auth_bundle), preferring an unsaved rotation."""
+    global _pending
+    raw, bundle = _load_db()
+    pending = _pending
+    if pending is None:
+        return raw, bundle
+    db_token, rotated = pending
+    if bundle and _refresh_token_of(bundle) == db_token:
+        return raw, rotated
+    # The DB row changed (reconnect, disconnect, or the save landed).
+    if _pending is pending:
+        _pending = None
+    return raw, bundle
+
+
+def _persist_rotated(raw: dict, db_token: str | None, rotated: dict) -> bool:
+    """Save a rotated bundle; on failure keep it pending and report degraded.
+
+    Caller holds _refresh_lock.
+    """
+    global _pending
+    try:
+        _save(raw, rotated)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Refreshed ChatGPT token but could not persist to DB; keeping it in memory and retrying: %s", e)
+        if db_token:
+            _pending = (db_token, rotated)
+        _record_refresh_outcome(f"rotated token not yet saved: {e}")
+        return False
+    _pending = None
+    _record_refresh_outcome(None)
+    return True
+
+
+def _retry_pending_save() -> bool:
+    """Retry saving an unsaved rotation. Returns True when nothing is pending."""
+    with _refresh_lock:
+        pending = _pending
+        if pending is None:
+            return True
+        raw, bundle = _load()
+        if _pending is None or bundle is not pending[1]:
+            return True
+        return _persist_rotated(raw, pending[0], pending[1])
+
+
+def _load_db() -> tuple[dict, dict | None]:
     """Return (raw_record_json, auth_bundle). bundle is None if absent.
 
     Source of truth is the DB row; the first load imports the legacy file
@@ -291,15 +350,21 @@ def _refresh_serialized(*, buffer_s: float, force: bool = False) -> dict | None:
         raw, bundle = _load()
         if not bundle:
             return None
+        is_pending = _pending is not None and bundle is _pending[1]
+        if is_pending:
+            # Still unsaved: retry the save before anything else.
+            is_pending = not _persist_rotated(raw, _pending[0], bundle)
         if not force and not _expires_soon(bundle, buffer_s=buffer_s):
             return bundle
+        # Captured first: _refresh_upstream rotates the bundle in place.
+        db_token = _pending[0] if is_pending and _pending is not None else _refresh_token_of(bundle)
         try:
-            refreshed = _refresh_upstream(bundle)
-            _save(raw, refreshed)
-            _record_refresh_outcome(None)
+            refreshed = _refresh_upstream(dict(bundle, tokens=dict(bundle.get("tokens") or {})))
         except Exception as e:  # noqa: BLE001
             _record_refresh_outcome(str(e))
             raise
+        # Health stays degraded until the rotated bundle is saved.
+        _persist_rotated(raw, db_token, refreshed)
         logger.info("Refreshed ChatGPT/codex OAuth token")
         return refreshed
 
@@ -363,6 +428,7 @@ async def proactive_refresh_loop() -> None:
     logger.info("Codex credential proactive refresh loop started (DB store)")
     while True:
         try:
+            await asyncio.to_thread(_retry_pending_save)
             _, bundle = _load()
             if bundle and _expires_soon(bundle, buffer_s=_PROACTIVE_BUFFER_S):
                 await asyncio.to_thread(
