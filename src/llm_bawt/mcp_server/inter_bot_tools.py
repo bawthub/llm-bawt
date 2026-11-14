@@ -941,8 +941,9 @@ def _compact_bot(entry: dict) -> dict:
     location = state.get("location")
     if isinstance(location, dict):
         row["location"] = location.get("house") or location.get("runtime")
-        if location.get("house_live") is False:
-            row["location"] = f'{location.get("runtime")} ({location["house"]} down)'
+        if location.get("house") and location.get("house_live") is not True:
+            status = "down" if location.get("house_live") is False else "lease unknown"
+            row["location"] = f'{location.get("runtime")} ({location["house"]} {status})'
     session = state.get("session")
     if isinstance(session, dict) and session.get("prompt_stale"):
         row["prompt_stale"] = True

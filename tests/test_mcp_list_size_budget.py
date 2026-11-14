@@ -38,7 +38,7 @@ FULL_BOT = {
         "session": {"id": "6a22871a-e177-5027-be43-c3fdb6c9998d", "started_at": "2026-11-14T01:00:00+00:00",
                     "prompt_stale": {"since": "2026-11-14T02:00:00+00:00",
                                      "changed_at": "2026-11-14T02:00:00+00:00", "sections": ["tags", "skills"]}},
-        "location": {"runtime": "house", "house": "h1"},
+        "location": {"runtime": "house", "house": "h1", "house_live": True},
     },
 }
 
@@ -70,6 +70,16 @@ def test_a_compact_bot_keeps_gate_and_unreadable_state():
     unread = {**FULL_BOT, "state": {**FULL_BOT["state"], "gated": None, "gate": None}}
     assert inter_bot_tools._compact_bot(unread)["gated"] is None  # unknown is never "not gated"
 
+
+
+def test_a_compact_bot_location_distinguishes_live_down_and_unreadable_lease():
+    def at(house_live):
+        loc = {"runtime": "house", "house": "h1", "house_live": house_live}
+        return inter_bot_tools._compact_bot({**FULL_BOT, "state": {**FULL_BOT["state"], "location": loc}})["location"]
+
+    assert at(True) == "h1"
+    assert at(False) == "house (h1 down)"
+    assert at(None) == "house (h1 lease unknown)"  # unreadable is never "live"
 
 BOARD_ROW = {
     "shortId": "TASK-1234", "title": "A long representative task title for sizing the board row",
