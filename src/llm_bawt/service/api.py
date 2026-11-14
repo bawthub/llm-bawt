@@ -672,7 +672,11 @@ def main():
         
         # Configure uvicorn log level
         # When using our rich logging, set uvicorn to warning to reduce noise
-        uvicorn_log_level = "debug" if args.debug else "warning"
+        # Off a TTY uvicorn must emit access records at INFO so the standard
+        # handler's filter can keep 4xx/5xx (TASK-2225); a terminal keeps the
+        # old quiet default.
+        from ..shared.logfmt import is_tty
+        uvicorn_log_level = "debug" if args.debug else ("warning" if is_tty() else "info")
         
         # Exclude generated/data files from reload watching to prevent feedback loops
         reload_excludes = [

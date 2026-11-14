@@ -121,3 +121,47 @@ def test_json_mode(monkeypatch, capture):
     rec = json.loads(buf.getvalue())
     assert rec["level"] == "INFO" and rec["msg"] == "turn_end" and rec["req"] == "r9"
     root.handlers.clear()
+
+
+def test_json_summary_values_are_not_cut(capture):
+    summary = '{"a":' + '"' + "x" * 300 + '","observer_errors":0,"last_productive_ms":12}'
+    logging.getLogger("claude_code_bridge.proxy").info("responses_progress req=r1 summary=%s", summary)
+    (line,) = lines(capture)
+    assert line.endswith("summary=" + summary)
+
+
+def test_whole_message_cap_keeps_inline_correlation(capture):
+    logging.getLogger("llm_bawt.x").error("event %s req=keep-this-request session=al:nick", "y" * 4100)
+    (line,) = lines(capture)
+    assert "req=keep-this-request" in line and "session=al:nick" in line
+    assert "len=" in line
+
+
+def test_capped_quoted_value_stays_well_formed(capture):
+    logging.getLogger("llm_bawt.x").info("event detail=%s", logfmt.quote("x " * 160))
+    (line,) = lines(capture)
+    value = re.search(r'detail=("(?:[^"\\]|\\.)*") detail_len=320', line)
+    assert value and value.group(1).endswith('…"')
+
+
+def test_redaction_covers_quoted_values_and_exceptions(capture):
+    log = logging.getLogger("llm_bawt.x")
+    log.info('call api_key="SYNTHETIC_KEY_12345"')
+    try:
+        raise ValueError("Bearer SYNTHETIC_TOKEN_12345")
+    except ValueError:
+        log.warning("upstream", exc_info=True)
+        log.error("upstream", exc_info=True)
+    text = capture.getvalue()
+    assert "SYNTHETIC_KEY_12345" not in text and "SYNTHETIC_TOKEN_12345" not in text
+    assert "Traceback" in text
+
+
+def test_uvicorn_config_keeps_error_access_records_without_debug(capture, monkeypatch):
+    """uvicorn.Config with the service's non-TTY level must not mute 5xx."""
+    import uvicorn
+
+    uvicorn.Config(app=lambda *a: None, log_config=None, log_level="info")
+    logging.getLogger("uvicorn.access").info(
+        '%s - "%s %s HTTP/%s" %d', "1.2.3.4:5", "GET", "/v1/campus", "1.1", 503)
+    assert lines(capture)[-1].endswith("WARN http http_access method=GET path=/v1/campus status=503")

@@ -114,36 +114,65 @@ def quote(value: Any) -> str:
     return s
 
 
+def _is_correlation(key: str) -> bool:
+    return key in CORRELATION_KEYS or key in ("request_id", "session_id") or key.endswith("_id")
+
+
 def cap_values(msg: str) -> str:
-    """Cut long non-correlation ``key=value`` values; ids are never cut."""
+    """Cut long ``key=value`` values. Correlation ids are never cut, and
+    JSON object/array values (bounded diagnostic summaries) are kept whole.
+    A cut quoted value is decoded, shortened and re-quoted."""
 
     def _cut(m: re.Match[str]) -> str:
         key, value = m.group(1), m.group(2)
-        if key in CORRELATION_KEYS or key.endswith("_id") or len(value) <= VALUE_CAP:
+        if _is_correlation(key) or len(value) <= VALUE_CAP or value[:1] in "{[":
             return m.group(0)
+        if value.startswith('"'):
+            try:
+                raw = json.loads(value)
+            except ValueError:
+                raw = value[1:]
+            return f"{key}={json.dumps(raw[:VALUE_CAP] + '…', ensure_ascii=False)} {key}_len={len(raw)}"
         return f"{key}={value[:VALUE_CAP]}… {key}_len={len(value)}"
 
     return _KV.sub(_cut, msg)
 
 
-class RedactFilter(logging.Filter):
-    """Backstop: mask credentials that slipped into a message."""
+def cap_message(msg: str) -> str:
+    """Whole-message cap that keeps every correlation ``key=value`` token."""
+    if len(msg) <= MESSAGE_CAP:
+        return msg
+    head = msg[:MESSAGE_CAP]
+    kept = [m.group(0) for m in _KV.finditer(msg)
+            if _is_correlation(m.group(1)) and m.group(0) not in head]
+    return " ".join([f"{head}… len={len(msg)}", *kept])
 
-    _PATTERNS = (
-        (re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{8,}"), r"\1***"),
-        (re.compile(r"\b(sk-(?:ant-)?[A-Za-z0-9_-]{6})[A-Za-z0-9_-]{10,}"), r"\1***"),
-        (re.compile(r"(?i)\b((?:access_|refresh_|api_)?(?:token|key|secret|password))=([^\s&\"]{6,})"), r"\1=***"),
-    )
+
+_REDACTIONS = (
+    (re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{8,}"), r"\1***"),
+    (re.compile(r"\b(sk-(?:ant-)?[A-Za-z0-9_-]{6})[A-Za-z0-9_-]{10,}"), r"\1***"),
+    (re.compile(r"(?i)\b((?:access_|refresh_|api_)?(?:token|key|secret|password))=(\"[^\"]{6,}\"|'[^']{6,}'|[^\s&\"']{6,})"), r"\1=***"),
+    (re.compile(r"(?i)([\"']?(?:access_token|refresh_token|api_key|apikey|secret|password|authorization)[\"']?\s*:\s*)([\"'])[^\"']{6,}\2"), r"\1\2***\2"),
+)
+
+
+def redact(text: str) -> str:
+    for pat, rep in _REDACTIONS:
+        text = pat.sub(rep, text)
+    return text
+
+
+class RedactFilter(logging.Filter):
+    """Backstop on the message; the formatter also redacts the final line
+    (including exception text), so this only keeps other handlers clean."""
 
     def filter(self, record: logging.LogRecord) -> bool:
         try:
             msg = record.getMessage()
         except Exception:
             return True
-        red = msg
-        for pat, rep in self._PATTERNS:
-            red = pat.sub(rep, red)
-        if red is not msg and red != msg:
+        red = redact(msg)
+        if red != msg:
             record.msg, record.args = red, ()
         return True
 
@@ -184,18 +213,17 @@ class LogfmtFormatter(logging.Formatter):
             out.update(f["corr"])
             if exc:
                 out["traceback"] = exc
-            return json.dumps(out, ensure_ascii=False, default=str)
-        msg = cap_values(f["msg"]).replace("\r", "").replace("\n", "\\n")
+            return redact(json.dumps(out, ensure_ascii=False, default=str))
+        msg = cap_message(cap_values(f["msg"]).replace("\r", "").replace("\n", "\\n"))
         present = [k for k in CORRELATION_KEYS if k in f["corr"] and f"{k}=" not in msg]
         extras = [k for k in f["corr"] if k not in CORRELATION_KEYS]
         tail = " ".join(f"{k}={quote(f['corr'][k])}" for k in present + extras)
         line = f"{f['ts']} {f['level']} {f['component']} {msg}"
-        if len(line) > MESSAGE_CAP:
-            line = line[:MESSAGE_CAP] + f"… len={len(line)}"
         if tail:
             line = f"{line} {tail}"
         if exc:
             line = f"{line}\n{exc}"
+        line = redact(line)
         return line
 
 
