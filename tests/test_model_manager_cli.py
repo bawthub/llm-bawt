@@ -291,3 +291,16 @@ def test_local_list_reads_catalog_not_models_yaml(monkeypatch):
     monkeypatch.setattr(cli, "ModelManager", FakeManager)
     cli.list_models(SimpleNamespace(), service_mode=False)
     assert built == [False]
+
+
+def test_add_catalog_model_rejects_bare_key_of_multi_endpoint_model(monkeypatch):
+    answers = iter(["gpt-5.5", "gpt-5.5", "fresh", "4096"])
+    monkeypatch.setattr(cli.Prompt, "ask", lambda *a, **k: next(answers))
+    manager = manager_with({
+        "gpt-5.5@openai-oauth": {"type": "openai"},
+        "gpt-5.5@openai-api": {"type": "openai"},
+    })
+    manager._catalog = SimpleNamespace(model_keys=lambda: ("gpt-5.5",))
+
+    assert manager.add_catalog_model({"type": "vllm"}, lambda e: "x", lambda d: False)
+    assert manager.service_client.upsert_catalog_model.call_args.args[0] == "fresh"

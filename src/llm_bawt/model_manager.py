@@ -319,12 +319,17 @@ class ModelManager:
                     f"[yellow]Model already exists under alias '[cyan]{alias}[/cyan]'. Not adding duplicate.[/yellow]"
                 )
                 return True
-        existing_aliases = list(models)
+        # A model with several endpoints appears in the compat mapping only as
+        # "key@path" refs, so also reserve the catalog's bare model keys;
+        # otherwise the upsert would overwrite that model row.
+        catalog = getattr(self, "_catalog", None)
+        taken = set(models) | set(catalog.model_keys() if catalog is not None else ())
+        existing_aliases = sorted(taken)
         alias = Prompt.ask(
             f"Proposed alias [cyan]{suggest_alias(existing_aliases)}[/cyan]. Use this or enter a new one?",
             default=suggest_alias(existing_aliases),
         ).strip()
-        while not alias or alias in models:
+        while not alias or alias in taken:
             console.print(
                 "[yellow]Alias cannot be empty.[/yellow]" if not alias
                 else f"[yellow]Alias '[cyan]{alias}[/cyan]' already exists.[/yellow]"
