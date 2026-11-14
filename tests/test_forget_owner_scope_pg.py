@@ -127,3 +127,84 @@ def test_owner_is_required(backend, two_users):
         backend.forget_owned_messages(user_id="", count=1)
     with pytest.raises(TypeError):
         backend.ignore_recent_messages(1)  # type: ignore[call-arg]
+
+
+class _ArrivalEngine:
+    """Engine proxy that commits a new message right after forget selects its IDs."""
+
+    def __init__(self, engine, arrive):
+        self._engine, self._arrive = engine, arrive
+
+    def __getattr__(self, name):
+        return getattr(self._engine, name)
+
+    def begin(self):
+        outer, arrive = self._engine.begin(), self._arrive
+
+        class _Ctx:
+            def __enter__(self_inner):
+                conn = outer.__enter__()
+                real = conn.execute
+
+                def execute(stmt, *args, **kwargs):
+                    result = real(stmt, *args, **kwargs)
+                    if "FOR UPDATE" in str(stmt):
+                        rows = result.fetchall()
+                        arrive()
+                        return rows
+                    return result
+                conn.execute = execute
+                return conn
+
+            def __exit__(self_inner, *exc):
+                return outer.__exit__(*exc)
+        return _Ctx()
+
+
+def test_concurrent_arrival_is_neither_moved_nor_purged(backend, two_users):
+    """TASK-2238 row 0: B arriving after selection keeps its row and memories,
+    and the selected A is moved together with its sourced memories."""
+    d = two_users
+    late = {}
+
+    def arrive():
+        late["id"] = _msg(backend, d["a2"], time.time() + 5)
+        late["mem"] = _memory(backend, [late["id"]])
+
+    real_engine = backend.engine
+    backend.engine = _ArrivalEngine(real_engine, arrive)
+    try:
+        result = backend.forget_owned_messages(user_id="alice", session_id=d["a2"], count=1)
+    finally:
+        backend.engine = real_engine
+
+    assert result["message_ids"] == [d["alice_t2"][-1]]
+    assert late["id"] in _canonical(backend)
+    assert d["alice_t2"][-1] not in _canonical(backend)
+    assert late["mem"] in _memories(backend)
+    assert d["mems"]["alice_t2"] not in _memories(backend)
+
+
+def test_time_window_cutoff_is_computed_once(backend, monkeypatch):
+    """TASK-2238 row 0: one cutoff decides both the moved rows and the purged memories."""
+    sid = _session(backend, "alice")
+    now = 1_000_000.0
+    inside = _msg(backend, sid, now - 60)
+    edge = _msg(backend, sid, now - 120)  # exactly at the 2-minute boundary
+    outside = _msg(backend, sid, now - 121)
+    mems = {m: _memory(backend, [m]) for m in (inside, edge, outside)}
+
+    from types import SimpleNamespace
+    from llm_bawt.memory import postgresql_messages
+    reads = []
+
+    def clock():  # a second read would move the cutoff an hour later
+        reads.append(1)
+        return now if len(reads) == 1 else now + 3600
+    monkeypatch.setattr(postgresql_messages, "time", SimpleNamespace(time=clock))
+    result = backend.forget_owned_messages(user_id="alice", minutes=2)
+
+    assert result["message_ids"] == sorted([inside, edge])
+    assert _canonical(backend) == {outside}
+    assert _memories(backend) == {mems[outside]}
+    assert len(reads) == 1

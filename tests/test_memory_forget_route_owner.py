@@ -49,3 +49,46 @@ def test_preview_requires_owner(service):
     routes.preview_messages_since_minutes(minutes=5, user_id="bob", bot_id="b")
     svc.get_memory_client.assert_called_once_with("b", "bob")
     owner_client.preview_messages_since_minutes.assert_called_once_with(5)
+
+
+def _embedded_client(user_id):
+    from types import SimpleNamespace
+    from llm_bawt.mcp_server.client import MemoryClient
+    client = MemoryClient(SimpleNamespace(), bot_id="b", user_id=user_id)
+    backend = Mock()
+    backend.forget_owned_messages.return_value = {"messages_ignored": 1, "memories_deleted": 0}
+    storage = Mock()
+    storage.get_backend.return_value = backend
+    client._storage, client._initialized = storage, True
+    return client, backend
+
+
+def test_in_chat_history_forget_is_owner_scoped():
+    """The executor's history tool forgets through its user-bound client."""
+    from llm_bawt.tools.executor import ToolExecutor
+    from llm_bawt.tools.parser import ToolCall
+    client, backend = _embedded_client("alice")
+    executor = ToolExecutor(memory_client=client, user_id="alice", bot_id="b")
+    out = executor._history_forget(ToolCall("history", {"action": "forget", "count": 2}, ""))
+    assert "Forgot 1 messages" in out
+    backend.forget_owned_messages.assert_called_once_with(count=2, user_id="alice")
+    executor._history_forget(ToolCall("history", {"action": "forget", "minutes": 5}, ""))
+    backend.forget_owned_messages.assert_called_with(minutes=5, user_id="alice")
+
+
+def test_mcp_forget_tools_take_the_owner_from_the_signed_caller(monkeypatch):
+    import asyncio
+    from llm_bawt.mcp_server import server
+    seen = []
+    monkeypatch.setattr(server, "history_caller_user", lambda bot, user, **kw: seen.append((bot, user, kw)) or "alice")
+    storage = Mock()
+
+    async def forget(**kw):
+        return {"called": kw}
+    storage.forget_owned_messages = forget
+    monkeypatch.setattr(server, "_get_storage", lambda: storage)
+    fn = getattr(server.forget_messages, "fn", server.forget_messages)
+    result = asyncio.run(fn(bot_id="b", count=3, session_id="t1"))
+    assert result["called"] == {"bot_id": "b", "user_id": "alice", "session_id": "t1", "count": 3, "minutes": None}
+    # Owner is never taken from an argument and never via the operator path.
+    assert seen == [("b", None, {})]
