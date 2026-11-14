@@ -12,6 +12,7 @@ import pytest
 from agent_bridge.approval import ApprovalPolicy, PolicyAction
 from mcp import Client
 
+from llm_bawt.mcp_server import approval_interceptor
 from llm_bawt.mcp_server.catalog import CatalogFastMCP
 
 
@@ -79,17 +80,44 @@ async def test_policy_outcome_keeps_its_wire_form():
     assert result.content[0].text == json.dumps(result.structured_content, indent=2)
 
 
+APPROVAL_REQUIRED = {
+    "status": "approval_required",
+    "approval_request_id": "req-1",
+    "tool": "guarded",
+    "subject": "guarded",
+    "continuation_capable": True,
+    "message": "Approval is required. The call was not executed.",
+}
+
+
 @pytest.mark.anyio
-async def test_policy_outcome_on_an_output_schema_tool_reaches_the_model():
-    # 1.x failed output validation here and sent only "Output validation error".
+@pytest.mark.parametrize("outcome", ["denied", "approval_required", "approval_context_missing"])
+async def test_policy_outcome_on_an_output_schema_tool_reaches_the_model(outcome, monkeypatch):
+    # Deliberate change: 1.x failed output validation on these and the model saw
+    # only "Output validation error". Now it is isError with the outcome JSON.
     server = _server([ApprovalPolicy(id="p1", tool_name="guarded", action=PolicyAction.DENY)])
+    ran = []
 
     @server.tool(name="guarded")
     async def guarded() -> str:  # str return => the tool has an output schema
+        ran.append(True)
         return "ran"
+
+    if outcome == "approval_context_missing":
+        # A caller context without a turn capability: the real interceptor path.
+        monkeypatch.setattr(approval_interceptor, "current_mcp_request_context", lambda: {"x": 1})
+    elif outcome == "approval_required":
+        # Creating a real card needs a trusted turn and a store; the wire
+        # conversion of the dict the interceptor returns is what is pinned here.
+        async def intercept(*args, **kwargs):
+            return dict(APPROVAL_REQUIRED)
+        monkeypatch.setattr(server, "_intercept_call", intercept)
 
     async with Client(server, mode="legacy") as client:
         result = await client.call_tool("guarded", {})
+    assert ran == []
     assert result.is_error is True
     assert result.structured_content is None
-    assert json.loads(result.content[0].text)["status"] == "denied"
+    payload = json.loads(result.content[0].text)
+    assert payload["status"] == outcome
+    assert result.content[0].text == json.dumps(payload, indent=2)
