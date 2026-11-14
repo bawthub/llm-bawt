@@ -456,11 +456,11 @@ Merged memory:"""
     ) -> tuple[int, list[str]]:
         """Delete a cluster's originals only while a verified survivor exists.
 
-        Runs in one transaction: the survivor row is locked FOR SHARE first,
-        and the survivor itself is never deleted even when deduplication folded
-        the merge into one of the originals. An original is deleted only if its
-        ``updated_at`` still matches what consolidation read, so a concurrent
-        edit keeps that row. Returns (deleted_count, kept_changed_ids).
+        Runs in one transaction: lock the survivor and unchanged originals,
+        preserve their metadata on the survivor, then delete only those
+        originals. A concurrent edit keeps that original; a changed original
+        survivor refuses the replacement entirely. Returns (deleted_count,
+        kept_changed_ids).
         """
         from sqlalchemy import text
 
@@ -475,43 +475,83 @@ Merged memory:"""
         group_guard = "mem.owner_user_id IS NOT DISTINCT FROM CAST(:merge_owner AS text)"
         with self.backend._memory_write_transaction() as conn:
             survivor = conn.execute(
-                text(f"""SELECT id, content FROM {table} mem WHERE id = :id
+                text(f"""SELECT id, content, tags, source_message_ids, importance,
+                    access_count, updated_at FROM {table} mem WHERE id = :id
                     AND {ownership.mutation_predicate} AND {group_guard} FOR UPDATE"""),
                 {**params, "id": survivor_id},
-            ).first()
+            ).mappings().first()
             if survivor is None:
                 raise MemoryConsolidationWriteError(
                     f"merged memory {survivor_id} is not present; originals kept"
                 )
             # The survivor must hold exactly the merged text: a semantic dedup
             # onto a different row, or an edit since the write, keeps all.
-            if survivor.content != merged_content:
+            if survivor["content"] != merged_content:
                 raise MemoryConsolidationWriteError(
                     f"memory {survivor_id} does not hold the merged content; originals kept"
                 )
+            original_survivor = next(
+                (mem for mem in cluster.memories if str(mem["id"]) == str(survivor_id)), None,
+            )
+            if original_survivor is not None and survivor["updated_at"] != original_survivor.get("updated_at"):
+                raise MemoryConsolidationWriteError("original survivor changed; originals kept")
+            verified = []
             for mem in cluster.memories:
                 mem_id = str(mem["id"])
                 if mem_id == str(survivor_id):
                     continue
                 row = conn.execute(
                     text(f"""
-                        DELETE FROM {table} mem
+                        SELECT id, tags, source_message_ids, importance, access_count, updated_at
+                        FROM {table} mem
                         WHERE id = :id
                           AND updated_at IS NOT DISTINCT FROM :updated_at
                           AND {ownership.mutation_predicate} AND {group_guard}
-                        RETURNING id
+                        FOR UPDATE
                     """),
                     {**params, "id": mem_id, "updated_at": mem.get("updated_at")},
-                ).first()
+                ).mappings().first()
                 if row is None:
                     kept.append(mem_id)
                 else:
-                    deleted += 1
-            if str(survivor_id) not in {str(mem["id"]) for mem in cluster.memories}:
-                conn.execute(text(f"""
-                    UPDATE {table} mem SET access_count = GREATEST(access_count, :count)
-                    WHERE id=:id AND {ownership.mutation_predicate} AND {group_guard}
-                """), {**params, "id": survivor_id, "count": cluster.total_access_count})
+                    verified.append(dict(row))
+            # A newly inserted survivor already contains the original cluster
+            # snapshot from add_memory, including later-changed rows we keep.
+            # Preserve that existing metadata; import new metadata only from
+            # the authoritative, unchanged rows locked above.
+            combined = MemoryCluster(memories=[dict(survivor), *verified])
+            originals = MemoryCluster(memories=(
+                [dict(survivor), *verified] if original_survivor is not None else verified
+            ))
+            count = (survivor["access_count"] or 0)
+            if original_survivor is not None:
+                count += MemoryCluster(memories=verified).total_access_count
+            else:
+                count = max(count, originals.total_access_count)
+            updated = conn.execute(text(f"""
+                UPDATE {table} mem
+                SET tags=CAST(:tags AS jsonb), source_message_ids=CAST(:sources AS jsonb),
+                    importance=GREATEST(importance, :importance), access_count=:count,
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE id=:id AND content=:content
+                  AND {ownership.mutation_predicate} AND {group_guard}
+                RETURNING id
+            """), {**params, "id": survivor_id, "content": merged_content,
+                   "tags": json.dumps(sorted(combined.combined_tags)),
+                   "sources": json.dumps(sorted(combined.all_source_message_ids)),
+                   "importance": originals.combined_importance, "count": count}).first()
+            if updated is None:
+                raise MemoryConsolidationWriteError("survivor metadata was not preserved; originals kept")
+            for mem in verified:
+                row = conn.execute(text(f"""
+                    DELETE FROM {table} mem
+                    WHERE id=:id AND updated_at IS NOT DISTINCT FROM :updated_at
+                      AND {ownership.mutation_predicate} AND {group_guard}
+                    RETURNING id
+                """), {**params, "id": mem["id"], "updated_at": mem["updated_at"]}).first()
+                if row is None:
+                    raise MemoryConsolidationWriteError("locked original changed; replacement rolled back")
+                deleted += 1
         return deleted, kept
 
     def consolidate(self, dry_run: bool = False) -> ConsolidationResult:

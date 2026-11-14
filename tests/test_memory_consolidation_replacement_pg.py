@@ -13,7 +13,7 @@ import json
 import uuid
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import event, text
 
 from llm_bawt.memory import embeddings
 from llm_bawt.memory.consolidation import MemoryConsolidator
@@ -119,6 +119,111 @@ def test_exact_duplicate_merge_without_embeddings_keeps_the_original(rig):
     assert _rows(backend) == {ids[0]: ORIGINALS[0]}
     assert result.new_memories_created == 0
     assert result.errors == []
+
+
+def _metadata(backend):
+    with backend.engine.connect() as conn:
+        return {row["id"]: dict(row) for row in conn.execute(text(f"""
+            SELECT id, tags, source_message_ids, importance, access_count, updated_at
+            FROM {backend._memories_table_name}
+        """)).mappings()}
+
+
+def _metadata_cluster(rig):
+    _storage, backend, _bot, ids, state = rig
+    state["available"] = False
+    with backend.engine.begin() as conn:
+        for index, memory_id in enumerate(ids):
+            conn.execute(text(f"""
+                UPDATE {backend._memories_table_name}
+                SET tags=CAST(:tags AS jsonb), importance=:importance, access_count=:count
+                WHERE id=:id
+            """), {"id": memory_id, "tags": json.dumps(["first" if index == 0 else "second"]),
+                   "importance": 0.5 if index == 0 else 1.0, "count": 4 if index == 0 else 7})
+    consolidator = MemoryConsolidator(backend)
+    cluster = consolidator.find_clusters(consolidator.get_all_active_memories_with_embeddings())[0]
+    return consolidator, cluster
+
+
+@pytest.mark.parametrize("kind", ["original", "inserted", "external"])
+def test_replacement_preserves_union_metadata_and_access_counts(rig, kind):
+    _storage, backend, _bot, ids, _state = rig
+    consolidator, cluster = _metadata_cluster(rig)
+    content = ORIGINALS[0] if kind == "original" else MERGED
+    external = None
+    if kind == "external":
+        external = str(uuid.uuid4())
+        assert backend.add_memory(external, MERGED, tags=["external"],
+                                  source_message_ids=["outside"], importance=0.3).persisted
+        with backend.engine.begin() as conn:
+            conn.execute(text(f"UPDATE {backend._memories_table_name} SET access_count=20 WHERE id=:id"),
+                         {"id": external})
+    outcome = consolidator.create_merged_memory(content, cluster)
+    if external:
+        assert outcome.memory_id == external
+    deleted, kept = consolidator.replace_originals(outcome.memory_id, cluster, content)
+    assert kept == [] and deleted == (1 if kind == "original" else 2)
+    rows = _metadata(backend)
+    assert set(rows) == {outcome.memory_id}
+    survivor = rows[outcome.memory_id]
+    assert set(survivor["tags"]) == {"first", "second"} | ({"external"} if external else set())
+    assert set(survivor["source_message_ids"]) == {"m0", "m1"} | ({"outside"} if external else set())
+    assert survivor["importance"] == 1.0
+    assert survivor["access_count"] == (20 if external else 11)
+    assert outcome.memory_id == ids[0] if kind == "original" else outcome.memory_id not in ids
+
+
+def test_changed_original_survivor_preserves_every_row_and_current_metadata(rig):
+    _storage, backend, _bot, ids, _state = rig
+    consolidator, cluster = _metadata_cluster(rig)
+    outcome = consolidator.create_merged_memory(ORIGINALS[0], cluster)
+    with backend.engine.begin() as conn:
+        conn.execute(text(f"""
+            UPDATE {backend._memories_table_name}
+            SET tags='["later"]'::jsonb, access_count=19, updated_at=updated_at+interval '1 second'
+            WHERE id=:id
+        """), {"id": outcome.memory_id})
+    before = _metadata(backend)
+    with pytest.raises(RuntimeError, match="original survivor changed"):
+        consolidator.replace_originals(outcome.memory_id, cluster, ORIGINALS[0])
+    assert _metadata(backend) == before and set(before) == set(ids)
+
+
+def test_changed_other_original_is_kept_without_importing_its_metadata(rig):
+    _storage, backend, _bot, ids, _state = rig
+    consolidator, cluster = _metadata_cluster(rig)
+    outcome = consolidator.create_merged_memory(ORIGINALS[0], cluster)
+    with backend.engine.begin() as conn:
+        conn.execute(text(f"""
+            UPDATE {backend._memories_table_name}
+            SET tags='["later"]'::jsonb, updated_at=updated_at+interval '1 second' WHERE id=:id
+        """), {"id": ids[1]})
+    assert consolidator.replace_originals(outcome.memory_id, cluster, ORIGINALS[0]) == (0, [ids[1]])
+    survivor = _metadata(backend)[outcome.memory_id]
+    assert survivor["tags"] == ["first"]
+    assert survivor["source_message_ids"] == ["m0"]
+    assert survivor["access_count"] == 4
+
+
+@pytest.mark.parametrize("stage", ["metadata", "delete"])
+def test_replacement_failure_rolls_back_metadata_and_keeps_originals(rig, stage):
+    _storage, backend, _bot, ids, _state = rig
+    consolidator, cluster = _metadata_cluster(rig)
+    outcome = consolidator.create_merged_memory(ORIGINALS[0], cluster)
+    before = _metadata(backend)
+
+    def fail(_conn, _cursor, statement, _parameters, _context, _executemany):
+        if ((stage == "metadata" and "SET tags=CAST" in statement)
+                or (stage == "delete" and statement.lstrip().startswith("DELETE FROM"))):
+            raise RuntimeError("synthetic replacement failure")
+
+    event.listen(backend.engine, "before_cursor_execute", fail)
+    try:
+        with pytest.raises(RuntimeError, match="synthetic replacement failure"):
+            consolidator.replace_originals(outcome.memory_id, cluster, ORIGINALS[0])
+    finally:
+        event.remove(backend.engine, "before_cursor_execute", fail)
+    assert _metadata(backend) == before and set(before) == set(ids)
 
 
 def test_failed_write_keeps_every_original_and_reports_an_error(rig, monkeypatch):

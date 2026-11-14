@@ -9,8 +9,9 @@ from llm_bawt.memory.maintenance import MemoryMaintenance, update_memory_meaning
 from llm_bawt.memory.ownership import MemoryAuthority, OPERATOR_MEMORY_AUTHORITY
 from tests.private_postgres import private_app_pg  # noqa: F401
 from tests.test_memory_update_pg import memory_rig  # noqa: F401
-from tests.test_memory_crud_owner_pg import owned_clients as owned_clients
+from tests.test_memory_crud_owner_pg import owned_clients as _owned_clients
 
+owned_clients = _owned_clients
 pytestmark = pytest.mark.integration
 
 
@@ -114,6 +115,7 @@ def test_consolidation_groups_owners_and_never_claims_null(owned_clients, monkey
 
     # Force exact dedup so heuristic survivor text can be verified.
     monkeypatch.setattr("llm_bawt.memory.embeddings.generate_embedding", lambda *a, **k: None)
+    monkeypatch.setattr("llm_bawt.memory.consolidation.get_local_llm_client", lambda _config: None)
     result = a.consolidate_memories(dry_run=False)
     assert result["errors"] == []
     assert result["memories_consolidated"] == 2
@@ -203,3 +205,42 @@ def test_changed_original_during_merge_embedding_refuses_insert(owned_clients, m
     with pytest.raises(RuntimeError, match="not persisted"):
         c.create_merged_memory("not authorized to merge", cluster)
     assert set(_rows(backend)) == set(originals)
+
+
+def test_original_survivor_keeps_core_importance_and_forget_provenance(owned_clients, monkeypatch):
+    backend, _a, _b, sources = owned_clients
+    second_source = str(uuid4())
+    with backend.engine.begin() as conn:
+        conn.execute(text(f"""
+            INSERT INTO {backend._messages_table_name}
+                (id, role, content, timestamp, session_id, author_entity_type, author_entity_id)
+            SELECT :id, role, 'Second owned source', timestamp+1, session_id,
+                   author_entity_type, author_entity_id
+            FROM {backend._messages_table_name} WHERE id=:source
+        """), {"id": second_source, "source": sources["owner-a"]})
+    survivor = _seed(backend, "owner-a", "Detailed preference " * 8, sources=[sources["owner-a"]])
+    other = _seed(backend, "owner-a", "Name is Alex", sources=[second_source])
+    with backend.engine.begin() as conn:
+        for memory_id, tag, importance, count in (
+            (survivor, "preference", 0.5, 4), (other, "identity", 1.0, 7),
+        ):
+            conn.execute(text(f"""
+                UPDATE {backend._memories_table_name}
+                SET tags=jsonb_build_array(CAST(:tag AS text)), importance=:importance, access_count=:count
+                WHERE id=:id
+            """), {"id": memory_id, "tag": tag, "importance": importance, "count": count})
+    monkeypatch.setattr("llm_bawt.memory.embeddings.generate_embedding", lambda *a, **k: None)
+    authority = MemoryAuthority(user_id="owner-a")
+    result = MemoryConsolidator(backend, authority=authority).consolidate()
+    assert result.errors == [] and result.memories_consolidated == 1
+    with backend.engine.connect() as conn:
+        row = conn.execute(text(f"""
+            SELECT id, importance, tags, source_message_ids, access_count
+            FROM {backend._memories_table_name}
+        """)).mappings().one()
+    assert row["id"] == survivor and row["importance"] == 1.0
+    assert set(row["tags"]) == {"preference", "identity"}
+    assert set(row["source_message_ids"]) == {sources["owner-a"], second_source}
+    assert row["access_count"] == 11
+    assert backend.delete_memories_by_source_message_ids([second_source], authority=authority) == 1
+    assert _rows(backend) == {}
