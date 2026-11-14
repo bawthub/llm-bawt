@@ -178,13 +178,6 @@ _RESERVED_PREFIXES = frozenset(
 
 
 def _segment_mutates(words: list[str], depth: int) -> bool:
-    if depth < 3:
-        # Command substitution inside a quoted word ("$(git push)" or a
-        # backtick) still executes; scan those words as commands too.
-        for word in words:
-            if "$(" in word or " ; " in word:
-                if _command_mutates(word.replace("$(", " ; "), depth + 1):
-                    return True
     i = 0
     while i < len(words) and (_ASSIGNMENT.match(words[i]) or words[i] in _RESERVED_PREFIXES):
         i += 1
@@ -206,8 +199,48 @@ def _segment_mutates(words: list[str], depth: int) -> bool:
     return program == "git" and _git_subcommand(words) in MUTATING_GIT_SUBCOMMANDS
 
 
+def _quoted_substitutions(command: str) -> list[str]:
+    """Bodies of ``$(...)`` and backticks inside double quotes.
+
+    Those still execute, but shlex hides them inside one word. Single-quoted
+    text is literal and is skipped.
+    """
+    bodies: list[str] = []
+    i, quote = 0, ""
+    while i < len(command):
+        ch = command[i]
+        if ch == "\\" and quote != "'":
+            i += 2
+            continue
+        if quote == "'":
+            quote = "" if ch == "'" else quote
+        elif ch == "'" and not quote:
+            quote = "'"
+        elif ch == '"':
+            quote = "" if quote == '"' else '"'
+        elif quote == '"' and (command.startswith("$(", i) or ch == "`"):
+            start = i + (2 if ch == "$" else 1)
+            closer = ")" if ch == "$" else "`"
+            level, j = 1, start
+            while j < len(command) and level:
+                if ch == "$" and command.startswith("$(", j):
+                    level += 1
+                    j += 1
+                elif command[j] == closer:
+                    level -= 1
+                j += 1
+            bodies.append(command[start:j - 1] if not level else command[start:])
+            i = j
+            continue
+        i += 1
+    return bodies
+
+
 def _command_mutates(command: str, depth: int = 0) -> bool:
     """Whether a shell command runs a mutating git subcommand (TASK-2272/2286)."""
+    if depth < 3 and any(_command_mutates(body, depth + 1)
+                         for body in _quoted_substitutions(command)):
+        return True
     try:
         segments = _segments(command)
     except ValueError:

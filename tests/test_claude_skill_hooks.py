@@ -100,6 +100,8 @@ def _cmd(command):
     "ls; cat push.log",
     "if git diff --quiet; then echo then git push; fi",
     "{ git status; echo do git commit; }",
+    "echo '$(git push)'",
+    "grep -n '`git commit`' docs/x.md",
 ])
 def test_gate_passes_read_only_commands_mentioning_mutation_words(command):
     """TASK-2272: operands and other commands are not git subcommands."""
