@@ -173,20 +173,6 @@ class PromptBuilder:
         }
         return defaults.get(name, SectionPosition.CUSTOM)
     
-    def remove_section(self, name: str) -> "PromptBuilder":
-        """Remove a section by name."""
-        if name in self._sections:
-            del self._sections[name]
-            logger.debug(f"Removed section '{name}'")
-        return self
-    
-    def enable_section(self, name: str, enabled: bool = True) -> "PromptBuilder":
-        """Enable or disable a section."""
-        if name in self._sections:
-            self._sections[name].enabled = enabled
-            logger.debug(f"Section '{name}' enabled={enabled}")
-        return self
-    
     def get_section(self, name: str) -> PromptSection | None:
         """Get a section by name."""
         return self._sections.get(name)

@@ -120,28 +120,6 @@ class ShortTermMessageReadsMixin:
         merged.sort(key=lambda m: m.timestamp or 0.0)
         return merged
 
-    def get_session_history(self, limit: int = 50) -> list[dict]:
-        """Get messages from the current session."""
-        with Session(self._backend.engine) as session:
-            stmt = (
-                select(self._backend.messages_table)
-                .where(self._backend.messages_table.c.session_id == self._current_session_id)
-                .order_by(self._backend.messages_table.c.timestamp.desc())
-                .limit(limit)
-            )
-            rows = session.execute(stmt).fetchall()
-            
-            # Return in chronological order
-            return [
-                {
-                    "id": row.id,
-                    "role": row.role,
-                    "content": row.content,
-                    "timestamp": row.timestamp,
-                }
-                for row in reversed(rows)
-            ]
-    
     def get_recent_messages(self, limit: int = 20) -> list[dict]:
         """Get recent messages regardless of session (for context building)."""
         with Session(self._backend.engine) as session:

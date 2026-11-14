@@ -558,27 +558,6 @@ class BotManager:
         """
         return sorted(self._bots.values(), key=lambda b: b.slug)
 
-    def get_effective_settings(self, slug: str) -> dict[str, Any]:
-        """Get effective bot settings (template hydrated + bot overrides)."""
-        bot = self.get_bot(slug)
-        return bot.settings.copy() if bot else {}
-
-    def bot_exists(self, slug: str) -> bool:
-        """Check if a bot exists.
-
-        Args:
-            slug: The bot identifier (case-insensitive)
-
-        Returns:
-            True if the bot exists
-        """
-        return slug.lower().strip() in self._bots
-
-    def get_default_slug(self, local_mode: bool = False) -> str:
-        """Get the default bot slug."""
-        return configured_default_bot_id(self.config)
-
-
 def get_bot(slug: str) -> Bot | None:
     """Convenience function to get a bot by slug.
 
@@ -589,19 +568,6 @@ def get_bot(slug: str) -> Bot | None:
         The Bot instance, or None if not found
     """
     return BUILTIN_BOTS.get(slug.lower().strip())
-
-
-def get_bot_system_prompt(slug: str) -> str | None:
-    """Get the system prompt for a bot.
-
-    Args:
-        slug: The bot identifier (case-insensitive)
-
-    Returns:
-        The system prompt string, or None if bot not found
-    """
-    bot = get_bot(slug)
-    return bot.system_prompt if bot else None
 
 
 def strip_emotes(text: str) -> str:

@@ -169,25 +169,3 @@ class ConfigResolver:
         ``.source``, ``.scope_type``/``.scope_id``) or None for unknown keys."""
         return self._prompts.resolve(key, scope_type=scope_type, scope_id=scope_id)
 
-    def resolve_body_with_provenance(
-        self,
-        key: str,
-        scope_type: str = "global",
-        scope_id: str | None = None,
-    ) -> ResolvedValue | None:
-        """Resolve a body but return it in the unified ``ResolvedValue`` shape,
-        translating PromptResolver's source vocabulary into the shared one."""
-        resolved = self.resolve_body(key, scope_type=scope_type, scope_id=scope_id)
-        if resolved is None:
-            return None
-        source = _PROMPT_SOURCE_MAP.get(resolved.source)
-        if source is None:
-            # db_override — refine into bot/global from the resolved scope.
-            source = SOURCE_BOT if resolved.scope_type == "bot" else SOURCE_GLOBAL
-        return ResolvedValue(
-            key=key,
-            value=resolved.body,
-            source=source,
-            scope_type=resolved.scope_type,
-            scope_id=resolved.scope_id,
-        )

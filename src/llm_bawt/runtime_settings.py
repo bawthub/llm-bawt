@@ -978,17 +978,6 @@ class RuntimeSettingsResolver:
             return fallback, "code_default"
         return None, "unset"
 
-    def resolve_from_config_attr(
-        self,
-        key: str,
-        config_attr: str,
-        request_overrides: dict[str, Any] | None = None,
-    ) -> Any:
-        """Resolve setting using config attribute as final fallback."""
-        fallback = getattr(self.config, config_attr, None)
-        return self.resolve(key=key, fallback=fallback, request_overrides=request_overrides)
-
-
 def resolve_job_model(config: Config, key: str) -> str | None:
     """Resolve a background-job model alias from the GLOBAL runtime setting.
 

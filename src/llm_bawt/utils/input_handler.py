@@ -1,5 +1,4 @@
 import sys
-from rich.prompt import Prompt
 from rich.console import Console
 
 class MultilineInputHandler:
@@ -60,24 +59,3 @@ class MultilineInputHandler:
         self.console.print("[italic]Input complete.[/italic]")
         return "\n".join(lines)
     
-    def preview_input(self, text):
-        """Preview the input as plain text before sending."""
-        if not text.strip():
-            return ""
-            
-        self.console.print()
-        self.console.print("[bold blue]Input Preview:[/bold blue]")
-        print(text)
-        
-        confirmation = Prompt.ask(
-            "Send this input? ",
-            choices=["y", "n", "e"],
-            default="y"
-        )
-        
-        if confirmation == "e":
-            self.console.print("[blue]Edit your input (type 'EOF' on a new line or press Ctrl+C to finish):[/blue]")
-            edited_text = self._get_multiline_input(first_line=text.split("\n")[0] if text else None)
-            return edited_text if edited_text.strip() else text
-        
-        return text if confirmation == "y" else ""

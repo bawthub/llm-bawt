@@ -132,13 +132,6 @@ class LLMClient(ABC):
         response = self.query(messages, plaintext_output=True, stream=False, stop=stop, **kwargs)
         return response, None
 
-    def format_message(self, role: str, content: str):
-        """Formats and prints a message based on its role."""
-        if role == "user":
-            self._print_user_message(content)
-        elif role == "assistant":
-            self._print_assistant_message(content)
-
     def _print_user_message(self, content: str):
         """Default implementation for printing user messages."""
         self.console.print()

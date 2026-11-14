@@ -44,11 +44,6 @@ def _reset_intent(service: Any, delivery_id: str | None) -> dict:
     return raw if isinstance(raw, dict) else {}
 
 
-def keep_house_requested(service: Any, delivery_id: str | None) -> bool:
-    """Whether this reset's persisted intent asked to keep the house."""
-    return _reset_intent(service, delivery_id).get("keep_house") is True
-
-
 def evict_for_reset(service: Any, llm_bawt: Any, bot_id: str, *,
                     delivery_id: str | None) -> str | None:
     """Vacate ``bot_id``'s house for this reset; return the house vacated.

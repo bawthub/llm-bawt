@@ -136,17 +136,6 @@ class RuntimeTunables(BaseModel):
     AGENT_GLOBAL_PROMPT_ENABLED: bool = Field(default=False, description="For agent backends (Claude Code, Codex): inject the shared 'agents.global_prompt' dynamic prompt into the system prompt (steers planning to the BawtHub task system instead of harness plan mode). Opt-in per bot.")
 
 
-# Map of runtime settings key -> RuntimeTunables field name (trivial: just uppercase)
-def runtime_key_to_config(key: str) -> str:
-    """Convert a runtime settings key to its Config field name."""
-    return key.upper()
-
-
-def config_to_runtime_key(field_name: str) -> str:
-    """Convert a Config field name to its runtime settings key."""
-    return field_name.lower()
-
-
 class Config(RuntimeTunables, BaseSettings):
     HISTORY_FILE: str = Field(default=os.path.expanduser("~/.cache/llm-bawt/chat-history"))
     OLLAMA_URL: str = Field(default="http://localhost:11434")
@@ -584,20 +573,6 @@ class Config(RuntimeTunables, BaseSettings):
         if isinstance(stored, dict):
             merged.update({k: v for k, v in stored.items() if k in merged})
         return merged
-
-    def get_model_n_gpu_layers(self, model_alias: str | None = None) -> int:
-        """Get the effective n_gpu_layers for a model.
-
-        Resolution order:
-        1. Per-model `n_gpu_layers` in model definition
-        2. Global LLAMA_CPP_N_GPU_LAYERS config
-        3. Hardcoded default: -1 (all layers)
-        """
-        model_def = self.resolve_model(model_alias or "", default={})
-        def_val = model_def.get("n_gpu_layers")
-        if def_val is not None:
-            return int(def_val)
-        return self.LLAMA_CPP_N_GPU_LAYERS if self.LLAMA_CPP_N_GPU_LAYERS is not None else -1
 
     def get_tool_format(self, model_alias: str | None = None, model_def: Dict[str, Any] | None = None) -> str:
         """Return the tool format for a given model alias or definition.

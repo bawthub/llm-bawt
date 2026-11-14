@@ -91,19 +91,6 @@ CODEX_MODEL_PRICING: dict[str, dict] = {
 }
 
 
-def codex_model_spec(model_id: str | None) -> dict | None:
-    """Return the reference spec (pricing + context_window) for a codex model.
-
-    Accepts a bare slug (``gpt-5.6-sol``) or a proxy-prefixed id
-    (``openai_chatgpt/gpt-5.6-sol``); the prefix is stripped before lookup.
-    Returns None for unknown/unpriced models (e.g. gpt-5.4-mini).
-    """
-    if not model_id:
-        return None
-    slug = model_id.split("/")[-1]
-    return CODEX_MODEL_PRICING.get(slug)
-
-
 def normalize_for_match(text: str) -> str:
     """Normalize text for fuzzy matching by lowercasing and removing special characters."""
     return re.sub(r'[^a-z0-9]', '', text.lower())

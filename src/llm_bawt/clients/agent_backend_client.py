@@ -357,13 +357,6 @@ class AgentBackendClient(LLMClient):
             for tc in tool_calls
         ]
 
-    def get_upstream_model(self) -> str:
-        """Return the actual model used by the upstream agent (e.g. gpt-5.3-codex)."""
-        result = self.last_result
-        if result is None:
-            return self._backend_name
-        return getattr(result, "model", "") or self._backend_name
-
     def get_token_usage(self) -> dict[str, Any] | None:
         """Return normalized usage from the last structured backend result."""
         result = self.last_result

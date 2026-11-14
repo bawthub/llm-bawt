@@ -130,9 +130,6 @@ class EntityPresentationResolver:
                 result[(author.entity_type, author.entity_id)] = fallback
             return result
 
-    def resolve_one(self, author: AuthorReference) -> dict:
-        return self.resolve_many_safe([author])[(author.entity_type, author.entity_id)]
-
     def _profiles(self, entity_ids: list[str]) -> dict[tuple[str, str], dict]:
         if not entity_ids:
             return {}

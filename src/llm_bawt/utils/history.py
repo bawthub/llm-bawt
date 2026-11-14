@@ -861,19 +861,6 @@ class HistoryManager:
             months = int(diff / 2592000)
             return f"{months} months ago"
     
-    def get_context_messages_excluding_last(self):
-        """Get messages to be used as context, excluding the most recent one."""
-        context_messages = self.get_context_messages()
-        if len(context_messages) > 1:
-            return context_messages[:-1]
-        elif context_messages and context_messages[0].role == "system":
-            return context_messages
-        else:
-            if any(msg.role == "system" for msg in context_messages):
-                return [msg for msg in context_messages if msg.role == "system"]
-            else:
-                return [Message(role="system", content=self.config.SYSTEM_MESSAGE)]
-
     def add_message(self, role, content, message_id=None, attachments=None,
                     reasoning=None, session_id=None, author=None, extract_memory=True):
         """Append a message to history and save.
@@ -993,13 +980,6 @@ class HistoryManager:
         else:
             self.client.console.print("[dim]No history file found to clear or history file path not set.[/dim]")
             
-    def get_last_assistant_message(self) -> str | None:
-        """Get the content of the last assistant message, or None."""
-        for msg in reversed(self.messages):
-            if msg.role == "assistant":
-                return msg.content
-        return None
-
     def remove_last_message_if_partial(self, role: str):
         """Remove the last message if it matches the specified role (used for cleanup on error/interrupt)."""
         if self.messages and self.messages[-1].role == role:

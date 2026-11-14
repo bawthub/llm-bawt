@@ -265,15 +265,6 @@ class ModelLifecycleManager:
             else:
                 return True, f"Got it! I'll use '{normalized_alias}' for your next message."
     
-    def has_pending_switch(self, owner: tuple[str, str] | None = None) -> str | None:
-        """Return the pending switch for this owner (or the unscoped one), if any."""
-        owner = _owner_key(owner)
-        with self._model_lock:
-            pending = self._pending_model_switches.get(owner)
-            if pending is None and owner is not None:
-                pending = self._pending_model_switches.get(None)
-            return pending
-    
     def clear_pending_switch(self, owner: tuple[str, str] | None = None) -> str | None:
         """Clear and return the pending switch for this owner.
 
@@ -290,10 +281,6 @@ class ModelLifecycleManager:
     def on_model_unloaded(self, callback):
         """Register a callback for when a model is unloaded."""
         self._on_model_unloaded.append(callback)
-    
-    def on_model_loaded(self, callback):
-        """Register a callback for when a model is loaded."""
-        self._on_model_loaded.append(callback)
     
     def get_status(self) -> dict[str, Any]:
         """Get current model status."""

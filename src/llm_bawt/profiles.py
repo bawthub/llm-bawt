@@ -373,20 +373,6 @@ class ProfileManager:
         self.get_or_create_profile(entity_type, entity_id)
         return self.update_profile(entity_type, entity_id, display_name=display_name)
     
-    def set_profile_summary(
-        self,
-        entity_type: EntityType,
-        entity_id: str,
-        summary: str,
-    ) -> EntityProfile | None:
-        """Set the pre-computed summary for an entity's profile.
-        
-        This summary is used directly in system prompt injection.
-        """
-        # Ensure profile exists
-        self.get_or_create_profile(entity_type, entity_id)
-        return self.update_profile(entity_type, entity_id, summary=summary)
-    
     # =========================================================================
     # Attribute CRUD
     # =========================================================================
@@ -510,14 +496,6 @@ class ProfileManager:
                 ProfileAttribute.status.in_(statuses),  # type: ignore[attr-defined]
             ).order_by(ProfileAttribute.id)
             return list(session.exec(statement).all())
-
-    def entities_with_candidates(self, entity_type: EntityType) -> list[str]:
-        with Session(self.engine) as session:
-            statement = select(ProfileAttribute.entity_id).where(
-                ProfileAttribute.entity_type == entity_type,
-                ProfileAttribute.status == STATUS_CANDIDATE,
-            ).distinct()
-            return sorted(session.exec(statement).all())
 
     @staticmethod
     def curation_snapshot(attr: ProfileAttribute) -> tuple[Any, ...]:
@@ -786,32 +764,6 @@ class ProfileManager:
             session.refresh(attr)
             return attr
     
-    def delete_attributes_by_category(
-        self,
-        entity_type: EntityType,
-        entity_id: str,
-        category: str,
-    ) -> int:
-        """Delete all attributes in a category for an entity. Returns count deleted."""
-        entity_id = entity_id.lower().strip()
-        category = category.lower().strip()
-        
-        with Session(self.engine) as session:
-            statement = select(ProfileAttribute).where(
-                ProfileAttribute.entity_type == entity_type,
-                ProfileAttribute.entity_id == entity_id,
-                ProfileAttribute.category == category,
-            )
-            attributes = session.exec(statement).all()
-            count = len(attributes)
-            
-            for attr in attributes:
-                session.delete(attr)
-            
-            session.commit()
-            logger.debug(f"Deleted {count} attributes from {entity_type}/{entity_id} in category {category}")
-            return count
-    
     def get_attribute_by_id(self, attribute_id: int) -> ProfileAttribute | None:
         """Get a specific attribute by its database ID.
         
@@ -984,63 +936,6 @@ class ProfileManager:
             ]
         )
     
-    def set_user_preference(
-        self, 
-        user_id: str, 
-        key: str, 
-        value: Any,
-        confidence: float = 1.0,
-        source: str = "explicit",
-    ) -> ProfileAttribute:
-        """Convenience method to set a user preference."""
-        return self.set_attribute(
-            EntityType.USER,
-            user_id,
-            AttributeCategory.PREFERENCE,
-            key,
-            value,
-            confidence=confidence,
-            source=source,
-        )
-    
-    def set_user_fact(
-        self, 
-        user_id: str, 
-        key: str, 
-        value: Any,
-        confidence: float = 1.0,
-        source: str = "explicit",
-    ) -> ProfileAttribute:
-        """Convenience method to set a user fact."""
-        return self.set_attribute(
-            EntityType.USER,
-            user_id,
-            AttributeCategory.FACT,
-            key,
-            value,
-            confidence=confidence,
-            source=source,
-        )
-    
-    def set_bot_personality(
-        self, 
-        bot_id: str, 
-        key: str, 
-        value: Any,
-        confidence: float = 1.0,
-    ) -> ProfileAttribute:
-        """Convenience method to set a bot personality trait."""
-        return self.set_attribute(
-            EntityType.BOT,
-            bot_id,
-            AttributeCategory.PERSONALITY,
-            key,
-            value,
-            confidence=confidence,
-            source="learned",
-        )
-
-
 # Backwards compatibility
 def load_user_profile_summary(config: Any, user_id: str) -> str:
     """Load and format user profile for system prompt injection.

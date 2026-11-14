@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Dict
 
@@ -26,15 +25,6 @@ def read_env_file(path: Path) -> Dict[str, str]:
             value = value[1:-1]
         if key:
             values[key] = value
-    return values
-
-
-def load_env_file(path: Path, override: bool = False) -> Dict[str, str]:
-    """Load .env values into os.environ for non-prefixed keys."""
-    values = read_env_file(path)
-    for key, value in values.items():
-        if override or key not in os.environ:
-            os.environ[key] = value
     return values
 
 

@@ -63,5 +63,3 @@ def write_manifest(entries: dict[str, dict[str, Any]], root: Path | None = None)
     path.write_text(json.dumps(payload, indent=2, sort_keys=False) + "\n", encoding="utf-8")
 
 
-def clear_cache() -> None:
-    synced_body.cache_clear()

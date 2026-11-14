@@ -171,9 +171,3 @@ def drop_columns(
     return [statement]
 
 
-def reset_schema_guards_for_tests(engine: Engine | None = None) -> None:
-    """Reset all registered guards without touching or disposing engines."""
-
-    with _bootstrap_lock:
-        for guard in list(_guards):
-            guard.reset_for_tests(engine)

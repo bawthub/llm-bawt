@@ -115,17 +115,3 @@ class MemoryBackend(ABC):
         """
         return False
     
-    def prune_older_than(self, days: int) -> int:
-        """Delete memories older than a specified number of days.
-        
-        Args:
-            days: Delete memories older than this many days.
-            
-        Returns:
-            Number of memories deleted.
-            
-        Note:
-            This method has a default implementation that returns 0.
-            Backends should override if they support pruning.
-        """
-        return 0
