@@ -38,6 +38,7 @@ _DURATIONS = defaultdict(float)
 _REAL_PROCESS: set[str] = set()  # nodeids marked real_process; judged on their own budget
 _RETIMED: dict[str, tuple[float, float]] = {}  # nodeid -> (first run, retry) after a slow first run
 _FAILED: set[str] = set()  # nodeids with a failed phase; never reported as a duration
+_PASSED: set[str] = set()  # nodeids whose call phase really passed (not skipped/xfail/xpass)
 
 # Root conftest is imported before nested conftests and test modules; a
 # pytest_configure hook would be too late for their import-time side effects.
@@ -79,6 +80,7 @@ def pytest_configure(config):
     _REAL_PROCESS.clear()
     _RETIMED.clear()
     _FAILED.clear()
+    _PASSED.clear()
     config._task1189_durations = _DURATIONS
 
 
@@ -140,6 +142,8 @@ def pytest_runtest_logreport(report):
         _DURATIONS[report.nodeid] += report.duration
         if getattr(report, "failed", False):
             _FAILED.add(report.nodeid)
+        if report.when == "call" and getattr(report, "outcome", None) == "passed" and not hasattr(report, "wasxfail"):
+            _PASSED.add(report.nodeid)
         # keywords travel with an xdist report, so the controller sees the marker too.
         if time_budget.REAL_PROCESS in getattr(report, "keywords", {}):
             _REAL_PROCESS.add(report.nodeid)
@@ -190,8 +194,11 @@ def pytest_sessionfinish(session, exitstatus):
 
 
 def _write_durations(path):
+    # Only a case whose call really passed was measured; a skip or xfail alone must
+    # not stand in for a loaded breach (TASK-2303 review).
     with open(path, "w", encoding="utf-8") as handle:
-        json.dump({nodeid: duration for nodeid, duration in _DURATIONS.items() if nodeid not in _FAILED}, handle)
+        json.dump({nodeid: duration for nodeid, duration in _DURATIONS.items()
+                   if nodeid in _PASSED and nodeid not in _FAILED}, handle)
 
 
 def _rerun_isolated(config, found, budget, process_budget):

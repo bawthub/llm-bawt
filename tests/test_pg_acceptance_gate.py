@@ -63,6 +63,7 @@ def _judge(monkeypatch, cases, unit_budget, real_process_budget=None, alone=None
     monkeypatch.setattr(conftest, "_REAL_PROCESS", set())
     monkeypatch.setattr(conftest, "_RETIMED", {})
     monkeypatch.setattr(conftest, "_FAILED", set())
+    monkeypatch.setattr(conftest, "_PASSED", set())
     config = _controller_config()
     config.getoption.side_effect = lambda key: {
         "--require-pg-acceptance": False,
@@ -75,10 +76,13 @@ def _judge(monkeypatch, cases, unit_budget, real_process_budget=None, alone=None
     config._task1189_durations = conftest._DURATIONS
     for nodeid, case in cases.items():
         keywords, phases, *retime = case
-        for when, duration in phases:
+        for phase in phases:
+            when, duration, *rest = phase
+            extra = rest[0] if rest else {"outcome": "passed"}
             properties = [(time_budget.RETIME, retime[0])] if retime and when == phases[-1][0] else []
             conftest.pytest_runtest_logreport(SimpleNamespace(
-                nodeid=nodeid, when=when, duration=duration, keywords=keywords, user_properties=properties))
+                nodeid=nodeid, when=when, duration=duration, keywords=keywords, user_properties=properties,
+                **extra))
     session = SimpleNamespace(config=config, exitstatus=None)
     conftest.pytest_sessionfinish(session, 0)
     return session.exitstatus
@@ -166,6 +170,19 @@ def test_the_isolated_run_reports_instead_of_rerunning_again(monkeypatch, tmp_pa
     assert _judge(monkeypatch, cases, 1.0, report_path=str(report)) == pytest.ExitCode.TESTS_FAILED
     time_budget.isolated_durations.assert_not_called()
     assert json.loads(report.read_text()) == {"tests/a.py::test_slow": 1.3, "tests/a.py::test_ok": 0.1}
+
+
+@pytest.mark.parametrize("phases", [
+    [("setup", 0.002, {"outcome": "skipped"})],
+    [("setup", 0.001), ("call", 0.001, {"outcome": "skipped"})],
+    [("setup", 0.001), ("call", 0.001, {"outcome": "skipped", "wasxfail": ""})],
+    [("setup", 0.001), ("call", 0.001, {"outcome": "passed", "wasxfail": ""})],
+])
+def test_an_isolated_case_that_did_not_really_pass_is_not_reported(monkeypatch, tmp_path, phases):
+    report = tmp_path / "durations.json"
+    cases = {"tests/a.py::test_slow": ({}, phases)}
+    _judge(monkeypatch, cases, 1.0, report_path=str(report))
+    assert json.loads(report.read_text()) == {}
 
 
 def test_isolated_durations_runs_only_those_cases_serially(tmp_path):
