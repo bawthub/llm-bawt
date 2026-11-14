@@ -80,8 +80,12 @@ def wired(engine, monkeypatch):
     return engine
 
 
+CARD_ONLY = _id("cardonly")
+
+
 def _no_remote() -> tuple[set[str], int]:
-    return set(), 1
+    """A healthy BawtHub reply that references nothing stored here."""
+    return {CARD_ONLY}, 1
 
 
 def test_sweep_finds_every_holder(engine):
@@ -125,3 +129,11 @@ def test_late_column_failure_deletes_nothing(wired, monkeypatch):
     assert len(seen) > 1
     assert store.deleted == []
     assert "tool_call_records.result_text" in result["aborted_reason"]
+
+
+def test_empty_remote_masked_by_local_refs_deletes_nothing(wired):
+    """Codex cmwfwt2l1: local references must not mask an empty BawtHub set."""
+    store = _Store()
+    result = run_media_gc(object(), media_store=store, fetch_remote=lambda: (set(), 4), max_candidates=10)
+    assert store.deleted == []
+    assert "BawtHub referenced set is empty" in result["aborted_reason"]

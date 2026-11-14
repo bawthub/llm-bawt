@@ -66,6 +66,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 
 from ..http_errors import safe_error_text
 
@@ -234,6 +235,15 @@ def _find_orphan_assets(conn, referenced: frozenset[str], grace_days: int) -> li
     return [dict(r) for r in rows]
 
 
+def _bound_statements(conn, *, deadline: float, clock: Callable[[], float]) -> None:
+    """Cap this transaction's statements at the remaining sweep budget."""
+    remaining_ms = int((deadline - clock()) * 1000)
+    if remaining_ms <= 0:
+        raise ReferenceScanIncomplete("sweep budget exceeded before candidate lookup")
+    timeout_ms = min(int(STATEMENT_TIMEOUT_MS), remaining_ms)
+    conn.exec_driver_sql(f"SET LOCAL statement_timeout = {timeout_ms}")
+
+
 def _count_collectable(conn) -> int:
     return int(conn.execute(text("SELECT count(*) FROM media_assets WHERE storage_key IS NULL")).scalar_one())
 
@@ -301,11 +311,24 @@ def run_media_gc(
 
     refs = ReferenceSet(frozenset(local_ids | remote_ids), local_columns, remote_columns)
 
-    with engine.connect() as conn:
-        collectable = _count_collectable(conn)
-        if not refs.ids and collectable:
-            return _aborted("referenced set is empty while assets exist", dry_run=dry_run, refs=refs)
-        orphans = _find_orphan_assets(conn, refs.ids, grace_days)
+    try:
+        with engine.connect() as conn, conn.begin():
+            _bound_statements(conn, deadline=deadline, clock=clock)
+            collectable = _count_collectable(conn)
+            # Each source is checked on its own: references from one database
+            # must not mask an empty (mispointed, freshly reset) other one.
+            if collectable:
+                if not local_ids:
+                    return _aborted("local referenced set is empty while assets exist", dry_run=dry_run, refs=refs)
+                if not remote_ids:
+                    return _aborted("BawtHub referenced set is empty while assets exist", dry_run=dry_run, refs=refs)
+            orphans = _find_orphan_assets(conn, refs.ids, grace_days)
+        if clock() > deadline:
+            raise ReferenceScanIncomplete("sweep budget exceeded during candidate lookup")
+    except ReferenceScanIncomplete as e:
+        return _aborted(str(e), dry_run=dry_run, refs=refs)
+    except DBAPIError as e:
+        return _aborted(f"candidate lookup failed: {safe_error_text(e)}", dry_run=dry_run, refs=refs)
 
     orphan_count = len(orphans)
     limit = max_candidates if max_candidates is not None else breaker_limit(collectable)

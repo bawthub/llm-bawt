@@ -124,7 +124,7 @@ def patched_orphan_finder(monkeypatch: pytest.MonkeyPatch):
     state: dict[str, Any] = {
         "orphans": [],
         "local_ids": {"ma_" + "R" * 26},
-        "remote_ids": set(),
+        "remote_ids": {"ma_" + "B" * 26},
         "collectable": 100,
     }
 
@@ -150,6 +150,9 @@ def patched_orphan_finder(monkeypatch: pytest.MonkeyPatch):
 
             def begin(self):
                 return self
+
+            def exec_driver_sql(self, sql):
+                state.setdefault("driver_sql", []).append(sql)
 
         class _DummyEngine:
             def connect(self):
@@ -495,6 +498,50 @@ class TestFailClosed:
 
         assert "empty" in result["aborted_reason"]
         assert asset_store.get_by_id(row["id"]) is not None
+
+    @pytest.mark.parametrize("empty", ["local", "remote"])
+    def test_one_empty_source_deletes_nothing(
+        self, fake_store, tmp_path, patched_orphan_finder, empty
+    ):
+        """Codex cmwfwt2l1: the other source's references must not mask an empty one."""
+        store, asset_store, paths, row = self._stage_orphan(fake_store, tmp_path)
+        patched_orphan_finder["orphans"] = [row]
+        patched_orphan_finder[f"{empty}_ids"] = set()
+
+        result = run_media_gc(config=object(), media_store=store)
+
+        assert result["deleted_count"] == 0
+        assert "empty" in result["aborted_reason"]
+        assert asset_store.get_by_id(row["id"]) is not None
+        assert all(p.exists() for p in paths)
+
+    def test_budget_exceeded_during_candidate_lookup_deletes_nothing(
+        self, fake_store, tmp_path, patched_orphan_finder
+    ):
+        store, asset_store, paths, row = self._stage_orphan(fake_store, tmp_path)
+        patched_orphan_finder["orphans"] = [row]
+        # start, after remote, timeout bound, after candidate lookup
+        ticks = iter([0.0, 1.0, 1.0, 10_000.0])
+
+        result = run_media_gc(
+            config=object(), media_store=store, sweep_budget_s=60, clock=lambda: next(ticks)
+        )
+
+        assert result["deleted_count"] == 0
+        assert "candidate lookup" in result["aborted_reason"]
+        assert asset_store.get_by_id(row["id"]) is not None
+        assert all(p.exists() for p in paths)
+
+    def test_candidate_queries_bounded_by_remaining_budget(
+        self, fake_store, tmp_path, patched_orphan_finder
+    ):
+        store, _, _, row = self._stage_orphan(fake_store, tmp_path)
+        patched_orphan_finder["orphans"] = [row]
+        ticks = iter([0.0, 1.0, 50.0, 51.0])
+
+        run_media_gc(config=object(), media_store=store, sweep_budget_s=60, clock=lambda: next(ticks))
+
+        assert patched_orphan_finder["driver_sql"] == ["SET LOCAL statement_timeout = 10000"]
 
     def test_breaker_trips_and_override_allows(self, fake_store, tmp_path, patched_orphan_finder):
         store, asset_store = fake_store
