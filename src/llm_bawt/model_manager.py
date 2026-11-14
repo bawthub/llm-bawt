@@ -57,40 +57,6 @@ def is_service_mode_enabled(config: Config) -> bool:
 
 console = Console()
 
-# Reference pricing + context windows for ChatGPT/Codex models, keyed by the
-# backend slug (the bit after any ``openai_chatgpt/`` proxy prefix). The codex
-# /models endpoint carries context_window but NO pricing (it's a subscription
-# surface), so rates are OpenAI's published per-1M-token API prices — used only
-# as an ESTIMATE on the cost pill (always rendered with a "*"). cache_read is
-# OpenAI's 90%-off cached-input rate; cache_write is set only for gpt-5.6+
-# (billed 1.25x input) — older models omit it and fall back to the input rate.
-# Injected onto a model row at add-time (see routes/models.py) when the user
-# didn't supply their own, for both the native codex bridge and the claude-code
-# ``openai_chatgpt/`` proxy path. Keep in sync when OpenAI revises pricing.
-CODEX_MODEL_PRICING: dict[str, dict] = {
-    "gpt-5.6-sol": {
-        "context_window": 372000,
-        "pricing": {"input": 5.0, "output": 30.0, "cache_read": 0.50, "cache_write": 6.25},
-    },
-    "gpt-5.6-terra": {
-        "context_window": 372000,
-        "pricing": {"input": 2.5, "output": 15.0, "cache_read": 0.25, "cache_write": 3.125},
-    },
-    "gpt-5.6-luna": {
-        "context_window": 372000,
-        "pricing": {"input": 1.0, "output": 6.0, "cache_read": 0.10, "cache_write": 1.25},
-    },
-    "gpt-5.5": {
-        "context_window": 272000,
-        "pricing": {"input": 5.0, "output": 30.0, "cache_read": 0.50},
-    },
-    "gpt-5.4": {
-        "context_window": 272000,
-        "pricing": {"input": 2.5, "output": 15.0, "cache_read": 0.25},
-    },
-}
-
-
 def normalize_for_match(text: str) -> str:
     """Normalize text for fuzzy matching by lowercasing and removing special characters."""
     return re.sub(r'[^a-z0-9]', '', text.lower())

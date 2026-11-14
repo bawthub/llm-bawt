@@ -25,7 +25,6 @@ from typing import Any
 from .prompt_registry import (
     PromptResolver,
     ResolvedPrompt,
-    _normalize_scope,
     get_prompt_resolver,
 )
 from .runtime_settings import RuntimeSettingsResolver
@@ -60,7 +59,7 @@ class ResolvedValue:
 class ConfigResolver:
     """Single entry point for resolving both scalar settings and prompt bodies.
 
-    Wraps the two existing resolvers, sharing ONE ``_normalize_scope`` and ONE
+    Wraps the two existing resolvers, sharing ONE
     provenance vocabulary. Constructed per bot (like ``RuntimeSettingsResolver``)
     so scalar bot-scope resolution has its subject; body resolution takes an
     explicit scope per call (bodies are looked up global-first with per-key bot
@@ -86,11 +85,6 @@ class ConfigResolver:
             config=config, bot=bot, bot_id=self.bot_id
         )
         self._prompts = prompts or get_prompt_resolver(config)
-
-    # -- shared scope normalization (the ONE implementation) -----------------
-    @staticmethod
-    def normalize_scope(scope_type: str = "global", scope_id: str | None = None) -> tuple[str, str]:
-        return _normalize_scope(scope_type, scope_id)
 
     # -- scalars (runtime_settings) -----------------------------------------
     def resolve_scalar(

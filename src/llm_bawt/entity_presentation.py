@@ -95,21 +95,6 @@ class EntityPresentationResolver:
             )
         return result
 
-    def hydrate(self, author_payloads: Iterable[dict]) -> list[dict]:
-        references = [
-            AuthorReference(
-                payload.get("entity_type"),
-                payload.get("entity_id"),
-                payload.get("status") or "canonical",
-            )
-            for payload in author_payloads
-        ]
-        resolved = self.resolve_many(references)
-        return [
-            resolved[(reference.entity_type, reference.entity_id)].to_dict()
-            for reference in references
-        ]
-
     def resolve_many_safe(
         self, authors: Iterable[AuthorReference]
     ) -> dict[tuple[str | None, str | None], dict]:

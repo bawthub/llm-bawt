@@ -9,10 +9,6 @@ from .utils.config import Config
 
 console = Console()
 
-def normalize_for_match(text: str) -> str:
-    return re.sub(r'[^a-z0-9]', '', text.lower())
-
-
 def get_or_download_gguf_model(repo_id: str, filename: str, config: Config) -> str | None:
     """Get path to GGUF model, downloading if needed.
     

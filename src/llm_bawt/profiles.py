@@ -957,21 +957,3 @@ class ProfileManager:
             ]
         )
     
-# Backwards compatibility
-def load_user_profile_summary(config: Any, user_id: str) -> str:
-    """Load and format user profile for system prompt injection.
-    
-    Backwards compatible function that works with both old and new systems.
-    
-    Args:
-        config: Config object.
-        user_id: User ID (required).
-    """
-    if not user_id:
-        raise ValueError("user_id is required for load_user_profile_summary")
-    try:
-        manager = ProfileManager(config)
-        return manager.get_user_profile_summary(user_id)
-    except Exception as e:
-        logger.warning(f"Could not load user profile from DB: {e}")
-        return ""

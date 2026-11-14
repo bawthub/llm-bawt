@@ -298,7 +298,6 @@ class BotProfileStore:
         from .bot_tags.catalog import lock_bot, profile_tag_write
         from .bot_tags.vocabulary import API_ASSIGNER
 
-        now = datetime.now(timezone.utc)
         borrowed = session is not None
         with (nullcontext(session) if borrowed else Session(self.engine)) as session:
             # Creation uses HTTP create/purge's storage -> tag lock order.
@@ -610,7 +609,7 @@ def purge_bot_data(config: Config, slug: str) -> dict[str, Any]:
     password = getattr(config, "POSTGRES_PASSWORD", "")
     database = getattr(config, "POSTGRES_DATABASE", "llm_bawt")
     from urllib.parse import quote_plus as _qp
-    url = f"postgresql+psycopg2://{user}:{_qp(password)}@{host}:{port}/{database}"
+    url = f"postgresql+psycopg2://{_qp(user)}:{_qp(password)}@{host}:{port}/{database}"
     engine = _create_engine(url, echo=False)
 
     result: dict[str, Any] = {"slug": normalized, "dropped_tables": [], "deleted_rows": {}}
