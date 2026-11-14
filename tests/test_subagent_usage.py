@@ -315,3 +315,21 @@ def test_unregistered_parent_concurrent_siblings_are_not_retired():
     ledger.observe_stream_event(start("b"), "wf")  # live sibling, not a's successor
     ledger.observe_stream_event(delta(input_tokens=500, output_tokens=50), "wf")
     assert ledger.for_event("wf", None) == {"cumulative_tokens": 0, "cumulative_partial": True}
+
+
+def test_interrupted_last_response_is_partial_at_terminal():
+    """TASK-2272: no later message_start retires it, so the end must."""
+    ledger = SubagentUsage()
+    ledger.register_task("agent1", "task1", "solo")
+    ledger.observe_stream_event(start("a"), "agent1")  # stops before message_delta
+    assert ledger.for_event("agent1", None, terminal=True) == {
+        "cumulative_tokens": 0, "cumulative_partial": True,
+    }
+
+
+def test_final_delta_stays_complete_at_terminal():
+    ledger = SubagentUsage()
+    ledger.register_task("agent1", "task1", "solo")
+    ledger.observe_stream_event(start("a"), "agent1")
+    ledger.observe_stream_event(delta(input_tokens=10, output_tokens=1), "agent1")
+    assert ledger.for_event("agent1", None, terminal=True) == {"cumulative_tokens": 11}

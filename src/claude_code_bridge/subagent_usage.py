@@ -188,7 +188,7 @@ class SubagentUsage:
                 changed = True
         return changed
 
-    def for_event(self, parent: str | None, usage: Any) -> dict | None:
+    def for_event(self, parent: str | None, usage: Any, *, terminal: bool = False) -> dict | None:
         result = {
             key: value for key in ("total_tokens", "tool_uses", "duration_ms")
             if isinstance(usage, dict) and self._count(value := usage.get(key))
@@ -200,7 +200,13 @@ class SubagentUsage:
             # SAME aggregate. Consumers take it once per spawning tool, not once
             # per task. Cached input is included, not added twice to input_tokens.
             result["cumulative_tokens"] = sum(sum(u.values()) for u in complete)
-            if parent in self._partial:
+            # TASK-2272: at the worker's end, a response still open without a
+            # final message_delta never reported its real usage.
+            unresolved = terminal and any(
+                (parent, rid) not in self._delta_seen
+                for rid in self._open_responses.get(parent or "", [])
+            )
+            if parent in self._partial or unresolved:
                 # Some sibling response's counts could not be attributed:
                 # the total is a measured lower bound, not the full amount.
                 result["cumulative_partial"] = True

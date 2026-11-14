@@ -454,7 +454,7 @@ class ClaudeStreamMixin:
                     "task_id": msg.task_id,
                     "status": status,
                     "output_file": getattr(msg, "output_file", ""),
-                    "usage": ledger.for_event(msg.tool_use_id, usage),
+                    "usage": ledger.for_event(msg.tool_use_id, usage, terminal=True),
                     **({"failure": failure} if failure else {}),
                 },
             )
@@ -542,8 +542,11 @@ class ClaudeStreamMixin:
         # each internal API call so the LAST one wins,
         # giving the UI the model's true final view
         # of the context (not a cumulative sum).
+        # TASK-2272: a worker's snapshot (parent_tool_use_id set) keeps its tool
+        # bookkeeping below but never replaces the parent's usage or answer text.
+        is_child = bool(getattr(msg, "parent_tool_use_id", None))
         am_usage = getattr(msg, "usage", None)
-        if isinstance(am_usage, dict) and am_usage:
+        if not is_child and isinstance(am_usage, dict) and am_usage:
             latest_assistant_usage = am_usage
         # When this AssistantMessage is a sub-agent's inner
         # activity, the SDK stamps parent_tool_use_id with the
@@ -624,7 +627,7 @@ class ClaudeStreamMixin:
                     btext = getattr(block, "text", "") or ""
                 if btext:
                     snapshot_parts.append(str(btext))
-        if snapshot_parts:
+        if snapshot_parts and not is_child:
             # Separate text blocks are separate narration beats — join with a
             # paragraph break, not "" (which glues "…Palworld.Grabbing coords…").
             assistant_snapshot_text = "\n\n".join(snapshot_parts)
