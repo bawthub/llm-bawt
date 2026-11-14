@@ -178,6 +178,16 @@ class ModelManager:
     def save_config(self, added: int = 0, updated: int = 0, deleted: int = 0) -> bool:
         if self.service_client:
             return self._save_via_service(added, updated, deleted)
+        if not getattr(self, "local_only", False):
+            # TASK-2282: models resolve only from the database catalog, so this
+            # mapping is a projection of it. Dumping it to models.yaml would
+            # overwrite the file with dispatch entries nothing reads back.
+            console.print(
+                "[bold red]Model changes need the running service:[/bold red] "
+                "models are stored in the catalog, not models.yaml. Start it with "
+                "[yellow]llm-service[/yellow]."
+            )
+            return False
         console.print(f"\nSaving configuration to {self.config_path}...")
         try:
             self.config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -289,6 +299,52 @@ class ModelManager:
             if not result["model"]:
                 return None
         return result or {"unchanged": True}
+
+    def add_catalog_model(self, entry: Dict[str, Any], suggest_alias, is_duplicate) -> bool:
+        """Add one locally served model (gguf/vllm) to the catalog via the service.
+
+        ``suggest_alias(existing_aliases)`` proposes an alias and
+        ``is_duplicate(existing_entry)`` spots an alias already serving it.
+        """
+        if not self.service_client:
+            console.print(
+                "[bold red]Adding a model needs the running service:[/bold red] "
+                "models are stored in the catalog. Start it with [yellow]llm-service[/yellow]."
+            )
+            return False
+        models = self.models_data.setdefault("models", {})
+        for alias, existing in models.items():
+            if isinstance(existing, dict) and is_duplicate(existing):
+                console.print(
+                    f"[yellow]Model already exists under alias '[cyan]{alias}[/cyan]'. Not adding duplicate.[/yellow]"
+                )
+                return True
+        existing_aliases = list(models)
+        alias = Prompt.ask(
+            f"Proposed alias [cyan]{suggest_alias(existing_aliases)}[/cyan]. Use this or enter a new one?",
+            default=suggest_alias(existing_aliases),
+        ).strip()
+        while not alias or alias in models:
+            console.print(
+                "[yellow]Alias cannot be empty.[/yellow]" if not alias
+                else f"[yellow]Alias '[cyan]{alias}[/cyan]' already exists.[/yellow]"
+            )
+            alias = Prompt.ask(
+                "Please enter a unique alias",
+                default=suggest_alias(existing_aliases + [alias]),
+            ).strip()
+        while True:
+            answer = Prompt.ask(f"Context window (tokens) for {alias}").strip()
+            if answer.isdigit() and int(answer) > 0:
+                break
+            console.print("[yellow]Enter a positive integer; the catalog requires a context window.[/yellow]")
+        models[alias] = {**entry, "context_window": int(answer)}
+        self._changed_aliases.add(alias)
+        if not self.save_config(added=1):
+            models.pop(alias, None)
+            return False
+        console.print(f"Use with: [cyan]llm --model {alias} \"your prompt\"[/cyan]")
+        return True
 
     def list_available_models(self):
         """Display locally-defined models from models.yaml / DB (local mode)."""
@@ -967,7 +1023,7 @@ def list_models(config: Config, service_mode: bool | None = None):
     """CLI wrapper: list models.
 
     In service mode, queries the running service for its authoritative model
-    catalog. In local mode, displays only models from models.yaml on disk.
+    catalog. In local mode, reads the catalog straight from the database.
     """
     if service_mode is None:
         service_mode = is_service_mode_enabled(config)
@@ -975,12 +1031,15 @@ def list_models(config: Config, service_mode: bool | None = None):
     if service_mode:
         _list_models_from_service(config)
     else:
+        # TASK-2282: models resolve only from the catalog, so list the catalog
+        # (read directly from the database) rather than models.yaml.
         try:
-            manager = ModelManager(config, local_only=True)
+            manager = ModelManager(config)
         except Exception:
             manager = ModelManager.__new__(ModelManager)
             manager.config = config
             manager.local_only = True
+            manager.models_data = {"models": {}}
         manager.list_available_models()
 
 

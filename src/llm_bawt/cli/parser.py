@@ -65,7 +65,7 @@ def parse_arguments(config_obj: "Config") -> argparse.Namespace:
         "--set-context-window",
         nargs=2,
         metavar=("ALIAS", "TOKENS"),
-        help="Set per-model context window in models.yaml (creates missing aliases)."
+        help="Set per-model context window in the model catalog (creates missing aliases)."
     )
     
     # Configuration management

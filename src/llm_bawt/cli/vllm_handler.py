@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import importlib.util
-import pathlib
 import re
 from typing import Any
 
-import yaml
 from rich.console import Console
 from rich.prompt import Prompt
 from rich.table import Table
@@ -200,86 +198,32 @@ def _validate_model_exists(model_id: str) -> bool:
         return False
 
 
-def _update_models_yaml(model_id: str, config: Config) -> bool:
-    """Add vLLM model to models.yaml configuration."""
-    yaml_path = pathlib.Path(config.MODELS_CONFIG_PATH)
-    models_data: dict[str, Any] = {"models": {}}
+def _add_to_catalog(model_id: str, config: Config, service_client) -> bool:
+    """Register a vLLM model in the model catalog (TASK-2282)."""
+    from ..model_manager import ModelManager
 
-    try:
-        if yaml_path.is_file():
-            with open(yaml_path, encoding="utf-8") as f:
-                loaded_data = yaml.safe_load(f)
-                if isinstance(loaded_data, dict):
-                    models_data = loaded_data
-                elif loaded_data is not None:
-                    console.print(f"[yellow]Warning:[/yellow] Existing content in {yaml_path} is not a dictionary. Overwriting structure.")
-        else:
-            console.print(f"[yellow]Models file {yaml_path} not found. Creating a new one.[/yellow]")
+    entry: dict[str, Any] = {
+        "type": "vllm",
+        "model_id": model_id,
+        "description": f"{model_id} (vLLM)",
+    }
+    quant = detect_quantization(model_id)
+    if quant:
+        entry["quantization"] = quant
+    return ModelManager(config, service_client=service_client).add_catalog_model(
+        entry,
+        suggest_alias=lambda existing: generate_vllm_alias(model_id, existing),
+        is_duplicate=lambda d: d.get("type") == "vllm" and d.get("model_id") == model_id,
+    )
 
-        if "models" not in models_data or not isinstance(models_data.get("models"), dict):
-            models_data["models"] = {}
-
-        # Check for duplicates
-        existing_aliases = list(models_data["models"].keys())
-        for alias, definition in models_data["models"].items():
-            if definition.get("type") == "vllm" and definition.get("model_id") == model_id:
-                console.print(f"[yellow]Model definition already exists under alias '[cyan]{alias}[/cyan]'. Not adding duplicate.[/yellow]")
-                return True
-
-        # Generate and confirm alias
-        suggested_alias = generate_vllm_alias(model_id, existing_aliases)
-        confirmed_alias = Prompt.ask(
-            f"Proposed alias [cyan]{suggested_alias}[/cyan]. Use this or enter a new one?",
-            default=suggested_alias,
-        )
-
-        while not confirmed_alias or confirmed_alias in existing_aliases:
-            if not confirmed_alias:
-                console.print("[yellow]Alias cannot be empty.[/yellow]")
-            else:
-                console.print(f"[yellow]Alias '[cyan]{confirmed_alias}[/cyan]' already exists.[/yellow]")
-            confirmed_alias = Prompt.ask(
-                "Please enter a unique alias",
-                default=generate_vllm_alias(model_id, existing_aliases + [confirmed_alias]),
-            )
-
-        quant = detect_quantization(model_id)
-
-        model_entry: dict[str, Any] = {
-            "type": "vllm",
-            "model_id": model_id,
-            "description": f"{model_id} (vLLM)",
-        }
-
-        if quant:
-            model_entry["quantization"] = quant
-
-        console.print("\n[dim]Optional: You can add vLLM parameters to models.yaml manually:[/dim]")
-        console.print("[dim]  - max_model_len: Maximum context length[/dim]")
-        console.print("[dim]  - gpu_memory_utilization: GPU memory fraction (0.0-1.0)[/dim]")
-        console.print("[dim]  - dtype: Data type (auto, half, float16, bfloat16)[/dim]")
-
-        models_data["models"][confirmed_alias] = model_entry
-
-        yaml_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(yaml_path, "w", encoding="utf-8") as f:
-            yaml.dump(models_data, f, sort_keys=False, default_flow_style=False, allow_unicode=True)
-
-        console.print("\n[green]Success![/green]")
-        console.print(f"Added model to [bold]{yaml_path}[/bold]")
-        console.print(f"Use with: [cyan]llm --model {confirmed_alias} \"your prompt\"[/cyan]")
-        return True
-
-    except yaml.YAMLError as e:
-        console.print(f"[bold red]Error processing YAML file {yaml_path}:[/bold red] {e}")
-        return False
-    except Exception as e:
-        console.print(f"[bold red]Unexpected error updating {yaml_path}:[/bold red] {e}")
-        return False
-
-
-def handle_add_vllm(config: Config) -> bool:
+def handle_add_vllm(config: Config, service_client=None) -> bool:
     """Add a vLLM model from HuggingFace interactively."""
+    if service_client is None:
+        console.print(
+            "[bold red]Adding a model needs the running service:[/bold red] "
+            "models are stored in the catalog. Start it with [yellow]llm-service[/yellow]."
+        )
+        return False
     if importlib.util.find_spec("huggingface_hub") is None:
         console.print("[bold red]Error:[/bold red] huggingface-hub is required to add vLLM models.")
         console.print("Install with: [cyan]pip install huggingface-hub[/cyan]")
@@ -350,7 +294,7 @@ def handle_add_vllm(config: Config) -> bool:
 
         if model_id:
             console.print(f"\n[bold]Adding model:[/bold] [cyan]{model_id}[/cyan]\n")
-            return _update_models_yaml(model_id, config)
+            return _add_to_catalog(model_id, config, service_client)
 
         return False
 

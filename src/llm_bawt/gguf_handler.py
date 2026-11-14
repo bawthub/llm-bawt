@@ -1,6 +1,5 @@
 import re
 import pathlib
-import yaml
 import importlib.util
 from typing import List, Dict, Any
 from rich.prompt import Prompt, Confirm
@@ -65,7 +64,13 @@ def generate_gguf_alias(repo_id: str, filename: str, existing_aliases: List[str]
         counter += 1
     return alias
 
-def handle_add_gguf(repo_id: str, config: Config) -> bool:
+def handle_add_gguf(repo_id: str, config: Config, service_client=None) -> bool:
+    if service_client is None:
+        console.print(
+            "[bold red]Adding a model needs the running service:[/bold red] "
+            "models are stored in the catalog. Start it with [yellow]llm-service[/yellow]."
+        )
+        return False
     if importlib.util.find_spec("huggingface_hub") is None:
         console.print("[bold red]Error:[/bold red] `huggingface-hub` is required to add GGUF models.")
         console.print("Install with: `pip install huggingface-hub`")
@@ -108,8 +113,7 @@ def handle_add_gguf(repo_id: str, config: Config) -> bool:
     if not download_success:
         return False
 
-    update_success = _update_models_yaml(repo_id, selected_filename, config)
-    return update_success
+    return _add_to_catalog(repo_id, selected_filename, config, service_client)
 
 
 def _format_size(size_bytes: int) -> str:
@@ -209,68 +213,20 @@ def _download_gguf_file(repo_id: str, filename: str, config: Config, max_retries
     
     return False
 
-def _update_models_yaml(repo_id: str, selected_filename: str, config: Config) -> bool:
-    yaml_path = pathlib.Path(config.MODELS_CONFIG_PATH)
-    models_data: Dict[str, Any] = {"models": {}}
-    success = False
+def _add_to_catalog(repo_id: str, selected_filename: str, config: Config, service_client) -> bool:
+    """Register a downloaded GGUF file in the model catalog (TASK-2282)."""
+    from .model_manager import ModelManager
 
-    try:
-        if yaml_path.is_file():
-            with open(yaml_path, 'r', encoding='utf-8') as f:
-                loaded_data = yaml.safe_load(f)
-                if isinstance(loaded_data, dict):
-                    models_data = loaded_data
-                elif loaded_data is not None:
-                    console.print(f"[yellow]Warning:[/yellow] Existing content in {yaml_path} is not a dictionary. Overwriting structure.")
-        else:
-             console.print(f"[yellow]Models file {yaml_path} not found. Creating a new one.[/yellow]")
+    entry = {
+        "type": "gguf",
+        "repo_id": repo_id,
+        "filename": selected_filename,
+        "description": f"{repo_id}/{selected_filename} (GGUF)",
+    }
+    return ModelManager(config, service_client=service_client).add_catalog_model(
+        entry,
+        suggest_alias=lambda existing: generate_gguf_alias(repo_id, selected_filename, existing),
+        is_duplicate=lambda d: d.get("type") == "gguf"
+        and d.get("repo_id") == repo_id and d.get("filename") == selected_filename,
+    )
 
-        if "models" not in models_data or not isinstance(models_data.get("models"), dict):
-            models_data["models"] = {}
-
-        existing_aliases = list(models_data.get("models", {}).keys())
-        new_alias = generate_gguf_alias(repo_id, selected_filename, existing_aliases)
-
-        model_entry = {
-            "type": "gguf",
-            "repo_id": repo_id,
-            "filename": selected_filename,
-            "description": f"{repo_id}/{selected_filename} (GGUF)",
-            # chat_format: optional override for models with non-standard chat formats
-            # Common values: None (auto-detect), "llama-2", "alpaca", "chatml", "pygmalion"
-            # "chat_format": None,
-        }
-
-        for alias, definition in models_data.get("models", {}).items():
-            if (definition.get("type") == "gguf" and definition.get("repo_id") == repo_id and definition.get("filename") == selected_filename):
-                console.print(f"[yellow]Model definition already exists under alias '[cyan]{alias}[/cyan]'. Not adding duplicate.")
-                return True
-
-        confirmed_alias = Prompt.ask(f"Proposed alias [cyan]{new_alias}[/cyan]. Use this or enter a new one?", default=new_alias)
-        while not confirmed_alias or confirmed_alias in existing_aliases:
-            if not confirmed_alias:
-                console.print("[yellow]Alias cannot be empty.[/yellow]")
-            else:
-                console.print(f"[yellow]Alias '[cyan]{confirmed_alias}[/cyan]' already exists.[/yellow]")
-            confirmed_alias = Prompt.ask("Please enter a unique alias", default=generate_gguf_alias(repo_id, selected_filename, existing_aliases + [confirmed_alias]))
-
-        models_data["models"][confirmed_alias] = model_entry
-
-        yaml_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(yaml_path, 'w', encoding='utf-8') as f:
-             yaml.dump(models_data, f, sort_keys=False, default_flow_style=False, allow_unicode=True)
-
-        console.print("[green]Success![/green]")
-        console.print(f"Added model to [bold]{yaml_path}[/bold]")
-        console.print(f"Use with: `llm-bawt --model {confirmed_alias} ...`")
-        success = True
-
-    except yaml.YAMLError as e:
-        console.print(f"[bold red]Error processing YAML file {yaml_path}:[/bold red] {e}")
-    except Exception as e:
-        console.print(f"[bold red]Unexpected error updating {yaml_path}:[/bold red] {e}")
-        if config.VERBOSE:
-            import traceback
-            traceback.print_exc()
-
-    return success 

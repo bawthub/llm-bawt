@@ -61,7 +61,7 @@ def parse_arguments(config_obj: Config) -> argparse.Namespace:
         "--set-context-window",
         nargs=2,
         metavar=("ALIAS", "TOKENS"),
-        help="Set per-model context window in models.yaml. Creates missing aliases (e.g., grok-* from --list-models).",
+        help="Set per-model context window in the model catalog. Creates missing aliases (e.g., grok-* from --list-models).",
     )
     parser.add_argument("--config-set", nargs=2, metavar=("KEY", "VALUE"), help="Set a configuration value (e.g., DEFAULT_MODEL_ALIAS) in the .env file.")
     parser.add_argument("--list-config", action="store_true", help="List the current effective configuration settings.")
@@ -156,7 +156,6 @@ def main():
             svc_client = get_service_client(config_obj)
             if not svc_client or not svc_client.is_available():
                 console.print("[bold red]Service not available.[/bold red] Start with: [yellow]llm-service[/yellow]")
-                console.print("[dim]Or use --local to write directly to models.yaml.[/dim]")
                 sys.exit(1)
 
         success = set_model_context_window(alias, context_window, config_obj, service_client=svc_client)
@@ -343,7 +342,6 @@ def main():
             svc_client = get_service_client(config_obj)
             if not svc_client or not svc_client.is_available():
                 console.print("[bold red]Service not available.[/bold red] Start with: [yellow]llm-service[/yellow]")
-                console.print("[dim]Or use --local to write directly to models.yaml.[/dim]")
                 sys.exit(1)
         success = False
         try:
@@ -383,7 +381,6 @@ def main():
             svc_client = get_service_client(config_obj)
             if not svc_client or not svc_client.is_available():
                 console.print("[bold red]Service not available.[/bold red] Start with: [yellow]llm-service[/yellow]")
-                console.print("[dim]Or use --local to write directly to models.yaml.[/dim]")
                 sys.exit(1)
         success = False
         try:
@@ -393,12 +390,12 @@ def main():
                 # Prompt for HuggingFace repo ID
                 repo_id = Prompt.ask("Enter HuggingFace repo ID (e.g., TheBloke/Llama-2-7B-GGUF)")
                 if repo_id and repo_id.strip():
-                    success = handle_add_gguf(repo_id.strip(), config_obj)
+                    success = handle_add_gguf(repo_id.strip(), config_obj, service_client=svc_client)
                 else:
                     console.print("[red]No repo ID provided. Cancelled.[/red]")
                     success = False
             elif args.add_model == 'vllm':
-                success = handle_add_vllm(config_obj)
+                success = handle_add_vllm(config_obj, service_client=svc_client)
             if success:
                 console.print(f"[green]Model add for '{args.add_model}' completed.[/green]")
             else:

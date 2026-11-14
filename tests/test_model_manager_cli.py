@@ -230,3 +230,64 @@ def test_service_set_context_window_on_new_alias_still_upserts():
 
     manager.service_client.upsert_catalog_model.assert_called_once()
     assert manager.service_client.upsert_catalog_model.call_args.args[0] == "gpt-9"
+
+
+# TASK-2282: models resolve only from the catalog, so models.yaml is never read.
+
+def test_add_catalog_model_writes_gguf_through_service(monkeypatch):
+    answers = iter(["my-gguf", "8192"])
+    monkeypatch.setattr(cli.Prompt, "ask", lambda *a, **k: next(answers))
+    manager = manager_with({"other": {"type": "openai", "model_id": "gpt-x"}})
+
+    entry = {"type": "gguf", "repo_id": "org/repo", "filename": "m.gguf", "description": "d"}
+    assert manager.add_catalog_model(entry, lambda existing: "repo", lambda d: False)
+
+    alias, sent = manager.service_client.upsert_catalog_model.call_args.args
+    assert alias == "my-gguf"
+    assert sent == {**entry, "context_window": 8192}
+
+
+def test_add_catalog_model_without_service_refuses_and_writes_nothing(tmp_path):
+    manager = manager_with(service=False)
+    manager.config_path = tmp_path / "models.yaml"
+
+    assert not manager.add_catalog_model({"type": "vllm"}, lambda e: "x", lambda d: False)
+    assert not manager.config_path.exists()
+
+
+def test_add_gguf_without_service_refuses_before_download(monkeypatch):
+    from llm_bawt import gguf_handler
+
+    monkeypatch.setattr(gguf_handler, "_download_gguf_file", Mock(side_effect=AssertionError))
+    assert not gguf_handler.handle_add_gguf("org/repo", SimpleNamespace(), service_client=None)
+
+
+def test_add_vllm_without_service_refuses():
+    from llm_bawt.cli import vllm_handler
+
+    assert not vllm_handler.handle_add_vllm(SimpleNamespace(), service_client=None)
+
+
+def test_save_without_service_does_not_overwrite_models_yaml(tmp_path):
+    manager = manager_with({"gpt-5.5": {"type": "openai", "endpoint_id": 7}}, service=False)
+    manager.local_only = False
+    manager.config_path = tmp_path / "models.yaml"
+    manager.config_path.write_text("models:\n  mine: {type: gguf}\n")
+
+    assert not manager.save_config(deleted=1)
+    assert manager.config_path.read_text() == "models:\n  mine: {type: gguf}\n"
+
+
+def test_local_list_reads_catalog_not_models_yaml(monkeypatch):
+    built = []
+
+    class FakeManager:
+        def __init__(self, config, local_only=False, service_client=None):
+            built.append(local_only)
+
+        def list_available_models(self):
+            pass
+
+    monkeypatch.setattr(cli, "ModelManager", FakeManager)
+    cli.list_models(SimpleNamespace(), service_mode=False)
+    assert built == [False]
