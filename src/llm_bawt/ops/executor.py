@@ -18,7 +18,8 @@ from ..service.providers.github_deploy import GhcrPullAdapter
 from ..utils.config import Config
 from .app_config_reconcile import (ACTION as APP_CONFIG_ACTION, BUILT_PROFILE_LABEL, PROCESS_PROFILE_LABEL,
                                    SOURCE_GUARD_LABEL, WORKER_CAPABILITY_LABEL as APP_CONFIG_WORKER_LABEL,
-                                   app_config_binding, app_profile, uses_process_profile, validate_app_spec)
+                                   app_config_binding, app_profile, uses_process_profile, validate_app_spec,
+                                   IMAGE_SWAP_LABEL)
 from .compose_config import (GPU_PROFILE_LABEL, DEV_PROFILE, HARDENED_PROFILE, HARDENED_PROFILE_LABEL,
                              CGROUP_PARENT_PROFILE_LABEL, INIT_MEMORY_PROFILE_LABEL, PINNED_PROCESS_PROFILE,
                              DNS_PROFILE_LABEL, evaluate, needs_cgroup_parent_worker, needs_dns_worker,
@@ -151,6 +152,10 @@ class Executor(ABC):
     def inspect_target_image(self, spec: dict) -> str:
         """Image ID the fixed image-action target runs now (approval-time CAS)."""
         raise ExecutorError(f"{self.kind()} executor cannot inspect image deploy targets")
+
+    def local_image(self, image_id: str) -> dict:
+        """TASK-2299: a local image's attributes by ID (never pulled); read-only."""
+        raise ExecutorError(f"{self.kind()} executor cannot inspect local images")
 
     def inspect_target_health(self, spec: dict) -> str:
         """Live health of the fixed target after a worker's verified swap."""
@@ -420,6 +425,17 @@ class DockerExecutor(Executor):
         except Exception as exc:
             raise ExecutorError(f"cannot inspect deploy target {spec['container_name']}: {exc}") from exc
 
+    def local_image(self, image_id):
+        try:
+            attrs = self.client.images.get(image_id).attrs
+        except Exception as exc:
+            if getattr(exc, "status_code", None) == 404:
+                raise ExecutorError("image_not_local: the requested image is not on this daemon") from exc
+            raise ExecutorError(f"cannot inspect local image: {type(exc).__name__}") from exc
+        if attrs.get("Id") != image_id:
+            raise ExecutorError("image_not_local: the daemon resolved a different image")
+        return attrs
+
     def inspect_target_health(self, spec):
         try:
             target = self.client.containers.get(spec["container_name"])
@@ -571,6 +587,10 @@ class DockerExecutor(Executor):
                     # TASK-1844: an older worker would refuse the GPU keys mid-job.
                     self._check_config_worker(self.execution_settings(spec), spec["action"],
                                               extra=(GPU_PROFILE_LABEL,))
+                if "image_swap" in spec:
+                    # TASK-2299: an older worker would recreate on the SAME image.
+                    self._check_config_worker(self.execution_settings(spec), spec["action"],
+                                              extra=(IMAGE_SWAP_LABEL,))
                 profile = app_profile(spec)
             elif spec["action"] == TAGGED_CONFIG_ACTION:
                 checker = (SourceChecker(self._render_api_factory(), spec["compose_config"]["renderer_image"],

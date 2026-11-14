@@ -599,6 +599,42 @@ _CONFIG_SEEDS: list[dict[str, Any]] = [{
 )]
 
 
+def _gpu_image_swap_seed(mode: str, slug: str, title: str, arg: dict, description: str, prefix: str) -> dict:
+    """TASK-2299: the local-model-bridge GPU reconcile, recreating onto another
+    LOCAL image by ID (deploy) or back to a deploy's recorded previous image
+    (rollback). Same target, guard and verification as the reconcile row."""
+    base = next(s for s in _CONFIG_SEEDS if s["slug"] == "llm-bawt.reconcile-local-model-bridge-config")
+    spec = json.loads(base["command_script"])
+    spec["image_swap"] = mode
+    name = next(iter(arg))
+    return {**base, "slug": slug, "title": title, "description": description,
+            "command_script": json.dumps(spec, ensure_ascii=False),
+            "args_schema_json": _schema(arg, [name]), "args_defaults_json": _defaults(),
+            "approval_prompt_prefix": prefix}
+
+
+_CONFIG_SEEDS += [
+    _gpu_image_swap_seed(
+        "deploy", "llm-bawt.deploy-local-model-bridge-image", "Deploy a local image to local-model-bridge",
+        {"image_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$",
+                      "description": "Full ID of a local llm-bawt-local-model-bridge image (never pulled)"}},
+        "Recreate the GPU local-model bridge from its declared Compose service onto ANOTHER local image, named "
+        "by ID; the image must carry the service's image name. The Compose tag is not moved. Same GPU handoff "
+        "hold, config drift check, CDI verification and health check as the reconcile; restores the previous "
+        "container on failure. The job record keeps the previous image ID for the rollback operation. Unloads "
+        "local models and cuts in-flight local inference and embeddings.",
+        "Deploy a local image to local-model-bridge (unloads local models)"),
+    _gpu_image_swap_seed(
+        "rollback", "llm-bawt.rollback-local-model-bridge-image", "Roll back the local-model-bridge image",
+        {"deploy_job_id": {"type": "string", "pattern": "^[0-9a-f]{32}$",
+                           "description": "The succeeded deploy job whose previous image to restore"}},
+        "Recreate the GPU local-model bridge onto the previous image recorded by a succeeded image deploy job; "
+        "refuses unless the bridge still runs the image that deploy installed. Same guard and verification as "
+        "the reconcile. Unloads local models and cuts in-flight local inference and embeddings.",
+        "Roll back the local-model-bridge image (unloads local models)"),
+]
+
+
 # The env_import destinations a plan may accept losing (closed list).
 _DESTINATIONS = sorted(DESTINATION_PROBES)
 

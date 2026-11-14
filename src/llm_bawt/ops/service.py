@@ -10,7 +10,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from .app_config_reconcile import ACTION as APP_CONFIG_ACTION, newly_trusted, valid_app_binding
+from .app_config_reconcile import (ACTION as APP_CONFIG_ACTION, IMAGE_ID_RE, IMAGE_SWAP_ARGS, IMAGE_SWAP_DEPLOY,
+                                   JOB_ID_RE, image_swap_mode, newly_trusted, valid_app_binding)
 from .config_reconcile import ACTION as CONFIG_ACTION, valid_config_binding
 from .dev_config_reconcile import ACTION as DEV_CONFIG_ACTION, valid_dev_binding
 from .tagged_config_reconcile import ACTION as TAGGED_CONFIG_ACTION, valid_tagged_binding
@@ -264,6 +265,54 @@ class OpsService:
                 "publish that commit first"))
         return bool(matches)
 
+    def _bind_image_swap(self, spec: dict, args: dict, config: dict, executor) -> dict:
+        """TASK-2299: the local image a GPU image swap recreates onto. Deploy
+        names it by ID and it must carry the service's Compose image name;
+        rollback restores the previous image a succeeded deploy recorded, and
+        only while the target still runs the image that deploy installed."""
+        mode, current = spec["image_swap"], config["image_id"]
+        if mode == IMAGE_SWAP_DEPLOY:
+            target = args["image_id"]
+            if not isinstance(target, str) or not IMAGE_ID_RE.fullmatch(target):
+                raise ValueError("image_id must be a full sha256:<64 hex> local image ID")
+            attrs = executor.local_image(target)
+            repo = config["image_tag"].rsplit(":", 1)[0]
+            if not any(tag.rsplit(":", 1)[0] == repo for tag in attrs.get("RepoTags") or []):
+                raise ValueError(f"image_not_this_service: the image carries no {repo} tag")
+            job_id = None
+        else:
+            job_id = args["deploy_job_id"]
+            if not isinstance(job_id, str) or not JOB_ID_RE.fullmatch(job_id):
+                raise ValueError("deploy_job_id must be a 32-hex ops job ID")
+            target = self._recorded_previous_image(spec, job_id, current)
+            executor.local_image(target)
+        if target == current:
+            raise ValueError("image_unchanged: the target already runs this image; use the config reconcile")
+        return {"mode": mode, "target_image_id": target, "from_image_id": current, "deploy_job_id": job_id}
+
+    def _recorded_previous_image(self, spec: dict, job_id: str, current: str) -> str:
+        job = self.store.get_job(job_id)
+        if job is None or job.state != JOB_SUCCEEDED or not job.invocation_snapshot_json:
+            raise ValueError("rollback requires a SUCCEEDED image deploy job")
+        snapshot = json.loads(job.invocation_snapshot_json)
+        deployed = snapshot.get("spec") or {}
+        if (deployed.get("action") != APP_CONFIG_ACTION or deployed.get("image_swap") != IMAGE_SWAP_DEPLOY
+                or deployed.get("container_name") != spec["container_name"]):
+            raise ValueError("job is not an image deploy of this target")
+        try:
+            record = json.loads(job.output_tail or "")
+        except ValueError:
+            record = None
+        if not isinstance(record, dict) or record.get("phase") != "done":
+            raise ValueError("deploy job has no complete deployment record")
+        previous = (record.get("previous") or {}).get("image_id")
+        installed = (record.get("deployed") or {}).get("image_id")
+        if not all(isinstance(v, str) and IMAGE_ID_RE.fullmatch(v) for v in (previous, installed)):
+            raise ValueError("deployment record lacks image identities")
+        if installed != current:
+            raise ValueError("target no longer runs the image that deploy installed; refusing rollback")
+        return previous
+
     def _last_classification(self, operation_slug: str):
         """The trust classification the last successful run executed, or
         ``None`` (first run, or a run from before classification existed)."""
@@ -337,10 +386,15 @@ class OpsService:
             # values; the worker re-renders and compares under the target lock.
             # TASK-1474: the same for the Compose-built app; TASK-1476: and for
             # a tagged public image; TASK-1649: and for a Compose-built dev service.
-            if merged:
+            swap_mode = image_swap_mode(spec) if spec["action"] == APP_CONFIG_ACTION else None
+            if swap_mode is None and merged:
                 raise OpsDispatchError("args_invalid", "config reconciliation accepts no arguments")
+            if swap_mode is not None and set(merged) != {IMAGE_SWAP_ARGS[swap_mode]}:
+                raise OpsDispatchError("args_invalid", f"this operation takes exactly {IMAGE_SWAP_ARGS[swap_mode]}")
             try:
                 snapshot["config"] = executor.config_approval(spec)
+                if swap_mode is not None:
+                    snapshot["image_swap"] = self._bind_image_swap(spec, merged, snapshot["config"], executor)
             except ConfigCheckError as exc:
                 raise OpsDispatchError(exc.code, str(exc)) from exc
             except (ValueError, ExecutorError) as exc:

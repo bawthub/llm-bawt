@@ -111,12 +111,53 @@ _BINDING_KEYS = frozenset({"container_id", "image_id", "image_ref", "image_tag",
                            "classification"})
 _CLASSES = ("source_mounts", "data_mounts", "opaque_env")
 
+# TASK-2299: a GPU reconcile may recreate onto another LOCAL image, named by ID.
+# ``deploy`` takes ``image_id``; ``rollback`` takes the ``deploy_job_id`` whose
+# recorded previous image it restores. Everything else (GPU reservation, drift
+# check, GPU verify, health, restore on failure) is the same-image reconcile.
+IMAGE_SWAP_DEPLOY = "deploy"
+IMAGE_SWAP_ROLLBACK = "rollback"
+IMAGE_SWAP_MODES = frozenset({IMAGE_SWAP_DEPLOY, IMAGE_SWAP_ROLLBACK})
+IMAGE_SWAP_ARGS = {IMAGE_SWAP_DEPLOY: "image_id", IMAGE_SWAP_ROLLBACK: "deploy_job_id"}
+IMAGE_SWAP_LABEL = "llm-bawt.ops.gpu-image-swap"
+IMAGE_ID_RE = re.compile(r"sha256:[0-9a-f]{64}")
+JOB_ID_RE = re.compile(r"[0-9a-f]{32}")
+_SWAP_KEYS = frozenset({"mode", "target_image_id", "from_image_id", "deploy_job_id"})
+
+
+def image_swap_mode(spec: dict) -> str | None:
+    return spec.get("image_swap") if isinstance(spec, dict) else None
+
+
+def valid_image_swap(snapshot: dict) -> bool:
+    """The resolved arguments and ``image_swap`` block of a snapshot agree
+    with its spec: absent and no arguments for a plain reconcile."""
+    mode, args, swap = image_swap_mode(snapshot["spec"]), snapshot["resolved_args"], snapshot.get("image_swap")
+    if mode is None:
+        return args == {} and swap is None
+    if not isinstance(swap, dict) or set(swap) != _SWAP_KEYS or swap["mode"] != mode:
+        return False
+    if set(args) != {IMAGE_SWAP_ARGS[mode]}:
+        return False
+    if not (isinstance(swap["target_image_id"], str) and IMAGE_ID_RE.fullmatch(swap["target_image_id"])
+            and isinstance(swap["from_image_id"], str) and IMAGE_ID_RE.fullmatch(swap["from_image_id"])
+            and swap["target_image_id"] != swap["from_image_id"]):
+        return False
+    if swap["from_image_id"] != (snapshot.get("config") or {}).get("image_id"):
+        return False
+    if mode == IMAGE_SWAP_DEPLOY:
+        return swap["deploy_job_id"] is None and args["image_id"] == swap["target_image_id"]
+    return (isinstance(swap["deploy_job_id"], str) and bool(JOB_ID_RE.fullmatch(swap["deploy_job_id"]))
+            and args["deploy_job_id"] == swap["deploy_job_id"])
+
 
 def validate_app_spec(spec: dict) -> dict:
-    if not isinstance(spec, dict) or set(spec) - {"gpu"} != _SPEC_KEYS:
+    if not isinstance(spec, dict) or set(spec) - {"gpu", "image_swap"} != _SPEC_KEYS:
         raise ValueError("app config reconcile spec has missing or unsupported fields")
     if "gpu" in spec and spec["gpu"] is not True:  # TASK-1844: opt-in only
         raise ValueError("gpu must be true when present")
+    if "image_swap" in spec and (spec["image_swap"] not in IMAGE_SWAP_MODES or spec.get("gpu") is not True):
+        raise ValueError("image_swap must be deploy or rollback, and only on a gpu reconcile")
     if spec["action"] != ACTION:
         raise ValueError("not an app config reconcile spec")
     validate_target_fields(spec, _PATTERNS)
@@ -209,13 +250,13 @@ def _valid_newly_trusted(value, classification: dict) -> bool:
 def snapshot_approval_text(snapshot: dict, prefix: str | None) -> str:
     """The approval card for a prepared invocation snapshot."""
     return approval_text(snapshot["spec"], snapshot["config"], prefix, operation=snapshot["operation"],
-                         newly_trusted=snapshot["newly_trusted"])
+                         newly_trusted=snapshot["newly_trusted"], image_swap=snapshot.get("image_swap"))
 
 
 def valid_app_binding(snapshot: dict) -> bool:
     binding = snapshot.get("config")
-    if (snapshot["resolved_args"] != {} or not isinstance(binding, dict) or set(binding) != _BINDING_KEYS
-            or "newly_trusted" not in snapshot):
+    if (not isinstance(binding, dict) or set(binding) != _BINDING_KEYS
+            or "newly_trusted" not in snapshot or not valid_image_swap(snapshot)):
         return False
     try:
         spec = validate_app_spec(snapshot["spec"])
@@ -276,7 +317,8 @@ def trust_text(binding: dict, operation: dict, newly) -> str:
             f"{_names(classes['opaque_env'])}\n")
 
 
-def approval_text(spec: dict, binding: dict, prefix: str | None, *, operation: dict, newly_trusted) -> str:
+def approval_text(spec: dict, binding: dict, prefix: str | None, *, operation: dict, newly_trusted,
+                  image_swap: dict | None = None) -> str:
     """Approval card body: names, ports, mounts and A1 enum values only."""
     drift = ", ".join(binding["drift"]) or "none (recreates to load the approved source)"
     shown = ", ".join(f"{k}={v}" for k, v in sorted(binding["display"].items())) or "none"
@@ -286,7 +328,13 @@ def approval_text(spec: dict, binding: dict, prefix: str | None, *, operation: d
     return (f"{prefix or 'Authorize same-image app configuration reconcile?'}\n"
             f"{trust_text(binding, operation, newly_trusted)}"
             f"Target: {spec['container_name']} ({binding['container_id']})\n"
-            f"Unchanged image: {binding['image_id']} (Compose tag {binding['image_tag']})\n{moved}"
+            + (f"Unchanged image: {binding['image_id']} (Compose tag {binding['image_tag']})\n{moved}"
+               if image_swap is None else
+               f"IMAGE {image_swap['mode'].upper()}: {image_swap['from_image_id']} -> {image_swap['target_image_id']}"
+               + (f" (restores the image before deploy job {image_swap['deploy_job_id']})"
+                  if image_swap["deploy_job_id"] else "")
+               + f"\nCompose tag {binding['image_tag']} is not moved; local image only, never pulled.\n")
+            +
             f"Source: github.com/{commit['repository']} {commit['branch']} @ {commit['head']} "
             "(published, clean)\n"
             f"Compose source: {', '.join(binding['source']['compose_files'])}\n"
@@ -437,6 +485,29 @@ class AppConfigReconciler(SourceGuardedReconciler):
         self.detail["source_reload_required"] = True
         return False
 
+    def _perform(self):
+        swap = self.snapshot.get("image_swap")
+        if image_swap_mode(self.spec) is None:
+            return super()._perform()
+        old, image = self._prepare()
+        self._verify_only(old)
+        self._before_swap()
+        target = self._swap_target(old, swap)
+        self._approved_image_id = target["Id"]
+        self._replace(old, image, target, target["Id"], None)
+
+    def _swap_target(self, old, swap):
+        """TASK-2299: the approved local image, re-read under the target lock.
+        Bound by ID; never pulled, never resolved through a tag."""
+        self._phase("verify-image")
+        self.detail["image_swap"] = dict(swap)
+        if old["Image"] != swap["from_image_id"]:
+            self._fail("target image changed since approval; nothing changed", known=True)
+        target = self._image(swap["target_image_id"])
+        if target is None or target.get("Id") != swap["target_image_id"]:
+            self._fail("approved image is not on the daemon (this op never pulls); nothing changed", known=True)
+        return target
+
     def _revert(self, swap):
         super()._revert(swap)
         self.detail["warnings"].append(
@@ -474,11 +545,12 @@ class AppConfigReconciler(SourceGuardedReconciler):
             raise StepError(f"gpu_config_mismatch ({', '.join(mismatch)})")
 
 
-__all__ = ["ACTION", "BUILT_PROFILE_LABEL", "HEALTH_PATTERNS", "PROCESS_PROFILE_LABEL", "SCHEMA",
+__all__ = ["ACTION", "BUILT_PROFILE_LABEL", "HEALTH_PATTERNS", "IMAGE_SWAP_ARGS", "IMAGE_SWAP_DEPLOY",
+           "IMAGE_SWAP_LABEL", "IMAGE_SWAP_MODES", "IMAGE_SWAP_ROLLBACK", "PROCESS_PROFILE_LABEL", "SCHEMA",
            "SOURCE_GUARD_LABEL", "WORKER_CAPABILITY_LABEL",
            "AppConfigReconciler", "ServiceConfigReconciler", "SourceGuardedReconciler",
            "app_config_binding", "app_profile",
-           "approval_text", "image_refs", "image_tag", "newly_trusted", "snapshot_approval_text", "trust_text",
+           "approval_text", "image_refs", "image_swap_mode", "image_tag", "newly_trusted", "snapshot_approval_text", "trust_text",
            "uses_process_profile", "valid_app_binding", "valid_image_tag", "validate_app_spec",
-           "validate_health_value",
+           "valid_image_swap", "validate_health_value",
            "validate_label_compose_config"]

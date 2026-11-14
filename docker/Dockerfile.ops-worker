@@ -68,4 +68,6 @@ LABEL llm-bawt.ops.dns-profile="1"
 # TASK-1844: ...and the native-CDI GPU profile (runtime/devices/ipc), its daemon
 # preflight and the created-container check, for an app spec with gpu: true.
 LABEL llm-bawt.ops.gpu-profile="1"
+# TASK-2299: ...and the GPU image swap (deploy/rollback onto a local image by ID).
+LABEL llm-bawt.ops.gpu-image-swap="1"
 ENTRYPOINT ["python3", "-I", "/ops/worker.py"]
