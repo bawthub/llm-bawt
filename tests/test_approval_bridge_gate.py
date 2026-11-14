@@ -665,3 +665,57 @@ def test_pre_tool_use_hook_stamps_execution_only_when_tool_will_run():
     asyncio.run(run("dd of=/dev/sda", "t-deny"))        # deny
     asyncio.run(run("rm -rf /home/x", "t-require"))     # require → deny pending approval
     assert [k["tool_use_id"] for k in executing()] == ["t-allow"]
+
+
+def test_policy_fetch_failure_backoff_without_cache(monkeypatch):
+    """TASK-2272: a cold-cache fetch failure honors the TTL backoff."""
+    calls = {"n": 0, "fail": True}
+
+    class _Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"version": 1, "etag": "e1", "policies": []}
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, *a, **k):
+            calls["n"] += 1
+            if calls["fail"]:
+                raise RuntimeError("down")
+            return _Resp()
+
+    monkeypatch.setitem(_namespace, "httpx", types.SimpleNamespace(AsyncClient=_Client))
+    b = ClaudeCodeBridge(_FakePub(), backend_name="claude-code", app_api_url="http://app")
+    b._policy_bundle = None
+    b._policy_bundle_fetched_at = 0.0
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(time, "monotonic", lambda: clock["t"])
+
+    for _ in range(3):
+        assert asyncio.run(b._get_policy_bundle()).policies == []
+    assert calls["n"] == 1 and b._policy_fetch_ok is False and b._policy_bundle is None
+
+    b._policy_bundle_fetched_at = 0.0  # reload forces a refetch
+    asyncio.run(b._get_policy_bundle())
+    assert calls["n"] == 2
+
+    calls["fail"] = False
+    clock["t"] += 61  # post-TTL recovery
+    assert asyncio.run(b._get_policy_bundle()).etag == "e1"
+    assert calls["n"] == 3 and b._policy_fetch_ok is True
+
+    calls["fail"] = True
+    clock["t"] += 61  # warm-cache failure keeps cached bundle and backs off
+    assert asyncio.run(b._get_policy_bundle()).etag == "e1"
+    asyncio.run(b._get_policy_bundle())
+    assert calls["n"] == 4

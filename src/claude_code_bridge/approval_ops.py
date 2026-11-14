@@ -62,11 +62,15 @@ class ClaudeApprovalMixin:
         → default-allow), which is the fail-open posture.
         """
         now = time.monotonic()
-        if (
-            self._policy_bundle is not None
+        fresh = (
+            self._policy_bundle_fetched_at > 0
             and (now - self._policy_bundle_fetched_at) < self._policy_bundle_ttl
-        ):
+        )
+        if fresh and self._policy_bundle is not None:
             return self._policy_bundle
+        if fresh and not self._policy_fetch_ok:
+            # Cold-cache failure: honor the backoff instead of retrying every call.
+            return PolicyBundle(version=1, etag="", policies=[])
         if not self._app_api_url:
             self._policy_bundle = self._policy_bundle or PolicyBundle(version=1, etag="", policies=[])
             self._policy_bundle_fetched_at = now
