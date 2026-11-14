@@ -9,6 +9,7 @@ import logging
 import os
 from datetime import datetime, timezone
 
+from .history_owner import history_caller_user
 from .server import mcp
 
 logger = logging.getLogger(__name__)
@@ -68,8 +69,10 @@ async def _tail_bubbles(bot_id: str, count: int) -> tuple[list[dict], int]:
     count = max(1, int(count))
     from .server import _get_storage
 
+    # Bot visibility does not grant access to another user's conversation.
+    user_id = history_caller_user(bot_id, None)
     storage = _get_storage()
-    messages = await storage.get_messages(bot_id=bot_id, raw=True)
+    messages = await storage.get_messages(bot_id=bot_id, raw=True, user_id=user_id)
     bubbles = [m for m in messages if (m.get("role") or "").lower() in _BUBBLE_ROLES]
     return bubbles[-count:], len(bubbles)
 
