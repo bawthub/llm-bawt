@@ -145,10 +145,12 @@ class ModelManager:
         raw_path = Path(self.config.MODELS_CONFIG_PATH)
         self.config_path = _PathWrapper(raw_path)
         self.models_data: Dict[str, Any] = {}
+        self._catalog = None
         self.load_config()
         if not local_only:
             catalog = self.config.ensure_model_catalog()
             if catalog is not None:
+                self._catalog = catalog
                 self.models_data = {"models": catalog.compatibility_mapping()}
 
     def load_config(self) -> bool:
@@ -212,7 +214,11 @@ class ModelManager:
             entry = models.get(alias)
             if entry is None:
                 continue
-            resp = self.service_client.upsert_catalog_model(alias, entry)
+            endpoint = self._catalog_endpoint_for(entry)
+            if endpoint is not None:
+                resp = self._update_catalog_endpoint(endpoint, entry)
+            else:
+                resp = self.service_client.upsert_catalog_model(alias, entry)
             if resp:
                 ok += 1
             else:
@@ -236,6 +242,53 @@ class ModelManager:
         else:
             console.print("[green]Models synced to service.[/green]")
         return True
+
+    def _catalog_endpoint_for(self, entry: Dict[str, Any]):
+        """Return the catalog endpoint a compatibility entry was built from."""
+        endpoint_id = entry.get("endpoint_id")
+        catalog = getattr(self, "_catalog", None)
+        if catalog is None or not isinstance(endpoint_id, int):
+            return None
+        try:
+            return catalog.resolve_endpoint(endpoint_id)
+        except Exception:
+            return None
+
+    def _update_catalog_endpoint(self, endpoint, entry: Dict[str, Any]):
+        """Write only the fields the CLI changes on an existing catalog row.
+
+        Compatibility entries are a dispatch projection of the catalog, so
+        sending them back through ``upsert_catalog_model`` would remap the
+        access path, replace ``serving_config`` and clear endpoint overrides.
+        """
+        client = self.service_client
+        result: Dict[str, Any] = {}
+        model = endpoint.model
+        current_window = endpoint.context_window_override or model.default_context_window
+        new_window = entry.get("context_window")
+        if isinstance(new_window, int) and new_window != current_window:
+            result["endpoint"] = client.patch_catalog_endpoint(
+                model.key,
+                endpoint.access_path.key,
+                {"endpoint_id": endpoint.id, "context_window_override": new_window},
+            )
+            if not result["endpoint"]:
+                return None
+        new_description = entry.get("description")
+        if new_description is not None and new_description != model.description:
+            result["model"] = client.put_catalog_model(
+                model.key,
+                {
+                    "vendor": model.vendor,
+                    "display_name": model.display_name,
+                    "description": new_description,
+                    "default_context_window": model.default_context_window,
+                    "default_tool_support": model.default_tool_support,
+                },
+            )
+            if not result["model"]:
+                return None
+        return result or {"unchanged": True}
 
     def list_available_models(self):
         """Display locally-defined models from models.yaml / DB (local mode)."""

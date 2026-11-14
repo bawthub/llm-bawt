@@ -830,6 +830,32 @@ class ServiceClient:
             logger.warning("Upsert normalized model '%s' via service failed: %s", alias, exc)
             return None
 
+    def patch_catalog_endpoint(
+        self, model_key: str, access_key: str, fields: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Partially update one existing catalog endpoint."""
+        if not self.is_available():
+            return None
+        try:
+            response = self._request(
+                "PATCH", f"/v1/models/catalog/endpoints/{model_key}/{access_key}", data=fields
+            )
+            return response if isinstance(response, dict) else None
+        except Exception as exc:
+            logger.warning("Patch endpoint '%s@%s' via service failed: %s", model_key, access_key, exc)
+            return None
+
+    def put_catalog_model(self, model_key: str, data: dict[str, Any]) -> dict[str, Any] | None:
+        """Write one catalog model row (fields not sent keep route defaults)."""
+        if not self.is_available():
+            return None
+        try:
+            response = self._request("PUT", f"/v1/models/catalog/models/{model_key}", data=data)
+            return response if isinstance(response, dict) else None
+        except Exception as exc:
+            logger.warning("Write catalog model '%s' via service failed: %s", model_key, exc)
+            return None
+
     def delete_catalog_model(self, alias: str) -> dict[str, Any] | None:
         """Delete a normalized model and its unassigned endpoint rows."""
         if not self.is_available():

@@ -161,3 +161,72 @@ def test_gguf_delete_refuses_path_outside_cache(monkeypatch, tmp_path):
     assert outside.read_bytes() == b"keep"
     assert (repo / "second.gguf").exists()
     confirm.assert_called_once()
+
+
+def _oauth_only_manager(**model_fields):
+    """Service-mode manager over a catalog whose gpt-5.5 lives only on openai-oauth."""
+    from llm_bawt.model_catalog import AccessPath, ModelCatalog, ModelEndpoint, ModelIdentity
+
+    endpoint = ModelEndpoint(
+        id=7,
+        model=ModelIdentity(
+            3, "gpt-5.5", "openai", "GPT-5.5",
+            description=model_fields.get("description", "gpt-5.5 (Created: 2026-01-01)"),
+            default_context_window=272000,
+        ),
+        access_path=AccessPath(
+            5, "openai-oauth", "openai", "openai-responses",
+            "https://chatgpt.com/backend-api/codex", "oauth",
+        ),
+        upstream_model_id="gpt-5.5",
+        serving_config={"reasoning_effort": "high"},
+        context_window_override=None,
+        tool_support_override="native",
+    )
+    catalog = ModelCatalog([endpoint])
+    manager = manager_with(catalog.compatibility_mapping())
+    manager._catalog = catalog
+    manager.service_client.patch_catalog_endpoint.return_value = {"id": 7}
+    manager.service_client.put_catalog_model.return_value = {"key": "gpt-5.5"}
+    return manager
+
+
+def test_service_set_context_window_patches_existing_endpoint_only():
+    manager = _oauth_only_manager()
+
+    assert manager.set_context_window("gpt-5.5", 400000)
+
+    client = manager.service_client
+    client.upsert_catalog_model.assert_not_called()
+    client.put_catalog_model.assert_not_called()
+    client.patch_catalog_endpoint.assert_called_once_with(
+        "gpt-5.5", "openai-oauth", {"endpoint_id": 7, "context_window_override": 400000},
+    )
+
+
+def test_service_description_refresh_keeps_display_name_and_endpoint():
+    manager = _oauth_only_manager()
+    manager.models_data["models"]["gpt-5.5"]["description"] = "gpt-5.5 (Created: 2026-02-02)"
+    manager._changed_aliases.add("gpt-5.5")
+
+    assert manager.save_config(updated=1)
+
+    client = manager.service_client
+    client.upsert_catalog_model.assert_not_called()
+    client.patch_catalog_endpoint.assert_not_called()
+    client.put_catalog_model.assert_called_once_with("gpt-5.5", {
+        "vendor": "openai",
+        "display_name": "GPT-5.5",
+        "description": "gpt-5.5 (Created: 2026-02-02)",
+        "default_context_window": 272000,
+        "default_tool_support": None,
+    })
+
+
+def test_service_set_context_window_on_new_alias_still_upserts():
+    manager = _oauth_only_manager()
+
+    assert manager.set_context_window("gpt-9", 128000)
+
+    manager.service_client.upsert_catalog_model.assert_called_once()
+    assert manager.service_client.upsert_catalog_model.call_args.args[0] == "gpt-9"
