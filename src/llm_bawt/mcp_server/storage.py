@@ -229,7 +229,7 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
         embedding = generate_embedding(content, self.config.MEMORY_EMBEDDING_MODEL, verbose=self.config.VERBOSE)
         
         # Store via backend (handles dedup, indexing, etc.)
-        backend.add_memory(
+        outcome = backend.add_memory(
             memory_id=memory_id,
             content=content,
             tags=tags,
@@ -237,9 +237,14 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
             source_message_ids=source_message_ids or [],
             embedding=embedding,
         )
-        
+        # Only hand out an ID a row actually holds: a duplicate resolves to
+        # the existing row, and a skipped or failed write is an error.
+        if not getattr(outcome, "persisted", False):
+            detail = getattr(outcome, "error", None) or getattr(outcome, "status", "no outcome")
+            raise RuntimeError(f"Memory was not stored ({detail})")
+
         return Memory(
-            id=memory_id,
+            id=outcome.memory_id,
             content=content,
             tags=tags,
             importance=importance,

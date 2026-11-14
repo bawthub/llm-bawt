@@ -16,7 +16,11 @@ from sqlalchemy.orm import Session
 
 from llm_bawt.bot_access import BotAccessError
 from llm_bawt.bot_access.provenance import MemoryProvenance
-from llm_bawt.memory.errors import MemoryUpdateConflictError, MemoryUpdateDuplicateError
+from llm_bawt.memory.errors import (
+    MemoryUpdateConflictError,
+    MemoryUpdateDuplicateError,
+    MemoryWriteOutcome,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,15 +56,18 @@ class PostgreSQLSemanticMemoryMixin:
         recurrence_keywords: list[str] | None = None,
         meaning_embedding: list[float] | None = None,
         meaning_updated_at: datetime | None = None,
-    ) -> None:
+    ) -> MemoryWriteOutcome:
         """Add a distilled memory to storage.
-        
+
         If no embedding is provided, one will be generated automatically
         using the configured local embedding model.
+
+        Returns what was actually written. Callers that hand out IDs or delete
+        other rows must check ``outcome.persisted`` and use ``outcome.memory_id``.
         """
         if not content or content.isspace():
             logger.warning(f"Skipping empty content for memory ID: {memory_id}")
-            return
+            return MemoryWriteOutcome("skipped")
         
         # Normalize tags
         tags = tags or ["misc"]
@@ -111,7 +118,7 @@ class PostgreSQLSemanticMemoryMixin:
                     
                     if similar and similar.similarity > dedup_threshold:
                         logger.debug(f"Skipping duplicate memory (similarity={similar.similarity:.2%} > {dedup_threshold:.2%}): '{content[:50]}...' similar to '{similar.content[:50]}...'")
-                        return
+                        return MemoryWriteOutcome("duplicate", str(similar.id))
                 else:
                     # Exact content match fallback
                     exact_sql = text(f"""
@@ -122,7 +129,7 @@ class PostgreSQLSemanticMemoryMixin:
                     exact_match = conn.execute(exact_sql, {"content": content}).first()
                     if exact_match:
                         logger.debug(f"Skipping exact duplicate memory: '{content[:50]}...'")
-                        return
+                        return MemoryWriteOutcome("duplicate", str(exact_match.id))
                 
                 # Check if this specific ID exists (for updates)
                 check_sql = text(f"""
@@ -202,8 +209,10 @@ class PostgreSQLSemanticMemoryMixin:
                     })
 
             logger.debug(f"Added memory {memory_id} to {self._memories_table_name}")
+            return MemoryWriteOutcome("updated" if existing else "inserted", memory_id)
         except Exception as e:
             logger.error(f"Failed to add memory {memory_id}: {e}")
+            return MemoryWriteOutcome("failed", error=str(e))
 
     def update_memory(
         self,

@@ -17,6 +17,8 @@ from typing import Any
 
 import numpy as np
 
+from .errors import MemoryWriteOutcome
+
 logger = logging.getLogger(__name__)
 _DEFAULT_USER_ALIAS = os.getenv("LLM_BAWT_DEFAULT_USER", "").strip().lower()
 
@@ -76,6 +78,10 @@ class MemoryCluster:
     
     def __len__(self) -> int:
         return len(self.memories)
+
+
+class MemoryConsolidationWriteError(RuntimeError):
+    """The merged memory could not be verified, so originals were kept."""
 
 
 @dataclass
@@ -151,7 +157,7 @@ class MemoryConsolidator:
         with self.backend.engine.connect() as conn:
             sql = text(f"""
                 SELECT id, content, tags, importance, source_message_ids,
-                       access_count, last_accessed, created_at, embedding, intent
+                       access_count, last_accessed, created_at, updated_at, embedding, intent
                 FROM {self.backend._memories_table_name}
                 WHERE embedding IS NOT NULL
                 ORDER BY created_at ASC
@@ -179,6 +185,7 @@ class MemoryConsolidator:
                     "intent": row.intent,
                     "last_accessed": row.last_accessed,
                     "created_at": row.created_at,
+                    "updated_at": getattr(row, "updated_at", None),
                     "embedding": embedding,
                 })
             
@@ -365,13 +372,13 @@ Merged memory:"""
         self,
         content: str,
         cluster: MemoryCluster,
-    ) -> str:
-        """Create a new merged memory in the database.
-        
+    ) -> MemoryWriteOutcome:
+        """Write the merged memory and return what was actually persisted.
+
         Uses the backend's add_memory method which handles embedding generation
-        and meaning field heuristics.
-        
-        Returns the new memory ID.
+        and meaning field heuristics. The backend may fold the content into an
+        existing row (deduplication), which can be one of the cluster's own
+        originals; ``outcome.memory_id`` names the surviving row either way.
         """
         memory_id = str(uuid.uuid4())
         tags = cluster.combined_tags
@@ -386,7 +393,7 @@ Merged memory:"""
         recurrence_keywords = self._infer_recurrence(content, tags)
         
         # Use backend's add_memory which handles embeddings and schema properly
-        self.backend.add_memory(
+        outcome = self.backend.add_memory(
             memory_id=memory_id,
             content=content,
             tags=tags,
@@ -398,9 +405,15 @@ Merged memory:"""
             recurrence_keywords=recurrence_keywords,
         )
         
+        if not isinstance(outcome, MemoryWriteOutcome) or not outcome.persisted:
+            detail = getattr(outcome, "error", None) or getattr(outcome, "status", "no outcome")
+            raise MemoryConsolidationWriteError(
+                f"merged memory was not persisted ({detail}); originals kept"
+            )
+
         # Update access count separately (add_memory doesn't support it)
         access_count = cluster.total_access_count
-        if access_count > 0:
+        if access_count > 0 and outcome.status == "inserted":
             from sqlalchemy import text
             with self.backend.engine.connect() as conn:
                 sql = text(f"""
@@ -411,7 +424,7 @@ Merged memory:"""
                 conn.execute(sql, {"count": access_count, "id": memory_id})
                 conn.commit()
         
-        return memory_id
+        return outcome
     
     def _infer_stakes(self, importance: float) -> str:
         """Infer stakes from importance score."""
@@ -450,6 +463,52 @@ Merged memory:"""
             conn.commit()
             logger.debug(f"Deleted {len(memory_ids)} merged memories")
     
+    def replace_originals(
+        self,
+        survivor_id: str,
+        cluster: MemoryCluster,
+    ) -> tuple[int, list[str]]:
+        """Delete a cluster's originals only while a verified survivor exists.
+
+        Runs in one transaction: the survivor row is locked FOR SHARE first,
+        and the survivor itself is never deleted even when deduplication folded
+        the merge into one of the originals. An original is deleted only if its
+        ``updated_at`` still matches what consolidation read, so a concurrent
+        edit keeps that row. Returns (deleted_count, kept_changed_ids).
+        """
+        from sqlalchemy import text
+
+        table = self.backend._memories_table_name
+        deleted = 0
+        kept: list[str] = []
+        with self.backend.engine.begin() as conn:
+            survivor = conn.execute(
+                text(f"SELECT id FROM {table} WHERE id = :id FOR SHARE"),
+                {"id": survivor_id},
+            ).first()
+            if survivor is None:
+                raise MemoryConsolidationWriteError(
+                    f"merged memory {survivor_id} is not present; originals kept"
+                )
+            for mem in cluster.memories:
+                mem_id = str(mem["id"])
+                if mem_id == str(survivor_id):
+                    continue
+                row = conn.execute(
+                    text(f"""
+                        DELETE FROM {table}
+                        WHERE id = :id
+                          AND updated_at IS NOT DISTINCT FROM :updated_at
+                        RETURNING id
+                    """),
+                    {"id": mem_id, "updated_at": mem.get("updated_at")},
+                ).first()
+                if row is None:
+                    kept.append(mem_id)
+                else:
+                    deleted += 1
+        return deleted, kept
+
     def consolidate(self, dry_run: bool = False) -> ConsolidationResult:
         """Run the full consolidation process.
         
@@ -498,17 +557,25 @@ Merged memory:"""
                     result.clusters_merged += 1
                     result.memories_consolidated += len(cluster)
                 else:
-                    # Create merged memory
-                    new_id = self.create_merged_memory(merged_content, cluster)
-                    
-                    # Delete the original memories
-                    self.delete_merged_memories(cluster.memory_ids)
-                    
+                    # Write the merge first; raises (originals kept) unless a
+                    # row verifiably holds it.
+                    outcome = self.create_merged_memory(merged_content, cluster)
+                    survivor_id = str(outcome.memory_id)
+
+                    deleted, kept = self.replace_originals(survivor_id, cluster)
+                    if kept:
+                        result.errors.append(
+                            f"Kept {len(kept)} memories changed during consolidation: {', '.join(kept)}"
+                        )
+
                     result.clusters_merged += 1
-                    result.memories_consolidated += len(cluster)
-                    result.new_memories_created += 1
-                    
-                    logger.debug(f"Created merged memory {new_id}, deleted {len(cluster)} originals")
+                    result.memories_consolidated += deleted
+                    if outcome.status == "inserted":
+                        result.new_memories_created += 1
+
+                    logger.debug(
+                        f"Merged into {outcome.status} memory {survivor_id}, deleted {deleted} originals"
+                    )
                     
             except Exception as e:
                 error_msg = f"Failed to process cluster: {e}"
