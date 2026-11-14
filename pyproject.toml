@@ -31,7 +31,7 @@ dependencies = [
     "websockets>=13.0",
     # Redis (shared agent-bridge transport: events, commands, fanout)
     "redis[hiredis]>=5.0.0",
-    # anthropic 1.x requires an httpx2 client; our clients pass httpx.AsyncClient.
+    # anthropic 1.x runs on httpx2; pass httpx2 clients if one is ever injected.
     "anthropic>=1,<2",
     "claude-agent-sdk>=0.2.180",
     "openai-codex-sdk>=0.1.11",
