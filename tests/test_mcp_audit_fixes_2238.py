@@ -351,3 +351,69 @@ def test_single_send_lost_response_is_uncertain(
         assert receipt["idempotency_key"] == "k2"
     else:
         assert receipt["queued"] is False and "outcome" not in receipt
+
+
+def _responding_client(monkeypatch: pytest.MonkeyPatch, response: httpx.Response) -> None:
+    real = httpx.AsyncClient
+    transport = httpx.MockTransport(lambda _request: response)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: real(transport=transport, **kw))
+
+
+_RESPONSES = {
+    "unreadable_502": (lambda: httpx.Response(502, content=b"upstream response lost"), True),
+    "generic_500": (lambda: httpx.Response(500, json={"detail": "Internal Server Error"}), True),
+    "refusal_403": (lambda: httpx.Response(403, json={"detail": "forbidden"}), False),
+    "unreadable_400": (lambda: httpx.Response(400, content=b"bad"), False),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_RESPONSES))
+def test_single_send_server_error_is_uncertain(monkeypatch: pytest.MonkeyPatch, case: str) -> None:
+    from llm_bawt.mcp_server import inter_bot_tools
+
+    make, uncertain = _RESPONSES[case]
+    _responding_client(monkeypatch, make())
+    receipt = asyncio.run(inter_bot_tools._enqueue_durable(
+        prefer_steer=True, target_bot_id="b", message="m", sender_bot_id="a", max_tokens=None,
+        temperature=0.7, timeout_seconds=300, idempotency_key="k3", project_id=None, task_id=None,
+        message_kind=None, metadata=None, session_policy=None, reset_session_before_delivery=None,
+        retain_history=None, reset_reason=None,
+    ))
+
+    if uncertain:
+        assert receipt["outcome"] == "uncertain" and receipt["queued"] is None
+        assert receipt["idempotency_key"] == "k3" and "SAME idempotency_key" in receipt["note"]
+    else:
+        assert receipt["queued"] is False and "outcome" not in receipt
+
+
+def test_single_send_server_error_keeps_delivery_receipt(monkeypatch: pytest.MonkeyPatch) -> None:
+    from llm_bawt.mcp_server import inter_bot_tools
+
+    _responding_client(monkeypatch, httpx.Response(500, json={"delivery_id": "d1", "queued": True}))
+    receipt = asyncio.run(inter_bot_tools._enqueue_durable(
+        prefer_steer=False, target_bot_id="b", message="m", sender_bot_id="a", max_tokens=None,
+        temperature=0.7, timeout_seconds=300, idempotency_key="k4", project_id=None, task_id=None,
+        message_kind=None, metadata=None, session_policy=None, reset_session_before_delivery=None,
+        retain_history=None, reset_reason=None,
+    ))
+
+    assert receipt["delivery_id"] == "d1" and receipt["status_code"] == 500
+
+
+@pytest.mark.parametrize("case", sorted(_RESPONSES))
+def test_batch_send_server_error_is_uncertain(monkeypatch: pytest.MonkeyPatch, case: str) -> None:
+    from llm_bawt.mcp_server.inter_bot_fanout import send_batch
+    from llm_bawt.mcp_server.inter_bot_send_mode import SendMode
+
+    make, uncertain = _RESPONSES[case]
+    _responding_client(monkeypatch, make())
+    receipt = asyncio.run(send_batch("http://app.invalid", targets=["a", "b"],
+                                     mode=SendMode("steer_or_idle", False), exclude=[],
+                                     fields={"idempotency_key": "k5"}))
+
+    if uncertain:
+        assert receipt["dispatched"] is None and receipt["outcome"] == "uncertain"
+        assert receipt["idempotency_key"] == "k5" and "SAME idempotency_key" in receipt["note"]
+    else:
+        assert receipt["dispatched"] is False and "outcome" not in receipt

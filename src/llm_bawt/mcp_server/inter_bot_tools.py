@@ -309,6 +309,11 @@ async def _enqueue_durable(
             body = None
         if isinstance(body, dict) and body.get("delivery_id"):
             return {**body, "status_code": exc.response.status_code}
+        if exc.response.status_code >= 500:
+            # No delivery receipt, and a server error can follow the committed enqueue.
+            return uncertain_receipt(exc, idempotency_key, queued=None, delivery=delivery_name,
+                                     bot_id=target_bot_id, sender=sender_bot_id,
+                                     status_code=exc.response.status_code)
         detail: Any = body.get("detail") if isinstance(body, dict) else exc.response.text
         refused = {
             "success": False,

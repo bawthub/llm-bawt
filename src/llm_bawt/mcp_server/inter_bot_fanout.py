@@ -82,13 +82,13 @@ def send_outcome_unknown(exc: BaseException) -> bool:
     return not isinstance(exc, _NOT_SENT)
 
 
-def uncertain_receipt(exc: BaseException, key: str | None, **extra: Any) -> dict[str, Any]:
+def uncertain_receipt(exc: BaseException | str, key: str | None, **extra: Any) -> dict[str, Any]:
     """Receipt for a send whose acceptance is unknown: never claims non-dispatch."""
     advice = ("retry with the SAME idempotency_key; it reattaches if the first send was accepted"
               if key else "check bots_deliveries_list before sending again")
     return {"success": False, "dispatched": None, "outcome": "uncertain",
             **({"idempotency_key": key} if key else {}), **extra,
-            "error": str(exc) or exc.__class__.__name__,
+            "error": str(exc) or type(exc).__name__,
             "note": f"The send may have been accepted; {advice}."}
 
 
@@ -141,6 +141,10 @@ async def send_batch(
                                       "status_code": response.status_code})
     detail = data.get("detail") if isinstance(data, dict) else data
     error = detail.get("error") if isinstance(detail, dict) else None
+    if response.status_code >= 500:
+        # No batch receipt, and a server error can follow the committed enqueue.
+        return uncertain_receipt(f"HTTP {response.status_code}: {error or detail}", key,
+                                 mode=mode.delivery, status_code=response.status_code)
     return {
         "success": False,
         "dispatched": False,
