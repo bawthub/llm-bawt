@@ -59,7 +59,8 @@ class ChangedFileLifecycleMixin:
         # Only trees this session actually changed.  Carrying trees it merely
         # read would re-register them every turn and mark other bots' live
         # turns there as overlapping (ineligible_shared_tree_busy).
-        roots = [str(r["tree"]) for r in receipts if r.get("tree") and r.get("status") == "observed"]
+        roots = [str(r["tree"]) for r in receipts
+                 if r.get("tree") and r.get("status") in {"observed", "observed_partial"}]
         if not roots:
             return
         carried = getattr(self, "_turn_snapshot_carried", None)

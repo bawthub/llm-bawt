@@ -71,7 +71,11 @@ def _command_rows(events: list) -> list[dict]:
 
 
 @pytest.mark.asyncio
-async def test_codex_shell_add_then_delete_are_observed(repo: Path, tmp_path: Path) -> None:
+@pytest.mark.parametrize("oversized_untracked", [False, True])
+async def test_codex_shell_add_then_delete_are_observed(repo: Path, tmp_path: Path, monkeypatch, oversized_untracked) -> None:
+    if oversized_untracked:
+        monkeypatch.setattr("agent_bridge.turn_snapshots.MAX_UNTRACKED_BYTES", 32)
+        (repo / "excluded.txt").write_text("x" * 33)
     bridge = _bridge(tmp_path)
 
     # Turn 1: the command names the tree, then creates a file.

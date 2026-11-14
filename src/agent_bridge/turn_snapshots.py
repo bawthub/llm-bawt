@@ -222,6 +222,8 @@ class TreeState:
     start: Snapshot | None = None
     start_error: str | None = None
     marker: Path | None = None
+    # Missing snapshot content is not evidence that a file was absent.
+    excluded_paths: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -232,7 +234,7 @@ class TurnObservation:
     bot_id: str | None
     started_at: float = field(default_factory=time.time)
     trees: dict[tuple[int, int], TreeState] = field(default_factory=dict)
-    pending_paths: set[Path] = field(default_factory=set)
+    pending_paths: dict[Path, Path | None] = field(default_factory=dict)
     timings: list[dict[str, Any]] = field(default_factory=list)
     lock: threading.Lock = field(default_factory=threading.Lock)
     finished: bool = False
@@ -313,7 +315,7 @@ class TurnSnapshotObserver:
         receipts: list[dict[str, Any]] = []
         for path in list(turn.pending_paths):
             try:
-                self._add_created_candidate(turn, path)
+                self._add_created_candidate(turn, path, finishing=True)
             except Exception:
                 logger.debug("created-tree candidate failed path=%s", path, exc_info=True)
         for state in turn.trees.values():
@@ -324,6 +326,9 @@ class TurnSnapshotObserver:
                 status, tree_files = self._finish_tree(turn, state, covered_set)
                 receipt["status"] = status
                 receipt["files"] = len(tree_files)
+                if state.excluded_paths:
+                    receipt["excluded_count"] = len(state.excluded_paths)
+                    receipt["excluded_paths"] = sorted(state.excluded_paths)[:MAX_FILES_PER_TREE]
                 files.extend(tree_files)
             except Exception as exc:
                 receipt["status"] = "error"
@@ -331,7 +336,7 @@ class TurnSnapshotObserver:
                 logger.warning("turn snapshot finish failed tree=%s: %s", state.root, exc)
             finally:
                 self._unregister(state, turn.turn_id)
-                if status != "observed":
+                if status not in {"observed", "observed_partial"}:
                     self._delete_refs(state, turn.turn_id)
             receipt["end_ms"] = round((time.monotonic() - started) * 1000, 1)
             receipts.append(receipt)
@@ -368,16 +373,26 @@ class TurnSnapshotObserver:
     def _add_candidate(self, turn: TurnObservation, path: Path) -> None:
         if not path.is_absolute():
             return
-        if not path.exists():
-            # Possibly a worktree this command is about to create.
-            if len(turn.pending_paths) < 64:
-                turn.pending_paths.add(path)
+        previous_pending = tuple(turn.pending_paths)
         root = find_tree_root(path)
+        if not path.exists():
+            # Remember the original root even if registration later fails.
+            if len(turn.pending_paths) < 64:
+                turn.pending_paths.setdefault(path, root.resolve() if root else None)
         if root is None:
             return
         key = _inode_key(root)
         if key is None or key in turn.trees:
             return
+        # A later tool can discover a tree whose creating command already
+        # edited files. Prefer its creation baseline before registering it with
+        # a late working-copy snapshot. Never replace an existing baseline.
+        for pending in previous_pending:
+            pending_root = find_tree_root(pending)
+            if pending_root is not None and _inode_key(pending_root) == key:
+                self._add_created_candidate(turn, pending)
+                if key in turn.trees:
+                    return
         started = time.monotonic()
         state = self._new_state(root)
         if state is None:
@@ -394,7 +409,7 @@ class TurnSnapshotObserver:
             "ms": round((time.monotonic() - started) * 1000, 1),
         })
 
-    def _add_created_candidate(self, turn: TurnObservation, path: Path) -> None:
+    def _add_created_candidate(self, turn: TurnObservation, path: Path, *, finishing: bool = False) -> None:
         """A tree that did not exist at first reference starts at its creation commit."""
         root = find_tree_root(path)
         if root is None:
@@ -405,8 +420,15 @@ class TurnSnapshotObserver:
         state = self._new_state(root)
         if state is None:
             return
-        created = self._creation_commit(root)
+        original_root = turn.pending_paths.get(path)
+        existed = original_root is not None and (
+            root.resolve() == original_root or _inode_key(original_root) == key
+        )
+        created = None if existed else self._creation_commit(root, turn.started_at)
         if created is None:
+            if finishing:
+                # At finish a working-copy baseline would falsely say unchanged.
+                turn.trees[key] = state
             return
         turn.trees[key] = state
         self._register(state, turn)
@@ -415,14 +437,16 @@ class TurnSnapshotObserver:
         self._update_ref(state, turn.turn_id, "start", created)
 
     @staticmethod
-    def _creation_commit(root: Path) -> str | None:
-        """First HEAD reflog entry of a tree created during this turn."""
-        out = _git_text(root, "reflog", "show", "--format=%H %ct", "HEAD", check=False)
-        lines = [line.split() for line in out.splitlines() if line.strip()]
+    def _creation_commit(root: Path, since: float) -> str | None:
+        """Use the reflog event time, not the possibly old base commit time."""
+        out = _git_text(root, "reflog", "show", "--format=%H %gD", "--date=unix", "HEAD", check=False)
+        lines = [line for line in out.splitlines() if line.strip()]
         if not lines:
             return None
-        commit, _ = lines[-1]
-        return commit
+        match = re.fullmatch(r"([0-9a-f]+) HEAD@\{([0-9]+)\}", lines[-1])
+        if match is None or int(match[2]) < since - COMMIT_CLOCK_SLACK_SECONDS:
+            return None
+        return match[1]
 
     @staticmethod
     def _new_state(root: Path) -> TreeState | None:
@@ -440,9 +464,12 @@ class TurnSnapshotObserver:
         head = _git_text(root, "rev-parse", "--verify", "-q", "HEAD", check=False) or None
         branch = _git_text(root, "symbolic-ref", "-q", "--short", "HEAD", check=False) or None
         status = _git(root, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames")
-        paths = self._changed_paths(root, status)
-        if len(paths) > MAX_STATUS_PATHS:
-            raise SnapshotTooLarge(f"{len(paths)} changed paths exceeds {MAX_STATUS_PATHS}")
+        excluded: set[str] = set()
+        paths = self._changed_paths(root, status, excluded=excluded)
+        path_count = len(paths) + len(excluded)
+        if path_count > MAX_STATUS_PATHS:
+            raise SnapshotTooLarge(f"{path_count} changed paths exceeds {MAX_STATUS_PATHS}")
+        state.excluded_paths.update(excluded)
         if not paths and head is not None:
             tree = _git_text(root, "rev-parse", f"{head}^{{tree}}")
         else:
@@ -456,7 +483,7 @@ class TurnSnapshotObserver:
         return Snapshot(commit=commit, tree=tree, head=head, branch=branch, taken_at=self._clock())
 
     @staticmethod
-    def _changed_paths(root: Path, status: bytes) -> list[str]:
+    def _changed_paths(root: Path, status: bytes, *, excluded: set[str]) -> list[str]:
         paths: list[str] = []
         for entry in status.split(b"\0"):
             if len(entry) < 4:
@@ -466,8 +493,10 @@ class TurnSnapshotObserver:
             if code == b"??":
                 try:
                     if (root / rel).stat().st_size > MAX_UNTRACKED_BYTES:
+                        excluded.add(rel)
                         continue
                 except OSError:
+                    excluded.add(rel)
                     continue
             paths.append(rel)
         return paths
@@ -529,11 +558,13 @@ class TurnSnapshotObserver:
         if not self._head_movement_is_own(state, state.start, end, turn.bot_id):
             return "ineligible_head_moved", []
         if end.tree == state.start.tree:
-            return "unchanged", []
+            return ("excluded_only" if state.excluded_paths else "unchanged"), []
         raw = _git(state.root, "diff-tree", "-r", "-z", "--no-renames", "--raw", state.start.tree, end.tree)
         entries = self._parse_raw_diff(raw)
         files: list[dict[str, Any]] = []
         for old_mode, new_mode, old_blob, new_blob, status, rel in entries:
+            if rel in state.excluded_paths:
+                continue
             if len(files) >= MAX_FILES_PER_TREE or turn.files_emitted >= MAX_FILES_PER_TURN:
                 break
             absolute = state.root / rel
@@ -544,6 +575,8 @@ class TurnSnapshotObserver:
                 continue  # submodule pointer, not file content
             files.append(self._file_payload(turn, state, end, rel, status, old_blob, new_blob))
             turn.files_emitted += 1
+        if state.excluded_paths:
+            return ("observed_partial" if files else "excluded_only"), files
         return "observed", files
 
     @staticmethod
