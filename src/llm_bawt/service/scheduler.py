@@ -16,6 +16,9 @@ from ..runtime_settings import RuntimeSettingsResolver
 
 logger = logging.getLogger(__name__)
 
+# Longest observed maintenance run is ~10 min; anything RUNNING past this died.
+ORPHANED_RUN_TIMEOUT = timedelta(hours=1)
+
 
 class JobStatus(str, Enum):
     """Status of a job run."""
@@ -215,10 +218,42 @@ class JobScheduler:
             
             await asyncio.sleep(self.check_interval)
     
+    def _reap_orphaned_runs(self) -> int:
+        """Mark maintenance runs stranded in RUNNING by a dead process as FAILED.
+
+        A process that dies mid-run never finalizes its JobRun. Runs older than
+        ORPHANED_RUN_TIMEOUT are terminal-marked as interrupted, never re-fired.
+        SEND_PROMPT runs are owned by prompt delivery state and are left alone.
+        Age-based rather than startup-based so a sibling worker's live run is safe.
+        """
+        now = datetime.now(timezone.utc)
+        maintenance_jobs = select(ScheduledJob.id).where(
+            ScheduledJob.job_type != JobType.SEND_PROMPT)
+        with Session(self.engine) as session:
+            stale = session.exec(select(JobRun).where(
+                JobRun.status == JobStatus.RUNNING,
+                JobRun.finished_at.is_(None),
+                JobRun.started_at < now - ORPHANED_RUN_TIMEOUT,
+                JobRun.job_id.in_(maintenance_jobs),
+            ).with_for_update(skip_locked=True)).all()
+            for run in stale:
+                started = run.started_at if run.started_at.tzinfo else run.started_at.replace(tzinfo=timezone.utc)
+                run.status = JobStatus.FAILED
+                run.finished_at = now
+                run.duration_ms = int((now - started).total_seconds() * 1000)
+                run.error_message = "interrupted: process exited before the run finished"
+                session.add(run)
+            session.commit()
+        if stale:
+            logger.warning("Reaped %d orphaned scheduler run(s) as interrupted", len(stale))
+            self._runs_changed()
+        return len(stale)
+
     async def _check_and_run_due_jobs(self) -> None:
         """Check for due jobs and enqueue them."""
         loop = asyncio.get_event_loop()
-        
+        await loop.run_in_executor(None, self._reap_orphaned_runs)
+
         def get_due_jobs():
             with Session(self.engine) as session:
                 now = datetime.now(timezone.utc)
