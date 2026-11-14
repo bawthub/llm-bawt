@@ -156,6 +156,10 @@ PG_ACCEPTANCE_SUITES = (
     "test_utility_usage_pg.py::",
     "test_playground_pg.py::",
     "test_media_gc_pg.py::",
+    "test_terminal_delivery_guards.py::",
+    "test_terminal_history.py::TestPostgresTerminalHistory::",
+    "test_terminal_reservation_protocol.py::TestPostgresReservationHandoff::",
+    "test_turn_terminal_protocol.py::TestPostgresProtocol::",
 )
 
 PG_SELECTORS = tuple("tests/" + suite.removesuffix("::") for suite in PG_ACCEPTANCE_SUITES)
