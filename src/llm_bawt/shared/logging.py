@@ -208,7 +208,24 @@ class LogConfig:
             debug: Enable DEBUG spam (overrides verbose).
         """
         from rich.logging import RichHandler
-        
+
+        from . import logfmt
+
+        if not logfmt.is_tty():
+            # Containers: the standard logfmt line (TASK-2225). --debug keeps
+            # DEBUG in the debug file only; stdout follows LLM_BAWT_LOG_LEVEL.
+            prefix = os.getenv("LLM_BAWT_LOG_PREFIX", "").strip()
+            log_dir = os.getenv("LLM_BAWT_LOG_DIR", ".logs")
+            name = f"{prefix}.debug.log" if prefix else "llm-bawt.debug.log"
+            logfmt.configure_logging(
+                prefix or "app",
+                level=None if (verbose or debug) else logging.WARNING,
+                debug_file=os.path.join(log_dir, name) if debug else None,
+            )
+            for logger_name in cls.NOISY_LOGGERS:
+                logging.getLogger(logger_name).setLevel(logging.WARNING)
+            return
+
         # Get the root logger and clear any existing handlers
         root = logging.getLogger()
         root.handlers.clear()

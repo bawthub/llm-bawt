@@ -688,6 +688,9 @@ def main():
             reload=args.reload,
             reload_excludes=reload_excludes,
             log_level=uvicorn_log_level,
+            # Keep uvicorn on our root handler so access lines use the standard
+            # format and the polling filter (TASK-2225).
+            log_config=None,
             # Open SSE streams would otherwise hold shutdown open forever, and
             # the lifespan teardown has to finish inside Docker's 10s stop
             # window (server.sh gives the process 8s; TASK-1286).

@@ -40,6 +40,8 @@ from uuid import uuid4
 from logging.handlers import RotatingFileHandler
 from rich.console import Console
 from rich.logging import RichHandler
+
+from ..shared import logfmt as _logfmt
 from rich.panel import Panel
 from rich.table import Table
 from rich.theme import Theme
@@ -111,7 +113,12 @@ def get_console() -> Console:
     global _console
     if _console is None:
         # force_terminal=True ensures Rich renders markup even when backgrounded
-        _console = Console(theme=SERVICE_THEME, stderr=True, force_terminal=True)
+        # Off a TTY the console's decorative prints (panels, prompt previews)
+        # are suppressed; everything worth keeping goes through logging.
+        _console = Console(
+            theme=SERVICE_THEME, stderr=True, force_terminal=True,
+            quiet=not _logfmt.is_tty(),
+        )
     return _console
 
 
@@ -140,6 +147,19 @@ def setup_service_logging(verbose: bool = False, debug: bool = False) -> None:
     root_level = logging.DEBUG if debug else console_level
 
     console = get_console()
+
+    # Containers (stdout not a TTY): one standard logfmt line per event
+    # (TASK-2225). --debug keeps full DEBUG in the debug file only; stdout
+    # stays at LLM_BAWT_LOG_LEVEL (default INFO). Rich stays for a terminal.
+    if not _logfmt.is_tty():
+        log_dir = os.getenv("LLM_BAWT_LOG_DIR", ".logs")
+        _logfmt.configure_logging(
+            os.getenv("LLM_BAWT_LOG_PREFIX", "").strip() or "app",
+            debug_file=os.path.join(log_dir, "llm-service.debug.log") if debug else None,
+        )
+        if not debug:
+            os.environ["TQDM_DISABLE"] = "1"
+        return
 
     # Configure root logger for the service
     log_prefix = os.getenv("LLM_BAWT_LOG_PREFIX", "").strip()
@@ -406,9 +426,9 @@ class ServiceLogger:
         if _debug and payload:
             try:
                 sanitized = _redact_image_data(payload)
-                self._logger.info("Request payload: %s", json.dumps(sanitized, ensure_ascii=False, default=str))
+                self._logger.debug("Request payload: %s", json.dumps(sanitized, ensure_ascii=False, default=str))
             except Exception:
-                self._logger.info("Request payload: (unserializable)")
+                self._logger.debug("Request payload: (unserializable)")
 
     def api_response(self, ctx: RequestContext, status: int = 200, tokens: int | None = None) -> None:
         """Log an API response."""
