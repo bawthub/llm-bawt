@@ -7,8 +7,10 @@ column, so this resolves each bot's current ``avatar`` into a self-hosted
 and overwrites). Reads new code, triggers the column migration on store
 init, and writes directly via SQL — does NOT restart the running app.
 
-    docker exec llm-bawt-app /app/.venv/bin/python /app/scripts/backfill_avatar_render.py
-    # add --force to re-resolve rows that already have a render
+    # scripts/ is not in the app image, so pipe the file in:
+    docker exec -i llm-bawt-app /app/.venv/bin/python - < scripts/backfill_avatar_render.py
+    # add --force to re-resolve rows that already have a render:
+    docker exec -i llm-bawt-app /app/.venv/bin/python - --force < scripts/backfill_avatar_render.py
 """
 from __future__ import annotations
 

@@ -106,14 +106,17 @@ def _run(command: list[str], *, env: dict | None = None) -> list[str]:
     return result.stdout.splitlines()
 
 
-def capture_live() -> tuple[list[str], dict]:
+def capture_live(expected_identity: str) -> tuple[list[str], dict]:
+    """Capture from pgq's operational target; *expected_identity* is ``database|user``."""
+    if expected_identity.count("|") != 1 or not all(expected_identity.split("|")):
+        raise ValueError("expected identity must be DATABASE|USER")
     env = dict(os.environ, PGOPTIONS="-c default_transaction_read_only=on -c statement_timeout=120000 -c lock_timeout=1000")
     def pgq(sql: str) -> list[str]:
         return _run(["pgq", "llm-bawt", "-X", "-A", "-t", "-v", "ON_ERROR_STOP=1", "-c", sql], env=env)
     # The catalog query is one SQL statement (one MVCC snapshot). Both
     # statements use the pgq target, whose route is asserted before capture.
     identity = pgq("SELECT current_database(), current_user, current_setting('server_version_num')")
-    if len(identity) != 1 or not identity[0].startswith("askllm|askllm|"):
+    if len(identity) != 1 or not identity[0].startswith(f"{expected_identity}|"):
         raise RuntimeError("pgq did not select the expected operational database/user")
     lines = pgq(CATALOG_SQL)
     parse_catalog(lines)
@@ -178,6 +181,8 @@ def main() -> None:
     capture = sub.add_parser("capture", help="capture metadata without schema provisioning")
     capture.add_argument("--mode", choices=("operational", "test"), required=True)
     capture.add_argument("--expected-db", help="mandatory *_test database for test mode")
+    capture.add_argument("--expected-identity", metavar="DATABASE|USER",
+                         help="mandatory operational database and user, e.g. llm_bawt|llm_bawt")
     capture.add_argument("--out", type=Path, required=True)
     diff = sub.add_parser("diff", help="compare existing JSONL snapshots offline")
     diff.add_argument("--reference", type=Path, required=True)
@@ -190,8 +195,12 @@ def main() -> None:
         if args.mode == "operational":
             if args.expected_db:
                 parser.error("--expected-db applies only to test capture")
-            lines, metadata = capture_live()
+            if not args.expected_identity:
+                parser.error("--expected-identity is required for operational capture")
+            lines, metadata = capture_live(args.expected_identity)
         else:
+            if args.expected_identity:
+                parser.error("--expected-identity applies only to operational capture")
             if not args.expected_db:
                 parser.error("--expected-db is required for test capture")
             lines, metadata = capture_test(args.expected_db)

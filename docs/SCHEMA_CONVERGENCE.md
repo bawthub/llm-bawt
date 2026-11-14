@@ -20,7 +20,8 @@ no further top-level table-drop work remains in this plan.
 
 `scripts/schema_catalog.py capture --mode test --expected-db <name> --out
 <new-path>.jsonl` is read-only and refuses a non-`_test` database. Operational
-capture uses `capture --mode operational --out <new-path>.jsonl` and `pgq`
+capture uses `capture --mode operational --expected-identity <db>|<user> --out
+<new-path>.jsonl` and `pgq`
 read-only only. Capture queries are single-statement MVCC snapshots; output
 includes a source-byte digest, Git HEAD/dirty flag, server version, catalog
 hash, and record count. `diff --reference <fresh>.jsonl --operational

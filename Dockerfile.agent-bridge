@@ -204,11 +204,15 @@ ENV PATH="/home/bridge/.local/bin:/app/.venv/bin:$PATH:/opt/agent-skills/bin" \
     HOME=/home/bridge \
     PYTHONDONTWRITEBYTECODE=1
 
-# Point the Bitwarden CLI at our self-hosted Vaultwarden. Writes to
+# Point the Bitwarden CLI at the tenant's vault server. Writes to
 # ~/.config/Bitwarden CLI/data.json; baked here so containers start
 # pre-configured (override at runtime with `bw config server <url>`).
-ARG BW_SERVER_URL=https://vault.ferreri.us
-RUN bw config server "$BW_SERVER_URL"
+# Deployment data, so no default: compose passes BW_SERVER_URL from .env and
+# the tenant publish workflow passes its own.
+ARG BW_SERVER_URL
+RUN test -n "$BW_SERVER_URL" \
+        || { echo "BW_SERVER_URL build arg is required (e.g. https://vault.bitwarden.com)" >&2; exit 1; } \
+    && bw config server "$BW_SERVER_URL"
 
 # Match BawtHub's packageManager; seed as bridge, not root, so first use needs
 # neither elevated permissions nor a download. Repos can still select a version.

@@ -13,10 +13,9 @@ coming from:
   t_total              — connection closed
 
 Usage:
-  python scripts/probe_voice_latency.py                 # default: nova, 3 trials per mode
-  python scripts/probe_voice_latency.py --bot mira      # different bot
-  python scripts/probe_voice_latency.py --trials 5      # more samples
-  python scripts/probe_voice_latency.py --url http://localhost:8642
+  python scripts/probe_voice_latency.py --bot <bot_id>              # 3 trials per mode
+  python scripts/probe_voice_latency.py --bot <bot_id> --trials 5   # more samples
+  python scripts/probe_voice_latency.py --bot <bot_id> --url http://localhost:8642
 """
 
 from __future__ import annotations
@@ -148,7 +147,7 @@ def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--url", default="http://localhost:8642",
                    help="llm-bawt service base URL (default: http://localhost:8642)")
-    p.add_argument("--bot", default="nova", help="bot_id to probe (default: nova)")
+    p.add_argument("--bot", required=True, help="bot_id to probe")
     p.add_argument("--trials", type=int, default=3, help="trials per mode (default: 3)")
     p.add_argument("--user", default="probe_voice_latency", help="user id")
     p.add_argument("--prompt", default="Say a single short sentence about the weather.",

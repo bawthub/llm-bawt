@@ -21,7 +21,7 @@ usage() {
 Docker management script for llm-bawt
 
 USAGE:
-    ./start.sh [COMMAND] [OPTIONS]
+    ./run.sh [COMMAND] [OPTIONS]
 
 COMMANDS:
     up              Start containers (production mode)
@@ -40,34 +40,34 @@ OPTIONS:
 
 EXAMPLES:
     # Start production mode
-    ./start.sh up
+    ./run.sh up
 
     # Start dev mode with live code mounting
-    ./start.sh dev
+    ./run.sh dev
 
     # Rebuild and restart
-    ./start.sh rebuild
+    ./run.sh rebuild
 
     # View logs
-    ./start.sh logs
+    ./run.sh logs
 
     # Stop everything
-    ./start.sh down
+    ./run.sh down
 
     # Open shell in container
-    ./start.sh shell
+    ./run.sh shell
 
     # Run a command in container
-    ./start.sh exec llm --status
+    ./run.sh exec llm --status
 
 DEVELOPMENT:
     Dev mode mounts ./src for live code changes.
-    After changing code: ./start.sh restart
+    After changing code: ./run.sh restart
     No rebuild needed - just restart!
 
 PRODUCTION:
     Production mode has source baked into image.
-    After changing code: ./start.sh rebuild
+    After changing code: ./run.sh rebuild
 EOF
 }
 
@@ -76,15 +76,15 @@ case "${1:-help}" in
     echo "Starting containers (production mode)..."
     docker compose up -d
     echo "✓ Services started on ports 8001 (MCP) and 8642 (LLM)"
-    echo "Run './start.sh logs' to view output"
+    echo "Run './run.sh logs' to view output"
     ;;
 
   dev)
     echo "Starting containers (dev mode with live mounting)..."
     dev_compose up -d
     echo "✓ Dev mode started - source code mounted from ./src"
-    echo "✓ After code changes: ./start.sh restart"
-    echo "Run './start.sh logs' to view output"
+    echo "✓ After code changes: ./run.sh restart"
+    echo "Run './run.sh logs' to view output"
     ;;
 
   down)
@@ -105,7 +105,7 @@ case "${1:-help}" in
         echo "✓ Production containers restarted"
       fi
     else
-      echo "No containers running. Use './start.sh up' or './start.sh dev'"
+      echo "No containers running. Use './run.sh up' or './run.sh dev'"
       exit 1
     fi
     ;;
@@ -115,7 +115,7 @@ case "${1:-help}" in
     docker compose down
     docker compose up -d --build
     echo "✓ Containers rebuilt and started"
-    echo "Run './start.sh logs' to view output"
+    echo "Run './run.sh logs' to view output"
     ;;
 
   logs)
@@ -133,8 +133,8 @@ case "${1:-help}" in
   exec)
     shift
     if [[ $# -eq 0 ]]; then
-      echo "Usage: ./start.sh exec <command>"
-      echo "Example: ./start.sh exec llm --status"
+      echo "Usage: ./run.sh exec <command>"
+      echo "Example: ./run.sh exec llm --status"
       exit 1
     fi
     docker compose exec app "$@"

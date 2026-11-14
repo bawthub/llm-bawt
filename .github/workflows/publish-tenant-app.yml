@@ -47,7 +47,8 @@ jobs:
           # launches per approved action (entrypoint + capability labels).
           - image: ops-worker
             dockerfile: docker/Dockerfile.ops-worker
-            build-args: OPS_PYTHON_BASE=python:3.12-slim
+            # Dockerfile.ops-worker wants a verified tag or repo@sha256 digest.
+            build-args: OPS_PYTHON_BASE=python:3.12-slim@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b
     steps:
       - uses: actions/checkout@v5
         with:

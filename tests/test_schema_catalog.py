@@ -69,12 +69,18 @@ def test_operational_capture_uses_only_pgq_and_rejects_wrong_identity(catalog_to
             return ["different|askllm|160015"]
         run["_run"] = fake
         with pytest.raises(RuntimeError, match="expected operational database/user"):
-            catalog_tool["capture_live"]()
+            catalog_tool["capture_live"]("askllm|askllm")
         assert len(called) == 1
         assert called[0][0][:2] == ["pgq", "llm-bawt"]
         assert "default_transaction_read_only=on" in called[0][1]
     finally:
         run["_run"] = original
+
+
+def test_operational_capture_requires_a_database_and_user(catalog_tool):
+    for bad in ("askllm", "askllm|", "|askllm", "a|b|c"):
+        with pytest.raises(ValueError, match="DATABASE\\|USER"):
+            catalog_tool["capture_live"](bad)
 
 
 def test_test_capture_rejects_unsafe_database_before_import(catalog_tool, monkeypatch):

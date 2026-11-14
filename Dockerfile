@@ -118,9 +118,11 @@ COPY --from=base /app/docker/agent-bridge-constraints.txt /app/docker/agent-brid
 # Create necessary directories
 RUN mkdir -p /app/.run /app/.logs /root/.config/llm-bawt
 
+# Container timezone; a tenant sets it with the TZ build arg (compose passes .env TZ).
+ARG TZ=UTC
 # Set environment variables
 ENV PATH="/app/.venv/bin:$PATH" \
-    TZ=America/New_York \
+    TZ=${TZ} \
     PYTHONUNBUFFERED=1
 
 # Set system timezone

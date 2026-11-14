@@ -58,8 +58,10 @@ RUN mkdir -p /app/.run /app/.logs /root/.config/llm-bawt
 # same path, so the app's skill catalog and injected skills see that tree.
 COPY tenant-skills/ /opt/bawthub/skills/
 
+# Container timezone; a tenant sets it with the TZ build arg (compose passes .env TZ).
+ARG TZ=UTC
 ENV PATH="/app/.venv/bin:$PATH" \
-    TZ=America/New_York \
+    TZ=${TZ} \
     PYTHONUNBUFFERED=1
 
 # Set system timezone

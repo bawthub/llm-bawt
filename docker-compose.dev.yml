@@ -26,7 +26,7 @@ services:
       - ${LLM_BAWT_MODEL_CACHE_DIR:-${HOME}/.cache/llm-bawt/models}:/root/.cache/llm-bawt/models
       - ${HF_HOME:-${HOME}/.cache/huggingface}:/root/.cache/huggingface
       # MediaStore blobs (TASK-223) — mirrors base compose so dev mode has it too.
-      - ${LLM_BAWT_MEDIA_HOST_PATH:-./data/media}:/var/lib/llm-bawt/media
+      - ${LLM_BAWT_MEDIA_HOST_PATH:-./data/media}:/var/lib/llm-bawt/media:rslave
 
     # Restart on reboot and on failure
     restart: unless-stopped

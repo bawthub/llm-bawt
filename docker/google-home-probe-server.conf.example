@@ -1,5 +1,7 @@
-# TASK-902 — DRAFT ONLY. Add ONLY to app.bawthub.com's NPM advanced_config,
+# TASK-902 — DRAFT ONLY. Add ONLY to the app host's NPM advanced_config,
 # preserving all existing fields/config. Do not put this in global server_proxy.conf.
+# Placeholders: LLM_BAWT_HOST (llm-bawt API host), <ID> (the NPM proxy-host id),
+# app.example.com (the public app hostname).
 # Backend checks SSO cookies itself for authorization; token/fulfillment use OAuth.
 # API 401s must remain 401s, not become inherited browser login redirects.
 location = /integrations/google-home/authorize {
@@ -10,12 +12,12 @@ location = /integrations/google-home/authorize {
     client_body_timeout 10s;
     limit_req zone=google_home_probe burst=10 nodelay;
     limit_req_status 429;
-    access_log /config/log/proxy-host-37_access.log google_home_probe;
+    access_log /config/log/proxy-host-<ID>_access.log google_home_probe;
     proxy_intercept_errors off;
-    proxy_pass http://10.0.0.101:8642;
+    proxy_pass http://LLM_BAWT_HOST:8642;
     proxy_http_version 1.1;
     proxy_set_header Connection "";
-    proxy_set_header Host app.bawthub.com;
+    proxy_set_header Host app.example.com;
     proxy_set_header X-Forwarded-Proto https;
     proxy_set_header X-Forwarded-For $remote_addr;
     proxy_set_header Authorization "";
@@ -35,12 +37,12 @@ location = /integrations/google-home/token {
     client_body_timeout 10s;
     limit_req zone=google_home_probe burst=10 nodelay;
     limit_req_status 429;
-    access_log /config/log/proxy-host-37_access.log google_home_probe;
+    access_log /config/log/proxy-host-<ID>_access.log google_home_probe;
     proxy_intercept_errors off;
-    proxy_pass http://10.0.0.101:8642;
+    proxy_pass http://LLM_BAWT_HOST:8642;
     proxy_http_version 1.1;
     proxy_set_header Connection "";
-    proxy_set_header Host app.bawthub.com;
+    proxy_set_header Host app.example.com;
     proxy_set_header X-Forwarded-Proto https;
     proxy_set_header X-Forwarded-For $remote_addr;
     proxy_set_header Cookie "";
@@ -57,12 +59,12 @@ location = /integrations/google-home/fulfillment {
     client_body_timeout 10s;
     limit_req zone=google_home_probe burst=10 nodelay;
     limit_req_status 429;
-    access_log /config/log/proxy-host-37_access.log google_home_probe;
+    access_log /config/log/proxy-host-<ID>_access.log google_home_probe;
     proxy_intercept_errors off;
-    proxy_pass http://10.0.0.101:8642;
+    proxy_pass http://LLM_BAWT_HOST:8642;
     proxy_http_version 1.1;
     proxy_set_header Connection "";
-    proxy_set_header Host app.bawthub.com;
+    proxy_set_header Host app.example.com;
     proxy_set_header X-Forwarded-Proto https;
     proxy_set_header X-Forwarded-For $remote_addr;
     proxy_set_header Cookie "";

@@ -23,7 +23,7 @@ Usage:
     python scripts/prefix_sizes.py /tmp/cachediag/<key>_turn001.txt
 
 Token estimate is chars/CHARS_PER_TOK (rough; JSON+English). For exact Anthropic
-counts, feed the text to the messages count_tokens endpoint — see --note.
+counts, feed the text to the Anthropic messages count_tokens endpoint.
 """
 from __future__ import annotations
 

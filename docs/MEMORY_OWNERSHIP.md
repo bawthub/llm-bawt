@@ -126,8 +126,9 @@ metadata, **not** an automatic archive restore: an operator must deliberately
 restore the chosen archive or re-run the reviewed activation procedure. Never
 silently reactivate using stale or merged archives.
 
-The obsolete `scripts/rebuild_profile.py` predates these APIs and is unsupported
-for owned-memory stores. Do not use it as an ownership migration or repair path.
+There is no profile rebuild script; the old `scripts/rebuild_profile.py` predated
+these APIs and was removed. Do not improvise one as an ownership migration or
+repair path.
 
 ## Verification map
 

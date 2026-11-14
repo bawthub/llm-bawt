@@ -13,6 +13,8 @@ x-agent-bridge-image: &agent-bridge-image
     args:
       BRIDGE_UID: ${BRIDGE_UID:-1000}
       BRIDGE_GID: ${BRIDGE_GID:-1000}
+      # The tenant's Bitwarden/Vaultwarden server; required at build time.
+      BW_SERVER_URL: ${BW_SERVER_URL:-}
   image: llm-bawt-agent-bridge
 
 services:
@@ -20,6 +22,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.app-cpu
+      args:
+        TZ: ${TZ:-UTC}
     # GPU removed (TASK-278): in-process local inference moved to the
     # local-model-bridge service, so the app reserves no GPU device, needs no
     # ipc:host (that existed only for the vLLM multiprocess shared-memory
@@ -374,6 +378,7 @@ services:
       args:
         WITH_CUDA: ${WITH_CUDA:-true}
         CUDA_ARCHS: ${CUDA_ARCHS:-120}
+        TZ: ${TZ:-UTC}
     image: llm-bawt-local-model-bridge
     container_name: llm-bawt-local-model-bridge
     command: ["python", "-m", "local_model_bridge"]
@@ -418,9 +423,10 @@ services:
       # vLLM hits "CUDA error: an illegal memory access" on load. See vLLM
       # issues #30707 / #35566.
       - FLASHINFER_CUDA_ARCH_LIST=12.0f
-      # sm_120 has no prebuilt FlashInfer sampling kernel and the runtime image
-      # has no C/CUDA toolchain to JIT-compile one (ninja build fails code=127).
-      # Use vLLM's native Torch sampler instead — no compile needed.
+      # sm_120 has no prebuilt FlashInfer sampling kernel, so FlashInfer would
+      # JIT-compile one on first use (the image ships gcc/g++ for Triton, but
+      # that sampler build has failed here with ninja code=127). Use vLLM's
+      # native Torch sampler instead — no compile needed.
       - VLLM_USE_FLASHINFER_SAMPLER=0
       # Reduce CUDA allocator fragmentation on the 16GB card (vLLM warmup OOM).
       - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
@@ -501,7 +507,8 @@ services:
       start_period: 180s
 
   playwright-mcp:
-    image: mcp/playwright
+    # Same pinned base as Dockerfile.playwright (the GPU override); bump both together.
+    image: mcp/playwright@sha256:8771dc4666e7c11440bfc6a0c6b00480e9a15b8891b45f29a52d7d995f8d1492
     container_name: llm-bawt-playwright-mcp
     # TASK-2072: init reaps orphaned Chrome children; .env memory cap, 0 = unlimited.
     init: true
@@ -531,7 +538,8 @@ services:
     restart: unless-stopped
 
   crawl4ai:
-    image: unclecode/crawl4ai:latest
+    # Pinned by digest (the image this deployment ran when pinned); bump deliberately.
+    image: unclecode/crawl4ai@sha256:385042cba2a216c257ccb77b0135dec5228ee25bf675edbc7487eb155bd5e644
     container_name: llm-bawt-crawl4ai
     ports:
       - "${CRAWL4AI_PORT:-11235}:11235"
@@ -558,10 +566,16 @@ services:
           echo "crawl4ai: no exported API token at /run/secrets/api_token; refusing to start" >&2
           exit 1
         fi
+        # Both patches must apply; an upstream layout change fails loudly
+        # instead of silently starting Redis without a writable dir.
         cp /app/supervisord.conf /tmp/supervisord.conf
         sed -i 's|command=/usr/bin/redis-server|command=/usr/bin/redis-server --dir /data|' /tmp/supervisord.conf
+        grep -q 'redis-server --dir /data' /tmp/supervisord.conf || {
+          echo "crawl4ai: supervisord.conf redis patch did not apply; upstream changed" >&2; exit 1; }
         cp /app/entrypoint.sh /tmp/entrypoint.sh
         sed -i 's|supervisord -c supervisord.conf|supervisord -c /tmp/supervisord.conf|' /tmp/entrypoint.sh
+        grep -q 'supervisord -c /tmp/supervisord.conf' /tmp/entrypoint.sh || {
+          echo "crawl4ai: entrypoint.sh supervisord patch did not apply; upstream changed" >&2; exit 1; }
         chmod +x /tmp/entrypoint.sh
         exec /tmp/entrypoint.sh
     restart: unless-stopped
