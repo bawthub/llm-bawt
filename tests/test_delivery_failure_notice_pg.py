@@ -56,7 +56,7 @@ def _origin(ctx, bot, *, status="archived"):
 
 
 @pytest.fixture
-def notices(gated):
+def notices(gated):  # noqa: F811 -- imported pytest fixture
     # The shared fixture removes source rows; notices are system-authored. This
     # module owns its entire private DB, so tracking the system sender is safe.
     gated.senders.append(SYSTEM_BOT_ID)
@@ -267,7 +267,10 @@ def test_executed_stop_audit_never_becomes_a_failure_restart_notice(notices, set
         """), {"id": claim.turn_id})
     assert TurnAbortCoordinator(notices.store).request(claim.turn_id, source="chat_stop", peer=None)
     if settlement == "failed":
-        assert notices.deliveries.mark_failed(source.id, "late worker error")
+        # A worker settles its owned claim; preclaim validation must not
+        # overwrite a claimed delivery merely by knowing its ID.
+        assert notices.deliveries.mark_failed(source.id, "late worker error") is None
+        assert notices.deliveries.fail_claim(source.id, claim.claim_token, "late worker error")
     elif settlement == "delivered":
         _delivered(notices, claim)
     else:

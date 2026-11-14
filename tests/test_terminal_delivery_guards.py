@@ -171,7 +171,7 @@ def test_hold_requeue_reclaim_and_consume_preserves_producer_assistant_id(protoc
     assert read(store.engine, claim.turn_id).terminal_protocol_state == "binding"
 
 
-@pytest.mark.parametrize("action", ["stop", "fail", "dead_letter", "withdraw"])
+@pytest.mark.parametrize("action", ["stop", "fail", "withdraw"])
 def test_terminal_producer_outcome_freezes_unconsumed_reservation(protocol_delivery, action):
     from llm_bawt.inter_bot_delivery_recovery import DeliveryLeaseRecovery
     from llm_bawt.service.turn_admission import revoke_reservation
@@ -182,8 +182,6 @@ def test_terminal_producer_outcome_freezes_unconsumed_reservation(protocol_deliv
         revoke_reservation(store.engine, claim.turn_id, disposition="user_stop", audit={"by": "test"})
     elif action == "fail":
         store.fail_claim(delivery.id, claim.claim_token, "pre-start failure")
-    elif action == "dead_letter":
-        store.mark_failed(delivery.id, "validation failed")
     else:
         with store.engine.begin() as conn:
             assert DeliveryLeaseRecovery.settle_withdrawn_turn(conn, claim.turn_id, cause="withdrawn")
@@ -192,6 +190,17 @@ def test_terminal_producer_outcome_freezes_unconsumed_reservation(protocol_deliv
     frozen = json.loads(row.terminal_snapshot_json)
     assert frozen["history_disposition"] == "unbound" and frozen["response_text"] == ""
     assert frozen["assistant_message_id"] == store.payload(delivery.id)["assistant_message_id"]
+
+
+def test_preclaim_dead_letter_cannot_freeze_a_claimed_reservation(protocol_delivery):
+    from tests.test_turn_terminal_protocol import read
+
+    store, delivery, claim, _ = protocol_delivery
+    before = read(store.engine, claim.turn_id).model_dump()
+    assert store.mark_failed(delivery.id, "late validation failure") is None
+    assert read(store.engine, claim.turn_id).model_dump() == before
+    current = store.get(delivery.id)
+    assert current.status == "DISPATCHING" and current.claim_token == claim.claim_token
 
 
 def test_legacy_overflow_retry_cannot_delete_a_protocol_outcome(delivery_store, monkeypatch):  # noqa: F811
