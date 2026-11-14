@@ -199,6 +199,32 @@ def _segment_mutates(words: list[str], depth: int) -> bool:
     return program == "git" and _git_subcommand(words) in MUTATING_GIT_SUBCOMMANDS
 
 
+def _substitution_end(command: str, start: int, closer: str) -> int:
+    """Index of the ``closer`` ending a substitution body (or ``len``).
+
+    Quotes, escapes and nested parentheses inside the body do not end it.
+    """
+    level, quote, j = 0, "", start
+    while j < len(command):
+        ch = command[j]
+        if ch == "\\" and quote != "'":
+            j += 2
+            continue
+        if quote:
+            if ch == quote:
+                quote = ""
+        elif ch in "'\"":
+            quote = ch
+        elif closer == ")" and ch == "(":
+            level += 1
+        elif ch == closer:
+            if not level:
+                return j
+            level -= 1
+        j += 1
+    return len(command)
+
+
 def _quoted_substitutions(command: str) -> list[str]:
     """Bodies of ``$(...)`` and backticks inside double quotes.
 
@@ -221,16 +247,9 @@ def _quoted_substitutions(command: str) -> list[str]:
         elif quote == '"' and (command.startswith("$(", i) or ch == "`"):
             start = i + (2 if ch == "$" else 1)
             closer = ")" if ch == "$" else "`"
-            level, j = 1, start
-            while j < len(command) and level:
-                if ch == "$" and command.startswith("$(", j):
-                    level += 1
-                    j += 1
-                elif command[j] == closer:
-                    level -= 1
-                j += 1
-            bodies.append(command[start:j - 1] if not level else command[start:])
-            i = j
+            j = _substitution_end(command, start, closer)
+            bodies.append(command[start:j])
+            i = j + 1
             continue
         i += 1
     return bodies
