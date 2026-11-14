@@ -134,6 +134,21 @@ def test_embedded_source_search_keeps_bound_authority_and_bot_policy(monkeypatch
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize("authority", [None, MemoryAuthority(user_id="synthetic-owner"),
+                                       MemoryAuthority(operator=True)])
+def test_maintenance_defers_backend_access_without_changing_authority(authority):
+    from llm_bawt.memory.maintenance import MemoryMaintenance
+    from llm_bawt.memory.ownership import NO_MEMORY_AUTHORITY
+
+    maint = MemoryMaintenance(backend=None, authority=authority)
+    assert maint.authority == (authority or NO_MEMORY_AUTHORITY)
+    assert maint.run(run_consolidation=False, run_recurrence_detection=False).errors == []
+    with pytest.raises(AttributeError):
+        _ = maint.ownership
+    maint.backend = SimpleNamespace(bot_id="synthetic-bot")
+    assert maint.ownership == maint.authority.scope("synthetic-bot")
+
+
 def test_authority_is_immutable_and_cannot_mix_operator_and_personal_modes():
     authority = MemoryAuthority(user_id="synthetic-owner")
     with pytest.raises(FrozenInstanceError):

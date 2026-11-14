@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from llm_bawt.memory.ownership import MemoryAuthority, NO_MEMORY_AUTHORITY
+from llm_bawt.memory.ownership import MemoryAuthority, MemoryOwnership, NO_MEMORY_AUTHORITY
 from llm_bawt.utils.error_text import safe_error_text
 
 from ..prompt_registry import get_prompt_resolver
@@ -96,7 +96,11 @@ class MemoryMaintenance:
         self.llm_client = llm_client
         self.config = config
         self.authority = authority or NO_MEMORY_AUTHORITY
-        self.ownership = self.authority.scope(backend.bot_id)
+
+    @property
+    def ownership(self) -> MemoryOwnership:
+        # Resolve only when an operation needs the backend, inside run's error boundary.
+        return self.authority.scope(self.backend.bot_id)
 
     def run(
         self,
