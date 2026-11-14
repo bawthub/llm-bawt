@@ -23,33 +23,38 @@ MUST_MATCH = frozenset({"claude-agent-sdk"})
 
 # Pre-existing drift as of TASK-1269: name -> (bridge constraint, uv.lock).
 # Shrink this as the app lock catches up. Never add an SDK from MUST_MATCH.
+# TASK-2305: each entry says why it is here. DIRECT entries are imported by
+# bridge code and are bumped in uv.lock next; the rest are transitive or not
+# loaded in the bridge and stay as named exceptions until their parent moves.
+# Classified against the running bridge on 2026-11-14 (import every
+# claude_code_bridge module, then map loaded modules to distributions).
 KNOWN_DRIFT = {
-    "annotated-doc": ("0.0.5", "0.0.4"),
-    "annotated-types": ("0.8.0", "0.7.0"),
-    "anyio": ("4.15.1", "4.12.1"),
-    "attrs": ("26.1.0", "25.4.0"),
-    "certifi": ("2026.7.22", "2026.2.25"),
-    "cffi": ("2.1.1", "2.0.0"),
-    "cryptography": ("50.0.1", "46.0.5"),
-    "fastapi": ("0.141.1", "0.135.1"),
-    "hiredis": ("3.4.2", "3.3.0"),
-    "jiter": ("0.17.0", "0.13.0"),
-    "openai": ("3.19.2", "2.24.0"),
-    "packaging": ("26.3", "26.0"),
-    "pillow": ("12.3.0", "12.1.1"),
-    "psycopg2-binary": ("2.9.13", "2.9.11"),
-    "pydantic": ("2.13.5", "2.12.5"),
-    "pydantic-core": ("2.46.5", "2.41.5"),
-    "pyjwt": ("2.15.0", "2.11.0"),
-    "python-multipart": ("0.0.32", "0.0.22"),
-    "redis": ("8.1.0", "7.2.1"),
-    "rpds-py": ("2026.6.3", "0.30.0"),
-    "sqlalchemy": ("2.1.1", "2.0.48"),
-    "sse-starlette": ("3.4.11", "3.3.2"),
-    "typing-inspection": ("0.4.4", "0.4.2"),
-    "typing-extensions": ("4.16.0", "4.15.0"),
-    "uvicorn": ("0.54.0", "0.41.0"),
-    "websockets": ("17.1", "16.0"),
+    "annotated-doc": ("0.0.5", "0.0.4"),  # transitive: fastapi
+    "annotated-types": ("0.8.0", "0.7.0"),  # transitive: pydantic
+    "anyio": ("4.15.1", "4.12.1"),  # DIRECT: imported by bridge code
+    "attrs": ("26.1.0", "25.4.0"),  # transitive: jsonschema/referencing (mcp)
+    "certifi": ("2026.7.22", "2026.2.25"),  # transitive: httpx/httpcore TLS roots
+    "cffi": ("2.1.1", "2.0.0"),  # transitive: cryptography
+    "cryptography": ("50.0.1", "46.0.5"),  # transitive: llm-bawt core imports it at bridge start
+    "fastapi": ("0.141.1", "0.135.1"),  # DIRECT: imported by bridge code
+    "hiredis": ("3.4.2", "3.3.0"),  # optional redis accelerator, loaded with redis
+    "jiter": ("0.17.0", "0.13.0"),  # transitive: openai response parsing
+    "openai": ("3.19.2", "2.24.0"),  # DIRECT: lazy imports in bridge proxy (chatgpt_transport, adapters.base)
+    "packaging": ("26.3", "26.0"),  # transitive: openai-codex; not loaded by bridge code
+    "pillow": ("12.3.0", "12.1.1"),  # llm-bawt requirement; not loaded by bridge code
+    "psycopg2-binary": ("2.9.13", "2.9.11"),  # llm-bawt requirement; not loaded by bridge code
+    "pydantic": ("2.13.5", "2.12.5"),  # transitive: fastapi/mcp/openai
+    "pydantic-core": ("2.46.5", "2.41.5"),  # transitive: pydantic
+    "pyjwt": ("2.15.0", "2.11.0"),  # transitive: mcp; not loaded by bridge code
+    "python-multipart": ("0.0.32", "0.0.22"),  # transitive: mcp
+    "redis": ("8.1.0", "7.2.1"),  # DIRECT: imported by bridge code
+    "rpds-py": ("2026.6.3", "0.30.0"),  # transitive: jsonschema/referencing (mcp)
+    "sqlalchemy": ("2.1.1", "2.0.48"),  # llm-bawt requirement; not loaded by bridge code
+    "sse-starlette": ("3.4.11", "3.3.2"),  # transitive: mcp
+    "typing-inspection": ("0.4.4", "0.4.2"),  # transitive: pydantic/fastapi/mcp
+    "typing-extensions": ("4.16.0", "4.15.0"),  # transitive: many
+    "uvicorn": ("0.54.0", "0.41.0"),  # DIRECT: imported by bridge code
+    "websockets": ("17.1", "16.0"),  # DIRECT: imported by bridge code
 }
 
 
