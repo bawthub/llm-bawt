@@ -235,6 +235,57 @@ Source may still change between reads or during later lazy imports; a completion
 recheck detects drift it sees, not every transient mutation. Pinned worktrees
 and stronger process/source custody remain separate work.
 
+### Other bind-mounted restarts and break-glass (TASK-1800)
+
+New guards also declare `source_repository` (`owner/repo`) and `source_branch`.
+Their tested revision must be **reachable from** that published canonical
+branch, not necessarily its current tip. The existing release verifier checks
+ancestry; forge/authentication/ambiguous-response failures refuse as
+`source_unverifiable`. A later HEAD change outside runtime paths remains allowed.
+The original five-field guard and its five-key binding remain compatible.
+
+A mixed-target restart can instead use:
+
+```json
+{"runtime_source": {"arg": "target", "targets": {
+  "source-container": {"project_dir": "...", "checker_image": "...",
+    "paths": ["src"], "mounts": {"/app/src": "src"}, "data_mounts": [],
+    "source_repository": "owner/repo", "source_branch": "main"},
+  "image-only-container": null
+}}}
+```
+
+`arg` must be the container/service selector argument. Its required string enum
+must exactly match the map. Only an explicit `null` exempts a target; unknown or
+missing classifications refuse. `expected_runtime_sha` remains declared with
+pattern `^[0-9a-f]{40}$`, but may be optional in this mixed schema so exempt targets
+need none. A selected source target still requires it at preparation.
+Classify every inspected mount destination individually, including workspace,
+credential, configuration and skills/hook destinations. Those executable
+configuration mounts are outside this runtime-code fence; they are not silently
+treated as reviewed code. A configured `PYTHONPATH` that could import from data
+mounts (including relative/empty entries) refuses.
+
+Extended schemas declare boolean `allow_dirty`, with default `false`. An
+explicit `true` waives only the dirty/unpublished-source policy: the sealed
+checker captures the actual regular-file Git blob hashes and executable modes,
+including ignored/untracked files and tracked deletions. No contents are stored.
+The capture is capped at 4096 files and 64 MiB of runtime bytes; exceeding either
+refuses, never truncates. Index flags, unsupported entries, unsafe bytecode,
+unclassified/changed mounts, target identity and post-approval drift still refuse.
+Inspected bytecode configuration is used for every target, including the backend.
+The card and worker receipt prominently say **BREAK-GLASS / UNTESTED**; the card
+lists dirty paths (or a counted remainder), publication state and captured tree
+identity. The worker rechecks that same actual tree before action and after
+health; break-glass never approves subsequent drift.
+
+All extended/map specs additionally require worker image capability
+`llm-bawt.ops.runtime-source-v2="1"`, so an older worker cannot run new semantics.
+Update the catalog through the configuration API only after matching code and
+worker adoption, preserving target/quiesce/approval/health settings. An activation
+hold remains a hold: TASK-1800 joins a planned app/reconciler restart and does not
+request a restart of its own.
+
 Activation order: publish/review/gate the source; build and pin the worker;
 reload the reconciler and app; then patch the live source-activating restart
 row's spec and required argument schema together. Preserve existing targeting,

@@ -243,18 +243,26 @@ class OpsService:
     def get_operation(self, slug):
         return self.store.get_operation_by_slug(slug)
 
-    def _check_source_published(self, commit: dict) -> None:
+    def _check_source_published(self, commit: dict, *, contains=False, allow_unpublished=False) -> bool:
         """TASK-1474: the app's checkout is clean at HEAD (the executor's sealed
         check); that HEAD must also be the published branch head, so a
         reconcile never runs code that exists only on this host."""
         try:
-            published = self._release_verifier.branch_head(commit["repository"], commit["branch"])
+            if contains:
+                published = self._release_verifier.branch_contains(
+                    commit["repository"], commit["branch"], commit["head"])
+                matches = published
+            else:
+                published = self._release_verifier.branch_head(commit["repository"], commit["branch"])
+                matches = published == commit["head"]
         except ReleaseVerificationError as exc:
             raise OpsDispatchError("source_unverifiable", f"source_unverifiable: {exc}") from exc
-        if published != commit["head"]:
+        if not matches and not allow_unpublished:
             raise OpsDispatchError("source_not_published", (
-                f"source_not_published: the checkout is at {commit['head'][:12]} but "
-                f"{commit['repository']} {commit['branch']} is at {published[:12]}; publish that commit first"))
+                f"source_not_published: commit {commit['head'][:12]} is not "
+                f"{'on' if contains else 'the tip of'} {commit['repository']} {commit['branch']}; "
+                "publish that commit first"))
+        return bool(matches)
 
     def _last_classification(self, operation_slug: str):
         """The trust classification the last successful run executed, or
@@ -396,6 +404,11 @@ class OpsService:
                 executor.check_target(spec, merged)
                 if "runtime_source" in spec:
                     snapshot["runtime_source"] = executor.runtime_source_approval(spec, merged)
+                    runtime = snapshot["runtime_source"]
+                    if runtime and "source_commit" in runtime:
+                        published = self._check_source_published(
+                            runtime["source_commit"], contains=True, allow_unpublished=runtime["allow_dirty"])
+                        runtime["publication"] = "published" if published else "unpublished"
                 if is_release_spec(spec):
                     snapshot["release_source"] = executor.approval_source(spec, merged)
             except ConfigCheckError as exc:  # TASK-1518: the release's deploy would refuse

@@ -87,6 +87,10 @@ class ReleaseVerifier(ABC):
         """The commit ``refs/heads/<branch>`` of ``repo`` names on the forge (TASK-1474)."""
         raise ReleaseVerificationError("this release verifier cannot read published branch heads")
 
+    def branch_contains(self, repo: str, branch: str, sha: str) -> bool:
+        """Whether the tested commit is published on the canonical branch."""
+        raise ReleaseVerificationError("this release verifier cannot verify published ancestry")
+
 
 def _stored_release_token() -> str:
     try:
@@ -141,11 +145,16 @@ class GitHubReleaseVerifier(ReleaseVerifier):
             raise ReleaseVerificationError("GitHub response too large")
         return status, location, body
 
-    def _json(self, path: str) -> dict:
-        status, _location, body = self._fetch(self.API + path)
+    def _json(self, path: str, *, missing_ok=False) -> dict | None:
+        status, _location, body = self._fetch(self.API + path, auth=bool(self._token))
+        if missing_ok and status == 404:
+            return None
         if status != 200:
             raise ReleaseVerificationError(f"GitHub GET {path.split('?')[0]} returned HTTP {status}")
-        return json.loads(body)
+        try:
+            return json.loads(body)
+        except ValueError as exc:
+            raise ReleaseVerificationError("GitHub response was not JSON") from exc
 
     def _artifact_receipt(self, repo: str, run_id: str, name: str, filename: str = RECEIPT_FILE) -> dict | None:
         """Return the named receipt, ``None`` if the run has no such artifact."""
@@ -222,6 +231,18 @@ class GitHubReleaseVerifier(ReleaseVerifier):
             raise ReleaseVerificationError(f"GitHub branch {branch} did not resolve to exactly one commit")
         return sha
 
+    def branch_contains(self, repo, branch, sha):
+        if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha):
+            raise ReleaseVerificationError("source_sha must be a full commit")
+        # Also validates repository/branch and resolves the current credential.
+        tip = self.branch_head(repo, branch)
+        if tip == sha:
+            return True
+        # The branch was positively resolved above. A missing compare here
+        # means this SHA is not published in this repository, not a waived
+        # network/authentication failure.
+        return self._branch_comparison(repo, sha, branch, missing_ok=True)[0]
+
     def _run(self, spec, run_id, event, workflow_path=None):
         """The pinned workflow's completed, successful run of ``event`` (one name
         or a tuple of accepted names) on the canonical branch."""
@@ -296,11 +317,23 @@ class GitHubReleaseVerifier(ReleaseVerifier):
         """Refuse unless ``branch`` contains ``sha``. Compared this way round the
         commit is the merge base and the commit is identical to or behind the
         branch, so the reply lists no commits or files and stays small."""
-        compare = self._json(f"/repos/{repo}/compare/{branch}...{sha}?per_page=1")
+        contains, status = self._branch_comparison(repo, sha, branch)
+        if not contains:
+            raise ReleaseVerificationError(f"source_sha {sha} is not on {branch} (compare status {status!r})")
+
+    def _branch_comparison(self, repo, sha, branch, *, missing_ok=False):
+        path = f"/repos/{repo}/compare/{branch}...{sha}?per_page=1"
+        compare = self._json(path, missing_ok=True) if missing_ok else self._json(path)
+        if compare is None:
+            return False, "missing"
+        if not isinstance(compare, dict) or not isinstance(compare.get("merge_base_commit"), dict):
+            raise ReleaseVerificationError("GitHub compare did not resolve commit ancestry")
         status = compare.get("status")
         base = (compare.get("merge_base_commit") or {}).get("sha")
-        if status not in ("identical", "behind") or base != sha:
-            raise ReleaseVerificationError(f"source_sha {sha} is not on {branch} (compare status {status!r})")
+        if status not in ("identical", "behind", "ahead", "diverged") or not re.fullmatch(
+                r"[0-9a-f]{40}", base or ""):
+            raise ReleaseVerificationError("GitHub compare did not resolve commit ancestry")
+        return status in ("identical", "behind") and base == sha, status
 
     def verify(self, spec, args):
         _require_args(args, _VERIFIER_ARGS)

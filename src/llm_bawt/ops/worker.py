@@ -31,7 +31,7 @@ if __package__:
     from .image_deploy import IMAGE_ACTIONS, ImageDeployer
     from .plan_reconcile import ACTION as PLAN_ACTION, PlanReconciler
     from .restart_health import has_health, wait_healthy
-    from .runtime_source import verify_runtime_source
+    from .runtime_source import selected_runtime_spec, verify_runtime_source
     from . import sequence
     from . import wake_on_lan
     from .routing_reconcile import ACTION as ROUTING_ACTION, RoutingReconciler
@@ -47,7 +47,7 @@ else:  # pragma: no cover - standalone worker image
     from image_deploy import IMAGE_ACTIONS, ImageDeployer
     from plan_reconcile import ACTION as PLAN_ACTION, PlanReconciler
     from restart_health import has_health, wait_healthy
-    from runtime_source import verify_runtime_source
+    from runtime_source import selected_runtime_spec, verify_runtime_source
     import sequence
     import wake_on_lan
     from routing_reconcile import ACTION as ROUTING_ACTION, RoutingReconciler
@@ -202,9 +202,12 @@ class DockerAPI:
         action = spec["action"]
         container_id = quote(container["Id"], safe="")
         grace = spec.get("stop_grace_seconds", 10)
-        if "runtime_source" in spec:
+        guarded = selected_runtime_spec(spec, args) is not None
+        if guarded:
             verified = verify_runtime_source(self, runtime_snapshot, container, tag=tag)
             receipt["runtime_source"] = verified
+            if verified.get("allow_dirty"):
+                receipt["runtime_source_warning"] = "BREAK-GLASS / UNTESTED runtime source"
         if action == "pull":
             image = container["Config"]["Image"]
             path = "/images/create?" + urlencode({"fromImage": image})
@@ -222,12 +225,14 @@ class DockerAPI:
         if has_health(spec):
             # TASK-1697: Docker accepting the restart is not the service being up.
             done += "; " + wait_healthy(self, container_id, spec, clock=self.clock, sleep=self.sleep)
-        if "runtime_source" in spec:
+        if guarded:
             after = self.request("GET", f"/containers/{container_id}/json")
             receipt["runtime_source_after"] = verify_runtime_source(self, runtime_snapshot, after, tag=tag)
             done += (f"; expected_runtime_sha={verified['expected_runtime_sha']}"
                      f"; observed_head={verified['observed_head']}"
                      f"; runtime_tree_hash={verified['runtime_tree_hash']}")
+            if verified.get("allow_dirty"):
+                done += "; BREAK-GLASS / UNTESTED runtime source"
         return done
 
 

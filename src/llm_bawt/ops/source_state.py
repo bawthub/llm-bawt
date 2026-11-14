@@ -38,6 +38,7 @@ import hashlib
 import json
 import posixpath
 import re
+import stat
 
 if __package__:
     from .compose_render import ComposeError, SAFE_PATH
@@ -190,6 +191,8 @@ PRODUCT_ENV = {
 def reserved_env_name(name: str) -> bool:
     return name in PRODUCT_ENV or name in RESERVED_ENV or name.startswith(RESERVED_PREFIXES)
 HASH_CHUNK = 256
+MAX_CAPTURE_FILES = 4096
+MAX_CAPTURE_BYTES = 64 * 1024 * 1024
 _REGULAR = ("100644", "100755")
 _GIT_ENV = ["GIT_CONFIG_NOSYSTEM=1", "HOME=/nonexistent", "XDG_CONFIG_HOME=/nonexistent",
             "GIT_LITERAL_PATHSPECS=1", "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0",
@@ -375,7 +378,7 @@ class SourceChecker:
         except SealedRunError as exc:
             raise SourceStateError("source_unverifiable", detail=f"sealed git {exc.kind}") from None
 
-    def check_revision(self, project_dir: str, plan: dict, revision: str) -> dict:
+    def check_revision(self, project_dir: str, plan: dict, revision: str, *, allow_dirty=False) -> dict:
         """Verify only runtime paths against a tested revision, not mutable HEAD.
 
         Non-runtime changes (for example tests) do not invalidate a restart.
@@ -385,15 +388,16 @@ class SourceChecker:
             raise SourceStateError("source_unverifiable", detail="expected revision must be a full SHA")
         try:
             with self.sealed.session(env=list(_GIT_ENV), directory=project_dir) as run:
-                return _Steps(run, project_dir, plan, revision=revision).verify()
+                return _Steps(run, project_dir, plan, revision=revision, allow_dirty=allow_dirty).verify()
         except SealedRunError as exc:
             raise SourceStateError("source_unverifiable", detail=f"sealed git {exc.kind}") from None
 
 
 class _Steps:
-    def __init__(self, run, project_dir: str, plan: dict, *, revision=None):
+    def __init__(self, run, project_dir: str, plan: dict, *, revision=None, allow_dirty=False):
         self.run, self.project, self.plan = run, project_dir, plan
         self.revision = revision
+        self.allow_dirty = allow_dirty
         self.base = ["git", "-c", f"safe.directory={project_dir}", "-c", "core.fsmonitor=false",
                      "-c", "core.ignoreStat=false", "-c", "core.untrackedCache=false",
                      "-c", "core.checkStat=default", "-c", "core.trustctime=true",
@@ -428,10 +432,12 @@ class _Steps:
                                   head, "--", *scoped, fresh=True))
                  if self.revision else
                  _records(self.git("status", "--porcelain=v2", "-z", "--untracked-files=no", fresh=True)))
-        if dirty:
+        if dirty and not self.allow_dirty:
             raise SourceStateError("source_dirty", dirty if self.revision else _status_names(dirty))
-        others = [] if not paths else _records(self.git("ls-files", "-z", "--others", "--directory",
-                                                        "--no-empty-directory", "--", *paths, fresh=True))
+        others = [] if not paths else _records(self.git(
+            "ls-files", "-z", "--others",
+            *([] if self.allow_dirty else ["--directory", "--no-empty-directory"]),
+            "--", *paths, fresh=True))
         cache = [p for p in others if PYCACHE_DIR in p.split("/")]
         # --directory collapses a retired package to e.g. src/oldpkg/, hiding
         # whether it holds only ignored __pycache__ files or real stray source.
@@ -444,7 +450,7 @@ class _Steps:
                 if members and all(PYCACHE_DIR in p.split("/") for p in members):
                     cache.append(directory)
         stray = [p for p in others if p not in cache]
-        if stray:
+        if stray and not self.allow_dirty:
             raise SourceStateError("source_untracked", stray)
         if cache and not self.plan["bytecode_ok"]:
             # Python would load a forged .pyc whose header matches its source.
@@ -461,6 +467,8 @@ class _Steps:
         if odd:
             raise SourceStateError("source_unsupported_entry", odd)
         expected = {**blobs, **tracked}
+        if self.allow_dirty:
+            return self._capture(head, observed_head, expected, stray, scoped)
         changed = []
         names = sorted(expected)
         for i in range(0, len(names), HASH_CHUNK):
@@ -476,6 +484,51 @@ class _Steps:
             return {"expected_runtime_sha": head, "observed_head": observed_head,
                     "runtime_tree_hash": hashlib.sha256(identity).hexdigest()}
         return head
+
+    def _capture(self, head, observed_head, expected, stray, scoped):
+        """Bind actual regular-file hashes/modes, never their contents.
+
+        Only the dirty/untracked policy is waived. Index flags, mount structure,
+        bytecode and unsupported entries still fail above or here.
+        """
+        deleted = set(_records(self.git(
+            "diff", "--no-ext-diff", "--no-textconv", "--diff-filter=D",
+            "--name-only", "-z", head, "--", *scoped, fresh=True)))
+        names = sorted((set(expected) | set(stray)) - deleted)
+        if len(set(expected) | set(stray)) > MAX_CAPTURE_FILES:
+            raise SourceStateError("source_capture_limit", detail=f"more than {MAX_CAPTURE_FILES} files")
+        manifest, size = {}, 0
+        for i in range(0, len(names), HASH_CHUNK):
+            chunk = names[i:i + HASH_CHUNK]
+            code, out, _err = self.run(["stat", "-c", "%f %s", "--", *chunk], [])
+            rows = out.decode("ascii", "replace").splitlines()
+            if code or len(rows) != len(chunk):
+                raise SourceStateError("source_unverifiable", detail="runtime file metadata unavailable")
+            modes = []
+            for path, row in zip(chunk, rows):
+                try:
+                    mode, length = row.split()
+                    mode, length = int(mode, 16), int(length)
+                except ValueError:
+                    raise SourceStateError("source_unverifiable", detail="runtime file metadata invalid") from None
+                if not stat.S_ISREG(mode) or length < 0:
+                    raise SourceStateError("source_unsupported_entry", [path])
+                modes.append("100755" if mode & stat.S_IXUSR else "100644")
+                size += length
+            if size > MAX_CAPTURE_BYTES:
+                raise SourceStateError("source_capture_limit", detail=f"more than {MAX_CAPTURE_BYTES} runtime bytes")
+            hashes = self.git("hash-object", "--no-filters", "--", *chunk).decode("ascii", "replace").splitlines()
+            if len(hashes) != len(chunk) or not all(SHA.fullmatch(value) for value in hashes):
+                raise SourceStateError("source_unverifiable", detail="runtime file hashes invalid")
+            manifest.update({path: [mode, digest] for path, mode, digest in zip(chunk, modes, hashes)})
+        changed = sorted(path for path in set(expected) | set(manifest)
+                         if list(expected.get(path, ())) != manifest.get(path))
+        identity = json.dumps(sorted(manifest.items()), separators=(",", ":")).encode()
+        return {
+            "expected_runtime_sha": head, "observed_head": observed_head,
+            "runtime_tree_hash": hashlib.sha256(identity).hexdigest(),
+            "runtime_manifest": manifest, "dirty_paths": changed,
+        }
 
     def _tree(self, head: str, paths: list, *, recursive: bool = True) -> dict:
         """``{path: (mode, blob sha)}`` of HEAD under ``paths``."""

@@ -46,7 +46,8 @@ from .routing_reconcile import (ACTION as ROUTING_ACTION, WORKER_CAPABILITY_LABE
                                 routing_binding, validate_routing_spec)
 from .source_state import SourceChecker
 from .runtime_source import (WORKER_CAPABILITY_LABEL as RUNTIME_SOURCE_LABEL, bind_runtime_source,
-                             validate_runtime_source)
+                             EXTENDED_CAPABILITY_LABEL as RUNTIME_SOURCE_V2_LABEL,
+                             extended_runtime_source, selected_runtime_spec, validate_runtime_source)
 from .tagged_config_reconcile import (ACTION as TAGGED_CONFIG_ACTION, TAGGED_GUARD_LABEL, needs_tagged_guard_worker,
                                       source_guarded, tagged_config_binding, validate_tagged_spec)
 from .validation import canonical_json
@@ -93,6 +94,8 @@ def spec_capability_labels(spec: dict) -> tuple[str, ...]:
         labels.append(sequence.WORKER_CAPABILITY_LABEL)
     if "runtime_source" in spec:
         labels.append(RUNTIME_SOURCE_LABEL)
+        if extended_runtime_source(spec):
+            labels.append(RUNTIME_SOURCE_V2_LABEL)
     if "health_probe" in spec:
         labels.append(HEALTH_PROBE_LABEL)
     config = spec.get("compose_config") or {}
@@ -694,6 +697,8 @@ class DockerExecutor(Executor):
 
     def runtime_source_approval(self, spec, args):
         self._check_spec_capabilities(self.execution_settings(spec), spec)
+        if selected_runtime_spec(spec, args) is None:
+            return None
         name, filters = target_selector(spec, args)
         try:
             if name is not None:

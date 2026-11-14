@@ -18,6 +18,8 @@ COPY src/llm_bawt/ops/worker.py src/llm_bawt/ops/image_deploy.py src/llm_bawt/op
 LABEL llm-bawt.ops.wake-on-lan="1"
 LABEL llm-bawt.ops.operation-sequence="1"
 LABEL llm-bawt.ops.runtime-source="1"
+# TASK-1800: classified restart targets, published tested SHAs, pinned dirty capture.
+LABEL llm-bawt.ops.runtime-source-v2="1"
 LABEL llm-bawt.ops.routing-reconcile="1"
 # TASK-1518: this worker renders the target's Compose service, reconciles its
 # configuration and refuses a deploy over configuration drift.

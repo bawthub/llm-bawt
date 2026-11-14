@@ -366,10 +366,8 @@ class OpsStore:
         for key in ("container_name_from_arg", "compose_service_from_arg"):
             if key in spec and schema.get("properties", {}).get(spec[key], {}).get("type") != "string":
                 raise ValueError(f"{key} must reference a declared string argument")
-        if "runtime_source" in spec and (
-                schema.get("properties", {}).get("expected_runtime_sha", {}).get("type") != "string"
-                or "expected_runtime_sha" not in schema.get("required", [])):
-            raise ValueError("runtime_source requires a declared, required expected_runtime_sha string argument")
+        from .runtime_source import validate_runtime_args
+        validate_runtime_args(spec, schema)
         if spec["action"] == REMOVE_ACTION:
             # TASK-1439 T2c: the row's args enum is the removal allowlist.
             validate_remove_schema(spec, schema)

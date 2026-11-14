@@ -90,6 +90,9 @@ def card_lines(snapshot: Mapping[str, Any], *, self_target: bool = False) -> lis
         lines.append(SELF_TARGET_CARD_LINE)
     runtime = snapshot.get("runtime_source")
     if runtime:
+        if runtime.get("allow_dirty"):
+            lines.append("BREAK-GLASS / UNTESTED: allow_dirty=true; approved actual runtime bytes, "
+                         "not a tested-tree guarantee.")
         lines.extend([
             f"Tested runtime revision: {runtime['expected_runtime_sha']}",
             f"Observed checkout HEAD: {runtime['observed_head']}",
@@ -97,6 +100,16 @@ def card_lines(snapshot: Mapping[str, Any], *, self_target: bool = False) -> lis
             "Runtime bytes and source mounts are rechecked immediately before restart; "
             "changed runtime source refuses with tree_changed. Non-runtime changes are allowed.",
         ])
+        if "publication" in runtime:
+            lines.append(f"Tested revision publication: {runtime['publication']}")
+        if runtime.get("allow_dirty"):
+            dirty = runtime["dirty_paths"]
+            # Names are untrusted display text, not markdown or terminal control.
+            shown = ["".join(c if c.isascii() and (c.isalnum() or c in "._/-") else "?"
+                             for c in path)[:200] for path in dirty[:20]]
+            lines.append(f"Dirty runtime files ({len(dirty)} total): " + (", ".join(shown) or "none"))
+            if len(dirty) > len(shown):
+                lines.append(f"{len(dirty) - len(shown)} additional dirty runtime files recorded in the binding.")
     return lines
 
 

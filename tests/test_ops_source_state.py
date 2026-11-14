@@ -82,14 +82,15 @@ class GitDocker:
     def _run(self, record):
         body = self.containers[record["container"]]["body"]
         argv = record["Cmd"]
-        assert argv[0] == "git"
+        assert argv[0] in ("git", "stat")
         self.argv.append(argv)
         env = {}
         for item in [*body["Env"], *record["Env"]]:
             name, _, value = item.partition("=")
             env[name] = value.replace("/tmp/", f"{self.scratch}/")  # the container's tmpfs
         env["PATH"] = os.environ.get("PATH", "/usr/bin:/bin")  # the image's PATH
-        proc = subprocess.run([GIT, *argv[1:]], cwd=body["WorkingDir"], env=env, capture_output=True,
+        program = GIT if argv[0] == "git" else shutil.which("stat")
+        proc = subprocess.run([program, *argv[1:]], cwd=body["WorkingDir"], env=env, capture_output=True,
                               check=False, timeout=60)
         record["code"] = proc.returncode
         return _frame(1, proc.stdout) + _frame(2, proc.stderr)
@@ -145,6 +146,74 @@ def commit(repo, message="change"):
     git(repo, "add", "-A")
     git(repo, "commit", "-q", "-m", message)
     return git(repo, "rev-parse", "HEAD").strip()
+
+
+def capture_dirty(repo, tmp_path, **overrides):
+    scratch = tmp_path / "dirty-scratch"
+    scratch.mkdir(exist_ok=True)
+    api = GitDocker(scratch)
+    head = git(repo, "rev-parse", "HEAD").strip()
+    try:
+        return SourceChecker(api, IMAGE, tag="dirty").check_revision(
+            str(repo), plan(**overrides), head, allow_dirty=True)
+    finally:
+        assert api.containers == {}
+
+
+@pytest.mark.parametrize("change", ["tracked", "deleted", "untracked", "ignored", "mode"])
+def test_dirty_capture_freezes_actual_regular_file_modes_and_hashes(repo, tmp_path, change):
+    module = repo / "src/pkg/module.py"
+    path = "src/pkg/module.py"
+    if change == "tracked":
+        module.write_text("VALUE = 2\n")
+    elif change == "deleted":
+        module.unlink()
+    elif change in ("untracked", "ignored"):
+        path = f"src/{change}.py"
+        (repo / path).write_text("VALUE = 3\n")
+        if change == "ignored":
+            (repo / ".git/info/exclude").write_text(path + "\n")
+    else:
+        module.chmod(0o755)
+    result = capture_dirty(repo, tmp_path)
+    assert result["dirty_paths"] == [path]
+    if change == "deleted":
+        assert path not in result["runtime_manifest"]
+    else:
+        mode, digest = result["runtime_manifest"][path]
+        assert mode == ("100755" if change == "mode" else "100644")
+        assert digest == git(repo, "hash-object", "--no-filters", "--", path).strip()
+    assert capture_dirty(repo, tmp_path) == result
+    (repo / "server.sh").write_text("#!/bin/sh\nchanged\n")
+    assert capture_dirty(repo, tmp_path)["runtime_tree_hash"] != result["runtime_tree_hash"]
+
+
+@pytest.mark.parametrize("change,code", [
+    ("symlink", "source_unsupported_entry"),
+    ("index-flags", "source_index_flags"),
+    ("bytecode", "source_bytecode_unsafe"),
+])
+def test_dirty_capture_does_not_waive_structural_or_bytecode_refusals(repo, tmp_path, change, code):
+    module = repo / "src/pkg/module.py"
+    if change == "symlink":
+        module.unlink()
+        module.symlink_to(repo / "server.sh")
+    elif change == "index-flags":
+        git(repo, "update-index", "--assume-unchanged", "src/pkg/module.py")
+    else:
+        (module.parent / "__pycache__").mkdir()
+        (module.parent / "__pycache__/module.pyc").write_bytes(b"cache")
+    with pytest.raises(SourceStateError, match=code):
+        capture_dirty(repo, tmp_path)
+
+
+@pytest.mark.parametrize("limit", ["MAX_CAPTURE_FILES", "MAX_CAPTURE_BYTES"])
+def test_dirty_capture_refuses_above_explicit_limits(repo, tmp_path, monkeypatch, limit):
+    from llm_bawt.ops import source_state
+
+    monkeypatch.setattr(source_state, limit, 1)
+    with pytest.raises(SourceStateError, match="source_capture_limit"):
+        capture_dirty(repo, tmp_path)
 
 
 # ── clean and the sealed container ──────────────────────────────────────────
