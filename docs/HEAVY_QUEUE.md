@@ -74,9 +74,10 @@ the image or task-local, and nothing that needs the network or an external
 service. It is not a full-unit or full-gate environment. The stock house image
 in particular lacks the frozen project lock and memory extra, the offline
 tokenizer cache, a local `redis-server` and a worktree's Git common directory,
-so the whole llm-bawt unit partition fails there for environment reasons. Do not
-read such a run as a product verdict, and do not patch images per task to chase
-parity.
+so it cannot support the full llm-bawt unit partition. A full run there is
+dominated by failures from those missing prerequisites, which masks whatever
+else fails, so it is neither a pass nor a usable product verdict. Do not patch
+images per task to chase parity.
 
 When an owner genuinely needs a full pre-check, the integrator runs one solo
 host `make gate` on the reviewed tip. A passing receipt for that exact SHA
