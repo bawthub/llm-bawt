@@ -105,7 +105,7 @@ class ReleaseRun(SQLModel, table=True):
     deploy_job_id: str | None = Field(default=None, sa_column=Column(String(64), nullable=True, index=True))
     # Pump throttle (many status readers, one cheap GitHub poll per interval)
     # and the deadline of the current phase (correlation, rerun registration,
-    # deploy-approval expiry, deploy-preparation retry window).
+    # build/receipt retrieval, deploy-approval expiry, deploy-preparation retry).
     next_check_at: datetime | None = Field(
         default=None, sa_column=Column(DateTime(timezone=True), nullable=True, index=True)
     )

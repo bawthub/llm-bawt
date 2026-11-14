@@ -222,6 +222,9 @@ class ReleaseCoordinator:
             # Reads after dispatch: GitHub being unreachable/forbidden does not
             # change what already happened remotely. Retry until the phase
             # deadline, then declare the outcome unknown.
+            # The handler may have persisted a new phase deadline before a
+            # later read failed (notably rerun registration -> receipt fetch).
+            row = self.releases.get(row.id) or row
             deadline = _aware(row.phase_deadline_at)
             if deadline is not None and self._clock() >= deadline:
                 return self._end(row, token, RELEASE_LOST, f"github_{exc.code}"[:64], str(exc))
@@ -291,10 +294,14 @@ class ReleaseCoordinator:
                              detail={"run_ids": [str(r.get("id")) for r in runs][:10]})
         if len(runs) == 1:
             run = runs[0]
+            attempt = int(run.get("run_attempt") or 1)
+            plan["confirmed_build_attempt"] = attempt
+            build_started = _parse_time(run.get("run_started_at")) or _parse_time(run.get("created_at")) or started
             self._move(row, token, RELEASE_BUILDING, "release.run_correlated",
                        detail={"run_id": str(run.get("id")), "url": run.get("html_url")},
-                       github_run_id=str(run["id"]), github_run_attempt=int(run.get("run_attempt") or 1),
-                       github_run_url=run.get("html_url") or None, phase_deadline_at=None,
+                       github_run_id=str(run["id"]), github_run_attempt=attempt,
+                       github_run_url=run.get("html_url") or None, release_plan_json=plan,
+                       phase_deadline_at=min(build_started, self._clock()) + BUILD_WINDOW,
                        error_code=None, error_text=None)
             return 0
         if self._clock() >= _aware(row.phase_deadline_at):
@@ -305,20 +312,48 @@ class ReleaseCoordinator:
     # ── building / partial ───────────────────────────────────────────────
     def _building(self, row: ReleaseRun, token: str, snapshot: dict) -> float:
         now = self._clock()
+        plan = _loads(row.release_plan_json)
+        expected = int(row.github_run_attempt or 1)
+        deadline = _aware(row.phase_deadline_at)
+        # Older initial builds cleared their deadline; restore a durable bound
+        # before any read, so an outage cannot leave them polling forever.
+        if deadline is None:
+            started = _aware(row.dispatch_started_at) or _aware(row.created_at)
+            deadline = started + (RERUN_REGISTRATION_WINDOW if row.rerun_count else BUILD_WINDOW)
+            row = self._note(row, token, "release.deadline_recovered", phase_deadline_at=deadline)
         run = self.gateway.get_run(row.github_repository, row.github_run_id)
         attempt = int(run.get("run_attempt") or 1)
-        expected = int(row.github_run_attempt or 1)
         if attempt < expected:
             return self._await_rerun(row, token, run)
-        if attempt > expected:
-            row = self._note(row, token, "release.attempt_adopted",
-                             {"from": expected, "to": attempt}, github_run_attempt=attempt)
+        if plan.get("confirmed_build_attempt") != attempt:
+            if row.rerun_count and plan.get("confirmed_build_attempt") is None:
+                # GitHub can retain an earlier attempt's start time. A new
+                # attempt's budget must not predate its durable rerun intent.
+                started = deadline - RERUN_REGISTRATION_WINDOW
+                remote_started = _parse_time(run.get("run_started_at"))
+                if remote_started is not None:
+                    started = max(started, remote_started)
+            elif attempt > expected:
+                started = _parse_time(run.get("run_started_at")) or now
+            else:
+                started = deadline - BUILD_WINDOW
+            deadline = min(started, now) + BUILD_WINDOW
+            plan["confirmed_build_attempt"] = attempt
+            event = "release.attempt_adopted" if attempt > expected else "release.build_attempt_confirmed"
+            row = self._note(row, token, event, {"from": expected, "to": attempt},
+                             github_run_attempt=attempt, release_plan_json=plan,
+                             phase_deadline_at=deadline)
+        # Always read once even past the deadline: a completed run may have
+        # succeeded while this coordinator was down. Never repeat a mutation.
         if run.get("status") != "completed":
-            run_started = _parse_time(run.get("run_started_at")) or _parse_time(run.get("created_at"))
-            if run_started is not None and now - run_started > BUILD_WINDOW:
+            if now >= deadline:
                 return self._end(row, token, RELEASE_LOST, "build_timeout",
                                  f"run attempt {attempt} not completed within {BUILD_WINDOW}")
             return POLL_BUILD
+        completed = _parse_time(run.get("updated_at"))
+        if completed is not None and completed + RECEIPT_GRACE > deadline:
+            deadline = completed + RECEIPT_GRACE
+            row = self._note(row, token, "release.receipt_grace", phase_deadline_at=deadline)
         conclusion = run.get("conclusion")
         try:
             receipt = self.gateway.download_release_receipt(row.github_repository, row.github_run_id, attempt)
@@ -383,7 +418,10 @@ class ReleaseCoordinator:
             return self._end(row, token, RELEASE_LOST, "partial_rerun_exhausted",
                              f"run {row.github_run_id} still partial after {row.rerun_count} re-runs")
         now = self._clock()
+        plan = _loads(row.release_plan_json)
+        plan.pop("confirmed_build_attempt", None)
         row = self._move(row, token, RELEASE_BUILDING, "release.rerun_intent",
+                         release_plan_json=plan,
                          detail={"attempt": int(row.github_run_attempt or 1) + 1},
                          rerun_count=int(row.rerun_count or 0) + 1,
                          github_run_attempt=int(row.github_run_attempt or 1) + 1,
