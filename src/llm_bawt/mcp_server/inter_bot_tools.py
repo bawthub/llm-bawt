@@ -18,7 +18,9 @@ from llm_bawt.bot_types import normalize_bot_type
 from .bot_access_deliveries import ScopedDeliveryReader
 from .delivery_receipt_compact import compact_send_receipt
 from llm_bawt.inter_bot_send_targets import SelectorError
-from .inter_bot_fanout import selector_error, send_batch, single_explicit_target
+from .inter_bot_fanout import (
+    selector_error, send_batch, send_outcome_unknown, single_explicit_target, uncertain_receipt,
+)
 from .inter_bot_send_mode import (
     STEER_ONLY, STEER_OR_IDLE, WHEN_IDLE, SendMode, SendModeError,
     require_one_recipient, resolve_send_mode,
@@ -322,6 +324,9 @@ async def _enqueue_durable(
             refused.update(detail, error=str(detail["message"]), error_code=detail.get("error"))
         return refused
     except Exception as exc:
+        if send_outcome_unknown(exc):
+            return uncertain_receipt(exc, idempotency_key, queued=None, delivery=delivery_name,
+                                     bot_id=target_bot_id, sender=sender_bot_id)
         return {
             "success": False,
             "queued": False,
@@ -525,8 +530,9 @@ async def send_message_to_bot(
                 **({"steer_only": True} if mode.steer_only else {}),
                 **durable_kwargs,
             )
-        return compact_send_receipt({**receipt, "mode": mode.label,
-                "dispatched": bool(receipt.get("delivery_id"))})
+        dispatched = (None if receipt.get("outcome") == "uncertain"
+                      else bool(receipt.get("delivery_id")))
+        return compact_send_receipt({**receipt, "mode": mode.label, "dispatched": dispatched})
 
     ceiling = _compat_hook(
         "_bot_send_wait_ceiling_seconds", _bot_send_wait_ceiling_seconds
@@ -564,7 +570,8 @@ async def send_message_to_bot(
             }
         receipt = await enqueue(prefer_steer=False, **durable_kwargs)
         if not receipt.get("delivery_id"):
-            return {**receipt, "mode": mode.label, "dispatched": False, **clamp}
+            dispatched = None if receipt.get("outcome") == "uncertain" else False
+            return {**receipt, "mode": mode.label, "dispatched": dispatched, **clamp}
     else:
         receipt = {**existing, "duplicate": True}
 

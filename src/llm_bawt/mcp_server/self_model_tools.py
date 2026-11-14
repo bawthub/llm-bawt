@@ -291,6 +291,9 @@ async def self_model(
             "status": receipt.get("status"),
             "delivery": "when_idle",
         }
+    elif receipt.get("outcome") == "uncertain":
+        result["continue"] = {"queued": None, "outcome": "uncertain",
+                              "error": receipt.get("error"), "note": receipt.get("note")}
     else:
         result["continue"] = {"queued": False, "error": receipt.get("error") or "delivery not queued"}
     return result

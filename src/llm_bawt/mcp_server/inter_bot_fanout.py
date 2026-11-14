@@ -68,6 +68,30 @@ def compact_batch_receipt(result: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+#: Failures raised before the request left this process: nothing was sent.
+_NOT_SENT = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout, httpx.UnsupportedProtocol)
+
+
+def send_outcome_unknown(exc: BaseException) -> bool:
+    """True when the route may have accepted the send before ``exc``.
+
+    A read timeout, dropped connection or unreadable response comes after the
+    request was written, so the delivery may exist; reporting it as not
+    dispatched invites a duplicate retry under a new key (TASK-2238).
+    """
+    return not isinstance(exc, _NOT_SENT)
+
+
+def uncertain_receipt(exc: BaseException, key: str | None, **extra: Any) -> dict[str, Any]:
+    """Receipt for a send whose acceptance is unknown: never claims non-dispatch."""
+    advice = ("retry with the SAME idempotency_key; it reattaches if the first send was accepted"
+              if key else "check bots_deliveries_list before sending again")
+    return {"success": False, "dispatched": None, "outcome": "uncertain",
+            **({"idempotency_key": key} if key else {}), **extra,
+            "error": str(exc) or exc.__class__.__name__,
+            "note": f"The send may have been accepted; {advice}."}
+
+
 def selector_error(exc: SelectorError, sender_bot_id: str) -> dict[str, Any]:
     return {"success": False, "dispatched": False, "error": str(exc), "sender": sender_bot_id}
 
@@ -92,16 +116,26 @@ async def send_batch(
         "mode": mode.delivery,
         "reply_mode": mode.label,
     }
+    key = fields.get("idempotency_key")
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 f"{base_url}/v1/inter-bot-deliveries/batch", json=body,
                 headers=with_sender_turn(), timeout=60.0,
             )
-            data = response.json()
     except Exception as exc:
+        if send_outcome_unknown(exc):
+            return uncertain_receipt(exc, key, mode=mode.delivery)
         return {"success": False, "dispatched": False, "mode": mode.delivery,
                 "error": str(exc) or exc.__class__.__name__}
+    try:
+        data = response.json()
+    except Exception as exc:
+        # An unreadable 4xx is a refusal; anything else may follow acceptance.
+        if 400 <= response.status_code < 500:
+            return {"success": False, "dispatched": False, "mode": mode.delivery,
+                    "error": response.text[:500] or str(exc), "status_code": response.status_code}
+        return uncertain_receipt(exc, key, mode=mode.delivery, status_code=response.status_code)
     if isinstance(data, dict) and "batch_id" in data:
         return compact_batch_receipt({**data, "success": bool(data.get("dispatched")),
                                       "status_code": response.status_code})
