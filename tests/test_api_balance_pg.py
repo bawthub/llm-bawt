@@ -114,18 +114,26 @@ def test_xai_manual_anchor_recounts_charges_from_provider_mode(rig, monkeypatch)
     from types import SimpleNamespace
 
     adapter = usage.get_adapter("xai")
-    monkeypatch.setattr(adapter, "_management_connection", lambda: None)
-    rig[1].set_anchor("xai", Decimal("100"))
-    monkeypatch.setattr(adapter, "_management_connection", lambda: SimpleNamespace())
-    _turn(rig, _usage(7, path={"key": "xai-chat"}))
-    _turn(rig, _usage(None, path={"key": "xai-responses"}))
-    assert rig[1].read("xai").spent_usd == 0
-    monkeypatch.setattr(adapter, "_management_connection", lambda: None)
-    first = adapter.anchored_balance_row(rig[1])
-    second = adapter.anchored_balance_row(rig[1])
-    assert (first.spent_usd, first.unpriced_turns) == (Decimal(7), 1)
-    assert (second.spent_usd, second.unpriced_turns) == (Decimal(7), 1)
-    assert anchored_balance(second, None)[0].remaining_usd == 93
+    # Patch the class: restoring a bound method on this registered singleton
+    # would leave an instance override that shadows later class-level fixtures.
+    with monkeypatch.context() as scoped:
+        scoped.setattr(type(adapter), "_management_connection", lambda self: None)
+        rig[1].set_anchor("xai", Decimal("100"))
+        scoped.setattr(type(adapter), "_management_connection", lambda self: SimpleNamespace())
+        _turn(rig, _usage(7, path={"key": "xai-chat"}))
+        _turn(rig, _usage(None, path={"key": "xai-responses"}))
+        assert rig[1].read("xai").spent_usd == 0
+        scoped.setattr(type(adapter), "_management_connection", lambda self: None)
+        first = adapter.anchored_balance_row(rig[1])
+        second = adapter.anchored_balance_row(rig[1])
+        assert (first.spent_usd, first.unpriced_turns) == (Decimal(7), 1)
+        assert (second.spent_usd, second.unpriced_turns) == (Decimal(7), 1)
+        assert anchored_balance(second, None)[0].remaining_usd == 93
+
+    assert "_management_connection" not in vars(adapter)
+    with monkeypatch.context() as scoped:
+        scoped.setattr(type(adapter), "_management_connection", lambda self: None)
+        assert adapter.balance_mode == "anchor"
 
 
 def test_open_turn_usage_is_not_charged_until_the_turn_ends(rig):
