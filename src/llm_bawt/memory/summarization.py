@@ -758,19 +758,9 @@ def summarize_session_with_llm(
         data = response.json()
         content = data.get("content", "").strip()
         
-        # Check for error responses that got saved as content
-        error_indicators = [
-            "Error:",
-            "exception occurred",
-            "exceed context window",
-            "tokens exceed",
-            "CUDA error",
-            "out of memory",
-        ]
-        for indicator in error_indicators:
-            if indicator.lower() in content.lower():
-                logger.error(f"LLM returned error in content: {content[:100]}...")
-                return None
+        if _summary_is_error(content):
+            logger.error(f"LLM returned error in content: {content[:100]}...")
+            return None
         
         return content
     except httpx.HTTPStatusError as e:
@@ -801,8 +791,8 @@ def summary_system_prompt(config: Any | None = None, *, bot_id: str | None = Non
         scope_type="bot" if bot_id else "global", scope_id=bot_id,
     )
 
-# Substrings that mean the "summary" is really an error message that leaked
-# into the completion body — never persist those as a summary.
+# Leading failure markers, not arbitrary mentions: valid summaries often
+# discuss exceptions, context limits or CUDA failures that were fixed.
 _SUMMARY_ERROR_INDICATORS = (
     "error:",
     "exception occurred",
@@ -811,6 +801,10 @@ _SUMMARY_ERROR_INDICATORS = (
     "cuda error",
     "out of memory",
 )
+
+
+def _summary_is_error(content: str) -> bool:
+    return content.lower().startswith(_SUMMARY_ERROR_INDICATORS)
 
 
 def summarize_session_with_client(
@@ -869,8 +863,7 @@ def summarize_session_with_client(
     content = (response or "").strip()
     if not content:
         return None
-    lower = content.lower()
-    if any(ind in lower for ind in _SUMMARY_ERROR_INDICATORS):
+    if _summary_is_error(content):
         logger.error(f"LLM returned error in content: {content[:100]}...")
         return None
     return content

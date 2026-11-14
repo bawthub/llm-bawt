@@ -10,6 +10,7 @@ from sqlmodel import SQLModel, create_engine
 
 from llm_bawt.memory.summarization import (
     Session,
+    compress_structured_summary_text,
     is_summary_low_quality,
     summarize_session_with_client,
     summarize_session_with_llm,
@@ -83,6 +84,49 @@ def test_single_summary_and_system_use_bot_scope_with_global_fallback(resolver, 
     assert system.startswith(f"{label}:history.summarization.system")
     assert user.startswith(f"{label}:history.summarization.single")
     assert "Keep API config and TASK-1234." in user
+
+
+@pytest.mark.parametrize("path", ["client", "http", "route"])
+@pytest.mark.parametrize("content,accepted", [
+    ("Summary: Fixed KeyError: missing session after a configuration change.", True),
+    ("Summary: Diagnosed CUDA error: out of memory and reduced the batch size.", True),
+    ("Summary: The exception occurred during startup; the patch fixed it.", True),
+    ("Summary: Checked whether tokens exceed the configured budget.", True),
+    ("Summary: Requests can exceed context window limits; split the input.", True),
+    ("Error: model unavailable", False),
+    ("  CUDA error: out of memory  ", False),
+    ("Exception occurred while loading the model", False),
+    ("Tokens exceed the configured context", False),
+    ("Exceed context window", False),
+    ("Out of memory", False),
+])
+def test_summary_error_mentions_are_not_provider_failures(resolver, monkeypatch, path, content, accepted):
+    seed(resolver)
+    if path == "client":
+        client = MagicMock()
+        client.query.return_value = content
+        result = summarize_session_with_client(session(), client)
+    elif path == "http":
+        post = MagicMock()
+        post.return_value.json.return_value = {"content": content}
+        monkeypatch.setattr("llm_bawt.memory.summarization.httpx.post", post)
+        result = summarize_session_with_llm(session())
+    else:
+        client = MagicMock()
+        client.query.return_value = content
+        config = SimpleNamespace(
+            SUMMARIZATION_QUALITY_RETRY=False,
+            resolve_summarization_job=lambda: {"model": "fixture-model"},
+            get_model_context_window=lambda alias: 32000,
+            get_model_max_tokens=lambda alias: 4096,
+        )
+        service = SimpleNamespace(config=config, _get_background_client=lambda **kw: (client, "fixture-model"))
+        summarize, _batch, _chunk = history_summaries._build_summary_callable(service, "scoped-bot")
+        result = summarize(session())
+    expected = content.strip() if accepted else None
+    if path == "route" and accepted:
+        expected = compress_structured_summary_text(expected, source_session=session())
+    assert result == expected
 
 
 @pytest.mark.parametrize("bot_id,label", [("scoped-bot", "BOT"), ("other-bot", "GLOBAL")])

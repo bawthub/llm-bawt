@@ -44,6 +44,7 @@ def _build_summary_callable(service, bot_id: str, user_id: str = "system", model
     """Create a summarization callable using the service's model resolution path."""
     from ...memory.summarization import (
         _extract_json_object,
+        _summary_is_error,
         compress_structured_summary_text,
         format_session_for_summarization,
         is_summary_low_quality,
@@ -140,8 +141,7 @@ def _build_summary_callable(service, bot_id: str, user_id: str = "system", model
             )
             if not response:
                 return None
-            error_indicators = ["Error:", "exception occurred", "exceed context window", "tokens exceed"]
-            if any(indicator.lower() in response.lower() for indicator in error_indicators):
+            if _summary_is_error(response.strip()):
                 log.error(f"LLM returned error: {response[:100]}...")
                 return None
             response_text = compress_structured_summary_text(response.strip(), source_session=session)

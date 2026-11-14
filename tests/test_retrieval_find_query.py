@@ -79,3 +79,28 @@ def test_ladder_words():
     assert [(r.name, r.need) for r in ladder(parse("stop OR start"), ("stop", "start"), ())] == [
         ("words", 1)]
     assert ladder(parse("the and"), (), ()) == ()
+
+
+@pytest.mark.parametrize("wanted,other", [
+    ("TASK-1281", "TASK-1282"),
+    ("messages_search_all", "messages_search_none"),
+    ("deployBridge", "deployBroken"),
+    ("src/llm_bawt/recall.py", "src/llm_bawt/retrieval.py"),
+    ("54386cc0", "54386c99"),
+    ("press the stop", "press the start"),
+])
+def test_snippet_preserves_full_identifier_and_phrase_matching(wanted, other):
+    from llm_bawt.retrieval.find import snippet
+
+    content = other + " unrelated context" * 30 + " " + wanted.upper() + " retained details"
+    excerpt, matched = snippet(content, (wanted,), 100)
+    assert wanted.upper() in excerpt and matched == [wanted]
+    _, absent = snippet(other, (wanted,), 100)
+    assert absent == []
+
+
+def test_snippet_keeps_prefix_matching_for_ordinary_stemmed_words():
+    from llm_bawt.retrieval.find import snippet
+
+    excerpt, matched = snippet("Earlier context. Deployment completed.", ("deployments",), 100)
+    assert "Deployment" in excerpt and matched == ["deployments"]

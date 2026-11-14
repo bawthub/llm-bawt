@@ -276,6 +276,10 @@ def _collapse(rows: Iterable[dict] | None, n: int,
 
 
 def _probe(term: str) -> str:
+    # Exact identifiers and quoted phrases must not match a different task,
+    # path or symbol merely because their first few characters coincide.
+    if parse(term).exact or any(char.isspace() for char in term):
+        return term.lower()
     return term.lower()[:max(4, min(len(term), 6))]
 
 
