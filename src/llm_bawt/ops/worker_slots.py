@@ -9,7 +9,10 @@ same transaction as each transition that commits a job to execution:
 - the quiesce driver's open step, before any hold opens (``waiting_slot``).
 
 A job that takes a slot records ``worker_slot_at``; it holds the slot while it
-is QUIESCING, DISPATCHING, ACCEPTED or RUNNING, and frees it by going terminal.
+is QUIESCING, DISPATCHING, ACCEPTED or RUNNING, and normally frees it by going
+terminal. The exception is a slot-reserved gate (``gate-custody:`` unit): it
+keeps counting in any state, terminal included, until its durable retirement
+stamp (``gate_retired_at``) is set; see ``UNRETIRED_GATE_SLOT``.
 A respawn (S4d) is the same job and takes no new slot. Isolated jobs are not in
 the ops service's process tree and are never counted; per-operation
 ``max_concurrent`` applies in both modes, unchanged.

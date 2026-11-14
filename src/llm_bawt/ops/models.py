@@ -1,6 +1,6 @@
 """Operation catalog + job ledger SQLModel tables (TASK-639).
 
-Two tables:
+Three tables:
 
 * ``ops_operations`` — operator-configured operations. ``slug`` is the
   stable identifier the agent references via ``ops_run(operation=slug, ...)``.
@@ -13,7 +13,10 @@ Two tables:
   Carries caller context (bot / user / turn / approval request) for audit
   and for the continuation dispatcher.
 
-Both tables live in the same ``askllm`` DB served by the shared
+* ``ops_operation_revisions`` — append-only full catalog history: one
+  snapshot per operation version, including enable/delete and attribution.
+
+All three tables live in the same ``askllm`` DB served by the shared
 :func:`~llm_bawt.utils.db.get_shared_engine` pool.
 """
 
@@ -137,8 +140,8 @@ class OpsOperation(SQLModel, table=True):
         default=False,
         sa_column=Column(Boolean, nullable=False, server_default="false", index=True),
     )
-    # Only docker is implemented. Extra executor kinds land alongside
-    # their implementation modules.
+    # ``docker`` (EXECUTOR_DOCKER) or ``release`` (EXECUTOR_RELEASE, see
+    # release_executor.py). New kinds land alongside their implementation.
     executor_kind: str = Field(
         default=EXECUTOR_DOCKER,
         sa_column=Column(String(32), nullable=False),
