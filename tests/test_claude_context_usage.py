@@ -133,17 +133,14 @@ def test_cumulative_only_usage_does_not_claim_resident_context():
     assert "resident_source" not in usage
 
 
-def test_interrupted_done_event_carries_partial_usage():
+def test_interrupted_usage_carries_partial_snapshot():
     harness = _Harness()
 
-    seq, usage = harness._publish_interrupted_done(
-        request_id="req-interrupted",
-        session_key="snark:nick",
-        seq=7,
-        text="partial answer",
+    usage = harness._compute_interrupted_usage(
         actual_model="openai_chatgpt/gpt",
         model="openai_chatgpt/gpt",
         bot_context_window=372000,
+        compact_threshold=None,
         latest_assistant_usage={
             "input_tokens": 10,
             "cache_read_input_tokens": 90,
@@ -152,16 +149,11 @@ def test_interrupted_done_event_carries_partial_usage():
         latest_stream_usage=None,
     )
 
-    assert seq == 8
-    event = harness.events[-1][3]
-    assert event["kind"] == AgentEventKind.ASSISTANT_DONE
-    assert event["text"] == "partial answer"
-    assert event["token_usage"] == usage
     assert usage["resident_tokens"] == 100
     assert usage["usage_status"] == "partial"
 
 
-def test_native_context_usage_overrides_resident_not_cost_accounting():
+def test_result_usage_keeps_cost_accounting_and_turn_totals():
     harness = _Harness()
     msg = SimpleNamespace(
         usage={
@@ -198,13 +190,6 @@ def test_native_context_usage_overrides_resident_not_cost_accounting():
         },
         latest_stream_usage=None,
         cost_baseline_usd=0.0,
-        native_context_usage={
-            "totalTokens": 90,
-            "maxTokens": 100,
-            "percentage": 90.0,
-            "isAutoCompactEnabled": True,
-            "autoCompactThreshold": 95,
-        },
         compact_status=None,
         compact_error_msg=None,
         turn_session_id="sdk-1",
@@ -217,13 +202,9 @@ def test_native_context_usage_overrides_resident_not_cost_accounting():
     event = harness.events[-1][3]
     assert event["kind"] == AgentEventKind.ASSISTANT_DONE
     usage = event["token_usage"]
-    assert usage["resident_tokens"] == 90
-    assert usage["context_window"] == 100
-    assert usage["resident_source"] == "claude_sdk_context"
     assert usage["cache_read_tokens"] == 2000
     assert usage["total_cost_usd"] is None  # unpriced proxy, not CLI fallback pricing
     assert usage["session_cost_usd"] == 1.25  # raw ledger preserved for audit
-    assert usage["auto_compact_enabled"] is True
     # TASK-1961: whole-turn totals ride beside the final-request numbers.
     assert usage["turn_request_totals"]["requests"] == 3
     assert usage["input_tokens"] == 1000
@@ -254,7 +235,6 @@ def test_successful_compact_persists_lifecycle_in_usage(monkeypatch):
         latest_assistant_usage=None,
         latest_stream_usage=None,
         cost_baseline_usd=0.0,
-        native_context_usage={"totalTokens": 250, "maxTokens": 372000},
         compact_status="success",
         compact_error_msg=None,
         turn_session_id="sdk-compact",
@@ -289,7 +269,6 @@ def test_successful_compact_without_metadata_still_records_the_boundary(monkeypa
         latest_assistant_usage=None,
         latest_stream_usage=None,
         cost_baseline_usd=0.0,
-        native_context_usage={"totalTokens": 250, "maxTokens": 372000},
         compact_status="success",
         compact_error_msg=None,
         turn_session_id="sdk-compact",
@@ -299,7 +278,6 @@ def test_successful_compact_without_metadata_still_records_the_boundary(monkeypa
     assert usage["context_action"] == "compact"
     assert usage["context_action_outcome"] == "success"
     assert "context_action_post_tokens" not in usage
-    assert usage["resident_source"] == "claude_sdk_context"
 
 
 def test_context_breakdown_keeps_bounded_facts_not_raw_payloads():

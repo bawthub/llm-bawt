@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from claude_code_bridge.send_preflight import prepare_send
+from tests.bridge_send_helpers import prepare_send
 from claude_code_bridge.session_ops import ClaudeSessionMixin
 
 

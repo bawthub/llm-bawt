@@ -290,10 +290,10 @@ class RedisSubscriber(CommandPublisherMixin):
         """Publish an approval.grant command so a bridge allows ONE gated call.
 
         Sent when a user approves a policy-gated tool (TASK-292). The bridge
-        stores ``grant_key`` in an in-memory grant set (with ``ttl_seconds``
-        expiry); when the model re-issues the identical tool call on the
-        continuation turn the bridge computes the same key, finds the grant,
-        consumes it, and allows the call exactly once. Fire-and-forget.
+        activates its pending approval record for ``request_id`` (the approval's
+        tool-use ID) in that session, with ``ttl_seconds`` expiry capped at
+        600 s. Only the server-owned continuation request can consume it, once,
+        for the identical call. Fire-and-forget.
         """
         fields: dict = {
             "action": "approval.grant",

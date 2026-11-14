@@ -18,7 +18,7 @@ from sqlmodel import SQLModel, create_engine
 from claude_code_bridge.bootstrap import _ensure_compact_hook
 from claude_code_bridge.compact_hook import guidance_for_hook
 from claude_code_bridge.compact_prompt_lookup import COMPACT_PROMPT_KEY, fetch_compact_prompt
-from claude_code_bridge.send_preflight import prepare_send
+from tests.bridge_send_helpers import prepare_send
 from llm_bawt.chat_prompt_defaults import COMPACT_SUMMARY_DEFAULT
 from llm_bawt.prompt_registry import (
     PromptResolver, PromptTemplate, PromptTemplateStore, PromptTemplateVersion,

@@ -1,6 +1,6 @@
 """Tests for the claude-code bridge approval gate decision logic (TASK-292).
 
-Exercises the bridge's _decide_approval / grant store / _evaluate_tool_gate
+Exercises the bridge's _decide_approval / grant store / _evaluate_tool_gate_hook
 against injected policy bundles and grants — no Redis, SDK import, app/DB
 import, or HTTP. AST extraction executes the production mixin with only
 stdlib dependencies and inert permission-result stand-ins.
@@ -140,60 +140,6 @@ def test_grant_one_shot_and_expiry():
     assert not b._consume_grant("k2", session_key="s", request_id=_continuation("tuid-2"))
     # An expired activation cannot be refreshed by delayed delivery.
     assert not b._grant_approval("k2", 600, session_key="s", request_id="tuid-2")
-
-
-def test_gate_allow_deny_require_emits_event():
-    _skip_if_no_sdk()
-    b = _bridge()
-
-    class Ctx:
-        tool_use_id = "tuid-1"
-
-    captured: list[dict] = []
-    b._publish_event = lambda *a, **k: captured.append(k)  # type: ignore[assignment]
-    seq = [0]
-
-    async def gate(cmd):
-        return await b._evaluate_tool_gate("Bash", {"command": cmd}, Ctx(), "req", "sess", seq)
-
-    assert isinstance(asyncio.run(gate("ls")), PermissionResultAllow)
-    assert isinstance(asyncio.run(gate("dd of=/dev/sda")), PermissionResultDeny)
-    assert isinstance(asyncio.run(gate("rm -rf /home/x")), PermissionResultDeny)
-    assert captured[-1]["kind"].value == "approval_required"
-    assert captured[-1]["tool_use_id"] == "tuid-1"
-    assert captured[-1]["extra_raw"]["grant_key"]
-
-
-def test_gate_granted_reissue_allows():
-    _skip_if_no_sdk()
-    b = _bridge()
-
-    class Ctx:
-        tool_use_id = "tuid-1"
-
-    b._publish_event = lambda *a, **k: None  # type: ignore[assignment]
-    gk = b._decide_approval("Bash", {"command": "rm -rf /home/x"}).grant_key
-    _grant(b, gk)
-
-    async def gate():
-        return await b._evaluate_tool_gate("Bash", {"command": "rm -rf /home/x"}, Ctx(), _continuation(), "s", [0])
-
-    assert isinstance(asyncio.run(gate()), PermissionResultAllow)
-
-
-def test_gate_fail_closed_denies_when_unreachable():
-    _skip_if_no_sdk()
-    b = _bridge()
-    b._approval_fail_closed = True
-    b._policy_fetch_ok = False
-
-    class Ctx:
-        tool_use_id = "t"
-
-    async def gate():
-        return await b._evaluate_tool_gate("Bash", {"command": "ls"}, Ctx(), "r", "s", [0])
-
-    assert isinstance(asyncio.run(gate()), PermissionResultDeny)
 
 
 def _hook_decision(out: dict) -> str | None:
@@ -465,42 +411,37 @@ def test_invalid_ttl_and_expired_pending_authority_fail_closed():
 
 
 def test_live_hook_exact_reissue_and_hard_deny_wins():
-    for hook_gate in (True, False):
-        b = _bridge()
-        b._policy_bundle = PolicyBundle(version=1, etag="all", policies=[
-            ApprovalPolicy(id="all", tool_name="Bash", matcher_type=MatcherType.ALWAYS),
-        ])
-        events = []
-        b._publish_event = lambda *a, **kw: events.append(kw)
-        original = {"command": "rm -rf /home/x", "timeout": 100}
+    b = _bridge()
+    b._policy_bundle = PolicyBundle(version=1, etag="all", policies=[
+        ApprovalPolicy(id="all", tool_name="Bash", matcher_type=MatcherType.ALWAYS),
+    ])
+    events = []
+    b._publish_event = lambda *a, **kw: events.append(kw)
+    original = {"command": "rm -rf /home/x", "timeout": 100}
 
-        def gate(arguments, request="origin", session="s", cwd="/repo"):
-            if hook_gate:
-                hook = b._make_pre_tool_use_hook(request_id=request, session_key=session, seq_holder=[0])
-                result = asyncio.run(hook({"tool_name": "Bash", "tool_input": arguments, "cwd": cwd}, "tuid-1", {}))
-                return _hook_decision(result) != "deny"
-            result = asyncio.run(b._evaluate_tool_gate("Bash", arguments, types.SimpleNamespace(tool_use_id="tuid-1"),
-                                                      request, session, [0], cwd=cwd))
-            return isinstance(result, PermissionResultAllow)
+    def gate(arguments, request="origin", session="s", cwd="/repo"):
+        hook = b._make_pre_tool_use_hook(request_id=request, session_key=session, seq_holder=[0])
+        result = asyncio.run(hook({"tool_name": "Bash", "tool_input": arguments, "cwd": cwd}, "tuid-1", {}))
+        return _hook_decision(result) != "deny"
 
-        assert not gate(original)
-        gk = events[-1]["extra_raw"]["grant_key"]
-        assert b._grant_approval(gk, 600, session_key="s", request_id="tuid-1")
-        assert not gate(original, request="unrelated")
-        assert not gate(original, request=_continuation(), session="other")
-        assert not gate(original, request=_continuation(), cwd="/elsewhere")
-        assert not gate({**original, "timeout": 101}, request=_continuation())
-        assert not gate({**original, "command": "rm  -rf /home/x"}, request=_continuation())
-        b._policy_bundle.policies.insert(0, ApprovalPolicy(id="hard", order=0, tool_name="Bash",
-            matcher_type=MatcherType.ALWAYS, action=PolicyAction.DENY))
-        assert not gate(original, request=_continuation())
-        assert b._pending_approvals[("s", "tuid-1")].state == "granted"
-        b._policy_bundle.policies.pop(0)
-        assert gate(original, request=_continuation())
-        # TASK-1095: the hook path then stamps the real execution start.
-        tail = [AgentEventKind.TOOL_PREAPPROVED] + ([AgentEventKind.TOOL_EXECUTING] if hook_gate else [])
-        assert [e["kind"] for e in events[-len(tail):]] == tail
-        assert not gate(original, request=_continuation())
+    assert not gate(original)
+    gk = events[-1]["extra_raw"]["grant_key"]
+    assert b._grant_approval(gk, 600, session_key="s", request_id="tuid-1")
+    assert not gate(original, request="unrelated")
+    assert not gate(original, request=_continuation(), session="other")
+    assert not gate(original, request=_continuation(), cwd="/elsewhere")
+    assert not gate({**original, "timeout": 101}, request=_continuation())
+    assert not gate({**original, "command": "rm  -rf /home/x"}, request=_continuation())
+    b._policy_bundle.policies.insert(0, ApprovalPolicy(id="hard", order=0, tool_name="Bash",
+        matcher_type=MatcherType.ALWAYS, action=PolicyAction.DENY))
+    assert not gate(original, request=_continuation())
+    assert b._pending_approvals[("s", "tuid-1")].state == "granted"
+    b._policy_bundle.policies.pop(0)
+    assert gate(original, request=_continuation())
+    # TASK-1095: the hook path then stamps the real execution start.
+    tail = [AgentEventKind.TOOL_PREAPPROVED, AgentEventKind.TOOL_EXECUTING]
+    assert [e["kind"] for e in events[-len(tail):]] == tail
+    assert not gate(original, request=_continuation())
 
 
 def test_legacy_stored_key_cannot_authorize_exact_pending_invocation():

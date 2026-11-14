@@ -278,7 +278,7 @@ def test_successful_compaction_reports_turn_delta_not_session_total(monkeypatch)
         latest_assistant_usage=None,
         latest_stream_usage=None,
         cost_baseline_usd=5.00,
-        native_context_usage=None,
+       
         compact_status="success",
         compact_error_msg=None,
         turn_session_id=SID,

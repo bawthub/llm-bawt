@@ -155,10 +155,6 @@ class WorkerLiveness:
         stop = self._stops_by_tool.get(attempt or "")
         return stop if stop is not None and stop.task_id == task_id else None
 
-    def stop_for_task(self, task_id: str | None) -> WorkerStop | None:
-        """The bridge stop of the task's *current* attempt, if any."""
-        return self._stop_of(self.attempt_for(task_id), task_id)
-
     def stop_for_tool(self, tool_use_id: str | None) -> WorkerStop | None:
         return self._stops_by_tool.get(tool_use_id or "")
 

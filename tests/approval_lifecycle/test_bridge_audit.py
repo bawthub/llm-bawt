@@ -15,7 +15,7 @@ from llm_bawt.agent_backends import agent_bridge as backend_module
 from llm_bawt.service.routes import approval_policies as routes
 
 
-def event_from_gate(*, hook=True, command="dd of=/dev/sda token=DO_NOT_LOG"):
+def event_from_gate(*, command="dd of=/dev/sda token=DO_NOT_LOG"):
     bridge = _bridge()
     events = []
     def publish(request_id, session_key, seq, **kw):
@@ -27,21 +27,17 @@ def event_from_gate(*, hook=True, command="dd of=/dev/sda token=DO_NOT_LOG"):
         ))
     bridge._publish_event = publish
     args = ("Bash", {"command": command, "secret": "DO_NOT_LOG"})
-    if hook:
-        asyncio.run(bridge._evaluate_tool_gate_hook(*args, "tool-1", "req-1", "session-1", [0]))
-    else:
-        asyncio.run(bridge._evaluate_tool_gate(*args, SimpleNamespace(tool_use_id="tool-1"), "req-1", "session-1", [0]))
+    asyncio.run(bridge._evaluate_tool_gate_hook(*args, "tool-1", "req-1", "session-1", [0]))
     return events[0]
 
 
-@pytest.mark.parametrize("hook", [True, False])
 @pytest.mark.parametrize("command,action,policy", [
     ("ls", "allow", None), ("rm -rf /tmp/safe/x", "allow", "allow1"),
     ("dd of=/dev/sda token=DO_NOT_LOG", "deny", "deny1"),
     ("rm -rf /home/x", "require_approval", "req1"),
 ])
-def test_bridge_event_redacted_and_committed(store, hook, command, action, policy):
-    event = AgentEvent.from_dict(event_from_gate(hook=hook, command=command).to_dict())
+def test_bridge_event_redacted_and_committed(store, command, action, policy):
+    event = AgentEvent.from_dict(event_from_gate(command=command).to_dict())
     assert event.kind == AgentEventKind.APPROVAL_DECISION
     assert event.tool_arguments is None
     assert "DO_NOT_LOG" not in json.dumps(event.to_dict())

@@ -125,8 +125,7 @@ class ClaudeCodeBridge(
         )
         # When the app is unreachable, fail OPEN by default (allow tools) so a
         # transient app blip never halts every agent. Set 1/true to fail CLOSED
-        # (deny gated tools when policies can't be fetched). Non-gated tools are
-        # unaffected either way — only tools a (cached) policy gates are denied.
+        # (deny every tool, gated or not, while the policy fetch is failing).
         self._approval_fail_closed: bool = os.getenv(
             "CLAUDE_CODE_APPROVAL_FAIL_CLOSED", ""
         ).strip().lower() in ("1", "true", "yes")

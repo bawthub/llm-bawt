@@ -200,100 +200,6 @@ class ClaudeApprovalMixin:
                 action=PolicyAction.DENY, subject="Invalid tool invocation identity",
             )
 
-    async def _evaluate_tool_gate(
-        self,
-        tool_name: str,
-        tool_input: dict,
-        ctx: ToolPermissionContext,
-        request_id: str,
-        session_key: str,
-        seq_holder: list[int],
-        *,
-        cwd: str | None = None,
-    ):
-        """Permission decision for a non-question tool (TASK-292).
-
-        Returns a PermissionResult. On require_approval (no live grant) emits an
-        APPROVAL_REQUIRED event and returns a deferred deny so the turn ends
-        cleanly — the user's decision arrives as a continuation turn.
-        """
-        await self._get_policy_bundle()
-
-        # Fail-closed: the app is unreachable AND the operator chose safety over
-        # availability → deny every tool until policies can be fetched again.
-        if self._approval_fail_closed and not self._policy_fetch_ok:
-            logger.warning(
-                "Approval fail-closed: policies unreachable, denying %s", tool_name
-            )
-            self._emit_approval_decision(
-                ApprovalDecision(action=PolicyAction.DENY, subject=""),
-                tool_name, (ctx.tool_use_id or "").strip(),
-                request_id, session_key, seq_holder, outcome="policy_unavailable",
-            )
-            return PermissionResultDeny(
-                message=(
-                    "[Tool execution is paused: the approval-policy service is "
-                    "unreachable and this bridge is configured fail-closed. "
-                    "Acknowledge and end your turn.]"
-                ),
-                interrupt=False,
-            )
-
-        decision = self._decide_approval(tool_name, tool_input, cwd=cwd)
-        self._emit_approval_decision(
-            decision, tool_name, (ctx.tool_use_id or "").strip(),
-            request_id, session_key, seq_holder,
-        )
-
-        if decision.action is PolicyAction.ALLOW:
-            return PermissionResultAllow()
-
-        if decision.action is PolicyAction.DENY:
-            logger.info(
-                "Tool DENIED by policy %s: %s %r",
-                getattr(decision.policy, "id", "?"), tool_name, decision.subject[:80],
-            )
-            return PermissionResultDeny(
-                message=(
-                    f"[This action is blocked by an approval policy and cannot be "
-                    f"run: {decision.subject[:200]}. Do not retry it. Continue "
-                    f"without it or explain what you need.]"
-                ),
-                interrupt=False,
-            )
-
-        # ---- require_approval ----
-        if self._consume_grant(
-            decision.grant_key, session_key=session_key, request_id=request_id,
-        ):
-            logger.info(
-                "Tool ALLOWED by prior approval grant: %s %r",
-                tool_name, decision.subject[:80],
-            )
-            # TASK-305: mark this re-attempt as pre-approved so the UI can show
-            # the gold/lock affordance on the exact card that ran with prior
-            # authorization. The bridge is the single source of truth for this.
-            self._emit_tool_preapproved(
-                decision, tool_name, (ctx.tool_use_id or "").strip(),
-                request_id, session_key, seq_holder,
-            )
-            return PermissionResultAllow()
-
-        tool_use_id = (ctx.tool_use_id or "").strip()
-        if not tool_use_id:
-            # No id → app can't key a persistent request; defer cleanly anyway.
-            logger.warning(
-                "Approval-gated %s with no tool_use_id — deferring without persistence",
-                tool_name,
-            )
-            return PermissionResultDeny(message=self._APPROVAL_PENDING_ACK, interrupt=False)
-
-        self._emit_approval_required(
-            decision, tool_name, tool_input, tool_use_id,
-            request_id, session_key, seq_holder,
-        )
-        return PermissionResultDeny(message=self._APPROVAL_PENDING_ACK, interrupt=False)
-
     def _emit_approval_decision(
         self, decision, tool_name, tool_use_id, request_id, session_key,
         seq_holder, *, outcome=None,
@@ -328,9 +234,8 @@ class ClaudeApprovalMixin:
     ) -> None:
         """Publish an APPROVAL_REQUIRED event for a gated tool (TASK-292).
 
-        Single source of truth for the approval-request event payload, shared by
-        the can_use_tool gate (_evaluate_tool_gate) and the PreToolUse hook gate
-        (_evaluate_tool_gate_hook). Best-effort: a publish failure is logged,
+        Single source of truth for the approval-request event payload, used by
+        the PreToolUse hook gate (_evaluate_tool_gate_hook). Best-effort: a publish failure is logged,
         never raised — the caller still ends the turn with the pending-ack.
         """
         self._remember_approval(decision.grant_key, session_key, tool_use_id, request_id)
@@ -374,8 +279,8 @@ class ClaudeApprovalMixin:
     ) -> None:
         """Publish a TOOL_PREAPPROVED event for a re-attempt that consumed a grant.
 
-        Single source of truth for the pre-approved marker (TASK-305), shared by
-        both gate paths (can_use_tool and the PreToolUse hook). The bridge is the
+        Single source of truth for the pre-approved marker (TASK-305), emitted
+        by the PreToolUse hook gate. The bridge is the
         only place that knows a tool ran because a one-shot grant was consumed —
         the client must not re-derive it. Best-effort: a publish failure is
         logged, never raised — the tool still runs.
@@ -439,8 +344,7 @@ class ClaudeApprovalMixin:
 
         The live gate under permission_mode="bypassPermissions": the SDK only
         consults PreToolUse hooks (never can_use_tool) for regular tools in that
-        mode. Mirrors _evaluate_tool_gate's policy logic but speaks the hook
-        control plane. Returns a hook JSON output dict:
+        mode, so this is the only policy gate. Returns a hook JSON output dict:
 
           ALLOW            → {} (no decision; tool proceeds normally)
           DENY             → "deny" + block reason
@@ -448,7 +352,7 @@ class ClaudeApprovalMixin:
                              emit APPROVAL_REQUIRED and "deny" with the
                              pending-ack reason so the turn ends cleanly and the
                              user's decision arrives as a continuation turn
-                             (same model as TASK-269 / the can_use_tool gate).
+                             (same model as TASK-269).
         """
         await self._get_policy_bundle()
 

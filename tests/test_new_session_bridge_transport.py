@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from agent_bridge.command_publisher import CommandPublisherMixin
-from claude_code_bridge.send_preflight import prepare_send
+from tests.bridge_send_helpers import prepare_send
 from claude_code_bridge.send_result import ClaudeResultMixin
 from claude_code_bridge.session_ops import ClaudeSessionMixin
 from llm_bawt.clients.agent_backend_client import AgentBackendClient
@@ -264,11 +264,11 @@ def test_successful_follow_up_done_carries_reset_evidence_not_replacement_text()
     evidence = {"thread_session_id": "fresh-thread", "provider_session_id": "sdk-fresh",
                 "clean_start": False}
     asyncio.run(Bridge()._finalize_result_message(
-        SimpleNamespace(text="actual task answer"), request_id="req", session_key="bot:test",
-        seq=0, text_parts=[], assistant_snapshot_text="", api_retry_count=0,
+        SimpleNamespace(), request_id="req", session_key="bot:test",
+        seq=0, text_parts=["actual task answer"],assistant_snapshot_text="", api_retry_count=0,
         api_last_error=None, actual_model="fixture", model="fixture",
         bot_context_window=None, latest_assistant_usage=None,
-        latest_stream_usage=None, cost_baseline_usd=0.0, native_context_usage=None,
+        latest_stream_usage=None, cost_baseline_usd=0.0,
         compact_status=None, compact_error_msg=None, turn_session_id="sdk-fresh",
         turn_screenshot_assets=[],
         reset_ack=evidence,

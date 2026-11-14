@@ -20,7 +20,7 @@ Registry seed/reset body (one line; editable in **Tools → Prompts** under
 
 > Write a concise continuity summary targeting about 2,000 tokens. Preserve active goals, exact identifiers and paths, authorization constraints, unfinished work and next steps, verification results and remaining gaps, and pointers to durable task receipts. Prefer current state over chronological retelling; omit repeated discussion and superseded details. Keep essential continuity even if it needs extra space.
 
-`send_preflight.prepare_send` checks for a bare command after `/new` preprocessing,
+`send_preflight.prepare_parsed_send` checks for a bare command after `/new` preprocessing,
 fetches the current global prompt through the app registry, and then constructs
 the SDK prompt. It never caches it across compactions; edits take effect in the
 same resumed conversation without session restart. `SendRequest.message`

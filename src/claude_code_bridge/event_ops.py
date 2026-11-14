@@ -138,15 +138,6 @@ class ClaudeEventMixin:
                 artifacts.append(artifact)
         return artifacts
 
-    async def _persist_screenshot_blocks(
-        self, content: list, session_key: str, tool_use_id: str | None,
-    ) -> list[dict]:
-        """Compatibility wrapper returning tiny refs for UI/history rails."""
-        artifacts = await self._persist_screenshot_artifacts(
-            content, session_key, tool_use_id,
-        )
-        return self._artifact_refs(artifacts)
-
     async def _upload_data_url(
         self, data_url: str, user_id: str, tool_use_id: str | None,
     ) -> dict | None:

@@ -51,8 +51,7 @@ def test_live_interrupted_and_result_fallback_share_capped_window(proxy):
     assert live["context_window"] == 250_000
     assert live["resident_tokens"] / live["context_window"] == 0.8
 
-    _, interrupted = harness._publish_interrupted_done(
-        request_id="req", session_key="caid:nick", seq=1, text="partial",
+    interrupted = harness._compute_interrupted_usage(
         actual_model=model, model=model, bot_context_window=1_000_000,
         compact_threshold=250_000, latest_assistant_usage=snapshot,
         latest_stream_usage=None,

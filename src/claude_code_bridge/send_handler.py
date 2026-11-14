@@ -358,11 +358,10 @@ class ClaudeSendMixin(
                         # runtime-setting edits require no bridge recreation.
                         sdk_env["MCP_TOOL_TIMEOUT"] = str(mcp_tool_timeout_ms)
 
-                    # Pass `seq` to the can_use_tool factory by reference so it
-                    # can keep the AWAIT_TOOL_RESULT event ordered in the same
-                    # sequence as the surrounding ASSISTANT_DELTA / TOOL_START
-                    # events.  Tuple-wrapped in a single-element list so the
-                    # closure can mutate it without rebinding.
+                    # One-time copy of `seq` in a mutable list, shared by the
+                    # can_use_tool and hook closures. It is never synced back to
+                    # `seq`, so their events can reuse sequence numbers of the
+                    # main stream (event_id stays unique).
                     seq_holder = [seq]
                     can_use_tool_cb = self._make_can_use_tool(
                         request_id=request_id,
@@ -848,7 +847,6 @@ class ClaudeSendMixin(
                                     latest_assistant_usage=latest_assistant_usage,
                                     latest_stream_usage=live_usage.stream_usage,
                                     cost_baseline_usd=cost_baseline_usd,
-                                    native_context_usage=None,
                                     capture_usage=lambda usage: terminal_usage.__setitem__(0, usage),
                                     turn_request_totals=live_usage.request_totals(),
                                     compact_status=compact_status,

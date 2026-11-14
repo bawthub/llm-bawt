@@ -8,7 +8,7 @@ import pytest
 
 from claude_code_bridge.compact_policy import apply_compact_default, is_bare_compact
 from llm_bawt.chat_prompt_defaults import COMPACT_SUMMARY_DEFAULT
-from claude_code_bridge.send_preflight import prepare_send
+from tests.bridge_send_helpers import prepare_send
 from claude_code_bridge.send_stream import ClaudeStreamMixin
 
 

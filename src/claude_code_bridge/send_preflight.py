@@ -25,21 +25,6 @@ class SendPreflight:
     reset_requested: bool
 
 
-async def prepare_send(
-    bridge: Any,
-    fields: dict,
-    msg_id: str,
-    async_redis: Any,
-) -> SendPreflight | None:
-    """Validate a send and run its one-time ``/new`` preprocessing."""
-    request = SendRequest.from_fields(fields)
-    if not request.request_id or not request.message:
-        logger.warning("Invalid send command: missing request_id or message")
-        await async_redis.xack(COMMANDS_STREAM, "claude-code-bridge", msg_id)
-        return None
-    return await prepare_parsed_send(bridge, request, msg_id, async_redis)
-
-
 async def prepare_parsed_send(
     bridge: Any,
     request: SendRequest,
