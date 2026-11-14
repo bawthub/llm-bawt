@@ -134,6 +134,8 @@ def preventive_session_policy(
     if candidate == SessionPolicy.RESET_RETAIN_HISTORY and caps.reset_retain_history:
         return candidate, "critical context threshold reached"
     if caps.reset_without_history:
+        if candidate == SessionPolicy.RESET_WITHOUT_HISTORY:
+            return candidate, "critical context threshold reached"
         return SessionPolicy.RESET_WITHOUT_HISTORY, (
             "critical context threshold reached; backend cannot retain seed history"
         )

@@ -549,7 +549,8 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
                 "their descriptions), {bot_roster} (visible agent bots: tags, "
                 "endpoint ref, provider) and {tag_catalog} (role tags: name, "
                 "description, capabilities). Literal braces must be doubled. The "
-                "default body is empty, which injects nothing. Supports per-bot "
+                "product default ships a body; an empty override injects nothing. "
+                "Supports per-bot "
                 "overrides via scope_type=bot."
             ),
         },

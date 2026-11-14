@@ -126,7 +126,6 @@ def compute_drift(rows: Iterable[Any], definitions: dict[str, Any]) -> list[Drif
         definition = definitions.get(row.key)
         if definition is not None and is_following(row):
             continue
-        definition = definitions.get(row.key)
         default = definition.default_body() if definition is not None else None
         if default is not None and default == row.body:
             continue

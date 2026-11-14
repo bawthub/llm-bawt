@@ -49,14 +49,14 @@ class SettingDefinition:
     """One typed setting."""
 
     key: str
-    type: str  # "bool" | "int" | "float" | "str" | "string_list"
+    type: str  # "bool" | "int" | "float" | "str" | "string_list" | "json"
     default: object
     applies_to: tuple[str, ...]  # bot types this setting affects
     storage: str
     label: str = ""
     help: str = ""
-    # If this setting supersedes/absorbs a legacy key, name it here so the
-    # migration and compat shims know the provenance.
+    # Legacy key names this setting replaced. Display-only provenance for the
+    # config route; nothing migrates or reads these keys.
     legacy_keys: tuple[str, ...] = field(default_factory=tuple)
     # Optional frontend render hint. Blank = render by ``type``; "model" tells
     # the UI to render a model-alias picker (dropdown of /v1/models) instead of
@@ -509,7 +509,8 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
     #     <job>_model -> maintenance_model
     # so each job's own picker actually controls that job, and maintenance_model
     # is the single "default for all jobs" knob. The terminal default lives on
-    # maintenance_model (dolphin-qwen-3b), so an all-unset instance still runs.
+    # maintenance_model. Its default is a local model alias that a fresh tenant
+    # may not define, so set maintenance_model when provisioning.
     # These retire the env/config vars SUMMARIZATION_MODEL / EXTRACTION_MODEL /
     # MAINTENANCE_MODEL / PROFILE_MAINTENANCE_MODEL (option (a): keep the shared
     # maintenance knob).

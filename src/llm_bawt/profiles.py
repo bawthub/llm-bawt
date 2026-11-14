@@ -132,9 +132,8 @@ class ProfileManager:
     """Manages entity profiles (users and bots) in PostgreSQL.
 
     NOTE on connection pooling: callers should treat this object as a
-    long-lived singleton (one per process). It owns a SQLAlchemy engine
-    with its own connection pool — instantiating it per HTTP request
-    leaks connections until GC collects the engine. Routes that need a
+    long-lived singleton (one per process). It uses the process-wide shared
+    engine rather than its own pool. Routes that need a
     ProfileManager should resolve a shared instance (see
     ``llm_bawt.service.dependencies.get_profile_manager``).
     """

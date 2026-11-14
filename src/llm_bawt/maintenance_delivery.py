@@ -2,8 +2,8 @@
 
 The turn log can become terminal before its normal event publisher runs. A
 successor therefore needs an acknowledged terminal snapshot, not just ended_at.
-Enqueue captures a read-only snapshot without taking the target lock (scheduler
-callers already hold job locks). Updates to existing rows use the target lock.
+Enqueue stamps the snapshot under the target lock (``lock_target``), as do
+updates to existing rows.
 """
 
 from __future__ import annotations
@@ -69,8 +69,10 @@ class MaintenanceBarrier:
         ), {"id": source_id, "target": self.target}).mappings().first()
         if source is None:
             raise RuntimeError("Maintenance source turn is missing; refusing to release queued work")
-        metadata["maintenance_barrier"] = {"turn_id": source_id, "published": False}
-        self._save(head, metadata)
+        pending = {"turn_id": source_id, "published": False}
+        if barrier != pending:
+            metadata["maintenance_barrier"] = pending
+            self._save(head, metadata)
         return dict(source)
 
     def released(self, head, source_id: str):

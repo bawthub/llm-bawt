@@ -35,7 +35,8 @@ class BotCreateTransaction:
 
         Partition rows use a lossy sanitized ID; profile, tag, setting and audit
         slugs can also identify a *different* bot that maps to that same ID.
-        Check both forms under the create/purge storage lock before any write.
+        Check both forms under the create storage lock before any write (purge
+        serializes separately via LOCK TABLE bot_profiles).
         """
         tables = set(inspect(conn).get_table_names())
         from . import bot_slug_aliases

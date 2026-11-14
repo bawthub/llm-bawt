@@ -205,8 +205,8 @@ class PromptSectionsMixin:
     def _sec_tag_context(self, builder: PromptBuilder, prompt: str) -> None:
         """TASK-1249 bot-tag section (agent backends only): this bot's role-tag
         instructions and the family roster, rendered into the operator's
-        ``agents.tag_context`` template. The default body is empty, so nothing
-        is read or injected until an operator writes one. A template or data
+        ``agents.tag_context`` template (the product default ships a body; an
+        empty override injects nothing). A template or data
         failure skips the section; it never fails the prompt build."""
         from ..bot_tags.context import TEMPLATE_KEY, load_tag_context
 

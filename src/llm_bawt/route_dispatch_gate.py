@@ -66,7 +66,7 @@ def check_route_claim(conn, candidate: dict, config) -> dict | None:
                 elif route.get("session_binding") is not None:
                     raise ValueError("Reset route unexpectedly carries a continuation binding")
             except ValueError as exc:
-                reason = str(exc)
+                reason = reason or str(exc)
     if reason:
         from .inter_bot_delivery import InterBotDeliveryStore
 

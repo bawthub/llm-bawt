@@ -123,8 +123,8 @@ def initiated_by(author_type: str | None, author_id: str | None,
                  schedule_id: str | None) -> dict | None:
     """Who started the session, from its first eligible message.
 
-    ``None`` when the session has no eligible message. A missing author is
-    ``unknown`` rather than a guess.
+    A missing author is ``unknown`` rather than a guess; callers return
+    ``None`` themselves when the session has no eligible message.
     """
     if schedule_id:
         return {"kind": "schedule", "id": str(schedule_id)}

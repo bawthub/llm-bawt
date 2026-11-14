@@ -7,7 +7,7 @@ it unless the reset asked to keep it (``keep_house``) or the profile pins it
 finished, so it never interrupts a running turn of this bot.
 
 When the last tenant leaves, the app asks the house to restart itself over the
-house's own command stream (:func:`agent_bridge.houses.request_recycle`). The
+house's own command stream (:func:`llm_bawt.house_lease.request_recycle`). The
 house drains any turn still admitted there before it exits, and Docker's
 restart policy brings it back on a fresh container. The app needs no Docker
 access. A house that never comes back has no lease, so new work falls back to

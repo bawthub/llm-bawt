@@ -717,7 +717,7 @@ class PromptResolver:
                     format=row.format or (definition.format if definition else "plain_text"),
                     body=row.body,
                     required_vars=_parse_json_list(row.required_vars_json) or list(definition.required_vars if definition else ()),
-                    metadata=_parse_json_dict(row.metadata_json) or dict(definition.metadata if definition else {}),
+                    metadata={**(definition.metadata if definition else {}), **_parse_json_dict(row.metadata_json)},
                     scope_type=row.scope_type,
                     scope_id=row.scope_id,
                     source="db_override",

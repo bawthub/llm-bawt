@@ -165,8 +165,6 @@ class RequestIdentityResolver:
         row = by_uuid if explicit else by_key
         if row is None:
             return None
-        if explicit and row["user_message_id"] != explicit:
-            raise IdentityConflict("scoped key belongs to another message UUID")
         return self._validate(row, values, payload, producer)
 
     def admit(self, *, values: dict[str, Any], payload: dict[str, Any],

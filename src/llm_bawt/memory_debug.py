@@ -420,8 +420,10 @@ def handle_regenerate_embeddings(bot_id: str):
         if result.get("embedding_dim"):
             console.print(f"  Embedding dimension: {result['embedding_dim']}")
     else:
-        console.print(f"[red]Error: {result.get('message', 'Unknown error')}[/red]")
-        console.print("Install with: [cyan]pipx runpip llm-bawt install sentence-transformers[/cyan]")
+        message = str(result.get('message', 'Unknown error'))
+        console.print(f"[red]Error: {message}[/red]")
+        if "sentence" in message.lower() and "transformers" in message.lower():
+            console.print("Install with: [cyan]pipx runpip llm-bawt install sentence-transformers[/cyan]")
 
 
 def handle_consolidate(bot_id: str, dry_run: bool = False):

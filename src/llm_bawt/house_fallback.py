@@ -41,7 +41,7 @@ def fallback_notifier(user_id: str | None):
         async with notify_bell.bell_http() as http:
             await notify_bell.record_push_bell(
                 http, push_id=receipt["id"], bot_id=bot_id or "system", user_id=user_id,
-                title=notify_module.push_title(bot_id, title, None), message=message,
+                title=notify_module.push_title(bot_id or "system", title, None), message=message,
                 urgency="high", link=None, result=receipt["result"])
 
     return notify
