@@ -11,6 +11,7 @@ from sqlalchemy import text
 
 from ..bot_tags import BehaviorTag, BotTags, sql_allowed
 from .embeddings import EMBED_DIM, embed_with_status, meaning_text
+from .ownership import MemoryAuthority, NO_MEMORY_AUTHORITY, OPERATOR_MEMORY_AUTHORITY
 from .postgresql import PostgreSQLMemoryBackend
 
 log = logging.getLogger(__name__)
@@ -94,7 +95,9 @@ class EmbeddingRepair:
         return totals
 
     def repair_bot(self, bot_id: str, *, limit: int = _MAX_ROWS,
-                   stop: threading.Event | None = None) -> dict:
+                   stop: threading.Event | None = None,
+                   authority: MemoryAuthority | None = OPERATOR_MEMORY_AUTHORITY) -> dict:
+        """Internal repair defaults to operator; request paths pass explicit authority."""
         if not 1 <= limit <= _MAX_ROWS:
             raise ValueError(f"repair limit must be 1..{_MAX_ROWS}")
         result = RepairResult()
@@ -104,8 +107,10 @@ class EmbeddingRepair:
         # never a cue to create one for a possibly protected bot.
         backend = PostgreSQLMemoryBackend(self.config, bot_id, provision_schema=False)
         table = backend._memories_table_name
+        ownership = (authority or NO_MEMORY_AUTHORITY).scope(bot_id)
         allowed, params = _allowed_sql()
-        params = {**params, "storage_id": backend.bot_id_sanitized, "raw_bot_id": bot_id}
+        params = {**params, **ownership.params,
+                  "storage_id": backend.bot_id_sanitized, "raw_bot_id": bot_id}
         with self.engine.connect() as conn:
             try:
                 if not conn.execute(text(_LOCK_SQL)).scalar():
@@ -147,17 +152,18 @@ class EmbeddingRepair:
                             result.stopped = True
                             break
                         row = conn.execute(text(f"""
-                            SELECT m.id, m.content, m.intent, m.stakes,
-                                   m.emotional_charge, m.recurrence_keywords,
-                                   m.embedding IS NULL AS missing_content,
-                                   m.meaning_embedding IS NULL AS missing_meaning
-                            FROM {table} AS m,
+                            SELECT mem.id, mem.content, mem.intent, mem.stakes,
+                                   mem.emotional_charge, mem.recurrence_keywords, mem.owner_user_id,
+                                   mem.embedding IS NULL AS missing_content,
+                                   mem.meaning_embedding IS NULL AS missing_meaning
+                            FROM {table} AS mem,
                                  (SELECT CAST(:raw_bot_id AS text) AS bot_id) AS b
-                            WHERE m.bot_id = :storage_id
-                              AND (m.embedding IS NULL OR m.meaning_embedding IS NULL)
-                              AND (CAST(:cursor AS varchar) IS NULL OR m.id > :cursor)
+                            WHERE mem.bot_id = :storage_id
+                              AND (mem.embedding IS NULL OR mem.meaning_embedding IS NULL)
+                              AND (CAST(:cursor AS varchar) IS NULL OR mem.id > :cursor)
                               AND {allowed}
-                            ORDER BY m.id LIMIT 1
+                              AND {ownership.mutation_predicate}
+                            ORDER BY mem.id LIMIT 1
                         """), {**params, "cursor": cursor}).mappings().first()
                         conn.commit()
                         if row is None:
@@ -209,7 +215,7 @@ class EmbeddingRepair:
                                 result.dimension_mismatch = True
                                 result.stopped = True
                                 break
-                            changed = self._fill(conn, table, params, row, field, vector)
+                            changed = self._fill(conn, table, params, row, field, vector, ownership)
                             if changed:
                                 if field == "embedding":
                                     result.repaired_content += 1
@@ -245,23 +251,26 @@ class EmbeddingRepair:
 
     @staticmethod
     def _fill(conn, table: str, params: dict, row, field: str,
-              vector: list[float]) -> bool:
+              vector: list[float], ownership) -> bool:
         # field is selected only from our own two constants above.
         assert field in {"embedding", "meaning_embedding"}
         allowed, _ = _allowed_sql()
         audit = ", meaning_updated_at = now()" if field == "meaning_embedding" else ""
         changed = conn.execute(text(f"""
-            UPDATE {table} AS m
+            UPDATE {table} AS mem
             SET {field} = :vector, updated_at = now(){audit}
             FROM (SELECT CAST(:raw_bot_id AS text) AS bot_id) AS b
-            WHERE m.bot_id = :storage_id AND m.id = :id AND m.{field} IS NULL
-              AND m.content = :content
-              AND m.intent IS NOT DISTINCT FROM :intent
-              AND m.stakes IS NOT DISTINCT FROM :stakes
-              AND m.emotional_charge IS NOT DISTINCT FROM :emotional_charge
-              AND m.recurrence_keywords IS NOT DISTINCT FROM CAST(:keywords AS jsonb)
+            WHERE mem.bot_id = :storage_id AND mem.id = :id AND mem.{field} IS NULL
+              AND mem.content = :content
+              AND mem.intent IS NOT DISTINCT FROM :intent
+              AND mem.stakes IS NOT DISTINCT FROM :stakes
+              AND mem.emotional_charge IS NOT DISTINCT FROM :emotional_charge
+              AND mem.recurrence_keywords IS NOT DISTINCT FROM CAST(:keywords AS jsonb)
+              AND mem.owner_user_id IS NOT DISTINCT FROM CAST(:repair_owner AS text)
               AND {allowed}
+              AND {ownership.mutation_predicate}
         """), {**params, "id": row["id"], "vector": str(vector),
+               "repair_owner": row["owner_user_id"],
                "content": row["content"], "intent": row["intent"],
                "stakes": row["stakes"], "emotional_charge": row["emotional_charge"],
                "keywords": (json.dumps(row["recurrence_keywords"])

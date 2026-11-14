@@ -125,13 +125,14 @@ class StorageAdminMixin:
         backend = self._get_backend(bot_id, provision_schema=True)
         return backend.delete_memories_by_source_message_ids(message_ids or [], authority=authority)
 
-    async def regenerate_embeddings(self, bot_id: str = "default", batch_size: int = 50) -> dict[str, Any]:
+    async def regenerate_embeddings(self, bot_id: str = "default", batch_size: int = 50, *,
+                                    authority: MemoryAuthority | None = None) -> dict[str, Any]:
         from llm_bawt.memory.embedding_repair import _eligible
 
         if not _eligible(bot_id, self.engine):
             return {"error": "bot excluded from embedding repair", "updated": 0, "failed": 0}
         backend = self._get_backend(bot_id, provision_schema=False)
-        return backend.regenerate_embeddings(batch_size=batch_size)
+        return backend.regenerate_embeddings(batch_size=batch_size, authority=authority)
 
     async def consolidate_memories(
         self,

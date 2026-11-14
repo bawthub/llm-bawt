@@ -727,8 +727,10 @@ async def delete_memories_by_source_message_ids(bot_id: str = "default", message
 
 @mcp.tool(name="memory_regenerate_embeddings")
 async def regenerate_embeddings(bot_id: str = "default", batch_size: int = 50) -> dict:
+    authority = _memory_caller_authority(bot_id)
     storage = _get_storage()
-    return await storage.regenerate_embeddings(bot_id=bot_id, batch_size=batch_size)
+    return await storage.regenerate_embeddings(bot_id=bot_id, batch_size=batch_size,
+                                             authority=authority)
 
 
 @mcp.tool(name="memory_consolidate")

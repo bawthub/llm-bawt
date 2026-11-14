@@ -178,7 +178,7 @@ class MemoryClientAdminMixin:
         if not _eligible(self.bot_id, storage.engine):
             return {"error": "bot excluded from embedding repair", "updated": 0, "failed": 0}
         backend = storage.get_backend(self.bot_id, provision_schema=False)
-        return backend.regenerate_embeddings(batch_size=batch_size)
+        return backend.regenerate_embeddings(batch_size=batch_size, authority=self._memory_authority)
 
     def consolidate_memories(self, dry_run: bool = True, similarity_threshold: float | None = None) -> dict[str, Any]:
         self._ensure_initialized()

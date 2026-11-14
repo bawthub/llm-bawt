@@ -21,6 +21,7 @@ from tests.test_bot_access_mcp import Resolver, identity, signer, turn  # noqa: 
     ("memory_list_high_importance", tools.list_memories, "get_high_importance_memories", {}),
     ("system_stats", tools.stats, "stats", {}),
     ("memory_clear", tools.clear_memories, "clear_memories", {}),
+    ("memory_regenerate_embeddings", tools.regenerate_embeddings, "regenerate_embeddings", {}),
     ("memory_consolidate", tools.consolidate_memories, "consolidate_memories", {}),
     ("memory_update_meaning", tools.update_memory_meaning, "update_memory_meaning",
      {"memory_id": "synthetic-id"}),
@@ -57,6 +58,7 @@ async def test_registered_crud_passes_personal_authority(monkeypatch, name, hand
     (tools.list_memories, {}),
     (tools.stats, {}),
     (tools.clear_memories, {}),
+    (tools.regenerate_embeddings, {}),
     (tools.consolidate_memories, {}),
     (tools.update_memory_meaning, {"memory_id": "synthetic-id"}),
     (tools.run_maintenance, {}),
@@ -157,3 +159,48 @@ def test_authority_is_immutable_and_cannot_mix_operator_and_personal_modes():
         MemoryAuthority(user_id="synthetic-owner", operator=True)
     with pytest.raises(ValueError):
         MemoryAuthority(user_id="")
+
+
+@pytest.mark.parametrize("authority", [MemoryAuthority(user_id="user_a"), MemoryAuthority(operator=True)])
+def test_embedded_embedding_repair_forwards_exact_authority(monkeypatch, authority):
+    from llm_bawt.mcp_server.client_admin import MemoryClientAdminMixin
+
+    calls = []
+    backend = SimpleNamespace(regenerate_embeddings=lambda **kw: calls.append(kw) or {})
+    storage = SimpleNamespace(engine=object(), get_backend=lambda *_a, **_k: backend)
+    client = SimpleNamespace(
+        _ensure_initialized=lambda: None, server_url=None, bot_id="public_fixture",
+        _get_storage=lambda: storage, _memory_authority=authority,
+    )
+    monkeypatch.setattr("llm_bawt.memory.embedding_repair._eligible", lambda *_a: True)
+    MemoryClientAdminMixin.regenerate_embeddings(client, batch_size=3)
+    assert calls == [{"batch_size": 3, "authority": authority}]
+
+
+@pytest.mark.asyncio
+async def test_storage_embedding_repair_forwards_exact_authority(monkeypatch):
+    from llm_bawt.mcp_server.storage_admin import StorageAdminMixin
+
+    authority = MemoryAuthority(user_id="user_b")
+    calls = []
+    backend = SimpleNamespace(regenerate_embeddings=lambda **kw: calls.append(kw) or {})
+    storage = SimpleNamespace(engine=object(), _get_backend=lambda *_a, **_k: backend)
+    monkeypatch.setattr("llm_bawt.memory.embedding_repair._eligible", lambda *_a: True)
+    await StorageAdminMixin.regenerate_embeddings(
+        storage, bot_id="public_fixture", batch_size=3, authority=authority)
+    assert calls == [{"batch_size": 3, "authority": authority}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("signer")
+@pytest.mark.parametrize("user", ["user_a", "user_b"])
+async def test_supersede_is_noop_for_either_registered_user(monkeypatch, user):
+    def forbidden_storage():
+        raise AssertionError("unimplemented supersede reached storage")
+
+    monkeypatch.setattr(tools, "_get_storage", forbidden_storage)
+    catalog = CatalogFastMCP("supersede-owner-probe", bot_policy_resolver=Resolver())
+    catalog.add_tool(tools.supersede_memory, name="memory_supersede")
+    with identity(turn(user=user)):
+        await catalog._tool_manager.call_tool("memory_supersede", {
+            "bot_id": "public_fixture", "old_memory_id": "foreign", "new_memory_id": "own"})

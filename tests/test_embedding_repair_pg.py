@@ -11,7 +11,7 @@ from sqlalchemy import event, text
 from llm_bawt.memory import embeddings
 from llm_bawt.memory import embedding_repair, maintenance
 from llm_bawt.memory.embedding_repair import EmbeddingRepair
-from llm_bawt.memory.ownership import OPERATOR_MEMORY_AUTHORITY
+from llm_bawt.memory.ownership import MemoryAuthority, OPERATOR_MEMORY_AUTHORITY
 from llm_bawt.memory.postgresql import PostgreSQLMemoryBackend
 from llm_bawt.runtime_settings import BotProfileStore
 from llm_bawt.service import embedding_repair_job
@@ -41,7 +41,7 @@ class EmbedServer:
 
 
 @pytest.fixture
-def memory_rig(private_app_pg, monkeypatch):
+def memory_rig(private_app_pg, monkeypatch):  # noqa: F811
     config = private_app_pg
     slug = f"repair-{uuid.uuid4().hex[:12]}"
     server = EmbedServer()
@@ -83,6 +83,54 @@ def test_outage_write_recovers_both_vectors_and_stats(memory_rig):
     assert result["repaired_content"] == result["repaired_meaning"] == 1
     assert tuple(_row(backend, memory_id)) == (True, True)
     assert backend.stats(authority=OPERATOR_MEMORY_AUTHORITY)["memories"]["missing_any_embeddings"] == 0
+
+
+def test_personal_repair_never_embeds_or_updates_foreign_rows(memory_rig):
+    _slug, server, backend, _repair, _store = memory_rig
+    ids = {}
+    for owner in ("owner-a", "owner-b", None):
+        mid = str(uuid.uuid4())
+        _operator_add(backend, mid, f"Repair ownership {owner}", intent=f"synthetic {owner}")
+        with backend.engine.begin() as conn:
+            conn.execute(text(f"UPDATE {backend._memories_table_name} SET owner_user_id=:owner WHERE id=:id"),
+                         {"owner": owner, "id": mid})
+        ids[owner] = mid
+    server.calls.clear()
+    server.code = 200
+    result = backend.regenerate_embeddings(authority=MemoryAuthority(user_id="owner-a"))
+    assert result["updated"] == 2
+    assert all("owner-a" in body for body in server.calls)
+    assert tuple(_row(backend, ids["owner-a"])) == (True, True)
+    assert tuple(_row(backend, ids["owner-b"])) == (False, False)
+    assert tuple(_row(backend, ids[None])) == (False, False)
+    server.calls.clear()
+    # Omitted authority at the request-facing backend is NOT operator.
+    assert backend.regenerate_embeddings()["updated"] == 0
+    assert server.calls == []
+    result = backend.regenerate_embeddings(authority=OPERATOR_MEMORY_AUTHORITY)
+    assert result["updated"] == 4
+    assert all(tuple(_row(backend, mid)) == (True, True) for mid in ids.values())
+
+
+def test_personal_repair_rechecks_owner_after_embedding(memory_rig, monkeypatch):
+    _slug, server, backend, _repair, _store = memory_rig
+    mid = str(uuid.uuid4())
+    _operator_add(backend, mid, "Own before embedding", intent="synthetic")
+    with backend.engine.begin() as conn:
+        conn.execute(text(f"UPDATE {backend._memories_table_name} SET owner_user_id='owner-a' WHERE id=:id"),
+                     {"id": mid})
+    original = server.post
+
+    def transfer(*args, **kwargs):
+        with backend.engine.begin() as conn:
+            conn.execute(text(f"UPDATE {backend._memories_table_name} SET owner_user_id='owner-b' WHERE id=:id"),
+                         {"id": mid})
+        return original(*args, **kwargs)
+
+    server.code = 200
+    monkeypatch.setattr(server, "post", transfer)
+    assert backend.regenerate_embeddings(authority=MemoryAuthority(user_id="owner-a"))["updated"] == 0
+    assert tuple(_row(backend, mid)) == (False, False)
 
 
 def test_changed_memory_during_outage_discards_stale_vectors(memory_rig):
@@ -168,11 +216,11 @@ def test_changed_content_is_not_overwritten_by_stale_vector(memory_rig, monkeypa
     server.code = 200
     original_fill = repair._fill
 
-    def edit_then_fill(conn, table, params, row, field, vector):
+    def edit_then_fill(conn, table, params, row, field, vector, ownership):
         with backend.engine.begin() as writer:
             writer.execute(text(f"UPDATE {table} SET content='source after edit' WHERE id=:id"),
                            {"id": memory_id})
-        return original_fill(conn, table, params, row, field, vector)
+        return original_fill(conn, table, params, row, field, vector, ownership)
 
     monkeypatch.setattr(repair, "_fill", edit_then_fill)
     result = repair.repair_bot(backend.bot_id)
@@ -187,9 +235,9 @@ def test_privacy_change_at_update_is_rejected_by_sql_guard(memory_rig, monkeypat
     server.code = 200
     original_fill = repair._fill
 
-    def privatize_then_fill(conn, table, params, row, field, vector):
+    def privatize_then_fill(conn, table, params, row, field, vector, ownership):
         store.upsert({"slug": slug, "include_in_global_search": False})
-        return original_fill(conn, table, params, row, field, vector)
+        return original_fill(conn, table, params, row, field, vector, ownership)
 
     monkeypatch.setattr(repair, "_fill", privatize_then_fill)
     result = repair.repair_bot(slug)

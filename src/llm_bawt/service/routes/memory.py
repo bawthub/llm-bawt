@@ -49,6 +49,13 @@ def _scoped_client(bot_id: str, user_id: str | None):
     return _require_memory_client_for_bot(bot_id, user_id.strip() if user_id else None)
 
 
+def _scoped_mutation_client(
+    bot_id: str = Depends(get_effective_bot_id),
+    user_id: Annotated[str | None, Query(description="Only mutate this user's memories")] = None,
+):
+    return _scoped_client(bot_id, user_id)
+
+
 # TASK-2279: mutations need the service credential (BawtHub's server, never a
 # bot) when the history_mutation_service_auth setting is on; a pinned user_id
 # always narrows them to that user's own rows.
@@ -226,12 +233,13 @@ def delete_memory(
         raise internal_error(e, f"Failed to delete memory for bot '{bot_id}'") from e
 
 
-@router.patch("/v1/memory/{memory_id}", response_model=MemoryItem, tags=["Memory"])
+@router.patch("/v1/memory/{memory_id}", response_model=MemoryItem, tags=["Memory"],
+              dependencies=_SERVICE_ONLY)
 def update_memory(
     memory_id: str,
     request: MemoryUpdateRequest,
     bot_id: str = Depends(get_effective_bot_id),
-    client=Depends(require_memory_client),
+    client=Depends(_scoped_mutation_client),
 ):
     """Update an existing memory by ID."""
     try:
@@ -371,10 +379,11 @@ def preview_ignored_messages(
         raise internal_error(e, f"Failed to preview ignored messages for bot '{bot_id}'") from e
 
 
-@router.post("/v1/memory/regenerate-embeddings", response_model=RegenerateEmbeddingsResponse, tags=["Memory"])
+@router.post("/v1/memory/regenerate-embeddings", response_model=RegenerateEmbeddingsResponse, tags=["Memory"],
+             dependencies=_SERVICE_ONLY)
 def regenerate_embeddings(
     bot_id: str = Depends(get_effective_bot_id),
-    client=Depends(require_memory_client),
+    client=Depends(_scoped_mutation_client),
 ):
     """Run one bounded content-and-meaning embedding repair pass."""
     try:
@@ -401,11 +410,12 @@ def regenerate_embeddings(
         raise internal_error(e, f"Failed to regenerate embeddings for bot '{bot_id}'") from e
 
 
-@router.post("/v1/memory/consolidate", response_model=ConsolidateResponse, tags=["Memory"])
+@router.post("/v1/memory/consolidate", response_model=ConsolidateResponse, tags=["Memory"],
+             dependencies=_SERVICE_ONLY)
 def consolidate_memories(
     request: ConsolidateRequest,
     bot_id: str = Depends(get_effective_bot_id),
-    client=Depends(require_memory_client),
+    client=Depends(_scoped_mutation_client),
 ):
     """Find and merge redundant memories."""
     try:

@@ -1125,7 +1125,8 @@ class PostgreSQLSemanticMemoryMixin:
                 logger.error(f"Failed to get stats: {e}")
                 return {"error": str(e)}
 
-    def regenerate_embeddings(self, batch_size: int = 50) -> dict:
+    def regenerate_embeddings(self, batch_size: int = 50, *,
+                              authority: MemoryAuthority | None = None) -> dict:
         """Repair both missing vectors in a bounded pass; never alter schema.
 
         This manual entry point deliberately refuses private and inactive bots,
@@ -1135,7 +1136,7 @@ class PostgreSQLSemanticMemoryMixin:
         from .embedding_repair import EmbeddingRepair
 
         repaired = EmbeddingRepair(self.config, self.engine).repair_bot(
-            self.bot_id, limit=min(batch_size, 25),
+            self.bot_id, limit=min(batch_size, 25), authority=authority or NO_MEMORY_AUTHORITY,
         )
         if repaired.get("excluded") or repaired["busy"] or repaired["dimension_mismatch"]:
             reason = ("bot excluded from embedding repair" if repaired.get("excluded") else

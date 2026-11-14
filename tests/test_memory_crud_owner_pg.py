@@ -5,6 +5,7 @@ import pytest
 from sqlalchemy import text
 
 from llm_bawt.mcp_server.client import MemoryClient
+from tests.test_bot_access_mcp import signer  # noqa: F401
 from tests.private_postgres import private_app_pg  # noqa: F401
 from tests.test_memory_update_pg import memory_rig  # noqa: F401
 
@@ -81,6 +82,94 @@ def test_foreign_delete_is_refused(owned_clients):
     target = b.store_memory("B personal fact", source_message_ids=[sources["owner-b"]])
     assert a.delete_memory(target.id) is False
     assert [row["id"] for row in b.list_recent()] == [target.id]
+
+
+def test_http_foreign_patch_and_delete_refused_with_real_store(owned_clients, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from types import SimpleNamespace
+    from llm_bawt.service.routes import memory as routes
+
+    backend, a, b, _sources = owned_clients
+    target = b.store_memory("B's HTTP-owned fact", importance=0.57)
+    clients = {"owner-a": a, "owner-b": b}
+    monkeypatch.setattr(routes, "get_service", lambda: SimpleNamespace(
+        get_memory_client=lambda _bot, user_id=None: clients[user_id]))
+    app = FastAPI()
+    app.include_router(routes.router)
+    app.dependency_overrides[routes.require_mutation_service_token] = lambda: None
+    with TestClient(app) as http:
+        params = {"bot_id": backend.bot_id, "user_id": "owner-a"}
+        assert http.patch(f"/v1/memory/{target.id}", params=params,
+                          json={"importance": 0.58}).status_code == 404
+        assert http.delete(f"/v1/memory/{target.id}", params=params).status_code == 404
+        with backend.engine.connect() as conn:
+            assert conn.execute(text(f"SELECT importance FROM {backend._memories_table_name} WHERE id=:id"),
+                                {"id": target.id}).scalar_one() == pytest.approx(0.57)
+        params["user_id"] = "owner-b"
+        response = http.patch(f"/v1/memory/{target.id}", params=params,
+                              json={"importance": 0.59})
+        assert response.status_code == 200, response.text
+        with backend.engine.connect() as conn:
+            assert conn.execute(text(f"SELECT importance FROM {backend._memories_table_name} WHERE id=:id"),
+                                {"id": target.id}).scalar_one() == pytest.approx(0.59)
+        assert http.delete(f"/v1/memory/{target.id}", params=params).status_code == 200
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("signer")
+@pytest.mark.parametrize("method,extra", [
+    ("memory_update", {"content": "Foreign change"}),
+    ("memory_delete", {}),
+    ("memory_update_meaning", {"intent": "Foreign intent"}),
+    ("memory_supersede", {"new_memory_id": "synthetic-new-id"}),
+])
+async def test_registered_mcp_foreign_ids_never_mutate_real_store(owned_clients, monkeypatch, method, extra):
+    from llm_bawt.mcp_server import server as tools
+    from llm_bawt.mcp_server.catalog import CatalogFastMCP
+    from tests.test_bot_access_mcp import Resolver, identity, turn
+
+    backend, a, b, _sources = owned_clients
+    target = b.store_memory("B's registered MCP fact", importance=0.57)
+    monkeypatch.setattr(tools, "_get_storage", lambda: a._storage)
+    resolver = Resolver()
+    resolver.rows.append({"slug": backend.bot_id, "include_in_global_search": True})
+    catalog = CatalogFastMCP("durable-owner-probe", bot_policy_resolver=resolver)
+    handlers = {
+        "memory_update": tools.update_memory, "memory_delete": tools.delete_memory,
+        "memory_update_meaning": tools.update_memory_meaning,
+        "memory_supersede": tools.supersede_memory,
+    }
+    catalog.add_tool(handlers[method], name=method)
+    id_key = "old_memory_id" if method == "memory_supersede" else "memory_id"
+    with identity(turn(bot=backend.bot_id, user="owner-a")):
+        await catalog._tool_manager.call_tool(method, {
+            "bot_id": backend.bot_id, id_key: target.id, **extra})
+    with backend.engine.connect() as conn:
+        row = conn.execute(text(f"""SELECT content, importance, intent, owner_user_id
+            FROM {backend._memories_table_name} WHERE id=:id"""), {"id": target.id}).mappings().one()
+    assert row["content"] == "B's registered MCP fact"
+    assert row["importance"] == pytest.approx(0.57)
+    assert row["intent"] is None
+    assert row["owner_user_id"] == "owner-b"
+
+
+def test_executor_foreign_ids_refused_by_its_personal_client(owned_clients):
+    from llm_bawt.tools.executor import ToolExecutor
+    from llm_bawt.tools.parser import ToolCall
+
+    backend, a, b, _sources = owned_clients
+    target = b.store_memory("B's executor fact")
+    executor = ToolExecutor.__new__(ToolExecutor)
+    executor.memory_client = a
+    executor.user_id = "owner-a"
+    for action, extra in (("update", {"content": "Foreign change"}), ("delete", {})):
+        result = getattr(executor, "_memory_" + action)(ToolCall(
+            name="memory", arguments={"memory_id": target.id, **extra}, raw_text=""))
+        assert 'status="error"' in result
+    with backend.engine.connect() as conn:
+        assert conn.execute(text(f"SELECT content FROM {backend._memories_table_name} WHERE id=:id"),
+                            {"id": target.id}).scalar_one() == "B's executor fact"
 
 
 def test_duplicate_response_matches_durable_row(owned_clients):
