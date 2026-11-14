@@ -538,8 +538,9 @@ services:
     restart: unless-stopped
 
   crawl4ai:
-    # Pinned by digest (the image this deployment ran when pinned); bump deliberately.
-    image: unclecode/crawl4ai@sha256:385042cba2a216c257ccb77b0135dec5228ee25bf675edbc7487eb155bd5e644
+    # Stays tag-based: llm-bawt.reconcile-crawl4ai-config binds this exact tag
+    # (seeds image_tag). Digest-pinning needs that op to accept digests first.
+    image: unclecode/crawl4ai:latest
     container_name: llm-bawt-crawl4ai
     ports:
       - "${CRAWL4AI_PORT:-11235}:11235"
