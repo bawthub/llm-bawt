@@ -43,3 +43,32 @@ def test_history_exposes_parent_terminal_signal_without_completing_tool(monkeypa
     assert serialized["tool_calls"][0]["exec_tracked"] is tracking
     assert serialized["tool_calls"][0]["exec_started_at"] == execution
     engine.dispose()
+
+
+def test_client_batch_tool_history_encodes_repeated_message_ids(monkeypatch):
+    import io
+    from urllib.parse import parse_qs, urlsplit
+
+    from llm_bawt.service.client import ServiceClient
+
+    client = ServiceClient(http_url="http://fixture.invalid")
+    monkeypatch.setattr(client, "is_available", lambda: True)
+    requests = []
+
+    def open_request(request, **kwargs):
+        requests.append(request)
+        return io.BytesIO(b'{"events": []}')
+
+    monkeypatch.setattr("urllib.request.urlopen", open_request)
+    ids = ["id-a", "id with + & / characters"]
+    assert client.get_tool_call_events(
+        bot_id="fixture-bot", user_id="fixture-user", message_ids=ids,
+        since_hours=48, limit=12,
+    ) == {"events": []}
+    assert len(requests) == 1
+    url = urlsplit(requests[0].full_url)
+    assert url.path == "/v1/tool-calls"
+    assert parse_qs(url.query) == {
+        "message_ids": ids, "bot_id": ["fixture-bot"], "user_id": ["fixture-user"],
+        "since_hours": ["48"], "limit": ["12"],
+    }

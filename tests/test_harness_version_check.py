@@ -91,6 +91,22 @@ def test_creates_one_queued_task_then_no_duplicate(pins):
     assert len(tasks.tasks) == 1
 
 
+def test_refreshes_pin_description_when_latest_and_title_are_unchanged():
+    tasks = FakeTasks()
+    package = {"name": "fixture-sdk", "pinned": "1.0", "latest": "3.0"}
+    with tasks.client() as client:
+        assert hvc.upsert_task(client, [package], agent_bot_id=None, priority="MEDIUM")["action"] == "created"
+        old_title = tasks.tasks[0]["title"]
+        package["pinned"] = "2.0"
+        assert hvc.upsert_task(client, [package], agent_bot_id=None, priority="MEDIUM")["action"] == "updated"
+        assert len(tasks.tasks) == 1
+        assert tasks.tasks[0]["title"] == old_title
+        assert "pinned 2.0, latest 3.0" in tasks.tasks[0]["description"]
+        assert "pinned 1.0" not in tasks.tasks[0]["description"]
+        assert hvc.upsert_task(client, [package], agent_bot_id=None, priority="MEDIUM")["action"] == "none"
+    assert tasks.calls.count("PATCH") == 1
+
+
 def test_updates_open_task_when_versions_move(pins):
     tasks = FakeTasks()
     run(pins, tasks)

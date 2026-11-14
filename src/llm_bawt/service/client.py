@@ -525,7 +525,7 @@ class ServiceClient:
         
         url = f"{self.http_url}{path}"
         if params:
-            url += "?" + urllib.parse.urlencode(params)
+            url += "?" + urllib.parse.urlencode(params, doseq=True)
         
         headers = {"Content-Type": "application/json"}
         if method in ("POST", "DELETE", "PATCH", "PUT"):

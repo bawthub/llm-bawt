@@ -164,7 +164,7 @@ def upsert_task(
     if open_tasks:
         task = open_tasks[0]
         task_id = task.get("id") or task.get("shortId")
-        if task.get("title") == title:  # same versions -> same description
+        if task.get("title") == title and task.get("description") == description:
             return {"action": "none", "id": task_id}
         client.patch(
             f"/api/tasks/tasks/{task_id}", json={"title": title, "description": description}

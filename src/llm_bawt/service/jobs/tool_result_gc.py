@@ -164,7 +164,8 @@ def run_tool_result_gc(
             res = conn.execute(clear_sql, {"keys": deleted})
             result["records_cleared"] = res.rowcount or 0
 
-        # Prune legacy Postgres overflow rows past retention (record keeps preview).
+        # Prune legacy payloads and clear their availability in one DB transaction.
+        # Preserve previews and any surviving object-store reference.
         prune_sql = text(
             """
             DELETE FROM tool_call_result_payloads
@@ -172,10 +173,22 @@ def run_tool_result_gc(
                 SELECT id FROM tool_call_records
                 WHERE created_at < NOW() - make_interval(days => :days)
             )
+            RETURNING tool_call_record_id
             """
         )
-        res2 = conn.execute(prune_sql, {"days": retention_days})
-        result["legacy_rows_pruned"] = res2.rowcount or 0
+        pruned_ids = conn.execute(prune_sql, {"days": retention_days}).scalars().all()
+        result["legacy_rows_pruned"] = len(pruned_ids)
+        if pruned_ids:
+            clear_legacy_sql = text(
+                """
+                UPDATE tool_call_records
+                SET result_payload_available = FALSE
+                WHERE id IN :ids AND result_blob_key IS NULL
+                  AND result_payload_available
+                """
+            ).bindparams(bindparam("ids", expanding=True))
+            cleared = conn.execute(clear_legacy_sql, {"ids": pruned_ids})
+            result["records_cleared"] += cleared.rowcount or 0
 
     logger.info(
         "tool_result_gc: deleted %d blob(s), cleared %d record(s), pruned %d legacy row(s) "
