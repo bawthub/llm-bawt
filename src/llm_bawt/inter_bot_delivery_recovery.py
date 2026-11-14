@@ -95,8 +95,11 @@ class DeliveryLeaseRecovery:
                   AND (d.lease_expires_at < now(){orphan})
                 ORDER BY d.ordinal FOR UPDATE OF d
             """), {"live_owner": live_owner} if orphan else {}).mappings().all()
+            from .inter_bot_delivery import EXPIRED_ACCEPTED_ERROR, settle_expired_accepted
+
             for row in rows:
                 is_turn = row.get("delivery_mode") != "steer"
+                expired = False
                 accepted = row.get("transport_accepted_at") is not None
                 if (is_turn and row.get("turn_protocol_state") not in (None, "reserved")
                         and row.get("turn_ended_at") is None):
@@ -166,14 +169,17 @@ class DeliveryLeaseRecovery:
                     and row["transport_accepted_at"]
                     < datetime.now(timezone.utc) - timedelta(days=7)
                 ):
-                    assignments = "status='FAILED', claim_token=NULL, claim_owner=NULL, lease_expires_at=NULL, last_error='accepted bridge run exceeded the seven-day recovery window; outcome is ambiguous and was not replayed'"
+                    expired = True
+                    assignments = "status='FAILED', claim_token=NULL, claim_owner=NULL, lease_expires_at=NULL, last_error=:error"
                 elif int(row["attempt_count"] or 0) < int(row["max_attempts"] or 0):
                     assignments = "status='QUEUED', claim_token=NULL, claim_owner=NULL, lease_expires_at=NULL, available_at=now(), next_retry_at=now(), last_error='delivery lease expired; retrying same logical message'"
                 else:
                     assignments = "status='FAILED', claim_token=NULL, claim_owner=NULL, lease_expires_at=NULL, last_error='delivery attempts exhausted before completion'"
                 updated = conn.execute(sa_text(
                     f"UPDATE inter_bot_deliveries SET {assignments}, updated_at=now() WHERE id=:id RETURNING *"
-                ), {"id": row["id"]}).mappings().one()
+                ), {"id": row["id"], "error": EXPIRED_ACCEPTED_ERROR}).mappings().one()
+                if expired:
+                    settle_expired_accepted(conn, updated)
                 DeliveryTransitionEvents.stage(conn, updated, reason_code=reason_code if user_stopped else "lease_recovery")
                 if user_stopped:
                     # TASK-1232 P4: a user Stop ends the turn too. Settling only

@@ -80,13 +80,47 @@ def submission_result(
                 else "Delivery is durable and will steer an active Claude turn or start one safe idle fallback turn."
             )
             if accepted
-            else "Delivery was recorded but is already in terminal FAILED state; inspect last_error."
+            else f"Delivery was recorded but is already in terminal {record.status} state; inspect last_error."
         ),
     })
     status_code = 202 if accepted else (404 if not target_exists else 422)
     return status_code, result
 
 
+
+
+EXPIRED_ACCEPTED_ERROR = (
+    "accepted bridge run exceeded the seven-day recovery window; "
+    "outcome is ambiguous and was not replayed"
+)
+
+
+def settle_expired_accepted(conn, row) -> None:
+    """Close and charge the turn of a delivery just failed for the 7-day window.
+
+    Shared by the queued sweep and lease recovery so both expiry paths leave
+    the same turn_logs state.
+    """
+    from .service.session_lifecycle.recovery import NewSessionRecovery
+    from .service.turn_terminal_reservations import interrupt_protocol_reservation
+    from .service.usage.balance import charge_settled_turns
+
+    if NewSessionRecovery.is_reset(row):
+        conn.execute(sa_text("""
+            UPDATE inter_bot_deliveries
+            SET metadata_json=jsonb_set(metadata_json, '{new_session_ambiguous}', 'true'::jsonb)
+            WHERE id=:id
+        """), {"id": row["id"]})
+    interrupt_protocol_reservation(conn, row["turn_id"], status="error",
+                                   error_text=row["last_error"],
+                                   audit={"cause": "recovery_window_expired"})
+    charge_settled_turns(conn, conn.execute(sa_text("""
+        UPDATE turn_logs SET status='error', end_reason='error',
+            error_text=:error, ended_at=COALESCE(ended_at, now())
+        WHERE id=:turn_id AND ended_at IS NULL
+          AND terminal_protocol_state IS NULL
+        RETURNING id, created_at, token_usage_json
+    """), {"turn_id": row["turn_id"], "error": row["last_error"]}))
 
 
 class InterBotDeliveryStore:
@@ -339,34 +373,14 @@ class InterBotDeliveryStore:
             rows = conn.execute(sa_text("""
                 UPDATE inter_bot_deliveries SET
                     status='FAILED', next_retry_at=NULL, available_at=now(),
-                    last_error='accepted bridge run exceeded the seven-day recovery window; outcome is ambiguous and was not replayed',
-                    updated_at=now()
+                    last_error=:error, updated_at=now()
                 WHERE status='QUEUED' AND transport_accepted_at IS NOT NULL
                   AND transport_accepted_at < now() - interval '7 days'
                 RETURNING *
-            """)).mappings().all()
+            """), {"error": EXPIRED_ACCEPTED_ERROR}).mappings().all()
             DeliveryTransitionEvents.stage(conn, *rows, reason_code="recovery_window_expired")
             for row in rows:
-                from .service.session_lifecycle.recovery import NewSessionRecovery
-                from .service.usage.balance import charge_settled_turns
-
-                if NewSessionRecovery.is_reset(row):
-                    conn.execute(sa_text("""
-                        UPDATE inter_bot_deliveries
-                        SET metadata_json=jsonb_set(metadata_json, '{new_session_ambiguous}', 'true'::jsonb)
-                        WHERE id=:id
-                    """), {"id": row["id"]})
-                from .service.turn_terminal_reservations import interrupt_protocol_reservation
-                interrupt_protocol_reservation(conn, row["turn_id"], status="error",
-                                               error_text=row["last_error"],
-                                               audit={"cause": "recovery_window_expired"})
-                charge_settled_turns(conn, conn.execute(sa_text("""
-                    UPDATE turn_logs SET status='error', end_reason='error',
-                        error_text=:error, ended_at=COALESCE(ended_at, now())
-                    WHERE id=:turn_id AND ended_at IS NULL
-                      AND terminal_protocol_state IS NULL
-                    RETURNING id, created_at, token_usage_json
-                """), {"turn_id": row["turn_id"], "error": row["last_error"]}))
+                settle_expired_accepted(conn, row)
         return [DeliveryRecord.from_mapping(row) for row in rows]
 
     def eligible_targets(self, limit: int = 100) -> list[str]:
@@ -829,10 +843,8 @@ class InterBotDeliveryStore:
             if not target:
                 return None
             # Same lock order as claim_next: target advisory lock, then row lock.
-            conn.execute(
-                sa_text("SELECT pg_advisory_xact_lock(hashtext(:target))"),
-                {"target": target},
-            )
+            from .service.turn_admission import lock_target
+            lock_target(conn, target)
             current = conn.execute(sa_text("""
                 SELECT * FROM inter_bot_deliveries WHERE id=:id FOR UPDATE
             """), {"id": delivery_id}).mappings().first()
@@ -907,21 +919,6 @@ class InterBotDeliveryStore:
                 WHERE id=:id AND status='DISPATCHING'
                   AND metadata_json->'new_session_provider_ack' IS NULL
             """), {"id": delivery_id, "seed": json.dumps(dict(seed))}).rowcount == 1
-
-    def _transition(self, delivery_id: str, assignments: str, params: dict[str, Any], *, only: str | None) -> DeliveryRecord | None:
-        if self.engine is None:
-            return None
-        values = {"id": delivery_id, **params}
-        predicate = " AND status=:only" if only else ""
-        if only:
-            values["only"] = only
-        with self.engine.begin() as conn:
-            row = conn.execute(sa_text(
-                f"UPDATE inter_bot_deliveries SET {assignments} WHERE id=:id{predicate} RETURNING *"
-            ), values).mappings().first()
-            if "status" in assignments:
-                DeliveryTransitionEvents.stage(conn, row)
-        return DeliveryRecord.from_mapping(row) if row else self.get(delivery_id)
 
     def recover_expired(self, *, live_owner: str | None = None) -> list[DeliveryRecord]:
         """Recover expired claims; singleton fencing excludes live peers.

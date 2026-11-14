@@ -479,6 +479,25 @@ def _restart_retry_failed(
 
 
 _PENDING_BATCH = 50
+_DEFER_UNTIL = "restart_retry_deferred_until"
+_DEFER_COUNT = "restart_retry_deferrals"
+
+
+def _defer_restart_retry(store: InterBotDeliveryStore, delivery_id: str) -> None:
+    """Back off a row whose restart retry raised: 30 s doubling, capped at 1 h."""
+    try:
+        with store.engine.begin() as conn:
+            conn.execute(sa_text(f"""
+                UPDATE inter_bot_deliveries SET metadata_json = metadata_json
+                    || jsonb_build_object(
+                        '{_DEFER_COUNT}', COALESCE((metadata_json->>'{_DEFER_COUNT}')::int, 0) + 1,
+                        '{_DEFER_UNTIL}', to_jsonb(now() + LEAST(
+                            interval '30 seconds' * power(2, COALESCE((metadata_json->>'{_DEFER_COUNT}')::int, 0)),
+                            interval '1 hour')))
+                WHERE id=:id
+            """), {"id": delivery_id})
+    except Exception:
+        logger.exception("could not record restart-retry backoff for delivery %s", delivery_id)
 
 
 def restart_retry_recovered(store: InterBotDeliveryStore) -> list[DeliveryRecord]:
@@ -505,6 +524,7 @@ def restart_retry_recovered(store: InterBotDeliveryStore) -> list[DeliveryRecord
         pending = conn.execute(sa_text(f"""
             SELECT id, target_bot_id, turn_id FROM inter_bot_deliveries
             WHERE status='FAILED' AND metadata_json->>'{RESTART_RETRY_PENDING}'='true'
+              AND COALESCE((metadata_json->>'{_DEFER_UNTIL}')::timestamptz, '-infinity') <= now()
             ORDER BY updated_at, ordinal LIMIT {_PENDING_BATCH}
         """)).mappings().all()
     children = []
@@ -524,7 +544,8 @@ def restart_retry_recovered(store: InterBotDeliveryStore) -> list[DeliveryRecord
                     " WHERE id=:id"
                 ), {"id": row["id"], "key": RESTART_RETRY_PENDING})
         except Exception:
-            logger.exception("restart retry of recovered delivery %s deferred to the next sweep", row["id"])
+            logger.exception("restart retry of recovered delivery %s deferred with backoff", row["id"])
+            _defer_restart_retry(store, row["id"])
             continue
         if child is not None:
             children.append(child)
