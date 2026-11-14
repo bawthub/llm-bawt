@@ -67,6 +67,7 @@ class BotCreateTransaction:
         rows = (
             ("messages", "bot_id", storage_id),
             ("memories", "bot_id", storage_id),
+            ("memory_ownership_activations", "bot_id", storage_id),
             ("forgotten_messages", "bot_id", storage_id),
             ("sessions", "bot_id", slug),
             ("turn_logs", "bot_id", slug),

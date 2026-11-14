@@ -91,6 +91,14 @@ class _Llm:
 
 def test_semantic_duplicate_merge_keeps_every_original(rig):
     _storage, backend, _bot, ids, _state = rig
+    # Give the longer representative a slightly different stored direction.
+    # Its generated [1, 0, ...] vector now deterministically dedups onto the
+    # shorter/different text, instead of relying on an equal-vector SQL tie.
+    vector = _vector(0)
+    vector[1] = 0.01
+    with backend.engine.begin() as conn:
+        conn.execute(text(f"UPDATE {backend._memories_table_name} SET embedding=:vector WHERE id=:id"),
+                     {"vector": _literal(vector), "id": ids[0]})
 
     result = MemoryConsolidator(backend).consolidate()
 

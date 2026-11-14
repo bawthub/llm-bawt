@@ -335,6 +335,7 @@ def test_memory_client_update_sends_sources_in_embedded_and_server_modes():
     embedded = MemoryClient.__new__(MemoryClient)
     embedded._initialized = True
     embedded.bot_id = "example"
+    embedded.user_id = "synthetic-owner"
     embedded.server_url = None
     embedded._storage = SimpleNamespace(update_memory=fake_update)
     result = embedded.update_memory("m", content="Updated", source_message_ids=["human"])

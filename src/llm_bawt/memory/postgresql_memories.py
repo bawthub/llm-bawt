@@ -11,11 +11,13 @@ import logging
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
-from sqlalchemy import delete, select, text
-from sqlalchemy.orm import Session
+from sqlalchemy import text
 
 from llm_bawt.bot_access import BotAccessError
 from llm_bawt.bot_access.provenance import MemoryProvenance
+from llm_bawt.memory.ownership import (
+    MemoryAuthority, NO_MEMORY_AUTHORITY, OPERATOR_MEMORY_AUTHORITY,
+)
 from llm_bawt.memory.errors import (
     MemoryUpdateConflictError,
     MemoryUpdateDuplicateError,
@@ -36,11 +38,19 @@ class PostgreSQLSemanticMemoryMixin:
         wait. The transaction releases the lock on commit, rollback or error.
         """
         with self.engine.begin() as conn:
+            # Exclude activation before observing its marker. A later INSERT's
+            # implicit table lock would be too late to close the cutover race.
+            conn.execute(text("LOCK TABLE sessions, messages, memories IN ROW EXCLUSIVE MODE"))
             conn.execute(text("""
                 SELECT pg_advisory_xact_lock(
                     hashtext('memory-dedup'), hashtext(:partition))
             """), {"partition": self._memories_table_name})
             yield conn
+
+    def _ownership(self, authority=None, eligibility=None):
+        if authority is None and eligibility is not None:
+            authority = MemoryAuthority(user_id=eligibility.authority.user_id)
+        return (authority or NO_MEMORY_AUTHORITY).scope(self.bot_id)
 
     @staticmethod
     def _validate_extraction_sources(conn, eligibility, source_message_ids):
@@ -70,6 +80,8 @@ class PostgreSQLSemanticMemoryMixin:
         meaning_updated_at: datetime | None = None,
         *,
         eligibility: MemoryProvenance | None = None,
+        authority: MemoryAuthority | None = None,
+        _merge_originals: list[dict] | None = None,
     ) -> MemoryWriteOutcome:
         """Add a distilled memory to storage.
 
@@ -110,11 +122,50 @@ class PostgreSQLSemanticMemoryMixin:
         if meaning_embedding:
             meaning_updated_at = meaning_updated_at or datetime.now(timezone.utc)
 
-        guard = eligibility.predicate if eligibility else "TRUE"
-        scope_params = eligibility.params if eligibility else {}
+        ownership = self._ownership(authority, eligibility)
+        guard = f"({eligibility.predicate if eligibility else 'TRUE'}) AND {ownership.mutation_predicate}"
+        scope_params = {**(eligibility.params if eligibility else {}), **ownership.params}
         try:
             with self._memory_write_transaction() as conn:
+                ownership.validate_write(conn, source_message_ids)
                 self._validate_extraction_sources(conn, eligibility, source_message_ids)
+                existing = conn.execute(text(f"""
+                    SELECT owner_user_id FROM {self._memories_table_name} WHERE id = :id
+                """), {"id": memory_id}).first()
+                if existing and conn.execute(text(f"""
+                    SELECT 1 FROM {self._memories_table_name} mem
+                    WHERE id = :id AND {guard}
+                """), {**scope_params, "id": memory_id}).first() is None:
+                    raise ValueError("cannot overwrite another owner's memory")
+                insert_owner = ownership.authority.user_id
+                if _merge_originals is not None:
+                    # Internal consolidation only: retain the originals' owner,
+                    # including NULL. Operator visibility must never launder a
+                    # merge into another owner; personal legacy merges stay NULL.
+                    if existing or not _merge_originals:
+                        raise ValueError("merge requires originals and a new survivor ID")
+                    owners = {row.get("owner_user_id") for row in _merge_originals}
+                    if len(owners) != 1:
+                        raise ValueError("cannot consolidate distinct memory owners")
+                    insert_owner = owners.pop()
+                    for original in _merge_originals:
+                        valid = conn.execute(text(f"""
+                            SELECT id FROM {self._memories_table_name} mem
+                            WHERE id=:id AND {guard}
+                              AND owner_user_id IS NOT DISTINCT FROM CAST(:merge_owner AS text)
+                              AND updated_at IS NOT DISTINCT FROM :merge_updated_at
+                            FOR SHARE
+                        """), {**scope_params, "id": original["id"],
+                               "merge_owner": insert_owner,
+                               "merge_updated_at": original.get("updated_at")}).first()
+                        if valid is None:
+                            raise ValueError("consolidation original changed or is not owned")
+                scope_params["memory_dedup_owner"] = (
+                    existing.owner_user_id if existing else insert_owner
+                )
+                dedup_guard = f"({guard}) AND {ownership.dedup_group_predicate}"
+                if _merge_originals is not None:
+                    dedup_guard += " AND mem.owner_user_id IS NOT DISTINCT FROM CAST(:memory_dedup_owner AS text)"
                 # Check for duplicate/similar content BEFORE inserting
                 # Use embedding similarity if available, otherwise exact content match
                 # Threshold from config (default 0.85) - catches semantic duplicates
@@ -125,7 +176,7 @@ class PostgreSQLSemanticMemoryMixin:
                     dedup_sql = text(f"""
                         SELECT id, content, 1 - (embedding <=> :embedding) AS similarity
                         FROM {self._memories_table_name} mem
-                        WHERE embedding IS NOT NULL AND {guard}
+                        WHERE embedding IS NOT NULL AND {dedup_guard}
                         ORDER BY embedding <=> :embedding
                         LIMIT 1
                     """)
@@ -141,7 +192,7 @@ class PostgreSQLSemanticMemoryMixin:
                     # Exact content match fallback
                     exact_sql = text(f"""
                         SELECT id FROM {self._memories_table_name} mem
-                        WHERE LOWER(content) = LOWER(:content) AND {guard}
+                        WHERE LOWER(content) = LOWER(:content) AND {dedup_guard}
                         LIMIT 1
                     """)
                     exact_match = conn.execute(exact_sql, {**scope_params, "content": content}).first()
@@ -149,18 +200,7 @@ class PostgreSQLSemanticMemoryMixin:
                         logger.debug(f"Skipping exact duplicate memory: '{content[:50]}...'")
                         return MemoryWriteOutcome("duplicate", str(exact_match.id))
                 
-                # Check if this specific ID exists (for updates)
-                check_sql = text(f"""
-                    SELECT id FROM {self._memories_table_name} WHERE id = :id
-                """)
-                existing = conn.execute(check_sql, {"id": memory_id}).first()
-                
                 if existing:
-                    if eligibility and conn.execute(text(f"""
-                        SELECT 1 FROM {self._memories_table_name} mem
-                        WHERE id = :id AND {guard}
-                    """), {**scope_params, "id": memory_id}).first() is None:
-                        raise ValueError("extraction cannot overwrite another owner's memory")
                     # Update existing
                     update_sql = text(f"""
                         UPDATE {self._memories_table_name} mem
@@ -212,12 +252,13 @@ class PostgreSQLSemanticMemoryMixin:
                     # Insert new
                     insert_sql = text(f"""
                         INSERT INTO {self._memories_table_name}
-                        (id, content, tags, importance, source_message_ids, embedding,
+                        (id, content, tags, importance, source_message_ids, embedding, owner_user_id,
                          intent, stakes, emotional_charge, recurrence_keywords, meaning_embedding, meaning_updated_at, created_at)
-                        VALUES (:id, :content, CAST(:tags AS jsonb), :importance, :source_ids, :embedding,
+                        VALUES (:id, :content, CAST(:tags AS jsonb), :importance, :source_ids, :embedding, :owner_user_id,
                                 :intent, :stakes, :emotional_charge, CAST(:recurrence_keywords AS jsonb), :meaning_embedding, :meaning_updated_at, CURRENT_TIMESTAMP)
                     """)
                     conn.execute(insert_sql, {
+                        "owner_user_id": insert_owner,
                         "id": memory_id,
                         "content": content,
                         "tags": json.dumps(tags),
@@ -247,6 +288,7 @@ class PostgreSQLSemanticMemoryMixin:
         importance: float | None = None,
         source_message_ids: list[str] | None = None,
         eligibility: MemoryProvenance | None = None,
+        authority: MemoryAuthority | None = None,
     ) -> dict | None:
         """Patch an existing row, excluding itself from duplicate detection.
 
@@ -254,12 +296,13 @@ class PostgreSQLSemanticMemoryMixin:
         fails visibly instead of overwriting a newer edit or returning invented
         state. An unavailable embedder clears vectors only when content changes.
         """
-        guard = eligibility.predicate if eligibility else "TRUE"
-        scope_params = eligibility.params if eligibility else {}
+        ownership = self._ownership(authority, eligibility)
+        guard = f"({eligibility.predicate if eligibility else 'TRUE'}) AND {ownership.mutation_predicate}"
+        scope_params = {**(eligibility.params if eligibility else {}), **ownership.params}
         with self.engine.connect() as conn:
             original = conn.execute(text(f"""
                 SELECT content, intent, stakes, emotional_charge,
-                       recurrence_keywords, updated_at
+                       recurrence_keywords, updated_at, owner_user_id
                 FROM {self._memories_table_name} mem WHERE id = :id AND {guard}
             """), {**scope_params, "id": memory_id}).mappings().first()
         if original is None:
@@ -293,6 +336,7 @@ class PostgreSQLSemanticMemoryMixin:
             **scope_params,
             "id": memory_id, "old_content": original["content"],
             "old_updated_at": original["updated_at"],
+            "memory_dedup_owner": original["owner_user_id"],
             "content": content, "changed": changed,
             "tags_provided": tags is not None,
             "tags": json.dumps(tags) if tags is not None else None,
@@ -306,6 +350,7 @@ class PostgreSQLSemanticMemoryMixin:
                                   if meaning_embedding else None),
         }
         with self._memory_write_transaction() as conn:
+            ownership.validate_write(conn, source_message_ids)
             if source_message_ids is not None:
                 self._validate_extraction_sources(conn, eligibility, source_message_ids)
             if changed:
@@ -314,7 +359,8 @@ class PostgreSQLSemanticMemoryMixin:
                 # still count even when this edit has a valid new embedding.
                 exact = conn.execute(text(f"""
                     SELECT id FROM {self._memories_table_name} mem
-                    WHERE id <> :id AND LOWER(content) = LOWER(:content) AND {guard} LIMIT 1
+                    WHERE id <> :id AND LOWER(content) = LOWER(:content) AND {guard}
+                      AND {ownership.dedup_group_predicate} LIMIT 1
                 """), params).first()
                 is_duplicate = exact is not None
                 if not is_duplicate and embedding:
@@ -322,6 +368,7 @@ class PostgreSQLSemanticMemoryMixin:
                         SELECT id, 1 - (embedding <=> :embedding) AS similarity
                         FROM {self._memories_table_name} mem
                         WHERE id <> :id AND embedding IS NOT NULL AND {guard}
+                          AND {ownership.dedup_group_predicate}
                         ORDER BY embedding <=> :embedding LIMIT 1
                     """), params).first()
                     is_duplicate = similar is not None and similar.similarity > threshold
@@ -345,6 +392,7 @@ class PostgreSQLSemanticMemoryMixin:
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = :id AND content = :old_content AND {guard}
                   AND updated_at IS NOT DISTINCT FROM :old_updated_at
+                  AND owner_user_id IS NOT DISTINCT FROM CAST(:memory_dedup_owner AS text)
                 RETURNING id, content, tags, importance, source_message_ids,
                           access_count, created_at, last_accessed,
                           intent, stakes, emotional_charge
@@ -358,41 +406,43 @@ class PostgreSQLSemanticMemoryMixin:
                 return None
             return dict(updated)
 
-    def delete_memory(self, memory_id: str, *, user_id: str | None = None) -> bool:
-        """Delete a specific memory.
-        
-        Supports both full UUID and prefix matching (first 8 chars).
-        With ``user_id`` (TASK-2279), only a memory sourced entirely from that
-        user's messages matches; sourceless memories are bot-wide, so only the
-        operator (no ``user_id``) can delete them.
+    def delete_memory(self, memory_id: str, *, user_id: str | None = None,
+                      authority: MemoryAuthority | None = None) -> bool:
+        """Delete by ID/prefix, preserving the optional scoped-delete API.
+
+        The existing internal API defines user_id=None as operator. Unbound
+        entry points must pass NO_MEMORY_AUTHORITY rather than use that legacy
+        operator shorthand; MCP resolves the signed caller before reaching here.
         """
+        if authority is None and user_id is None:
+            authority = OPERATOR_MEMORY_AUTHORITY
         if user_id is not None:
-            return self._delete_owned_memory(memory_id, user_id)
-        with Session(self.engine) as session:
-            try:
-                # If it's a short ID (prefix), use LIKE matching
-                if len(memory_id) < 36:  # Full UUID is 36 chars
-                    stmt = delete(self.memories_table).where(
-                        self.memories_table.c.id.like(f"{memory_id}%")
-                    )
-                else:
-                    stmt = delete(self.memories_table).where(
-                        self.memories_table.c.id == memory_id
-                    )
-                result = session.execute(stmt)
-                session.commit()
-                return result.rowcount > 0
-            except Exception as e:
-                session.rollback()
-                logger.error(f"Failed to delete memory {memory_id}: {e}")
-                return False
+            personal = MemoryAuthority(user_id=user_id)
+            if authority is not None and authority != personal:
+                raise ValueError("conflicting memory authorities")
+            authority = personal
+        if authority is not None and authority.user_id is not None:
+            return self._delete_owned_memory(memory_id, authority.user_id)
+        ownership = self._ownership(authority)
+        match = "id LIKE :mid" if len(memory_id) < 36 else "id = :mid"
+        params = {**ownership.params, "mid": f"{memory_id}%" if len(memory_id) < 36 else memory_id}
+        try:
+            with self._memory_write_transaction() as conn:
+                return conn.execute(text(f"""
+                    DELETE FROM {self._memories_table_name} mem
+                    WHERE {match} AND {ownership.mutation_predicate}
+                """), params).rowcount > 0
+        except Exception as e:
+            logger.error(f"Failed to delete memory {memory_id}: {e}")
+            return False
 
     def _delete_owned_memory(self, memory_id: str, user_id: str) -> bool:
         if not str(user_id).strip():
             raise ValueError("user_id must be nonblank")
         from .short_term_message_reads import history_owner_clause
 
-        params: dict = {}
+        ownership = self._ownership(MemoryAuthority(user_id=user_id))
+        params = ownership.params
         owner = history_owner_clause(params, bot_id=self.bot_id, user_id=user_id)
         if len(memory_id) < 36:
             match, params["mid"] = "id LIKE :mid", f"{memory_id}%"
@@ -402,7 +452,9 @@ class PostgreSQLSemanticMemoryMixin:
         # messages, live or forgotten.
         sql = text(f"""
             DELETE FROM {self._memories_table_name} mem
-            WHERE {match}
+            WHERE {match} AND (
+              ({ownership.active} AND {ownership.owned_predicate}) OR
+              (NOT ({ownership.active})
               AND jsonb_typeof(mem.source_message_ids::jsonb) = 'array'
               AND jsonb_array_length(mem.source_message_ids::jsonb) > 0
               AND NOT EXISTS (
@@ -412,61 +464,54 @@ class PostgreSQLSemanticMemoryMixin:
                     UNION ALL
                     SELECT id FROM {self._forgotten_table_name} WHERE {owner}
                 )
-              )
+              ))
+            )
         """)
         try:
-            with self.engine.begin() as conn:
+            with self._memory_write_transaction() as conn:
                 return conn.execute(sql, params).rowcount > 0
         except Exception as e:
             logger.error(f"Failed to delete memory {memory_id}: {e}")
             return False
 
-    def delete_memories_by_source_message_ids(self, message_ids: list[str]) -> int:
-        """Delete all memories whose source_message_ids contain any of the given message IDs.
-        
-        Args:
-            message_ids: List of message UUIDs to match against source_message_ids.
-            
-        Returns:
-            Number of memories deleted.
+    def delete_memories_by_source_message_ids(self, message_ids: list[str], *,
+                                             authority: MemoryAuthority | None = None) -> int:
+        """Forget any memory citing a validated owned message, including mixed rows.
+
+        This intentionally differs from by-ID deletion: demanding ownership of
+        every source would retain private content the user asked to forget.
         """
         if not message_ids:
             return 0
-            
-        with self.engine.connect() as conn:
-            try:
-                # Use JSONB containment: source_message_ids ?| array[...] checks if any element matches
-                sql = text(f"""
+        ownership = self._ownership(authority)
+        try:
+            with self._memory_write_transaction() as conn:
+                ownership.validate_forget(conn, message_ids)
+                return conn.execute(text(f"""
                     DELETE FROM {self._memories_table_name}
-                    WHERE source_message_ids ?| :ids
-                    RETURNING id
-                """)
-                result = conn.execute(sql, {"ids": message_ids})
-                deleted_ids = [row.id for row in result.fetchall()]
-                conn.commit()
-                
-                if deleted_ids:
-                    logger.debug(f"Deleted {len(deleted_ids)} memories associated with forgotten messages")
-                return len(deleted_ids)
-            except Exception as e:
-                conn.rollback()
-                logger.error(f"Failed to delete memories by source message IDs: {e}")
-                return 0
+                    WHERE source_message_ids ?| CAST(:ids AS text[])
+                """), {"ids": message_ids}).rowcount
+        except Exception as e:
+            logger.error(f"Failed to delete memories by source message IDs: {e}")
+            return 0
 
-    def update_memory_access(self, memory_id: str) -> None:
-        """Update access tracking for a memory (reinforcement)."""
-        with self.engine.connect() as conn:
-            try:
-                sql = text(f"""
-                    UPDATE {self._memories_table_name}
+    def update_memory_access(self, memory_id: str, *,
+                             authority: MemoryAuthority | None = None,
+                             eligibility: MemoryProvenance | None = None) -> None:
+        """Reinforce only rows eligible for this read (including legacy reads)."""
+        ownership = self._ownership(authority, eligibility)
+        try:
+            with self._memory_write_transaction() as conn:
+                conn.execute(text(f"""
+                    UPDATE {self._memories_table_name} mem
                     SET access_count = access_count + 1,
                         last_accessed = CURRENT_TIMESTAMP
-                    WHERE id = :id
-                """)
-                conn.execute(sql, {"id": memory_id})
-                conn.commit()
-            except Exception as e:
-                logger.error(f"Failed to update memory access: {e}")
+                    WHERE id = :id AND {ownership.read_predicate}
+                      AND ({eligibility.predicate if eligibility else 'TRUE'})
+                """), {"id": memory_id, **ownership.params,
+                       **(eligibility.params if eligibility else {})})
+        except Exception as e:
+            logger.error(f"Failed to update memory access: {e}")
 
     def search_memories_by_text(
         self,
@@ -474,8 +519,10 @@ class PostgreSQLSemanticMemoryMixin:
         n_results: int = 5,
         min_importance: float = 0.0,
         tags: list[str] | None = None,
+        *, authority: MemoryAuthority | None = None,
     ) -> list[dict]:
         """Search memories using PostgreSQL full-text search."""
+        ownership = self._ownership(authority)
         if not query or query.isspace():
             return []
         
@@ -492,8 +539,9 @@ class PostgreSQLSemanticMemoryMixin:
                            access_count, last_accessed, created_at,
                            intent, stakes, emotional_charge,
                            ts_rank(to_tsvector('english', content), plainto_tsquery('english', :query)) AS rank
-                    FROM {self._memories_table_name}
+                    FROM {self._memories_table_name} mem
                     WHERE to_tsvector('english', content) @@ plainto_tsquery('english', :query)
+                    AND {ownership.read_predicate}
                     AND importance >= :min_importance
                     {tag_filter}
                     ORDER BY rank DESC, importance DESC
@@ -501,16 +549,20 @@ class PostgreSQLSemanticMemoryMixin:
                 """)
                 
                 rows = conn.execute(sql, {
+                    **ownership.params,
                     "query": query,
                     "min_importance": min_importance,
                     "limit": n_results,
                     "filter_tags": tags,
                 }).fetchall()
-                
+                # Access reinforcement uses another transaction. Release read
+                # locks first so activation cannot deadlock that writer.
+                conn.commit()
+
                 results = []
                 for row in rows:
                     # Update access tracking
-                    self.update_memory_access(row.id)
+                    self.update_memory_access(row.id, authority=authority)
                     
                     row_tags = row.tags if isinstance(row.tags, list) else (json.loads(row.tags) if row.tags else ["misc"])
                     results.append({
@@ -542,6 +594,7 @@ class PostgreSQLSemanticMemoryMixin:
         meaning_weight: float | None = None,
         *,
         eligibility: MemoryProvenance | None = None,
+        authority: MemoryAuthority | None = None,
     ) -> list[dict]:
         """Search memories using vector similarity with temporal decay and diversity.
         
@@ -555,6 +608,7 @@ class PostgreSQLSemanticMemoryMixin:
         if not embedding:
             return []
         
+        ownership = self._ownership(authority, eligibility)
         # Get decay settings from config
         decay_enabled = getattr(self.config, 'MEMORY_DECAY_ENABLED', True)
         half_life_days = getattr(self.config, 'MEMORY_DECAY_HALF_LIFE_DAYS', 90.0)
@@ -594,6 +648,7 @@ class PostgreSQLSemanticMemoryMixin:
                         FROM {self._memories_table_name} mem
                         WHERE embedding IS NOT NULL
                         AND importance >= :min_importance
+                        AND {ownership.read_predicate}
                         {f'AND ({eligibility.predicate})' if eligibility is not None else ''}
                         {tag_filter}
                         ORDER BY embedding <=> :embedding
@@ -611,6 +666,7 @@ class PostgreSQLSemanticMemoryMixin:
                         FROM {self._memories_table_name} mem
                         WHERE embedding IS NOT NULL
                         AND importance >= :min_importance
+                        AND {ownership.read_predicate}
                         {f'AND ({eligibility.predicate})' if eligibility is not None else ''}
                         {tag_filter}
                         ORDER BY embedding <=> :embedding
@@ -619,6 +675,7 @@ class PostgreSQLSemanticMemoryMixin:
                     fetch_limit = n_results
                 
                 rows = conn.execute(sql, {
+                    **ownership.params,
                     "embedding": str(embedding),
                     "meaning_embedding": str(meaning_embedding) if meaning_embedding else str(embedding),
                     "use_meaning": bool(meaning_embedding),
@@ -627,7 +684,10 @@ class PostgreSQLSemanticMemoryMixin:
                     "filter_tags": tags,
                     **(eligibility.params if eligibility is not None else {}),
                 }).fetchall()
-                
+                # Do not retain the reader's locks while reinforcing via a
+                # second transaction (activation acquires locks in writer order).
+                conn.commit()
+
                 if not rows:
                     return []
                 
@@ -710,7 +770,7 @@ class PostgreSQLSemanticMemoryMixin:
                 
                 # Update access counts for retrieved memories
                 for r in results:
-                    self.update_memory_access(r["id"])
+                    self.update_memory_access(r["id"], authority=authority, eligibility=eligibility)
                 
                 return results
                 
@@ -788,7 +848,8 @@ class PostgreSQLSemanticMemoryMixin:
         
         return selected
 
-    def search(self, query: str, n_results: int = 5, min_relevance: float = 0.0) -> list[dict] | None:
+    def search(self, query: str, n_results: int = 5, min_relevance: float = 0.0, *,
+               authority: MemoryAuthority | None = None) -> list[dict] | None:
         """Search for relevant memories (implements MemoryBackend interface).
         
         Search strategy:
@@ -822,7 +883,8 @@ class PostgreSQLSemanticMemoryMixin:
             }
         
         # 1. Try text search on memories - but only accept high-quality matches
-        text_results = self.search_memories_by_text(query, n_results, min_importance=min_relevance)
+        text_results = self.search_memories_by_text(
+            query, n_results, min_importance=min_relevance, authority=authority)
         if text_results:
             # Check if any result has good relevance (not just keyword matching noise)
             best_relevance = max(r.get("relevance", 0) for r in text_results)
@@ -842,7 +904,8 @@ class PostgreSQLSemanticMemoryMixin:
                 from .embeddings import generate_embedding
                 query_embedding = generate_embedding(query, self.embedding_model, verbose=getattr(self.config, 'VERBOSE', False))
                 if query_embedding:
-                    embedding_results = self.search_memories_by_embedding(query_embedding, n_results, min_importance=min_relevance)
+                    embedding_results = self.search_memories_by_embedding(
+                        query_embedding, n_results, min_importance=min_relevance, authority=authority)
                     if embedding_results:
                         logger.debug(f"Found {len(embedding_results)} memories via embedding search")
                         for r in embedding_results:
@@ -854,7 +917,8 @@ class PostgreSQLSemanticMemoryMixin:
         
         # Add high-importance core facts (limit to a few to avoid overwhelming)
         # These are foundational facts like name, profession that should always be included
-        high_importance_results = self.get_high_importance_memories(3, min_importance=0.9)
+        high_importance_results = self.get_high_importance_memories(
+            3, min_importance=0.9, authority=authority)
         for r in high_importance_results:
             if r["id"] not in seen_ids:
                 combined_results.append(format_memory_result(r))
@@ -865,7 +929,9 @@ class PostgreSQLSemanticMemoryMixin:
             return combined_results[:n_results]
         
         # 3. Last resort: search raw messages
-        message_results = self.search_messages_by_text(query, n_results, exclude_recent_seconds=10.0)
+        message_results = self.search_messages_by_text(
+            query, n_results, exclude_recent_seconds=10.0,
+            authority=authority or NO_MEMORY_AUTHORITY)
         
         if not message_results:
             return None
@@ -886,24 +952,24 @@ class PostgreSQLSemanticMemoryMixin:
             for r in message_results
         ]
 
-    def get_high_importance_memories(self, n_results: int = 10, min_importance: float = 0.7) -> list[dict]:
-        """Get the most important memories, regardless of query matching.
-        
-        Useful as a fallback for general queries like "what do you know about me?"
-        """
+    def get_high_importance_memories(self, n_results: int = 10, min_importance: float = 0.7, *,
+                                     authority: MemoryAuthority | None = None) -> list[dict]:
+        """Get the most important eligible memories, regardless of query matching."""
+        ownership = self._ownership(authority)
         with self.engine.connect() as conn:
             try:
                 sql = text(f"""
                     SELECT id, content, tags, importance, source_message_ids,
                            access_count, last_accessed, created_at,
                            intent, stakes, emotional_charge
-                    FROM {self._memories_table_name}
-                    WHERE importance >= :min_importance
+                    FROM {self._memories_table_name} mem
+                    WHERE importance >= :min_importance AND {ownership.read_predicate}
                     ORDER BY importance DESC, access_count DESC, created_at DESC
                     LIMIT :limit
                 """)
                 
                 rows = conn.execute(sql, {
+                    **ownership.params,
                     "min_importance": min_importance,
                     "limit": n_results,
                 }).fetchall()
@@ -927,29 +993,39 @@ class PostgreSQLSemanticMemoryMixin:
                 logger.error(f"Failed to get high-importance memories: {e}")
                 return []
 
-    def clear(self) -> bool:
-        """Clear all memories (NOT messages - those are permanent)."""
-        with Session(self.engine) as session:
-            try:
-                stmt = delete(self.memories_table)
-                session.execute(stmt)
-                session.commit()
-                logger.debug(f"Cleared all memories from {self._memories_table_name}")
-                return True
-            except Exception as e:
-                session.rollback()
-                logger.error(f"Failed to clear memories: {e}")
-                return False
+    def clear(self, *, authority: MemoryAuthority | None = None) -> bool:
+        """Clear mutable memories in the caller's scope, never messages."""
+        ownership = self._ownership(authority)
+        try:
+            with self._memory_write_transaction() as conn:
+                ownership.validate_write(conn, None)
+                conn.execute(text(f"""
+                    DELETE FROM {self._memories_table_name} mem
+                    WHERE {ownership.mutation_predicate}
+                """), ownership.params)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to clear memories: {e}")
+            return False
 
-    def list_recent(self, n: int = 10) -> list[dict]:
-        """List the most recent memories."""
-        with Session(self.engine) as session:
-            stmt = (
-                select(self.memories_table)
-                .order_by(self.memories_table.c.created_at.desc())
-                .limit(n)
-            )
-            rows = session.execute(stmt).fetchall()
+    def get_memory_by_id(self, memory_id: str, *, authority: MemoryAuthority | None = None) -> dict | None:
+        ownership = self._ownership(authority)
+        with self.engine.connect() as conn:
+            row = conn.execute(text(f"""
+                SELECT * FROM {self._memories_table_name} mem
+                WHERE id=:id AND {ownership.read_predicate}
+            """), {**ownership.params, "id": memory_id}).mappings().first()
+        return dict(row) if row is not None else None
+
+    def list_recent(self, n: int = 10, *, authority: MemoryAuthority | None = None) -> list[dict]:
+        """Apply caller ownership before ordering and LIMIT."""
+        ownership = self._ownership(authority)
+        with self.engine.connect() as conn:
+            rows = conn.execute(text(f"""
+                SELECT * FROM {self._memories_table_name} mem
+                WHERE {ownership.read_predicate}
+                ORDER BY created_at DESC LIMIT :limit
+            """), {**ownership.params, "limit": n}).fetchall()
             
             return [
                 {
@@ -964,8 +1040,12 @@ class PostgreSQLSemanticMemoryMixin:
                 for row in rows
             ]
 
-    def stats(self) -> dict:
-        """Get statistics about memory storage."""
+    def stats(self, *, authority: MemoryAuthority | None = None) -> dict:
+        """Get caller-scoped statistics, without exposing a whole-partition size."""
+        ownership = self._ownership(authority)
+        size = f"pg_total_relation_size('{self._memories_table_name}')"
+        if not ownership.authority.operator:
+            size = f"CASE WHEN {ownership.active} THEN NULL ELSE {size} END"
         with self.engine.connect() as conn:
             try:
                 # Memory stats
@@ -978,10 +1058,11 @@ class PostgreSQLSemanticMemoryMixin:
                         COUNT(*) FILTER (WHERE embedding IS NULL) AS missing_content_embeddings,
                         COUNT(*) FILTER (WHERE meaning_embedding IS NULL) AS missing_meaning_embeddings,
                         COUNT(*) FILTER (WHERE embedding IS NULL OR meaning_embedding IS NULL) AS missing_any_embeddings,
-                        pg_total_relation_size('{self._memories_table_name}') as size_bytes
-                    FROM {self._memories_table_name}
+                        {size} as size_bytes
+                    FROM {self._memories_table_name} mem
+                    WHERE {ownership.read_predicate}
                 """)
-                mem_row = conn.execute(mem_stats_sql).first()
+                mem_row = conn.execute(mem_stats_sql, ownership.params).first()
                 
                 # Message stats
                 msg_stats_sql = text(f"""
@@ -991,14 +1072,16 @@ class PostgreSQLSemanticMemoryMixin:
                         MIN(created_at) as oldest,
                         MAX(created_at) as newest
                     FROM {self._messages_table_name}
+                    WHERE {ownership.message_read_predicate}
                 """)
-                msg_row = conn.execute(msg_stats_sql).first()
+                msg_row = conn.execute(msg_stats_sql, ownership.params).first()
                 
                 # Forgotten message count
                 forgotten_count = 0
                 try:
-                    forgotten_sql = text(f"SELECT COUNT(*) FROM {self._forgotten_table_name}")
-                    forgotten_count = conn.execute(forgotten_sql).scalar() or 0
+                    forgotten_sql = text(f"""SELECT COUNT(*) FROM {self._forgotten_table_name}
+                        WHERE {ownership.message_read_predicate}""")
+                    forgotten_count = conn.execute(forgotten_sql, ownership.params).scalar() or 0
                 except Exception:
                     pass  # Table may not exist yet
                 

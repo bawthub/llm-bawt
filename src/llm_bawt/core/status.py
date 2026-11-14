@@ -236,7 +236,8 @@ def _collect_memory_info(config: Config, default_bot_slug: str) -> MemoryInfo:
             bot_id=default_bot_slug,
             provision_schema=False,
         )
-        db_stats = backend.stats()
+        from llm_bawt.memory.ownership import OPERATOR_MEMORY_AUTHORITY
+        db_stats = backend.stats(authority=OPERATOR_MEMORY_AUTHORITY)
         info.postgres_connected = True
         info.postgres_host = config.POSTGRES_HOST
         info.memories_count = db_stats.get("memories", {}).get("total_count", 0)

@@ -12,6 +12,7 @@ from llm_bawt.retrieval.find import like_pattern
 from sqlalchemy import text
 
 from llm_bawt.bot_tags import SNAPSHOT_SQL, TagPolicyUnavailable, TagSnapshot
+from llm_bawt.memory.ownership import MemoryAuthority
 
 from .budgets import DATABASE_WORKER, compact_json
 from .contracts import (
@@ -415,8 +416,9 @@ class MessageSource(PostgresSource):
 
 class MemorySource(PostgresSource):
     source = "memories"
-    # Memories have NO user_id column. Every source must resolve to an allowed
-    # message, not just one matching source. Unattributed/manual facts are omitted.
+    # Explicit ownership supplements the existing source-only recall contract:
+    # every source must resolve to an allowed message; manual facts stay omitted.
+    # The predicate is a bind-only template; extra_params supplies trusted scope.
     # Current schema physically deletes consolidated originals; no imaginary
     # superseded column exists to filter. Read only the live memories parent.
     statement = f"""
@@ -424,6 +426,7 @@ class MemorySource(PostgresSource):
         FROM memories mem
         {_MEMORY_WINDOW[1]}
         WHERE mem.bot_id = :partition
+          AND {MemoryAuthority().scope('').read_predicate}
           AND jsonb_typeof(mem.source_message_ids) = 'array'
           AND jsonb_array_length(mem.source_message_ids) BETWEEN 1 AND 64
           AND NOT EXISTS (
@@ -438,6 +441,9 @@ class MemorySource(PostgresSource):
                  mem.created_at DESC, mem.id
         LIMIT :limit
     """
+
+    def extra_params(self, scope: RecallScope, query: str) -> dict:
+        return MemoryAuthority(user_id=scope.user_id).scope(scope.bot_id).params
 
 
 class ToolEvidenceSource(PostgresSource):

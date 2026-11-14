@@ -47,6 +47,10 @@ def rig(private_app_pg):
             access_count int DEFAULT 0, last_accessed timestamptz,
             created_at timestamptz DEFAULT now(), intent text, stakes text,
             emotional_charge float)"""))
+        from llm_bawt.memory.ownership_migration import ensure_schema
+        # Build the marker in this fixture's schema even if public has one.
+        conn.execute(text(f"SET LOCAL search_path TO {schema}"))
+        ensure_schema(conn)
     instance = SimpleNamespace(engine=engine)
     try:
         yield instance
@@ -81,13 +85,10 @@ def eligibility(rig, bot="public-fixture"):
 class Backend(PostgreSQLSemanticMemoryMixin):
     _memories_table_name = "memories"
 
-    def __init__(self, engine, decay):
+    def __init__(self, engine, decay, bot_id="public-fixture"):
         self.engine = engine
+        self.bot_id = bot_id
         self.config = SimpleNamespace(MEMORY_DECAY_ENABLED=decay, MEMORY_DIVERSITY_ENABLED=False)
-
-    def update_memory_access(self, id):
-        with self.engine.begin() as conn:
-            conn.execute(text("UPDATE memories SET access_count=access_count+1 WHERE id=:id"), {"id": id})
 
 
 @pytest.mark.parametrize("decay", [True, False])
@@ -104,6 +105,27 @@ def test_provenance_precedes_both_limits_and_denied_access_writes(rig, decay):
         counts = dict(conn.execute(text("SELECT id, access_count FROM memories")).all())
     assert counts.pop("allowed") == 1
     assert set(counts.values()) == {0}
+
+
+@pytest.mark.parametrize("decay", [True, False])
+def test_active_ownership_composes_with_existing_author_provenance(rig, decay):
+    from llm_bawt.memory.ownership_migration import ACTIVATIONS
+    add_message(rig)
+    add_memory(rig, "foreign_owner", ["good"])
+    add_memory(rig, "own_unsourced", [])
+    add_memory(rig, "legacy_eligible", ["good"], vector="[0.9,0.1,0]")
+    with rig.engine.begin() as conn:
+        conn.execute(text(f"INSERT INTO {ACTIVATIONS} (bot_id, mode, actor_id) "
+                          "VALUES ('publicfixture', 'new', 'synthetic')"))
+        conn.execute(text("UPDATE memories SET owner_user_id='user_b' WHERE id='foreign_owner'"))
+        conn.execute(text("UPDATE memories SET owner_user_id='user_a' WHERE id='own_unsourced'"))
+    rows = Backend(rig.engine, decay).search_memories_by_embedding(
+        [1, 0, 0], n_results=1, eligibility=eligibility(rig))
+    assert [row["id"] for row in rows] == ["legacy_eligible"]
+    with rig.engine.connect() as conn:
+        assert dict(conn.execute(text("SELECT id, access_count FROM memories")).all()) == {
+            "foreign_owner": 0, "own_unsourced": 0, "legacy_eligible": 1,
+        }
 
 
 @pytest.mark.parametrize("sources", [None, {}, [], "good", ["missing"], [3], [None], ["good"] * 65])
@@ -147,7 +169,8 @@ def test_public_and_self_have_distinct_authorities(rig):
     backend = Backend(rig.engine, False)
     assert [r["id"] for r in backend.search_memories_by_embedding([1, 0, 0], eligibility=eligibility(rig))] == ["public"]
     own = eligibility(rig, "private_fixture")
-    assert [r["id"] for r in backend.search_memories_by_embedding([1, 0, 0], eligibility=own)] == ["self_owned"]
+    own_backend = Backend(rig.engine, False, "private_fixture")
+    assert [r["id"] for r in own_backend.search_memories_by_embedding([1, 0, 0], eligibility=own)] == ["self_owned"]
     with rig.engine.connect() as conn:
         history = conn.execute(text("SELECT m.id FROM messages m JOIN sessions s ON s.id=m.session_id WHERE "
                                     + own.authority.predicate(history=True)), own.params).scalars().all()

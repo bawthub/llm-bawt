@@ -81,6 +81,23 @@ def test_standalone_purge_keeps_profile_and_tags(db):
     assert count(db, "SELECT count(*) FROM messages WHERE bot_id='source'") == 0
 
 
+@pytest.mark.parametrize("delete_profile", [False, True])
+def test_memory_ownership_activation_is_retained_and_inventoried(db, delete_profile):
+    from llm_bawt.memory.ownership_migration import ensure_activation_schema
+    with db.begin() as conn:
+        ensure_activation_schema(conn)
+        conn.execute(text("""
+            INSERT INTO memory_ownership_activations (bot_id, mode, actor_id)
+            VALUES ('source', 'new', 'synthetic-create')
+        """))
+    manifest = preview.preview_bot_purge(db, "source", delete_profile=delete_profile)
+    rows = {r["key"]: r for r in manifest["inventory"]}
+    assert rows["memory_ownership_activations"]["count"] == 1
+    assert rows["memory_ownership_activations"]["disposition"] == "retained"
+    run(db, delete_profile=delete_profile, digest=manifest["manifest_digest"])
+    assert count(db, "SELECT count(*) FROM memory_ownership_activations WHERE bot_id='source'") == 1
+
+
 def test_digest_is_action_specific(db):
     standalone = preview.preview_bot_purge(db, "source")["manifest_digest"]
     with pytest.raises(ex.PurgeStale):

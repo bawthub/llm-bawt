@@ -30,6 +30,9 @@ def backend(private_app_pg):  # noqa: F811
 
 
 def _session(backend, user_id: str) -> str:
+    # Match normal human chat setup; strict owned-memory proof rejects unknown users.
+    from llm_bawt.profiles import EntityType, ProfileManager
+    ProfileManager(backend.config).get_or_create_profile(EntityType.USER, user_id)
     sid = str(uuid.uuid4())
     with backend.engine.begin() as conn:
         conn.execute(text(

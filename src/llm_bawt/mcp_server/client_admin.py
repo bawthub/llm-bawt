@@ -30,7 +30,7 @@ class MemoryClientAdminMixin:
             return self._call_server("system_stats", {"bot_id": self.bot_id})
         storage = self._get_storage()
         backend = storage.get_backend(self.bot_id)
-        return backend.stats()
+        return backend.stats(authority=self._memory_authority)
 
     def list_memories(self, limit: int = 20, min_importance: float = 0.0) -> list[dict[str, Any]]:
         self._ensure_initialized()
@@ -41,7 +41,8 @@ class MemoryClientAdminMixin:
             )
         storage = self._get_storage()
         backend = storage.get_backend(self.bot_id)
-        return backend.get_high_importance_memories(n_results=limit, min_importance=min_importance)
+        return backend.get_high_importance_memories(
+            n_results=limit, min_importance=min_importance, authority=self._memory_authority)
 
     def _forget_scope(self, session_id: str | None) -> dict[str, Any]:
         """Owner and optional thread for count/time selection (TASK-2279).
@@ -161,7 +162,8 @@ class MemoryClientAdminMixin:
             )
         storage = self._get_storage()
         backend = storage.get_backend(self.bot_id, provision_schema=True)
-        return int(backend.delete_memories_by_source_message_ids(message_ids))
+        return int(backend.delete_memories_by_source_message_ids(
+            message_ids, authority=self._memory_authority))
 
     def regenerate_embeddings(self, batch_size: int = 50) -> dict[str, Any]:
         self._ensure_initialized()
@@ -196,6 +198,7 @@ class MemoryClientAdminMixin:
             llm_client=llm_client,
             similarity_threshold=threshold,
             config=self.config,
+            authority=self._memory_authority,
         )
         result = consolidator.consolidate(dry_run=dry_run)
         return {
@@ -244,6 +247,7 @@ class MemoryClientAdminMixin:
                     emotional_charge=emotional_charge,
                     recurrence_keywords=recurrence_keywords,
                     updated_tags=updated_tags,
+                    authority=self._memory_authority,
                 )
             )
         )
@@ -278,5 +282,6 @@ class MemoryClientAdminMixin:
                 run_decay_pruning=run_decay_pruning,
                 run_orphan_cleanup=run_orphan_cleanup,
                 dry_run=dry_run,
+                authority=self._memory_authority,
             )
         )

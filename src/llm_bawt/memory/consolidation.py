@@ -18,6 +18,7 @@ from typing import Any
 import numpy as np
 
 from .errors import MemoryWriteOutcome
+from .ownership import MemoryAuthority, NO_MEMORY_AUTHORITY
 
 logger = logging.getLogger(__name__)
 _DEFAULT_USER_ALIAS = os.getenv("LLM_BAWT_DEFAULT_USER", "").strip().lower()
@@ -136,6 +137,7 @@ class MemoryConsolidator:
         llm_client: Any | None = None,
         similarity_threshold: float | None = None,
         config: Any = None,
+        *, authority: MemoryAuthority | None = None,
     ):
         """Initialize the consolidator.
         
@@ -149,20 +151,23 @@ class MemoryConsolidator:
         self.llm_client = llm_client
         self.config = config
         self.threshold = similarity_threshold or self.DEFAULT_SIMILARITY_THRESHOLD
+        self.authority = authority or NO_MEMORY_AUTHORITY
     
     def get_all_active_memories_with_embeddings(self) -> list[dict]:
         """Fetch all memories that have embeddings."""
         from sqlalchemy import text
         
+        ownership = self.authority.scope(self.backend.bot_id)
         with self.backend.engine.connect() as conn:
             sql = text(f"""
                 SELECT id, content, tags, importance, source_message_ids,
-                       access_count, last_accessed, created_at, updated_at, embedding, intent
-                FROM {self.backend._memories_table_name}
-                WHERE embedding IS NOT NULL
+                       access_count, last_accessed, created_at, updated_at, embedding, intent,
+                       owner_user_id
+                FROM {self.backend._memories_table_name} mem
+                WHERE embedding IS NOT NULL AND {ownership.mutation_predicate}
                 ORDER BY created_at ASC
             """)
-            rows = conn.execute(sql).fetchall()
+            rows = conn.execute(sql, ownership.params).fetchall()
             
             memories = []
             for row in rows:
@@ -186,6 +191,7 @@ class MemoryConsolidator:
                     "last_accessed": row.last_accessed,
                     "created_at": row.created_at,
                     "updated_at": getattr(row, "updated_at", None),
+                    "owner_user_id": row.owner_user_id,
                     "embedding": embedding,
                 })
             
@@ -241,6 +247,8 @@ class MemoryConsolidator:
                     continue
                 
                 mem_j = memories[j]
+                if mem_i.get("owner_user_id") != mem_j.get("owner_user_id"):
+                    continue  # NULL is a separate group, not a wildcard.
                 tags_i = set(mem_i.get("tags") or [])
                 tags_j = set(mem_j.get("tags") or [])
                 tag_overlap = bool(tags_i & tags_j)
@@ -403,6 +411,8 @@ Merged memory:"""
             stakes=stakes,
             emotional_charge=emotional_charge,
             recurrence_keywords=recurrence_keywords,
+            authority=self.authority,
+            _merge_originals=cluster.memories,
         )
         
         if not isinstance(outcome, MemoryWriteOutcome) or not outcome.persisted:
@@ -411,19 +421,7 @@ Merged memory:"""
                 f"merged memory was not persisted ({detail}); originals kept"
             )
 
-        # Update access count separately (add_memory doesn't support it)
-        access_count = cluster.total_access_count
-        if access_count > 0 and outcome.status == "inserted":
-            from sqlalchemy import text
-            with self.backend.engine.connect() as conn:
-                sql = text(f"""
-                    UPDATE {self.backend._memories_table_name}
-                    SET access_count = :count
-                    WHERE id = :id
-                """)
-                conn.execute(sql, {"count": access_count, "id": memory_id})
-                conn.commit()
-        
+        # Access counts are carried forward only inside verified replacement.
         return outcome
     
     def _infer_stakes(self, importance: float) -> str:
@@ -450,19 +448,6 @@ Merged memory:"""
         words = re.findall(r"[a-zA-Z]{4,}", content.lower())
         return list(set(tag_list + words[:3]))
     
-    def delete_merged_memories(self, memory_ids: list[str]) -> None:
-        """Delete the old memories that were merged into a new one."""
-        from sqlalchemy import text
-        
-        with self.backend.engine.connect() as conn:
-            sql = text(f"""
-                DELETE FROM {self.backend._memories_table_name}
-                WHERE id = ANY(:ids)
-            """)
-            conn.execute(sql, {"ids": memory_ids})
-            conn.commit()
-            logger.debug(f"Deleted {len(memory_ids)} merged memories")
-    
     def replace_originals(
         self,
         survivor_id: str,
@@ -482,10 +467,17 @@ Merged memory:"""
         table = self.backend._memories_table_name
         deleted = 0
         kept: list[str] = []
-        with self.backend.engine.begin() as conn:
+        ownership = self.authority.scope(self.backend.bot_id)
+        owners = {mem.get("owner_user_id") for mem in cluster.memories}
+        if len(owners) != 1:
+            raise MemoryConsolidationWriteError("distinct memory owners; originals kept")
+        params = {**ownership.params, "merge_owner": owners.pop()}
+        group_guard = "mem.owner_user_id IS NOT DISTINCT FROM CAST(:merge_owner AS text)"
+        with self.backend._memory_write_transaction() as conn:
             survivor = conn.execute(
-                text(f"SELECT id, content FROM {table} WHERE id = :id FOR SHARE"),
-                {"id": survivor_id},
+                text(f"""SELECT id, content FROM {table} mem WHERE id = :id
+                    AND {ownership.mutation_predicate} AND {group_guard} FOR UPDATE"""),
+                {**params, "id": survivor_id},
             ).first()
             if survivor is None:
                 raise MemoryConsolidationWriteError(
@@ -503,17 +495,23 @@ Merged memory:"""
                     continue
                 row = conn.execute(
                     text(f"""
-                        DELETE FROM {table}
+                        DELETE FROM {table} mem
                         WHERE id = :id
                           AND updated_at IS NOT DISTINCT FROM :updated_at
+                          AND {ownership.mutation_predicate} AND {group_guard}
                         RETURNING id
                     """),
-                    {"id": mem_id, "updated_at": mem.get("updated_at")},
+                    {**params, "id": mem_id, "updated_at": mem.get("updated_at")},
                 ).first()
                 if row is None:
                     kept.append(mem_id)
                 else:
                     deleted += 1
+            if str(survivor_id) not in {str(mem["id"]) for mem in cluster.memories}:
+                conn.execute(text(f"""
+                    UPDATE {table} mem SET access_count = GREATEST(access_count, :count)
+                    WHERE id=:id AND {ownership.mutation_predicate} AND {group_guard}
+                """), {**params, "id": survivor_id, "count": cluster.total_access_count})
         return deleted, kept
 
     def consolidate(self, dry_run: bool = False) -> ConsolidationResult:

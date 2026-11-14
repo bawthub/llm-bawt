@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from llm_bawt.shared.logging import LogConfig
+from llm_bawt.memory.ownership import MemoryAuthority
 
 # TASK-639 slice A: the FastMCP instance + host allowlist moved to
 # ``mcp_server/registry.py`` so the approval-aware interceptor (Slice E) can
@@ -109,6 +110,11 @@ def _parse_timestamp(value: str | float | int | None) -> float | None:
 # ---------------------------------------------------------------------------
 
 
+def _memory_caller_authority(bot_id: str, user_id: str | None = None) -> MemoryAuthority:
+    user = history_caller_user(bot_id, user_id, operator=True)
+    return MemoryAuthority(user_id=user, operator=user is None)
+
+
 @mcp.tool(name="memory_store")
 async def store_memory(
     content: str,
@@ -130,6 +136,7 @@ async def store_memory(
         Stored memory dict with generated id.
     """
     logger.debug("MCP tool invoked: tools/store_memory bot_id=%s", bot_id)
+    authority = _memory_caller_authority(bot_id)
     storage = _get_storage()
     memory = await storage.store_memory(
         content=content,
@@ -137,6 +144,7 @@ async def store_memory(
         tags=tags,
         importance=importance,
         source_message_ids=source_message_ids,
+        authority=authority,
     )
     return memory.to_dict()
 
@@ -162,6 +170,7 @@ async def search_memories(
         List of memory dicts with relevance scores.
     """
     logger.debug("MCP tool invoked: tools/search_memories bot_id=%s", bot_id)
+    authority = _memory_caller_authority(bot_id)
     storage = _get_storage()
     memories = await storage.search_memories(
         query=query,
@@ -169,6 +178,7 @@ async def search_memories(
         n_results=n_results,
         min_relevance=min_relevance,
         tags=tags,
+        authority=authority,
     )
     return [m.to_dict() for m in memories]
 
@@ -214,6 +224,7 @@ async def search_memory_source(
         includes a 'source' key indicating which bot the memory belongs to.
     """
     logger.debug("MCP tool invoked: tools/search_memory_source source=%s", source)
+    authority = _memory_caller_authority(source)
     storage = _get_storage()
     memories = await storage.search_memories(
         query=query,
@@ -221,6 +232,7 @@ async def search_memory_source(
         n_results=n_results,
         min_relevance=min_relevance,
         tags=tags,
+        authority=authority,
     )
     results = []
     for m in memories:
@@ -335,11 +347,13 @@ async def get_recent_context(
         Dict with keys: messages, memories.
     """
     logger.debug("MCP tool invoked: tools/get_recent_context bot_id=%s", bot_id)
+    authority = _memory_caller_authority(bot_id)
     storage = _get_storage()
     messages = await storage.get_recent_messages(
         bot_id=bot_id,
         max_messages=n_messages,
         max_age_seconds=3600,
+        authority=authority,
     )
 
     memories: list[dict] = []
@@ -353,6 +367,7 @@ async def get_recent_context(
                 bot_id=bot_id,
                 n_results=n_memories,
                 min_relevance=0.0,
+                authority=authority,
             )
             memories = [m.to_dict() for m in mems]
 
@@ -438,6 +453,7 @@ async def extract_facts(
     from llm_bawt.mcp_server.extraction import extract_facts_from_messages
 
     MemoryExtractionService.require_source_ids(messages)
+    authority = _memory_caller_authority(bot_id, user_id)
     facts = await extract_facts_from_messages(
         messages=messages,
         use_llm=use_llm,
@@ -454,12 +470,13 @@ async def extract_facts(
         storage = _get_storage()
         stored_facts = []
         for fact in facts:
-            memory = await storage.store_memory(
+            memory = await storage.store_extracted_memory(
                 content=fact["content"],
                 bot_id=bot_id,
                 tags=fact.get("tags", ["misc"]),
                 importance=fact.get("importance", 0.5),
                 source_message_ids=fact.get("source_message_ids", []),
+                authority=authority,
             )
             stored_facts.append(memory.to_dict())
         return stored_facts
@@ -482,6 +499,7 @@ async def update_memory(
         source_message_ids: Replacement human-message IDs; None retains prior sources.
     """
     logger.debug("MCP tool invoked: tools/update_memory bot_id=%s memory_id=%s", bot_id, memory_id)
+    authority = _memory_caller_authority(bot_id)
     storage = _get_storage()
     memory = await storage.update_memory(
         memory_id=memory_id,
@@ -490,6 +508,7 @@ async def update_memory(
         tags=tags,
         importance=importance,
         source_message_ids=source_message_ids,
+        authority=authority,
     )
     return memory.to_dict() if memory else None
 
@@ -524,8 +543,9 @@ async def delete_memory(
 async def clear_memories(bot_id: str = "default") -> bool:
     """Delete all distilled memories for a bot."""
     logger.debug("MCP tool invoked: tools/clear_memories bot_id=%s", bot_id)
+    authority = _memory_caller_authority(bot_id)
     storage = _get_storage()
-    return await storage.clear_memories(bot_id=bot_id)
+    return await storage.clear_memories(bot_id=bot_id, authority=authority)
 
 
 @mcp.tool(name="memory_supersede")
@@ -534,11 +554,8 @@ async def supersede_memory(
     new_memory_id: str,
     bot_id: str = "default",
 ) -> bool:
-    """Mark a memory as superseded by another (or DELETED)."""
-    storage = _get_storage()
-    backend = storage.get_backend(bot_id, provision_schema=True)
-    if hasattr(backend, "supersede_memory"):
-        return bool(backend.supersede_memory(old_memory_id, new_memory_id))  # type: ignore[attr-defined]
+    """Superseding is not implemented by the current memory backend."""
+    _memory_caller_authority(bot_id)
     return False
 
 
@@ -548,16 +565,18 @@ async def list_recent(
     n: int = 50,
 ) -> list[dict]:
     """List recent memories (backend-native shape)."""
+    authority = _memory_caller_authority(bot_id)
     storage = _get_storage()
-    return await storage.list_recent_memories(bot_id=bot_id, n=n)
+    return await storage.list_recent_memories(bot_id=bot_id, n=n, authority=authority)
 
 
 @mcp.tool(name="system_stats")
 async def stats(bot_id: str = "default") -> dict:
     """Get memory/message stats."""
     logger.debug("MCP tool invoked: tools/stats bot_id=%s", bot_id)
+    authority = _memory_caller_authority(bot_id)
     storage = _get_storage()
-    return await storage.stats(bot_id=bot_id)
+    return await storage.stats(bot_id=bot_id, authority=authority)
 
 
 @mcp.tool(name="memory_list_high_importance")
@@ -567,11 +586,13 @@ async def list_memories(
     min_importance: float = 0.0,
 ) -> list[dict]:
     """List memories ordered by importance."""
+    authority = _memory_caller_authority(bot_id)
     storage = _get_storage()
     return await storage.get_high_importance_memories(
         bot_id=bot_id,
         n_results=limit,
         min_importance=min_importance,
+        authority=authority,
     )
 
 
@@ -698,8 +719,10 @@ async def mark_messages_recalled(bot_id: str = "default", message_ids: list[str]
 
 @mcp.tool(name="memory_delete_by_source_messages")
 async def delete_memories_by_source_message_ids(bot_id: str = "default", message_ids: list[str] | None = None) -> int:
+    authority = _memory_caller_authority(bot_id)
     storage = _get_storage()
-    return await storage.delete_memories_by_source_message_ids(bot_id=bot_id, message_ids=message_ids)
+    return await storage.delete_memories_by_source_message_ids(
+        bot_id=bot_id, message_ids=message_ids, authority=authority)
 
 
 @mcp.tool(name="memory_regenerate_embeddings")
@@ -714,11 +737,13 @@ async def consolidate_memories(
     dry_run: bool = True,
     similarity_threshold: float | None = None,
 ) -> dict:
+    authority = _memory_caller_authority(bot_id)
     storage = _get_storage()
     return await storage.consolidate_memories(
         bot_id=bot_id,
         dry_run=dry_run,
         similarity_threshold=similarity_threshold,
+        authority=authority,
     )
 
 
@@ -732,6 +757,7 @@ async def update_memory_meaning(
     recurrence_keywords: list[str] | None = None,
     updated_tags: list[str] | None = None,
 ) -> bool:
+    authority = _memory_caller_authority(bot_id)
     logger.debug("MCP tool invoked: tools/update_memory_meaning bot_id=%s memory_id=%s", bot_id, memory_id)
     storage = _get_storage()
     return await storage.update_memory_meaning(
@@ -742,6 +768,7 @@ async def update_memory_meaning(
         emotional_charge=emotional_charge,
         recurrence_keywords=recurrence_keywords,
         updated_tags=updated_tags,
+        authority=authority,
     )
 
 
@@ -754,6 +781,7 @@ async def run_maintenance(
     run_orphan_cleanup: bool = False,
     dry_run: bool = False,
 ) -> dict:
+    authority = _memory_caller_authority(bot_id)
     logger.debug("MCP tool invoked: tools/run_maintenance bot_id=%s", bot_id)
     storage = _get_storage()
     return await storage.run_maintenance(
@@ -763,6 +791,7 @@ async def run_maintenance(
         run_decay_pruning=run_decay_pruning,
         run_orphan_cleanup=run_orphan_cleanup,
         dry_run=dry_run,
+        authority=authority,
     )
 
 

@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from llm_bawt.memory.ownership import MemoryAuthority, NO_MEMORY_AUTHORITY
 from llm_bawt.utils.error_text import safe_error_text
 
 from ..prompt_registry import get_prompt_resolver
@@ -89,10 +90,13 @@ class MemoryMaintenance:
         backend: Any,  # PostgreSQLMemoryBackend
         llm_client: Any | None = None,
         config: Any = None,
+        *, authority: MemoryAuthority | None = None,
     ):
         self.backend = backend
         self.llm_client = llm_client
         self.config = config
+        self.authority = authority or NO_MEMORY_AUTHORITY
+        self.ownership = self.authority.scope(backend.bot_id)
 
     def run(
         self,
@@ -151,6 +155,7 @@ class MemoryMaintenance:
             backend=self.backend,
             llm_client=self.llm_client,
             config=self.config,
+            authority=self.authority,
         )
         cons = consolidator.consolidate(dry_run=dry_run)
         return {
@@ -167,17 +172,19 @@ class MemoryMaintenance:
         themes_detected = 0
         memories_tagged = 0
 
-        with self.backend.engine.connect() as conn:
-            # Fetch all memories with recurrence_keywords
+        ownership = self.ownership
+        with self.backend._memory_write_transaction() as conn:
+            # Lock candidates so the evidence/group cannot change during tagging.
             sql = text(f"""
-                SELECT id, tags, recurrence_keywords
-                FROM {self.backend._memories_table_name}
-                WHERE recurrence_keywords IS NOT NULL
+                SELECT id, tags, recurrence_keywords, owner_user_id
+                FROM {self.backend._memories_table_name} mem
+                WHERE recurrence_keywords IS NOT NULL AND {ownership.mutation_predicate}
+                FOR UPDATE
             """)
-            rows = conn.execute(sql).fetchall()
+            rows = conn.execute(sql, ownership.params).fetchall()
 
-            # Build keyword -> memory_ids mapping
-            keyword_to_ids: dict[str, list[str]] = defaultdict(list)
+            # Identical keywords from distinct owners are not a recurring theme.
+            keyword_to_ids: dict[tuple[str | None, str], list[str]] = defaultdict(list)
             id_to_tags: dict[str, list[str]] = {}
             for row in rows:
                 keywords = row.recurrence_keywords or []
@@ -194,7 +201,7 @@ class MemoryMaintenance:
                         tags = []
                 id_to_tags[row.id] = tags
                 for kw in keywords:
-                    keyword_to_ids[kw.lower()].append(row.id)
+                    keyword_to_ids[(row.owner_user_id, kw.lower())].append(row.id)
 
             # Identify recurring themes (keyword appearing in 3+ memories)
             recurring_threshold = getattr(self.config, "MEMORY_RECURRENCE_THRESHOLD", 3)
@@ -214,15 +221,16 @@ class MemoryMaintenance:
                         else:
                             new_tags = tags + ["recurring"]
                             update_sql = text(f"""
-                                UPDATE {self.backend._memories_table_name}
+                                UPDATE {self.backend._memories_table_name} mem
                                 SET tags = CAST(:tags AS jsonb), updated_at = CURRENT_TIMESTAMP
-                                WHERE id = :id
+                                WHERE id = :id AND {ownership.mutation_predicate}
                             """)
-                            conn.execute(update_sql, {"id": mem_id, "tags": json.dumps(new_tags)})
+                            changed = conn.execute(update_sql, {
+                                **ownership.params, "id": mem_id, "tags": json.dumps(new_tags),
+                            })
+                            memories_tagged += changed.rowcount
+                            continue
                         memories_tagged += 1
-
-            if not dry_run:
-                conn.commit()
 
         return {"themes_detected": themes_detected, "memories_tagged": memories_tagged}
 
@@ -237,17 +245,23 @@ class MemoryMaintenance:
         half_life = getattr(self.config, "MEMORY_DECAY_HALF_LIFE_DAYS", 90.0)
         prune_threshold = getattr(self.config, "MEMORY_PRUNE_THRESHOLD", 0.05)
 
-        with self.backend.engine.connect() as conn:
+        ownership = self.ownership
+        with self.backend._memory_write_transaction() as conn:
             sql = text(f"""
                 SELECT id, importance, created_at
-                FROM {self.backend._memories_table_name}
+                FROM {self.backend._memories_table_name} mem
+                WHERE {ownership.mutation_predicate}
+                FOR UPDATE
             """)
-            rows = conn.execute(sql).fetchall()
+            rows = conn.execute(sql, ownership.params).fetchall()
 
             now = datetime.now(timezone.utc)
             to_archive: list[str] = []
             for row in rows:
-                age_days = (now - row.created_at).total_seconds() / 86400.0
+                created_at = row.created_at
+                if created_at.tzinfo is None:
+                    created_at = created_at.replace(tzinfo=timezone.utc)
+                age_days = (now - created_at).total_seconds() / 86400.0
                 decay = math.exp(-age_days * math.log(2) / half_life)
                 effective_importance = float(row.importance) * decay
                 if effective_importance < prune_threshold:
@@ -259,12 +273,13 @@ class MemoryMaintenance:
                 else:
                     # Delete stale low-importance memories
                     delete_sql = text(f"""
-                        DELETE FROM {self.backend._memories_table_name}
-                        WHERE id = ANY(:ids)
+                        DELETE FROM {self.backend._memories_table_name} mem
+                        WHERE id = ANY(:ids) AND {ownership.mutation_predicate}
                     """)
-                    conn.execute(delete_sql, {"ids": to_archive})
-                    conn.commit()
-                archived = len(to_archive)
+                    changed = conn.execute(delete_sql, {**ownership.params, "ids": to_archive})
+                    archived = changed.rowcount
+                if dry_run:
+                    archived = len(to_archive)
 
         return {"archived": archived}
 
@@ -284,6 +299,7 @@ def update_memory_meaning(
     emotional_charge: float | None = None,
     recurrence_keywords: list[str] | None = None,
     updated_tags: list[str] | None = None,
+    *, authority: MemoryAuthority | None = None,
 ) -> bool:
     """Update meaning metadata on an existing memory.
     
@@ -293,22 +309,25 @@ def update_memory_meaning(
     from sqlalchemy import text
     from .embeddings import generate_embedding, meaning_text
 
+    ownership = (authority or NO_MEMORY_AUTHORITY).scope(backend.bot_id)
     with backend.engine.connect() as conn:
         updates = ["updated_at = CURRENT_TIMESTAMP"]
-        params: dict[str, Any] = {"id": memory_id}
+        params: dict[str, Any] = {**ownership.params, "id": memory_id}
         meaning_changed = any(
             value is not None for value in (intent, stakes, emotional_charge, recurrence_keywords)
         )
-        guard = ""
+        current = conn.execute(text(f"""
+            SELECT content, intent, stakes, emotional_charge, recurrence_keywords, owner_user_id
+            FROM {backend._memories_table_name} mem
+            WHERE id = :id AND {ownership.mutation_predicate}
+        """), params).mappings().first()
+        conn.commit()  # No transaction/row lock spans the embedding request.
+        if current is None:
+            return False
+        params["old_owner"] = current["owner_user_id"]
+        guard = "AND owner_user_id IS NOT DISTINCT FROM CAST(:old_owner AS text)"
         if meaning_changed:
-            current = conn.execute(text(f"""
-                SELECT content, intent, stakes, emotional_charge, recurrence_keywords
-                FROM {backend._memories_table_name} WHERE id = :id
-            """), {"id": memory_id}).mappings().first()
-            conn.commit()  # No transaction/row lock spans the embedding request.
-            if current is None:
-                return False
-            guard = """
+            guard += """
                 AND content = :old_content
                 AND intent IS NOT DISTINCT FROM :old_intent
                 AND stakes IS NOT DISTINCT FROM :old_stakes
@@ -360,12 +379,12 @@ def update_memory_meaning(
             ])
             params["meaning_embedding"] = f"[{','.join(str(x) for x in emb)}]" if emb else None
 
+    with backend._memory_write_transaction() as conn:
         result = conn.execute(text(f"""
-            UPDATE {backend._memories_table_name}
+            UPDATE {backend._memories_table_name} mem
             SET {', '.join(updates)}
-            WHERE id = :id {guard}
+            WHERE id = :id {guard} AND {ownership.mutation_predicate}
         """), params)
-        conn.commit()
         return result.rowcount > 0
 
 

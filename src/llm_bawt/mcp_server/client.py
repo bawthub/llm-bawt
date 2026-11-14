@@ -15,6 +15,7 @@ import weakref
 from typing import Any, TYPE_CHECKING
 
 from llm_bawt.utils.config import Config
+from llm_bawt.memory.ownership import MemoryAuthority
 from llm_bawt.bot_access.service import ServicePrincipal
 from llm_bawt.message_authorship import AuthorReference, require_system_author
 
@@ -134,6 +135,11 @@ class MemoryClient(
             raise RuntimeError("Storage not initialized - are you in server mode?")
         return self._storage
 
+    @property
+    def _memory_authority(self) -> MemoryAuthority:
+        # This facade is an app service principal, not an unbound MCP caller.
+        return MemoryAuthority(user_id=self.user_id, operator=self.user_id is None)
+
     def get_short_term_manager(self) -> Any:
         """Get the short-term memory manager for conversation history.
         
@@ -187,6 +193,7 @@ class MemoryClient(
                 tags=tags or ["misc"],
                 importance=importance,
                 source_message_ids=source_message_ids or [],
+                authority=self._memory_authority,
             )
         )
         return MemoryResult.from_dict(result.to_dict())
@@ -229,6 +236,7 @@ class MemoryClient(
                 bot_id=self.bot_id,
                 n_results=n_results,
                 min_relevance=min_relevance,
+                authority=self._memory_authority,
             )
         )
         return [MemoryResult.from_dict(r.to_dict()) for r in results]
@@ -267,6 +275,7 @@ class MemoryClient(
             storage.get_recent_messages(
                 bot_id=self.bot_id,
                 max_messages=n_messages,
+                authority=self._memory_authority,
             )
         )
         
@@ -280,6 +289,7 @@ class MemoryClient(
                         query=search_query,
                         bot_id=self.bot_id,
                         n_results=n_memories,
+                        authority=self._memory_authority,
                     )
                 )
         
@@ -466,7 +476,8 @@ class MemoryClient(
         if self.server_url:
             return bool(self._call_server("memory_clear", {"bot_id": self.bot_id}))
         storage = self._get_storage()
-        return bool(_run_async(storage.clear_memories(bot_id=self.bot_id)))
+        return bool(_run_async(storage.clear_memories(
+            bot_id=self.bot_id, authority=self._memory_authority)))
 
     def remove_last_message_if_partial(self, role: str, *, user_id: str | None = None) -> bool:
         user_id = self._history_user(user_id)
@@ -552,6 +563,7 @@ class MemoryClient(
                 importance=importance,
                 tags=tags,
                 source_message_ids=source_message_ids,
+                authority=self._memory_authority,
             )
         )
         return MemoryResult.from_dict(result.to_dict()) if result else None
@@ -581,9 +593,10 @@ class MemoryClient(
                 memory_id=memory_id,
                 bot_id=self.bot_id,
                 user_id=user_id,
+                authority=MemoryAuthority(user_id=user_id, operator=user_id is None),
             )
         )
-    
+
     # -------------------------------------------------------------------------
     # Message Operations
     # -------------------------------------------------------------------------
@@ -783,14 +796,16 @@ class MemoryClient(
         # Store facts if requested
         if store:
             stored = []
+            storage = self._get_storage()
             for fact in facts:
-                memory = self.store_memory(
-                    content=fact["content"],
+                memory = _run_async(storage.store_extracted_memory(
+                    content=fact["content"], bot_id=self.bot_id,
                     tags=fact.get("tags", ["misc"]),
                     importance=fact.get("importance", 0.5),
                     source_message_ids=fact.get("source_message_ids", []),
-                )
-                stored.append(memory)
+                    authority=self._memory_authority,
+                ))
+                stored.append(MemoryResult.from_dict(memory.to_dict()))
             return stored
         
         return [MemoryResult.from_dict(f) for f in facts]
@@ -838,7 +853,7 @@ class MemoryClient(
         storage = self._get_storage()
         backend = storage.get_backend(self.bot_id)
         if hasattr(backend, 'list_recent'):
-            return backend.list_recent(n=n)
+            return backend.list_recent(n=n, authority=self._memory_authority)
         return []
     
     def supersede_memory(self, old_memory_id: str, new_memory_id: str) -> bool:
@@ -863,11 +878,8 @@ class MemoryClient(
                 "new_memory_id": new_memory_id,
             })
         
-        # Embedded mode
-        storage = self._get_storage()
-        backend = storage.get_backend(self.bot_id, provision_schema=True)
-        if hasattr(backend, 'supersede_memory'):
-            return backend.supersede_memory(old_memory_id, new_memory_id)  # type: ignore
+        # No backend currently implements supersede. Do not provision schema
+        # or create an unscoped mutation dispatch for a future implementation.
         return False
 
     # Server-mode transport (_call_server / _log_response_debug) lives in

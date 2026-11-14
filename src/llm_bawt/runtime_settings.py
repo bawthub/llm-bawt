@@ -225,6 +225,8 @@ class BotProfileStore:
             bot_profile_changes.ensure_schema(conn)
             from . import bot_slug_aliases
             bot_slug_aliases.ensure_schema(conn)
+            from .memory.ownership_migration import ensure_activation_schema
+            ensure_activation_schema(conn)
 
         self._schema_guard.run(self.engine, "bot-profile-store", bootstrap)
 
@@ -295,6 +297,12 @@ class BotProfileStore:
         now = datetime.now(timezone.utc)
         borrowed = session is not None
         with (nullcontext(session) if borrowed else Session(self.engine)) as session:
+            # Creation uses HTTP create/purge's storage -> tag lock order.
+            # Existing updates keep their established house/tag lock order.
+            creating = session.exec(select(BotProfile.slug).where(BotProfile.slug == slug)).first() is None
+            if creating:
+                from .utils.bot_partition import lock_bot_storage, sanitize_table_name
+                lock_bot_storage(session.connection(), sanitize_table_name(slug))
             if "house" in payload:
                 # Every house assignment writer serializes here first (TASK-2118),
                 # so a manual PATCH can't interleave with a self-move's check.
@@ -307,6 +315,8 @@ class BotProfileStore:
             # below can't pass on a row another upsert is about to change.
             lock_bot(session.connection(), slug)
             row = session.exec(select(BotProfile).where(BotProfile.slug == slug)).first()
+            if row is None and not creating:
+                raise BotProfileNotFound(f"Bot '{slug}' was deleted during update; retry creation explicitly")
             if require_existing and row is None:
                 raise BotProfileNotFound(f"Bot '{slug}' not found")
             if create_only:
@@ -456,6 +466,9 @@ class BotProfileStore:
 
             session.add(row)
             session.flush()
+            if previous is None:
+                from .memory.ownership_migration import mark_new_bot
+                mark_new_bot(session.connection(), slug)
             if guard is not None:
                 guard.check(session.connection(), previous, row)
             profile_changes.record_change(

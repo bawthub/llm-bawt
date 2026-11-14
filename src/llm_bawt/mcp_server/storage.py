@@ -16,10 +16,11 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, TYPE_CHECKING
 
 from llm_bawt.memory.postgresql import PostgreSQLMemoryBackend
+from llm_bawt.memory.ownership import MemoryAuthority
 from llm_bawt.memory.embeddings import generate_embedding
 from llm_bawt.memory.message_store import _NativeSelectedOwnerConstraint, NativeSelectedOwnerDenied
 from llm_bawt.bot_access import BotAccessError
@@ -218,6 +219,7 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
         tags: list[str] | None = None,
         importance: float = 0.5,
         source_message_ids: list[str] | None = None,
+        *, authority: MemoryAuthority | None = None,
     ) -> Memory:
         """Store a new memory with auto-generated embedding."""
         memory_id = str(uuid.uuid4())
@@ -236,6 +238,7 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
             importance=importance,
             source_message_ids=source_message_ids or [],
             embedding=embedding,
+            authority=authority,
         )
         # Only hand out an ID a row actually holds: a duplicate resolves to
         # the existing row, and a skipped or failed write is an error.
@@ -243,14 +246,31 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
             detail = getattr(outcome, "error", None) or getattr(outcome, "status", "no outcome")
             raise RuntimeError(f"Memory was not stored ({detail})")
 
-        return Memory(
-            id=outcome.memory_id,
-            content=content,
-            tags=tags,
-            importance=importance,
-            source_message_ids=source_message_ids or [],
-            created_at=datetime.now(timezone.utc),
+        stored = await self.get_memory(outcome.memory_id, bot_id, authority=authority)
+        if stored is None:
+            raise RuntimeError("Stored memory is no longer available to the caller")
+        return stored
+
+    async def store_extracted_memory(
+        self, content: str, bot_id: str, *, authority: MemoryAuthority,
+        tags: list[str] | None = None, importance: float = 0.5,
+        source_message_ids: list[str] | None = None,
+    ) -> Memory:
+        """Use sourced-only extraction eligibility, not general manual-memory CRUD."""
+        from llm_bawt.memory.extraction.storage import ExtractionMemoryStore
+
+        if authority.user_id is None:
+            raise ValueError("extracted memories require a user-bound authority")
+        backend = self._get_backend(bot_id)
+        writer = ExtractionMemoryStore(backend, bot_id, authority.user_id)
+        memory_id = writer.add_memory(
+            content=content, tags=tags, importance=importance,
+            source_message_ids=source_message_ids,
         )
+        stored = await self.get_memory(memory_id, bot_id, authority=authority)
+        if stored is None:
+            raise RuntimeError("extracted memory survivor is no longer readable")
+        return stored
 
     async def search_memories(
         self,
@@ -259,6 +279,7 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
         n_results: int = 10,
         min_relevance: float = 0.0,
         tags: list[str] | None = None,
+        *, authority: MemoryAuthority | None = None,
     ) -> list[Memory]:
         """Search memories using semantic similarity."""
         backend = self._get_backend(bot_id)
@@ -272,6 +293,7 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
                 n_results=n_results,
                 min_importance=min_relevance,
                 tags=tags,
+                authority=authority,
             )
         else:
             # Fallback to text search
@@ -280,6 +302,7 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
                 n_results=n_results,
                 min_importance=min_relevance,
                 tags=tags,
+                authority=authority,
             )
         
         memories = []
@@ -306,45 +329,22 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
         
         return memories
 
-    async def get_memory(self, memory_id: str, bot_id: str = "default") -> Memory | None:
-        """Get a specific memory by ID."""
+    async def get_memory(self, memory_id: str, bot_id: str = "default", *,
+                         authority: MemoryAuthority | None = None) -> Memory | None:
+        """Return the durable row through the same scoped backend as writes."""
         backend = self._get_backend(bot_id)
-        
-        # Use the backend's method if available, otherwise use raw SQL
-        result = None
-        if hasattr(backend, 'get_memory_by_id'):
-            result = backend.get_memory_by_id(memory_id)  # type: ignore
-        else:
-            # Fallback: raw SQL lookup
-            from sqlalchemy import text
-            try:
-                with backend.engine.connect() as conn:
-                    sql = text(f"""
-                        SELECT id, content, tags, importance, source_message_ids
-                        FROM {backend._memories_table_name}
-                        WHERE id = :id
-                    """)
-                    row = conn.execute(sql, {"id": memory_id}).fetchone()
-                    if row:
-                        result = {
-                            "id": row[0],
-                            "content": row[1],
-                            "tags": row[2] if row[2] else ["misc"],
-                            "importance": row[3] if row[3] else 0.5,
-                            "source_message_ids": row[4] if row[4] else [],
-                        }
-            except Exception as e:
-                logger.error(f"Failed to get memory {memory_id}: {e}")
-        
-        if result:
-            return Memory(
-                id=result["id"],
-                content=result["content"],
-                tags=result.get("tags", ["misc"]),
-                importance=result.get("importance", 0.5),
-                source_message_ids=result.get("source_message_ids", []),
-            )
-        return None
+        result = backend.get_memory_by_id(memory_id, authority=authority)
+        if result is None:
+            return None
+        return Memory(
+            id=result["id"], content=result["content"],
+            tags=result.get("tags") or ["misc"], importance=result["importance"],
+            source_message_ids=result.get("source_message_ids") or [],
+            access_count=result.get("access_count") or 0,
+            created_at=result.get("created_at"), last_accessed=result.get("last_accessed"),
+            intent=result.get("intent"), stakes=result.get("stakes"),
+            emotional_charge=result.get("emotional_charge"),
+        )
 
     async def update_memory(
         self,
@@ -354,6 +354,7 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
         tags: list[str] | None = None,
         importance: float | None = None,
         source_message_ids: list[str] | None = None,
+        *, authority: MemoryAuthority | None = None,
     ) -> Memory | None:
         """Update an existing memory."""
         backend = self._get_backend(bot_id, provision_schema=True)
@@ -363,6 +364,7 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
             tags=tags,
             importance=importance,
             source_message_ids=source_message_ids,
+            authority=authority,
         )
         if stored is None:
             return None
@@ -385,25 +387,11 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
         memory_id: str,
         bot_id: str = "default",
         user_id: str | None = None,
+        *, authority: MemoryAuthority | None = None,
     ) -> bool:
         """Delete a memory; with ``user_id``, only one that user owns."""
         backend = self._get_backend(bot_id, provision_schema=True)
-        if user_id is not None:
-            return backend.delete_memory(memory_id, user_id=user_id)
-        
-        try:
-            if hasattr(backend, 'delete_memory'):
-                return backend.delete_memory(memory_id)
-            else:
-                # Fallback: use raw SQL
-                from sqlalchemy import text
-                with backend.engine.connect() as conn:
-                    conn.execute(text(f"DELETE FROM {backend._memories_table_name} WHERE id = :id"), {"id": memory_id})
-                    conn.commit()
-            return True
-        except Exception as e:
-            logger.error(f"Failed to delete memory {memory_id}: {e}")
-            return False
+        return backend.delete_memory(memory_id, user_id=user_id, authority=authority)
 
     # =========================================================================
     # Message Operations
@@ -527,9 +515,11 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
         bot_id: str = "default",
         max_messages: int = 20,
         max_age_seconds: int = 3600,
+        *, authority: MemoryAuthority | None = None,
     ) -> list[Message]:
         """Get recent conversation messages."""
         backend = self._get_backend(bot_id)
+        ownership = authority.scope(bot_id) if authority is not None else None
         
         # Get recent messages
         cutoff = time.time() - max_age_seconds
@@ -541,10 +531,12 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
                     SELECT id, role, content, timestamp, session_id
                     FROM {backend._messages_table_name}
                     WHERE timestamp >= :cutoff
+                    AND {ownership.message_read_predicate if ownership else 'TRUE'}
                     ORDER BY timestamp DESC
                     LIMIT :limit
                 """)
-                rows = conn.execute(sql, {"cutoff": cutoff, "limit": max_messages}).fetchall()
+                rows = conn.execute(sql, {"cutoff": cutoff, "limit": max_messages,
+                                          **(ownership.params if ownership else {})}).fetchall()
                 
                 # Reverse to chronological order
                 return [
@@ -835,9 +827,10 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
             logger.error("Failed to clear messages: %s", e)
             raise
 
-    async def clear_memories(self, bot_id: str = "default") -> bool:
-        """Delete all distilled memories for a bot through its cached backend."""
-        return bool(self._get_backend(bot_id, provision_schema=True).clear())
+    async def clear_memories(self, bot_id: str = "default", *,
+                             authority: MemoryAuthority | None = None) -> bool:
+        """Delete mutable memories in this caller's scope."""
+        return bool(self._get_backend(bot_id, provision_schema=True).clear(authority=authority))
 
     async def remove_last_message_if_partial(
         self, bot_id: str = "default", role: str = "assistant", user_id: str | None = None,

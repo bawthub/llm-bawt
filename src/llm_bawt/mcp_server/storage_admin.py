@@ -4,29 +4,33 @@ from __future__ import annotations
 
 from typing import Any
 
+from llm_bawt.memory.ownership import MemoryAuthority
+
 
 class StorageAdminMixin:
     """Maintenance and UX operations sharing the facade's cached backends."""
 
-    async def stats(self, bot_id: str = "default") -> dict[str, Any]:
+    async def stats(self, bot_id: str = "default", *,
+                    authority: MemoryAuthority | None = None) -> dict[str, Any]:
         """Return memory/message statistics."""
         backend = self._get_backend(bot_id)
-        return backend.stats()
+        return backend.stats(authority=authority)
 
     async def get_high_importance_memories(
         self,
         bot_id: str = "default",
         n_results: int = 20,
         min_importance: float = 0.0,
+        *, authority: MemoryAuthority | None = None,
     ) -> list[dict[str, Any]]:
         backend = self._get_backend(bot_id)
-        return backend.get_high_importance_memories(n_results=n_results, min_importance=min_importance)
+        return backend.get_high_importance_memories(
+            n_results=n_results, min_importance=min_importance, authority=authority)
 
-    async def list_recent_memories(self, bot_id: str = "default", n: int = 10) -> list[dict[str, Any]]:
+    async def list_recent_memories(self, bot_id: str = "default", n: int = 10, *,
+                                   authority: MemoryAuthority | None = None) -> list[dict[str, Any]]:
         backend = self._get_backend(bot_id)
-        if hasattr(backend, "list_recent"):
-            return backend.list_recent(n=n)
-        return []
+        return backend.list_recent(n=n, authority=authority)
 
     async def preview_recent_messages(
         self, bot_id: str = "default", count: int = 10, *,
@@ -116,9 +120,10 @@ class StorageAdminMixin:
         manager = self.get_short_term_manager(bot_id, provision_schema=True)
         return manager.mark_messages_recalled(message_ids or [])
 
-    async def delete_memories_by_source_message_ids(self, bot_id: str = "default", message_ids: list[str] | None = None) -> int:
+    async def delete_memories_by_source_message_ids(self, bot_id: str = "default", message_ids: list[str] | None = None, *,
+                                                   authority: MemoryAuthority | None = None) -> int:
         backend = self._get_backend(bot_id, provision_schema=True)
-        return backend.delete_memories_by_source_message_ids(message_ids or [])
+        return backend.delete_memories_by_source_message_ids(message_ids or [], authority=authority)
 
     async def regenerate_embeddings(self, bot_id: str = "default", batch_size: int = 50) -> dict[str, Any]:
         from llm_bawt.memory.embedding_repair import _eligible
@@ -133,6 +138,7 @@ class StorageAdminMixin:
         bot_id: str = "default",
         dry_run: bool = True,
         similarity_threshold: float | None = None,
+        *, authority: MemoryAuthority | None = None,
     ) -> dict[str, Any]:
         """Run consolidation using the existing backend implementation.
 
@@ -149,6 +155,7 @@ class StorageAdminMixin:
             llm_client=llm_client,
             similarity_threshold=threshold,
             config=self.config,
+            authority=authority,
         )
 
         result = consolidator.consolidate(dry_run=dry_run)
@@ -172,6 +179,7 @@ class StorageAdminMixin:
         emotional_charge: float | None = None,
         recurrence_keywords: list[str] | None = None,
         updated_tags: list[str] | None = None,
+        *, authority: MemoryAuthority | None = None,
     ) -> bool:
         """Update meaning metadata on an existing memory."""
         if not memory_id:
@@ -188,6 +196,7 @@ class StorageAdminMixin:
                 emotional_charge=emotional_charge,
                 recurrence_keywords=recurrence_keywords,
                 updated_tags=updated_tags,
+                authority=authority,
             )
         )
 
@@ -199,6 +208,7 @@ class StorageAdminMixin:
         run_decay_pruning: bool = False,
         run_orphan_cleanup: bool = False,
         dry_run: bool = False,
+        *, authority: MemoryAuthority | None = None,
     ) -> dict[str, Any]:
         """Run unified memory maintenance inside the memory service."""
         from llm_bawt.memory.maintenance import MemoryMaintenance
@@ -208,6 +218,7 @@ class StorageAdminMixin:
             backend=backend,
             llm_client=None,
             config=self.config,
+            authority=authority,
         )
         result = maint.run(
             run_consolidation=run_consolidation,

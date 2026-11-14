@@ -107,6 +107,7 @@ def ensure_parent_tables(conn, embedding_dim: int = 384) -> None:
             tags JSONB NOT NULL DEFAULT '["misc"]'::jsonb,
             importance REAL NOT NULL DEFAULT 0.5,
             source_message_ids JSONB,
+            owner_user_id TEXT,
             access_count INTEGER DEFAULT 0,
             last_accessed TIMESTAMP,
             intent TEXT,
@@ -123,6 +124,8 @@ def ensure_parent_tables(conn, embedding_dim: int = 384) -> None:
     """)
 
     conn.execute(memories_sql)
+    from .ownership_migration import ensure_schema as ensure_ownership_schema
+    ensure_ownership_schema(conn)
 
     # Parent-level btree/gin indexes — template to every partition.
     parent_indexes = [
@@ -309,6 +312,7 @@ def get_memory_table_pg(bot_id: str) -> Table:
         Column("tags", JSON, nullable=False, default=["misc"]),
         Column("importance", Float, nullable=False, default=0.5),
         Column("source_message_ids", JSON, nullable=True),  # Array of message UUIDs
+        Column("owner_user_id", Text, nullable=True),
         Column("access_count", Integer, default=0),  # For reinforcement
         Column("last_accessed", DateTime, nullable=True),
         Column("intent", Text, nullable=True),

@@ -9,11 +9,13 @@ from sqlalchemy import text
 
 from llm_bawt.bot_access.policy import BotPolicyResolver, PartitionScope
 from llm_bawt.bot_access.provenance import MemoryProvenance, ScopedMessageAuthority
+from llm_bawt.memory.ownership import MemoryAuthority
 
 
 class ExtractionMemoryStore:
     def __init__(self, backend, bot_id: str, user_id: str):
         self.backend = backend
+        self.ownership = MemoryAuthority(user_id=user_id).scope(bot_id)
         self.policy = BotPolicyResolver(backend.engine).resolve_sync()
         self.eligibility = MemoryProvenance(ScopedMessageAuthority(
             PartitionScope(bot_id, self.policy.partitions[bot_id], "global"),
@@ -26,9 +28,10 @@ class ExtractionMemoryStore:
             return [dict(row) for row in conn.execute(text(f"""
                 SELECT id, content, tags, importance, source_message_ids
                 FROM {self.backend._memories_table_name} mem
-                WHERE {self.eligibility.predicate} AND importance >= :importance
+                WHERE {self.eligibility.predicate} AND {self.ownership.mutation_predicate}
+                  AND importance >= :importance
                 ORDER BY created_at DESC LIMIT :limit
-            """), {**self.eligibility.params, "importance": min_importance,
+            """), {**self.eligibility.params, **self.ownership.params, "importance": min_importance,
                    "limit": limit}).mappings()]
 
     def add_memory(self, **kwargs):
@@ -48,4 +51,5 @@ class ExtractionMemoryStore:
             return bool(conn.execute(text(f"""
                 DELETE FROM {self.backend._memories_table_name} mem
                 WHERE id = :id AND {self.eligibility.predicate}
-            """), {**self.eligibility.params, "id": memory_id}).rowcount)
+                  AND {self.ownership.mutation_predicate}
+            """), {**self.eligibility.params, **self.ownership.params, "id": memory_id}).rowcount)

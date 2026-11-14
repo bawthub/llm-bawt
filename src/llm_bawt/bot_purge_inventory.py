@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-SCOPE_VERSION = "bot-purge/3"
+SCOPE_VERSION = "bot-purge/4"
 
 
 @dataclass(frozen=True)
@@ -58,6 +58,9 @@ DELETED = (
 
 _RETAINED_REASON = "Not deleted by the existing standalone purge; operational records can survive."
 RETAINED = (
+    InventorySpec("memory_ownership_activations", "memory_ownership_activations", ("bot_id",),
+                  "bot_id=:storage", "retained",
+                  "Ownership cutover/receipt survives purge and profile deletion; identity reuse must not disable isolation."),
     owned("bot_profiles", "slug", disposition="retained", reason="Standalone purge retains the definition; session FK pointers may be nulled."),
     owned("bot_profile_tags", "bot_slug", disposition="retained", reason="Assignments outlive profiles, including protection/reuse metadata."),
     owned("bot_profile_changes", "bot_slug", disposition="retained", reason="Historical profile-change audit is retained."),

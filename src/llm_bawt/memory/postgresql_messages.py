@@ -270,6 +270,7 @@ class PostgreSQLMessageMixin:
         role_filter: str | None = "user",
         since: float | None = None,
         until: float | None = None,
+        *, authority=None,
     ) -> list[dict]:
         """Search raw messages using PostgreSQL full-text search.
 
@@ -297,6 +298,7 @@ class PostgreSQLMessageMixin:
         tsquery = fts.tsquery_sql()
 
         cutoff_time = time.time() - exclude_recent_seconds
+        ownership = authority.scope(self.bot_id) if authority is not None else None
 
         with self.engine.connect() as conn:
             try:
@@ -311,6 +313,7 @@ class PostgreSQLMessageMixin:
                     FROM {self._messages_table_name}
                     WHERE content_tsv @@ {tsquery}
                     AND timestamp < :cutoff
+                    AND {ownership.message_read_predicate if ownership else 'TRUE'}
                     {role_clause}
                     {since_clause}
                     {until_clause}
@@ -320,6 +323,7 @@ class PostgreSQLMessageMixin:
 
                 params: dict[str, Any] = {
                     **fts.params,
+                    **(ownership.params if ownership else {}),
                     "limit": n_results,
                     "cutoff": cutoff_time,
                 }

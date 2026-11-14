@@ -21,6 +21,8 @@ class MemoryClientCrossBotMixin:
             access = await BotPolicyResolver(storage._require_engine()).resolve(self._service_principal.caller())
             if target is not None:
                 kwargs["bot_id"] = access.require_target(target)
+            if method == "search_memories":
+                kwargs["authority"] = self._memory_authority
             with bind_bot_access(access):
                 return await getattr(storage, method)(**kwargs)
 
