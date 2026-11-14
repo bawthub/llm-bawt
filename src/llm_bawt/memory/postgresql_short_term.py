@@ -295,17 +295,19 @@ class PostgreSQLShortTermManager(ShortTermMessageReadsMixin, ShortTermMessageMut
             else:
                 params["since"] = since
             clauses.append("started_at >= :since")
-        messages_table = self._backend._messages_table_name
+        from ..sessions.first_message import storage_bot_sql
+
+        messages_table = self._backend._messages_table_name if target_bot else "messages"
         needle = (query or "").strip().lower()
         if needle:
-            from ..sessions.first_message import first_message_params, given_title_sql, storage_bot_sql
+            from ..sessions.first_message import first_message_params, given_title_sql
 
             escaped = needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             params.update({"query": needle, "query_like": f"%{escaped}%", **first_message_params()})
             clauses.append(f"""(
                 strpos(LOWER({given_title_sql('s')}), :query) > 0
                 OR EXISTS (
-                    SELECT 1 FROM {messages_table if target_bot else 'messages'} mq
+                    SELECT 1 FROM {messages_table} mq
                     WHERE mq.session_id = s.id AND mq.bot_id = {storage_bot_sql('s.bot_id')}
                       AND mq.role IN ('user', 'assistant', 'summary')
                       AND mq.content ILIKE :query_like ESCAPE '\\'
@@ -314,9 +316,12 @@ class PostgreSQLShortTermManager(ShortTermMessageReadsMixin, ShortTermMessageMut
 
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         sql = f"""
-            WITH message_stats AS (
+            WITH filtered_sessions AS (
+                SELECT s.* FROM sessions AS s
+                {where}
+            ), message_stats AS (
                 SELECT
-                    session_id,
+                    bot_id, session_id,
                     COUNT(*) FILTER (WHERE role IN ('user', 'assistant')) AS message_count,
                     COUNT(*) FILTER (WHERE role = 'user') AS turn_count,
                     MIN(timestamp) FILTER (WHERE role IN ('user', 'assistant')) AS first_message_at,
@@ -340,7 +345,10 @@ class PostgreSQLShortTermManager(ShortTermMessageReadsMixin, ShortTermMessageMut
                     ) FILTER (WHERE role = 'summary'))[1] AS summary
                 FROM {messages_table}
                 WHERE session_id IS NOT NULL
-                GROUP BY session_id
+                  AND (bot_id, session_id) IN (
+                      SELECT {storage_bot_sql('s.bot_id')}, s.id FROM filtered_sessions AS s
+                  )
+                GROUP BY bot_id, session_id
             )
             SELECT
                 s.id, s.bot_id, s.user_id, s.started_at, s.ended_at,
@@ -354,9 +362,9 @@ class PostgreSQLShortTermManager(ShortTermMessageReadsMixin, ShortTermMessageMut
                 ms.last_assistant_message,
                 ms.last_assistant_at,
                 ms.summary
-            FROM sessions AS s
-            LEFT JOIN message_stats AS ms ON ms.session_id = s.id
-            {where}
+            FROM filtered_sessions AS s
+            LEFT JOIN message_stats AS ms
+              ON ms.session_id = s.id AND ms.bot_id = {storage_bot_sql('s.bot_id')}
             ORDER BY
                 CASE WHEN s.status = 'active' THEN 0 ELSE 1 END,
                 COALESCE(ms.last_message_at, EXTRACT(EPOCH FROM s.started_at)) DESC
