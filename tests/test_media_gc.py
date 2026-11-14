@@ -30,9 +30,13 @@ import pytest
 from llm_bawt.media.store import MediaStore
 from llm_bawt.service.jobs import media_gc
 from llm_bawt.service.jobs.media_gc import (
-    _build_referenced_query,
+    ReferenceScanIncomplete,
+    breaker_limit,
+    parse_bawthub_references,
     run_media_gc,
 )
+
+_VALID_ID = "ma_" + "A" * 26
 
 
 # ---------------------------------------------------------------------------
@@ -117,23 +121,35 @@ def patched_orphan_finder(monkeypatch: pytest.MonkeyPatch):
     "would have" returned, and ``state["tables"]`` to the discovered
     messages-table count.
     """
-    state: dict[str, Any] = {"orphans": [], "tables": ["bot1_messages"]}
+    state: dict[str, Any] = {
+        "orphans": [],
+        "local_ids": {"ma_" + "R" * 26},
+        "remote_ids": set(),
+        "collectable": 100,
+    }
 
-    def fake_find_orphans(conn, tables, grace_days):
-        return list(state["orphans"])
+    def fake_find_orphans(conn, referenced, grace_days):
+        state["referenced_seen"] = set(referenced)
+        return [r for r in state["orphans"] if r["id"] not in referenced]
 
-    def fake_discover(conn):
-        return list(state["tables"])
+    def fake_collect(conn, *, deadline, clock=None):
+        return set(state["local_ids"]), 1
+
+    def fake_fetch():
+        return set(state["remote_ids"]), 1
 
     def fake_engine(config, **kwargs):
-        # Any sentinel that supports ``connect()`` as a context manager —
-        # the real query callbacks above ignore the conn entirely.
+        # Any sentinel that supports ``connect()`` / ``begin()`` as context
+        # managers; the query callbacks above ignore the conn entirely.
         class _DummyConn:
             def __enter__(self):
                 return self
 
             def __exit__(self, *a):
                 return False
+
+            def begin(self):
+                return self
 
         class _DummyEngine:
             def connect(self):
@@ -142,7 +158,9 @@ def patched_orphan_finder(monkeypatch: pytest.MonkeyPatch):
         return _DummyEngine()
 
     monkeypatch.setattr(media_gc, "_find_orphan_assets", fake_find_orphans)
-    monkeypatch.setattr(media_gc, "_discover_message_tables", fake_discover)
+    monkeypatch.setattr(media_gc, "collect_local_references", fake_collect)
+    monkeypatch.setattr(media_gc, "fetch_bawthub_references", fake_fetch)
+    monkeypatch.setattr(media_gc, "_count_collectable", lambda conn: state["collectable"])
     monkeypatch.setattr(media_gc, "get_shared_engine", fake_engine, raising=False)
     # ``run_media_gc`` does ``from llm_bawt.utils.db import get_shared_engine``
     # late, so we have to patch the source module too.
@@ -183,7 +201,9 @@ class TestRunMediaGc:
         assert result["freed_bytes"] == 0
         assert result["dry_run"] is False
         assert result["errors"] == []
-        assert result["scanned_tables"] == 1
+        assert result["scanned_columns"] == 1
+        assert result["bawthub_columns"] == 1
+        assert "aborted_reason" not in result
 
     def test_orphan_evicted_deletes_row_and_blobs(
         self,
@@ -411,45 +431,129 @@ class TestRunMediaGc:
         assert asset_store.get_by_id("ma_OK") is None
 
 
-class TestSqlBuilder:
-    """SQL-construction tests that don't need a live Postgres."""
+class TestFailClosed:
+    """TASK-2224: an incomplete reference picture deletes nothing."""
 
-    def test_empty_tables_returns_safe_fallback(self):
-        """Zero ``*_messages`` tables → the WITH clause still parses.
+    def _stage_orphan(self, fake_store, tmp_path, asset_id="ma_ORPHAN", sha="9" * 64):
+        store, asset_store = fake_store
+        asset_store.add(asset_id=asset_id, sha256=sha, size_bytes=10)
+        paths = _write_blob_set(tmp_path, sha)
+        return store, asset_store, paths, {"id": asset_id, "sha256": sha, "size_bytes": 10}
 
-        A brand-new install before any bot has booted has no per-bot
-        tables yet. The GC should still run and find any orphans by
-        ``expires_at`` alone.
-        """
-        sql = _build_referenced_query([])
-        assert "FALSE" in sql.upper() or "WHERE FALSE" in sql.upper()
-        assert "UNION ALL" not in sql
+    def test_bawthub_referenced_asset_survives(self, fake_store, tmp_path, patched_orphan_finder):
+        """A card-only image (referenced only in BawtHub) is not collected."""
+        store, asset_store, paths, row = self._stage_orphan(fake_store, tmp_path)
+        patched_orphan_finder["orphans"] = [row]
+        patched_orphan_finder["remote_ids"] = {row["id"]}
 
-    def test_single_table_emits_one_fragment(self):
-        sql = _build_referenced_query(["nova_messages"])
-        assert "nova_messages" in sql
-        assert "jsonb_array_elements" in sql
-        assert "UNION ALL" not in sql
+        result = run_media_gc(config=object(), media_store=store)
 
-    def test_multiple_tables_unioned(self):
-        sql = _build_referenced_query(
-            ["nova_messages", "echo_messages", "pip_messages"]
+        assert result["deleted_count"] == 0
+        assert row["id"] in patched_orphan_finder["referenced_seen"]
+        assert asset_store.get_by_id(row["id"]) is not None
+        assert all(p.exists() for p in paths)
+
+    @pytest.mark.parametrize("failure", ["local", "remote"])
+    def test_unreadable_source_deletes_nothing(
+        self, fake_store, tmp_path, patched_orphan_finder, monkeypatch, failure
+    ):
+        store, asset_store, paths, row = self._stage_orphan(fake_store, tmp_path)
+        patched_orphan_finder["orphans"] = [row]
+
+        def boom(*a, **k):
+            raise ReferenceScanIncomplete(f"{failure} source unreadable")
+
+        target = "collect_local_references" if failure == "local" else "fetch_bawthub_references"
+        monkeypatch.setattr(media_gc, target, boom)
+
+        result = run_media_gc(config=object(), media_store=store)
+
+        assert result["deleted_count"] == 0
+        assert f"{failure} source unreadable" in result["aborted_reason"]
+        assert asset_store.get_by_id(row["id"]) is not None
+        assert all(p.exists() for p in paths)
+
+    def test_budget_exceeded_after_remote_deletes_nothing(self, fake_store, tmp_path, patched_orphan_finder):
+        store, asset_store, _, row = self._stage_orphan(fake_store, tmp_path)
+        patched_orphan_finder["orphans"] = [row]
+        ticks = iter([0.0, 10_000.0])
+
+        result = run_media_gc(
+            config=object(), media_store=store, sweep_budget_s=60, clock=lambda: next(ticks)
         )
-        assert "nova_messages" in sql
-        assert "echo_messages" in sql
-        assert "pip_messages" in sql
-        # N tables → N-1 UNION ALL connectors.
-        assert sql.count("UNION ALL") == 2
-        # asset_id selector wired correctly on every fragment.
-        assert sql.count("asset_id") >= 3
 
-    def test_query_filters_null_asset_ids(self):
-        """Defensive: malformed attachments shouldn't surface as NULL ids
-        that then fail the orphan join (``r.asset_id = a.id`` against
-        NULL is always NULL/false but we still want them stripped at
-        the source)."""
-        sql = _build_referenced_query(["nova_messages"])
-        assert "IS NOT NULL" in sql
+        assert "budget" in result["aborted_reason"]
+        assert asset_store.get_by_id(row["id"]) is not None
+
+    def test_empty_reference_set_deletes_nothing(self, fake_store, tmp_path, patched_orphan_finder):
+        store, asset_store, _, row = self._stage_orphan(fake_store, tmp_path)
+        patched_orphan_finder["orphans"] = [row]
+        patched_orphan_finder["local_ids"] = set()
+        patched_orphan_finder["remote_ids"] = set()
+
+        result = run_media_gc(config=object(), media_store=store)
+
+        assert "empty" in result["aborted_reason"]
+        assert asset_store.get_by_id(row["id"]) is not None
+
+    def test_breaker_trips_and_override_allows(self, fake_store, tmp_path, patched_orphan_finder):
+        store, asset_store = fake_store
+        rows = []
+        for i in range(30):
+            sha = f"{i:064x}"
+            asset_store.add(asset_id=f"ma_B{i}", sha256=sha, size_bytes=1)
+            rows.append({"id": f"ma_B{i}", "sha256": sha, "size_bytes": 1})
+        patched_orphan_finder["orphans"] = rows
+        patched_orphan_finder["collectable"] = 100
+        assert breaker_limit(100) == 25
+
+        tripped = run_media_gc(config=object(), media_store=store, include_candidates=True)
+        assert tripped["deleted_count"] == 0
+        assert "breaker" in tripped["aborted_reason"]
+        assert len(tripped["candidates"]) == 30
+        assert all(asset_store.get_by_id(r["id"]) for r in rows)
+
+        purged = run_media_gc(config=object(), media_store=store, max_candidates=30)
+        assert purged["deleted_count"] == 30
+
+    def test_scheduled_result_carries_no_ids(self, fake_store, tmp_path, patched_orphan_finder):
+        """job_runs is swept for references, so default results hold no ids."""
+        store, _, _, row = self._stage_orphan(fake_store, tmp_path)
+        patched_orphan_finder["orphans"] = [row]
+
+        result = run_media_gc(config=object(), media_store=store, dry_run=True)
+
+        assert "candidates" not in result
+        assert row["id"] not in repr(result)
+
+
+class TestParseBawthubReferences:
+    def test_valid(self):
+        ids, columns = parse_bawthub_references({"complete": True, "columns_scanned": 9, "ids": [_VALID_ID]})
+        assert ids == {_VALID_ID} and columns == 9
+
+    def test_empty_but_complete_is_valid(self):
+        assert parse_bawthub_references({"complete": True, "columns_scanned": 3, "ids": []}) == (set(), 3)
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            None,
+            "<html>app shell</html>",
+            [],
+            {"columns_scanned": 3, "ids": []},
+            {"complete": "true", "columns_scanned": 3, "ids": []},
+            {"complete": True, "columns_scanned": 0, "ids": []},
+            {"complete": True, "columns_scanned": True, "ids": []},
+            {"complete": True, "columns_scanned": 3},
+            {"complete": True, "columns_scanned": 3, "ids": "ma_x"},
+            {"complete": True, "columns_scanned": 3, "ids": ["not-an-id"]},
+            {"complete": True, "columns_scanned": 3, "ids": [_VALID_ID + "Z"]},
+        ],
+    )
+    def test_malformed_rejected(self, payload):
+        with pytest.raises(ReferenceScanIncomplete):
+            parse_bawthub_references(payload)
 
 
 # ---------------------------------------------------------------------------
