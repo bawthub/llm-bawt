@@ -58,4 +58,3 @@ class MultilineInputHandler:
             
         self.console.print("[italic]Input complete.[/italic]")
         return "\n".join(lines)
-    

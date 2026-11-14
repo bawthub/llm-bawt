@@ -114,4 +114,3 @@ class MemoryBackend(ABC):
             Backends should override if they support deletion.
         """
         return False
-    
