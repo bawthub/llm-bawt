@@ -467,6 +467,7 @@ Merged memory:"""
         self,
         survivor_id: str,
         cluster: MemoryCluster,
+        merged_content: str,
     ) -> tuple[int, list[str]]:
         """Delete a cluster's originals only while a verified survivor exists.
 
@@ -483,12 +484,18 @@ Merged memory:"""
         kept: list[str] = []
         with self.backend.engine.begin() as conn:
             survivor = conn.execute(
-                text(f"SELECT id FROM {table} WHERE id = :id FOR SHARE"),
+                text(f"SELECT id, content FROM {table} WHERE id = :id FOR SHARE"),
                 {"id": survivor_id},
             ).first()
             if survivor is None:
                 raise MemoryConsolidationWriteError(
                     f"merged memory {survivor_id} is not present; originals kept"
+                )
+            # The survivor must hold exactly the merged text: a semantic dedup
+            # onto a different row, or an edit since the write, keeps all.
+            if survivor.content != merged_content:
+                raise MemoryConsolidationWriteError(
+                    f"memory {survivor_id} does not hold the merged content; originals kept"
                 )
             for mem in cluster.memories:
                 mem_id = str(mem["id"])
@@ -562,7 +569,7 @@ Merged memory:"""
                     outcome = self.create_merged_memory(merged_content, cluster)
                     survivor_id = str(outcome.memory_id)
 
-                    deleted, kept = self.replace_originals(survivor_id, cluster)
+                    deleted, kept = self.replace_originals(survivor_id, cluster, merged_content)
                     if kept:
                         result.errors.append(
                             f"Kept {len(kept)} memories changed during consolidation: {', '.join(kept)}"

@@ -89,18 +89,17 @@ class _Llm:
         yield self.reply
 
 
-def test_semantic_duplicate_merge_keeps_the_row_it_folded_into(rig):
+def test_semantic_duplicate_merge_keeps_every_original(rig):
     _storage, backend, _bot, ids, _state = rig
 
     result = MemoryConsolidator(backend).consolidate()
 
-    # Both originals share a vector, so dedup may fold into either; the row it
-    # folded into survives and only the other is deleted.
-    rows = _rows(backend)
-    assert len(rows) == 1 and set(rows) <= set(ids)
+    # The merge folded into a row with different text, so no information may
+    # be dropped: every original survives and an error is reported.
+    assert _rows(backend) == dict(zip(ids, ORIGINALS))
     assert result.new_memories_created == 0
-    assert result.memories_consolidated == 1
-    assert result.errors == []
+    assert result.memories_consolidated == 0
+    assert any("merged content" in e for e in result.errors)
 
 
 def test_exact_duplicate_merge_without_embeddings_keeps_the_original(rig):
@@ -176,7 +175,7 @@ def test_missing_survivor_deletes_nothing(rig):
     cluster = consolidator.find_clusters(consolidator.get_all_active_memories_with_embeddings())[0]
 
     with pytest.raises(RuntimeError, match="not present"):
-        consolidator.replace_originals(str(uuid.uuid4()), cluster)
+        consolidator.replace_originals(str(uuid.uuid4()), cluster, MERGED)
 
     assert _rows(backend) == dict(zip(ids, ORIGINALS))
 
@@ -193,3 +192,28 @@ def test_store_memory_returns_existing_id_for_duplicate_and_raises_on_failure(ri
     )
     with pytest.raises(RuntimeError, match="not stored"):
         asyncio.run(storage.store_memory("brand new fact", bot_id=bot_id))
+
+
+def test_survivor_edited_before_replacement_keeps_every_original(rig, monkeypatch):
+    _storage, backend, _bot, ids, _state = rig
+    consolidator = MemoryConsolidator(backend, llm_client=_Llm(MERGED))
+    write = consolidator.create_merged_memory
+
+    def write_then_edit_survivor(content, cluster):
+        outcome = write(content, cluster)
+        with backend.engine.begin() as conn:
+            conn.execute(text(f"""
+                UPDATE {backend._memories_table_name}
+                SET content = 'User now likes red', updated_at = updated_at + interval '1 second'
+                WHERE id = :id
+            """), {"id": str(outcome.memory_id)})
+        return outcome
+
+    monkeypatch.setattr(consolidator, "create_merged_memory", write_then_edit_survivor)
+
+    result = consolidator.consolidate()
+
+    rows = _rows(backend)
+    assert {i: rows.get(i) for i in ids} == dict(zip(ids, ORIGINALS))
+    assert result.memories_consolidated == 0
+    assert any("merged content" in e for e in result.errors)
