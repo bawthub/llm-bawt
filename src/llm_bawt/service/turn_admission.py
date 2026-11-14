@@ -327,6 +327,8 @@ def write_reservation(
     request_json: dict[str, Any],
     trigger_message_id: str | None,
     only_unstarted: bool = False,
+    terminal_protocol: bool = False,
+    assistant_message_id: str | None = None,
 ) -> bool:
     """Insert or re-arm a reserved row (caller holds the lock and decided idle).
 
@@ -335,10 +337,25 @@ def write_reservation(
     and ``False`` is returned. Without it (durable delivery retries) an ended
     row is deliberately re-armed for the next attempt.
     """
-    guard = (
-        " WHERE turn_logs.status='reserved' AND turn_logs.ended_at IS NULL"
-        if only_unstarted else ""
-    )
+    # Only a genuinely unconsumed protocol reservation may keep this ID.
+    # The conflict UPDATE deliberately never changes its protocol marker/UUID.
+    rearmable = """(turn_logs.terminal_protocol_state IS NULL OR (
+        turn_logs.terminal_protocol_state='reserved' AND turn_logs.status='reserved'
+        AND turn_logs.bot_id=EXCLUDED.bot_id AND turn_logs.user_id=EXCLUDED.user_id
+        AND turn_logs.ended_at IS NULL AND turn_logs.history_session_id IS NULL
+        AND turn_logs.agent_request_id IS NULL AND turn_logs.agent_session_key IS NULL
+        AND turn_logs.agent_backend IS NULL AND turn_logs.terminal_snapshot_json IS NULL
+        AND turn_logs.follower_owner IS NULL AND turn_logs.follower_lease_until IS NULL
+        AND turn_logs.assistant_message_id IS NOT NULL
+        AND COALESCE(turn_logs.response_text, '')='' AND COALESCE(turn_logs.reasoning, '')=''
+    ))"""
+    guard = " WHERE " + rearmable
+    if only_unstarted:
+        guard += " AND turn_logs.status='reserved' AND turn_logs.ended_at IS NULL"
+    protocol_fields = {}
+    if terminal_protocol:
+        from .turn_terminal_protocol import protocol_reservation_fields
+        protocol_fields = protocol_reservation_fields(assistant_message_id=assistant_message_id)
     # A re-arm starts a new attempt on the same row: carry the prior attempt's
     # audits and history forward (TASK-1232 r2-M1, TASK-1234 Fix 2).
     lock = " FOR NO KEY UPDATE" if conn.dialect.name == "postgresql" else ""
@@ -351,11 +368,11 @@ def write_reservation(
         INSERT INTO turn_logs (
             id, created_at, path, stream, bot_id, user_id, status,
             user_prompt, request_json, response_text,
-            trigger_message_id, ended_at
+            trigger_message_id, ended_at, terminal_protocol_state, assistant_message_id
         ) VALUES (
             :turn_id, now(), '/v1/chat/completions', false, :target,
             :user_id, 'reserved', :message, CAST(:request_json AS jsonb)::text,
-            '', :message_id, NULL
+            '', :message_id, NULL, :protocol_state, :assistant_id
         )
         ON CONFLICT (id) DO UPDATE SET
             status='reserved', ended_at=NULL, error_text=NULL, created_at=EXCLUDED.created_at,
@@ -367,6 +384,8 @@ def write_reservation(
         "message": user_prompt,
         "request_json": merged_request_json,
         "message_id": trigger_message_id,
+        "protocol_state": protocol_fields.get("terminal_protocol_state"),
+        "assistant_id": protocol_fields.get("assistant_message_id"),
     })
     return bool(result.rowcount)
 
@@ -382,6 +401,8 @@ def reserve_turn(
     trigger_message_id: str | None,
     owner: str,
     fence: Callable[[Any], bool] | None = None,
+    terminal_protocol: bool = False,
+    assistant_message_id: str | None = None,
 ) -> None:
     """Atomically claim an idle target with a fenced reservation, else TargetBusy.
 
@@ -413,6 +434,7 @@ def reserve_turn(
             user_prompt=user_prompt,
             request_json={**request_json, RESERVATION_OWNER_KEY: owner},
             trigger_message_id=trigger_message_id, only_unstarted=True,
+            terminal_protocol=terminal_protocol, assistant_message_id=assistant_message_id,
         ):
             raise TargetBusy(f"turn '{turn_id}' already started")
 
@@ -605,8 +627,13 @@ def _revoke_reservation_once(conn, session: Session, turn_id: str, *, dispositio
     if disposition == "hold":
         return _hold_producer(conn, turn_id, locked, reason=str(audit.get("reason") or "system gate hold"))
     producer = _revoke_producer(conn, turn_id, delivery_id=locked.delivery_id, owner=locked.owner)
-    settle_open_turn(session, locked.row, audit_key="user_stop", now=datetime.now(timezone.utc),
-                     audit={**audit, "reservation_producer": producer})
+    if locked.row.terminal_protocol_state == "reserved":
+        from .turn_terminal_reservations import interrupt_protocol_reservation
+        interrupt_protocol_reservation(conn, turn_id, audit_key="user_stop",
+                                       audit={**audit, "reservation_producer": producer})
+    else:
+        settle_open_turn(session, locked.row, audit_key="user_stop", now=datetime.now(timezone.utc),
+                         audit={**audit, "reservation_producer": producer})
     return producer
 
 

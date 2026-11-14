@@ -79,7 +79,8 @@ class BotPolicyReceipt:
                        t.error_text AS turn_error, t.user_id AS turn_user_id,
                        t.response_text AS turn_response_text,
                        t.trigger_message_id AS turn_trigger_id,
-                       t.assistant_message_id AS turn_assistant_id
+                       t.assistant_message_id AS turn_assistant_id,
+                       t.terminal_protocol_state AS turn_protocol_state
                 FROM inter_bot_deliveries d JOIN turn_logs t ON t.id=d.turn_id
                 WHERE d.id=:id FOR UPDATE OF d
             """), {"id": record.id}).mappings().one_or_none()
@@ -91,6 +92,7 @@ class BotPolicyReceipt:
                     or row["reset_status"] not in {"ROTATED", "COMPLETED"}
                     or row["turn_status"] not in {"ok", "completed"}
                     or row["turn_ended_at"] is None or row["turn_error"]
+                    or row["turn_protocol_state"] is not None
                     or row["turn_trigger_id"] != row["user_message_id"]
                     or row["new_session_id"] != record.new_session_id
                     or row["old_session_id"] != record.old_session_id
@@ -241,7 +243,8 @@ class BotPolicyReceipt:
                 SELECT d.*, t.status AS turn_status, t.ended_at AS turn_ended_at,
                        t.error_text AS turn_error, t.user_id AS turn_user_id,
                        t.trigger_message_id AS turn_trigger_id,
-                       t.assistant_message_id AS turn_assistant_id
+                       t.assistant_message_id AS turn_assistant_id,
+                       t.terminal_protocol_state AS turn_protocol_state
                 FROM inter_bot_deliveries d JOIN turn_logs t ON t.id=d.turn_id
                 WHERE d.id=:id FOR UPDATE OF d
             """), {"id": record.id}).mappings().one_or_none()
@@ -250,6 +253,7 @@ class BotPolicyReceipt:
                     or row["reset_status"] not in {"ROTATED", "COMPLETED"}
                     or row["turn_status"] not in {"ok", "completed"}
                     or row["turn_ended_at"] is None or row["turn_error"]
+                    or row["turn_protocol_state"] is not None
                     or row["turn_user_id"] != intent.user_id
                     or row["target_bot_id"] != intent.bot_id
                     or row["user_message_id"] != row["turn_trigger_id"]

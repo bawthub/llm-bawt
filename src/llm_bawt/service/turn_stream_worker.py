@@ -129,6 +129,9 @@ class TurnStreamWorker(TurnStreamPublishMixin):
             )
 
         try:
+            terminal_follower = getattr(ctx, "terminal_follower", None)
+            if terminal_follower is not None:
+                terminal_follower.check()
             # Check if already cancelled before starting
             if cancel_event.is_set():
                 cancelled_holder[0] = True
@@ -160,6 +163,8 @@ class TurnStreamWorker(TurnStreamPublishMixin):
             # cached instance never leaks a prior turn's thread override into
             # a continuous (no-session_id) request.
             _sid = getattr(request, "session_id", None)
+            if terminal_follower is not None and not ctx.terminal_history_session_id:
+                raise ValueError("protocol worker requires its bound history session")
             llm_bawt._session_id_override = (
                 _sid.strip() if isinstance(_sid, str) and _sid.strip() else None
             )
@@ -236,6 +241,8 @@ class TurnStreamWorker(TurnStreamPublishMixin):
             working_memory = WorkingMemoryTurn.begin(ctx)
             agent_context_suffix = working_memory.extend_suffix(agent_context_suffix)
 
+            if terminal_follower is not None:
+                terminal_follower.check()
             with selected_history_context("initial"):
                 messages = llm_bawt.prepare_messages_for_query(
                     user_prompt,
@@ -244,6 +251,9 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                     attachments=attachments_to_persist or None,
                     context_suffix=agent_context_suffix,
                     author=user_author,
+                    **({
+                        "history_write_session_id": ctx.terminal_history_session_id,
+                    } if terminal_follower is not None else {}),
                 )
             outbound_task = (
                 ctx.bridge_prompt if ctx.bridge_prompt is not None else
@@ -309,6 +319,8 @@ class TurnStreamWorker(TurnStreamPublishMixin):
             if cancel_event.is_set():
                 cancelled_holder[0] = True
                 return
+            if terminal_follower is not None:
+                terminal_follower.check()
 
             # Choose streaming method based on whether bot uses tools.
             # Agent-backend models (e.g. claude-code/codex) already handle
@@ -505,6 +517,9 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                     bridge_state = abort_bridge_run_before_app_error(
                         self, turn_log_id, execution, loop)
                     error_text = f"{error_text} [bridge abort: {bridge_state}]"
+                # Protocol rows reject the generic writer. Carry the actual
+                # failure into the frozen terminal instead of losing it there.
+                ctx.terminal_error_text = error_text
                 self._update_turn_log(
                     turn_id=turn_log_id,
                     status="error",

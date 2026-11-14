@@ -266,6 +266,10 @@ class NativeSelectedOwnerDenied(Exception):
     """No authorized INSERT source row; no DML or successful write occurred."""
 
 
+class TerminalMessageConflict(RuntimeError):
+    """A pinned terminal message ID already contains a different projection."""
+
+
 @dataclass(frozen=True)
 class _NativeSelectedOwnerConstraint:
     """Internal authenticated write predicate, not a caller-supplied identity."""
@@ -293,6 +297,53 @@ class MessageRowStore:
         self.engine = engine
         self.table = table
         self.table_name = table_name
+
+    def insert_terminal(
+        self, *, message_id: str, role: str, content: str, timestamp: float,
+        session_id: str, attachments: list[dict] | None = None,
+        reasoning: str | None = None, author: AuthorReference | None = None,
+        connection=None,
+    ) -> None:
+        """Insert one immutable terminal projection; conflicting bytes fail closed.
+
+        No active-session lookup, cached history mutation, extraction or mutable
+        upsert. A caller can share a transaction for assistant and tools rows.
+        Summarization/extraction flags are deliberately excluded from retry
+        comparison: maintenance can advance them after the first projection.
+        """
+        if not message_id or len(message_id) > 36 or not session_id or len(session_id) > 36:
+            raise ValueError("terminal projection requires pinned storage-compatible IDs")
+        if role not in {"assistant", "system"}:
+            raise ValueError("terminal projection only writes assistant/tools history")
+        if connection is not None and connection.engine is not self.engine:
+            raise ValueError("terminal message transaction belongs to a different engine")
+        dialect = self.engine.dialect.name
+        if dialect == "postgresql":
+            from sqlalchemy.dialects.postgresql import insert
+            conflict = [column("bot_id"), self.table.c.id]
+        elif dialect == "sqlite":
+            from sqlalchemy.dialects.sqlite import insert
+            conflict = [self.table.c.id]
+        else:
+            raise NotImplementedError(f"terminal projection is unsupported for {dialect}")
+        frozen = dict(
+            id=message_id, role=role, content=content, timestamp=timestamp,
+            session_id=session_id, attachments=attachments or [], reasoning=reasoning,
+            author_entity_type=author.entity_type if author else None,
+            author_entity_id=author.entity_id if author else None,
+        )
+        statement = insert(self.table).values(
+            **frozen, processed=False, created_at=datetime.now(timezone.utc),
+        ).on_conflict_do_nothing(index_elements=conflict)
+        from contextlib import nullcontext
+
+        with (nullcontext(connection) if connection is not None else self.engine.begin()) as conn:
+            conn.execute(statement)
+            stored = conn.execute(
+                select(self.table).where(self.table.c.id == message_id).with_for_update()
+            ).mappings().one()
+            if any(stored[key] != value for key, value in frozen.items()):
+                raise TerminalMessageConflict(f"terminal message identity collision: {message_id}")
 
     def upsert(
         self,

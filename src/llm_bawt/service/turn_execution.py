@@ -47,6 +47,7 @@ class TurnExecution:
         self.cancel_event = cancel_event
         self.is_agent = is_agent
         self.store = store
+        self.terminal_follower = None
         self.backend: str | None = None
         self.session_key: str | None = None
         self.request_id: str | None = None
@@ -67,15 +68,15 @@ class TurnExecution:
 
     # ── Shutdown detach (TASK-1286) ──────────────────────────────────────
 
-    def launch_worker(self, loop, worker: Callable[[], None]):
+    def launch_worker(self, loop, worker: Callable[[], Any]):
         """Run ``worker`` on the default executor; record when it has returned.
 
         ``_worker_exited`` is set only after ``worker`` itself returns or
         raises, so no asyncio-side cancel or timeout can fake an exit.
         """
-        def run() -> None:
+        def run():
             try:
-                worker()
+                return worker()
             finally:
                 self._worker_exited.set()
 
@@ -116,9 +117,13 @@ class TurnExecution:
         # Persist the actual request-local identity before command publication,
         # never from the bot's shared _active_request_id or first model output.
         # ``steer_caps`` (TASK-1243) is the run's encoded steer capabilities.
+        fence = {}
+        if self.terminal_follower is not None:
+            self.terminal_follower.check()
+            fence["follower_lease"] = self.terminal_follower.lease
         self.store.bind_agent_bridge(
             turn_id=self.turn_id, backend=backend, request_id=request_id, session_key=session_key,
-            steer_caps=steer_caps,
+            steer_caps=steer_caps, **fence,
         )
         with self._lock:
             self.backend, self.session_key, self.request_id = backend, session_key, request_id

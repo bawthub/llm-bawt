@@ -69,6 +69,25 @@ class ChatStreamingMixin(BridgeSessionResetMixin):
         self,
         request: ChatCompletionRequest,
     ) -> AsyncIterator[str]:
+        from .turn_terminal_follower import TerminalFollowerScope
+
+        terminal_scope = TerminalFollowerScope(self._turn_log_store)
+        stream = self._chat_completion_stream(request, terminal_scope=terminal_scope)
+        try:
+            async for event in stream:
+                yield event
+        except Exception as exc:
+            terminal_scope.fail_setup(safe_error_text(exc, "Turn setup failed"))
+            raise
+        finally:
+            try:
+                await stream.aclose()
+            finally:
+                terminal_scope.close_if_unlaunched()
+
+    async def _chat_completion_stream(
+        self, request: ChatCompletionRequest, *, terminal_scope,
+    ) -> AsyncIterator[str]:
         """Handle a streaming chat completion request.
 
         Uses llm_bawt's internal history + memory for context.
@@ -314,14 +333,19 @@ class ChatStreamingMixin(BridgeSessionResetMixin):
             yield f"data: {json.dumps(decision.receipt())}\n\n"
             yield "data: [DONE]\n\n"
             return
+        from .turn_terminal_admission import direct_protocol_options
+        protocol_options = await direct_protocol_options(
+            self.config, bot_id, request, user_prompt, admission_claim,
+        )
         try:
-            self._persist_turn_log(
+            admission_lease = self._persist_turn_log(
                 turn_id=turn_log_id, request_id=ctx.request_id, path=ctx.path,
                 stream=True, model=model_alias, bot_id=bot_id, user_id=user_id,
                 status="streaming", latency_ms=None, user_prompt=user_prompt,
                 prepared_messages=[], response_text="", agent_session_key=oc_session_key,
                 trigger_message_id=trigger_message_id, assistant_message_id=assistant_message_id,
                 parent_turn_id=parent_turn_id, admission_claim=admission_claim,
+                **protocol_options,
                 request_extensions=turn_start_extensions(
                     request, is_agent_backend=is_agent_backend, admission_claim=admission_claim,
                 ),
@@ -333,6 +357,13 @@ class ChatStreamingMixin(BridgeSessionResetMixin):
             for event in request_failed_events(response_id, created, model_alias, refused):
                 yield event
             return
+        if admission_lease is not None and admission_lease.assistant_message_id:
+            assistant_message_id = admission_lease.assistant_message_id
+        terminal_scope.admitted(
+            admission_lease, turn_id=turn_log_id, cancel_event=cancel_event,
+            is_agent=is_agent_backend,
+            on_close=lambda: self._end_generation(cancel_event, done_event, bot_id),
+        )
         if is_agent_backend:
             from .turn_task_attribution import stamp_turn_task
             await stamp_turn_task(
@@ -357,7 +388,12 @@ class ChatStreamingMixin(BridgeSessionResetMixin):
                     error_text=f"Chat reset setup failed: {safe_error_text(exc)}",
                 )
                 raise
-            cancel_event, done_event = await self._start_generation(bot_id)
+            if terminal_scope.follower is None:
+                cancel_event, done_event = await self._start_generation(bot_id)
+            else:
+                cancel_event, done_event = await self._start_generation(
+                    bot_id, cancel_event=cancel_event, done_event=done_event,
+                )
 
         from .session_lifecycle.execution import NativeSelectedHistory
 
@@ -436,6 +472,14 @@ class ChatStreamingMixin(BridgeSessionResetMixin):
         elif chat_reset is not None:
             session_id = chat_reset.session_id
             thread_binding = {"thread_session_id": session_id}
+        if terminal_scope.follower is not None:
+            from .turn_terminal_sessions import bind_terminal_session
+
+            session_id = bind_terminal_session(
+                terminal_scope.follower, llm_bawt, bot_id=bot_id, user_id=user_id,
+                resolved_session_id=session_id or getattr(request, "session_id", None),
+                is_agent=is_agent_backend,
+            )
         # Record which continuation turn carried the answer back to the agent.
         if answered_question_id:
             try:
@@ -500,12 +544,17 @@ class ChatStreamingMixin(BridgeSessionResetMixin):
             _approval_handled=_approval_handled,
             _await_handled=_await_handled,
             _upstream_model=_upstream_model,
+            terminal_follower=terminal_scope.follower,
+            terminal_history_session_id=session_id if terminal_scope.follower is not None else None,
         )
         from .turn_execution import TurnExecution, turn_executions
-        _turn_ctx.execution = TurnExecution(
-            turn_log_id, cancel_event, is_agent=is_agent_backend, store=self._turn_log_store,
-        )
-        turn_executions.register(_turn_ctx.execution)
+        if terminal_scope.follower is not None:
+            _turn_ctx.execution = terminal_scope.follower.execution
+        else:
+            _turn_ctx.execution = TurnExecution(
+                turn_log_id, cancel_event, is_agent=is_agent_backend, store=self._turn_log_store,
+            )
+            turn_executions.register(_turn_ctx.execution)
         _turn_worker = TurnStreamWorker(_turn_ctx)
 
         # Announce turn kickoff to the unified SSE stream BEFORE the worker
@@ -651,7 +700,9 @@ class ChatStreamingMixin(BridgeSessionResetMixin):
             # standalone local_model_bridge, TASK-276/278), so every model
             # streams on the default thread pool — multiple bots run
             # concurrently and nothing is serialized on a single GPU thread.
-            _turn_ctx.execution.launch_worker(loop, _turn_worker._stream_to_queue)
+            terminal_scope.launch_worker(
+                loop, _turn_worker._stream_to_queue, execution=_turn_ctx.execution,
+            )
 
             # Yield SSE chunks (with keepalive to prevent client timeout
             # during slow backends like vLLM first-inference)

@@ -95,6 +95,85 @@ def test_a_not_found_orphan_settles_keeps_its_stranded_reply_and_a_rerun_is_a_no
     assert TurnLogStore(store.config).get_turn(turn_id).ended_at == row.ended_at
 
 
+def _old_protocol_turn(store, bot):
+    from llm_bawt.service.turn_logs import TurnLog
+    from llm_bawt.service.turn_terminal_protocol import protocol_insert_fields
+
+    turn_id = f"turn-{uuid.uuid4().hex}"
+    with store.engine.begin() as conn:
+        fields = protocol_insert_fields(
+            connection=conn, assistant_message_id=str(uuid.uuid4()),
+            history_session_id=str(uuid.uuid4()),
+        )
+        # Simulate an expired follower, not a healthy newly admitted turn.
+        fields["follower_lease_until"] = datetime.now(timezone.utc) - timedelta(minutes=1)
+        conn.execute(TurnLog.__table__.insert().values(
+            id=turn_id, bot_id=bot, user_id="nick", status="streaming",
+            created_at=datetime.now(timezone.utc) - timedelta(minutes=15),
+            response_text="durable protocol partial", agent_backend="claude-code",
+            agent_session_key=f"{bot}:nick", agent_request_id=f"req-{uuid.uuid4().hex}",
+            **fields,
+        ))
+    return turn_id
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_legacy_orphan_sweep_never_probes_or_settles_protocol_rows(delivery_store, dry_run):  # noqa: F811
+    store, _, target = delivery_store
+    protocol_turn = _old_protocol_turn(store, target)
+    legacy_turn = _old_turn(store, target)
+    turns = TurnLogStore(store.config)
+    before = turns.get_turn(protocol_turn).model_dump()
+    probe = Probe(NOT_FOUND)
+    report = asyncio.run(RecoverySweep(store.engine, probe=probe).run(
+        dry_run=dry_run, bots=[target], steps=["orphan_turns"],
+    ))
+    step = _step(report, "orphan_turns")
+    assert _ids(step["found"]) == [legacy_turn]
+    assert probe.calls == [legacy_turn]
+    assert turns.get_turn(protocol_turn).model_dump() == before
+    assert (turns.get_turn(legacy_turn).ended_at is None) is dry_run
+
+
+def test_orphan_apply_rechecks_protocol_marker_even_with_a_stale_candidate(delivery_store):  # noqa: F811
+    from llm_bawt.service.recovery.base import Plan, SweepScope
+    from llm_bawt.service.recovery.orphan_turns import OrphanTurnsStep
+
+    store, _, target = delivery_store
+    turn_id = _old_protocol_turn(store, target)
+    turns = TurnLogStore(store.config)
+    before = turns.get_turn(turn_id).model_dump()
+    now = datetime.now(timezone.utc)
+    scope = SweepScope(engine=store.engine, now=now, dry_run=False, bots=frozenset([target]))
+    step = OrphanTurnsStep(Probe(NOT_FOUND), started_at=now)
+    # A stale or externally retained plan is not authority to bypass the
+    # locked SQL recheck. The row was protocol-owned from its initial INSERT.
+    outcome = asyncio.run(step.apply(
+        scope, {"turn_id": turn_id, "bot_id": target}, Plan("settle", carry=NOT_FOUND),
+    ))
+    assert outcome is None
+    assert turns.get_turn(turn_id).model_dump() == before
+
+
+def test_startup_ended_at_backfill_is_legacy_only(delivery_store):  # noqa: F811
+    from llm_bawt.service.turn_log_schema import bootstrap_turn_log_schema
+
+    store, _, target = delivery_store
+    protocol_turn = _old_protocol_turn(store, target)
+    legacy_turn = _old_turn(store, target, status="error")
+    with store.engine.begin() as conn:
+        # Deliberately incomplete protocol state: bootstrap must not repair
+        # terminal truth outside the protocol's own immutable commit path.
+        conn.execute(sa_text(
+            "UPDATE turn_logs SET status='error', end_reason='error' WHERE id=:id"
+        ), {"id": protocol_turn})
+        bootstrap_turn_log_schema(conn)
+    turns = TurnLogStore(store.config)
+    assert turns.get_turn(protocol_turn).ended_at is None
+    assert turns.get_turn(protocol_turn).terminal_snapshot_json is None
+    assert turns.get_turn(legacy_turn).ended_at is not None
+
+
 @pytest.mark.parametrize("result", [
     None,  # no bridge answers run.status yet
     ProbeResult("not_found", backend_matched=False, backend="codex"),

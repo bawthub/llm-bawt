@@ -143,6 +143,30 @@ class TurnLog(SQLModel, table=True):
         default=None,
         sa_column=Column(DateTime(timezone=True), nullable=True, index=True),
     )
+    # TASK-1242: NULL is a legacy row and is never adopted by protocol recovery.
+    # New admissions own "binding" immediately; owner-validated session setup
+    # transitions to "open" before inference. Already-bound inserts may be open.
+    terminal_protocol_state: str | None = Field(
+        default=None, sa_column=Column(String(32), nullable=True),
+    )
+    history_session_id: str | None = Field(default=None)
+    follower_owner: str | None = Field(default=None)
+    follower_lease_until: datetime | None = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    terminal_snapshot_json: str | None = Field(
+        default=None, sa_column=Column(Text, nullable=True),
+    )
+    terminal_history_projected_at: datetime | None = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    terminal_publication_deadline: datetime | None = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    terminal_published_stream_id: str | None = Field(default=None)
+    terminal_published_at: datetime | None = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
 
 
 def bootstrap_turn_log_schema(conn) -> None:
@@ -178,6 +202,25 @@ def bootstrap_turn_log_schema(conn) -> None:
         conn.execute(sa_text(
             "ALTER TABLE turn_logs ADD COLUMN IF NOT EXISTS"
             " assistant_message_id VARCHAR"
+        ))
+        for name, sql_type in (
+            ("terminal_protocol_state", "VARCHAR(32)"),
+            ("history_session_id", "VARCHAR"),
+            ("follower_owner", "VARCHAR"),
+            ("follower_lease_until", "TIMESTAMPTZ"),
+            ("terminal_snapshot_json", "TEXT"),
+            ("terminal_history_projected_at", "TIMESTAMPTZ"),
+            ("terminal_publication_deadline", "TIMESTAMPTZ"),
+            ("terminal_published_stream_id", "VARCHAR"),
+            ("terminal_published_at", "TIMESTAMPTZ"),
+        ):
+            conn.execute(sa_text(
+                f"ALTER TABLE turn_logs ADD COLUMN IF NOT EXISTS {name} {sql_type}"
+            ))
+        conn.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS ix_turn_logs_terminal_recovery"
+            " ON turn_logs (terminal_protocol_state, follower_lease_until)"
+            " WHERE terminal_protocol_state IS NOT NULL"
         ))
         conn.execute(sa_text(
             "CREATE INDEX IF NOT EXISTS ix_turn_logs_assistant_message_id"
@@ -298,6 +341,7 @@ def bootstrap_turn_log_schema(conn) -> None:
             "UPDATE turn_logs SET"
             " ended_at = created_at + (COALESCE(latency_ms, 0) * interval '1 millisecond')"
             " WHERE ended_at IS NULL"
+            " AND terminal_protocol_state IS NULL"
             " AND (status IN ('ok','completed','error','timeout','cancelled','aborted')"
             "      OR end_reason IS NOT NULL)"
         ))

@@ -403,6 +403,32 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
             "chat still runs. 0 disables the hold."
         ),
     ),
+    "turn_terminal_protocol_enabled": SettingDefinition(
+        key="turn_terminal_protocol_enabled",
+        type="bool",
+        default=False,
+        applies_to=BOT_TYPES_ALL,
+        storage=STORAGE_RUNTIME_SETTING,
+        label="Durable terminal commit for new turns",
+        help=(
+            "Opt eligible new turns into fenced terminal recovery. Requires global "
+            "terminal_recovery_mode=recover. Existing legacy rows stay legacy; "
+            "reset/receipt-rewriting turns remain on their existing lifecycle."
+        ),
+    ),
+    "terminal_recovery_mode": SettingDefinition(
+        key="terminal_recovery_mode",
+        type="str",
+        default="report",
+        applies_to=(),
+        storage=STORAGE_RUNTIME_SETTING,
+        label="Durable turn terminal recovery",
+        help=(
+            "report discovers expired protocol followers without writes; recover observes "
+            "and projects bounded durable outcomes; off disables discovery. Unknown values "
+            "report only. This does not enable new protocol admissions."
+        ),
+    ),
     "memory_embedding_repair_mode": SettingDefinition(
         key="memory_embedding_repair_mode",
         type="str",

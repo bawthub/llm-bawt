@@ -61,6 +61,7 @@ _OPEN_STARTED = """
     SELECT t.id, t.bot_id, t.status, t.agent_backend, t.agent_session_key, t.agent_request_id, t.created_at
     FROM turn_logs t
     WHERE t.ended_at IS NULL AND t.created_at < :started_at
+      AND t.terminal_protocol_state IS NULL
       AND (t.status <> 'reserved' OR (
           -- TASK-2142: a run re-armed to reserved by recover_expired whose
           -- delivery was then withdrawn. Its bridge run may still be live, so

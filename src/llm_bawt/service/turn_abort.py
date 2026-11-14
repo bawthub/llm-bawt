@@ -242,6 +242,14 @@ async def _publish_abort_snapshot(service, turn_id: str) -> None:
     subscriber = getattr(service, "_redis_subscriber", None)
     if row is None or subscriber is None or not row.bot_id:
         return
+    if row.terminal_protocol_state is not None:
+        # Stop can beat the worker's finalizer, including during unbound setup.
+        # Never emit a mutable direct completion ahead of immutable history.
+        from .turn_terminal_finalize import project_execution_terminal
+        from .turn_terminal_protocol import TurnTerminalProtocol
+
+        await project_execution_terminal(TurnTerminalProtocol(store), turn_id, subscriber)
+        return
     session_id = None
     if row.trigger_message_id:
         with store.engine.connect() as conn:

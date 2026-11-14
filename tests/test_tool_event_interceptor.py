@@ -98,6 +98,76 @@ def test_text_tool_text_ordering_offsets_and_paragraph_break():
     h.stamps.on_tool_started.assert_called_once_with("tu1", call["_call_id"])
 
 
+def test_protocol_checkpoints_complete_text_and_reasoning_before_events():
+    h = _make()
+    h.ctx.terminal_follower = Mock()
+    checkpoints = []
+
+    def checkpoint(**fields):
+        checkpoints.append((fields, len(h.published)))
+
+    h.ctx.terminal_follower.write_partial.side_effect = checkpoint
+    out = list(h.it.run([
+        {"event": "reasoning", "text": "thinking"}, "Hi 🙂.",
+        {"event": "tool_call", "name": "Read", "arguments": {}, "tool_use_id": "call"},
+        {"event": "tool_result", "name": "Read", "result": "done", "tool_use_id": "call"},
+        "Answer",
+    ]))
+    assert out[-2:] == ["\n\n", "Answer"]
+    assert [fields for fields, _ in checkpoints] == [
+        {"text_value": "", "reasoning": "thinking"},
+        {"text_value": "Hi 🙂.", "reasoning": "thinking"},
+        {"text_value": "Hi 🙂.\n\nAnswer", "reasoning": "thinking"},
+    ]
+    assert [seen for _, seen in checkpoints] == [0, 1, 4]
+    assert h.published[-1]["delta"] == "\n\nAnswer"
+    h.svc._update_turn_log.assert_not_called()
+
+
+def test_protocol_reasoning_batches_are_checkpointed_before_publish():
+    h = _make()
+    h.ctx.terminal_follower = Mock()
+    checkpoints = []
+    h.ctx.terminal_follower.write_partial.side_effect = lambda **fields: checkpoints.append(
+        (fields, len(h.published))
+    )
+    chunks = [{"event": "reasoning", "text": "r"} for _ in range(1024)]
+    out = list(h.it.run(chunks + ["Answer"]))
+    reasoning_events = [event for event in h.published if event["_type"] == "reasoning_delta"]
+    assert "".join(event["delta"] for event in reasoning_events) == "r" * 1024
+    assert [event["reasoning_offset"] for event in reasoning_events] == [0, 512]
+    assert len(checkpoints) == 3  # two reasoning batches, one answer
+    assert checkpoints[0][0]["reasoning"] == "r" * 512
+    assert checkpoints[1][0]["reasoning"] == "r" * 1024
+    assert checkpoints[2][0]["text_value"] == "Answer"
+    assert out[-1] == "Answer"
+
+
+def test_protocol_fence_loss_stops_before_any_partial_event():
+    from llm_bawt.service.turn_execution import TurnExecutionDetached
+    from llm_bawt.service.turn_terminal_protocol import FollowerFenceLost
+    from tests.test_terminal_follower import follower
+
+    h = _make()
+    guard = follower()
+    guard.protocol.write_partial.side_effect = FollowerFenceLost("lost to another owner")
+    h.ctx.terminal_follower = guard
+    with pytest.raises(TurnExecutionDetached):
+        list(h.it.run(["Never publish"] ))
+    assert guard.execution.detach_requested()
+    assert h.published == []
+    guard.protocol.claim.assert_not_called()
+
+
+def test_protocol_bridge_cancel_is_classified_without_generic_terminal_write():
+    h = _make()
+    h.ctx.terminal_follower = Mock()
+    h.ctx.cancelled_holder = [False]
+    assert list(h.it.run([{"event": "turn_cancelled", "abort_cause": "bridge_stop"}])) == []
+    assert h.ctx.cancelled_holder[0]
+    h.svc._update_turn_log.assert_not_called()
+
+
 def test_text_buffer_flushes_at_threshold_and_feeds_tts():
     tts = _Tts()
     h = _make(tts=tts)

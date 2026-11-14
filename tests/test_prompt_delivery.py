@@ -501,7 +501,7 @@ def test_real_stream_coordinator_selects_isolated_prompt_instance(rig, monkeypat
     service._turn_log_store.accept_session_binding = Mock()
     service._resolve_request_model = Mock(side_effect=AssertionError("Personal model resolver used"))
     service._get_llm_bawt = Mock(side_effect=AssertionError("Personal cached instance used"))
-    service._persist_turn_log = Mock()
+    service._persist_turn_log = Mock(return_value=None)
     service._maybe_summarize_on_new = Mock()
     service._maybe_rotate_agent_session = Mock()
     service._redis_subscriber = None

@@ -356,10 +356,15 @@ class InterBotDeliveryStore:
                         SET metadata_json=jsonb_set(metadata_json, '{new_session_ambiguous}', 'true'::jsonb)
                         WHERE id=:id
                     """), {"id": row["id"]})
+                from .service.turn_terminal_reservations import interrupt_protocol_reservation
+                interrupt_protocol_reservation(conn, row["turn_id"], status="error",
+                                               error_text=row["last_error"],
+                                               audit={"cause": "recovery_window_expired"})
                 charge_settled_turns(conn, conn.execute(sa_text("""
                     UPDATE turn_logs SET status='error', end_reason='error',
                         error_text=:error, ended_at=COALESCE(ended_at, now())
                     WHERE id=:turn_id AND ended_at IS NULL
+                      AND terminal_protocol_state IS NULL
                     RETURNING id, created_at, token_usage_json
                 """), {"turn_id": row["turn_id"], "error": row["last_error"]}))
         return [DeliveryRecord.from_mapping(row) for row in rows]
@@ -623,6 +628,23 @@ class InterBotDeliveryStore:
             """), values).mappings().first()
             DeliveryTransitionEvents.stage(conn, row, reason_code=reason_code)
             return DeliveryRecord.from_mapping(row) if row else None
+        if claim and claim["delivery_mode"] == "turn":
+            protocol_state = conn.execute(sa_text(
+                "SELECT terminal_protocol_state FROM turn_logs WHERE id=:turn_id"
+            ), {"turn_id": claim["turn_id"]}).scalar_one_or_none()
+            if protocol_state is not None and protocol_state != "reserved":
+                # All live requeue callers share this authority. A consumed
+                # protocol ID cannot run again after a transient stream error.
+                # Keep the claim, but make it eligible for delivery recovery;
+                # the terminal owner first observes/commits, then expiry settles.
+                row = conn.execute(sa_text("""
+                    UPDATE inter_bot_deliveries SET lease_expires_at=now(),
+                        last_error=:error, updated_at=now()
+                    WHERE id=:id AND status='DISPATCHING' AND claim_token=:claim_token
+                    RETURNING *
+                """), values).mappings().first()
+                DeliveryTransitionEvents.stage(conn, row, reason_code="terminal_recovery_pending")
+                return DeliveryRecord.from_mapping(row) if row else None
         mode_reset = (
             ", delivery_mode=NULL, target_turn_id=NULL, transport_accepted_at=NULL"
             if clear_delivery_mode else ""
@@ -683,6 +705,12 @@ class InterBotDeliveryStore:
             """), {"id": delivery_id, "claim": claim_token}).mappings().first()
             if not head or head["target_bot_id"] != target:
                 return None
+            # Legacy overflow retry deletes and replaces the same TurnLog ID.
+            # A marked outcome must survive; explicit retries use a new delivery.
+            if conn.execute(sa_text(
+                "SELECT terminal_protocol_state FROM turn_logs WHERE id=:turn"
+            ), {"turn": head["turn_id"]}).scalar_one_or_none() is not None:
+                return None
             # Generic overflow recovery rotates the active personal thread and
             # changes the logical RPC. Automation must never take that path.
             if (head.get("metadata_json") or {}).get("prompt_schedule"):
@@ -720,10 +748,14 @@ class InterBotDeliveryStore:
             }).mappings().first()
             DeliveryTransitionEvents.stage(conn, row)
             if row:
+                from .service.turn_terminal_reservations import interrupt_protocol_reservation
+                interrupt_protocol_reservation(conn, row["turn_id"], status="error",
+                                               error_text=error[:4000], audit={"cause": "delivery_failed"})
                 conn.execute(sa_text("""
                     UPDATE turn_logs SET status='error', end_reason='error',
                         error_text=:error, ended_at=now()
                     WHERE id=:turn_id AND status='reserved'
+                      AND terminal_protocol_state IS NULL
                 """), {"turn_id": row["turn_id"], "error": error[:4000]})
         return DeliveryRecord.from_mapping(row) if row else None
 
@@ -739,6 +771,10 @@ class InterBotDeliveryStore:
                 WHERE id=:id AND status != 'DELIVERED' RETURNING *
             """), {"id": delivery_id, "error": error[:4000]}).mappings().first()
             DeliveryTransitionEvents.stage(conn, row)
+            if row:
+                from .service.turn_terminal_reservations import interrupt_protocol_reservation
+                interrupt_protocol_reservation(conn, row["turn_id"], status="error",
+                                               error_text=error[:4000], audit={"cause": "delivery_failed"})
         return DeliveryRecord.from_mapping(row) if row else None
 
     @staticmethod

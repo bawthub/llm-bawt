@@ -270,6 +270,27 @@ def test_persist_turn_log_fails_closed_on_store_error(stream, with_claim):
     assert isinstance(exc.value.__cause__, ConnectionError)
 
 
+def test_persist_turn_log_returns_admission_authority_without_reclaiming():
+    from unittest.mock import Mock
+    from llm_bawt.service.turn_lifecycle import TurnLifecycleMixin
+
+    authority = object()
+    store = Mock()
+    store.save_turn.return_value = authority
+    host = object.__new__(TurnLifecycleMixin)
+    host._turn_log_store = store
+    result = host._persist_turn_log(
+        turn_id="t", request_id="r", path="/v1/chat/completions", stream=True,
+        model="m", bot_id="test-terminal", user_id="test-user",
+        status="streaming", latency_ms=None, user_prompt="hi",
+        prepared_messages=[], response_text="", assistant_message_id="assistant",
+        terminal_protocol=True,
+    )
+    assert result is authority
+    assert store.save_turn.call_args.kwargs["terminal_protocol"] is True
+    store.claim.assert_not_called()
+
+
 @pytest.mark.parametrize("stream", [True, False], ids=["stream", "nonstream"])
 @pytest.mark.parametrize("configured", [False, True], ids=["database-less", "configured"])
 @pytest.mark.parametrize("admission", ["start", "idle_only", "claimed"])

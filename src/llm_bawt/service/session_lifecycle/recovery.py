@@ -63,6 +63,7 @@ class NewSessionRecovery:
             UPDATE turn_logs SET status='error', end_reason='error',
                 error_text=:reason, ended_at=COALESCE(ended_at, now())
             WHERE id=:turn AND ended_at IS NULL
+              AND terminal_protocol_state IS NULL
         """), {"turn": head["turn_id"], "reason": reason})
         return True
 
@@ -101,5 +102,6 @@ class NewSessionRecovery:
                 UPDATE turn_logs SET status='error', end_reason='error',
                     error_text=:reason, ended_at=COALESCE(ended_at, now())
                 WHERE id=:turn AND ended_at IS NULL
+              AND terminal_protocol_state IS NULL
             """), {"turn": row["turn_id"], "reason": reason[:4000]})
         return DeliveryRecord.from_mapping(row) if row else None

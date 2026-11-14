@@ -57,16 +57,20 @@ def _owner_claim(owner="owner-a", fence=None):
     return AdmissionClaim(owner=owner, fence=fence or (lambda conn: True))
 
 
-def _save(store, bot, *, turn_id=None, admission=None, claim=None, connection=None):
+def _save(
+    store, bot, *, turn_id=None, admission=None, claim=None, connection=None,
+    protocol=False, assistant_id=None,
+):
     payload = {"messages": []}
     if admission:
         payload["admission"] = admission
-    store.save_turn(
+    return store.save_turn(
         turn_id=turn_id or f"turn-{uuid.uuid4().hex}", request_id="r",
         path="/v1/chat/completions", stream=True, model="m", bot_id=bot,
         user_id="nick", status="streaming", latency_ms=None, user_prompt="hi",
         request_payload=payload, response_text="", tool_calls=None,
         admission_claim=claim, connection=connection,
+        terminal_protocol=protocol, assistant_message_id=assistant_id,
     )
 
 
@@ -82,6 +86,80 @@ def _assert_waiting_on_holder(engine, holding_conn, worker, *, timeout=5.0):
     """Observe a real PG lock wait, not merely a thread that has not run yet."""
     holder_pid = holding_conn.execute(sa_text("SELECT pg_backend_pid()")).scalar_one()
     wait_blocked_by(engine, holder_pid, worker, timeout=timeout)
+
+
+@pytest.mark.integration
+def test_protocol_admission_returns_the_initial_committed_lease(pg_turns):
+    from llm_bawt.service.turn_terminal_protocol import TurnTerminalProtocol
+
+    turns, bot = pg_turns
+    turn_id = f"turn-{uuid.uuid4().hex}"
+    assistant_id = str(uuid.uuid4())
+    lease = _save(turns, bot, turn_id=turn_id, protocol=True, assistant_id=assistant_id)
+    row = turns.get_turn(turn_id)
+    assert row.terminal_protocol_state == "binding"
+    assert row.assistant_message_id == assistant_id and row.history_session_id is None
+    assert row.follower_owner == lease.token and row.follower_lease_until == lease.expires_at
+    assert row.id == lease.turn_id
+    protocol = TurnTerminalProtocol(turns)
+    assert turn_id not in protocol.recoverable_ids()
+    assert protocol.claim(turn_id) is None
+    assert protocol.renew(lease).token == lease.token
+
+
+@pytest.mark.integration
+def test_protocol_admission_lease_and_marker_rollback_with_the_shared_transaction(pg_turns):
+    turns, bot = pg_turns
+    turn_id = f"turn-{uuid.uuid4().hex}"
+    with pytest.raises(RuntimeError, match="rollback admission"):
+        with turns.engine.begin() as connection:
+            lease = _save(
+                turns, bot, turn_id=turn_id, protocol=True,
+                assistant_id=str(uuid.uuid4()), connection=connection,
+            )
+            row = connection.execute(sa_text(
+                "SELECT terminal_protocol_state, follower_owner FROM turn_logs WHERE id=:id"
+            ), {"id": turn_id}).mappings().one()
+            assert row["terminal_protocol_state"] == "binding" and row["follower_owner"] == lease.token
+            raise RuntimeError("rollback admission")
+    assert turns.get_turn(turn_id) is None
+
+
+@pytest.mark.integration
+def test_new_protocol_insert_cannot_adopt_a_legacy_reservation(pg_turns):
+    turns, bot = pg_turns
+    turn_id = f"turn-{uuid.uuid4().hex}"
+    _reserve(turns, bot, turn_id)
+    before = turns.get_turn(turn_id).model_dump()
+    with pytest.raises(AdmissionFenceLost, match="cannot adopt"):
+        _save(
+            turns, bot, turn_id=turn_id, protocol=True,
+            assistant_id=str(uuid.uuid4()), claim=_owner_claim(),
+        )
+    assert turns.get_turn(turn_id).model_dump() == before
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("committed", [False, True], ids=["binding", "committed"])
+def test_durable_retry_reservation_never_rearms_a_protocol_attempt(pg_turns, committed):
+    from llm_bawt.service.turn_admission import write_reservation
+    from llm_bawt.service.turn_terminal_protocol import TurnTerminalProtocol
+
+    turns, bot = pg_turns
+    turn_id = f"turn-{uuid.uuid4().hex}"
+    lease = _save(turns, bot, turn_id=turn_id, protocol=True, assistant_id=str(uuid.uuid4()))
+    if committed:
+        TurnTerminalProtocol(turns).commit(
+            lease, status="error", end_reason="setup_error", error_text="immutable outcome",
+        )
+    before = turns.get_turn(turn_id).model_dump()
+    with turns.engine.begin() as conn:
+        assert not write_reservation(
+            conn, turn_id=turn_id, bot_id=bot, user_id="nick", user_prompt="retry",
+            request_json={"inter_bot_delivery_id": "delivery"},
+            trigger_message_id=str(uuid.uuid4()),
+        )
+    assert turns.get_turn(turn_id).model_dump() == before
 
 
 @pytest.mark.integration

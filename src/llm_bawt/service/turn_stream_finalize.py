@@ -109,6 +109,9 @@ class TurnStreamFinalizer:
     def _finalize(self, *, prepared_messages: list[Any]) -> None:
         """Finalize persistence and publish the authoritative terminal outcome."""
         ctx = self.ctx
+        if getattr(ctx, "terminal_follower", None) is not None:
+            self._finalize_protocol()
+            return
         svc = ctx.svc
         end_time = ctx.timing_holder[1] or time.time()
         start_time = ctx.timing_holder[0] or end_time
@@ -470,3 +473,129 @@ class TurnStreamFinalizer:
             "model": ctx.model_alias,
             "ts": time.time(),
         })
+
+    def _finalize_protocol(self) -> None:
+        """Freeze everything before commit; only project the winning snapshot."""
+        from .turn_terminal_finalize import prepare_terminal_content
+
+        ctx = self.ctx
+        follower = ctx.terminal_follower
+        follower.check()
+        if ctx.terminal_history_session_id is None:
+            if (ctx.full_response_holder[0] or ctx.reasoning_holder[0]
+                    or ctx.tool_context_holder[0] or ctx.agent_attachments_holder):
+                raise ValueError("unbound stream unexpectedly contains inference output")
+            try:
+                result = follower.protocol.commit(
+                    follower.lease, status="error", end_reason="setup_error",
+                    error_text=ctx.terminal_error_text or "Turn setup failed before history binding",
+                )
+            except Exception:
+                log.exception("Protocol setup terminal commit failed for %s", ctx.turn_log_id)
+                return
+            self._project_protocol_result(result)
+            return
+        cancelled = ctx.cancelled_holder[0] or self._turn_was_aborted()
+        error_text = ctx.terminal_error_text
+        if not cancelled and not error_text:
+            _, error_text = self._turn_has_upstream_error()
+        suffix = ""
+        response = ctx.full_response_holder[0] or ""
+        if cancelled:
+            status, reason = "aborted", "aborted"
+        elif error_text:
+            status, reason = "error", "upstream_error"
+            suffix = turn_failure_suffix(response, error_text)
+            response = response.rstrip() + suffix
+        elif response:
+            status = "ok"
+            reason = (
+                "question" if ctx.question_id_holder[0] else
+                "approval" if ctx.approval_id_holder[0] else
+                "approval_persist_failed" if ctx.approval_persist_failed_holder[0] else "stop"
+            )
+        else:
+            status, reason = "timeout", "error"
+
+        question = ctx.question_id_holder[0]
+        if question:
+            row = ctx.svc._pending_question_store.get(question)
+            if row is not None and row.live_deadline and row.status in ("answered", "skipped"):
+                question = None
+                if reason == "question":
+                    reason = "stop"
+        content = prepare_terminal_content(
+            ctx.svc, ctx.llm_bawt, response_text=response,
+            tool_context=ctx.tool_context_holder[0], tool_call_details=ctx.tool_call_details_holder,
+            token_usage=self._usage_so_far(),
+        )
+        try:
+            attachments = (
+                self._enrich_attachment_refs(ctx.agent_attachments_holder)
+                if ctx.agent_attachments_holder else None
+            )
+        except Exception:
+            attachments = list(ctx.agent_attachments_holder) or None
+        try:
+            changed_files = ctx.svc._turn_log_store.changed_files_summary(ctx.turn_log_id)
+        except Exception:
+            changed_files = None
+        tail = None
+        tts_text = None
+        if ctx.tts_scrubber is not None and not cancelled:
+            try:
+                offset = ctx.tts_scrubber.offset
+                speech = ctx.tts_scrubber.feed(suffix) + ctx.tts_scrubber.flush()
+                tts_text = ctx.tts_scrubber.text
+                if speech:
+                    tail = {"tts_offset": offset, "delta": speech, "ts": time.time()}
+            except Exception:
+                # Speech is optional; never abandon the durable text terminal.
+                log.warning("Terminal speech cleanup failed for %s", ctx.turn_log_id)
+        try:
+            result = follower.protocol.commit(
+                follower.lease, status=status, end_reason=reason, **content,
+                reasoning=ctx.reasoning_holder[0] or None,
+                attachments=attachments,
+                error_text=error_text or (
+                    json.dumps(ctx.approval_persist_failed_holder[0])
+                    if ctx.approval_persist_failed_holder[0] else None
+                ),
+                tts_tail=tail,
+                completion_fields={
+                    "question_id": question,
+                    "approval_id": ctx.approval_id_holder[0],
+                    "approval_persist_failed": ctx.approval_persist_failed_holder[0],
+                    "animation": ctx.animation_holder[0],
+                    "changed_files": changed_files,
+                    "text_offset": ctx.stream_text_offset,
+                    "tts_text": tts_text,
+                },
+            )
+        except Exception:
+            # Never publish a guessed success or fall back to mutable history.
+            log.exception("Protocol terminal commit failed for %s", ctx.turn_log_id)
+            return
+        self._project_protocol_result(result)
+
+    def _project_protocol_result(self, result) -> None:
+        from .turn_terminal_finalize import project_execution_terminal_from_worker
+
+        ctx = self.ctx
+        follower = ctx.terminal_follower
+        follower.close()
+        # HTTP-side final rendering must use the winner too, not a losing local
+        # response. Publication/history can only consume the durable snapshot.
+        ctx.full_response_holder[0] = result.snapshot["response_text"]
+        ctx.cancelled_holder[0] = result.snapshot["completion"]["status"] == "cancelled"
+        if result.won:
+            bump_after_finalize(ctx, result.snapshot["completion"]["token_usage"])
+        try:
+            project_execution_terminal_from_worker(
+                follower.protocol, ctx.turn_log_id, ctx._redis_sub, ctx.loop,
+                publish_lock=ctx.publish_lock,
+            )
+        except Exception:
+            log.warning(
+                "Committed terminal %s awaits projection recovery", ctx.turn_log_id, exc_info=True,
+            )

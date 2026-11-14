@@ -467,17 +467,18 @@ class InterBotDeliveryDispatcher:
         bot = BotManager(self.service.config).get_bot(target_bot_id)
         from .maintenance_queue import MaintenanceQueue
         await MaintenanceQueue(self.service, dispatcher=self).publish_ready(target_bot_id)
-        record = self.store.claim_next(  # a bound run's own pinned caps decide (TASK-1243)
-            target_bot_id,
+        # Admission and rollout settings read the DB; keep them off the API loop.
+        record = await asyncio.to_thread(
+            self.store.claim_next, target_bot_id,
             claim_owner=self.claim_owner,
             steer_capable=bot_steer_caps(bot),
         )
         if record is None:
             return False
         await self._emit(record)
-        if record.status in ("CANCELLED", "FAILED"):
-            # A steer_only or control row the claim settled terminal (TASK-1431):
-            # not needed, or a control ask it could not confirm.
+        if record.status in SETTLED_DELIVERY_STATUSES:
+            # Control refusals and already-consumed protocol identities may
+            # settle at claim time. Never dispatch a terminal receipt again.
             return True
         if record.status == "STEERING":
             await self._steer(record)

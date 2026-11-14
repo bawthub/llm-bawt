@@ -54,7 +54,11 @@ class DeliveryLeaseRecovery:
 
         from .service.turn_logs import TurnLog
         from .service.turn_termination import settle_open_turn
+        from .service.turn_terminal_reservations import interrupt_protocol_reservation
 
+        if interrupt_protocol_reservation(conn, turn_id, audit_key="user_stop",
+                                          audit={"cause": "delivery_stopped"}):
+            return True
         with Session(bind=conn) as session:
             row = session.exec(select(TurnLog).where(TurnLog.id == turn_id).with_for_update(key_share=True)).first()
             return bool(row is not None and settle_open_turn(
@@ -83,6 +87,7 @@ class DeliveryLeaseRecovery:
             rows = conn.execute(sa_text(f"""
                 SELECT d.*, t.status AS turn_status, t.ended_at AS turn_ended_at,
                        t.error_text AS turn_error_text,
+                       t.terminal_protocol_state AS turn_protocol_state,
                        d.lease_expires_at < now() AS lease_expired
                 FROM inter_bot_deliveries d
                 LEFT JOIN turn_logs t ON t.id=d.turn_id
@@ -93,6 +98,13 @@ class DeliveryLeaseRecovery:
             for row in rows:
                 is_turn = row.get("delivery_mode") != "steer"
                 accepted = row.get("transport_accepted_at") is not None
+                if (is_turn and row.get("turn_protocol_state") not in (None, "reserved")
+                        and row.get("turn_ended_at") is None):
+                    # Delivery-lease expiry is not execution failure. The fenced
+                    # terminal recovery owner must observe/stop/commit this run;
+                    # putting it back in QUEUED would authorize inference again.
+                    # A later pass settles the delivery from the committed row.
+                    continue
                 if not row["lease_expired"] and ((accepted and NewSessionRecovery.is_reset(row))
                                                  or not store._explicit_stop_requested(conn, row["turn_id"])):
                     continue
@@ -181,6 +193,7 @@ class DeliveryLeaseRecovery:
                             end_reason=NULL, error_text=NULL,
                             request_json=CAST(:request_json AS jsonb)::text
                         WHERE id=:turn_id AND ended_at IS NULL
+                          AND terminal_protocol_state IS NULL
                     """), {
                         "turn_id": row["turn_id"],
                         "request_json": DeliveryLeaseRecovery._archived_rearm_payload(
@@ -256,6 +269,10 @@ class DeliveryLeaseRecovery:
             if conn.execute(sa_text("SELECT 1 FROM tool_call_records WHERE turn_id=:id LIMIT 1"),
                             {"id": turn_id}).first():
                 return False
+            if row.terminal_protocol_state == "reserved":
+                from .service.turn_terminal_reservations import interrupt_protocol_reservation
+                return interrupt_protocol_reservation(conn, turn_id,
+                                                      audit={"cause": cause, "by": "delivery_cancelled"})
             settled = bool(settle_open_turn(
                 session, row, audit_key="recovery", now=datetime.now(timezone.utc),
                 audit={"cause": cause, "by": "delivery_cancelled"},

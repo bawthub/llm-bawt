@@ -11,6 +11,7 @@ turn was owned, and ``tasks_associate_current`` saw no trusted context.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -27,7 +28,7 @@ def _service(execute_llm_query, *, model_type: str = "claude-code") -> Backgroun
     service.config = SimpleNamespace(DEFAULT_BOT="nova", DEFAULT_USER="nick")
     service._redis_subscriber = SimpleNamespace(publish_tool_event=AsyncMock())
     service._resolve_request_model = Mock(return_value=("test-model", []))
-    service._persist_turn_log = Mock()
+    service._persist_turn_log = Mock(return_value=None)
     service._update_turn_log = Mock()
     service._end_generation = Mock()
     service._start_generation = AsyncMock(
@@ -633,3 +634,264 @@ def test_chat_bot_nonstream_tool_calls_are_recorded(_isolate, monkeypatch, model
     assert starts[0]["arguments"] == {"query": "iceland"}
     assert starts[0]["call_id"] == ends[0]["call_id"]
     assert ends[0]["result"] == "Found 5 results"
+
+
+def _protocol_admission(service, monkeypatch):
+    """Inject the internal opt-in result, without enabling runtime admissions."""
+    from llm_bawt.service.turn_terminal_follower import TerminalFollower
+    from llm_bawt.service.turn_terminal_protocol import FollowerLease
+
+    protocol = Mock()
+    protocol.renew.side_effect = lambda lease: lease
+    protocol.commit.return_value = SimpleNamespace(snapshot={
+        "response_text": "answer", "completion": {"status": "completed", "end_reason": "stop"},
+    }, won=True)
+    service._turn_log_store.get_turn = Mock(return_value=SimpleNamespace(
+        id="turn-delivery-test", terminal_protocol_state="open", terminal_snapshot_json=None,
+        status="streaming", response_text="",
+    ))
+    monkeypatch.setattr(
+        "llm_bawt.service.turn_terminal_finalize.project_execution_terminal_from_worker", Mock(),
+    )
+    service._persist_turn_log.return_value = FollowerLease(
+        "turn-delivery-test", "insert-token", datetime.now(timezone.utc),
+    )
+    monkeypatch.setattr(
+        "llm_bawt.service.turn_terminal_follower.TurnTerminalProtocol", lambda store: protocol,
+    )
+    original_start = TerminalFollower.start
+
+    def start(follower):
+        follower._stop.wait = Mock(return_value=True)
+        return original_start(follower)
+
+    monkeypatch.setattr(TerminalFollower, "start", start)
+    llm = service._get_llm_bawt.return_value
+    llm.history_manager = SimpleNamespace(_db_backend=SimpleNamespace(
+        bot_id="caid", user_id="nick",
+        get_or_create_active_session=Mock(return_value="canonical-native"),
+    ))
+    return protocol, llm
+
+
+def test_protocol_nonstream_pins_post_reset_session_before_user_history(monkeypatch):
+    from llm_bawt.service.session_lifecycle.execution import NewSessionExecution, PreparedNewSession
+
+    order = []
+    service = _service(Mock(return_value=("answer", "", [])))
+    protocol, llm = _protocol_admission(service, monkeypatch)
+
+    def prepare(*args, **kwargs):
+        execution = turn_executions.get("turn-delivery-test")
+        assert execution is not None
+        protocol.renew.assert_called_once()
+        order.append("reset")
+        return PreparedNewSession(None, {"thread_session_id": "final-successor"}, None)
+
+    def bind(lease, *, session_id):
+        assert lease.token == "insert-token"
+        assert session_id == "final-successor"
+        order.append("bind")
+
+    def messages(*args, **kwargs):
+        assert llm._session_id_override is None
+        assert kwargs["history_write_session_id"] == "final-successor"
+        order.append("user-history")
+        return []
+
+    monkeypatch.setattr(NewSessionExecution, "prepare_agent", prepare)
+    protocol.bind_history_session.side_effect = bind
+    llm.prepare_messages_for_query.side_effect = messages
+    response = asyncio.run(service.chat_completion(_claimed(_request())))
+    assert response.choices[0].message.content == "answer"
+    assert order == ["reset", "bind", "user-history"]
+    llm.history_manager._db_backend.get_or_create_active_session.assert_not_called()
+    assert llm.execute_llm_query.call_args.kwargs["turn_execution"].turn_id == "turn-delivery-test"
+    assert turn_executions.get("turn-delivery-test") is None
+    service._end_generation.assert_called_once()
+
+
+def test_protocol_nonstream_returns_only_the_terminal_winner(monkeypatch):
+    service = _service(Mock(return_value=("losing local answer", "", [])))
+    protocol, llm = _protocol_admission(service, monkeypatch)
+    protocol.commit.return_value = SimpleNamespace(
+        won=False, snapshot={
+            "response_text": "Stop-owned partial",
+            "completion": {"status": "cancelled", "end_reason": "aborted"},
+        },
+    )
+    response = asyncio.run(service.chat_completion(_claimed(_request())))
+    assert response.choices[0].message.content == "Stop-owned partial"
+    assert response.choices[0].finish_reason == "cancelled"
+    service._finalize_turn.assert_not_called()
+    events = [call.args[2] for call in service._redis_subscriber.publish_tool_event.await_args_list]
+    assert not any(event["_type"] in {"text_delta", "turn_complete"} for event in events)
+    assert turn_executions.get("turn-delivery-test") is None
+
+
+def test_protocol_nonstream_inference_error_commits_before_raising(monkeypatch):
+    service = _service(Mock(side_effect=RuntimeError("provider failed")))
+    protocol, _ = _protocol_admission(service, monkeypatch)
+    with pytest.raises(RuntimeError, match="provider failed"):
+        asyncio.run(service.chat_completion(_claimed(_request())))
+    candidate = protocol.commit.call_args.kwargs
+    assert candidate["status"] == "error" and candidate["end_reason"] == "upstream_error"
+    assert candidate["error_text"] == "provider failed"
+    service._finalize_turn.assert_not_called()
+    service._update_turn_log.assert_not_called()
+    events = [call.args[2] for call in service._redis_subscriber.publish_tool_event.await_args_list]
+    assert not any(event["_type"] == "turn_complete" for event in events)
+
+
+def test_protocol_nonstream_voice_strips_emotes_only_from_returned_winner(monkeypatch):
+    service = _service(Mock(return_value=("*smiles* Hello", "", [])))
+    protocol, _ = _protocol_admission(service, monkeypatch)
+    frozen = "*smiles* Hello"
+    protocol.commit.return_value = SimpleNamespace(
+        won=True, snapshot={
+            "response_text": frozen, "completion": {"status": "completed", "end_reason": "stop"},
+        },
+    )
+    monkeypatch.setattr(
+        "llm_bawt.service.chat_nonstream.get_bot",
+        lambda _bot: SimpleNamespace(voice_optimized=True),
+    )
+    response = asyncio.run(service.chat_completion(_claimed(_request())))
+    assert response.choices[0].message.content == "Hello"
+    assert protocol.commit.return_value.snapshot["response_text"] == frozen
+
+
+def test_nonstream_projection_waits_on_approval_publish_lock(monkeypatch):
+    from llm_bawt.service import turn_terminal_finalize
+
+    service = _service(Mock(return_value=("answer", "", [])))
+    _protocol_admission(service, monkeypatch)
+    asyncio.run(service.chat_completion(_claimed(_request())))
+    call = turn_terminal_finalize.project_execution_terminal_from_worker.call_args
+    assert isinstance(call.kwargs["publish_lock"], asyncio.Lock)
+
+
+def test_failed_nonstream_commit_never_retries_as_an_empty_error(monkeypatch):
+    service = _service(Mock(return_value=("provider reply", "", [])))
+    protocol, _ = _protocol_admission(service, monkeypatch)
+    protocol.commit.side_effect = ConnectionError("commit unavailable")
+    with pytest.raises(ConnectionError, match="commit unavailable"):
+        asyncio.run(service.chat_completion(_claimed(_request())))
+    protocol.commit.assert_called_once()
+    candidate = protocol.commit.call_args.kwargs
+    assert candidate["response_text"] == "provider reply"
+    assert candidate["status"] == "ok"
+
+
+def test_protocol_nonstream_freezes_actual_bridge_metadata(monkeypatch):
+    def query(*args, **kwargs):
+        callback = kwargs["bridge_event_callback"]
+        callback({"event": "attachments", "attachments": [{"asset_id": "image"}]})
+        callback({"event": "reasoning", "text": "thinking"})
+        callback({"event": "token_usage", "token_usage": {"input_tokens": 11}})
+        callback({
+            "event": "approval_required", "tool_use_id": "approval", "tool_name": "Bash",
+            "arguments": {}, "provider": "claude-code",
+        })
+        return "answer", "", []
+
+    service = _service(query)
+    service._tool_approval_policy_store = Mock()
+    protocol, _ = _protocol_admission(service, monkeypatch)
+    asyncio.run(service.chat_completion(_claimed(_request())))
+    candidate = protocol.commit.call_args.kwargs
+    assert candidate["end_reason"] == "approval"
+    assert candidate["attachments"] == [{"asset_id": "image"}]
+    assert candidate["reasoning"] == "thinking"
+    assert candidate["token_usage"]["input_tokens"] == 11
+    assert candidate["completion_fields"]["approval_id"] == "approval"
+    service._tool_approval_policy_store.record_request.assert_called_once()
+
+
+@pytest.mark.parametrize("stream", [True, False])
+def test_protocol_setup_failure_closes_early_owner_before_any_user_write(monkeypatch, stream):
+    from llm_bawt.service.session_lifecycle.execution import NewSessionExecution
+
+    service = _service(Mock(side_effect=AssertionError("no inference after setup failure")))
+    protocol, llm = _protocol_admission(service, monkeypatch)
+
+    def fail(*args, **kwargs):
+        assert turn_executions.get("turn-delivery-test") is not None
+        protocol.renew.assert_called_once()
+        raise ValueError("reset failed")
+
+    monkeypatch.setattr(NewSessionExecution, "prepare_agent", fail)
+
+    async def run():
+        request = _claimed(_request())
+        if stream:
+            async for _ in service.chat_completion_stream(request):
+                pass
+        else:
+            await service.chat_completion(request)
+
+    with pytest.raises(ValueError, match="reset failed"):
+        asyncio.run(run())
+    assert turn_executions.get("turn-delivery-test") is None
+    llm.prepare_messages_for_query.assert_not_called()
+    llm.execute_llm_query.assert_not_called()
+    protocol.bind_history_session.assert_not_called()
+    protocol.commit.assert_called_once_with(
+        service._persist_turn_log.return_value, status="error",
+        end_reason="setup_error", error_text="reset failed",
+    )
+    service._end_generation.assert_called_once()
+
+
+def test_nonstream_setup_failure_projection_uses_same_publish_lock(monkeypatch):
+    from llm_bawt.service import turn_terminal_finalize
+    from llm_bawt.service.session_lifecycle.execution import NewSessionExecution
+
+    service = _service(Mock(side_effect=AssertionError("no inference")))
+    _protocol_admission(service, monkeypatch)
+    monkeypatch.setattr(
+        NewSessionExecution, "prepare_agent", Mock(side_effect=RuntimeError("setup failed")),
+    )
+    with pytest.raises(RuntimeError, match="setup failed"):
+        asyncio.run(service.chat_completion(_claimed(_request())))
+    call = turn_terminal_finalize.project_execution_terminal_from_worker.call_args
+    assert isinstance(call.kwargs["publish_lock"], asyncio.Lock)
+
+
+def test_protocol_stream_worker_preserves_canonical_native_pin(monkeypatch):
+    from llm_bawt.service.turn_execution import TurnExecutionDetached
+    from llm_bawt.working_memory.turn import WorkingMemoryTurn
+
+    service = _service(Mock(side_effect=AssertionError("no provider needed")), model_type="openai")
+    protocol, llm = _protocol_admission(service, monkeypatch)
+    service._start_generation = AsyncMock(side_effect=lambda *args, **kwargs: (
+        kwargs["cancel_event"], kwargs["done_event"],
+    ))
+    monkeypatch.setattr(
+        WorkingMemoryTurn, "begin",
+        lambda ctx: SimpleNamespace(extend_suffix=lambda suffix: suffix),
+    )
+    pins = []
+
+    def messages(*args, **kwargs):
+        protocol.bind_history_session.assert_called_once()
+        assert llm._session_id_override is None
+        pins.append(kwargs["history_write_session_id"])
+        # Stop before inference, using the real worker's observation-only
+        # detach path and real finalizer cleanup.
+        execution = turn_executions.get("turn-delivery-test")
+        execution.detach()
+        raise TurnExecutionDetached()
+
+    llm.prepare_messages_for_query.side_effect = messages
+
+    async def run():
+        return [event async for event in service.chat_completion_stream(_claimed(_request()))]
+
+    asyncio.run(run())
+    assert pins == ["canonical-native"]
+    protocol.bind_history_session.assert_called_once_with(
+        service._persist_turn_log.return_value, session_id="canonical-native",
+    )
+    llm.execute_llm_query.assert_not_called()
+    assert turn_executions.get("turn-delivery-test") is None

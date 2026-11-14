@@ -182,6 +182,9 @@ def settle_open_turn(session: Session, row, *, audit_key: str, audit: dict, now:
     clients treat as a stopped reply (A1). The cause lives in the audit under
     ``audit_key`` (``user_stop`` or ``recovery``), never in ``end_reason``.
     """
+    if row.terminal_protocol_state is not None:
+        from .turn_terminal_protocol import FollowerFenceLost
+        raise FollowerFenceLost("protocol interruption requires the immutable commit path")
     if row.ended_at is not None:
         return False
     payload = turn_payload(row.request_json)
@@ -224,6 +227,7 @@ def reap_unowned_turns(store, bot_id: str, current_turn_id: str) -> list[dict]:
         rows = session.exec(select(TurnLog).where(
             TurnLog.bot_id == bot_id,
             TurnLog.ended_at.is_(None),
+            TurnLog.terminal_protocol_state.is_(None),
             TurnLog.id != current_turn_id,
             TurnLog.created_at < current.created_at,
             TurnLog.id.not_in(turn_executions.active_ids()),
@@ -306,6 +310,32 @@ class TurnAbortCoordinator:
         False when another writer (the worker's own finalize) ended it first.
         """
         from .turn_logs import TurnLog
+
+        # The protocol marker is fixed at INSERT. Release the read transaction
+        # before the primitive takes its own row lock; nested row locks would
+        # deadlock on PostgreSQL. The primitive rechecks the terminal winner.
+        with Session(self.store.engine) as lookup:
+            row = lookup.get(TurnLog, turn_id)
+            protocol_turn = row is not None and row.terminal_protocol_state is not None
+        if protocol_turn:
+            from .turn_terminal_protocol import TurnTerminalProtocol
+            result = TurnTerminalProtocol(self.store).interrupt(
+                turn_id, status="aborted", end_reason="aborted",
+                audit_key="user_stop", audit=audit,
+            )
+            if not result.won:
+                with Session(self.store.engine) as session:
+                    row = session.exec(select(TurnLog).where(TurnLog.id == turn_id).with_for_update(key_share=True)).first()
+                    if row is not None:
+                        now = datetime.now(timezone.utc)
+                        payload = turn_payload(row.request_json)
+                        payload["user_stop"] = {**audit, "settled": False, "recorded_at": now.isoformat()}
+                        row.request_json = dump_payload(payload)
+                        session.add(row)
+                        session.commit()
+            else:
+                reconcile_finished_tool_safely(self.store.engine, turn_id=turn_id)
+            return result.won
 
         with Session(self.store.engine) as session:
             row = session.exec(select(TurnLog).where(TurnLog.id == turn_id).with_for_update(key_share=True)).first()

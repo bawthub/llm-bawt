@@ -207,11 +207,15 @@ class NewSessionReceipt:
                 SELECT d.status, d.user_message_id, d.turn_id, d.target_bot_id,
                        d.payload_json, d.metadata_json, t.status AS turn_status,
                        t.ended_at, t.error_text, t.assistant_message_id,
-                       t.trigger_message_id, t.user_id
+                       t.trigger_message_id, t.user_id,
+                       t.terminal_protocol_state AS turn_protocol_state
                 FROM inter_bot_deliveries d JOIN turn_logs t ON t.id=d.turn_id
                 WHERE d.id=:id FOR UPDATE OF d
             """), {"id": record.id}).mappings().one_or_none()
-            if row is None or row["status"] != "DELIVERED" or row["ended_at"] is None:
+            if (row is None or row["status"] != "DELIVERED"
+                    or row["ended_at"] is None or row["turn_protocol_state"] is not None):
+                # The legacy reset receipt rewrites the assistant and turn text;
+                # immutable protocol snapshots need a separate pre-commit path.
                 return None
             if (row["turn_status"] not in {"ok", "completed"} or row["error_text"]
                     or row["user_id"] != intent.user_id

@@ -120,6 +120,7 @@ async def test_a_full_teardown_with_stop_events_raises_in_no_phase(monkeypatch):
     service, scheduler, redis, home_audio = _wiring(events)
     service._ollama_reachability_stop = asyncio.Event()
     service._embedding_repair_stop = threading.Event()
+    service._terminal_recovery_stop = asyncio.Event()
     phases = api.shutdown_phases(
         service, scheduler=scheduler, redis_subscriber=redis, home_audio_worker=home_audio,
     )
@@ -127,6 +128,9 @@ async def test_a_full_teardown_with_stop_events_raises_in_no_phase(monkeypatch):
     assert await run_shutdown_phases(phases) == []
     assert service._ollama_reachability_stop.is_set()
     assert service._embedding_repair_stop.is_set()
+    assert service._terminal_recovery_stop.is_set()
+    names = [name for name, _ in phases]
+    assert names.index("terminal recovery stop") < names.index("background tasks") < names.index("redis subscriber")
     assert events == ["home audio", "scheduler", "dispatcher", "redis", "service"]
 
 

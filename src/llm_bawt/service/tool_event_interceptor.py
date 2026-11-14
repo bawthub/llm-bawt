@@ -26,6 +26,7 @@ from .upstream_status import upstream_status_sse_payload
 # Same logger name as the worker the code came from, so log filters and
 # operators' searches keep matching.
 log = get_service_logger("llm_bawt.service.turn_stream_worker")
+_REASONING_CHECKPOINT_UNITS = 512
 
 
 def js_len(s: str) -> int:
@@ -56,6 +57,9 @@ class InterceptorState:
     # publication. Must stay in lock-step with ``text_chars`` so each
     # delta's ``text_offset`` (chars emitted before it) is exact.
     text_buf: list[str] = field(default_factory=list)
+    reasoning_buf: list[str] = field(default_factory=list)
+    reasoning_buf_units: int = 0
+    reasoning_buf_started: float = 0.0
 
 
 class ToolEventInterceptor:
@@ -92,6 +96,7 @@ class ToolEventInterceptor:
         self.call_index = call_index
         self.confirmed_start_reaped = confirmed_start_reaped
         self.state = InterceptorState()
+        self._protocol_partial_text = ""
         # Per-turn identity, read once like the closure's captured locals.
         self.turn_id = ctx.turn_log_id
         self.trigger_message_id = ctx.trigger_message_id
@@ -108,6 +113,13 @@ class ToolEventInterceptor:
         if len(s) < min_chars:
             return
         st.text_buf.clear()
+        follower = getattr(self.ctx, "terminal_follower", None)
+        if follower is not None:
+            self._protocol_partial_text += s
+            follower.write_partial(
+                text_value=self._protocol_partial_text,
+                reasoning=self.ctx.reasoning_holder[0] or None,
+            )
         self.ctx.stream_text_offset = st.text_chars
         self.publish({
             "_type": "text_delta",
@@ -141,6 +153,30 @@ class ToolEventInterceptor:
                     "ts": time.time(),
                 })
 
+    def flush_reasoning(self) -> Iterator[dict]:
+        """Checkpoint a bounded reasoning batch before publishing any of it."""
+        st = self.state
+        if not st.reasoning_buf:
+            return
+        delta = "".join(st.reasoning_buf)
+        offset = st.reasoning_units - st.reasoning_buf_units
+        follower = getattr(self.ctx, "terminal_follower", None)
+        if follower is not None:
+            follower.write_partial(
+                text_value=self._protocol_partial_text,
+                reasoning=self.ctx.reasoning_holder[0],
+            )
+        st.reasoning_buf.clear()
+        st.reasoning_buf_units = 0
+        st.reasoning_buf_started = 0.0
+        self.publish({
+            "_type": "reasoning_delta", "turn_id": self.turn_id,
+            "trigger_message_id": self.trigger_message_id,
+            "bot_id": self.bot_id, "user_id": self.user_id,
+            "delta": delta, "reasoning_offset": offset, "ts": time.time(),
+        })
+        yield {"_type": "reasoning_delta", "delta": delta}
+
     # ------------------------------------------------------------- main loop
 
     def run(self, inner: Iterable[Any]) -> Iterator[Any]:
@@ -149,6 +185,8 @@ class ToolEventInterceptor:
         for item in inner:
             if not ctx.is_agent_backend and ctx.cancel_event.is_set():
                 break  # do not publish a post-Stop delta/tool start to Redis
+            if not (isinstance(item, dict) and item.get("event") == "reasoning"):
+                yield from self.flush_reasoning()
             if isinstance(item, dict) and item.get("event") == "steer_lifecycle":
                 self.flush_text()
                 self.publish({
@@ -194,10 +232,13 @@ class ToolEventInterceptor:
                     yield from self._on_reasoning(item)
                     continue
                 if evt == "turn_cancelled":
-                    self.svc._update_turn_log(
-                        turn_id=self.turn_id, status="aborted", end_reason="aborted",
-                        abort_cause=item.get("abort_cause"),
-                    )
+                    if getattr(ctx, "terminal_follower", None) is not None:
+                        ctx.cancelled_holder[0] = True
+                    else:
+                        self.svc._update_turn_log(
+                            turn_id=self.turn_id, status="aborted", end_reason="aborted",
+                            abort_cause=item.get("abort_cause"),
+                        )
                     continue
                 if evt == "metadata":
                     if item.get("upstream_model"):
@@ -256,9 +297,11 @@ class ToolEventInterceptor:
                 self.flush_text(min_chars=_TEXT_DELTA_FLUSH_CHARS)
             yield item
 
-        # Flush trailing buffered text so the tail of the response reaches the
-        # resume channel even if it never crossed the size threshold.
-        self.flush_text()
+        # Legacy tail behavior is unchanged; a stopped protocol-native worker
+        # must not publish buffered content after the Stop commit.
+        if getattr(ctx, "terminal_follower", None) is None or ctx.is_agent_backend or not ctx.cancel_event.is_set():
+            yield from self.flush_reasoning()
+            self.flush_text()
 
     # -------------------------------------------------------------- handlers
 
@@ -319,12 +362,28 @@ class ToolEventInterceptor:
         if not rtext:
             return
         st = self.state
+        follower = getattr(self.ctx, "terminal_follower", None)
+        if follower is not None and not st.reasoning_buf:
+            # Preserve text→reasoning order when text is waiting below its
+            # publication threshold; never save reasoning over missing text.
+            self.flush_text()
         # Absolute reasoning offset (units emitted BEFORE this delta) lets a
         # refreshed client splice each live delta against the cold-reload
         # seed (TASK-506); UTF-16 units (TASK-799).
         r_offset = st.reasoning_units
-        st.reasoning_units += js_len(rtext)
+        units = js_len(rtext)
+        st.reasoning_units += units
         self.ctx.reasoning_holder[0] += rtext
+        if follower is not None:
+            if not st.reasoning_buf:
+                st.reasoning_buf_started = time.monotonic()
+            st.reasoning_buf.append(rtext)
+            st.reasoning_buf_units += units
+            if st.reasoning_buf_units >= _REASONING_CHECKPOINT_UNITS or (
+                time.monotonic() - st.reasoning_buf_started >= 0.25
+            ):
+                yield from self.flush_reasoning()
+            return
         self.publish({
             "_type": "reasoning_delta",
             "turn_id": self.turn_id,

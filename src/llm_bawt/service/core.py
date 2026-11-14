@@ -546,6 +546,7 @@ class ServiceLLMBawt(BaseLLMBawt):
         attachments: list[dict] | None = None,
         context_suffix: str | None = None,
         author=None,
+        history_write_session_id: str | None = None,
     ) -> list[Message]:
         """Prepare messages for query including history and memory context.
 
@@ -573,6 +574,9 @@ class ServiceLLMBawt(BaseLLMBawt):
                 like the agent prefixes). NEVER persisted: ``prompt`` above is
                 what lands in history. Used to hand the agent a curlable
                 attachment manifest without polluting the stored message.
+            history_write_session_id: Internal canonical destination for the
+                user write only. Does not select or narrow the history read
+                pool; explicit thread selection still uses its own override.
 
         Returns:
             List of messages ready for LLM query
@@ -584,6 +588,14 @@ class ServiceLLMBawt(BaseLLMBawt):
         # invalidate the history cache so the next continuous turn reloads the
         # continuous pool instead of inheriting the scoped one.
         _thread_override = (getattr(self, "_session_id_override", None) or "").strip() or None
+        if history_write_session_id is not None:
+            if (
+                not isinstance(history_write_session_id, str) or not history_write_session_id
+                or history_write_session_id != history_write_session_id.strip()
+                or len(history_write_session_id) > 36
+                or (_thread_override is not None and history_write_session_id != _thread_override)
+            ):
+                raise ValueError("history write pin must be canonical and match explicit selection")
         if _thread_override:
             self.history_manager.load_history(session_id=_thread_override)
             self.invalidate_history_cache()
@@ -595,7 +607,8 @@ class ServiceLLMBawt(BaseLLMBawt):
         # Add user message to history first (with optional attachment refs).
         self.history_manager.add_message(
             "user", prompt, message_id=message_id, attachments=attachments,
-            session_id=_thread_override, author=author,
+            session_id=history_write_session_id if history_write_session_id is not None else _thread_override,
+            author=author,
         )
 
         # Build context with system prompt, memory, and history. context_suffix

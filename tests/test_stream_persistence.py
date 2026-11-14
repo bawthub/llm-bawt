@@ -57,7 +57,7 @@ def test_inter_bot_nonstream_turn_publishes_visible_lifecycle(
     subscriber = SimpleNamespace(publish_tool_event=AsyncMock())
     service._redis_subscriber = subscriber
     service._resolve_request_model = Mock(return_value=("test-model", []))
-    service._persist_turn_log = Mock()
+    service._persist_turn_log = Mock(return_value=None)
     service._update_turn_log = Mock()
     service._end_generation = Mock()
     service._bind_agent_thread = Mock(return_value=None)
@@ -210,7 +210,7 @@ def test_inter_bot_nonstream_turn_start_prefers_request_session_over_archived_se
     subscriber = SimpleNamespace(publish_tool_event=AsyncMock())
     service._redis_subscriber = subscriber
     service._resolve_request_model = Mock(return_value=("test-model", []))
-    service._persist_turn_log = Mock()
+    service._persist_turn_log = Mock(return_value=None)
     service._update_turn_log = Mock()
     service._end_generation = Mock()
     service._bind_agent_thread = Mock(return_value=None)

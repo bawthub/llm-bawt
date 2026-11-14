@@ -315,6 +315,17 @@ async def dispatch_mcp_result_continuation(
             # grant). Busy -> TargetBusy -> deferred, and no grant is sent.
             # While reserved, ordinary starts and other producers lose.
             # Fail closed: no admission authority means no unfenced dispatch.
+            from .turn_terminal_admission import protocol_admission_enabled
+
+            protocol_options = {}
+            if await asyncio.to_thread(
+                protocol_admission_enabled, service.config, row.bot_id,
+                user_prompt=request.messages[0].content,
+                session_policy=getattr(request, "inter_bot_session_policy", None),
+                reset_only=bool(getattr(request, "inter_bot_reset_only", False)),
+            ):
+                protocol_options = {"terminal_protocol": True,
+                                    "assistant_message_id": identity["assistant_message_id"]}
             reserve = getattr(turn_store, "reserve_idle_turn", None)
             if reserve is None or not await asyncio.to_thread(
                 reserve,
@@ -330,6 +341,7 @@ async def dispatch_mcp_result_continuation(
                 trigger_message_id=identity["user_message_id"],
                 owner=admission_claim.owner,
                 fence=admission_claim.fence,
+                **protocol_options,
             ):
                 raise RuntimeError("Turn admission unavailable; refusing unfenced continuation")
         if row.request_kind != KIND_MCP:

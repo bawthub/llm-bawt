@@ -77,6 +77,9 @@ class TurnStreamContext:
     # harnesses that support request-local MCP headers (Claude SDK today).
     task_turn_capability: str | None = None
     execution: Any = None
+    terminal_follower: Any = None
+    terminal_history_session_id: str | None = None
+    terminal_error_text: str | None = None
     # Preserve worker text/control/tool order through asynchronous Redis writes.
     publish_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     stream_text_offset: int = 0

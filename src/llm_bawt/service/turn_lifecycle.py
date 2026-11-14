@@ -138,7 +138,10 @@ class TurnLifecycleMixin:
 
     # ---- Generation cancellation ----
 
-    async def _start_generation(self, bot_id: str | None = None) -> tuple[threading.Event, threading.Event]:
+    async def _start_generation(
+        self, bot_id: str | None = None, *,
+        cancel_event: threading.Event | None = None, done_event: threading.Event | None = None,
+    ) -> tuple[threading.Event, threading.Event]:
         """Start a new generation, cancelling and waiting for any in-progress one FOR THE SAME BOT.
 
         Returns:
@@ -177,9 +180,10 @@ class TurnLifecycleMixin:
                     finally:
                         self._cancel_lock.acquire()
 
-            # Create new events for this generation
-            cancel_event = threading.Event()
-            done_event = threading.Event()
+            # Protocol admissions already own their cancellation identity before
+            # session setup; do not replace it and lose an early Stop/fence loss.
+            cancel_event = cancel_event if cancel_event is not None else threading.Event()
+            done_event = done_event if done_event is not None else threading.Event()
             self._gen_cancels[key] = cancel_event
             self._gen_dones[key] = done_event
 
@@ -235,7 +239,8 @@ class TurnLifecycleMixin:
         request_extensions: dict | None = None,
         admission_claim=None,
         connection=None,
-    ) -> None:
+        terminal_protocol: bool = False,
+    ):
         """Persist one turn record to short-lived DB storage.
 
         This start-row write is the turn's mandatory admission, not optional
@@ -249,7 +254,7 @@ class TurnLifecycleMixin:
             }
             if request_extensions:
                 request_payload.update(request_extensions)
-            self._turn_log_store.save_turn(
+            return self._turn_log_store.save_turn(
                 turn_id=turn_id,
                 request_id=request_id,
                 path=path,
@@ -271,6 +276,7 @@ class TurnLifecycleMixin:
                 parent_turn_id=parent_turn_id,
                 admission_claim=admission_claim,
                 connection=connection,
+                **({"terminal_protocol": True} if terminal_protocol else {}),
             )
         except Exception as e:
             from .turn_admission import AdmissionFenceLost, AdmissionUnavailable, TargetBusy

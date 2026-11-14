@@ -8,6 +8,7 @@ import time
 from contextlib import nullcontext
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
+from typing import TYPE_CHECKING
 from sqlalchemy import exists as sa_exists, func, text as sa_text
 from sqlmodel import Session, delete, select
 
@@ -42,6 +43,9 @@ from .turn_gates import GateActor, ensure_gate_schema, gate_blocks, pin_member_r
 from .turn_termination import reconcile_finished_tool_safely
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from .turn_terminal_protocol import FollowerLease
 
 
 # Compat name for existing importers; the admission authority owns the type.
@@ -115,7 +119,15 @@ class TurnLogStore:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=self.ttl_hours)
         try:
             with Session(self.engine) as session:
-                session.exec(delete(TurnLog).where(TurnLog.created_at < cutoff))
+                # A short telemetry TTL must not delete protocol recovery work.
+                # Publication expiry alone does not finish durable history.
+                session.exec(delete(TurnLog).where(
+                    TurnLog.created_at < cutoff,
+                    (TurnLog.terminal_protocol_state.is_(None)) | (
+                        TurnLog.terminal_protocol_state.in_(("published", "publication_expired"))
+                        & TurnLog.terminal_history_projected_at.is_not(None)
+                    ),
+                ))
                 session.commit()
             self.__class__._last_cleanup_at = now
         except Exception as e:
@@ -147,7 +159,8 @@ class TurnLogStore:
         parent_turn_id: str | None = None,
         admission_claim: AdmissionClaim | None = None,
         connection=None,
-    ) -> None:
+        terminal_protocol: bool = False,
+    ) -> FollowerLease | None:
         """Persist one turn entry (and run TTL cleanup if a TTL is configured).
 
         ``admission_claim`` is the producer's trusted claim over a fenced
@@ -158,9 +171,17 @@ class TurnLogStore:
         durable producer (claim / IDLE_ONLY) has no authority to admit it. Only
         a database-less deployment (no shared targets, no durable producers)
         starts ordinary turns without a row.
+
+        ``terminal_protocol`` is an internal opt-in for a fresh admission. It
+        returns the INSERT token for immediate renewal, never a second claim.
+        Existing legacy rows/reservations are not upgraded by this interface.
         """
+        if terminal_protocol and (
+            not bot_id or not user_id or status not in {"pending", "streaming"}
+        ):
+            raise ValueError("protocol admission requires an owned, not-yet-executing turn")
         if self.engine is None:
-            if (self.database_configured or admission_claim is not None
+            if (terminal_protocol or self.database_configured or admission_claim is not None
                     or TurnAdmission.from_payload(request_payload) is TurnAdmission.IDLE_ONLY):
                 raise AdmissionUnavailable("turn admission database unavailable; turn not started")
             return
@@ -197,6 +218,13 @@ class TurnLogStore:
                 existing_status = fence_consumption(
                     conn, turn_id=turn_id, claim=admission_claim,
                 )
+                if terminal_protocol and existing_status is not None:
+                    marker = conn.execute(sa_text(
+                        "SELECT terminal_protocol_state FROM turn_logs WHERE id=:id"
+                    ), {"id": turn_id}).scalar_one_or_none()
+                    if marker != "reserved":
+                        from .turn_admission import AdmissionFenceLost
+                        raise AdmissionFenceLost("protocol INSERT cannot adopt an existing legacy turn or reservation")
                 # TASK-1233 backstop: a live gate refuses like a busy target (C1 re-attach exempt).
                 block = gate_blocks(conn, bot_id, GateActor("save_turn", turn_id))
                 state = classify_target(conn, bot_id, exclude_turn_id=turn_id)
@@ -215,6 +243,12 @@ class TurnLogStore:
                     if existing_status is not None:
                         if existing_status != "reserved":
                             raise RuntimeError(f"turn id already exists: {turn_id}")
+                        from .turn_terminal_protocol import consume_protocol_reservation
+                        initial_lease = consume_protocol_reservation(
+                            conn, turn_id=turn_id, bot_id=bot_id, user_id=user_id,
+                        )
+                        if initial_lease is not None:
+                            assistant_message_id = initial_lease.assistant_message_id
                         # A reservation is not a started turn. Stamp admission
                         # time so the new unknown gauge supersedes turns that
                         # finished while this request was queued.
@@ -268,12 +302,26 @@ class TurnLogStore:
                             created_at=created_at, ended_at=None,
                             token_usage_json=None, agent_session_key=agent_session_key,
                         ))
-                        return
+                        return initial_lease
 
                     # Ordinary turn insert stays inside the advisory-lock transaction
                     # so it cannot cross a delivery claim between check and commit.
                     finished_at = (_terminal_ended_at(created_at, latency_ms)
                                    if _is_terminal(status, None) else None)
+                    protocol_fields = {}
+                    initial_lease = None
+                    if terminal_protocol:
+                        from .turn_terminal_protocol import FollowerLease, protocol_insert_fields
+                        protocol_fields = protocol_insert_fields(
+                            connection=conn, assistant_message_id=assistant_message_id,
+                        )
+                        # The already-minted/validated ID is supplied explicitly
+                        # below; the remaining fields belong to the same INSERT.
+                        protocol_fields.pop("assistant_message_id")
+                        initial_lease = FollowerLease(
+                            turn_id, protocol_fields["follower_owner"],
+                            protocol_fields["follower_lease_until"],
+                        )
                     conn.execute(
                         TurnLog.__table__.insert().values(
                             id=turn_id,
@@ -298,6 +346,7 @@ class TurnLogStore:
                             token_usage_json=token_usage_json,
                             parent_turn_id=parent_turn_id,
                             ended_at=finished_at,
+                            **protocol_fields,
                         )
                     )
                     from .turn_context_snapshot import record_turn_context
@@ -308,7 +357,7 @@ class TurnLogStore:
                         token_usage_json=token_usage_json,
                         agent_session_key=agent_session_key,
                     ))
-                    return
+                    return initial_lease
             raise busy  # after the commit: the own-reservation release must persist
 
         row = TurnLog(
@@ -366,7 +415,7 @@ class TurnLogStore:
         )
 
     def bind_agent_bridge(self, *, turn_id: str, backend: str, session_key: str, request_id: str,
-                          steer_caps: str | None = None) -> None:
+                          steer_caps: str | None = None, follower_lease=None) -> None:
         """Bind before publication, refusing a turn finalized by another owner.
 
         A worker may outlive its HTTP request or lose a race to cancellation.
@@ -384,6 +433,16 @@ class TurnLogStore:
                     or row.status not in {"pending", "streaming"}
                     or (row.agent_request_id is not None and row.agent_request_id != request_id)):
                 raise TurnExecutionCancelled(f"turn '{turn_id}' no longer permits bridge publication")
+            if row.terminal_protocol_state is not None:
+                from .turn_terminal_protocol import FollowerFenceLost, FollowerLease, TurnTerminalProtocol, _db_now
+                if not isinstance(follower_lease, FollowerLease):
+                    raise FollowerFenceLost("protocol bridge binding requires the current follower")
+                TurnTerminalProtocol._fence(row, follower_lease, _db_now(session))
+                if row.terminal_protocol_state != "open":
+                    raise FollowerFenceLost("bridge binding requires a pinned history session")
+                if ((row.agent_backend is not None and row.agent_backend != backend)
+                        or (row.agent_session_key is not None and row.agent_session_key != session_key)):
+                    raise FollowerFenceLost("protocol bridge identity is immutable once bound")
             row.agent_backend = backend
             row.agent_session_key = session_key
             row.agent_request_id = request_id
@@ -420,6 +479,12 @@ class TurnLogStore:
             row = session.exec(select(TurnLog).where(TurnLog.id == turn_id).with_for_update(key_share=True)).first()
             if row is None:
                 logger.debug("update_turn: no row with id=%s", turn_id)
+                return
+            if row.terminal_protocol_state is not None:
+                # Protocol content, identity and accounting require its lease or
+                # interrupt authority, even before the terminal snapshot exists.
+                # Do not leave an unfenced "enrichment" or timeout-repair bypass.
+                logger.debug("update_turn: protocol-owned row id=%s", turn_id)
                 return
             prior_status = row.status
             prior_end_reason = row.end_reason
@@ -531,6 +596,7 @@ class TurnLogStore:
                         sa_text(
                             "UPDATE turn_logs SET response_text = :t, reasoning = :r"
                             " WHERE id = :id AND status = 'streaming'"
+                            " AND terminal_protocol_state IS NULL"
                         ),
                         {"t": response_text, "r": reasoning, "id": turn_id},
                     )
@@ -539,6 +605,7 @@ class TurnLogStore:
                         sa_text(
                             "UPDATE turn_logs SET response_text = :t"
                             " WHERE id = :id AND status = 'streaming'"
+                            " AND terminal_protocol_state IS NULL"
                         ),
                         {"t": response_text, "id": turn_id},
                     )

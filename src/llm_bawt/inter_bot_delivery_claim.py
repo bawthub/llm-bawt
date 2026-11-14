@@ -254,6 +254,7 @@ class DeliveryClaim:
                     user_id = delivery_user_id
                     from .service.session_lifecycle.lifecycle import NewSessionLifecycle
 
+                    preparation = conn.begin_nested()
                     payload, _, _ = NewSessionLifecycle.rotate_delivery_claim(
                         conn, head=head, payload=payload,
                         target_bot_id=target, user_id=user_id,
@@ -274,7 +275,18 @@ class DeliveryClaim:
                             payload, user_prompt = inter_bot_batch.attach(
                                 conn, head, followers, payload,
                             )
-                    write_reservation(
+                    from .service.turn_terminal_admission import protocol_admission_enabled
+
+                    protocol_options = {}
+                    if head.get("transport_accepted_at") is None and protocol_admission_enabled(
+                        store.config, target, user_prompt=user_prompt,
+                        session_policy=head.get("session_policy"),
+                        reset_intent=bool((head.get("metadata_json") or {}).get("new_session_intent")),
+                        reset_only=bool(payload.get("inter_bot_reset_only")),
+                    ):
+                        protocol_options = {"terminal_protocol": True,
+                                            "assistant_message_id": payload.get("assistant_message_id")}
+                    if not write_reservation(
                         conn,
                         turn_id=head["turn_id"],
                         bot_id=target,
@@ -282,7 +294,13 @@ class DeliveryClaim:
                         user_prompt=user_prompt,
                         request_json=payload,
                         trigger_message_id=head["user_message_id"],
-                    )
+                        **protocol_options,
+                    ):
+                        # Undo preparation, but settle the unusable queue head
+                        # in the outer transaction so it cannot wedge later work.
+                        preparation.rollback()
+                        return settle_refused_reservation(conn, head)
+                    preparation.commit()
                     if forced:
                         roster_send_now_turn(conn, bot_id=target, turn_id=head["turn_id"],
                                              delivery_id=head["id"], gate_ids=forced)
@@ -308,6 +326,29 @@ class DeliveryClaim:
                 DeliveryTransitionEvents.stage(conn, row)
                 break
         return DeliveryRecord.from_mapping(row) if row else None
+
+
+def settle_refused_reservation(conn, head) -> DeliveryRecord | None:
+    """A consumed protocol ID is never new inference or a permanently stuck head."""
+    turn = conn.execute(sa_text("""
+        SELECT ended_at, status, error_text FROM turn_logs WHERE id=:id
+    """), {"id": head["turn_id"]}).mappings().first()
+    success = bool(turn and turn["ended_at"] is not None
+                   and turn["status"] in {"ok", "completed"} and not turn["error_text"])
+    error = None if success else (
+        turn["error_text"] if turn and turn["ended_at"] is not None and turn["error_text"]
+        else "Turn identity already consumed; recovery owns its outcome. A new delivery is required for an explicit retry."
+    )
+    row = conn.execute(sa_text("""
+        UPDATE inter_bot_deliveries SET status=:status, last_error=:error,
+            delivered_at=CASE WHEN :success THEN COALESCE(delivered_at, now()) ELSE delivered_at END,
+            claim_token=NULL, claim_owner=NULL, lease_expires_at=NULL,
+            next_retry_at=NULL, updated_at=now()
+        WHERE id=:id AND status='QUEUED' RETURNING *
+    """), {"id": head["id"], "status": "DELIVERED" if success else "FAILED",
+            "success": success, "error": error}).mappings().first()
+    DeliveryTransitionEvents.stage(conn, row, reason_code="terminal_reservation_refused")
+    return DeliveryRecord.from_mapping(row) if row else None
 
 
 def _provisional_caps(steer_capable: bool | frozenset[str]) -> frozenset[str]:

@@ -289,6 +289,23 @@ async def lifespan(app):
             await abandon_redis_subscriber(service, redis_subscriber)
             redis_subscriber = None
 
+    if config.REDIS_URL and service._turn_log_store.engine is not None:
+        from agent_bridge.subscriber import RedisSubscriber
+        from ..runtime_setting_resolution import resolve_global_runtime_setting
+        from .turn_terminal_protocol import TurnTerminalProtocol
+        from .turn_terminal_pump import run_terminal_recovery_pump
+
+        service._terminal_recovery_stop = asyncio.Event()
+        service._terminal_recovery_task = asyncio.create_task(
+            run_terminal_recovery_pump(
+                TurnTerminalProtocol(service._turn_log_store), redis_subscriber,
+                service._terminal_recovery_stop,
+                mode_resolver=lambda: resolve_global_runtime_setting(config, "terminal_recovery_mode"),
+                subscriber_factory=lambda: RedisSubscriber(config.REDIS_URL),
+            ),
+            name="terminal-recovery",
+        )
+
     if service._system_events is not None and config.REDIS_URL:
         # Keep retrying Redis even when the shared subscriber was unavailable
         # at startup; committed rows must not wait for another app restart.
@@ -448,6 +465,7 @@ async def lifespan(app):
 
 
 BACKGROUND_TASK_ATTRIBUTES = (
+    "_terminal_recovery_task",
     "_embedding_repair_task",
     "_system_event_outbox_task",
     "_tool_persist_task",
@@ -505,6 +523,8 @@ def shutdown_phases(service, *, scheduler, redis_subscriber, home_audio_worker) 
         phases.append(("ollama reachability stop", service._ollama_reachability_stop.set))
     if hasattr(service, "_embedding_repair_stop"):
         phases.append(("embedding repair stop", service._embedding_repair_stop.set))
+    if hasattr(service, "_terminal_recovery_stop"):
+        phases.append(("terminal recovery stop", service._terminal_recovery_stop.set))
     if scheduler:
         phases.append(("scheduler", scheduler.stop))
     dispatcher = service._inter_bot_dispatcher

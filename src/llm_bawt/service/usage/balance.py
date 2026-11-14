@@ -400,7 +400,7 @@ def anchored_balance(row: BalanceRow | None, connected_at: datetime | None) -> t
     ), None
 
 
-def balance_update_for_turn(engine, token_usage_json: Any) -> dict | None:
+def balance_update_for_turn(engine, token_usage_json: Any, *, connection=None) -> dict | None:
     """``turn_complete.balance_update``: the one builder every producer calls.
 
     ``None`` means the turn's committed usage names no balance path, so it moved
@@ -416,7 +416,13 @@ def balance_update_for_turn(engine, token_usage_json: Any) -> dict | None:
     if adapter.balance_mode == BALANCE_PROVIDER:
         return refresh  # only the provider knows what is left
     try:
-        row = ApiBalanceStore(engine).read(adapter.provider)
+        if connection is None:
+            row = ApiBalanceStore(engine).read(adapter.provider)
+        else:
+            # A terminal snapshot is frozen in the charge's transaction. Read
+            # that transaction's new counter, not a second connection's old one.
+            raw = ApiBalanceStore._select(connection, adapter.provider)
+            row = BalanceRow(*raw) if raw is not None else None
         balance, _reason = anchored_balance(row, adapter.credential_connected_at())
     except Exception:
         logger.warning("balance_update read failed for %s; sending refresh", adapter.provider, exc_info=True)

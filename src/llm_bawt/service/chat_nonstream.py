@@ -18,6 +18,7 @@ from agent_bridge.maintenance import is_new_command
 from ..bots import get_bot, strip_emotes
 from ..inter_bot_reply_channel import append_request_reply_channel_note
 from .chat_message_text import last_user_text, message_content_text
+from .http_errors import safe_error_text
 from .inter_bot_claims import continuation_author, turn_admission_claim, validate_inter_bot_claim
 from .ordinary_turn_queue import admit_ordinary_agent_turn
 from .turn_admission import turn_start_extensions
@@ -64,6 +65,20 @@ class ChatNonStreamMixin:
     async def chat_completion(
         self,
         request: ChatCompletionRequest,
+    ) -> ChatCompletionResponse | AsyncIterator:
+        from .turn_terminal_follower import TerminalFollowerScope
+
+        terminal_scope = TerminalFollowerScope(self._turn_log_store)
+        try:
+            return await self._chat_completion(request, terminal_scope=terminal_scope)
+        except Exception as exc:
+            terminal_scope.fail_setup(safe_error_text(exc, "Turn setup failed"))
+            raise
+        finally:
+            terminal_scope.close_if_unlaunched()
+
+    async def _chat_completion(
+        self, request: ChatCompletionRequest, *, terminal_scope,
     ) -> ChatCompletionResponse | AsyncIterator:
         """
         Handle an OpenAI-compatible chat completion request.
@@ -170,15 +185,27 @@ class ChatNonStreamMixin:
         )
         if decision is not None:
             return decision.receipt()
-        self._persist_turn_log(
+        from .turn_terminal_admission import direct_protocol_options
+        protocol_options = await direct_protocol_options(
+            self.config, bot_id, request, user_prompt, admission_claim,
+        )
+        admission_lease = self._persist_turn_log(
             turn_id=turn_log_id, request_id=ctx.request_id, path=ctx.path,
             stream=False, model=model_alias, bot_id=bot_id, user_id=user_id,
             status="pending", latency_ms=None, user_prompt=user_prompt,
             prepared_messages=[], response_text="", trigger_message_id=trigger_message_id,
             assistant_message_id=assistant_message_id, admission_claim=admission_claim,
+            **protocol_options,
             request_extensions=turn_start_extensions(
                 request, is_agent_backend=is_agent_backend, admission_claim=admission_claim,
             ),
+        )
+        if admission_lease is not None and admission_lease.assistant_message_id:
+            assistant_message_id = admission_lease.assistant_message_id
+        terminal_scope.admitted(
+            admission_lease, turn_id=turn_log_id, cancel_event=cancel_event,
+            is_agent=is_agent_backend,
+            on_close=lambda: self._end_generation(cancel_event, done_event, bot_id),
         )
         if is_agent_backend:
             from .turn_task_attribution import stamp_turn_task
@@ -202,7 +229,12 @@ class ChatNonStreamMixin:
                     error_text=f"Chat reset setup failed: {exc}",
                 )
                 raise
-            cancel_event, done_event = await self._start_generation(bot_id)
+            if terminal_scope.follower is None:
+                cancel_event, done_event = await self._start_generation(bot_id)
+            else:
+                cancel_event, done_event = await self._start_generation(
+                    bot_id, cancel_event=cancel_event, done_event=done_event,
+                )
 
         from .session_lifecycle.execution import NativeSelectedHistory
 
@@ -287,8 +319,8 @@ class ChatNonStreamMixin:
         # TASK-1015: register the request-local execution handle exactly like
         # the streaming path so Stop/steer/reaper see this live owner and the
         # bridge binds agent_session_key + agent_request_id before dispatch.
-        turn_execution = None
-        if is_agent_backend:
+        turn_execution = terminal_scope.follower.execution if terminal_scope.follower is not None else None
+        if is_agent_backend and turn_execution is None:
             from .turn_execution import TurnExecution, turn_executions
 
             turn_execution = TurnExecution(
@@ -301,6 +333,53 @@ class ChatNonStreamMixin:
             loop = asyncio.get_event_loop()
             llm_start_time = time.time()
             cancelled = False
+            terminal_snapshot = None
+            terminal_finalizing = False
+            from .turn_terminal_finalize import NonstreamTerminalMetadata
+
+            terminal_metadata = NonstreamTerminalMetadata(
+                self, request, turn_id=turn_log_id, trigger_message_id=trigger_message_id,
+                bot_id=bot_id, user_id=user_id, loop=loop,
+            ) if terminal_scope.follower is not None else None
+
+            def commit_protocol_terminal(
+                *, response=None, tool_context="", tool_calls=None,
+                status="ok", end_reason="stop", error_text=None,
+            ):
+                nonlocal terminal_snapshot
+                from .turn_terminal_finalize import (
+                    commit_nonstream_terminal, project_execution_terminal_from_worker,
+                )
+
+                follower = terminal_scope.follower
+                fields = terminal_metadata.frozen_fields()
+                if status == "ok":
+                    end_reason = (
+                        "question" if fields["question_id"] else
+                        "approval" if fields["approval_id"] else
+                        "approval_persist_failed" if fields["approval_persist_failed"] else end_reason
+                    )
+                result = commit_nonstream_terminal(
+                    self, llm_bawt, follower, response_text=response,
+                    tool_context=tool_context, tool_call_details=tool_calls,
+                    status=status, end_reason=end_reason, error_text=error_text,
+                    token_usage=terminal_metadata.token_usage,
+                    attachments=terminal_metadata.frozen_attachments(),
+                    reasoning=terminal_metadata.reasoning or None,
+                    completion_fields=fields,
+                )
+                terminal_snapshot = result.snapshot
+                try:
+                    project_execution_terminal_from_worker(
+                        follower.protocol, turn_log_id, getattr(self, "_redis_subscriber", None), loop,
+                        publish_lock=terminal_metadata.ctx.publish_lock,
+                    )
+                except Exception:
+                    log.warning(
+                        "Committed terminal %s awaits projection recovery", turn_log_id, exc_info=True,
+                    )
+                return result.snapshot["response_text"]
+
             bridge_event_callback = None
             if publish_nonstream_lifecycle:
                 from .tool_event_coordinator import ToolEventCoordinator
@@ -396,7 +475,9 @@ class ChatNonStreamMixin:
                 bridge_event_callback = _bridge_event_callback
 
             def _do_query_with_context():
-                nonlocal cancelled
+                nonlocal cancelled, terminal_finalizing
+                if terminal_scope.follower is not None:
+                    terminal_scope.follower.check()
                 # Check if already cancelled before starting
                 if cancel_event.is_set():
                     cancelled = True
@@ -478,20 +559,26 @@ class ChatNonStreamMixin:
                         trigger_message_id=trigger_message_id, bot_id=bot_id, user_id=user_id,
                     )
 
-                # The reply note stays outbound-only, never in stored history.
-                with history_context(thread_binding, initial_capability, phase="initial"):
-                    prepared_messages = llm_bawt.prepare_messages_for_query(
-                        user_prompt,
-                        message_id=trigger_message_id,
-                        author=user_author,
-                        context_suffix=(
-                            append_request_reply_channel_note(self, request, None)
-                            if _is_agent else None
-                        ),
-                    )
+                def prepare_user_messages(binding, capability):
+                    # The reply note stays outbound-only, never in stored history.
+                    with history_context(binding, capability, phase="initial"):
+                        return llm_bawt.prepare_messages_for_query(
+                            user_prompt, message_id=trigger_message_id, author=user_author,
+                            context_suffix=(
+                                append_request_reply_channel_note(self, request, None)
+                                if _is_agent else None
+                            ),
+                            **({
+                                "history_write_session_id": resolved_session_id,
+                            } if terminal_scope.follower is not None else {}),
+                        )
 
-                # Log what we're sending to the LLM (verbose mode)
-                log.llm_context(prepared_messages)
+                prepared_messages = None
+                if terminal_scope.follower is None:
+                    # Legacy-null ordering stays exactly as before. Protocol
+                    # writes must instead wait for final post-reset binding.
+                    prepared_messages = prepare_user_messages(thread_binding, initial_capability)
+                    log.llm_context(prepared_messages)
 
                 from .session_lifecycle.execution import NewSessionExecution, PreparedNewSession
 
@@ -567,6 +654,19 @@ class ChatNonStreamMixin:
                         bot_id=bot_id,
                         user_id=user_id,
                     )
+                if terminal_scope.follower is not None:
+                    from .turn_terminal_sessions import bind_terminal_session
+
+                    resolved_session_id = bind_terminal_session(
+                        terminal_scope.follower, llm_bawt, bot_id=bot_id, user_id=user_id,
+                        resolved_session_id=(
+                            resolved_session_id if _is_agent
+                            else getattr(request, "session_id", None)
+                        ),
+                        is_agent=_is_agent,
+                    )
+                    prepared_messages = prepare_user_messages(thread_binding, task_turn_capability)
+                    log.llm_context(prepared_messages)
 
                 # Persist the original /new command; send only its parsed task
                 # to the bridge, without mutating cached history or model text.
@@ -588,6 +688,9 @@ class ChatNonStreamMixin:
 
                 def notice_bridge_event(item):
                     scheduled_notices.observe(item)
+                    if terminal_scope.follower is not None:
+                        terminal_scope.follower.check()
+                        terminal_metadata.observe(item, session_id=resolved_session_id)
                     if bridge_event_callback is not None:
                         bridge_event_callback(item)
 
@@ -596,6 +699,7 @@ class ChatNonStreamMixin:
 
                     response, tool_context, tool_call_details = RESET_CONFIRMATION, "", []
                 else:
+                    terminal_scope.begin_inference()
                     response, tool_context, tool_call_details = llm_bawt.execute_llm_query(
                         outbound_messages,
                         plaintext_output=True,
@@ -609,6 +713,8 @@ class ChatNonStreamMixin:
                         turn_execution=turn_execution,
                         task_turn_capability=task_turn_capability,
                     )
+                    if terminal_scope.follower is not None:
+                        terminal_scope.follower.check()
                     scheduled_notices.observe(response)
                     # Agent bridges report their calls through the bridge
                     # event path; chat bots ran llm-bawt's own tool loop,
@@ -640,11 +746,19 @@ class ChatNonStreamMixin:
                 if cancel_event.is_set():
                     log.info("Generation cancelled - newer request received")
                     cancelled = True
-                    return ""
+                    if terminal_scope.follower is None:
+                        return ""
 
                 # Reset preparation may have rebound the session. Use ONLY
                 # the final binding's verified owner and final agent proof;
                 # never carry the initial history authority across rotation.
+                if terminal_scope.follower is not None:
+                    terminal_finalizing = True
+                    return commit_protocol_terminal(
+                        response=response, tool_context=tool_context, tool_calls=tool_call_details,
+                        status="aborted" if cancelled or terminal_metadata.cancelled else "ok",
+                        end_reason="aborted" if cancelled or terminal_metadata.cancelled else "stop",
+                    )
                 with history_context(thread_binding, task_turn_capability, phase="final"):
                     self._finalize_turn(
                         llm_bawt=llm_bawt,
@@ -665,6 +779,7 @@ class ChatNonStreamMixin:
                 return response
 
             def _do_query():
+                nonlocal terminal_finalizing
                 # ContextVars must be bound INSIDE the executor thread. Native
                 # reset provenance covers its query; agent history separately
                 # scopes verified initial/final bindings, never a selected id.
@@ -674,23 +789,60 @@ class ChatNonStreamMixin:
                     bot_id=bot_id, user_id=user_id, turn_id=turn_log_id,
                     trigger_message_id=trigger_message_id,
                 ) if chat_reset is not None else None
-                with bind_service_turn(capability):
-                    return _do_query_with_context()
+                try:
+                    with bind_service_turn(capability):
+                        result = _do_query_with_context()
+                        if terminal_scope.follower is not None and terminal_snapshot is None:
+                            # The worker observed cancellation before setup.
+                            terminal_finalizing = True
+                            return commit_protocol_terminal(status="aborted", end_reason="aborted")
+                        return result
+                except Exception as exc:
+                    # Nonstream agent setup runs in this real worker. Only
+                    # it can certify the provider has not been entered; an
+                    # HTTP cancellation/error must never make that claim.
+                    terminal_scope.fail_setup(
+                        safe_error_text(exc, "Turn setup failed"), from_worker=True,
+                    )
+                    if (terminal_scope.follower is not None and terminal_snapshot is None
+                            and not terminal_finalizing):
+                        # A failed commit may have reached the DB. Reinterpretation
+                        # as an empty error would discard a completed provider reply.
+                        try:
+                            if terminal_scope._inference_started:
+                                commit_protocol_terminal(
+                                    status="error", end_reason="upstream_error",
+                                    error_text=safe_error_text(exc, "Turn failed"),
+                                )
+                            else:
+                                # fail_setup already owns the commit. Only
+                                # project it; never reinterpret its outcome.
+                                from .turn_terminal_finalize import project_execution_terminal_from_worker
+
+                                project_execution_terminal_from_worker(
+                                    terminal_scope.follower.protocol, turn_log_id,
+                                    getattr(self, "_redis_subscriber", None), loop,
+                                    publish_lock=terminal_metadata.ctx.publish_lock,
+                                )
+                        except Exception:
+                            log.exception("Protocol nonstream terminal failed for %s", turn_log_id)
+                    raise
 
             try:
                 # In-process GPU inference is gone (local models run in
                 # local_model_bridge, TASK-276/278), so every model now streams
                 # on the default thread pool — no single-worker serialization.
-                response_text = await loop.run_in_executor(None, _do_query)
+                response_text = await terminal_scope.launch_worker(loop, _do_query)
             except Exception as e:
                 elapsed_ms = (time.time() - llm_start_time) * 1000
-                self._update_turn_log(
-                    turn_id=turn_log_id,
-                    status="error",
-                    latency_ms=elapsed_ms,
-                    error_text=str(e),
-                )
-                if publish_nonstream_lifecycle:
+                if terminal_scope.follower is None:
+                    self._update_turn_log(
+                        turn_id=turn_log_id,
+                        status="error",
+                        latency_ms=elapsed_ms,
+                        error_text=str(e),
+                    )
+                if publish_nonstream_lifecycle and terminal_scope.follower is None:
                     await self._publish_nonstream_turn_event(
                         bot_id=bot_id,
                         user_id=user_id,
@@ -713,7 +865,7 @@ class ChatNonStreamMixin:
             llm_elapsed_ms = (time.time() - llm_start_time) * 1000
 
             # If cancelled, return empty response (the new request will handle it)
-            if cancelled:
+            if cancelled and terminal_scope.follower is None:
                 self._update_turn_log(
                     turn_id=turn_log_id,
                     status="cancelled",
@@ -751,7 +903,7 @@ class ChatNonStreamMixin:
                     usage=UsageInfo(prompt_tokens=0, completion_tokens=0, total_tokens=0),
                 )
 
-            if publish_nonstream_lifecycle:
+            if publish_nonstream_lifecycle and terminal_scope.follower is None:
                 token_usage = None
                 get_token_usage = getattr(llm_bawt.client, "get_token_usage", None)
                 if callable(get_token_usage):
@@ -801,11 +953,12 @@ class ChatNonStreamMixin:
                     },
                 )
         finally:
-            if turn_execution is not None:
+            if turn_execution is not None and terminal_scope.follower is None:
                 from .turn_execution import turn_executions
 
                 turn_executions.remove(turn_log_id)
-            self._end_generation(cancel_event, done_event, bot_id)
+            if terminal_scope.follower is None:
+                self._end_generation(cancel_event, done_event, bot_id)
 
         # Post-process for voice_optimized bots (strip emotes for TTS)
         bot = get_bot(bot_id)
@@ -832,7 +985,10 @@ class ChatNonStreamMixin:
                 ChatCompletionChoice(
                     index=0,
                     message=ChatMessage(role="assistant", content=response_text),
-                    finish_reason="stop",
+                    finish_reason=(
+                        "cancelled" if terminal_snapshot is not None
+                        and terminal_snapshot["completion"]["status"] == "cancelled" else "stop"
+                    ),
                 )
             ],
             usage=UsageInfo(
