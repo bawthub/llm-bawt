@@ -214,6 +214,13 @@ def git_gate(data: Mapping, env: Mapping[str, str]) -> dict | None:
 def resume_reminder(data: Mapping, env: Mapping[str, str]) -> dict | None:
     if data.get("source") not in ("resume", "compact"):
         return None
+    if data.get("source") == "compact":
+        # TASK-2272: compaction drops tool-loaded skill bodies, so their
+        # markers no longer prove the skill is in context. Resume is lossless.
+        try:
+            _marker(data).unlink()
+        except OSError:
+            pass
     injected = injected_skills(env)
     text = REMINDER_INJECTED.replace("{injected}", ", ".join(injected)) if injected \
         else REMINDER_ALL

@@ -176,3 +176,16 @@ def test_install_replaces_legacy_scripts_and_keeps_other_hooks():
     assert hooks["SessionStart"][-1]["hooks"][0]["command"] == hook_command("resume-reminder")
     assert hooks["PreCompact"] == settings["hooks"]["PreCompact"]
     assert once["attribution"] == {"commit": ""}
+
+
+def test_compact_invalidates_loaded_skills_but_resume_keeps_them():
+    """TASK-2272: compaction discards tool-loaded skill bodies."""
+    load = {"session_id": "s1", "tool_input": {"skill": "git-commits"}}
+    record(load, {})
+    resume_reminder({"session_id": "s1", "source": "resume"}, {})
+    assert git_gate(_push("s1"), {}) is None
+    resume_reminder({"session_id": "s1", "source": "compact"}, {})
+    assert git_gate(_push("s1"), {}) is not None
+    assert git_gate(_push("s1"), {INJECTED_SKILLS_ENV: "git-commits"}) is None
+    record(load, {})
+    assert git_gate(_push("s1"), {}) is None
