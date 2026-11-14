@@ -48,11 +48,12 @@ def test_borrowed_session_emits_on_callers_commit_not_on_rollback(api, sent):  #
     assert [(s[0], s[3]) for s in sent] == [(BOT, "move_in")]
 
 
-def test_deleting_a_housed_bot_moves_it_out(api, sent):  # noqa: F811
+def test_deleting_a_housed_bot_sends_no_location_frame(api, sent):  # noqa: F811
+    """A deleted bot is invisible after commit; bot_profile_changed covers it."""
     api.store.upsert({**AGENT, "house": "h1"}, require_existing=True)
     sent.clear()
     assert api.store.delete(BOT)
-    assert [(s[0], s[1]["house"], s[2], s[3]) for s in sent] == [(BOT, "h1", {}, "move_out")]
+    assert sent == []
 
 
 def test_versions_increase_with_each_committed_write(api, sent):  # noqa: F811

@@ -528,10 +528,6 @@ class BotProfileStore:
                 conn, row.slug, {profile_changes.TAGS: tags_before},
                 {profile_changes.TAGS: [t for t in tags_before if t in keep]},
                 {profile_changes.CHANGE_NOTE: "profile deleted"}, "profile-delete")
-            from .campus_events import note_tenancy_change, tenancy_fields, version_of
-            version = version_of(row)
-            note_tenancy_change(session, row.slug, tenancy_fields(row), {}, "move_out",
-                                version + 1 if version is not None else None)
             session.delete(row)
             from .bot_policy_events import policy_changed
             policy_changed(session.connection())

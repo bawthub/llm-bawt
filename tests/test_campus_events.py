@@ -62,8 +62,7 @@ def test_create_and_delete_only_for_housed_profiles():
     created = ce.location_frame("b", {}, fields("h1"), "", {LEASE_H1: True})
     assert created["from"] is None and created["reason"] == "move_in"
     assert ce.location_frame("b", fields(), {}, "move_out", {}) is None
-    deleted = ce.location_frame("b", fields("h1"), {}, "move_out", {LEASE_H1: True})
-    assert deleted["to"] is None and deleted["reason"] == "move_out"
+    assert ce.location_frame("b", fields("h1"), {}, "move_out", {LEASE_H1: True}) is None
 
 
 # --- commit binding ----------------------------------------------------------

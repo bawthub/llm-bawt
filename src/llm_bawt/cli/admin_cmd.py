@@ -197,13 +197,9 @@ def bootstrap_runtime_settings(config: Config, bot_id: str | None, overwrite: bo
     from llm_bawt.bots import BotManager
 
     bot_manager = BotManager(config)
-    bots = bot_manager.list_bots()
-    if bot_id:
-        target = bot_manager.get_bot(bot_id)
-        if not target:
-            console.print(f"[red]Unknown bot: {bot_id}[/red]")
-            return False
-        bots = [target]
+    if bot_id and not bot_manager.get_bot(bot_id):
+        console.print(f"[red]Unknown bot: {bot_id}[/red]")
+        return False
 
     # TASK-615: seed CANONICAL keys only, sourced from the setting registry
     # (not env fields — the legacy context/summarization env fields are
@@ -252,22 +248,6 @@ def bootstrap_runtime_settings(config: Config, bot_id: str | None, overwrite: bo
             continue
         batch_items.append({"scope_type": "global", "scope_id": "*", "key": key, "value": value})
         set_count += 1
-
-    for bot in bots:
-        bot_resp = client.get_settings(scope_type="bot", scope_id=bot.slug)
-        if bot_resp is None and not overwrite:
-            console.print(f"[red]Could not read settings for {bot.slug}; nothing was written.[/red]")
-            return False
-        bot_existing_keys = set()
-        if bot_resp:
-            for item in bot_resp.get("settings", []):
-                bot_existing_keys.add(item.get("key"))
-        for key, value in (bot.settings or {}).items():
-            if key in bot_existing_keys and not overwrite:
-                skipped_count += 1
-                continue
-            batch_items.append({"scope_type": "bot", "scope_id": bot.slug, "key": key, "value": value})
-            set_count += 1
 
     if batch_items and client.batch_set_settings(batch_items) is None:
         console.print("[red]Saving settings failed (or its outcome is unknown).[/red]")

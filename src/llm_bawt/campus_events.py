@@ -5,8 +5,8 @@ stamped from one Redis counter that the ``/v1/campus`` snapshot also reads, so
 a client drops events with ``seq <= snapshot.seq`` and refetches once on a gap:
 
 * ``bot_location_changed {event_id, seq, ts, kind, bot_id, from, to, reason}``;
-  ``from``/``to`` are :mod:`bot_location` next-turn routes (null for a housed
-  profile created or deleted). ``kind`` is ``assignment`` (a committed
+  ``from``/``to`` are :mod:`bot_location` next-turn routes (``from`` is null
+  for a profile created into a house; deletion sends no frame). ``kind`` is ``assignment`` (a committed
   house/pin write) or ``route`` (the house's lease came or went; no write).
   Neither moves a turn already running: that stays where it was admitted.
   ``version`` is the bot's committed location version (see :func:`version_of`):
@@ -53,7 +53,6 @@ HOUSE_PREVIEW_CHANGED = "house_preview_changed"
 ASSIGNMENT, ROUTE = "assignment", "route"
 ASSIGNMENT_REASONS = frozenset({"move_in", "move_out", "new_session", "idle_evict",
                                 "pinned_change"})
-ROUTE_REASONS = frozenset({"house_down_fallback", "house_up"})
 #: Optional upsert payload key naming why the tenancy changed.
 REASON_KEY = "_location_reason"
 
@@ -187,14 +186,14 @@ def location_frame(bot_id: str, before: dict, after: dict, reason: str,
         return {"_type": BOT_LOCATION_CHANGED, "kind": ASSIGNMENT, "bot_id": bot_id,
                 "from": old, "to": new, "reason": why, "version": version}
 
-    # A profile created into, or deleted from, a house; mansion bots appear and
-    # disappear through the ordinary bot_profile_changed frame.
+    # A profile created into a house. Deletion sends no location frame: the
+    # deleted bot is no longer visible after commit, so clients learn of it
+    # through bot_profile_changed and refetch, like a mansion bot.
     if not before:
         new = loc(after)
         return frame(None, new, "move_in") if new.get("house") else None
     if not after:
-        old = loc(before)
-        return frame(old, None, "move_out") if old.get("house") else None
+        return None
     old, new = loc(before), loc(after)
     if old == new:
         return None

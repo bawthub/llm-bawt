@@ -234,7 +234,6 @@ def list_bots():
             endpoint_id=bot.endpoint_id,
             agent_backend=bot.agent_backend,
             agent_backend_config=bot.agent_backend_config or {},
-            settings=bot.settings,
             steer_capabilities=sorted(bot_steer_caps(bot)),
             aliases=None if aliases is None else aliases.get(bot.slug, []),
         ))

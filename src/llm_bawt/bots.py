@@ -48,7 +48,6 @@ class Bot:
     bot_type: str = "chat"  # High-level bot type (chat or agent)
     agent_backend: str | None = None  # External agent backend slug (e.g. "claude-code")
     agent_backend_config: dict[str, Any] = field(default_factory=dict)  # Backend-specific config
-    settings: dict[str, Any] = field(default_factory=dict)  # Effective bot settings
 
     def __post_init__(self):
         self.slug = self.slug.lower().strip()

@@ -51,7 +51,7 @@ _OPS_DEFAULT_POLICIES: list[dict[str, Any]] = [
         "action": "require_approval",
         "severity": "high",
         "category": "deploy",
-        "approval_prompt": "Deploy this verified BawtHub release digest to production (app.bawthub.com)? Approve?",
+        "approval_prompt": "Deploy this verified BawtHub release digest to production? Approve?",
         "order": 7,
     },
     {
