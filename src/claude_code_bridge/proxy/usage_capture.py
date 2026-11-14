@@ -23,8 +23,9 @@ import logging
 import os
 import time
 
-# Shared contract with the app-side usage adapter. Keep both in lockstep.
-from llm_bawt.shared.chatgpt_usage import account_scope, snapshot_key
+# The bridge cannot import llm_bawt's application dependencies. Keep this tiny
+# contract copy byte-identical to shared/chatgpt_usage.py (checked by tests).
+from .usage_scope import account_scope, snapshot_key
 
 logger = logging.getLogger(__name__)
 

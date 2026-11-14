@@ -201,6 +201,39 @@ def test_fetch_uses_stale_passive_snapshot_without_claiming_bad_credential(monke
     assert [limit.used_pct for limit in result.limits] == [40.0, 60.0]
 
 
+def test_bridge_scope_contract_matches_app_without_importing_app():
+    from pathlib import Path
+    import subprocess
+    import sys
+    from claude_code_bridge.proxy import usage_scope
+    from llm_bawt.shared import chatgpt_usage
+
+    assert Path(usage_scope.__file__).read_bytes() == Path(chatgpt_usage.__file__).read_bytes()
+    for account in (None, "", " ", "A", " B ", "åccount"):
+        scope = usage_scope.account_scope(account)
+        assert scope == chatgpt_usage.account_scope(account)
+        if scope:
+            assert usage_scope.snapshot_key(scope) == chatgpt_usage.snapshot_key(scope)
+    # A fresh interpreter is essential: the ordinary test process already has
+    # llm_bawt loaded and its application dependencies installed.
+    source = Path(__file__).resolve().parents[1] / "src"
+    probe = '''
+import sys
+sys.path.insert(0, sys.argv[1])
+class RejectApp:
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "llm_bawt" or fullname.startswith("llm_bawt."):
+            raise ImportError("Application package unavailable in bridge")
+sys.meta_path.insert(0, RejectApp())
+from claude_code_bridge.proxy.usage_capture import schedule_capture, account_scope
+assert callable(schedule_capture) and account_scope("fixture")
+assert "llm_bawt" not in sys.modules
+'''
+    result = subprocess.run([sys.executable, "-I", "-c", probe, str(source)],
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+
+
 def test_account_switch_rejects_old_passive_and_process_cache(monkeypatch):
     from unittest.mock import AsyncMock
     from llm_bawt.service import usage
