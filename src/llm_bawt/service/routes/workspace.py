@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from urllib.parse import urlsplit
 
 import httpx
@@ -13,6 +14,8 @@ from fastapi.responses import JSONResponse
 
 from .. import bridge_gate
 from ..dependencies import get_runtime_settings_store, get_service
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -90,7 +93,14 @@ async def _proxy(method: str, item: CloneInput | None = None):
         return _error(exc.status, exc.detail, exc.code)
     except httpx.TimeoutException:
         return _error(504, "Workspace request timed out. Check folders before retrying.", "clone_timeout")
-    except Exception:
+    except Exception as exc:
+        # Class and route only: the URL, response body and headers may carry secrets.
+        logger.warning(
+            "Workspace bridge %s %s failed: %s",
+            method,
+            "clone" if item else "list",
+            type(exc).__name__,
+        )
         return _error(503, "Workspace bridge is unavailable.", "bridge_unavailable")
 
 

@@ -34,6 +34,23 @@ def _get_scheduler_engine():
     return manager.engine
 
 
+
+def _latest_runs_by_job(session: Session, job_ids: list) -> dict:
+    """Return each job's most recent run, read as one ranked query for the page."""
+    if not job_ids:
+        return {}
+    rank = (
+        func.row_number()
+        .over(partition_by=JobRun.job_id, order_by=JobRun.started_at.desc())
+        .label("run_rank")
+    )
+    ranked = select(JobRun.id.label("run_id"), rank).where(JobRun.job_id.in_(job_ids)).subquery()
+    runs = session.exec(
+        select(JobRun).join(ranked, JobRun.id == ranked.c.run_id).where(ranked.c.run_rank == 1)
+    ).all()
+    return {run.job_id: run for run in runs}
+
+
 @router.post("/v1/jobs/{job_type}/trigger", tags=["Jobs"])
 def trigger_job(job_type: str):
     """Trigger a scheduled job to run immediately.
@@ -151,14 +168,11 @@ def list_scheduled_jobs(
         total_count = int(session.exec(count_statement).one() or 0)
         jobs = session.exec(statement.offset(offset).limit(limit)).all()
 
+        latest_runs = _latest_runs_by_job(session, [job.id for job in jobs])
+
         items: list[ScheduledJobInfo] = []
         for job in jobs:
-            latest_run = session.exec(
-                select(JobRun)
-                .where(JobRun.job_id == job.id)
-                .order_by(JobRun.started_at.desc())
-                .limit(1)
-            ).first()
+            latest_run = latest_runs.get(job.id)
 
             items.append(
                 ScheduledJobInfo(

@@ -594,6 +594,27 @@ class ProfileManager:
             ).order_by(ProfileAttribute.category, ProfileAttribute.key)
             return list(session.exec(statement).all())
     
+    def get_live_attributes_by_entity(
+        self,
+        entity_type: EntityType,
+        entity_ids: list[str],
+    ) -> dict[str, list[ProfileAttribute]]:
+        """Get live attributes for many entities in one query, keyed by entity ID."""
+        ids = sorted({entity_id.lower().strip() for entity_id in entity_ids})
+        grouped: dict[str, list[ProfileAttribute]] = {entity_id: [] for entity_id in ids}
+        if not ids:
+            return grouped
+
+        with Session(self.engine) as session:
+            statement = select(ProfileAttribute).where(
+                ProfileAttribute.entity_type == entity_type,
+                ProfileAttribute.entity_id.in_(ids),
+                ProfileAttribute.status == STATUS_LIVE,
+            ).order_by(ProfileAttribute.entity_id, ProfileAttribute.category, ProfileAttribute.key)
+            for attribute in session.exec(statement).all():
+                grouped.setdefault(attribute.entity_id, []).append(attribute)
+        return grouped
+
     @staticmethod
     def _invalidate_summary(session, entity_type, entity_id):
         profile = session.exec(select(EntityProfile).where(

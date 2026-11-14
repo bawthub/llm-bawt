@@ -28,6 +28,10 @@ def _get_profile_detail(manager, entity_type_enum, entity_type: str, entity_id: 
         raise HTTPException(status_code=404, detail=f"{entity_type.capitalize()} '{entity_id}' not found")
 
     attributes = manager.get_all_attributes(entity_type_enum, entity_id)
+    return _profile_detail_from(profile, attributes, entity_type, entity_id)
+
+
+def _profile_detail_from(profile, attributes, entity_type: str, entity_id: str) -> ProfileDetail:
     return ProfileDetail(
         entity_type=entity_type,
         entity_id=entity_id,
@@ -84,25 +88,28 @@ def list_profiles(entity_type: str | None = None, entity_id: str | None = None):
                 return profiles
             return [p for p in profiles if str(p.entity_id).strip().lower() == wanted]
 
+        def _details(target_type, type_name: str) -> list[ProfileDetail]:
+            # Reuse the listed rows and read all their attributes in one query.
+            profiles = _kept(manager.list_profiles(target_type))
+            attributes = manager.get_live_attributes_by_entity(
+                target_type, [profile.entity_id for profile in profiles]
+            )
+            return [
+                _profile_detail_from(
+                    profile,
+                    attributes.get(str(profile.entity_id).lower().strip(), []),
+                    type_name,
+                    profile.entity_id,
+                )
+                for profile in profiles
+            ]
+
         if normalized_entity_type:
             target_type = EntityType.USER if normalized_entity_type == "user" else EntityType.BOT
-            typed_profiles = _kept(manager.list_profiles(target_type))
-            result_profiles = [
-                _get_profile_detail(manager, target_type, normalized_entity_type, profile.entity_id)
-                for profile in typed_profiles
-            ]
+            result_profiles = _details(target_type, normalized_entity_type)
         else:
-            user_profiles = _kept(manager.list_profiles(EntityType.USER))
-            bot_profiles = _kept(manager.list_profiles(EntityType.BOT))
-
-            result_profiles.extend(
-                _get_profile_detail(manager, EntityType.USER, "user", profile.entity_id)
-                for profile in user_profiles
-            )
-            result_profiles.extend(
-                _get_profile_detail(manager, EntityType.BOT, "bot", profile.entity_id)
-                for profile in bot_profiles
-            )
+            result_profiles.extend(_details(EntityType.USER, "user"))
+            result_profiles.extend(_details(EntityType.BOT, "bot"))
 
         return ProfileListResponse(profiles=result_profiles, total_count=len(result_profiles))
     except HTTPException:
