@@ -194,7 +194,8 @@ class TaskSource(SourceProvider):
             window, start, truncated, kind = focused_window(
                 part.body, query, max(200, PART_CHARS - len(part.header)))
             evidence = Evidence(self.source, f"{row['shortId']}{part.suffix}", scope.bot_id, scope.user_id,
-                                part.header + window, start, truncated, kind, part.at, part.speaker)
+                                part.header + window, start, truncated, kind, part.at, part.speaker,
+                                display_prefix_chars=len(part.header))
             ranked.append(Ranked(row["id"], coverage, part.at, order, evidence))
         return ranked
 

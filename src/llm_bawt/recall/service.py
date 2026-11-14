@@ -458,7 +458,11 @@ class RecallService:
                 if not span:
                     answers.rejected += 1
                     continue
-                offset = item.text.find(span)
+                # Prefer the body occurrence when the same words also appear
+                # in synthetic display context (for example a task title).
+                offset = item.text.find(span, item.display_prefix_chars)
+                if offset < 0:
+                    offset = item.text.find(span)
                 parts = self._quote_parts(span)
                 if not parts:
                     answers.omitted += 1
@@ -474,8 +478,10 @@ class RecallService:
                         clipped = True
                     if provenance:
                         entry["provenance"] = provenance
-                    if len(parts) > 1 or item.start_char or offset:
-                        entry["start_char"] = item.start_char + offset + position
+                    body_offset = offset + position - item.display_prefix_chars
+                    # Header-only and cross-header quotes have no body start.
+                    if body_offset >= 0 and (len(parts) > 1 or item.start_char or offset):
+                        entry["start_char"] = item.start_char + body_offset
                     entries.append(entry)
                 answers.add(GroundedAnswer(entries))
             if answers.rejected and not answers.answers and not answers.omitted:

@@ -131,6 +131,9 @@ class Evidence:
     source_bot: str | None = None
     session_id: str | None = None
     review_ref: str | None = None
+    # Server-built display context preceding the source-body window. It is
+    # visible to synthesis but never part of the body's character coordinates.
+    display_prefix_chars: int = 0
 
 
 class EvidenceBatch(list[Evidence]):

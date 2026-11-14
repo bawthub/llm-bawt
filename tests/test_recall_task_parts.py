@@ -310,6 +310,83 @@ async def test_detail_coverage_reports_depth_and_partial_reasons():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["description", "response", "outcome", "review", "step"])
+@pytest.mark.parametrize("deep", [False, True])
+async def test_task_citation_offsets_point_into_source_body_not_display_header(field, deep):
+    quote = "The retry rewrite fix landed after review."
+    body = ("Unrelated background. " * 100 if deep else "") + quote + " More context." * 30
+    row, reviews = task(42), []
+    source, depth, ref = "tasks", "key_fields", "TASK-42"
+    original = body
+    if field in ("description", "response", "outcome"):
+        row[field] = body
+        if field != "description":
+            ref += "#" + field
+    else:
+        source, depth = "task_details", "details"
+        if field == "review":
+            reviews = [review("bot", "peer", body)]
+            ref += "#review:" + REVIEW_ID
+        else:
+            row["steps"] = [{"orderIndex": 0, "title": "Step fixture", "status": "COMPLETED", "output": body}]
+            original = "Step fixture\n" + body
+            ref += "#step:0"
+    provider = Fake(Reader(row, reviews=reviews), source, depth)
+    result = await RecallService([provider], Model([{"source": source, "id": ref, "quote": quote}])).recall(
+        RecallRequest(query="retry rewrite fix", sources=(source,), task_ids=("TASK-42",)), SCOPE)
+    assert result["status"] == "ok"
+    finding = result["findings"][0]
+    assert finding["start_char"] == original.index(quote)
+    assert original[finding["start_char"]:finding["start_char"] + len(quote)] == finding["quote"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("quote,in_body", [
+    ("Retry rewrite", True),
+    ("TASK-42:", False),
+    ("Status: REVIEW\nRetry rewrite", False),
+])
+async def test_task_citation_prefers_body_occurrence_and_omits_synthetic_header_offsets(quote, in_body):
+    body = "Retry rewrite was approved after testing."
+    row = task(42, title="Retry rewrite", description=body)
+    result = await RecallService(
+        [Fake(Reader(row))], Model([{"source": "tasks", "id": "TASK-42", "quote": quote}]),
+    ).recall(RecallRequest(query="retry rewrite", sources=("tasks",), task_ids=("TASK-42",)), SCOPE)
+    assert result["status"] == "ok"
+    finding = result["findings"][0]
+    assert finding["quote"] == quote
+    if in_body:
+        assert finding["start_char"] == 0
+    else:
+        assert "start_char" not in finding
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("include_header", [False, True])
+async def test_split_task_quotes_keep_body_coordinates_for_each_piece(include_header):
+    body = "Retry rewrite approved after testing. " * 20
+    header = "TASK-42: Task 42\nStatus: REVIEW\n"
+    quote = (header if include_header else "") + body
+    result = await RecallService(
+        [Fake(Reader(task(42, description=body)))],
+        Model([{"source": "tasks", "id": "TASK-42", "quote": quote}]),
+    ).recall(RecallRequest(query="retry rewrite", sources=("tasks",), task_ids=("TASK-42",),
+                          output_tokens=1800), SCOPE)
+    assert result["status"] == "ok"
+    findings = result["findings"]
+    assert len(findings) > 1 and "".join(item["quote"] for item in findings) == quote
+    position = 0
+    for finding in findings:
+        body_start = position - (len(header) if include_header else 0)
+        if body_start < 0:
+            assert "start_char" not in finding
+        else:
+            assert finding["start_char"] == body_start
+            assert body[body_start:body_start + len(finding["quote"])] == finding["quote"]
+        position += len(finding["quote"])
+
+
+@pytest.mark.asyncio
 async def test_grounding_returns_source_bytes_but_cannot_judge_a_planted_passage():
     """S1: grounding stops fabricated bytes, not a model choosing a misleading real one.
 
