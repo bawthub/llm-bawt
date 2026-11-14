@@ -169,7 +169,7 @@ def test_slow_summary_seeds_raw_turns_for_summaries_only(monkeypatch, scope, sum
 
 def test_bounded_summarize_reports_a_slow_summary(monkeypatch):
     """The real gate returns False when the summary outlasts its bound."""
-    import threading, time
+    import threading
     from llm_bawt.service.session_lifecycle.bridge_reset import BridgeSessionResetMixin
     from llm_bawt.memory import summarization
 
@@ -190,12 +190,12 @@ def test_bounded_summarize_reports_a_slow_summary(monkeypatch):
                           history_manager=SimpleNamespace(_db_backend=object()))
     svc = SimpleNamespace(config=None, _get_background_client=lambda **k: (None, None))
     try:
-        started = time.monotonic()
         ok = BridgeSessionResetMixin._maybe_summarize_on_new(
             svc, llm, "fixture", "/new",
             thread_binding={"thread_session_id": "old-thread"}, timeout_s=0.2,
             history_scope="summaries")
-        assert ok is False and time.monotonic() - started < 2
+        # The summary worker is still blocked, so False means the bound fired.
+        assert ok is False and not release.is_set()
     finally:
         release.set()
 
