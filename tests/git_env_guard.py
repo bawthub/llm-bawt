@@ -44,12 +44,19 @@ def link_hint(root: Path = ROOT) -> str | None:
         text = link.read_text(errors="replace").strip()
         target = text.removeprefix("gitdir:").strip() if text.startswith("gitdir:") else ""
     marker = "/.git/worktrees/"
+    generic = f"{root} is not a git checkout here; tests that list tracked files will fail."
     if marker not in target or root.parent.name != ".worktrees":
-        return f"{root} is not a git checkout here; tests that list tracked files will fail."
+        return generic
     repo_rel, admin = target.split(marker, 1)
-    # Same layout on both mounts: <dev>/<repo> and <dev>/.worktrees/<tree>.
-    relative = os.path.relpath(Path(root.parent.parent, Path(repo_rel).name, ".git", "worktrees", admin),
-                               root)
+    # Same layout on both mounts; the tree sits in <dev>/.worktrees (sibling
+    # repo) or <dev>/<repo>/.worktrees (nested). Suggest only a link that
+    # resolves here to a real worktree admin dir.
+    candidates = (Path(root.parent.parent, Path(repo_rel).name, ".git", "worktrees", admin),
+                  Path(root.parent.parent, ".git", "worktrees", admin))
+    found = next((c for c in candidates if (c / "commondir").is_file()), None)
+    if found is None:
+        return generic
+    relative = os.path.relpath(found, root)
     return (f"{link} points at {target}, which does not exist here (a worktree created "
             f"under another mount). Make the link relative instead of exporting GIT_DIR: "
             f"printf 'gitdir: {relative}\\n' > {link}")

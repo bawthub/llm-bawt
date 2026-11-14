@@ -83,3 +83,25 @@ def test_link_hint_names_a_relative_link_that_resolves(tmp_path, shared_with_wor
     assert relative == f"../../llm-bawt/.git/worktrees/{Path(admin).name}"
     (tree / ".git").write_text(f"gitdir: {relative}\n")
     assert git_env_guard.link_hint(tree) is None
+
+
+@pytest.mark.real_process(reason="resolves worktree .git links with real git")
+def test_link_hint_nested_layout_and_unverifiable_targets(tmp_path):
+    shared = tmp_path / "dev" / "llm-bawt"
+    shared.mkdir(parents=True)
+    git(shared, "init", "-q", "-b", "master")
+    git(shared, "-c", "user.name=T", "-c", "user.email=t@example.com",
+        "commit", "-q", "--allow-empty", "-m", "base")
+    nested = shared / ".worktrees" / "tree"  # <dev>/<repo>/.worktrees/<tree>
+    git(shared, "worktree", "add", "-q", "--detach", str(nested))
+    admin = Path(git(nested, "rev-parse", "--absolute-git-dir")).name
+
+    (nested / ".git").write_text(f"gitdir: /elsewhere/dev/llm-bawt/.git/worktrees/{admin}\n")
+    hint = git_env_guard.link_hint(nested)
+    relative = hint.rsplit("printf 'gitdir: ", 1)[1].split("\\n'", 1)[0]
+    assert relative == f"../../.git/worktrees/{admin}"
+    (nested / ".git").write_text(f"gitdir: {relative}\n")
+    assert git_env_guard.link_hint(nested) is None
+
+    (nested / ".git").write_text("gitdir: /elsewhere/dev/llm-bawt/.git/worktrees/missing\n")
+    assert "is not a git checkout here" in git_env_guard.link_hint(nested)
