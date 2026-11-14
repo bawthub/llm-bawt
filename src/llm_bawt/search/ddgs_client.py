@@ -124,10 +124,10 @@ class DuckDuckGoClient(SearchClient):
                 return []
             # TASK-1619: report the failure; [] would read as an empty answer.
             if "ratelimit" in type(e).__name__.lower() or "ratelimit" in str(e).lower():
-                logger.warning(f"DuckDuckGo rate limit hit: {e}")
+                logger.warning("DuckDuckGo rate limit hit")
                 raise SearchError(self.PROVIDER, "DuckDuckGo is rate limiting searches. Try again shortly.",
                                   status_code=429) from None
-            logger.error(f"DuckDuckGo search failed: {e}")
+            logger.error("DuckDuckGo search failed (%s)", type(e).__name__)
             raise SearchError(self.PROVIDER, f"DuckDuckGo search failed ({type(e).__name__}).") from None
     
     def search_news(
@@ -148,7 +148,7 @@ class DuckDuckGoClient(SearchClient):
         """
         if not is_ddgs_available():
             logger.error("ddgs library not installed")
-            return []
+            raise SearchError(self.PROVIDER, "DuckDuckGo news search is unavailable: the ddgs library isn't installed.")
         
         max_results = max_results or self.max_results
         
@@ -177,11 +177,14 @@ class DuckDuckGoClient(SearchClient):
             return results
             
         except Exception as e:
-            if "ratelimit" in str(e).lower():
-                logger.warning(f"DuckDuckGo rate limit hit: {e}")
-            else:
-                logger.error(f"DuckDuckGo news search failed: {e}")
-            return []
+            if _is_no_results(e):
+                return []
+            if "ratelimit" in type(e).__name__.lower() or "ratelimit" in str(e).lower():
+                logger.warning("DuckDuckGo news rate limit hit")
+                raise SearchError(self.PROVIDER, "DuckDuckGo is rate limiting news searches. Try again shortly.",
+                                  status_code=429) from None
+            logger.error("DuckDuckGo news search failed (%s)", type(e).__name__)
+            raise SearchError(self.PROVIDER, f"DuckDuckGo news search failed ({type(e).__name__}).") from None
     
     def is_available(self) -> bool:
         """Check if DuckDuckGo search is available."""

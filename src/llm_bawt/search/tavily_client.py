@@ -10,7 +10,7 @@ Free tier: 1,000 searches/month
 import logging
 from typing import TYPE_CHECKING
 
-from .base import SearchClient, SearchResult, SearchProvider
+from .base import SearchClient, SearchError, SearchResult, SearchProvider
 
 if TYPE_CHECKING:
     from tavily import TavilyClient as TavilyAPI
@@ -88,11 +88,11 @@ class TavilyClient(SearchClient):
         """
         if not is_tavily_available():
             logger.error("tavily-python not installed. Install with: pip install tavily-python")
-            return []
-        
+            raise SearchError(self.PROVIDER, "Tavily search is unavailable: tavily-python isn't installed.")
+
         if not self._api_key:
             logger.error("Tavily API key not configured")
-            return []
+            raise SearchError(self.PROVIDER, "Tavily search is unavailable: no API key is configured.")
         
         max_results = max_results or self.max_results
         
@@ -124,8 +124,8 @@ class TavilyClient(SearchClient):
             return results
             
         except Exception as e:
-            logger.error(f"Tavily search failed: {e}")
-            return []
+            logger.error("Tavily search failed (%s)", type(e).__name__)
+            raise SearchError(self.PROVIDER, f"Tavily search failed ({type(e).__name__}).") from None
     
     def search_news(
         self,
@@ -153,11 +153,11 @@ class TavilyClient(SearchClient):
 
         if not is_tavily_available():
             logger.error("tavily-python not installed")
-            return []
-        
+            raise SearchError(self.PROVIDER, "Tavily news search is unavailable: tavily-python isn't installed.")
+
         if not self._api_key:
             logger.error("Tavily API key not configured")
-            return []
+            raise SearchError(self.PROVIDER, "Tavily news search is unavailable: no API key is configured.")
         
         max_results = max_results or self.max_results
         
@@ -189,8 +189,8 @@ class TavilyClient(SearchClient):
             return results
             
         except Exception as e:
-            logger.error(f"Tavily news search failed: {e}")
-            return []
+            logger.error("Tavily news search failed (%s)", type(e).__name__)
+            raise SearchError(self.PROVIDER, f"Tavily news search failed ({type(e).__name__}).") from None
     
     def search_with_answer(self, query: str, max_results: int | None = None) -> tuple[list[SearchResult], str | None]:
         """Search and get an AI-generated answer summary.

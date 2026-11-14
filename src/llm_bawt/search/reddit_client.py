@@ -8,7 +8,7 @@ from typing import Any
 
 import httpx
 
-from .base import SearchClient, SearchProvider, SearchResult
+from .base import SearchClient, SearchError, SearchProvider, SearchResult
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +66,7 @@ class RedditSearchClient(SearchClient):
             return True
         if not self._client_id or not self._client_secret:
             logger.error("Reddit client credentials not configured")
-            return False
+            raise SearchError(self.PROVIDER, "Reddit search is unavailable: client credentials aren't configured.")
 
         try:
             client = self._get_client()
@@ -86,19 +86,22 @@ class RedditSearchClient(SearchClient):
             expires_in = int(data.get("expires_in", 3600))
             if not token:
                 logger.error("Reddit token response missing access_token")
-                return False
+                raise SearchError(self.PROVIDER, "Reddit authentication failed: no access token was returned.")
 
             # Refresh 60s before expiry.
             self._access_token = token
             self._token_expires_at = datetime.now(UTC) + timedelta(seconds=max(60, expires_in - 60))
             return True
 
+        except SearchError:
+            raise
         except httpx.HTTPStatusError as e:
-            logger.error("Reddit auth failed (%s): %s", e.response.status_code, e)
-            return False
+            status = e.response.status_code
+            logger.error("Reddit authentication failed (HTTP %s)", status)
+            raise SearchError(self.PROVIDER, f"Reddit authentication failed (HTTP {status}).", status) from None
         except Exception as e:
-            logger.error("Reddit auth failed: %s", e)
-            return False
+            logger.error("Reddit authentication failed (%s)", type(e).__name__)
+            raise SearchError(self.PROVIDER, f"Reddit authentication failed ({type(e).__name__}).") from None
 
     def _map_time_range(self, time_range: str | None) -> timedelta | None:
         """Map tool time range to relative cutoff window."""
@@ -167,12 +170,11 @@ class RedditSearchClient(SearchClient):
         time_range: str | None = None,
     ) -> list[SearchResult]:
         """Search Reddit posts/threads via OAuth API."""
-        if not self._ensure_token():
-            return []
-
-        max_results = max_results or self.max_results
         if not query.strip():
             return []
+        self._ensure_token()
+
+        max_results = max_results or self.max_results
 
         try:
             client = self._get_client()
@@ -225,19 +227,12 @@ class RedditSearchClient(SearchClient):
             return results
 
         except httpx.HTTPStatusError as e:
-            if e.response.status_code in {401, 403}:
-                logger.error("Reddit search unauthorized. Check credentials and app access.")
-            elif e.response.status_code == 429:
-                logger.warning("Reddit rate limit exceeded")
-            else:
-                logger.error("Reddit search HTTP error: %s", e)
-            return []
-        except httpx.RequestError as e:
-            logger.error("Reddit search request failed: %s", e)
-            return []
+            status = e.response.status_code
+            logger.error("Reddit search failed (HTTP %s)", status)
+            raise SearchError(self.PROVIDER, f"Reddit search failed (HTTP {status}).", status) from None
         except Exception as e:
-            logger.error("Reddit search failed: %s", e)
-            return []
+            logger.error("Reddit search failed (%s)", type(e).__name__)
+            raise SearchError(self.PROVIDER, f"Reddit search failed ({type(e).__name__}).") from None
 
     def is_available(self) -> bool:
         """Check if Reddit search is configured and available."""
