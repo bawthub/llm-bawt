@@ -676,14 +676,18 @@ class ClaudeSendMixin(
                                     ),
                                     request_id=request_id, session_key=session_key, seq=seq,
                                 )
-                                if event.get("type") == "message_delta":
-                                    seq = live_usage.publish(
-                                        seq,
-                                        assistant_usage=latest_assistant_usage,
-                                        stream_usage=event.get("usage"),
-                                    )
-                                seq, side_effect = stream_blocks.on_event(event, seq)
-                                model_side_effects |= side_effect
+                                # TASK-2272: a worker's stream is accounted in its
+                                # own ledger above; it must not feed the parent's
+                                # answer text, reasoning or resident usage.
+                                if not msg.parent_tool_use_id:
+                                    if event.get("type") == "message_delta":
+                                        seq = live_usage.publish(
+                                            seq,
+                                            assistant_usage=latest_assistant_usage,
+                                            stream_usage=event.get("usage"),
+                                        )
+                                    seq, side_effect = stream_blocks.on_event(event, seq)
+                                    model_side_effects |= side_effect
 
                             elif isinstance(msg, AssistantMessage):
                                 seq = self._publish_subagent_live_usage(
