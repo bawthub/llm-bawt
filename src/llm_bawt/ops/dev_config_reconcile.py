@@ -65,7 +65,7 @@ _SPEC_KEYS = frozenset({"action", "compose_config", "display_values", "stat_path
 _BINDING_KEYS = frozenset({"container_id", "image_id", "image_ref", "image_tag", "image_tag_moved", "source",
                            "current_config_hash", "desired_hash", "rendered_hash", "drift", "mounts", "tmpfs",
                            "ports", "depends_on", "memory", "display"})
-_MEMORY_TEXT = re.compile(r"unlimited|[0-9]{1,16} bytes, swap (?:unlimited|[0-9]{1,16} bytes)")
+_MEMORY_TEXT = re.compile(r"unlimited|[0-9]{1,16} bytes, swap (?:unlimited|Docker default|[0-9]{1,16} bytes)")
 
 
 def validate_dev_spec(spec: dict) -> dict:

@@ -180,7 +180,11 @@ def run(snapshot: dict, *, api, preflight, execute, checkpoint, sleep, clock=now
     except Exception as exc:  # worker interruption/SIGALRM also retains the ledger
         uncertain = bool(active and active["state"] == "running"
                          and api.side_effect_started and not getattr(exc, "outcome_known", False))
-        if active:
+        if active and active["state"] in TERMINAL:
+            # Its mutation ran and was verified; only persisting that failed.
+            # Keep the known result and stop the remaining steps.
+            active["reason"] = tail(f"progress checkpoint failed after this step ({type(exc).__name__})")
+        elif active:
             submitted = active["state"] == "running"
             active.update(state="lost" if uncertain else "failed" if submitted else "skipped",
                           exit=None if uncertain or not submitted else 1,

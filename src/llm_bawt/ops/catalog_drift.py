@@ -37,7 +37,8 @@ _ABSENT = object()
 
 def _parsed(value: Any) -> Any:
     """A JSON object/array stored as text is compared structurally."""
-    if isinstance(value, str) and value[:1] in ("{", "["):
+    # json.loads (the executor's parser) accepts leading whitespace too.
+    if isinstance(value, str) and value.lstrip()[:1] in ("{", "["):
         try:
             return json.loads(value)
         except ValueError:

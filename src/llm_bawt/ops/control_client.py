@@ -15,14 +15,14 @@ import time
 
 import httpx
 
-from .control_protocol import (CODE_PATTERN, EXECUTORS_PATH, PREPARE_PATH, PROTOCOL_FIELD, PROTOCOL_VERSION,
+from .control_protocol import (CLIENT_TIMEOUT_SECONDS, CODE_PATTERN,EXECUTORS_PATH, PREPARE_PATH, PROTOCOL_FIELD, PROTOCOL_VERSION,
                                REFUSAL_STATUSES, control_token)
 from .service import OpsDispatchError, OpsService
 from .validation import canonical_json
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_TIMEOUT_SECONDS = 15.0
+DEFAULT_TIMEOUT_SECONDS = CLIENT_TIMEOUT_SECONDS
 #: The control server's Retry-After for ``ops_busy``.
 BUSY_RETRY_SECONDS = 2.0
 UNAVAILABLE = "ops_unavailable"

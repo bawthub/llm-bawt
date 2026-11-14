@@ -228,6 +228,11 @@ class OpsHealthState:
             if fresh(self._modes["isolated"]):
                 self._modes["isolated"] = replace(self._modes["isolated"], sampled=now)
 
+    def catalog_ok(self):
+        """True when the last catalog read succeeded."""
+        with self._lock:
+            return self._catalog.status == "ok"
+
     def docker_ok(self):
         """True when the last docker, ops.executor and isolated publishes were ok."""
         with self._lock:

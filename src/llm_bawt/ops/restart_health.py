@@ -71,7 +71,12 @@ def _demux_stdout(raw: bytes) -> str:
 
 def _probe_once(api, container_id: str, spec: dict) -> str | None:
     """None when healthy, else a short reason. Never echoes the response body."""
-    state = api.request("GET", f"/containers/{container_id}/json").get("State") or {}
+    # The restart already ran: a failed inspect is one unhealthy sample to
+    # retry until the deadline, not an unknown restart outcome.
+    try:
+        state = api.request("GET", f"/containers/{container_id}/json").get("State") or {}
+    except RuntimeError as exc:
+        return f"container inspect failed: {str(exc)[:200]}"
     if not state.get("Running"):
         return f"container not running (status {state.get('Status')})"
     try:

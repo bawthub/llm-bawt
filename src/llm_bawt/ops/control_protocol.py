@@ -20,6 +20,11 @@ import re
 CONTROL_PORT = 8651
 PREPARE_PATH = "/v1/ops/prepare"
 EXECUTORS_PATH = "/v1/ops/executors"
+#: How long the server lets one request's work run before answering 504.
+SERVER_BUDGET_SECONDS = 20.0
+#: The client waits past the server budget, so a slow success or the server's
+#: own coded 504 arrives instead of a client-side timeout.
+CLIENT_TIMEOUT_SECONDS = SERVER_BUDGET_SECONDS + 5.0
 #: Versioned derivation label; a future scheme must not collide with this one.
 TOKEN_LABEL = "ops-control-token/v1"
 #: Every response the control server writes carries this field, so the client

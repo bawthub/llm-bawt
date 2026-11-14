@@ -306,7 +306,7 @@ class OpsHealthCollector:
         freshness contract. A full re-read every ``reconcile`` seconds is only
         a backstop for missed notifies (writes outside OpsStore, such as
         seeding or manual SQL). Without a live listener it re-reads each
-        ``confirm_every`` instead."""
+        ``confirm_every`` instead, as it does after a failed read."""
         try:
             self.collect_catalog()
             last_read = self.state.clock()
@@ -316,8 +316,9 @@ class OpsHealthCollector:
                 if stop.is_set():
                     break
                 listening = _listening(waiter)
-                # A fresh (re)connect may have missed writes before LISTEN.
-                if (woke or not listening or not listening_before
+                # A fresh (re)connect may have missed writes before LISTEN; a
+                # quiet LISTEN proves nothing about a read that failed.
+                if (woke or not listening or not listening_before or not self.state.catalog_ok()
                         or self.state.clock() - last_read >= reconcile):
                     self.collect_catalog()
                     last_read = self.state.clock()

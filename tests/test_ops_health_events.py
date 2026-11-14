@@ -259,3 +259,27 @@ def test_operation_writes_notify_the_catalog_channel():
     from llm_bawt.ops import store as store_mod
     src = open(store_mod.__file__).read()
     assert src.count("self._notify_catalog(session, row.slug)") == 2
+
+
+def test_a_failed_catalog_read_is_retried_on_a_quiet_listen_wait():
+    # TASK-2231: LISTEN stays live while the catalog read fails once; the next
+    # quiet wait re-reads instead of waiting for the 60s reconcile.
+    clock = Clock()
+    state = OpsHealthState(clock=clock)
+    stop = Event()
+    outcomes = ["ok", "down", "ok", "ok"]
+    reads = []
+    collector = OpsHealthCollector(state, lambda: None)
+
+    def read():
+        status = outcomes[len(reads)]
+        reads.append(status)
+        state.publish_catalog(CatalogSample(state.sample_time(), status,
+                                            None if status == "ok" else "operation catalog unavailable",
+                                            services=()))
+    collector.collect_catalog = read
+    # initial, connect (forced, fails), quiet (retries the failure), quiet x2 (confirm only)
+    waiter = ScriptedWaiter([(False, True)] * 4, stop, clock)
+    collector.watch_catalog(stop, waiter, reconcile=1000)
+    assert reads == ["ok", "down", "ok"]
+    assert state.catalog_ok()

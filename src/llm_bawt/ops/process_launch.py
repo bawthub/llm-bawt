@@ -520,11 +520,16 @@ class ProcessLauncher(WorkerLauncher):
             child.popen.wait()
         for stream in streams.values():
             stream.thread.join()
-        record = {"exit_code": child.popen.returncode, **{name: stream.record() for name, stream in streams.items()}}
-        atomic_json(directory / f"process-output.{child.attempt}.json", record)
-        if killed:
-            _write_kill_receipt(directory, job_id, digest, output_tail=diagnostic_tail(record))
-        child.done.set()
+        # The child is reaped: mark it done even if a diagnostic write fails
+        # (e.g. ENOSPC), or the probe would keep reporting it alive.
+        try:
+            record = {"exit_code": child.popen.returncode,
+                      **{name: stream.record() for name, stream in streams.items()}}
+            atomic_json(directory / f"process-output.{child.attempt}.json", record)
+            if killed:
+                _write_kill_receipt(directory, job_id, digest, output_tail=diagnostic_tail(record))
+        finally:
+            child.done.set()
 
     def diagnostics(self, directory):
         """The latest attempt's exit code and capped output, for a job that ended

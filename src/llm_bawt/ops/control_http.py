@@ -35,7 +35,8 @@ from fastapi.responses import Response
 import uvicorn
 
 from .control_protocol import (CONTROL_PORT, EXECUTORS_PATH, MAX_BODY_BYTES, PREPARE_PATH, PROTOCOL_FIELD,
-                               PROTOCOL_VERSION, control_token, refusal_status, token_matches)
+                               PROTOCOL_VERSION, SERVER_BUDGET_SECONDS, control_token, refusal_status,
+                               token_matches)
 from .health_http import _HealthProtocol
 from .service import OpsDispatchError
 
@@ -44,7 +45,7 @@ logger = logging.getLogger(__name__)
 CONCURRENCY_ENV = "LLM_BAWT_OPS_CONTROL_CONCURRENCY"
 DEFAULT_CONCURRENCY = 2
 MAX_CONCURRENCY = 16
-DEFAULT_BUDGET_SECONDS = 20.0
+DEFAULT_BUDGET_SECONDS = SERVER_BUDGET_SECONDS
 READ_TIMEOUT_SECONDS = 5.0
 RETRY_AFTER_SECONDS = 2
 CONNECTION_LIMIT = 32
