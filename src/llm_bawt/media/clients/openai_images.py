@@ -15,6 +15,9 @@ logger = logging.getLogger(__name__)
 
 OPENAI_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_TIMEOUT = 180.0
+# Reference images are fetched without provider credentials (TASK-2263).
+SOURCE_IMAGE_MAX_BYTES = 25 * 1024 * 1024
+SOURCE_IMAGE_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 
 
 @dataclass(frozen=True)
@@ -141,10 +144,27 @@ class OpenAIImageClient(MediaClient):
     async def _resolve_source_image(self, source_image: str) -> _SourceImage:
         if source_image.startswith("data:"):
             return self._decode_data_url(source_image)
-        response = await self._client.get(source_image)
-        response.raise_for_status()
-        mime = response.headers.get("content-type", "image/png").split(";", 1)[0]
-        return _SourceImage(response.content, mime, self._filename_for_mime(mime))
+        if httpx.URL(source_image).scheme not in {"http", "https"}:
+            raise ValueError("source_image must be a data: URL or an absolute http(s) URL")
+        # A separate client with no provider auth or default headers, so the
+        # API key never reaches the reference host; redirects are not followed.
+        async with httpx.AsyncClient(
+            timeout=SOURCE_IMAGE_TIMEOUT, follow_redirects=False
+        ) as client:
+            async with client.stream("GET", source_image) as response:
+                response.raise_for_status()
+                declared = response.headers.get("content-length")
+                if declared and declared.isdigit() and int(declared) > SOURCE_IMAGE_MAX_BYTES:
+                    raise ValueError("source_image is larger than the reference image limit")
+                chunks: list[bytes] = []
+                size = 0
+                async for chunk in response.aiter_bytes():
+                    size += len(chunk)
+                    if size > SOURCE_IMAGE_MAX_BYTES:
+                        raise ValueError("source_image is larger than the reference image limit")
+                    chunks.append(chunk)
+                mime = response.headers.get("content-type", "image/png").split(";", 1)[0]
+        return _SourceImage(b"".join(chunks), mime, self._filename_for_mime(mime))
 
     @staticmethod
     def _decode_data_url(data_url: str) -> _SourceImage:
