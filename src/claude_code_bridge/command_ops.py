@@ -45,22 +45,34 @@ class ClaudeCommandMixin:
         db = conn_kwargs.get("db", 0)
         # socket_timeout=None: redis-py 8.0 defaults to 5s, which races our
         # blocking XREADGROUP(block=5000) reads. Bound only the connect.
-        async_redis = aioredis.Redis(
-            host=host,
-            port=port,
-            db=db,
-            decode_responses=True,
-            socket_timeout=None,
-            socket_connect_timeout=5,
-        )
+        # Reconnect from the publisher's original URL so auth, TLS and URL
+        # options survive; host/port/db is the fallback for URL-less fakes.
+        redis_url = getattr(self._publisher, "redis_url", None)
+        if redis_url:
+            async_redis = aioredis.from_url(
+                redis_url,
+                decode_responses=True,
+                socket_timeout=None,
+                socket_connect_timeout=5,
+            )
+        else:
+            redis_url = f"redis://{host}:{port}/{db}"
+            async_redis = aioredis.Redis(
+                host=host,
+                port=port,
+                db=db,
+                decode_responses=True,
+                socket_timeout=None,
+                socket_connect_timeout=5,
+            )
         self._command_ready = False
         try:
-            await self._consume_commands(async_redis, host, port, db)
+            await self._consume_commands(async_redis, redis_url)
         finally:
             self._command_ready = False
             await async_redis.aclose()
 
-    async def _consume_commands(self, async_redis, host, port, db) -> None:
+    async def _consume_commands(self, async_redis, redis_url: str) -> None:
         reader = GroupReader(
             async_redis, "claude-code-bridge", "worker-0", [COMMANDS_STREAM], initial_id="0",
         )
@@ -88,7 +100,7 @@ class ClaudeCommandMixin:
         # TASK-291: subscribe to approval-policy reload broadcasts so admin
         # edits drop the cached bundle without a restart. Best-effort.
         if self._approval_reload_task is None or self._approval_reload_task.done():
-            reload_url = f"redis://{host}:{port}/{db}"
+            reload_url = redis_url
             self._approval_reload_task = asyncio.create_task(
                 self._approval_reload_listener(reload_url)
             )

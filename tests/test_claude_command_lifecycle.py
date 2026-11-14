@@ -74,7 +74,7 @@ class FakeRedis:
 
 def bridge_harness():
     bridge = ClaudeCodeBridge.__new__(ClaudeCodeBridge)
-    bridge._publisher = Mock(connected=True)
+    bridge._publisher = Mock(connected=True, redis_url=None)
     bridge._publisher._redis.connection_pool.connection_kwargs = {}
     bridge._backend_name = "claude-code"
     bridge._session_queue = Mock()
@@ -239,3 +239,38 @@ def test_health_server_wires_live_consumer_readiness(monkeypatch):
         bridge.command_consumer_ready = True
         assert callback() is True
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("url", [
+    "redis://fixture-user:fixture-pass@redis.invalid:6380/4?health_check_interval=13",
+    "rediss://fixture-user:fixture-pass@redis.invalid:6380/4?ssl_cert_reqs=required",
+])
+def test_listeners_reconnect_with_original_redis_url(monkeypatch, url):
+    """TASK-2272: auth/TLS/URL options reach both bridge listeners."""
+    async def run():
+        redis = FakeRedis()
+        bridge = bridge_harness()
+        bridge._publisher.redis_url = url
+        seen = {}
+
+        def from_url(u, **kwargs):
+            seen["url"], seen["kwargs"] = u, kwargs
+            return redis
+
+        def no_rebuild(**kwargs):
+            raise AssertionError("host/port rebuild drops URL options")
+
+        monkeypatch.setenv("BAWT_HOUSE", "test-house")
+        monkeypatch.setattr("redis.asyncio.from_url", from_url)
+        monkeypatch.setattr("redis.asyncio.Redis", no_rebuild)
+        monkeypatch.setattr(HouseSlot, "_heartbeat", AsyncMock(side_effect=lambda: None))
+        bridge._command_task = asyncio.create_task(bridge._command_listener())
+        for _ in range(100):
+            if bridge._approval_reload_listener.await_count:
+                break
+            await asyncio.sleep(0.01)
+        await cleanup(bridge)
+        assert seen["url"] == url
+        assert seen["kwargs"]["socket_timeout"] is None
+        bridge._approval_reload_listener.assert_awaited_with(url)
+    asyncio.run(asyncio.wait_for(run(), 5))

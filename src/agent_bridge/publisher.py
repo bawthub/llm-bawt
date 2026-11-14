@@ -81,6 +81,8 @@ DURABLE_RPC_RESULT_TTL_S = 604800
 
 class RedisPublisher:
     def __init__(self, redis_url: str, *, default_provider: str | None = None) -> None:
+        # Kept so listeners can reconnect with the same auth/TLS/options.
+        self.redis_url = redis_url
         # socket_timeout=None: redis-py 8.0 defaults to 5s, which breaks
         # long/blocking operations. Bound only the initial connect.
         self._redis = redis.Redis.from_url(
