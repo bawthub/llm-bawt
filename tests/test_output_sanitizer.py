@@ -37,3 +37,8 @@ def test_malformed_tool_uses_falls_back():
 def test_existing_cleanup_still_applies():
     text = "Hi <tool_call>{}</tool_call>there\n\n\n\nbye"
     assert strip(text) == "Hi there\n\nbye"
+
+
+def test_whitespace_only_opening_line_keeps_code_indent():
+    assert strip("\n \n    code") == "    code"
+    assert strip("\t\r\n    a\n        b") == "    a\n        b"

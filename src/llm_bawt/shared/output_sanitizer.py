@@ -79,7 +79,9 @@ def strip_tool_protocol_leakage(text: str) -> str:
     # when the reply itself started indented (e.g. an indented code block).
     cleaned = cleaned.rstrip()
     body = cleaned.lstrip()
-    indent = re.match(r"[ \t]*", text.lstrip("\r\n")).group(0)
-    if indent and cleaned.lstrip("\r\n").startswith(indent + body[:1]):
+    # Indentation of the first content line, skipping blank/whitespace-only lines.
+    first_indent = re.compile(r"(?:[ \t\r]*\n)*([ \t]*)")
+    indent = first_indent.match(text).group(1)
+    if indent and first_indent.match(cleaned).group(1) == indent:
         return indent + body
     return body
