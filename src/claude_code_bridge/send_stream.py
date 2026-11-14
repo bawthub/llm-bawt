@@ -23,6 +23,8 @@ import copy
 import asyncio
 import logging
 import os
+import time
+import warnings
 from collections.abc import AsyncIterable
 
 from agent_bridge.events import AgentEventKind
@@ -55,6 +57,23 @@ from .turn_phase import TurnPhaseTracker
 from .worker_liveness import WorkerLiveness
 
 logger = logging.getLogger("claude_code_bridge.bridge")
+
+# The SDK repeats this advisory on every turn; it is configuration, not an
+# event, so show it once per process (TASK-2225).
+warnings.filterwarnings("once", message=r"can_use_tool will not be invoked")
+
+
+class _BoundedStarts(dict):
+    """tool_use_id -> monotonic start, for tool_end ms; bounded so a call
+    that never ends can't grow it without limit."""
+
+    def __setitem__(self, key, value):
+        if len(self) >= 4096:
+            self.pop(next(iter(self)))
+        super().__setitem__(key, value)
+
+
+_TOOL_STARTED_AT: dict[str, float] = _BoundedStarts()
 
 
 class ClaudeStreamMixin:
@@ -572,11 +591,12 @@ class ClaudeStreamMixin:
                 # on TOOL_START. Must equal the TOOL_END
                 # tool_use_id for the same call; if the
                 # frontend can't heal a card, compare this
-                # id against the "TOOLMAP end" line and the
+                # id against the "tool_end" line and the
                 # frontend "TOOLMAP" orphan line.
-                logger.info(
-                    "TOOLMAP start tool=%s tool_use_id=%s parent=%s session=%s",
-                    block.name, tu_id, parent_tuid, session_key,
+                _TOOL_STARTED_AT[tu_id] = time.monotonic()
+                logger.debug(
+                    "tool_start req=%s tool=%s tool_use=%s parent=%s session=%s",
+                    request_id, block.name, tu_id, parent_tuid, session_key,
                 )
                 self._publish_event(
                     request_id, session_key, seq,
@@ -718,12 +738,16 @@ class ClaudeStreamMixin:
                 # "running". Pair this with the frontend
                 # "TOOLMAP" console line and the TOOL_START log
                 # below (grep both for the same tool_use_id).
+                _started = _TOOL_STARTED_AT.pop(block.tool_use_id or "", None)
                 logger.info(
-                    "TOOLMAP end tool_use_id=%s parent=%s session=%s is_error=%s",
+                    "tool_end req=%s tool=%s tool_use=%s parent=%s session=%s ms=%s error=%s",
+                    request_id,
+                    tool_names_by_id.get(block.tool_use_id or "", "unknown"),
                     block.tool_use_id,
                     parent_tuid,
                     session_key,
-                    getattr(block, "is_error", None),
+                    int((time.monotonic() - _started) * 1000) if _started else "na",
+                    bool(getattr(block, "is_error", False)),
                 )
                 self._publish_event(
                     request_id, session_key, seq,

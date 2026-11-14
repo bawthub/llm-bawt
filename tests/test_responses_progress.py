@@ -100,7 +100,7 @@ def test_real_sdk_rejection_is_distinguishable_from_raw_receipt(caplog):
             assert stream.progress.counts["decoded"] == {}
             assert stream.progress.counts["exported"] == {}
 
-    with caplog.at_level("INFO"):
+    with caplog.at_level("DEBUG"):
         virtual_clock.run(run(), follow=[chatgpt_transport])
     assert len(reports(caplog)) == 1
     assert "private" not in caplog.text
@@ -128,7 +128,7 @@ def test_real_adapter_pairs_native_decode_productivity_and_export(monkeypatch, c
             finally:
                 await h.adapter.close()
 
-    with caplog.at_level("INFO"):
+    with caplog.at_level("DEBUG"):
         virtual_clock.run(run(), follow=[chatgpt_transport])
     rows = reports(caplog)
     assert [(a, trigger) for a, trigger, _ in rows] == [(1, "stall"), (1, "close")]
@@ -166,7 +166,7 @@ def test_real_sdk_retry_summaries_are_attempt_local(monkeypatch, caplog, disconn
             finally:
                 await h.adapter.close()
 
-    with caplog.at_level("INFO"):
+    with caplog.at_level("DEBUG"):
         virtual_clock.run(run(), follow=[chatgpt_transport])
     closed = [(a, s) for a, trigger, s in reports(caplog) if trigger == "close"]
     assert [a for a, _ in closed] == [1, 2]
@@ -199,7 +199,7 @@ def test_downstream_cancel_closes_tap_without_retry(monkeypatch, caplog):
                 await asyncio.gather(pending, return_exceptions=True)
                 await h.adapter.close()
 
-    with caplog.at_level("INFO"):
+    with caplog.at_level("DEBUG"):
         virtual_clock.run(run(), follow=[chatgpt_transport])
     rows = reports(caplog)
     assert [(a, trigger) for a, trigger, _ in rows] == [(1, "close")]
@@ -236,7 +236,7 @@ def test_fixed_labels_oversize_resync_and_privacy(separator, chunk_size, caplog)
     # Unfinished content must not survive close in either parser.
     tap.feed("raw", b"data: " + secret.encode())
     tap.feed("exported", b"data: " + secret.encode())
-    with caplog.at_level("INFO"):
+    with caplog.at_level("DEBUG"):
         for _ in range(5):
             tap.report("stall", "sse")
             tap.report("close", "sse")
@@ -286,7 +286,7 @@ def test_missing_raw_hook_is_not_reported_as_observed_zero(caplog):
     tap = trace()
     tap.attach_http(NS(response=NS(headers={})))
     tap.decoded(NS(type="response.in_progress"), False)
-    with caplog.at_level("INFO"):
+    with caplog.at_level("DEBUG"):
         tap.report("close", "sse")
     summary = reports(caplog)[0][2]
     assert not summary["raw_attached"]
@@ -312,7 +312,7 @@ def test_unknown_event_types_do_not_leak_into_stall_diagnostics(caplog):
             assert stream.progress.counts["raw"]["unknown"] > 0
             assert stream.progress.counts["decoded"]["unknown"] > 0
 
-    with caplog.at_level("INFO"):
+    with caplog.at_level("DEBUG"):
         virtual_clock.run(run(), follow=[chatgpt_transport])
     assert "PRIVATE_UNTRUSTED_EVENT_TYPE" not in caplog.text
 
@@ -327,7 +327,7 @@ def test_ws_transport_observes_existing_json_and_tool_export(monkeypatch, caplog
             await h.adapter.close()
         assert h.feeds[0].close.await_count == 1
 
-    with caplog.at_level("INFO"):
+    with caplog.at_level("DEBUG"):
         virtual_clock.run(run(), follow=[chatgpt_transport])
     rows = reports(caplog)
     assert [(a, t) for a, t, _ in rows] == [(1, "close")]
@@ -367,7 +367,7 @@ def test_ws_reuses_existing_json_and_counters_saturate(raw, caplog):
     tap.received_ws(raw, payload)
     tap.decoded(payload, True)
     tap.decoded({"type": "response.in_progress"}, False)
-    with caplog.at_level("INFO"):
+    with caplog.at_level("DEBUG"):
         tap.report("close", "websocket")
     summary = reports(caplog)[0][2]
     assert summary["raw_attached"] and summary["counts"]["raw"]["reasoning_native"] == _CAP

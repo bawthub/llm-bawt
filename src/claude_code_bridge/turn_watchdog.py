@@ -141,6 +141,7 @@ class TurnWatchdog:
         self._max_tool_timeout = float(max_tool_timeout)
         self._clock = clock
         self._on_health = on_health
+        self._last_logged_phase: str | None = None
         # Shared spawn → live-host resolution (SubagentUsage.host_parent), so
         # resumed-agent activity keeps the RUNNING host alive, not its old spawn.
         self._resolve_parent = resolve_parent
@@ -441,8 +442,26 @@ class TurnWatchdog:
             )
         else:
             details = "none"
-        logger.info(
-            "Turn health: request_id=%s session=%s phase=%s "
+        # Heartbeat policy (TASK-2225): DEBUG every interval, INFO when the
+        # phase changes, WARN once a turn is past half its idle limit.
+        if phase == "tool_running":
+            now = self._clock()
+            stalled = any(
+                now - tool.last_activity_at > tool.timeout_seconds / 2
+                for tool in self._active_tools.values()
+            )
+        else:
+            stalled = remaining < self._idle_timeout / 2
+        if stalled:
+            level = logging.WARNING
+        elif phase != self._last_logged_phase:
+            level = logging.INFO
+        else:
+            level = logging.DEBUG
+        self._last_logged_phase = phase
+        logger.log(
+            level,
+            "turn_health req=%s session=%s phase=%s "
             "active_tools=%s deadline_in=%.1fs",
             request_id,
             session_key,

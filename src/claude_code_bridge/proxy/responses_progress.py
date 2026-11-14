@@ -227,7 +227,10 @@ class ResponsesProgress:
                                      or self._exported._discarding),
                 },
             }
-            logger.info("responses_progress request_id=%s attempt=%d transport=%s trigger=%s summary=%s",
+            # Healthy completed streams are DEBUG; anything incomplete or with
+            # observer errors stays INFO for forensics (TASK-2225).
+            healthy = bool(complete) and not self.observer_errors
+            (logger.debug if healthy else logger.info)("responses_progress request_id=%s attempt=%d transport=%s trigger=%s summary=%s",
                         self.request_id, self.attempt,
                         transport if transport in {"sse", "websocket"} else "unknown", trigger,
                         json.dumps(summary, sort_keys=True, separators=(",", ":")))

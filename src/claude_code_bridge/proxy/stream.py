@@ -674,7 +674,7 @@ async def responses_to_anthropic_sse(
                         state.usage_snapshot = (input_tokens, output_tokens, cache_read, cache_create)
                     if on_usage is not None:
                         on_usage(input_tokens, output_tokens, cache_read, cache_create)
-                    logger.info(
+                    logger.debug(
                         "Responses usage: input=%d cached=%d uncached=%d output=%d cache_hit=%.1f%%",
                         input_tokens, cache_read,
                         max(input_tokens - cache_read, 0), output_tokens,

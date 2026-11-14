@@ -566,7 +566,7 @@ async def messages(request: Request) -> JSONResponse | StreamingResponse:
         logger.info("proxy_request_rejected_cancelled request_id=%s", context.request_id)
         raise anthropic_error(499, "Request cancelled", error_type="api_error")
 
-    logger.info(
+    logger.debug(
         "proxy_stream_start request_id=%s provider=%s bot=%s session_hash=%s "
         "upstream_model=%s messages=%d tools=%d",
         context.request_id,

@@ -439,7 +439,10 @@ def _fetch_broker_token(
         token = payload.get("access_token")
         expires_at = payload.get("expires_at")
         if token:
-            logger.info("Fetched Claude access token from app broker (state=%s)", payload.get("state"))
+            state = payload.get("state")
+            (logger.debug if state == "ok" else logger.info)(
+                "claude_token_fetch state=%s", state,
+            )
         return token or None, expires_at if isinstance(expires_at, int) else None
     except Exception as e:
         logger.warning("Claude token broker unreachable: %s", e)

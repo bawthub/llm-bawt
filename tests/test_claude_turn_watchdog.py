@@ -360,3 +360,15 @@ def test_task_progress_refreshes_workflow_inactivity_deadline() -> None:
     deadline, phase = watchdog._deadline(wait_started_at=350.0)
     assert phase == "tool_running"
     assert deadline == 680.0
+
+
+def test_turn_health_log_levels_follow_policy(caplog) -> None:
+    """TASK-2225: heartbeat is DEBUG, a phase change INFO, past half the idle limit WARN."""
+    wd = TurnWatchdog(IDLE_TIMEOUT_S, clock=lambda: 0.0)
+    idle = wd._idle_timeout
+    with caplog.at_level("DEBUG", logger="claude_code_bridge"):
+        wd._log_health(request_id="r1", session_key="al:nick", phase="waiting", remaining=idle)
+        wd._log_health(request_id="r1", session_key="al:nick", phase="waiting", remaining=idle)
+        wd._log_health(request_id="r1", session_key="al:nick", phase="waiting", remaining=idle / 2 - 0.01)
+    levels = [r.levelname for r in caplog.records if r.getMessage().startswith("turn_health")]
+    assert levels == ["INFO", "DEBUG", "WARNING"]
