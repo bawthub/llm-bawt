@@ -50,11 +50,18 @@ class Message:
         tool_call_id = data.get("tool_call_id")
         db_id = data.get("db_id")
         session_id = data.get("session_id")
+        content_parts = data.get("content_parts")
+        if content_parts is None and isinstance(data.get("content"), list):
+            content_parts = [
+                item for item in data["content"]
+                if isinstance(item, dict) and item.get("type") != "text"
+            ] or None
         return cls(
             role, content, timestamp, tool_calls, tool_call_id, db_id=db_id,
             session_id=session_id,
             author_entity_type=data.get("author_entity_type"),
             author_entity_id=data.get("author_entity_id"),
+            content_parts=content_parts,
         )
 
     @staticmethod

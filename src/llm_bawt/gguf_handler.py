@@ -165,49 +165,25 @@ def _select_gguf_file(repo_id: str, gguf_files_info: list[dict]) -> str | None:
                 return None
 
 def _download_gguf_file(repo_id: str, filename: str, config: Config, max_retries: int = 3) -> bool:
-    if importlib.util.find_spec("huggingface_hub") is None:
-        console.print("[bold red]Error:[/bold red] `huggingface-hub` required for download but not found.")
-        return False
-    from huggingface_hub import hf_hub_download
+    """Download through :func:`get_or_download_gguf_model`, retrying failures."""
     import time
 
-    console.print(f"Downloading '[yellow]{filename}[/yellow]'...")
-    cache_dir = pathlib.Path(config.MODEL_CACHE_DIR).expanduser()
-    model_repo_cache_dir = cache_dir / repo_id
-    local_model_path = model_repo_cache_dir / filename
-
-    if local_model_path.is_file():
-         console.print("[dim]File already exists in cache.[/dim]")
-         return True
-    
-    model_repo_cache_dir.mkdir(parents=True, exist_ok=True)
-    
     for attempt in range(1, max_retries + 1):
+        if attempt > 1:
+            console.print(f"[yellow]Retry {attempt}/{max_retries} in 5 seconds...[/yellow]")
+            time.sleep(5)
         try:
-            if attempt > 1:
-                console.print(f"[yellow]Retry {attempt}/{max_retries}...[/yellow]")
-            downloaded_path_str = hf_hub_download(
-                repo_id=repo_id,
-                filename=filename,
-                local_dir=str(model_repo_cache_dir),
-            )
-            console.print(f"[green]Download complete:[/green] {downloaded_path_str}")
-            return True
+            if get_or_download_gguf_model(repo_id, filename, config):
+                return True
         except KeyboardInterrupt:
             console.print("\n[red]Download cancelled.[/red]")
             return False
-        except Exception as e:
-            error_msg = str(e)
-            if attempt < max_retries:
-                console.print(f"[yellow]Download error (attempt {attempt}/{max_retries}):[/yellow] {error_msg}")
-                console.print("[dim]Waiting 5 seconds before retry...[/dim]")
-                time.sleep(5)
-            else:
-                console.print(f"[bold red]Download failed after {max_retries} attempts:[/bold red] {error_msg}")
-                console.print("Cannot add model to config without successful download.")
-                return False
-    
+        if importlib.util.find_spec("huggingface_hub") is None:
+            return False
+    console.print(f"[bold red]Download failed after {max_retries} attempts.[/bold red]")
+    console.print("Cannot add model to config without successful download.")
     return False
+
 
 def _add_to_catalog(repo_id: str, selected_filename: str, config: Config, service_client) -> bool:
     """Register a downloaded GGUF file in the model catalog (TASK-2282)."""

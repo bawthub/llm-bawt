@@ -360,7 +360,11 @@ class HistoryManager:
         if not self._file_owned_or_absent():
             return
         try:
-            message_dicts = [msg.to_dict() for msg in self.messages]
+            message_dicts = [
+                {**msg.to_dict(), "content_parts": msg.content_parts} if msg.content_parts
+                else msg.to_dict()
+                for msg in self.messages
+            ]
             payload: Any = message_dicts
             if self._file_owner is not None:
                 payload = {"owner": self._file_owner, "messages": message_dicts}

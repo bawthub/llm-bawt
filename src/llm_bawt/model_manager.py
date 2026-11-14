@@ -22,7 +22,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import pytz
 import yaml
 from rich.console import Console
 from rich.prompt import Confirm, Prompt
@@ -485,7 +484,7 @@ class ModelManager:
         Only overwrites descriptions that match the auto-generated pattern
         (contain 'Created:' or 'Modified:').  Custom descriptions are left alone.
         """
-        tz = pytz.timezone('US/Eastern')
+        tz = None  # the host's local timezone
         count = 0
         for m in api_models:
             mid = m['id']
@@ -522,7 +521,7 @@ class ModelManager:
         new_models: List[Dict[str, Any]],
         provider_type: str = PROVIDER_OPENAI,
     ) -> List[Dict[str, Any]]:
-        tz = pytz.timezone('US/Eastern')
+        tz = None  # the host's local timezone
         console.print("New models detected:")
         new_models.sort(key=lambda m: m['id'])
         choices_map = {str(idx + 1): model for idx, model in enumerate(new_models)}
@@ -551,7 +550,7 @@ class ModelManager:
         return selected
 
     def _prepare_new_model_entries(self, provider_type: str, selected_models: List[Dict[str, Any]]) -> int:
-        tz = pytz.timezone('US/Eastern')
+        tz = None  # the host's local timezone
         existing = set(self.models_data['models'].keys())
         count = 0
         for m in selected_models:
@@ -745,8 +744,6 @@ class ModelManager:
         normalized = alias.strip().lower()
         if normalized.startswith("grok"):
             return PROVIDER_GROK
-        if normalized.startswith("gpt") or normalized.startswith(("o1", "o3", "o4")):
-            return PROVIDER_OPENAI
         return PROVIDER_OPENAI
 
     def set_context_window(self, alias: str, context_window: int) -> bool:
@@ -998,6 +995,7 @@ def list_models(config: Config, service_mode: bool | None = None):
             manager.config = config
             manager.local_only = True
             manager.models_data = {"models": {}}
+            manager.config_path = "(catalog unavailable)"
         manager.list_available_models()
 
 
