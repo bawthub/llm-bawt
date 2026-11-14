@@ -153,6 +153,44 @@ def test_video_owner_refused(store):
     assert err.value.code == "gpu_not_idle"
 
 
+
+def test_asleep_tts_admitted_and_still_asleep_after_release(store):
+    """TASK-2297: an idle-slept TTS is admitted; release keeps it asleep."""
+    set_state(store.engine, owner="asleep")
+    reserve(store)
+    assert (store.status().phase, store.status().owner) == ("gpu_reconciling", "asleep")
+    assert store.release_gpu_reconcile("k1")
+    state = store.status()
+    assert (state.phase, state.owner, state.reconcile_key) == ("idle", "asleep", None)
+
+
+def test_tts_wake_refused_while_reconciling_asleep(store):
+    set_state(store.engine, owner="asleep")
+    reserve(store)
+    with pytest.raises(HandoffConflict) as err:
+        with Session(store.engine) as session, session.begin():
+            GpuHandoffFence.tts_wake("w1")(session)
+    assert err.value.code == "tts_not_asleep"
+    assert (store.status().phase, store.status().owner) == ("gpu_reconciling", "asleep")
+
+
+@pytest.mark.parametrize("phase", ["tts_sleeping", "tts_waking"])
+def test_asleep_tts_mid_power_change_refused(store, phase):
+    set_state(store.engine, owner="asleep", phase=phase)
+    with pytest.raises(HandoffConflict) as err:
+        reserve(store)
+    assert err.value.code == "gpu_not_idle"
+
+
+def test_asleep_tts_with_open_video_claims_refused(store):
+    from llm_bawt.media.gpu_handoff_store import _video_jobs
+    set_state(store.engine, owner="asleep")
+    with store.engine.begin() as conn:
+        conn.execute(_video_jobs.insert().values(id="v1", generation=0))
+    with pytest.raises(HandoffConflict) as err:
+        reserve(store)
+    assert err.value.code == "active_video_claims" and store.status().reconcile_key is None
+
 def test_release_is_key_checked_and_idempotent(store):
     reserve(store)
     assert not store.release_gpu_reconcile("other")

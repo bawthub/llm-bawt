@@ -303,9 +303,11 @@ class GpuHandoffFence:
                 return  # Same request: the unique key replays the existing job.
             raise HandoffConflict("A GPU service reconcile is already in progress",
                                   code="gpu_reconcile_in_progress")
-        if row["phase"] != "idle" or row["owner"] not in ("voice", "unknown"):
-            raise HandoffConflict("GPU service reconciles only while voice or no one owns an idle GPU",
-                                  code="gpu_not_idle")
+        # TASK-2297: an idle-slept TTS (asleep) is the least loaded GPU state. Release
+        # leaves owner untouched, and a wake needs phase=idle, so it waits it out.
+        if row["phase"] != "idle" or row["owner"] not in ("voice", "unknown", ASLEEP_OWNER):
+            raise HandoffConflict("GPU service reconciles only while voice, a sleeping TTS or no one "
+                                  "owns an idle GPU", code="gpu_not_idle")
         if conn.execute(select(_video_jobs.c.id).limit(1)).first() is not None:
             raise HandoffConflict("Video render claims are still open", code="active_video_claims")
         _changed(conn)
