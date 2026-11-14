@@ -330,9 +330,9 @@ class GitHubReleaseVerifier(ReleaseVerifier):
             raise ReleaseVerificationError("GitHub compare did not resolve commit ancestry")
         status = compare.get("status")
         base = (compare.get("merge_base_commit") or {}).get("sha")
-        if status not in ("identical", "behind", "ahead", "diverged") or not re.fullmatch(
-                r"[0-9a-f]{40}", base or ""):
+        if not re.fullmatch(r"[0-9a-f]{40}", base or ""):
             raise ReleaseVerificationError("GitHub compare did not resolve commit ancestry")
+        # An unrecognised status never proves containment; it refuses as "not on".
         return status in ("identical", "behind") and base == sha, status
 
     def verify(self, spec, args):
