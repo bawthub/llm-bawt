@@ -266,3 +266,14 @@ def test_routes_sleep_and_answer_status(client, power):
     power.health.instances = stopped()
     done = client.get(f"{url}/sleep/s1").json()
     assert (done["outcome"], done["owner"]) == ("released", "asleep")
+
+
+def test_gpu_status_names_the_power_request_a_restarted_backend_must_resume():
+    from llm_bawt.service.routes.media import _fence_request_id, _power_fence
+
+    assert _power_fence("tts-sleep:s1") == {"action": "sleep", "request_id": "s1"}
+    assert _power_fence("tts-wake:w1") == {"action": "wake", "request_id": "w1"}
+    assert _power_fence("tts-restart:r1") is None and _power_fence(None) is None
+    assert _fence_request_id("tts-restart:r1", "tts-restart:") == "r1"
+    # A power fence is no longer misreported as a restart request id.
+    assert _fence_request_id("tts-sleep:s1", "tts-restart:") is None

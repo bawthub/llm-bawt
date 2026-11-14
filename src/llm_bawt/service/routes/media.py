@@ -24,7 +24,12 @@ from fastapi.responses import Response
 from ...media.clients import MediaClient, media_provider_registry
 from ...media.db import MediaGenerationStore
 from ...media.generation_service import MediaGenerationService
-from ...media.gpu_handoff_store import TTS_RESTART_KEY_PREFIX, GpuHandoffStore
+from ...media.gpu_handoff_store import (
+    TTS_RESTART_KEY_PREFIX,
+    TTS_SLEEP_KEY_PREFIX,
+    TTS_WAKE_KEY_PREFIX,
+    GpuHandoffStore,
+)
 from ...media.gpu_preflight import GpuPreflight
 from ...media.object_store import BlobBackendUnavailable
 from ...media.schemas import (
@@ -309,6 +314,18 @@ async def local_video_model_status():
     return await _get_video_client("local-video").model_status()
 
 
+def _fence_request_id(key: str | None, prefix: str) -> str | None:
+    return key[len(prefix):] if key and key.startswith(prefix) else None
+
+
+def _power_fence(key: str | None) -> dict | None:
+    for action, prefix in (("sleep", TTS_SLEEP_KEY_PREFIX), ("wake", TTS_WAKE_KEY_PREFIX)):
+        request_id = _fence_request_id(key, prefix)
+        if request_id:
+            return {"action": action, "request_id": request_id}
+    return None
+
+
 @router.get("/v1/media/local-video/gpu")
 async def local_video_gpu_status():
     """Observations, not a switch permit. Stale/failed telemetry is explicit."""
@@ -346,8 +363,10 @@ async def local_video_gpu_status():
         "pending_target": state.target, "pending_actions": state.actions,
         "next_action": state.next_action, "pending_action": state.pending_action,
         "last_job_id": state.last_job_id, "last_error": state.last_error,
-        "tts_restart_request_id": (state.tts_restart_key.removeprefix(TTS_RESTART_KEY_PREFIX)
-                                   if state.tts_restart_key else None),
+        "tts_restart_request_id": _fence_request_id(state.tts_restart_key, TTS_RESTART_KEY_PREFIX),
+        # TASK-1678: the sleep/wake whose status read releases the fence, so a
+        # restarted voice backend resumes polling it instead of starting another.
+        "tts_power": _power_fence(state.tts_restart_key),
         "gpu": gpu, "model": model, "active_video_jobs": active_video_jobs, "video_claims": video_claims,
         "preflight": preflight,
         "handoff_available": True,
