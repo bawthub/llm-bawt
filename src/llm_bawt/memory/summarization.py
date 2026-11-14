@@ -1123,10 +1123,12 @@ class HistorySummarizer:
 
             existing_ids = meta.get("message_ids", [])
             if isinstance(existing_ids, list) and existing_ids:
-                # Exact match or any overlap with current source messages.
-                if existing_ids == session.message_ids or bool(chunk_ids.intersection(existing_ids)):
+                # Explicit sources are authoritative: replace only on overlap,
+                # never fall through to the time-window fallbacks (another
+                # thread's or an adjacent chunk's summary must survive).
+                if chunk_ids.intersection(existing_ids):
                     replace_ids.append(row.id)
-                    continue
+                continue
 
             # Legacy/metadata-light fallback: overlapping session time window.
             try:
@@ -1567,54 +1569,72 @@ class HistorySummarizer:
         self,
         start_timestamp: float | None = None,
         end_timestamp: float | None = None,
+        keep_ids: set[str] | None = None,
     ) -> int:
-        """Delete historical summaries in optional time range.
+        """Delete pre-existing historical summaries in an optional time range.
 
-        Active-session summaries are never deleted by this helper.
+        Runs after a rebuild created replacements (``keep_ids``) and in one
+        transaction: each deleted summary's source messages that no kept
+        summary covers are marked unsummarized again, so ordinary
+        summarization picks them back up. Active-session summaries, the new
+        summaries, and legacy summaries without recorded source IDs (whose
+        sources could not be restored) are kept.
         """
         from sqlalchemy import text
 
-        with self._backend.engine.connect() as conn:
-            sql = text(
-                f"""
-                SELECT id, summary_metadata, timestamp
-                FROM {self._backend._messages_table_name}
-                WHERE role = 'summary'
-                ORDER BY timestamp ASC
-                """
-            )
-            rows = conn.execute(sql).fetchall()
+        keep = {str(i) for i in (keep_ids or set())}
+        table = self._backend._messages_table_name
+        with self._backend.engine.begin() as conn:
+            rows = conn.execute(
+                text(
+                    f"""
+                    SELECT id, summary_metadata, timestamp
+                    FROM {table}
+                    WHERE role = 'summary'
+                    ORDER BY timestamp ASC
+                    """
+                )
+            ).fetchall()
 
-            to_delete: list[str] = []
+            covered: set[str] = set()
+            candidates: list[tuple[str, list[str]]] = []
             for row in rows:
-                ts = float(row.timestamp or 0)
-                if start_timestamp is not None and ts < start_timestamp:
-                    continue
-                if end_timestamp is not None and ts > end_timestamp:
-                    continue
-
                 meta = row.summary_metadata or {}
                 if isinstance(meta, str):
                     try:
                         meta = json.loads(meta)
                     except Exception:
                         meta = {}
-                if isinstance(meta, dict) and meta.get("summary_type") == "active_session":
+                if not isinstance(meta, dict):
+                    meta = {}
+                source_ids = meta.get("message_ids")
+                source_ids = [str(i) for i in source_ids] if isinstance(source_ids, list) else []
+                if str(row.id) in keep:
+                    covered.update(source_ids)
                     continue
+                if meta.get("summary_type") == "active_session" or not source_ids:
+                    continue
+                ts = float(row.timestamp or 0)
+                if start_timestamp is not None and ts < start_timestamp:
+                    continue
+                if end_timestamp is not None and ts > end_timestamp:
+                    continue
+                candidates.append((str(row.id), source_ids))
 
-                to_delete.append(row.id)
-
-            if not to_delete:
+            if not candidates:
                 return 0
 
-            delete_sql = text(
-                f"""
-                DELETE FROM {self._backend._messages_table_name}
-                WHERE id = ANY(:ids)
-                """
+            to_delete = [summary_id for summary_id, _ in candidates]
+            restore = sorted({i for _, ids in candidates for i in ids} - covered)
+            conn.execute(
+                text(f"DELETE FROM {table} WHERE id = ANY(:ids)"),
+                {"ids": to_delete},
             )
-            conn.execute(delete_sql, {"ids": to_delete})
-            conn.commit()
+            if restore:
+                conn.execute(
+                    text(f"UPDATE {table} SET summarized = FALSE WHERE id = ANY(:ids)"),
+                    {"ids": restore},
+                )
             return len(to_delete)
 
     def _cleanup_active_session_summaries(self) -> int:
@@ -1929,12 +1949,8 @@ class HistorySummarizer:
         if session_limit > 0:
             eligible = eligible[-session_limit:]
 
+        # Purge runs only after replacements exist (see end of method).
         purged_count = 0
-        if purge_existing:
-            purged_count = self._purge_historical_summaries(
-                start_timestamp=start_timestamp,
-                end_timestamp=end_timestamp,
-            )
 
         if not eligible:
             return {
@@ -1997,6 +2013,18 @@ class HistorySummarizer:
                 except Exception as e:
                     logger.error(f"Error rebuilding session: {e}")
                     errors.append(safe_error_text(e))
+
+        if purge_existing and created_count > 0:
+            new_ids = {str(r["summary_id"]) for r in results if r.get("success") and r.get("summary_id")}
+            try:
+                purged_count = self._purge_historical_summaries(
+                    start_timestamp=start_timestamp,
+                    end_timestamp=end_timestamp,
+                    keep_ids=new_ids,
+                )
+            except Exception as e:
+                logger.error(f"Historical summary purge failed; nothing purged: {e}")
+                errors.append(f"Purge: {safe_error_text(e)}")
 
         return {
             "sessions_targeted": len(eligible),

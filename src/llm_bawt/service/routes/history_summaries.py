@@ -432,7 +432,7 @@ def rebuild_history_summaries(
     use_heuristic: bool = Query(False, description="Fall back to heuristic if LLM fails"),
     start_ts: float | None = Query(None, description="Optional Unix start timestamp filter"),
     end_ts: float | None = Query(None, description="Optional Unix end timestamp filter"),
-    purge_existing: bool = Query(False, description="Delete existing historical summaries in range before rebuild"),
+    purge_existing: bool = Query(False, description="After a successful rebuild, delete other historical summaries in range and mark their unreplaced source messages for re-summarization"),
     model: str | None = Query(None, description="Optional model alias override"),
 ):
     """Rebuild summaries for the last N eligible sessions from original history."""
