@@ -128,6 +128,14 @@ def test_mcp_cancel_cannot_bypass_generic_route(delivery_api, monkeypatch):
 
 @pytest.fixture
 def history_backend(engine):
+    from llm_bawt.memory.postgresql import sessions_table
+
+    sessions_table.create(engine)
+    with engine.begin() as conn:
+        conn.execute(insert(sessions_table), [
+            {"id": session_id, "bot_id": "test", "user_id": "owner", "status": "active"}
+            for session_id in ("personal", "automation")
+        ])
     table = Table("messages_test", MetaData(),
                   Column("id", String, primary_key=True), Column("role", String),
                   Column("content", String), Column("timestamp", Float),
@@ -137,6 +145,7 @@ def history_backend(engine):
                   Column("summary_metadata", JSON), Column("created_at", DateTime))
     table.metadata.create_all(engine)
     backend = PostgreSQLMessageMixin()
+    backend.bot_id = "test"
     backend.engine, backend.messages_table, backend._messages_table_name = engine, table, table.name
     backend._message_rows = MessageRowStore(engine, table, table.name)
     manager = PostgreSQLShortTermManager.__new__(PostgreSQLShortTermManager)
@@ -169,11 +178,11 @@ def test_prompt_request_persists_atomic_extraction_policy_for_both_roles(history
         rows = conn.execute(select(backend.messages_table)).mappings().all()
     assert all(row["processed"] is (not extract) for row in rows)
     assert all(row["session_id"] == "automation" for row in rows)
-    assert len(backend.get_unprocessed_messages()) == (2 if extract else 0)
+    assert len(backend.get_unprocessed_messages(user_id="owner")) == (2 if extract else 0)
     assert history._db_backend._session_id_cache == "personal"
     # Stable-id updates cannot revive an excluded row even with default consent.
     backend.add_message("user", "user", "edited", 2)
-    assert len(backend.get_unprocessed_messages()) == (2 if extract else 0)
+    assert len(backend.get_unprocessed_messages(user_id="owner")) == (2 if extract else 0)
 
 
 def test_excluded_message_insert_failure_leaves_no_extractable_row(history_backend):
@@ -186,7 +195,7 @@ def test_excluded_message_insert_failure_leaves_no_extractable_row(history_backe
     with pytest.raises(RuntimeError, match="injected insert failure"):
         history.add_message("user", "Secret", message_id="failed", session_id="automation")
     event.remove(backend.engine, "before_cursor_execute", fail_insert)
-    assert backend.get_unprocessed_messages() == []
+    assert backend.get_unprocessed_messages(user_id="owner") == []
     with backend.engine.connect() as conn:
         assert conn.execute(select(backend.messages_table)).first() is None
 
@@ -198,7 +207,9 @@ def test_extraction_policy_is_request_local(history_backend):
     other = PromptHistoryManager.__new__(PromptHistoryManager)
     other.messages, other._db_backend = [], history._db_backend
     other.add_message("user", "Allowed", message_id="ordinary", session_id="personal")
-    assert [row["id"] for row in backend.get_unprocessed_messages()] == ["ordinary"]
+    assert [row["id"] for row in backend.get_unprocessed_messages(user_id="owner")] == ["ordinary"]
+    assert backend.get_unprocessed_messages() == []
+    assert backend.get_unprocessed_messages(user_id="other-owner") == []
 
 
 @pytest.mark.parametrize("excluded_role", ["user", "assistant"])

@@ -116,7 +116,8 @@ class _Backend:
     def add_message(self, **kwargs):
         self.writes.append(kwargs)
 
-    def get_unprocessed_messages(self, limit=100):
+    def get_unprocessed_messages(self, limit=100, *, user_id=None):
+        self.read_scope = (limit, user_id)
         return self.rows
 
 
@@ -152,7 +153,8 @@ def test_storage_refuses_untrusted_or_mixed_authors(kwargs):
 def test_unprocessed_reader_hydrates_system_rows():
     backend = _Backend([{"id": "m1", "role": "user", "content": "x", "timestamp": 1.0,
                          "author_entity_type": "system", "author_entity_id": MCP_ID}])
-    [message] = asyncio.run(_storage(backend).get_unprocessed_messages(bot_id=BOT))
+    [message] = asyncio.run(_storage(backend).get_unprocessed_messages(bot_id=BOT, user_id=USER_ID))
+    assert backend.read_scope == (100, USER_ID)
     assert message.author == AuthorReference("system", MCP_ID)
 
 

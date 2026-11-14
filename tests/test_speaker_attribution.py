@@ -105,9 +105,14 @@ def test_mcp_storage_unprocessed_adapter_carries_authorship():
             {"id": "x1", "role": "user", "content": "legacy", "timestamp": 3.0,
              "session_id": "s", "author_entity_type": None, "author_entity_id": None}]
     storage = MemoryStorage.__new__(MemoryStorage)
+    calls = []
+    def unprocessed(self, limit=100, *, user_id=None):
+        calls.append((limit, user_id))
+        return rows
     storage._get_backend = lambda *a, **k: type(
-        "B", (), {"get_unprocessed_messages": lambda self, limit=100: rows})()
-    msgs = asyncio.run(storage.get_unprocessed_messages(bot_id="t"))
+        "B", (), {"get_unprocessed_messages": unprocessed})()
+    msgs = asyncio.run(storage.get_unprocessed_messages(bot_id="t", user_id="owner"))
+    assert calls == [(100, "owner")]
     assert [speaker_of(m).kind for m in msgs] == [BOT, USER, USER]
     assert speaker_of(msgs[0]).bot_id == "snark"
     assert speaker_of(msgs[0].to_dict()).kind == BOT
