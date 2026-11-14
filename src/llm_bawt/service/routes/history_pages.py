@@ -8,14 +8,15 @@ from ..dependencies import get_media_asset_store, get_service
 from ..logging import get_service_logger
 from ..http_errors import internal_error
 from ..schemas import HistoryClearResponse, HistoryMessage, HistoryResponse
-from .service_auth import require_service_token
+from .service_auth import require_mutation_service_token
 from .history_scheduler import hydrate_scheduler_for_page
 from .history_approval_notice import hydrate_approver_notices_for_page
 from .history_resumption import hydrate_resumptions_for_page
 
 read_router = APIRouter()
-# TASK-2279: history mutations need the service credential (BawtHub's server).
-mutation_router = APIRouter(dependencies=[Depends(require_service_token)])
+# TASK-2279: history mutations need the service credential when the
+# history_mutation_service_auth setting is on.
+mutation_router = APIRouter(dependencies=[Depends(require_mutation_service_token)])
 log = get_service_logger(__name__)
 
 def _fetch_attachments_via_shared_engine(

@@ -29,6 +29,31 @@ def require_service_token(authorization: str | None = Header(default=None)) -> N
     raise HTTPException(401, "unauthorized", headers={**NO_STORE, "WWW-Authenticate": "Bearer"})
 
 
+MUTATION_AUTH_SETTING = "history_mutation_service_auth"
+
+
+def mutation_auth_required() -> bool:
+    """Whether history/memory mutations need the service bearer (TASK-2279).
+
+    A global runtime setting, default off, so a surface that still reaches the
+    backend without BawtHub's server keeps working until it moves behind it.
+    """
+    from llm_bawt.runtime_setting_resolution import resolve_global_runtime_setting
+
+    from ..dependencies import get_service
+
+    value = resolve_global_runtime_setting(get_service().config, MUTATION_AUTH_SETTING, False)
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
+def require_mutation_service_token(authorization: str | None = Header(default=None)) -> None:
+    """``require_service_token`` when the enforcement setting is on; else a no-op."""
+    if mutation_auth_required():
+        require_service_token(authorization)
+
+
 async def read_body(request: Request, model: type[Body]) -> Body:
     """The request body as ``model``, parsed after the caller's auth check.
 
@@ -43,4 +68,6 @@ async def read_body(request: Request, model: type[Body]) -> Body:
         raise HTTPException(422, detail, headers=NO_STORE) from None
 
 
-__all__ = ["NO_STORE", "read_body", "require_service_token"]
+__all__ = [
+    "NO_STORE", "read_body", "require_mutation_service_token", "require_service_token",
+]

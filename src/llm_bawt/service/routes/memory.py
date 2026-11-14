@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from llm_bawt.memory.errors import MemoryUpdateConflictError, MemoryUpdateDuplicateError
 
 from ..dependencies import get_effective_bot_id, get_service, require_memory_client
-from .service_auth import require_service_token
+from .service_auth import require_mutation_service_token
 from ..logging import get_service_logger
 from ..http_errors import internal_error
 from ..schemas import (
@@ -50,8 +50,9 @@ def _scoped_client(bot_id: str, user_id: str | None):
 
 
 # TASK-2279: mutations need the service credential (BawtHub's server, never a
-# bot); a pinned user_id narrows them to that user's own rows.
-_SERVICE_ONLY = [Depends(require_service_token)]
+# bot) when the history_mutation_service_auth setting is on; a pinned user_id
+# always narrows them to that user's own rows.
+_SERVICE_ONLY = [Depends(require_mutation_service_token)]
 
 
 def _build_preview_response(bot_id: str, messages: list[dict]) -> MessagesPreviewResponse:

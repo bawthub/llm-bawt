@@ -763,6 +763,20 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
         label="Playground trash retention (days)",
         help="A Playground artifact in Trash is deleted forever this many days after it was trashed.",
     ),
+    # TASK-2279: global only; read per request by the history/memory mutation routes.
+    "history_mutation_service_auth": SettingDefinition(
+        key="history_mutation_service_auth",
+        type="bool",
+        default=False,
+        applies_to=(),
+        storage=STORAGE_RUNTIME_SETTING,
+        label="Require the service credential for history/memory changes",
+        help=(
+            "When on, deleting, forgetting, restoring and clearing history or memories "
+            "over HTTP needs BawtHub's service credential. Turn on once every BawtHub "
+            "surface reaches these routes through its server."
+        ),
+    ),
 }
 
 
