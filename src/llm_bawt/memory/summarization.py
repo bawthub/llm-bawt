@@ -522,7 +522,9 @@ def find_budget_overflow_sessions(
     """Find sessions whose messages would be dropped from context due to budget overflow.
 
     Instead of using a time-based cutoff, this computes which messages won't fit
-    in the token budget and returns the sessions they belong to.
+    in each durable thread's token budget and returns the sessions they belong to.
+    Each thread retains its own protected recent turns. Unlinked legacy rows
+    share a separate bucket with the existing timestamp-gap fallback.
 
     Args:
         all_messages: All message dicts (user/assistant only, no summaries or recalled).
@@ -536,6 +538,27 @@ def find_budget_overflow_sessions(
     """
     if max_context_tokens <= 0 or not all_messages:
         return []
+
+    all_messages = [msg for msg in all_messages if msg.get("role") != "summary"]
+    by_thread: dict[str | None, list[dict]] = {}
+    for msg in all_messages:
+        sid = msg.get("session_id")
+        by_thread.setdefault(str(sid) if sid else None, []).append(msg)
+    if len(by_thread) > 1:
+        eligible = [
+            session
+            for messages in by_thread.values()
+            for session in find_budget_overflow_sessions(
+                messages,
+                session_gap_seconds=session_gap_seconds,
+                max_context_tokens=max_context_tokens,
+                protected_recent_turns=protected_recent_turns,
+                min_messages_per_session=min_messages_per_session,
+            )
+        ]
+        return sorted(eligible, key=lambda session: (
+            session.start_timestamp, session.session_id or "", tuple(map(str, session.message_ids)),
+        ))
 
     # Sort chronologically
     sorted_msgs = sorted(all_messages, key=lambda m: (m.get("timestamp", 0), str(m.get("id", ""))))

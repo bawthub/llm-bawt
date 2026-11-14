@@ -371,7 +371,7 @@ async def test_split_task_quotes_keep_body_coordinates_for_each_piece(include_he
         [Fake(Reader(task(42, description=body)))],
         Model([{"source": "tasks", "id": "TASK-42", "quote": quote}]),
     ).recall(RecallRequest(query="retry rewrite", sources=("tasks",), task_ids=("TASK-42",),
-                          output_tokens=1800), SCOPE)
+                          output_tokens=1600), SCOPE)
     assert result["status"] == "ok"
     findings = result["findings"]
     assert len(findings) > 1 and "".join(item["quote"] for item in findings) == quote

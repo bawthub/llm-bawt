@@ -140,6 +140,60 @@ def test_find_budget_overflow_sessions_respects_min_messages() -> None:
     assert len(result) == 0
 
 
+def _thread_messages(sid, start, count, size):
+    return [{**_msg(f"{sid}-{i}", "user" if i % 2 == 0 else "assistant", "x" * size, start + i),
+             "session_id": sid} for i in range(count)]
+
+
+def test_busy_thread_does_not_summarize_a_quiet_threads_recent_messages():
+    quiet = _thread_messages("quiet", 1, 4, 100)
+    busy = _thread_messages("busy", 20, 12, 500)
+    result = find_budget_overflow_sessions(
+        quiet + busy, max_context_tokens=900, protected_recent_turns=1, min_messages_per_session=2,
+    )
+    assert result and {session.session_id for session in result} == {"busy"}
+    assert all(message["id"] not in {row["id"] for row in busy[-2:]}
+               for session in result for message in session.messages)
+
+
+def test_individually_fitting_threads_do_not_overflow_when_combined():
+    first = _thread_messages("first", 1, 6, 100)
+    second = _thread_messages("second", 20, 6, 100)
+    assert find_budget_overflow_sessions(
+        first + second, max_context_tokens=800, protected_recent_turns=1, min_messages_per_session=2,
+    ) == []
+
+
+def test_each_overflowing_thread_preserves_its_own_recent_pairs_and_result_order():
+    first = _thread_messages("first", 1, 8, 300)
+    second = _thread_messages("second", 20, 8, 300)
+    result = find_budget_overflow_sessions(
+        second + first, max_context_tokens=900, protected_recent_turns=1, min_messages_per_session=2,
+    )
+    assert [session.session_id for session in result] == ["first", "second"]
+    protected = {row["id"] for row in first[-2:] + second[-2:]}
+    assert all(not protected.intersection(session.message_ids) for session in result)
+
+
+def test_summary_rows_do_not_consume_any_threads_budget():
+    rows = _thread_messages("first", 1, 6, 100) + _thread_messages("second", 20, 6, 100)
+    rows.append({**_msg("summary", "summary", "x" * 10000, 100), "session_id": "first"})
+    assert find_budget_overflow_sessions(
+        rows, max_context_tokens=800, protected_recent_turns=1, min_messages_per_session=2,
+    ) == []
+
+
+def test_legacy_bucket_keeps_gap_fallback_and_does_not_share_durable_thread_budget():
+    legacy = _thread_messages(None, 1, 6, 300)
+    legacy += _thread_messages("", 8000, 6, 300)
+    durable = _thread_messages("durable", 16000, 4, 100)
+    kwargs = {"max_context_tokens": 900, "protected_recent_turns": 1, "min_messages_per_session": 2}
+    expected = find_budget_overflow_sessions(legacy, **kwargs)
+    assert expected and all(session.session_id is None for session in expected)
+    result = find_budget_overflow_sessions(durable + legacy, **kwargs)
+    assert [session.message_ids for session in result] == [session.message_ids for session in expected]
+
+
 def test_prioritize_summarizable_sessions_orders_by_estimated_savings() -> None:
     now = time.time() - 7200
     short_session = _session(
