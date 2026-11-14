@@ -317,23 +317,6 @@ class MediaAssetStore:
             row = conn.execute(sql, {"sha": sha256}).mappings().first()
             return dict(row) if row else None
 
-    def list_by_owner(
-        self,
-        owner_user_id: str,
-        *,
-        limit: int = 50,
-        offset: int = 0,
-    ) -> list[dict[str, Any]]:
-        sql = text(
-            f"SELECT * FROM {TABLE_NAME} "
-            f"WHERE owner_user_id = :owner "
-            f"ORDER BY created_at DESC LIMIT :limit OFFSET :offset"
-        )
-        params = {"owner": owner_user_id, "limit": limit, "offset": offset}
-        with self.engine.connect() as conn:
-            rows = conn.execute(sql, params).mappings().all()
-            return [dict(r) for r in rows]
-
     def browse(
         self, *, q: str = "", kind: str | None = None,
         source: str | None = None, limit: int = 48, offset: int = 0,

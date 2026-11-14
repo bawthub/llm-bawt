@@ -130,27 +130,6 @@ class RedisPublisher:
             logger.exception("Failed to publish event to Redis stream %s", stream_key)
             return None
 
-    def publish_history(self, bot_id: str, role: str, content: str) -> str | None:
-        """Publish a history-persist command for the main app to consume."""
-        if not self._connected:
-            return None
-        try:
-            fields = {
-                "bot_id": bot_id,
-                "role": role,
-                "content": content,
-            }
-            stream_id = self._redis.xadd(
-                HISTORY_STREAM,
-                fields,
-                maxlen=1000,
-                approximate=True,
-            )
-            return stream_id
-        except Exception:
-            logger.exception("Failed to publish history command")
-            return None
-
     def publish_run_event(self, request_id: str, event: AgentEvent) -> str | None:
         """Publish an event to a per-run response stream for the requesting client."""
         if not self._connected:

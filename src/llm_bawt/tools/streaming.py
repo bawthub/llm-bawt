@@ -99,15 +99,6 @@ _REACT_LINE_MARKERS = (
 )
 
 
-def _contains_react_marker(text: str) -> bool:
-    """Check if text contains a ReAct marker that should stop streaming."""
-    lower = text.lower()
-    for marker in _REACT_LINE_MARKERS:
-        if marker in lower:
-            return True
-    return False
-
-
 def stream_with_tools(
     messages: list["Message"],
     stream_fn: Callable[[list["Message"], list[str] | None], Iterator[str]],

@@ -182,17 +182,6 @@ class MediaGenerationStore:
             rows = conn.execute(list_sql, params).mappings().all()
             return [dict(r) for r in rows], total
 
-    def list_pending_jobs(self) -> list[dict[str, Any]]:
-        """Get all jobs with status 'pending' or 'processing' for background polling."""
-        sql = text(
-            f"SELECT * FROM {TABLE_NAME} "
-            f"WHERE status IN ('pending', 'processing') "
-            f"ORDER BY created_at ASC"
-        )
-        with self.engine.connect() as conn:
-            rows = conn.execute(sql).mappings().all()
-            return [dict(r) for r in rows]
-
     # ------------------------------------------------------------------
     # Delete
     # ------------------------------------------------------------------

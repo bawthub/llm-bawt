@@ -137,9 +137,6 @@ class WorkerLiveness:
             )
         return stop
 
-    def live_task(self, tool_use_id: str) -> str | None:
-        return self._live_task_by_tool.get(tool_use_id)
-
     def containable(self, tool_use_id: str, tool_name: str) -> str | None:
         """The task to stop for an expired tool, or None if the parent must fail."""
         if tool_name not in CONTAINABLE_HOST_TOOLS or tool_use_id in self._stops_by_tool:

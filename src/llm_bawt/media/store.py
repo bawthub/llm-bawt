@@ -154,15 +154,6 @@ class MediaAssetNotFound(LookupError):
 # ---------------------------------------------------------------------------
 
 
-def _shard_key(variant_subdir: str, sha256_hex: str) -> str:
-    """Back-compat alias for the image-variant key layout.
-
-    Pre-TASK-847 callers built ``<subdir>/<aa>/<bb>/<sha>.webp`` through this
-    helper; the canonical implementation is :func:`asset_kinds.shard_key`.
-    """
-    return shard_key(variant_subdir, sha256_hex, ".webp")
-
-
 def _row_to_asset(row: dict) -> MediaAsset:
     """Coerce a raw DB-row dict into the :class:`MediaAsset` SQLModel.
 
