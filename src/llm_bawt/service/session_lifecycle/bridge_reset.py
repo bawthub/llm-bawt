@@ -418,7 +418,10 @@ class BridgeSessionResetMixin:
                     max_prompt_tokens=seed_max_prompt_tokens,
                 )
 
+            succeeded = False
+
             def _work():
+                nonlocal succeeded
                 try:
                     summarizer = HistorySummarizer(
                         self.config, bot_id=bot_id, summarize_fn=_bounded_llm,
@@ -433,6 +436,9 @@ class BridgeSessionResetMixin:
                         protect_recent_turns=not summary_only,
                         min_messages=1 if summary_only else None,
                     )
+                    # No pending work is a success; worker completion with
+                    # errors is not evidence that outgoing history was seeded.
+                    succeeded = not result.get("errors")
                     log.info(
                         "/new pre-seed summarization: bot=%s thread=%s "
                         "created=%s messages=%s errors=%s",
@@ -458,7 +464,7 @@ class BridgeSessionResetMixin:
                     "thread)", timeout_s, bot_id,
                 )
                 return False
-            return True
+            return succeeded
         except Exception as e:
             log.warning("/new summarize gate failed for %s: %s", bot_id, e)
             return False

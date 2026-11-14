@@ -104,8 +104,8 @@ class BackgroundService(
         from ..core.model_lifecycle import get_model_lifecycle
         self._model_lifecycle = get_model_lifecycle(config)
 
-        # Cached LLMBawt instances keyed by (model_alias, bot_id, user_id)
-        self._llm_bawt_cache: dict[tuple[str, str, str], Any] = {}
+        # Cached instances isolate request memory-augmentation mode.
+        self._llm_bawt_cache: dict[tuple[str, str, str, bool], Any] = {}
         self._cache_lock = asyncio.Lock()
 
         # Cached LLM clients keyed by model_alias only

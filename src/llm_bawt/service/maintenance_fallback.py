@@ -605,12 +605,16 @@ class FallbackClient:
         except Exception as error:
             cause = switch_cause(error)
             if cause is None:
+                self._defer_failed_probe(probing)
                 raise
             return self._switch(error, cause, probing, stateful, method, args, kwargs)
         if isinstance(result, str) and result.lstrip().startswith("ERROR:") \
                 and (cause := switch_cause(result)) is not None:
             return self._switch(result, cause, probing, stateful, method, args, kwargs)
         self._served(self._model, self._provider, False)
+        if isinstance(result, str) and (not result.strip() or result.lstrip().startswith("ERROR:")):
+            self._defer_failed_probe(probing)
+            return result
         if probing is not None:
             switched_back, _ = self._state_op(
                 lambda: self._store.clear(self._provider, probing[0].since, probing[1]), False)
@@ -618,6 +622,14 @@ class FallbackClient:
                 log.warning("Maintenance: %s %s cleared, back on primary %s", self._provider,
                             _CAUSE_TEXT.get(probing[0].cause, probing[0].cause), self._model)
         return result
+
+    def _defer_failed_probe(self, probing: tuple[Exhaustion, str] | None) -> None:
+        """Release the probe lease without claiming recovery or changing cause."""
+        if probing is not None:
+            record, token = probing
+            self._state_op(lambda: self._store.rearm(
+                self._provider, record.since, token,
+                self._clock() + float(self._cooldown()), record.cause), False)
 
     def _switch(self, error: Any, cause: str, probing: tuple[Exhaustion, str] | None,
                 stateful: bool, method: str, args: tuple, kwargs: dict) -> Any:

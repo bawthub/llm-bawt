@@ -348,11 +348,12 @@ class NewSessionExecution:
         # can override the bot's scope. If the bot setting cannot be resolved to
         # a canonical scope, None keeps each consumer's established fallback.
         reset_scope = None
-        if plan and plan.continuity is Continuity.CONFIGURED and not prompt_record:
+        if plan and plan.continuity is not Continuity.CLEAN and not prompt_record:
             from ...setting_definitions import HISTORY_SCOPES
             from ...utils.history import effective_history_scope
 
-            reset_scope = NewSessionExecution.scheduled_history_scope(service, delivery_id)
+            if plan.continuity is Continuity.CONFIGURED:
+                reset_scope = NewSessionExecution.scheduled_history_scope(service, delivery_id)
             try:
                 resolved = effective_history_scope(llm_bawt.config_resolver, reset_scope)
             except Exception:
@@ -394,6 +395,7 @@ class NewSessionExecution:
                 build_context_seed(
                     bot_id, model_alias, service,
                     session_id=plan.predecessor_session_id, llm_bawt=llm_bawt,
+                    history_scope=reset_scope,
                 ).get("messages", [])
                 if plan.predecessor_session_id else []
             )

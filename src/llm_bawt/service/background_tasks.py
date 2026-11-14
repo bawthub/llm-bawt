@@ -550,8 +550,8 @@ class BackgroundTasksMixin:
         # for this bot so next request reloads from DB immediately.
         # Snapshot: this runs on a job thread while the event loop may add
         # cache entries.
-        for (_model, cached_bot_id, _user), llm_bawt in list(self._llm_bawt_cache.items()):
-            if cached_bot_id != bot_id:
+        for key, llm_bawt in list(self._llm_bawt_cache.items()):
+            if key[1] != bot_id:
                 continue
             invalidate = getattr(llm_bawt, "invalidate_history_cache", None)
             if callable(invalidate):

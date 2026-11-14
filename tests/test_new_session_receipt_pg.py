@@ -17,8 +17,22 @@ from tests.session_lifecycle_pg_fixtures import scheduled_intent
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("private_app_pg")]
 
 
+def test_scheduler_missing_receipt_is_settled_without_replaying(rig, real_lifecycle):
+    intent = scheduled_intent(rig)
+    asyncio.run(real_lifecycle.submit(intent, timeout_seconds=0))
+    claim = real_lifecycle.store.claim_next(rig.bot, claim_owner="fixture", steer_capable=False)
+    assert claim is not None
+    real_lifecycle.store.mark_transport_accepted(claim.id, claim.claim_token)
+    real_lifecycle.store.mark_delivered(claim.id, claim.claim_token, response_model="fixture", response_chars=0)
+    settled = NewSessionReceipt.reconcile_typed(rig.engine)
+    assert any(row.id == claim.id and row.status == "FAILED" for row in settled)
+    assert real_lifecycle.store.get(claim.id).metadata["new_session_ambiguous"] is True
+    assert real_lifecycle.store.claim_next(rig.bot, claim_owner="retry", steer_capable=False) is None
+
+
 @pytest.mark.parametrize("lifecycle_backend", ["claude-code", "codex"], indirect=True)
-def test_provider_ack_and_exact_persisted_receipt(rig, real_lifecycle, lifecycle_backend):
+@pytest.mark.parametrize("finisher", ["observer", "dispatcher", "reconciler"])
+def test_provider_ack_and_exact_persisted_receipt(rig, real_lifecycle, lifecycle_backend, finisher):
     intent = scheduled_intent(rig)
     asyncio.run(real_lifecycle.submit(intent, timeout_seconds=0))
     claim = real_lifecycle.store.claim_next(rig.bot, claim_owner="fixture", steer_capable=False)
@@ -72,8 +86,19 @@ def test_provider_ack_and_exact_persisted_receipt(rig, real_lifecycle, lifecycle
     assert NewSessionReceipt.record_provider_ack(
         rig.engine, request_id=event.run_id, bot_id=rig.bot, event=event,
     ) is True
-    real_lifecycle.store.mark_delivered(claim.id, claim.claim_token,
-                                        response_model="fixture", response_chars=20)
+    delivered = real_lifecycle.store.mark_delivered(claim.id, claim.claim_token,
+                                                    response_model="fixture", response_chars=20)
+    if finisher == "dispatcher":
+        from unittest.mock import AsyncMock
+        from llm_bawt.service.inter_bot_dispatcher import InterBotDeliveryDispatcher
+        dispatcher = InterBotDeliveryDispatcher.__new__(InterBotDeliveryDispatcher)
+        dispatcher.store = real_lifecycle.store
+        dispatcher._emit = AsyncMock()
+        asyncio.run(dispatcher._finish_delivered(delivered))
+    elif finisher == "reconciler":
+        assert any(row.id == claim.id for row in NewSessionReceipt.reconcile_typed(rig.engine))
+    if finisher != "observer":
+        assert real_lifecycle.store.get(claim.id).metadata.get("new_session_receipt")
     done = asyncio.run(real_lifecycle.submit(intent, timeout_seconds=0))
     replay = asyncio.run(real_lifecycle.submit(intent, timeout_seconds=0))
     assert done.outcome is Outcome.COMPLETED and done == replay
@@ -90,8 +115,9 @@ def test_provider_ack_and_exact_persisted_receipt(rig, real_lifecycle, lifecycle
 
 
 @pytest.mark.parametrize("lifecycle_backend", ["claude-code", "codex"], indirect=True)
+@pytest.mark.parametrize("finisher", ["observer", "dispatcher", "reconciler"])
 def test_seeded_scheduler_receipt_reports_the_acknowledged_continuity(
-    rig, real_lifecycle, lifecycle_backend,
+    rig, real_lifecycle, lifecycle_backend, finisher,
 ):
     """A seeded reset's bubble cites the restored manifest, never bridge prose."""
     intent = scheduled_intent(rig)
@@ -146,8 +172,19 @@ def test_seeded_scheduler_receipt_reports_the_acknowledged_continuity(
     assert NewSessionReceipt.record_provider_ack(
         rig.engine, request_id=event.run_id, bot_id=rig.bot, event=event,
     ) is True
-    real_lifecycle.store.mark_delivered(claim.id, claim.claim_token,
-                                        response_model="fixture", response_chars=20)
+    delivered = real_lifecycle.store.mark_delivered(claim.id, claim.claim_token,
+                                                    response_model="fixture", response_chars=20)
+    if finisher == "dispatcher":
+        from unittest.mock import AsyncMock
+        from llm_bawt.service.inter_bot_dispatcher import InterBotDeliveryDispatcher
+        dispatcher = InterBotDeliveryDispatcher.__new__(InterBotDeliveryDispatcher)
+        dispatcher.store = real_lifecycle.store
+        dispatcher._emit = AsyncMock()
+        asyncio.run(dispatcher._finish_delivered(delivered))
+    elif finisher == "reconciler":
+        assert any(row.id == claim.id for row in NewSessionReceipt.reconcile_typed(rig.engine))
+    if finisher != "observer":
+        assert real_lifecycle.store.get(claim.id).metadata.get("new_session_receipt")
     done = asyncio.run(real_lifecycle.submit(intent, timeout_seconds=0))
     replay = asyncio.run(real_lifecycle.submit(intent, timeout_seconds=0))
     assert done.outcome is Outcome.COMPLETED and done == replay

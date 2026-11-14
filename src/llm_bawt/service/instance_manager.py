@@ -64,6 +64,15 @@ class InstanceManagerMixin:
             log.debug("Cleared all cached instances (%s)", cleared)
         return cleared
 
+    def invalidate_model_catalog(self) -> int:
+        """Retire cache entries, not clients still held by in-flight requests."""
+        with self._bg_client_lock:
+            self._catalog_generation = getattr(self, "_catalog_generation", 0) + 1
+            cleared = self.invalidate_all_instances()
+            self._client_cache.clear()
+            self._bg_client_cache.clear()
+        return cleared
+
     def clear_session_model_overrides(self, bot_id: str | None = None, user_id: str | None = None) -> int:
         """Clear session model overrides, optionally scoped by bot and/or user."""
         if not self._session_model_overrides:
@@ -243,7 +252,9 @@ class InstanceManagerMixin:
         # 2. Explicit requested model
         model = requested_model.strip() if requested_model else None
         if model:
-            if model in self._available_models:
+            if resolve_model_config(
+                self.config, model, harness=getattr(bot, "harness", None), default=None,
+            ) is not None:
                 return model, warnings
             # Requested model not available — fall through with warning
             warnings.append(f"Model '{model}' not available on service")
@@ -335,7 +346,8 @@ class InstanceManagerMixin:
             model_alias = self._session_model_overrides[session_key]
             log.debug(f"Using session model override: {model_alias}")
 
-        cache_key = (model_alias, bot_id, user_id)
+        generation = getattr(self, "_catalog_generation", 0)
+        cache_key = (model_alias, bot_id, user_id, local_mode)
 
         # Check if we need to switch models (different model requested).
         # Only unload when the PREVIOUS model holds local resources
@@ -355,22 +367,9 @@ class InstanceManagerMixin:
 
         if cache_key in self._llm_bawt_cache:
             cached = self._llm_bawt_cache[cache_key]
-            # If cached instance has no memory (local_mode=True) but this request
-            # needs memory (local_mode=False), discard the stale instance so we
-            # create a fresh memory-enabled one.
-            #
-            # The reverse (memory-enabled instance reused for a local_mode=True
-            # request) is harmless — extra context won't break anything, and
-            # memory extraction is gated by request.extract_memory separately.
-            cached_local = getattr(cached, "local_mode", False)
+            # Memory augmentation is part of instance identity in both directions.
             discard = False
-            if cached_local and not local_mode:
-                log.info(
-                    "Upgrading cached local-mode instance → memory-enabled for %s/%s/%s",
-                    model_alias, bot_id, user_id,
-                )
-                discard = True
-            elif not local_mode and not cached_local:
+            if not local_mode:
                 # Non-local instance whose memory init failed (e.g. transient DB
                 # outage).  _db_available=False + memory=None means the init
                 # exception path was hit — discard so we retry the connection.
@@ -430,19 +429,20 @@ class InstanceManagerMixin:
                 user_id=user_id,
                 existing_client=existing_client,  # Reuse cached client if available
             )
-            self._llm_bawt_cache[cache_key] = llm_bawt
-
-            # Cache reusable chat clients. Botless background jobs use their
-            # separate pool and never borrow a bot's client or identity.
-            if model_alias not in self._client_cache and model_type not in ("agent_backend", "claude-code"):
-                self._client_cache[model_alias] = llm_bawt.client
+            # A catalog reload may finish while this instance is building.
+            # Its in-flight caller can finish, but must not warm the new pools.
+            with self._bg_client_lock:
+                if generation == getattr(self, "_catalog_generation", 0):
+                    self._llm_bawt_cache[cache_key] = llm_bawt
+                    if model_type not in ("agent_backend", "claude-code"):
+                        self._client_cache.setdefault(model_alias, llm_bawt.client)
             # Note: BaseLLMBawt.__init__ already registers with lifecycle manager
 
         except Exception as e:
             log.model_error(model_alias, str(e))
             raise
 
-        return self._llm_bawt_cache[cache_key]
+        return llm_bawt
 
     def get_client(self, model_alias: str):
         """Get a botless extraction client, never a bot's cached chat client."""
@@ -595,6 +595,7 @@ class InstanceManagerMixin:
             UnsupportedBackgroundModel, build_background_client, resolve_background_model,
         )
 
+        generation = getattr(self, "_catalog_generation", 0)
         try:
             model_def = resolve_background_model(self.config, preferred)
         except Exception as e:
@@ -632,6 +633,7 @@ class InstanceManagerMixin:
         # Insert under the lock so two concurrent cold-start callers for the
         # same model don't double-build; the loser reuses the winner.
         with self._bg_client_lock:
-            client = self._bg_client_cache.setdefault(cache_key, client)
+            if generation == getattr(self, "_catalog_generation", 0):
+                client = self._bg_client_cache.setdefault(cache_key, client)
         log.info("Background client ready: %s (%s)", cache_key, kind)
         return client, cache_key, model_def

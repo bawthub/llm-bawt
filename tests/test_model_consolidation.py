@@ -605,8 +605,8 @@ def test_resolve_chat_bot_uses_pinned_endpoint_when_model_has_two_paths(monkeypa
         default_model="grok-4.7",
     )
     mgr.config.ensure_model_catalog = lambda: catalog
-    mgr.config.resolve_model = lambda ref, harness=None, default=None: catalog.resolve(
-        ref, harness=harness,
+    mgr.config.resolve_model = lambda ref, harness=None, default=None: (
+        {"type": "grok"} if ref == "grok-4.7" else catalog.resolve(ref, harness=harness)
     )
 
     alias, warnings = mgr._resolve_request_model(None, "nova", local_mode=False)

@@ -32,8 +32,8 @@ def _resolve_summarization_limits(service, model_alias: str | None) -> tuple[int
 
 def _invalidate_bot_history_cache(service, bot_id: str) -> None:
     """Invalidate in-memory history views for a bot after summary writes."""
-    for (_model, cached_bot_id, _user), llm_bawt in service._llm_bawt_cache.items():
-        if cached_bot_id != bot_id:
+    for key, llm_bawt in list(service._llm_bawt_cache.items()):
+        if key[1] != bot_id:
             continue
         invalidate = getattr(llm_bawt, "invalidate_history_cache", None)
         if callable(invalidate):

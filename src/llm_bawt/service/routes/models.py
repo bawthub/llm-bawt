@@ -181,7 +181,7 @@ def reload_models_catalog():
     config.install_model_catalog(normalized_catalog)
 
     service._load_available_models()
-    cleared = service.invalidate_all_instances()
+    cleared = service.invalidate_model_catalog()
 
     return {
         "ok": True,

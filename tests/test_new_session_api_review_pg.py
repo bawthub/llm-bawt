@@ -121,6 +121,15 @@ def test_api_admission_claim_receipt_and_retry_are_one_operation(rig, real_lifec
     assert result.receipt_message_id == payload["assistant_message_id"]
     assert real_lifecycle._admit(intent)[0].id == record.id
     assert real_lifecycle._observe(intent, record.id) == result
+    # A normal subsequent turn mints/rebinds the provider session. The original
+    # committed receipt is still observable, including a clean reset's null key.
+    with rig.engine.begin() as conn:
+        conn.execute(text("""
+            UPDATE sessions SET session_metadata=jsonb_set(session_metadata,
+                '{agent_session_keys}', CAST(:keys AS jsonb)) WHERE id=:id
+        """), {"id": claim.new_session_id,
+                "keys": json.dumps({backend.replace("-", "_"): "subsequent-turn"})})
+    assert real_lifecycle._observe(intent, record.id) == result
     with rig.engine.connect() as conn:
         rows = conn.execute(text("""
             SELECT role,content FROM messages WHERE bot_id=:bot AND session_id=:session

@@ -57,7 +57,8 @@ class NewSessionReceipt:
         with engine.connect() as conn:
             rows = conn.execute(text("""
                 SELECT * FROM inter_bot_deliveries WHERE status='DELIVERED'
-                  AND metadata_json->'new_session_intent'->>'origin'='chat_command'
+                  AND metadata_json->'new_session_intent'->>'origin' IN ('chat_command', 'scheduler')
+                  AND session_policy='continue'
                   AND metadata_json->'new_session_receipt' IS NULL
                 ORDER BY updated_at LIMIT 50
             """)).mappings().all()
@@ -85,9 +86,10 @@ class NewSessionReceipt:
 
     @staticmethod
     def typed_intent(record) -> NewSessionIntent | None:
-        """Reconstruct only a server-stamped literal command, not model prose."""
+        """Reconstruct a persisted typed or scheduled command, not model prose."""
         raw = record.metadata.get("new_session_intent")
-        if (not isinstance(raw, dict) or raw.get("origin") != Origin.CHAT_COMMAND
+        if (not isinstance(raw, dict)
+                or raw.get("origin") not in {Origin.CHAT_COMMAND, Origin.SCHEDULER}
                 or record.session_policy != "continue"):
             return None
         from .execution import NewSessionExecution

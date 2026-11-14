@@ -21,7 +21,8 @@ class NewSessionRecovery:
                                             'true'::jsonb), updated_at=now()
                 WHERE id=:id AND status='DELIVERED'
                   AND transport_accepted_at IS NOT NULL
-                  AND metadata_json->'new_session_intent'->>'origin'='chat_command'
+                  AND metadata_json->'new_session_intent'->>'origin' IN ('chat_command', 'scheduler')
+                  AND session_policy='continue'
                   AND metadata_json->'new_session_receipt' IS NULL
                 RETURNING *
             """), {"id": delivery_id, "reason": reason[:4000]}).mappings().one_or_none()

@@ -293,11 +293,14 @@ class BotPolicyReceipt:
             lineage = SessionResetLineage.metadata(successor["session_metadata"])
             bound = (successor["session_metadata"] or {}).get(
                 "agent_session_keys", {}).get(provider.replace("-", "_"))
-            if (lineage.get("rotation_delivery_id") != record.id
-                    or lineage.get("reset_predecessor_ids") != [record.old_session_id]
-                    or (bound != provider_id if provider_id else bool(bound))):
-                return None
             previous = (row["metadata_json"] or {}).get("new_session_receipt")
+            if (lineage.get("rotation_delivery_id") != record.id
+                    or lineage.get("reset_predecessor_ids") != [record.old_session_id]):
+                return None
+            # First commit must prove the current provider binding. A durable
+            # receipt remains valid after a normal turn binds the clean session.
+            if previous is None and (bound != provider_id if provider_id else bool(bound)):
+                return None
             if previous is not None and (row["reset_status"] != "COMPLETED"
                     or not isinstance(previous, dict)
                     or previous.get("id") != receipt_id

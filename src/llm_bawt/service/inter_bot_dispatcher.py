@@ -558,14 +558,21 @@ class InterBotDeliveryDispatcher:
                 if settled:
                     await self._emit(settled)
             else:
-                queued = self.store.requeue(
-                    record.id,
-                    claim_token,
-                    response.detail,
-                    delay_seconds=1,
-                )
-                if queued:
-                    await self._emit(queued)
+                current = self.store.get(record.id) or record
+                if current.attempt_count >= current.max_attempts:
+                    settled = self.store.fail_claim(
+                        record.id, claim_token,
+                        "steered_persistence_failed: accepted by run but not saved; do not resend",
+                    )
+                else:
+                    # Keep the accepted target and generation: retry persistence,
+                    # never replay the accepted message as a new turn.
+                    settled = self.store.requeue(
+                        record.id, claim_token, response.detail,
+                        delay_seconds=min(30.0, float(2 ** max(0, current.attempt_count - 1))),
+                    )
+                if settled:
+                    await self._emit(settled)
         except SteerGateRefused as refused:
             # A live system gate refused before any RPC (TASK-1233). Not an
             # attempt, and the steer target is kept: the claim gate holds the
@@ -896,7 +903,7 @@ class InterBotDeliveryDispatcher:
                 await self._emit(self.store.get(record.id) or record)
                 return
         elif (not isinstance(record.metadata.get("new_session_intent"), dict)
-              or record.metadata["new_session_intent"].get("origin") != "chat_command"):
+              or record.metadata["new_session_intent"].get("origin") not in {"chat_command", "scheduler"}):
             await self._emit(record)
             return
         ambiguous = await asyncio.to_thread(

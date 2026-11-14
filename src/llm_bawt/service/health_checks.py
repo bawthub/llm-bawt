@@ -115,7 +115,7 @@ def check_ops_queue(store, now: datetime | None = None) -> dict:
     now = now or datetime.now(timezone.utc)
     problems: list[str] = []
     status = OK
-    for job in store.list_jobs(state=JOB_QUEUED, limit=50):
+    for job in store.list_jobs(state=JOB_QUEUED, limit=None):
         if job.error_text:
             status = DOWN
             problems.append(f"{job.operation_slug} blocked: {job.error_text}")
@@ -123,7 +123,7 @@ def check_ops_queue(store, now: datetime | None = None) -> dict:
             status = max(status, DEGRADED, key=_RANK.__getitem__)
             problems.append(f"{job.operation_slug} queued but unclaimed")
     for state in (JOB_DISPATCHING, JOB_ACCEPTED, JOB_RUNNING):
-        for job in store.list_jobs(state=state, limit=50):
+        for job in store.list_jobs(state=state, limit=None):
             seen = job.last_reconcile_at or job.dispatched_at or job.submitted_at
             if (_age_seconds(seen, now) or 0) > ACTIVE_UNRECONCILED_SECONDS:
                 status = max(status, DEGRADED, key=_RANK.__getitem__)
