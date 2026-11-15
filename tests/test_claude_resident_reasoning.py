@@ -16,7 +16,7 @@ from claude_code_bridge.send_usage import LiveUsagePublisher
 
 
 def _publisher() -> LiveUsagePublisher:
-    return LiveUsagePublisher(None, "req", "nova:nick", "m", "m", 200_000)
+    return LiveUsagePublisher(None, "req", "bot:user", "m", "m", 200_000)
 
 
 def _request(p, msg_id, thinking, source=None, details=True):
