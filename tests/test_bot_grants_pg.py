@@ -16,6 +16,7 @@ from fastapi import HTTPException
 from sqlalchemy import text
 
 from llm_bawt.bot_tags import BehaviorTag, grants
+from llm_bawt.runtime_settings import RuntimeSettingsStore
 from llm_bawt.service.routes import bot_grants as grant_routes
 from llm_bawt.task_turn_context import TASK_TURN_CONTEXT_HEADER, TaskTurnContextError
 from tests.bot_tag_fixtures import tag
@@ -33,9 +34,18 @@ BEARER = "Bearer fixture-token"
 PERSON = "fixture-person"
 
 
+def _settings_store(engine) -> RuntimeSettingsStore:
+    """The real runtime settings store on the fixture DB (its bootstrap makes the table)."""
+    store = RuntimeSettingsStore.__new__(RuntimeSettingsStore)
+    store.config, store.engine = None, engine
+    store._ensure_tables_exist()
+    return store
+
+
 @pytest.fixture
 def grant_api(api, monkeypatch):  # noqa: F811
-    settings = {grants.MANAGER_CAPABILITY_SETTING: CAPABILITY}
+    settings = _settings_store(api.rig.engine)
+    settings.set_value("global", "*", grants.MANAGER_CAPABILITY_SETTING, CAPABILITY)
 
     def bearer(authorization):
         if authorization != BEARER:
@@ -49,9 +59,6 @@ def grant_api(api, monkeypatch):  # noqa: F811
     monkeypatch.setattr(grant_routes, "get_service", lambda: SimpleNamespace(config=None))
     monkeypatch.setattr(grant_routes, "require_service_token", bearer)
     monkeypatch.setattr(grant_routes, "open_task_turn_context", open_turn)
-    monkeypatch.setattr(grant_routes, "get_runtime_settings_store", lambda _config: SimpleNamespace(
-        get_scope_settings=lambda scope, scope_id: dict(settings)
-        if (scope, scope_id) == ("global", "*") else {}))
     api.client.app.include_router(grant_routes.router)
     api.settings = settings
 
@@ -170,7 +177,7 @@ def test_a_bot_without_the_manager_role_is_refused(grant_api):
 
 
 def test_no_bot_manages_grants_while_the_setting_is_unset(grant_api):
-    grant_api.settings.clear()
+    grant_api.settings.delete_value("global", "*", grants.MANAGER_CAPABILITY_SETTING)
 
     response = grant_api.as_bot(MANAGER, "fixture-target")
 
@@ -271,6 +278,61 @@ def test_a_role_edit_waits_for_a_grant_authorized_under_it(grant_api):
     assert grant_api.rig.tags("fixture-target") == [str(GRANT)]
     # The edit landed, so the next grant write is refused.
     assert _code(grant_api.as_bot(MANAGER, "fixture-peer")) == "not_grant_manager"
+
+
+# --- a manager-capability setting change and a bot's grant write serialize (TASK-1623)
+
+
+def test_a_setting_change_before_the_grant_commits_refuses_it(grant_api):
+    """The grant reads the setting in its own transaction, after an in-flight change commits."""
+    engine = grant_api.rig.engine
+    with ThreadPoolExecutor(max_workers=1) as pool, engine.connect() as holder:
+        holder.begin()
+        holder.execute(text("""
+            UPDATE runtime_settings SET value_json = '"fixture-other-capability"'
+            WHERE scope_type = 'global' AND scope_id = '*' AND key = :key
+        """), {"key": grants.MANAGER_CAPABILITY_SETTING})
+        racer = pool.submit(grant_api.as_bot, MANAGER, "fixture-target")
+        wait_blocked_by(engine, _backend_pid(holder), racer, timeout=10)
+        holder.commit()
+        refused = racer.result(timeout=10)
+
+    assert refused.status_code == 403, refused.text
+    assert _code(refused) == "not_grant_manager"
+    assert grant_api.rig.tags("fixture-target") == []
+
+
+def test_a_setting_delete_waits_for_a_grant_authorized_under_it(grant_api):
+    """Unsetting the capability can't land mid-grant; it runs after the grant commits."""
+    engine = grant_api.rig.engine
+    with ThreadPoolExecutor(max_workers=1) as pool, engine.connect() as holder:
+        holder.begin()
+        record = grants.write_grant(holder, str(GRANT), "fixture-target", granted=True,
+                                    reason="fixture reason",
+                                    capability=grants.read_manager_capability(holder),
+                                    actor=grants.GrantActor.for_bot(MANAGER))
+        racer = pool.submit(grant_api.settings.delete_value, "global", "*",
+                            grants.MANAGER_CAPABILITY_SETTING)
+        wait_blocked_by(engine, _backend_pid(holder), racer, timeout=10)
+        holder.commit()
+        assert racer.result(timeout=10) is True
+
+    assert record.changed and record.assigned_by == f"bot:{MANAGER}"
+    assert grant_api.rig.tags("fixture-target") == [str(GRANT)]
+    # The delete landed, so the next grant write is refused.
+    assert _code(grant_api.as_bot(MANAGER, "fixture-peer")) == "not_grant_manager"
+
+
+def test_a_missing_or_invalid_setting_reads_as_unset(grant_api):
+    store = grant_api.settings
+    with grant_api.rig.engine.connect() as conn:
+        assert grants.read_manager_capability(conn) == CAPABILITY
+    store.set_value("global", "*", grants.MANAGER_CAPABILITY_SETTING, "  ")
+    with grant_api.rig.engine.connect() as conn:
+        assert grants.read_manager_capability(conn) is None
+    store.delete_value("global", "*", grants.MANAGER_CAPABILITY_SETTING)
+    with grant_api.rig.engine.connect() as conn:
+        assert grants.read_manager_capability(conn) is None
 
 
 # --- every other tag writer refuses to move a grant tag ------------------------

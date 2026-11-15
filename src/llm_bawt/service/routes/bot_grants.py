@@ -30,7 +30,7 @@ from ...task_turn_context import (
     TaskTurnContextError,
     open_task_turn_context,
 )
-from ..dependencies import get_runtime_settings_store, get_service
+from ..dependencies import get_service
 from . import settings as profile_routes
 from .bot_tags import bot_tag_store
 from .service_auth import NO_STORE, read_body, require_service_token
@@ -63,11 +63,6 @@ def _response(record: grants.GrantRecord) -> GrantResponse:
     return GrantResponse(tag=record.tag, bot=record.bot, granted=record.granted,
                          granted_by=record.assigned_by, granted_at=record.assigned_at,
                          changed=record.changed)
-
-
-def _manager_capability() -> str | None:
-    store = get_runtime_settings_store(get_service().config)
-    return grants.manager_capability(store.get_scope_settings("global", "*"))
 
 
 async def _actor(request: Request, authorization: str | None) -> tuple[grants.GrantActor, GrantWrite]:
@@ -110,8 +105,9 @@ async def put_bot_grant(tag: str, slug: str, request: Request,
     engine = bot_tag_store().engine
 
     def write():
-        capability = _manager_capability() if actor.bot is not None else None
         with engine.begin() as conn:
+            # In the grant's transaction, so a setting change can't land mid-grant.
+            capability = grants.read_manager_capability(conn) if actor.bot is not None else None
             return grants.write_grant(conn, tag, slug, granted=body.granted,
                                       reason=body.reason, actor=actor, capability=capability)
 

@@ -20,6 +20,7 @@ Functions taking ``conn`` run in the caller's transaction.
 """
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -121,6 +122,28 @@ def manager_capability(global_settings: Mapping[str, object]) -> str | None:
     """The configured manager capability from the global runtime settings, or None."""
     value = global_settings.get(MANAGER_CAPABILITY_SETTING)
     return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def read_manager_capability(conn) -> str | None:
+    """The configured manager capability, read in the caller's transaction (TASK-1623).
+
+    The setting row is held ``FOR SHARE`` until the caller commits, so a setting
+    update or delete (a plain row write) waits for the grant authorized under
+    it, and a read that waited for one sees its committed value. A missing row,
+    table or valid value reads as unset, which refuses every bot actor.
+    """
+    if conn.execute(text("SELECT to_regclass('runtime_settings')")).scalar() is None:
+        return None
+    raw = conn.execute(text("""
+        SELECT value_json FROM runtime_settings
+        WHERE scope_type = 'global' AND scope_id = '*' AND key = :key
+        FOR SHARE
+    """), {"key": MANAGER_CAPABILITY_SETTING}).scalar()
+    try:
+        value = json.loads(raw) if raw is not None else None
+    except ValueError:
+        return None
+    return manager_capability({MANAGER_CAPABILITY_SETTING: value})
 
 
 def manager_roles(conn, capability: str | None, *, lock: bool = False) -> frozenset[str]:
