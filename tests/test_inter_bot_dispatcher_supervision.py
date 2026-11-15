@@ -59,7 +59,7 @@ class _FakeStore:
 def _make_dispatcher(subscriber_connected: bool = True) -> InterBotDeliveryDispatcher:
     subscriber = SimpleNamespace(connected=subscriber_connected)
     service = SimpleNamespace(
-        config=SimpleNamespace(DEFAULT_USER="nick"),
+        config=SimpleNamespace(DEFAULT_USER="operator"),
         _redis_subscriber=subscriber,
     )
     dispatcher = InterBotDeliveryDispatcher.__new__(InterBotDeliveryDispatcher)

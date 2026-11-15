@@ -58,7 +58,7 @@ def test_tool_capture_to_durable_summary_and_diff(tmp_path: Path, coordinator):
     persisted = coordinator.persist({
         "turn_id": "turn-1",
         "bot_id": "snark",
-        "user_id": "nick",
+        "user_id": "operator",
         "trigger_message_id": "msg-1",
         "tool_use_id": "tool-1",
         "tool_name": finished[0],
@@ -103,7 +103,7 @@ def test_overlapping_turns_keep_only_their_declared_files(tmp_path: Path, coordi
         assert coordinator.persist({
             "turn_id": turn_id,
             "bot_id": "snark",
-            "user_id": "nick",
+            "user_id": "operator",
             "trigger_message_id": f"msg-{turn_id}",
             "tool_use_id": tool_id,
             "tool_name": finished[0],
@@ -119,7 +119,7 @@ def test_metadata_fallback_uses_completed_tool_arguments(coordinator):
     persisted = coordinator.persist({
         "turn_id": "turn-meta",
         "bot_id": "snark",
-        "user_id": "nick",
+        "user_id": "operator",
         "trigger_message_id": "msg-meta",
         "tool_use_id": None,
         "tool_name": "Write",
@@ -145,7 +145,7 @@ def test_bridge_content_enriches_metadata_first_row(tmp_path: Path, coordinator)
     first = coordinator.persist({
         "turn_id": "turn-enrich",
         "bot_id": "snark",
-        "user_id": "nick",
+        "user_id": "operator",
         "trigger_message_id": "msg-enrich",
         "tool_use_id": "tool-enrich",
         "tool_name": "Edit",
@@ -161,7 +161,7 @@ def test_bridge_content_enriches_metadata_first_row(tmp_path: Path, coordinator)
     second = coordinator.persist({
         "turn_id": "turn-enrich",
         "bot_id": "snark",
-        "user_id": "nick",
+        "user_id": "operator",
         "trigger_message_id": "msg-enrich",
         "tool_use_id": "tool-enrich",
         "tool_name": finished[0],

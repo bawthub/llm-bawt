@@ -23,7 +23,7 @@ def _values() -> dict[str, str]:
         "turn_id": "turn-" + "a" * 32,
         "trigger_message_id": str(uuid4()),
         "bot_id": "loopy",
-        "user_id": "nick",
+        "user_id": "operator",
     }
 
 
@@ -37,7 +37,7 @@ def test_round_trip_preserves_all_trusted_identifiers(fernet: Fernet) -> None:
     assert opened.turn_id == values["turn_id"]
     assert opened.trigger_message_id == values["trigger_message_id"]
     assert opened.bot_id == "loopy"
-    assert opened.user_id == "nick"
+    assert opened.user_id == "operator"
     assert opened.issued_at == 123
 
 
@@ -237,7 +237,7 @@ def test_association_posts_only_verified_server_context(
     assert captured["json"] == {
         "sessionId": values["session_id"],
         "botId": "loopy",
-        "userId": "nick",
+        "userId": "operator",
         "source": "AGENT",
         "turn": {
             "triggerMessageId": values["trigger_message_id"],
@@ -259,7 +259,7 @@ def test_codex_request_context_preserves_trusted_task_association(
     envelope = mint_mcp_request_context(
         capability=capability,
         agent_request_id="req-codex",
-        session_key="codex:nick",
+        session_key="codex:operator",
         backend="codex",
     )
     captured = {}

@@ -5,7 +5,7 @@ import pytest
 
 from llm_bawt.retrieval.handles import HandleExpired, HandleStore
 
-A, B = ("snark", "nick"), ("byte", "nick")
+A, B = ("snark", "operator"), ("byte", "operator")
 
 
 class Clock:

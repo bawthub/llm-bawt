@@ -19,7 +19,7 @@ def _service(turn):
 
 
 def test_aborts_this_turns_exact_run_and_reports_state(monkeypatch) -> None:
-    turn = SimpleNamespace(id="t1", agent_session_key="caid:nick", agent_request_id="req-1")
+    turn = SimpleNamespace(id="t1", agent_session_key="caid:operator", agent_request_id="req-1")
     seen = []
 
     async def fake_abort(service, row, execution):
@@ -35,11 +35,11 @@ def test_aborts_this_turns_exact_run_and_reports_state(monkeypatch) -> None:
         thread.join(2)
 
     assert state == "aborted"
-    assert seen == [("caid:nick", "req-1", "exec")]
+    assert seen == [("caid:operator", "req-1", "exec")]
 
 
 def test_abort_failure_never_raises(monkeypatch) -> None:
-    turn = SimpleNamespace(id="t1", agent_session_key="caid:nick", agent_request_id="req-1")
+    turn = SimpleNamespace(id="t1", agent_session_key="caid:operator", agent_request_id="req-1")
 
     async def broken(service, row, execution):
         raise RuntimeError("redis down")
@@ -59,7 +59,7 @@ def test_hung_bridge_abort_times_out_and_is_recorded(monkeypatch) -> None:
     """A dead bridge must not hold the row non-terminal: the wait is bounded."""
     import agent_bridge.abort_contract as contract
 
-    turn = SimpleNamespace(id="t1", agent_session_key="caid:nick", agent_request_id="req-1")
+    turn = SimpleNamespace(id="t1", agent_session_key="caid:operator", agent_request_id="req-1")
 
     async def hang(service, row, execution):
         await asyncio.sleep(60)

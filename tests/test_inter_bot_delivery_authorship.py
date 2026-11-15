@@ -22,7 +22,7 @@ from llm_bawt.service.routes.inter_bot_deliveries import (
 def test_user_authored_delivery_is_not_wrapped_as_a_bot_message() -> None:
     message = "Repository workspace decision request: TASK-792"
 
-    assert _format_delivery_message(message, AuthorReference.user("nick")) == message
+    assert _format_delivery_message(message, AuthorReference.user("operator")) == message
 
 
 def test_bot_authored_delivery_keeps_the_bot_wrapper() -> None:
@@ -62,7 +62,7 @@ def test_async_delivery_note_names_the_sender_to_call_back() -> None:
 
 @pytest.mark.parametrize("record", [
     None,
-    _record(author=AuthorReference.user("nick")),
+    _record(author=AuthorReference.user("operator")),
     _record(author=AuthorReference.bot("unknown")),
     # TASK-1231B: a reserved identity (an ops-blocked notice is sent as
     # "system") cannot receive a reply, so it gets no reply-to-system note.
@@ -225,7 +225,7 @@ def test_reply_channel_keys_are_registered_with_seed_bodies() -> None:
 
 @pytest.mark.parametrize("options", [
     {"prefer_steer": True},
-    {"prefer_steer": False, "author_entity_type": "user", "author_entity_id": "nick"},
+    {"prefer_steer": False, "author_entity_type": "user", "author_entity_id": "operator"},
     {"prefer_steer": False, "sender_bot_id": "unknown"},
 ])
 def test_waited_contract_rejects_steers_and_non_bot_senders(options) -> None:

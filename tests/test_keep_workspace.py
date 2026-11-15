@@ -30,7 +30,7 @@ def key():
 
 
 def configure(manager, key):
-    return manager.configure_workspace("google-keep", json.dumps(key[0]), "Nick@Example.com")
+    return manager.configure_workspace("google-keep", json.dumps(key[0]), "Operator@Example.com")
 
 
 def google(manager, key, *, keep_status=200, token_error=None, on_probe=None):
@@ -43,7 +43,7 @@ def google(manager, key, *, keep_status=200, token_error=None, on_probe=None):
             assertion = form["assertion"][0]
             claims = jwt.decode(assertion, key[1].public_key(), algorithms=["RS256"], audience=TOKEN_URL)
             assert claims["iss"] == key[0]["client_email"]
-            assert claims["sub"] == "nick@example.com"
+            assert claims["sub"] == "operator@example.com"
             assert claims["scope"] == KEEP_SCOPE
             assert claims["exp"] - claims["iat"] == 3600
             assert jwt.get_unverified_header(assertion)["kid"] == "key-id"
@@ -63,7 +63,7 @@ def google(manager, key, *, keep_status=200, token_error=None, on_probe=None):
 
 def test_configuration_is_encrypted_and_redacted(manager, key):
     result = configure(manager, key)
-    assert result["workspace"]["subject"] == "nick@example.com"
+    assert result["workspace"]["subject"] == "operator@example.com"
     assert result["workspace"]["client_id"] == key[0]["client_id"]
     assert result["auth_method"] == "service_account_delegation"
     assert result["workspace_admin_scopes"] == [KEEP_SCOPE]
@@ -99,7 +99,7 @@ def test_verified_connection_contains_no_private_key_or_refresh_token(manager, k
     result = manager.verify_workspace("google-keep")
     assert len(calls) == 2
     assert result["connection"]["connected"]
-    assert result["connection"]["account"] == "nick@example.com"
+    assert result["connection"]["account"] == "operator@example.com"
     assert result["connection"]["auth_method"] == "service_account_delegation"
     assert result["connection"]["meta"]["expires_at"] > time.time()
     assert manager.store.load("google-keep").secret == {"access_token": "private-access"}
@@ -215,7 +215,7 @@ def test_selected_list_reads_only_unchecked_flat_items(manager, key):
     manager.client_factory = lambda **kw: httpx.Client(transport=httpx.MockTransport(handle), **kw)
     result = manager.read_keep_list("google-keep", "notes/a")
     assert result["unchecked_items"] == ["first task"]
-    assert result["account"] == "nick@example.com"
+    assert result["account"] == "operator@example.com"
     assert calls[-1].url.path == "/v1/notes/a"
     assert calls[-1].method == "GET"
 
@@ -245,7 +245,7 @@ def test_workspace_routes(manager, key, monkeypatch):
     app.include_router(routes.router)
     client = TestClient(app)
     response = client.put("/v1/integrations/google-keep/workspace", json={
-        "service_account_json": json.dumps(key[0]), "subject": "nick@example.com",
+        "service_account_json": json.dumps(key[0]), "subject": "operator@example.com",
     })
     assert response.status_code == 200
     assert "PRIVATE KEY" not in response.text

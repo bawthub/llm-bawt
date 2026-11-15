@@ -207,7 +207,7 @@ class TestSummarizeThreadPolicy:
 class _Bridge(BridgeSessionResetMixin):
     def __init__(self, bg_client=None):
         self.config = SimpleNamespace(
-            DEFAULT_USER="nick", REDIS_URL="redis://localhost:6379",
+            DEFAULT_USER="operator", REDIS_URL="redis://localhost:6379",
         )
         self._bg_client = bg_client
         self.bg_client_calls = 0
@@ -222,7 +222,7 @@ class _Bridge(BridgeSessionResetMixin):
 def _llm(scope="inline+summaries", backend=...):
     if backend is ...:
         backend = SimpleNamespace(
-            user_id="nick", _current_session_id="thread-1",
+            user_id="operator", _current_session_id="thread-1",
         )
 
     def _resolve(key):
@@ -373,7 +373,7 @@ class TestMaybeSummarizeOnNew:
         monkeypatch.setattr(summod, "HistorySummarizer", _FakeSummarizer)
 
         proxy = SimpleNamespace(  # no _current_session_id, like the real proxy
-            user_id="nick",
+            user_id="operator",
             _memory_client=SimpleNamespace(
                 get_active_session=lambda: {"id": "active-thread-9"},
             ),
@@ -385,7 +385,7 @@ class TestMaybeSummarizeOnNew:
 
     def test_proxy_without_active_session_is_noop(self):
         proxy = SimpleNamespace(
-            user_id="nick",
+            user_id="operator",
             _memory_client=SimpleNamespace(get_active_session=lambda: None),
         )
         assert _Bridge()._maybe_summarize_on_new(

@@ -58,10 +58,10 @@ def test_query_string_transport_passes_parsed_filters(client_with):
 @pytest.mark.parametrize("params", [
     {"query": "  "},
     {},
-    {"query": "x", "author": "nick"},
-    {"query": "x", "author": "team:nick"},
+    {"query": "x", "author": "operator"},
+    {"query": "x", "author": "team:operator"},
     {"query": "x", "author": "user:"},
-    {"query": "x", "author": ":nick"},
+    {"query": "x", "author": ":operator"},
 ])
 def test_invalid_requests_are_400_without_searching(client_with, params):
     fake = FakeStorage()

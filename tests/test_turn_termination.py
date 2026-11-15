@@ -28,8 +28,8 @@ def store():
     store.engine = engine
     store.ttl_hours = None
     with Session(engine) as session:
-        session.add(TurnLog(id="turn", bot_id="al", user_id="nick", status="streaming", agent_session_key="al:nick", agent_request_id="req-original"))
-        session.add(TurnLog(id="sibling", bot_id="al", user_id="nick", status="streaming"))
+        session.add(TurnLog(id="turn", bot_id="al", user_id="operator", status="streaming", agent_session_key="al:operator", agent_request_id="req-original"))
+        session.add(TurnLog(id="sibling", bot_id="al", user_id="operator", status="streaming"))
         session.add(ToolCallRecord(turn_id="turn", call_id="call", tool_use_id="tool", tool_name="Bash"))
         session.add(ToolCallRecord(turn_id="sibling", call_id="other", tool_name="Bash"))
         session.commit()
@@ -106,19 +106,19 @@ def test_late_tool_result_reconciles_without_reopening_or_duplicate(store):
     TurnAbortCoordinator(store).request("turn", source="unknown", peer=None)
     store.update_turn(turn_id="turn", status="aborted", end_reason="aborted")
     calls = ToolCallStore(store.engine)
-    record_id, _ = calls.save_result(turn_id="turn", call_id="different-call", tool_use_id="tool", tool_name="Bash", bot_id="al", user_id="nick", payload=ToolResultPayload.from_value("real output"), ended_at=123.0, is_error=False)
+    record_id, _ = calls.save_result(turn_id="turn", call_id="different-call", tool_use_id="tool", tool_name="Bash", bot_id="al", user_id="operator", payload=ToolResultPayload.from_value("real output"), ended_at=123.0, is_error=False)
     assert record_id == 1
     assert _records_to_calls([tool(store)])[0]["result"] == "real output"
     assert _records_to_calls([tool(store)])[0]["status"] == "completed"
     assert store.get_turn("turn").status == "aborted"
-    assert calls.save_start(turn_id="turn", bot_id="al", user_id="nick", call_id="late-start-id", tool_use_id="tool", tool_name="Bash") == record_id
+    assert calls.save_start(turn_id="turn", bot_id="al", user_id="operator", call_id="late-start-id", tool_use_id="tool", tool_name="Bash") == record_id
     assert tool(store).result_text == "real output"
 
 
 def test_late_start_and_legacy_history_remain_terminal(store):
     store.update_turn(turn_id="turn", status="error", end_reason="upstream_error")
     calls = ToolCallStore(store.engine)
-    record_id = calls.save_start(turn_id="turn", bot_id="al", user_id="nick", call_id="late", tool_name="Read")
+    record_id = calls.save_start(turn_id="turn", bot_id="al", user_id="operator", call_id="late", tool_name="Read")
     assert _records_to_calls([tool(store, record_id)])[0]["status"] == "interrupted"
     legacy = ToolCallRecord(tool_name="Bash", result_text=None)
     assert _records_to_calls([legacy], turn_ended_at=store.get_turn("turn").ended_at)[0]["status"] == "interrupted"
@@ -135,7 +135,7 @@ def test_abort_is_persisted_before_request_scoped_rpc(store, monkeypatch):
     monkeypatch.setattr(llm_bawt.bots, "BotManager", lambda config: SimpleNamespace(get_bot=lambda bot: SimpleNamespace(agent_backend="claude-code")))
     async def send_rpc(method, params, request_id, **kwargs):
         assert store.get_turn("turn").status == "cancelling"
-        assert params == {"sessionKey": "al:nick", "requestId": "req-original"}
+        assert params == {"sessionKey": "al:operator", "requestId": "req-original"}
         store.update_turn(turn_id="turn", status="ok", end_reason="stop", response_text="EOF partial")
         return AbortReply.build(backend="claude-code", boot_id="b", request_id="req-original",
                                 state=AbortState.CANCELLED, detail="task_cancelled").to_dict()
@@ -187,7 +187,7 @@ def finalizer_context(store, monkeypatch, *, partial="partial"):
     def persist(**kwargs):
         store.update_turn(turn_id="turn", status=kwargs.get("status", "ok"), end_reason=kwargs.get("end_reason"), response_text=kwargs["response_text"])
     svc._finalize_turn = persist
-    ctx = SimpleNamespace(svc=svc, turn_log_id="turn", timing_holder=[1., 2.], cancelled_holder=[False], llm_bawt=None, token_usage_holder=[{}], full_response_holder=[partial], tool_context_holder=[""], tool_call_details_holder=[], user_prompt="test", model_alias="test-model", bot_id="al", user_id="nick", animation_holder=[None], agent_attachments_holder=[], reasoning_holder=[""], assistant_message_id="assistant", question_id_holder=[None], approval_id_holder=[None], approval_persist_failed_holder=[None], tts_scrub=False, tts_scrubber=None, thread_binding={"thread_session_id": "thread"}, loop=None, chunk_queue=[], is_agent_backend=True, done_event=threading.Event())
+    ctx = SimpleNamespace(svc=svc, turn_log_id="turn", timing_holder=[1., 2.], cancelled_holder=[False], llm_bawt=None, token_usage_holder=[{}], full_response_holder=[partial], tool_context_holder=[""], tool_call_details_holder=[], user_prompt="test", model_alias="test-model", bot_id="al", user_id="operator", animation_holder=[None], agent_attachments_holder=[], reasoning_holder=[""], assistant_message_id="assistant", question_id_holder=[None], approval_id_holder=[None], approval_persist_failed_holder=[None], tts_scrub=False, tts_scrubber=None, thread_binding={"thread_session_id": "thread"}, loop=None, chunk_queue=[], is_agent_backend=True, done_event=threading.Event())
     monkeypatch.setattr("llm_bawt.service.turn_stream_finalize.put_queue_item_threadsafe", lambda loop, queue, value: queue.append(value))
     return ctx
 

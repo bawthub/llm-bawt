@@ -17,7 +17,7 @@ def test_subscription_survives_reopen_and_only_one_worker_claims_send(private_ap
     outbox = TalkReplyOutbox(engine)
     message_id = str(uuid.uuid4())
     subscription = TalkReplySubscription(
-        message_id=message_id, bot_id="test-nova", user_id="test-nick",
+        message_id=message_id, bot_id="test-nova", user_id="test-operator",
         source_type="delivery", source_id=f"delivery-{message_id}",
         backend="https://talk.example", conversation_token="room", reply_to=42,
     )
@@ -53,7 +53,7 @@ def test_pending_subscription_checks_cannot_starve_newer_replies(private_app_pg)
     try:
         for message_id in ids:
             outbox.register(TalkReplySubscription(
-                message_id=message_id, bot_id="test-nova", user_id="test-nick",
+                message_id=message_id, bot_id="test-nova", user_id="test-operator",
                 source_type="turn", source_id=f"turn-{message_id}",
                 backend="https://talk.example", conversation_token="room", reply_to=None,
             ))

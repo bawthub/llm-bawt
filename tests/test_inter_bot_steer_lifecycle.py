@@ -224,7 +224,7 @@ def test_the_run_stream_settles_only_bot_steers_and_publishes_every_one(monkeypa
         settled.append(payload)
 
     def lifecycle_event(origin, proof):
-        return AgentEvent(event_id=f"e-{origin}", session_key="byte:nick", run_id="req",
+        return AgentEvent(event_id=f"e-{origin}", session_key="byte:operator", run_id="req",
                           kind=AgentEventKind.STEER_LIFECYCLE, origin="system",
                           raw=_payload("cancelled", proof=proof, origin=origin))
 
@@ -254,7 +254,7 @@ def test_the_run_stream_settles_only_bot_steers_and_publishes_every_one(monkeypa
     monkeypatch.setattr("agent_bridge.subscriber.RedisSubscriber", Subscriber)
     monkeypatch.setattr(module, "_settle_bot_steer", settle)
     queued = list(module.AgentBridgeBackend().stream_raw(
-        "hello", {"bot_id": "byte", "user_id": "nick", "model": "claude-opus-5-5",
+        "hello", {"bot_id": "byte", "user_id": "operator", "model": "claude-opus-5-5",
                   "timeout_seconds": 1, "ordered_steer_events": ordered},
     ))
     assert [p["origin"] for p in settled] == ["bot"]
@@ -367,12 +367,12 @@ def test_steer_framing_by_origin_and_priority(registry):
 
     registry.bodies[steer_prompts.NEXT_ASIDE_KEY] = "<next>{message}</next>"
     registry.bodies[steer_prompts.INTERRUPT_REPLACEMENT_KEY] = "<now>{messages}</now>"
-    kw = {"bot_id": "byte", "user_id": "nick"}
+    kw = {"bot_id": "byte", "user_id": "operator"}
     assert _steer_framing("quiesce", origin="system", priority="now", **kw) == {}
     assert _steer_framing("hi", origin="user", priority="next", **kw) == {
-        "framed_message": "<next>hi</next>", "interrupt_item": "Message from user 'nick': hi"}
+        "framed_message": "<next>hi</next>", "interrupt_item": "Message from user 'operator': hi"}
     assert _steer_framing("hi", origin="user", priority="now", **kw) == {
-        "framed_message": "<now>Message from user 'nick': hi</now>"}
+        "framed_message": "<now>Message from user 'operator': hi</now>"}
     bot = "Message from bot 'snark': hi"
     assert _steer_framing(bot, origin="bot", priority="next", **kw) == {
         "framed_message": f"<next>{bot}</next>", "interrupt_item": bot}
@@ -421,13 +421,13 @@ def test_a_steer_that_cannot_be_framed_is_refused_before_the_bridge(
         registered(steer_prompts.NEXT_ASIDE_KEY, default)
     registry.bodies[steer_prompts.NEXT_ASIDE_KEY] = live
     turn = SimpleNamespace(
-        id="turn-live", bot_id="byte", user_id="nick", status="streaming", ended_at=None,
-        agent_session_key="byte:nick", agent_request_id="req-live", user_prompt="work",
+        id="turn-live", bot_id="byte", user_id="operator", status="streaming", ended_at=None,
+        agent_session_key="byte:operator", agent_request_id="req-live", user_prompt="work",
     )
     service = SimpleNamespace(config=None, _turn_log_store=SimpleNamespace(get_turn=lambda _id: turn))
     with pytest.raises(HTTPException) as caught:
         asyncio.run(steer_active_turn(service, ChatSteerRequest(
-            turn_id=turn.id, message="hi", message_id="m-1", bot_id="byte", user_id="nick",
+            turn_id=turn.id, message="hi", message_id="m-1", bot_id="byte", user_id="operator",
             priority="next")))
     assert caught.value.status_code == 503
     assert caught.value.detail.startswith(f"steer_prompt_unavailable: {steer_prompts.NEXT_ASIDE_KEY}")

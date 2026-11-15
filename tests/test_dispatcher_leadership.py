@@ -307,7 +307,7 @@ def _dispatcher(check=None, changes: StateChanges | None = None) -> InterBotDeli
     """A dispatcher on the fakes, at every production interval and timeout."""
     dispatcher = InterBotDeliveryDispatcher.__new__(InterBotDeliveryDispatcher)
     dispatcher.service = SimpleNamespace(
-        config=SimpleNamespace(DEFAULT_USER="nick"),
+        config=SimpleNamespace(DEFAULT_USER="operator"),
         _redis_subscriber=SimpleNamespace(connected=True),
     )
     dispatcher.store = _Store(changes)

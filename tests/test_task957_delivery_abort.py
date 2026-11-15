@@ -75,19 +75,19 @@ def test_steering_does_not_reassign_active_turn_tool_ownership(priority):
     bridge = _Bridge()
     redis = SimpleNamespace(xack=AsyncMock())
     asyncio.run(bridge._handle_steer({
-        "backend": "claude-code", "session_key": "loopy:nick",
+        "backend": "claude-code", "session_key": "loopy:operator",
         "message": "old delivery", "message_id": "old-trigger",
         "target_request_id": "req-current", "request_id": "steer-old",
         "priority": priority,
     }, "event-1", redis))
-    bridge._publish_event("req-current", "loopy:nick", 1, kind=AgentEventKind.TOOL_START,
+    bridge._publish_event("req-current", "loopy:operator", 1, kind=AgentEventKind.TOOL_START,
                           tool_name="Read", tool_use_id="tool-one")
-    bridge._publish_event("req-current", "loopy:nick", 2, kind=AgentEventKind.ASSISTANT_DELTA,
+    bridge._publish_event("req-current", "loopy:operator", 2, kind=AgentEventKind.ASSISTANT_DELTA,
                           text="response")
-    bridge._publish_event("req-current", "loopy:nick", 3, kind=AgentEventKind.RUN_COMPLETED,
+    bridge._publish_event("req-current", "loopy:operator", 3, kind=AgentEventKind.RUN_COMPLETED,
                           token_usage={"input_tokens": 1})
     assert [event.trigger_message_id for event in bridge.published] == ["new-trigger"] * 3
-    bridge._session_queue.get_active_client("loopy:nick").steer.assert_awaited_once_with(
+    bridge._session_queue.get_active_client("loopy:operator").steer.assert_awaited_once_with(
         "old delivery", priority=priority, message_id="old-trigger", origin="system",
         framed_message=None, interrupt_item=None, steer_rpc_id="steer-old",
     )

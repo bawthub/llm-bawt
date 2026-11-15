@@ -124,7 +124,7 @@ def _stamp(entity_type, entity_id):
     (_record(retry.AuthorReference.bot("vex"), _request_identity_producer="retry",
              retry_original_author=_stamp("bot", "snark")), None),
     (_record(SYSTEM, _request_identity_producer="retry",
-             retry_original_author=_stamp("user", "nick")), None),
+             retry_original_author=_stamp("user", "fixture-user")), None),
     (_record(SYSTEM, _request_identity_producer="retry",
              retry_original_author=_stamp("bot", "system")), None),
     (_record(SYSTEM, _request_identity_producer="retry"), None),
@@ -136,5 +136,5 @@ def test_retry_reply_to_is_trusted_only_on_system_retries(record, expected):
 
 def test_retry_original_author_keeps_the_user():
     record = _record(SYSTEM, _request_identity_producer="retry",
-                     retry_original_author=_stamp("user", "nick"))
-    assert retry.retry_original_author(record) == retry.AuthorReference.user("nick")
+                     retry_original_author=_stamp("user", "fixture-user"))
+    assert retry.retry_original_author(record) == retry.AuthorReference.user("fixture-user")

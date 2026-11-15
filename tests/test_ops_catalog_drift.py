@@ -40,12 +40,12 @@ def test_a_seed_key_the_live_row_lacks_is_reported_missing_and_nothing_is_writte
     script = _script(store, HEALTH_SLUG)
     dropped = sorted(key for key in script if key.startswith("health_"))
     store.update_operation(HEALTH_SLUG, {"command_script": json.dumps(
-        {k: v for k, v in script.items() if k not in dropped})}, actor="nick")
+        {k: v for k, v in script.items() if k not in dropped})}, actor="operator")
     before = _catalog(store)
 
     entry = _entry(catalog_drift.report(store), HEALTH_SLUG)
 
-    assert entry["status"] == "operator_override" and entry["updated_by"] == "nick"
+    assert entry["status"] == "operator_override" and entry["updated_by"] == "operator"
     assert entry["missing_paths"] == [f"command_script.{key}" for key in dropped]
     assert _catalog(store) == before  # read-only: no version, hash or actor moved
 
@@ -68,7 +68,7 @@ def test_a_changed_nested_value_names_its_path_and_both_values():
 def test_installer_rows_absent_rows_and_unseeded_rows_are_classified_apart():
     seeds = [{"slug": "a", "title": "A"}, {"slug": "b", "title": "B"}, {"slug": "c", "title": "C"}]
     live = [{"slug": "a", "title": "A2", "updated_by": "tenant-install"},
-            {"slug": "c", "title": "C", "enabled": True, "updated_by": "nick"},
+            {"slug": "c", "title": "C", "enabled": True, "updated_by": "operator"},
             {"slug": "local.extra", "title": "E"}]
 
     result = catalog_drift.compare(seeds, live)

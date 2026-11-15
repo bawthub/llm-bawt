@@ -63,7 +63,7 @@ def _frames(monkeypatch, interval: float) -> list[tuple[str, dict]]:
         return [
             chunk
             async for chunk in event_stream._unified_event_stream(
-                "redis://unused", ["caid"], "nick", "window-x"
+                "redis://unused", ["caid"], "operator", "window-x"
             )
         ]
 
@@ -110,7 +110,7 @@ def test_config_only_sse_receives_global_events_without_a_user_or_bot(monkeypatc
 
     for invalid in (
         "/v1/ws?config_only=true",
-        "/v1/ws?config_only=true&consumer_id=x&user_id=nick",
+        "/v1/ws?config_only=true&consumer_id=x&user_id=operator",
         "/v1/ws?config_only=true&consumer_id=x&bot_id=al",
     ):
         assert client.get(invalid).status_code == 400

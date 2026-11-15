@@ -24,7 +24,7 @@ def test_live_usage_update_normalizes_and_deduplicates_iteration_snapshot() -> N
     publisher = LiveUsagePublisher(
         harness,
         "req-1",
-        "snark:nick",
+        "snark:operator",
         "openai_chatgpt/gpt-5.6-sol",
         "openai_chatgpt/gpt-5.6-sol",
         372_000,
@@ -80,7 +80,7 @@ def test_live_usage_update_ignores_output_only_frame_without_resident_context() 
     publisher = LiveUsagePublisher(
         harness,
         "req-1",
-        "snark:nick",
+        "snark:operator",
         "claude-opus-4-6",
         "claude-opus-4-6",
         200_000,
@@ -110,7 +110,7 @@ def test_turn_usage_coordinator_checkpoints_and_builds_both_channels() -> None:
         turn_id="turn-1",
         trigger_message_id="user-1",
         bot_id="snark",
-        user_id="nick",
+        user_id="operator",
         model="codex-gpt-5.6-sol",
         token_usage={"resident_tokens": 139_613, "usage_status": "partial"},
     )
@@ -141,7 +141,7 @@ def test_usage_checkpoint_write_failure_does_not_end_the_turn() -> None:
         turn_id="turn-1",
         trigger_message_id="user-1",
         bot_id="caid",
-        user_id="nick",
+        user_id="operator",
         model="m",
         token_usage={"resident_tokens": 10, "usage_status": "partial"},
     )
@@ -153,7 +153,7 @@ def test_usage_checkpoint_write_failure_does_not_end_the_turn() -> None:
 def test_usage_update_round_trips_through_agent_event_transport() -> None:
     event = AgentEvent(
         event_id="evt-usage",
-        session_key="snark:nick",
+        session_key="snark:operator",
         run_id="req-1",
         kind=AgentEventKind.USAGE_UPDATE,
         origin="system",
@@ -207,7 +207,7 @@ def _delta(fresh: int, cached: int, created: int = 0) -> dict:
 def test_request_totals_sum_every_upstream_request_not_only_the_last() -> None:
     """TASK-1961: proxy routes report usage only in message_delta."""
     harness = _Harness()
-    publisher = LiveUsagePublisher(harness, "req-1", "vex:nick", "m", "m", 372_000)
+    publisher = LiveUsagePublisher(harness, "req-1", "vex:operator", "m", "m", 372_000)
     assert publisher.request_totals() is None
     for fresh, cached in ((40_641, 0), (41_607, 0), (18_235, 128_640)):
         publisher.observe_stream_event(_start())
@@ -228,7 +228,7 @@ def test_request_totals_sum_every_upstream_request_not_only_the_last() -> None:
 
 def test_request_totals_keep_native_start_usage_and_route_interleaved_subagents() -> None:
     harness = _Harness()
-    publisher = LiveUsagePublisher(harness, "req-1", "byte:nick", "m", "m", 1_000_000)
+    publisher = LiveUsagePublisher(harness, "req-1", "byte:operator", "m", "m", 1_000_000)
     # Native Anthropic: usage arrives in message_start; delta may repeat zeros.
     publisher.observe_stream_event(_start({
         "input_tokens": 10, "cache_read_input_tokens": 9_000, "cache_creation_input_tokens": 500,
@@ -248,7 +248,7 @@ def test_request_totals_keep_native_start_usage_and_route_interleaved_subagents(
 
 def test_live_usage_update_carries_running_request_totals() -> None:
     harness = _Harness()
-    publisher = LiveUsagePublisher(harness, "req-1", "vex:nick", "m", "m", 372_000)
+    publisher = LiveUsagePublisher(harness, "req-1", "vex:operator", "m", "m", 372_000)
     publisher.observe_stream_event(_start())
     publisher.observe_stream_event(_delta(1_000, 0))
     publisher.publish(0, assistant_usage=None, stream_usage=_delta(1_000, 0)["usage"])
@@ -260,7 +260,7 @@ def test_live_usage_republishes_when_only_request_totals_change() -> None:
     """Two same-sized consecutive requests leave the context signature equal;
     the changed request count must still publish."""
     harness = _Harness()
-    publisher = LiveUsagePublisher(harness, "req-1", "vex:nick", "m", "m", 372_000)
+    publisher = LiveUsagePublisher(harness, "req-1", "vex:operator", "m", "m", 372_000)
     seq = 0
     for _ in range(2):
         publisher.observe_stream_event(_start())
@@ -272,7 +272,7 @@ def test_live_usage_republishes_when_only_request_totals_change() -> None:
 
 def test_with_totals_keeps_totals_without_inventing_final_request_usage() -> None:
     harness = _Harness()
-    publisher = LiveUsagePublisher(harness, "req-1", "byte:nick", "m", "m", 1_000_000)
+    publisher = LiveUsagePublisher(harness, "req-1", "byte:operator", "m", "m", 1_000_000)
     assert publisher.with_totals(None) is None  # nothing measured yet
     publisher.observe_stream_event(_start({"input_tokens": 50, "cache_read_input_tokens": 0}))
     assert publisher.with_totals(None) == {"turn_request_totals": {

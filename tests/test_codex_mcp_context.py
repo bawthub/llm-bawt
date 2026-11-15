@@ -16,14 +16,14 @@ def test_codex_mcp_environment_is_request_local_and_does_not_mutate_base():
         base,
         capability="cap-one",
         agent_request_id="req-one",
-        session_key="codex:nick:one",
+        session_key="codex:operator:one",
         backend="codex",
     )
     second = codex_mcp_environment(
         base,
         capability="cap-two",
         agent_request_id="req-two",
-        session_key="codex:nick:two",
+        session_key="codex:operator:two",
         backend="codex",
     )
 
@@ -35,7 +35,7 @@ def test_codex_mcp_environment_is_request_local_and_does_not_mutate_base():
         verify_mcp_request_context(
             capability="cap-one", raw_context=first[MCP_REQUEST_CONTEXT_ENV]
         ).session_key
-        == "codex:nick:one"
+        == "codex:operator:one"
     )
 
 
@@ -46,7 +46,7 @@ def test_concurrent_codex_environments_do_not_cross_sessions():
             {"BASE": "value"},
             capability=capability,
             agent_request_id=f"req-{index}",
-            session_key=f"codex:nick:{index}",
+            session_key=f"codex:operator:{index}",
             backend="codex",
         )
         opened = verify_mcp_request_context(
@@ -60,5 +60,5 @@ def test_concurrent_codex_environments_do_not_cross_sessions():
 
     assert len({env[MCP_REQUEST_CONTEXT_ENV] for env, _ in results}) == 32
     assert [opened.session_key for _, opened in results] == [
-        f"codex:nick:{index}" for index in range(32)
+        f"codex:operator:{index}" for index in range(32)
     ]

@@ -31,7 +31,7 @@ def _enqueue(ctx, deliveries, bot, *, on_gate, key=None):
     return deliveries.enqueue(
         sender_bot_id=sender, target_bot_id=bot, message="callback",
         payload={"messages": [{"role": "user", "content": "callback"}],
-                 "bot_id": bot, "user": "nick", "stream": True},
+                 "bot_id": bot, "user": "operator", "stream": True},
         idempotency_key=key, on_gate=on_gate,
     )
 
@@ -99,7 +99,7 @@ def test_a_retry_accepted_before_the_freeze_still_gets_its_receipt(gated):
         return deliveries.enqueue(
             sender_bot_id=sender, target_bot_id=bot, message="callback",
             payload={"messages": [{"role": "user", "content": "callback"}],
-                     "bot_id": bot, "user": "nick", "stream": True},
+                     "bot_id": bot, "user": "operator", "stream": True},
             idempotency_key=key, on_gate="deny",
         )
 

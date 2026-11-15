@@ -87,7 +87,7 @@ def test_approving_an_ops_run_wakes_the_reconciler(private_app_pg):
             store.record_mcp_request(**_mcp_req(request_id=rid, tool_use_id=f"toolu_{rid}",
                                                 invocation_hash=hashlib.sha256(rid.encode()).hexdigest()))
             waiter.received.clear()
-            store.resolve_request(rid, status=status, resolved_by="nick")
+            store.resolve_request(rid, status=status, resolved_by="operator")
             assert waiter.wait(threading.Event(), 1 if woke else 0.3) is woke
             if woke:
                 assert f"approval:{rid}" in waiter.received

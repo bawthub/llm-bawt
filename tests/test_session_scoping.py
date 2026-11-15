@@ -1,6 +1,6 @@
 """TASK-251 — the four scoped-read proofs (explicit session_id ONLY).
 
-THE design principle (locked by Nick, 2026-07-21):
+THE design principle (locked by Operator, 2026-07-21):
     Continuous message history is the substrate. Threads are an optional
     lens over it. A request WITHOUT session_id gets the continuous pool —
     session boundaries invisible. Scoped reads happen ONLY when a request
@@ -47,7 +47,7 @@ def scoped_env(private_app_pg):
     from llm_bawt.mcp_server.client import get_memory_client
 
     bot = f"_t251_pytest_{uuid.uuid4().hex[:8]}"
-    user = "nick"
+    user = "operator"
     config = require_test_db_config()
     client = get_memory_client(config=config, bot_id=bot, user_id=user)
     manager = client.get_short_term_manager()  # _MCPShortTermManager adapter

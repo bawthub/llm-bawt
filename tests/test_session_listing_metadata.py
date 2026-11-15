@@ -12,7 +12,7 @@ def _session_row(**overrides):
     values = {
         "id": "session-1",
         "bot_id": "snark",
-        "user_id": "nick",
+        "user_id": "operator",
         "started_at": datetime(2026, 8, 4, 20, 0, 0),
         "ended_at": None,
         "archived_at": None,
@@ -109,13 +109,13 @@ def test_list_sessions_aggregates_bot_partition_and_sorts_by_activity():
     calls = []
     manager = PostgreSQLShortTermManager.__new__(PostgreSQLShortTermManager)
     manager.bot_id = "snark"
-    manager.user_id = "nick"
+    manager.user_id = "operator"
     manager._backend = SimpleNamespace(
         _messages_table_name="messages_p_snark",
         engine=_Engine([_session_row()], calls),
     )
 
-    rows = manager.list_sessions(bot_id="snark", user_id="nick", limit=25)
+    rows = manager.list_sessions(bot_id="snark", user_id="operator", limit=25)
 
     assert rows[0]["last_user_message"] == "add the useful metadata"
     sql, params = calls[0]
@@ -129,4 +129,4 @@ def test_list_sessions_aggregates_bot_partition_and_sorts_by_activity():
     assert "ms.last_assistant_at" in sql
     assert "COALESCE(ms.last_message_at" in sql
     assert "CASE WHEN s.status = 'active' THEN 0 ELSE 1 END" in sql
-    assert params == {"limit": 25, "bot_id": "snark", "user_id": "nick"}
+    assert params == {"limit": 25, "bot_id": "snark", "user_id": "operator"}

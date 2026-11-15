@@ -135,5 +135,5 @@ def test_profile_batch_helper_handles_empty_and_case():
     manager = object.__new__(ProfileManager)
     manager.engine = engine
     assert manager.get_live_attributes_by_entity(EntityType.USER, []) == {}
-    assert manager.get_live_attributes_by_entity(EntityType.USER, [" Nick "]) == {"nick": []}
+    assert manager.get_live_attributes_by_entity(EntityType.USER, [" Operator "]) == {"operator": []}
     engine.dispose()

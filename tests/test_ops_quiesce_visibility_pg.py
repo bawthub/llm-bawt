@@ -103,7 +103,7 @@ def test_cancelling_pending_steers_stamps_control_changed_at(rig):
     rig.driver.step(job_id)
     rig.sql("UPDATE gate_members SET control_changed_at = now() - interval '1 hour' WHERE turn_id=:t",
             t=turn_id)
-    assert cancel_quiesce_job(rig.engine, job_id, actor="nick") == ("cancelled", JOB_CANCELLED)
+    assert cancel_quiesce_job(rig.engine, job_id, actor="fixture-user") == ("cancelled", JOB_CANCELLED)
     state, fresh = rig.sql("SELECT control_state, control_changed_at > now() - interval '1 minute'"
                            " FROM gate_members WHERE turn_id=:t", t=turn_id).one()
     assert (state, fresh) == ("cancelled", True)
@@ -190,7 +190,7 @@ def test_live_holds_lists_job_and_operator_gates(rig):
         assert op_hold["job"] is None and op_hold["reason"] == "maintenance"
         assert op_hold["members"]["total"] == 0 and op_hold["scope"] == {"bots": []}
 
-        cancel_quiesce_job(rig.engine, job_id, actor="nick")
+        cancel_quiesce_job(rig.engine, job_id, actor="fixture-user")
         assert gate_id not in {h["gate_id"] for h in live_holds(rig.engine)}
     finally:
         rig.sql("DELETE FROM system_gates WHERE id=:id", id=operator)
@@ -216,16 +216,16 @@ def test_cancel_before_dispatch_releases_every_generation_and_is_idempotent(rig,
     rig.sql("UPDATE system_gates SET expires_at = now() + interval '1 minute' WHERE id=:id", id=first)
     assert len(rig.gates_of(job_id)) == 2 and rig.held()
 
-    body = routes.CancelRequest(actor="nick-ui", reason="wrong target")
+    body = routes.CancelRequest(actor="fixture-user-ui", reason="wrong target")
     result = routes.cancel_job(job_id, body)
     assert result["cancelled"] is True and result["job"]["state"] == JOB_CANCELLED
     row = rig.row(job_id)
-    assert row["error_text"] == ("cancelled by operator (claimed actor: nick-ui) before dispatch;"
+    assert row["error_text"] == ("cancelled by operator (claimed actor: fixture-user-ui) before dispatch;"
                                  " no action submitted: wrong target")
     assert row["finished_at"] is not None and row["quiesce_driver_id"] is None
     receipt = json.loads(row["quiesce_json"])
     assert receipt["outcome"] == "cancelled"
-    assert receipt["cancelled_by"] == {"actor_claimed": "nick-ui", "reason": "wrong target"}
+    assert receipt["cancelled_by"] == {"actor_claimed": "fixture-user-ui", "reason": "wrong target"}
     assert result["job"]["quiesce"]["phase"]["name"] == "cancelled"
     assert all(g["released_at"] is not None for g in rig.gates_of(job_id)) and not rig.held()
     assert rig.sql("SELECT control_state FROM gate_members WHERE turn_id=:t", t=turn_id).scalars().all() == [
@@ -247,7 +247,7 @@ def test_a_dispatched_job_is_not_cancellable(rig, monkeypatch):
     rig.end(turn_id)
     assert rig.driver.step(job_id).outcome == "dispatched"
     with pytest.raises(HTTPException) as refused:
-        routes.cancel_job(job_id, routes.CancelRequest(actor="nick"))
+        routes.cancel_job(job_id, routes.CancelRequest(actor="fixture-user"))
     assert refused.value.status_code == 409
     assert refused.value.detail["code"] == "not_cancellable"
     assert refused.value.detail["state"] == JOB_DISPATCHING
@@ -256,7 +256,7 @@ def test_a_dispatched_job_is_not_cancellable(rig, monkeypatch):
 
 def test_a_cancelled_unopened_job_ignores_a_late_preflight_note(rig):
     job_id = rig.job()
-    assert cancel_quiesce_job(rig.engine, job_id, actor="nick") == ("cancelled", JOB_CANCELLED)
+    assert cancel_quiesce_job(rig.engine, job_id, actor="fixture-user") == ("cancelled", JOB_CANCELLED)
     error = rig.row(job_id)["error_text"]
     assert rig.driver.note_unopened(job_id, "target unhealthy").outcome == "not_owner"
     assert rig.driver.step(job_id).outcome == "not_owner"
@@ -282,7 +282,7 @@ def test_a_cancel_waits_for_a_step_that_is_mid_open_then_releases_its_new_gate(r
     results: dict[str, object] = {}
     step = threading.Thread(target=lambda: results.setdefault("step", rig.driver.step(job_id).outcome))
     cancel = threading.Thread(target=lambda: results.setdefault(
-        "cancel", cancel_quiesce_job(rig.engine, job_id, actor="nick")))
+        "cancel", cancel_quiesce_job(rig.engine, job_id, actor="fixture-user")))
     step.start()
     assert opened.wait(10)
     cancel.start()
@@ -307,7 +307,7 @@ def test_the_app_receipt_loop_announces_a_cancelled_jobs_receipt(rig, monkeypatc
     ops_tools = _as_caller(rig, monkeypatch, turn_id=rig.turn())
     job_id = asyncio.run(ops_tools.ops_run(rig.slug, {"target": "a"}))["job_id"]
     rig.driver.step(job_id)
-    assert cancel_quiesce_job(rig.engine, job_id, actor="nick")[0] == "cancelled"
+    assert cancel_quiesce_job(rig.engine, job_id, actor="fixture-user")[0] == "cancelled"
 
     dispatcher = InterBotDeliveryDispatcher(SimpleNamespace(config=rig.store.config))
     emitted = []

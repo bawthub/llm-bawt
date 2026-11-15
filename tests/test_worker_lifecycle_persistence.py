@@ -29,7 +29,7 @@ def engine():
 
 
 def _evt(kind, ts, **extra):
-    return {"_type": kind, "turn_id": TURN, "bot_id": "codex", "user_id": "nick", "task_id": TASK, "ts": ts, **extra}
+    return {"_type": kind, "turn_id": TURN, "bot_id": "codex", "user_id": "operator", "task_id": TASK, "ts": ts, **extra}
 
 
 def _natural_sequence():
@@ -104,7 +104,7 @@ def test_idless_frame_for_unknown_worker_is_not_invented(engine):
 def test_worker_count_is_never_inferred_from_child_tools(engine):
     tools = ToolCallStore(engine)
     for i in range(32):
-        tools.save_start(turn_id=TURN, bot_id="codex", user_id="nick", call_id=f"c{i}", tool_name="Grep",
+        tools.save_start(turn_id=TURN, bot_id="codex", user_id="operator", call_id=f"c{i}", tool_name="Grep",
                          arguments={}, iteration=1, started_at=1.0, tool_use_id=f"child{i}",
                          parent_tool_use_id=PARENT)
     assert _turn_workers(SimpleNamespace(engine=engine), [SimpleNamespace(id=TURN)]) == {}

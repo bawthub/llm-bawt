@@ -36,15 +36,15 @@ def test_accepted_queue_drains_before_reset_and_start(setup):
     adapter.render_active = True
 
     async def run():
-        offered = await controller.offer_restore(user="nick", expected_generation=store.status().generation)
+        offered = await controller.offer_restore(user="operator", expected_generation=store.status().generation)
         assert not any(e in adapter.effects for e in ("reset_video", *controller_start_ops))
         store.claim_video("accepted-during-offer")
-        generation = await controller.accept_restore(user="nick", token=offered["token"],
+        generation = await controller.accept_restore(user="operator", token=offered["token"],
             expected_generation=offered["generation"], approved=True)
         assert store.status().phase == "draining"
         with pytest.raises(HandoffConflict):
             store.claim_video("arrived-after-confirm")
-        task = asyncio.create_task(controller.execute_restore(user="nick", generation=generation))
+        task = asyncio.create_task(controller.execute_restore(user="operator", generation=generation))
         await asyncio.sleep(0.02)
         assert store.status().phase == "draining"
         assert "reset_video" not in adapter.effects
@@ -67,11 +67,11 @@ def test_drain_timeout_preserves_claims_and_requires_recovery(setup):
     store.claim_video("slow")
 
     async def run():
-        offered = await controller.offer_restore(user="nick", expected_generation=store.status().generation)
-        generation = await controller.accept_restore(user="nick", token=offered["token"],
+        offered = await controller.offer_restore(user="operator", expected_generation=store.status().generation)
+        generation = await controller.accept_restore(user="operator", token=offered["token"],
             expected_generation=offered["generation"], approved=True)
         with pytest.raises(HandoffConflict, match="timed out"):
-            await controller.execute_restore(user="nick", generation=generation)
+            await controller.execute_restore(user="operator", generation=generation)
 
     asyncio.run(run())
     assert store.status().phase == "recovery_required"
@@ -84,16 +84,16 @@ def test_denied_or_duplicate_restore_does_not_drain(setup):
     store.claim_video("accepted")
 
     async def run():
-        offered = await controller.offer_restore(user="nick", expected_generation=store.status().generation)
+        offered = await controller.offer_restore(user="operator", expected_generation=store.status().generation)
         with pytest.raises(HandoffConflict):
-            await controller.accept_restore(user="nick", token=offered["token"],
+            await controller.accept_restore(user="operator", token=offered["token"],
                 expected_generation=offered["generation"], approved=False)
         assert store.status().phase == "offered"
         store.claim_video("accepted-after-decline")
-        generation = await controller.accept_restore(user="nick", token=offered["token"],
+        generation = await controller.accept_restore(user="operator", token=offered["token"],
             expected_generation=offered["generation"], approved=True)
         with pytest.raises(HandoffConflict):
-            await controller.accept_restore(user="nick", token=offered["token"],
+            await controller.accept_restore(user="operator", token=offered["token"],
                 expected_generation=offered["generation"], approved=True)
         assert store.status().generation == generation
 

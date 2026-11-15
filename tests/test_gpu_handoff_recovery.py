@@ -31,11 +31,11 @@ def test_lost_start_response_requires_receipt_and_skips_successful_start(setup):
     adapter.dispatch = lost_response
 
     async def interrupted():
-        proposed = await controller.offer_restore(user="nick", expected_generation=store.status().generation)
-        generation = await controller.accept_restore(user="nick", token=proposed["token"],
+        proposed = await controller.offer_restore(user="operator", expected_generation=store.status().generation)
+        generation = await controller.accept_restore(user="operator", token=proposed["token"],
             expected_generation=proposed["generation"], approved=True)
         with pytest.raises(RuntimeError, match="response lost"):
-            await controller.execute_restore(user="nick", generation=generation)
+            await controller.execute_restore(user="operator", generation=generation)
 
     asyncio.run(interrupted())
     fenced = store.status()
@@ -43,7 +43,7 @@ def test_lost_start_response_requires_receipt_and_skips_successful_start(setup):
     assert fenced.last_job_id is None  # The ops store, not the HTTP response, owns the receipt.
     adapter.jobs.pop("stt")
     with pytest.raises(HandoffConflict, match="unverified"):
-        asyncio.run(controller.offer_restore(user="nick", expected_generation=fenced.generation))
+        asyncio.run(controller.offer_restore(user="operator", expected_generation=fenced.generation))
     assert store.status() == fenced
     # The idempotent ops key resolves the actual successful job; do not replay it.
     adapter.jobs["stt"] = {"id": "stt", "operation": START_OPERATIONS[0], "terminal": True,
@@ -52,11 +52,11 @@ def test_lost_start_response_requires_receipt_and_skips_successful_start(setup):
     prior_starts = adapter.effects.count(START_OPERATIONS[0])
 
     async def recover():
-        proposed = await controller.offer_restore(user="nick", expected_generation=fenced.generation)
+        proposed = await controller.offer_restore(user="operator", expected_generation=fenced.generation)
         assert proposed["operations"] == [START_OPERATIONS[1]]
-        generation = await controller.accept_restore(user="nick", token=proposed["token"],
+        generation = await controller.accept_restore(user="operator", token=proposed["token"],
             expected_generation=proposed["generation"], approved=True)
-        await controller.execute_restore(user="nick", generation=generation)
+        await controller.execute_restore(user="operator", generation=generation)
 
     asyncio.run(recover())
     assert adapter.effects.count(START_OPERATIONS[0]) == prior_starts
@@ -72,8 +72,8 @@ def test_interrupted_drain_keeps_claims_and_refuses_busy_worker_reset(setup):
     adapter.render_active = True
 
     async def begin():
-        proposed = await controller.offer_restore(user="nick", expected_generation=store.status().generation)
-        await controller.accept_restore(user="nick", token=proposed["token"],
+        proposed = await controller.offer_restore(user="operator", expected_generation=store.status().generation)
+        await controller.accept_restore(user="operator", token=proposed["token"],
             expected_generation=proposed["generation"], approved=True)
     asyncio.run(begin())
     assert store.status().phase == "draining"
@@ -83,7 +83,7 @@ def test_interrupted_drain_keeps_claims_and_refuses_busy_worker_reset(setup):
     with pytest.raises(HandoffConflict):
         store.claim_video("late")
     with pytest.raises(HandoffConflict, match="still running"):
-        asyncio.run(controller.offer_restore(user="nick", expected_generation=fence.generation))
+        asyncio.run(controller.offer_restore(user="operator", expected_generation=fence.generation))
     assert "reset_video" not in adapter.effects
 
 
@@ -93,16 +93,16 @@ def test_lost_lease_and_active_voice_block_restore_without_effects(setup):
     effects = list(adapter.effects)
     adapter.voice["park_id"] = "b" * 32
     with pytest.raises(HandoffConflict, match="lease was lost"):
-        asyncio.run(controller.offer_restore(user="nick", expected_generation=store.status().generation))
+        asyncio.run(controller.offer_restore(user="operator", expected_generation=store.status().generation))
     assert adapter.effects == effects
     adapter.voice["park_id"] = "a" * 32
     adapter.voice["parked"] = False
     with pytest.raises(HandoffConflict, match="lease was lost"):
-        asyncio.run(controller.offer_restore(user="nick", expected_generation=store.status().generation))
+        asyncio.run(controller.offer_restore(user="operator", expected_generation=store.status().generation))
     adapter.voice["parked"] = True
     adapter.voice["active_gpu_work"] = 1
     with pytest.raises(HandoffConflict, match="Active voice"):
-        asyncio.run(controller.offer_restore(user="nick", expected_generation=store.status().generation))
+        asyncio.run(controller.offer_restore(user="operator", expected_generation=store.status().generation))
     assert adapter.effects == effects
 
 
@@ -112,7 +112,7 @@ def test_restore_rejects_stale_gpu_without_reset_or_ops(setup):
     effects = list(adapter.effects)
     adapter.stale = True
     with pytest.raises(HandoffConflict, match="telemetry is stale"):
-        asyncio.run(controller.offer_restore(user="nick", expected_generation=store.status().generation))
+        asyncio.run(controller.offer_restore(user="operator", expected_generation=store.status().generation))
     assert adapter.effects == effects
 
 
@@ -124,6 +124,6 @@ def test_interrupted_stop_with_unknown_receipt_blocks_new_consent(setup):
     fenced = store.status()
     assert fenced.pending_action == "stop_moshi_stt"
     with pytest.raises(HandoffConflict, match="unverified"):
-        asyncio.run(controller.offer_restore(user="nick", expected_generation=fenced.generation))
+        asyncio.run(controller.offer_restore(user="operator", expected_generation=fenced.generation))
     assert store.status() == fenced
     assert STOP_OPERATIONS[0] in adapter.effects

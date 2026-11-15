@@ -39,12 +39,12 @@ class Subscriptions:
 def source(status="DELIVERED", *, message_id="original", text="Exact answer"):
     return SimpleNamespace(
         id="delivery-original", status=status, sender_bot_id="nova", target_bot_id="nova",
-        author_entity_type="user", author_entity_id="nick",
+        author_entity_type="user", author_entity_id="operator",
         user_message_id=message_id, turn_id="turn-original",
         metadata={"ordinary_chat": {"digest": "original"}}, last_error=None,
     ), SimpleNamespace(
         ended_at=datetime.now(timezone.utc), status="ok", error_text=None,
-        bot_id="nova", user_id="nick", trigger_message_id=message_id,
+        bot_id="nova", user_id="operator", trigger_message_id=message_id,
         response_text=text,
     )
 
@@ -52,7 +52,7 @@ def source(status="DELIVERED", *, message_id="original", text="Exact answer"):
 def setup(monkeypatch, *, kind="delivery"):
     calls = []
     sub = TalkReplySubscription(
-        message_id="original", bot_id="nova", user_id="nick",
+        message_id="original", bot_id="nova", user_id="operator",
         source_type=kind, source_id="delivery-original" if kind == "delivery" else "turn-original",
         backend="https://talk.example", conversation_token="room", reply_to=42,
     )

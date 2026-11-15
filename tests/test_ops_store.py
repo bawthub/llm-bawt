@@ -71,12 +71,12 @@ def _op_data(**over):
 
 def test_create_operation_writes_row_with_script_hash():
     store = _store()
-    row = store.create_operation(_op_data(), actor="nick")
+    row = store.create_operation(_op_data(), actor="operator")
     assert row.slug == "test.restart-thing"
     assert row.version == 1
     expected = hashlib.sha256(row.command_script.encode("utf-8")).hexdigest()
     assert row.script_hash == expected
-    assert row.created_by == "nick"
+    assert row.created_by == "operator"
 
 
 def test_create_operation_rejects_duplicate_slug():
@@ -107,11 +107,11 @@ def test_update_operation_bumps_version_and_rehashes_script():
     updated = store.update_operation(
         row.id,
         {"command_script": '{"action":"start","container_name":"test"}'},
-        actor="nick",
+        actor="operator",
     )
     assert updated.version == 2
     assert updated.script_hash != orig_hash
-    assert updated.updated_by == "nick"
+    assert updated.updated_by == "operator"
 
 
 def test_soft_delete_operation_disables_and_marks():

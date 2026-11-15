@@ -27,7 +27,7 @@ def test_phase_fields_survive_both_relay_hops():
     }
     item = upstream_status_queue_item(_event(status))
     payload = upstream_status_sse_payload(
-        item, turn_id="turn_1", trigger_message_id=None, bot_id="caid", user_id="nick",
+        item, turn_id="turn_1", trigger_message_id=None, bot_id="caid", user_id="operator",
     )
 
     assert payload["_type"] == "upstream_status"

@@ -23,9 +23,9 @@ def test_initial_and_final_owner_provenance_do_not_cross_rotation(monkeypatch, i
     initial = {"thread_session_id": "before"}
     final = {"thread_session_id": "after"}
     if initial_verified:
-        initial["_service_owner"] = ("before", "caid", "nick")
+        initial["_service_owner"] = ("before", "caid", "operator")
     if final_verified:
-        final["_service_owner"] = ("after", "caid", "nick")
+        final["_service_owner"] = ("after", "caid", "operator")
     service._bind_agent_thread.return_value = initial
     monkeypatch.setattr(NewSessionExecution, "prepare_agent",
                         lambda *a, **kw: PreparedNewSession(None, final, "after"))
@@ -56,7 +56,7 @@ def test_initial_and_final_owner_provenance_do_not_cross_rotation(monkeypatch, i
 def test_agent_nonstream_failure_clears_all_executor_scopes(monkeypatch, phase):
     service = _service(Mock(return_value=("answer", "", [])))
     llm = service._get_llm_bawt.return_value
-    binding = {"thread_session_id": "bound", "_service_owner": ("bound", "caid", "nick")}
+    binding = {"thread_session_id": "bound", "_service_owner": ("bound", "caid", "operator")}
     service._bind_agent_thread.return_value = binding
     llm.prepare_messages_for_query.return_value = [Message(role="user", content="do the task")]
     monkeypatch.setattr("llm_bawt.task_turn_context.mint_for_agent_turn", lambda **kw: "proof")

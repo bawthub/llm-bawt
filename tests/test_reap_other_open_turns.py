@@ -45,8 +45,8 @@ def _row(store, turn_id):
 
 def test_reaps_other_open_turns_for_same_bot():
     store = _store()
-    _add(store, turn_id="zombie", bot_id="byte", user_id="nick")   # stuck open
-    _add(store, turn_id="current", bot_id="byte", user_id="nick")  # the live one
+    _add(store, turn_id="zombie", bot_id="byte", user_id="operator")   # stuck open
+    _add(store, turn_id="current", bot_id="byte", user_id="operator")  # the live one
 
     reaped = store.reap_other_open_turns(bot_id="byte", current_turn_id="current")
 
@@ -61,8 +61,8 @@ def test_reaps_other_open_turns_for_same_bot():
 
 def test_does_not_touch_the_current_turn_or_other_bots():
     store = _store()
-    _add(store, turn_id="current", bot_id="byte", user_id="nick")
-    _add(store, turn_id="other_bot", bot_id="snark", user_id="nick")  # different bot
+    _add(store, turn_id="current", bot_id="byte", user_id="operator")
+    _add(store, turn_id="other_bot", bot_id="snark", user_id="operator")  # different bot
 
     reaped = store.reap_other_open_turns(bot_id="byte", current_turn_id="current")
 
@@ -73,8 +73,8 @@ def test_does_not_touch_the_current_turn_or_other_bots():
 
 def test_already_closed_turns_are_not_re_reaped():
     store = _store()
-    _add(store, turn_id="done", bot_id="byte", user_id="nick", ended=True)
-    _add(store, turn_id="current", bot_id="byte", user_id="nick")
+    _add(store, turn_id="done", bot_id="byte", user_id="operator", ended=True)
+    _add(store, turn_id="current", bot_id="byte", user_id="operator")
 
     reaped = store.reap_other_open_turns(bot_id="byte", current_turn_id="current")
 
@@ -87,7 +87,7 @@ def test_returns_user_id_for_indicator_clear():
     # turn_complete on the correct {bot_id}:{user_id} stream.
     store = _store()
     _add(store, turn_id="zombie", bot_id="byte", user_id="someoneelse")
-    _add(store, turn_id="current", bot_id="byte", user_id="nick")
+    _add(store, turn_id="current", bot_id="byte", user_id="operator")
 
     reaped = store.reap_other_open_turns(bot_id="byte", current_turn_id="current")
 
@@ -97,19 +97,19 @@ def test_returns_user_id_for_indicator_clear():
 def test_does_not_reap_newer_queued_turn_when_older_turn_confirms_late():
     store = _store()
     base = datetime(2026, 7, 10, 16, 35, 35, tzinfo=timezone.utc)
-    _add(store, turn_id="current", bot_id="byte", user_id="nick", created_at=base)
+    _add(store, turn_id="current", bot_id="byte", user_id="operator", created_at=base)
     _add(
         store,
         turn_id="newer_queued",
         bot_id="byte",
-        user_id="nick",
+        user_id="operator",
         created_at=base + timedelta(minutes=2),
     )
     _add(
         store,
         turn_id="older_zombie",
         bot_id="byte",
-        user_id="nick",
+        user_id="operator",
         created_at=base - timedelta(minutes=5),
     )
 
@@ -124,7 +124,7 @@ def test_does_not_reap_newer_queued_turn_when_older_turn_confirms_late():
 
 def test_missing_current_turn_does_not_reap_anything():
     store = _store()
-    _add(store, turn_id="zombie", bot_id="byte", user_id="nick")
+    _add(store, turn_id="zombie", bot_id="byte", user_id="operator")
 
     reaped = store.reap_other_open_turns(bot_id="byte", current_turn_id="missing")
 

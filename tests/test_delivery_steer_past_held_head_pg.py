@@ -94,7 +94,7 @@ def _from_same_sender(gated, held, bot, message):
             "SELECT sender_bot_id FROM inter_bot_deliveries WHERE id=:id"), {"id": held.id}).scalar_one()
     record, _ = deliveries.enqueue(
         sender_bot_id=sender, target_bot_id=bot, message=message,
-        payload={"messages": [{"role": "user", "content": message}], "bot_id": bot, "user": "nick", "stream": True},
+        payload={"messages": [{"role": "user", "content": message}], "bot_id": bot, "user": "operator", "stream": True},
     )
     return record
 

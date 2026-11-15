@@ -65,8 +65,8 @@ def test_compact_row_drops_metadata_and_bulky_fields():
 
 def test_compact_row_names_a_user_author_only():
     assert "author" not in _record().to_compact()
-    user = _record(author_entity_type="user", author_entity_id="nick").to_compact()
-    assert user["author"] == "nick"
+    user = _record(author_entity_type="user", author_entity_id="operator").to_compact()
+    assert user["author"] == "operator"
 
 
 def test_full_row_carries_text_only_for_a_users_queued_chat_message():

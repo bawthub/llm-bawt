@@ -29,10 +29,10 @@ def restored(tmp_path):
         store.finish_calibration("calibration", measurement())
         store.claim_video("lost-render")
         store.recover_orphaned_video(worker_restarted=True)
-        proposed = await controller.offer_restore(user="nick", expected_generation=store.status().generation)
-        restore_generation = await controller.accept_restore(user="nick", token=proposed["token"],
+        proposed = await controller.offer_restore(user="operator", expected_generation=store.status().generation)
+        restore_generation = await controller.accept_restore(user="operator", token=proposed["token"],
             expected_generation=proposed["generation"], approved=True)
-        await controller.execute_restore(user="nick", generation=restore_generation)
+        await controller.execute_restore(user="operator", generation=restore_generation)
 
     asyncio.run(establish())
     assert store.status().owner == "voice" and store.active_video_jobs() == 1
@@ -41,7 +41,7 @@ def restored(tmp_path):
 
 
 def reviewed(controller, store, **overrides):
-    args = dict(user="nick", job_id="lost-render", expected_generation=store.status().generation,
+    args = dict(user="operator", job_id="lost-render", expected_generation=store.status().generation,
                 outcome="unknown", evidence="Inspected bridge job and media record; output not recoverable.",
                 approved=True, media_observation={"id": "gen-1", "provider": "local-video", "status": "pending"})
     return asyncio.run(controller.resolve_video_claim(**(args | overrides)))
@@ -68,7 +68,7 @@ def test_claim_resolution_requires_consent_evidence_and_stopped_worker(restored)
     assert store.active_video_jobs() == 0
     archive = store.resolved_video_claim("lost-render")
     assert archive["claim_generation"] > 0
-    assert archive["reviewed_by"] == "nick"
+    assert archive["reviewed_by"] == "operator"
     assert archive["observations"]["media"]["id"] == "gen-1"
     assert "Inspected bridge job" in archive["evidence"]
     assert adapter.effects == effects
@@ -101,7 +101,7 @@ def test_resolution_route_validates_payload_and_persists_audit(restored, monkeyp
     app.include_router(media_handoff.router)
     with TestClient(app) as client:
         path = "/v1/media/local-video/handoff/claims/resolve"
-        body = {"user": "nick", "job_id": "lost-render", "expected_generation": store.status().generation,
+        body = {"user": "operator", "job_id": "lost-render", "expected_generation": store.status().generation,
                 "outcome": "unknown", "evidence": "Inspected job output and found no recoverable video.", "approved": True}
         assert client.post(path, json=body | {"approved": False}).status_code == 409
         assert client.post(path, json=body | {"approved": "true"}).status_code == 422

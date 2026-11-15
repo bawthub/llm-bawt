@@ -8,13 +8,13 @@ from llm_bawt.approval_defaults import _OPS_DEFAULT_POLICIES
 
 @pytest.mark.parametrize("command", [
     "make rebuild-prod",
-    "cd /home/nick/dev/bawthub && make rebuild-prod",
-    "cd /home/nick/dev/bawthub && docker compose up -d --build frontend-prod",
+    "cd /home/operator/dev/bawthub && make rebuild-prod",
+    "cd /home/operator/dev/bawthub && docker compose up -d --build frontend-prod",
     "make snapshot-rebuild",
     "make -o version-release snapshot-rebuild",
-    "ssh nick@172.18.0.1 'cd /home/nick/dev/bawthub && make rebuild-prod'",
+    "ssh operator@172.18.0.1 'cd /home/operator/dev/bawthub && make rebuild-prod'",
     "docker stop bawthub-frontend-prod-1",
-    "ssh nick@172.18.0.1 'docker restart bawthub-frontend-prod-1'",
+    "ssh operator@172.18.0.1 'docker restart bawthub-frontend-prod-1'",
     "docker compose up -d --build frontend-prod",
 ])
 def test_seeded_agent_release_mutations_are_denied(command):

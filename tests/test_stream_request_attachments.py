@@ -14,7 +14,7 @@ from llm_bawt.service.stream_request_attachments import (
 
 def _run(request, log):
     return asyncio.run(
-        prepare_stream_request_attachments(request, user_id="nick", log=log)
+        prepare_stream_request_attachments(request, user_id="operator", log=log)
     )
 
 

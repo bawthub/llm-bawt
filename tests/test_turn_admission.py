@@ -58,14 +58,14 @@ def _mcp_claim(store, request_id="req-mcp-1"):
     args = {"operation": "demo", "args": {}}
     context = {
         "session_id": "session-1", "turn_id": "turn-1",
-        "trigger_message_id": "message-1", "bot_id": "snark", "user_id": "nick",
+        "trigger_message_id": "message-1", "bot_id": "snark", "user_id": "operator",
         "issued_at": 1, "agent_request_id": "agent-request-1",
-        "session_key": "snark:nick", "backend": "claude-code", "tool_use_id": "toolu-1",
+        "session_key": "snark:operator", "backend": "claude-code", "tool_use_id": "toolu-1",
     }
     row = store.record_mcp_request(
         request_id=request_id, tool_use_id="toolu-1", mcp_server="bawthub",
-        bot_id="snark", user_id="nick", turn_id="turn-1",
-        trigger_message_id="message-1", session_key="snark:nick",
+        bot_id="snark", user_id="operator", turn_id="turn-1",
+        trigger_message_id="message-1", session_key="snark:operator",
         backend="claude-code", tool_name="generic", tool_arguments=args,
         subject="subject", grant_key="g", policy_id=None, severity="high",
         prompt="Approve?", invocation_hash=canonical_invocation_hash("generic", args),
@@ -83,7 +83,7 @@ def _mcp_claim(store, request_id="req-mcp-1"):
 
 def _harness_claim(store, status, request_id="h-1"):
     row = store.record_request(
-        request_id=request_id, bot_id="snark", user_id="nick", turn_id="turn-1",
+        request_id=request_id, bot_id="snark", user_id="operator", turn_id="turn-1",
         backend="claude-code", tool_name="Bash", tool_arguments={"command": "x"},
         subject="x", grant_key="g", policy_id=None, severity="high",
         prompt="Approve?", session_id="session-1",
@@ -239,7 +239,7 @@ def test_persist_turn_log_propagates_admission_outcomes(stream, error):
     with pytest.raises(error):
         host._persist_turn_log(
             turn_id="t", request_id="r", path="/v1/chat/completions", stream=stream,
-            model="m", bot_id="snark", user_id="nick",
+            model="m", bot_id="snark", user_id="operator",
             status="streaming" if stream else "pending", latency_ms=None,
             user_prompt="hi", prepared_messages=[], response_text="",
             request_extensions={"admission": "idle_only"},
@@ -262,7 +262,7 @@ def test_persist_turn_log_fails_closed_on_store_error(stream, with_claim):
     with pytest.raises(AdmissionUnavailable, match="turn admission failed") as exc:
         host._persist_turn_log(
             turn_id="t", request_id="r", path="/v1/chat/completions", stream=stream,
-            model="m", bot_id="snark", user_id="nick",
+            model="m", bot_id="snark", user_id="operator",
             status="streaming" if stream else "pending", latency_ms=None,
             user_prompt="hi", prepared_messages=[], response_text="",
             admission_claim=claim,
@@ -305,7 +305,7 @@ def test_missing_engine_only_allows_database_less_ordinary_start(stream, configu
     payload = {"messages": [], "admission": "idle_only" if admission == "idle_only" else "start"}
     kwargs = dict(
         turn_id="turn-test", request_id="r", path="/v1/chat/completions", stream=stream,
-        model="m", bot_id="snark", user_id="nick",
+        model="m", bot_id="snark", user_id="operator",
         status="streaming" if stream else "pending", latency_ms=None,
         user_prompt="hi", request_payload=payload, response_text="", tool_calls=None,
         admission_claim=claim,
@@ -346,7 +346,7 @@ def _sqlite_row(turns, turn_id, *, status="reserved", owner=None, ended=False):
         payload["reservation_owner"] = owner
     with Session(turns.engine) as session:
         session.add(TurnLog(
-            id=turn_id, bot_id="snark", user_id="nick", status=status,
+            id=turn_id, bot_id="snark", user_id="operator", status=status,
             request_json=json.dumps(payload), ended_at=(1 if ended else None),
         ))
         session.commit()
@@ -355,7 +355,7 @@ def _sqlite_row(turns, turn_id, *, status="reserved", owner=None, ended=False):
 def _consume(turns, turn_id, claim, *, admission="idle_only", stream=True):
     turns.save_turn(
         turn_id=turn_id, request_id="r", path="/v1/chat/completions", stream=stream,
-        model="m", bot_id="snark", user_id="nick",
+        model="m", bot_id="snark", user_id="operator",
         status="streaming" if stream else "pending",
         latency_ms=None, user_prompt="result",
         request_payload={"messages": [], "admission": admission},
@@ -601,7 +601,7 @@ def test_delivery_claim_is_fenced_at_consumption(sqlite_turns, stream):
 def test_reserved_turns_are_not_executing_steer_targets(sqlite_turns):
     _, turns = sqlite_turns
     _sqlite_row(turns, "turn-reserved", owner="approval-owner")
-    rows, count = turns.list_turns(bot_id="snark", user_id="nick", active_only=True)
+    rows, count = turns.list_turns(bot_id="snark", user_id="operator", active_only=True)
     assert rows == [] and count == 0
     assert turns.active_turn_for_bot("snark") is None
     # Direct inspection still exposes the reservation for debugging.

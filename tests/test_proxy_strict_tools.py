@@ -239,7 +239,7 @@ def test_strict_flag_command_to_proxy_context_round_trip(monkeypatch):
 
     env = Mixin()._build_sdk_env(
         use_proxy=True, model=req.model, subagent_model=None, force_refresh=False,
-        bot_id="snark", session_key="snark:nick", thread_session_id="thread-1",
+        bot_id="snark", session_key="snark:operator", thread_session_id="thread-1",
         request_id="request-1", strict_tools=req.strict_tools,
     )
     headers = dict(line.split(": ", 1) for line in env["ANTHROPIC_CUSTOM_HEADERS"].splitlines())

@@ -25,7 +25,7 @@ from llm_bawt.prompt_sync import (
 from llm_bawt.prompt_synced_defaults import body_sha256, load_manifest
 
 
-def _row(key, body, *, category="agents", scope_type="global", updated_by="nick", metadata=None):
+def _row(key, body, *, category="agents", scope_type="global", updated_by="operator", metadata=None):
     return PromptTemplate(
         key=key, scope_type=scope_type, scope_id="*", title=key, category=category,
         format="plain_text", body=body, updated_by=updated_by,
@@ -148,7 +148,7 @@ def test_untouched_rows_follow_new_default_and_custom_rows_stay(store) -> None:
     seeded = _bodies(s)
     assert json.loads(seeded["k.follow"].metadata_json)[DEFAULT_SHA_KEY] == body_sha256("v1")
 
-    s.upsert(key="k.custom", body="mine", metadata=json.loads(seeded["k.custom"].metadata_json), updated_by="nick")
+    s.upsert(key="k.custom", body="mine", metadata=json.loads(seeded["k.custom"].metadata_json), updated_by="operator")
     # A row seeded before hashes existed: no hash, still written only by the seed.
     with Session(s.engine) as session:
         legacy = session.exec(select(PromptTemplate).where(PromptTemplate.key == "k.legacy")).one()
@@ -176,7 +176,7 @@ def test_followed_row_takes_the_new_required_vars_and_custom_rows_keep_theirs(st
     s.seed_defaults()
     seeded = _bodies(s)
     s.upsert(key="k.custom", body="mine {a} {b}", required_vars=["a", "b"],
-             metadata=json.loads(seeded["k.custom"].metadata_json), updated_by="nick")
+             metadata=json.loads(seeded["k.custom"].metadata_json), updated_by="operator")
     for key in ("k.follow", "k.custom"):
         defs[key] = PromptDefinition(key=key, title=key, category="agents", loader=lambda: "{a}", required_vars=("a",))
     assert s.seed_defaults()["followed_keys"] == ["k.follow"]

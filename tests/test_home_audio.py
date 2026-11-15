@@ -47,7 +47,7 @@ def store(tmp_path):
 
 def payload(text="hello", bot_id="loopy"):
     return dict(target="media_player.kitchen_display", bot_id=bot_id, text=text,
-                voice="test-voice", asset_id=None, user_id="nick")
+                voice="test-voice", asset_id=None, user_id="operator")
 
 
 def wav(seconds=1):

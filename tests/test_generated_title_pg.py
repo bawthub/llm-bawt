@@ -30,7 +30,7 @@ def engine(private_pg, private_module_db):
 
 def _session(engine, sid, meta, messages):
     with engine.begin() as conn:
-        conn.execute(text("INSERT INTO sessions VALUES (:id,'bot-a','nick','active',CAST(:m AS jsonb))"),
+        conn.execute(text("INSERT INTO sessions VALUES (:id,'bot-a','operator','active',CAST(:m AS jsonb))"),
                      {"id": sid, "m": json.dumps(meta)})
         for i, (mid, role, content) in enumerate(messages):
             conn.execute(text("INSERT INTO messages VALUES ('bota',:id,:role,:c,:ts,:s)"),
@@ -55,7 +55,7 @@ def test_first_message_gets_generated_title(engine):
     _session(engine, "s1", {}, [("c", "user", "/new"), ("m0", "user", "###"),
                                 ("m1", "user", "how do I rebase onto master?")])
     model = Model('"Git rebase question."')
-    assert generate_session_title(engine, "s1", "bot-a", "nick", model) == "Git rebase question"
+    assert generate_session_title(engine, "s1", "bot-a", "operator", model) == "Git rebase question"
     assert _meta(engine, "s1") == {"title": "Git rebase question", "title_source": "generated"}
     assert "how do I rebase onto master?" in model.calls[0].prompt
 
@@ -64,8 +64,8 @@ def test_given_names_are_left_alone(engine):
     model = Model("Anything")
     _session(engine, "s3", {"title": "My name", "title_source": "user"}, [("m1", "user", "hello there")])
     _session(engine, "s4", {"title": "Daily brief", "title_source": "automation"}, [("m1", "user", "brief")])
-    assert generate_session_title(engine, "s3", "bot-a", "nick", model) is None
-    assert generate_session_title(engine, "s4", "bot-a", "nick", model) is None
+    assert generate_session_title(engine, "s3", "bot-a", "operator", model) is None
+    assert generate_session_title(engine, "s4", "bot-a", "operator", model) is None
     assert model.calls == []
     assert _meta(engine, "s3")["title"] == "My name"
     assert _meta(engine, "s4")["title"] == "Daily brief"
@@ -80,15 +80,15 @@ def test_rename_during_generation_wins(engine):
                 || '{"title": "Renamed", "title_source": "user"}'::jsonb WHERE id='s5'"""))
         return SimpleNamespace(content="Trip planning", model="test")
 
-    assert generate_session_title(engine, "s5", "bot-a", "nick", renaming_model) is None
+    assert generate_session_title(engine, "s5", "bot-a", "operator", renaming_model) is None
     assert _meta(engine, "s5") == {"title": "Renamed", "title_source": "user"}
 
 
 def test_auto_copy_is_replaced_and_refusal_stores_nothing(engine):
     _session(engine, "s6", {"title": "plan a tr…", "title_source": "auto"}, [("m1", "user", "plan a trip")])
-    assert generate_session_title(engine, "s6", "bot-a", "nick", Model("Trip planning")) == "Trip planning"
+    assert generate_session_title(engine, "s6", "bot-a", "operator", Model("Trip planning")) == "Trip planning"
     _session(engine, "s7", {}, [("m1", "user", "something")])
-    assert generate_session_title(engine, "s7", "bot-a", "nick", Model("I'm sorry, I can't help")) is None
+    assert generate_session_title(engine, "s7", "bot-a", "operator", Model("I'm sorry, I can't help")) is None
     assert _meta(engine, "s7") == {}
 
 
@@ -101,7 +101,7 @@ def test_wrong_user_is_not_touched(engine):
 def test_marker_only_session_reports_no_eligible(engine):
     _session(engine, "s9", {}, [("m0", "user", "###")])
     model = Model("Unused")
-    assert generate_session_title(engine, "s9", "bot-a", "nick", model) is gt.NO_ELIGIBLE
+    assert generate_session_title(engine, "s9", "bot-a", "operator", model) is gt.NO_ELIGIBLE
     assert model.calls == []
 
 
@@ -136,7 +136,7 @@ def scheduler(monkeypatch):
     monkeypatch.setattr(gt, "generate_session_title",
                         lambda *a, **kw: real(*a, **{**kw, "complete": Model("Git rebase question")}))
     return lambda sid, mid, content: gt.schedule_session_title(
-        engine_holder[0], session_id=sid, bot_id="bot-a", user_id="nick",
+        engine_holder[0], session_id=sid, bot_id="bot-a", user_id="operator",
         message_id=mid, content=content)
 
 
@@ -206,6 +206,6 @@ def test_new_message_in_old_unnamed_chat_is_not_backfilled(engine, scheduler):
 def test_unrelated_first_message_is_skipped_by_generator(engine):
     _session(engine, "s14", {}, [("old", "user", "Old question")])
     model = Model("Unused")
-    assert generate_session_title(engine, "s14", "bot-a", "nick", model,
+    assert generate_session_title(engine, "s14", "bot-a", "operator", model,
                                   trigger_ids={"other"}) is gt.NOT_TRIGGERED
     assert model.calls == []

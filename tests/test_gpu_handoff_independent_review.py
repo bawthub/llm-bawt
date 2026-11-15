@@ -40,16 +40,16 @@ def test_resume_video_refuses_nonterminal_moshi_start(review_setup):
         raise RuntimeError("Response lost; the queued operation may still execute")
 
     async def run():
-        proposed = await controller.offer_restore(user="nick", expected_generation=store.status().generation)
-        generation = await controller.accept_restore(user="nick", token=proposed["token"],
+        proposed = await controller.offer_restore(user="operator", expected_generation=store.status().generation)
+        generation = await controller.accept_restore(user="operator", token=proposed["token"],
             expected_generation=proposed["generation"], approved=True)
         adapter.dispatch = response_lost
         with pytest.raises(RuntimeError, match="Response lost"):
-            await controller.execute_restore(user="nick", generation=generation)
+            await controller.execute_restore(user="operator", generation=generation)
         assert store.status().pending_action == "start_moshi_stt"
         assert adapter.jobs["pending-start"]["operation"] == START_OPERATIONS[0]
         with pytest.raises(HandoffConflict, match="unverified|receipt|pending"):
-            await controller.resume_video(user="nick", expected_generation=store.status().generation)
+            await controller.resume_video(user="operator", expected_generation=store.status().generation)
 
     asyncio.run(run())
 
@@ -62,7 +62,7 @@ def test_repeated_unconfirmed_voice_offers_preserve_calibration(review_setup):
 
     async def run():
         for _ in range(2):
-            await controller.offer_restore(user="nick", expected_generation=store.status().generation)
+            await controller.offer_restore(user="operator", expected_generation=store.status().generation)
         return store.finish_calibration("accepted-calibration", measurement())
 
     evidence = asyncio.run(run())
@@ -93,7 +93,7 @@ def test_public_calibration_admission_survives_repeated_voice_offers(review_setu
 
     async def run():
         for _ in range(2):
-            await controller.offer_restore(user="nick", expected_generation=store.status().generation)
+            await controller.offer_restore(user="operator", expected_generation=store.status().generation)
         with pytest.raises(AdmissionReached):
             await media.create_generation(MediaGenerationRequest(
                 prompt="review", provider="local-video", media_type="video",

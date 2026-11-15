@@ -29,7 +29,7 @@ def ctx(world):  # noqa: F811
     world.cursors = HandleStore(per_owner=16)
     world.context = MessageContext(world.engine, world.handles, world.cursors)
 
-    def call(caller="pub", user="nick", *, trigger_id=None, raw=False, **request):
+    def call(caller="pub", user="operator", *, trigger_id=None, raw=False, **request):
         if "focus" in request and request["focus"] is not None:
             request["focus"] = tuple(request["focus"])
         out = world.context.context(world.access(caller, user), ContextRequest(**request),
@@ -155,7 +155,7 @@ def test_5_self_access_uses_caller_scope(ctx):
 def test_6_user_pin_and_dead_sessions(ctx):
     ctx.session("s_eve", "pub", user="eve")
     eve = ctx.message("pub", "s_eve", "eve said", author=("user", "eve"))
-    mine = ctx.message("pub", "s_eve", "nick in eve's session")
+    mine = ctx.message("pub", "s_eve", "operator in eve's session")
     assert ctx.ctx(bot="pub", id=eve) == NOT_FOUND
     assert ctx.ctx(bot="pub", id=mine) == NOT_FOUND
     assert ctx.ctx("pub", "eve", bot="pub", id=eve)["status"] == "ok"

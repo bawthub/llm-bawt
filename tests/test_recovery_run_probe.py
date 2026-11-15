@@ -15,7 +15,7 @@ from llm_bawt.service.recovery.base import SweepScope
 from llm_bawt.service.recovery.orphan_turns import BridgeRunProbe, OrphanTurnsStep, ProbeResult
 
 TURN = {"turn_id": "turn-1", "bot_id": "snark", "agent_backend": "claude-code",
-        "agent_session_key": "snark:nick", "agent_request_id": "req-1"}
+        "agent_session_key": "snark:operator", "agent_request_id": "req-1"}
 
 
 class _Subscriber:
@@ -43,7 +43,7 @@ def test_not_found_from_the_recorded_backend_is_the_only_settling_answer():
     assert (result.state, result.backend_matched, result.backend, result.boot_id) == (
         "not_found", True, "claude-code", "boot-9")
     assert subscriber.calls == [{"method": "run.status", "timeout_s": 7.0, "backend": "claude-code",
-                                 "params": {"sessionKey": "snark:nick", "requestId": "req-1"}}]
+                                 "params": {"sessionKey": "snark:operator", "requestId": "req-1"}}]
 
 
 @pytest.mark.parametrize("state", ["preflight", "queued", "running", "stopping", "tombstoned", "error"])

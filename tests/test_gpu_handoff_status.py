@@ -47,7 +47,7 @@ def test_gpu_status_exposes_original_calibration_reservation_after_reoffers(monk
         await confirm(controller, await offer(controller))
         reservation = ledger.status().generation
         for _ in range(2):
-            await controller.offer_restore(user="nick", expected_generation=ledger.status().generation)
+            await controller.offer_restore(user="operator", expected_generation=ledger.status().generation)
         return reservation
 
     reservation = asyncio.run(reoffer())

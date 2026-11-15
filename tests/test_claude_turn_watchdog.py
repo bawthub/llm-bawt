@@ -65,14 +65,14 @@ def test_long_bash_outlives_normal_sdk_idle_timeout() -> None:
         watchdog = _watchdog(on_health=health.append)
 
         start = await watchdog.receive_next(
-            stream, request_id="req-long", session_key="snark:nick"
+            stream, request_id="req-long", session_key="snark:operator"
         )
         assert isinstance(start, AssistantMessage)
         assert watchdog.active_tools[0].timeout_seconds == BASH_TIMEOUT_S
 
         began = asyncio.get_running_loop().time()
         result = await watchdog.receive_next(
-            stream, request_id="req-long", session_key="snark:nick"
+            stream, request_id="req-long", session_key="snark:operator"
         )
         assert isinstance(result, UserMessage)
         assert watchdog.active_tools == ()
@@ -103,7 +103,7 @@ def test_silent_sdk_still_hits_idle_watchdog(caplog) -> None:
             match=re.escape(f"No SDK messages for {IDLE_TIMEOUT_S}s"),
         ) as raised:
             await watchdog.receive_next(
-                _silent_stream(), request_id="req-idle", session_key="loopy:nick"
+                _silent_stream(), request_id="req-idle", session_key="loopy:operator"
             )
         assert raised.value.phase == "sdk_idle"
         assert raised.value.retry_fresh_session is True
@@ -138,12 +138,12 @@ def test_active_tool_fails_after_declared_timeout_and_grace() -> None:
         # Before the tool is observed, so elapsed covers its whole deadline.
         began = asyncio.get_running_loop().time()
         await watchdog.receive_next(
-            stream, request_id="req-overdue", session_key="snark:nick"
+            stream, request_id="req-overdue", session_key="snark:operator"
         )
 
         with pytest.raises(TurnWatchdogTimeout, match="active-tool deadline") as raised:
             await watchdog.receive_next(
-                stream, request_id="req-overdue", session_key="snark:nick"
+                stream, request_id="req-overdue", session_key="snark:operator"
             )
         # tool_running (not sdk_idle) is the Bash's own deadline firing.
         assert raised.value.phase == "tool_running"
@@ -171,7 +171,7 @@ def test_health_callback_failure_does_not_kill_turn() -> None:
 
         watchdog = _watchdog(on_health=broken_callback)
         message = await watchdog.receive_next(
-            stream(), request_id="req-health", session_key="loopy:nick"
+            stream(), request_id="req-health", session_key="loopy:operator"
         )
         assert isinstance(message, UserMessage)
 
@@ -367,8 +367,8 @@ def test_turn_health_log_levels_follow_policy(caplog) -> None:
     wd = TurnWatchdog(IDLE_TIMEOUT_S, clock=lambda: 0.0)
     idle = wd._idle_timeout
     with caplog.at_level("DEBUG", logger="claude_code_bridge"):
-        wd._log_health(request_id="r1", session_key="al:nick", phase="waiting", remaining=idle)
-        wd._log_health(request_id="r1", session_key="al:nick", phase="waiting", remaining=idle)
-        wd._log_health(request_id="r1", session_key="al:nick", phase="waiting", remaining=idle / 2 - 0.01)
+        wd._log_health(request_id="r1", session_key="al:operator", phase="waiting", remaining=idle)
+        wd._log_health(request_id="r1", session_key="al:operator", phase="waiting", remaining=idle)
+        wd._log_health(request_id="r1", session_key="al:operator", phase="waiting", remaining=idle / 2 - 0.01)
     levels = [r.levelname for r in caplog.records if r.getMessage().startswith("turn_health")]
     assert levels == ["INFO", "DEBUG", "WARNING"]

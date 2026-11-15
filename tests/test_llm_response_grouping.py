@@ -159,13 +159,13 @@ def engine():
         LlmResponseRecord.__table__,
     ])
     with Session(engine) as session:
-        session.add(TurnLog(id="turn", bot_id="al", user_id="nick", status="streaming", trigger_message_id="m"))
+        session.add(TurnLog(id="turn", bot_id="al", user_id="operator", status="streaming", trigger_message_id="m"))
         session.commit()
     return engine
 
 
 def _upsert(store, rid, seq, **kw):
-    return store.upsert(turn_id="turn", response_id=rid, first_seen_seq=seq, bot_id="al", user_id="nick", **kw)
+    return store.upsert(turn_id="turn", response_id=rid, first_seen_seq=seq, bot_id="al", user_id="operator", **kw)
 
 
 def test_usage_max_merges_never_sums_and_replay_keeps_known_values(engine):
@@ -212,7 +212,7 @@ def test_invalid_identity_is_not_persisted(engine):
 
 
 def _coord_start(coord, call_id, **extra):
-    coord.start({"turn_id": "turn", "bot_id": "al", "user_id": "nick", "call_id": call_id,
+    coord.start({"turn_id": "turn", "bot_id": "al", "user_id": "operator", "call_id": call_id,
                  "tool_use_id": f"tu-{call_id}", "tool_name": "Bash", "arguments": {}, "ts": 1.0, **extra})
 
 
@@ -244,14 +244,14 @@ def test_tool_end_keeps_response_membership(engine):
     _coord_start(coord, "c1", response_id="msg_1")
     ToolCallStore(engine).save_result(
         turn_id="turn", call_id="c1", tool_use_id="tu-c1", tool_name="Bash", bot_id="al",
-        user_id="nick", payload=ToolResultPayload.from_value("ok"), ended_at=2.0, is_error=False,
+        user_id="operator", payload=ToolResultPayload.from_value("ok"), ended_at=2.0, is_error=False,
     )
     assert _row(engine, "c1").response_id == "msg_1"
 
 
 def test_coordinator_publishes_the_merged_record(engine):
     coord = ToolEventCoordinator(engine)
-    base = {"turn_id": "turn", "bot_id": "al", "user_id": "nick", "trigger_message_id": "m",
+    base = {"turn_id": "turn", "bot_id": "al", "user_id": "operator", "trigger_message_id": "m",
             "response_id": "msg_1", "first_seen_seq": 2, "model": "opus"}
     coord.response({**base, "usage": START_USAGE})
     public = coord.response({**base, "usage": {"output_tokens": 50}, "usage_state": "final"})

@@ -35,7 +35,7 @@ def test_session_patch_with_blank_title_does_not_commit_status(monkeypatch):
         return {"id": "s1", "status": "archived"}
 
     monkeypatch.setattr(sessions, "get_effective_bot_id", lambda bot_id=None: "nova")
-    monkeypatch.setattr(sessions, "_resolve_user", lambda user: "nick")
+    monkeypatch.setattr(sessions, "_resolve_user", lambda user: "operator")
     monkeypatch.setattr(sessions, "_owned_session_or_404", owned)
     monkeypatch.setattr(sessions, "get_storage", lambda: storage)
 

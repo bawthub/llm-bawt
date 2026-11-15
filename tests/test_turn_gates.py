@@ -182,7 +182,7 @@ def _stream(monkeypatch, *, claim):
     monkeypatch.setattr("llm_bawt.service.chat_streaming.admit_ordinary_agent_turn", lambda *a, **k: None)
     monkeypatch.setattr("llm_bawt.service.chat_streaming.turn_admission_claim", lambda *_: claim)
     request = ChatCompletionRequest(
-        bot_id="caid", user="nick", model="test-model", stream=True,
+        bot_id="caid", user="fixture-user", model="test-model", stream=True,
         messages=[ChatMessage(role="user", content="hi")],
         user_message_id="00000000-0000-4000-8000-000000000001",
     )
@@ -330,7 +330,7 @@ def test_the_bridge_client_hands_the_run_terminal_to_its_execution(monkeypatch):
     monkeypatch.setattr(agent_bridge, "get_agent_subscriber", lambda: root)
     monkeypatch.setattr("agent_bridge.subscriber.RedisSubscriber", Subscriber)
     list(agent_bridge.AgentBridgeBackend().stream_raw("hello", {
-        "session_key": "test:nick", "request_id": "req-A", "turn_execution": owner,
+        "session_key": "test:fixture-user", "request_id": "req-A", "turn_execution": owner,
     }))
     owner.record_accept.assert_called_once_with(accepted)
     owner.record_exit.assert_called_once_with(terminal)

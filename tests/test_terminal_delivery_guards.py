@@ -162,7 +162,7 @@ def test_hold_requeue_reclaim_and_consume_preserves_producer_assistant_id(protoc
     )
     lease = TurnLogStore(store.config).save_turn(
         turn_id=claim.turn_id, request_id="request", path="/test", stream=False,
-        model="test", bot_id=target, user_id="nick", status="pending", latency_ms=None,
+        model="test", bot_id=target, user_id="operator", status="pending", latency_ms=None,
         user_prompt="protocol reservation", request_payload={}, response_text="", tool_calls=[],
         assistant_message_id="replacement-must-not-win", admission_claim=admission,
     )

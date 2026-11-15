@@ -30,7 +30,7 @@ def calls(world):  # noqa: F811 - imported shared pytest fixture
     return world
 
 
-def add(w, *, bot="pub", user="nick", session=None, trigger=None, author=("user", "nick"),
+def add(w, *, bot="pub", user="operator", session=None, trigger=None, author=("user", "operator"),
         args=None, result="result fixture", error=False, tool="Bash", age=60,
         payload=False, blob=None, digest=None, turn=None):
     if trigger is None:
@@ -103,7 +103,7 @@ def test_protected_id_and_filter_no_oracle(calls, bot):
     "missing_trigger", "protected_author", "unknown_author", "partial_author", "current_trigger",
 ])
 def test_trigger_and_owner_provenance(calls, case):
-    session, user, author, trigger = "s_pub", "nick", ("user", "nick"), None
+    session, user, author, trigger = "s_pub", "operator", ("user", "operator"), None
     if case == "foreign_session":
         session = calls.session("foreign", "pub", user="other")
     elif case == "deleted_session":

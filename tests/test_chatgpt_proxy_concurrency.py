@@ -154,16 +154,16 @@ def _conversation(bot: str, user: str, thread: str) -> str:
 
 
 def test_durable_identity_is_stable_isolated_and_rotates_on_new() -> None:
-    snark_thread = _conversation("snark", "nick", "thread-1")
-    assert snark_thread == _conversation("snark", "nick", "thread-1")
-    assert snark_thread != _conversation("al", "nick", "thread-1")
+    snark_thread = _conversation("snark", "operator", "thread-1")
+    assert snark_thread == _conversation("snark", "operator", "thread-1")
+    assert snark_thread != _conversation("al", "operator", "thread-1")
     assert snark_thread != _conversation("snark", "other-user", "thread-1")
     # /new rotates the durable DB thread before bridge dispatch.
-    assert snark_thread != _conversation("snark", "nick", "thread-2")
+    assert snark_thread != _conversation("snark", "operator", "thread-2")
 
 
 def test_custom_header_channel_carries_only_opaque_metadata() -> None:
-    conversation_id = _conversation("snark", "nick", "thread-1")
+    conversation_id = _conversation("snark", "operator", "thread-1")
     context = ProxyRequestContext(
         request_id="request-1",
         provider="openai_chatgpt",
@@ -182,7 +182,7 @@ def test_custom_header_channel_carries_only_opaque_metadata() -> None:
         RESPONSES_TRANSPORT_HEADER: "sse",
     }
     serialized = json.dumps(headers)
-    assert "nick" not in serialized
+    assert "operator" not in serialized
     assert "thread-1" not in serialized
 
 
@@ -196,7 +196,7 @@ def test_sdk_env_threads_durable_identity_into_proxy_headers() -> None:
         subagent_model=None,
         force_refresh=False,
         bot_id="snark",
-        session_key="snark:nick",
+        session_key="snark:operator",
         thread_session_id="thread-1",
         request_id="request-1",
         responses_transport="sse",
@@ -204,7 +204,7 @@ def test_sdk_env_threads_durable_identity_into_proxy_headers() -> None:
     headers = dict(
         line.split(": ", 1) for line in env["ANTHROPIC_CUSTOM_HEADERS"].splitlines()
     )
-    assert headers[CONVERSATION_HEADER] == _conversation("snark", "nick", "thread-1")
+    assert headers[CONVERSATION_HEADER] == _conversation("snark", "operator", "thread-1")
     assert headers[BOT_HEADER] == "snark"
     assert headers[REQUEST_HEADER] == "request-1"
     assert headers[RESPONSES_TRANSPORT_HEADER] == "sse"
@@ -212,7 +212,7 @@ def test_sdk_env_threads_durable_identity_into_proxy_headers() -> None:
 
 def test_proxy_route_extracts_request_local_metadata(monkeypatch) -> None:
     captured: list[ProxyRequestContext] = []
-    conversation_id = _conversation("snark", "nick", "thread-1")
+    conversation_id = _conversation("snark", "operator", "thread-1")
 
     class Adapter:
         def account_hash(self):
@@ -260,7 +260,7 @@ def test_session_and_prompt_cache_use_same_durable_identity() -> None:
         request_id="request-1",
         provider=adapter.name,
         bot_id="snark",
-        conversation_id=_conversation("snark", "nick", "thread-1"),
+        conversation_id=_conversation("snark", "operator", "thread-1"),
     )
     body = {
         "instructions": "Stable persona",
@@ -283,7 +283,7 @@ def test_session_and_prompt_cache_use_same_durable_identity() -> None:
         request_id="request-2",
         provider=adapter.name,
         bot_id="al",
-        conversation_id=_conversation("al", "nick", "thread-1"),
+        conversation_id=_conversation("al", "operator", "thread-1"),
     )
     assert (
         adapter.prepare_request(dict(body), other)["prompt_cache_key"]
@@ -344,7 +344,7 @@ def test_structured_log_splits_setup_ttfb_stream_and_cache(caplog) -> None:
         request_id="observed-request",
         provider=adapter.name,
         bot_id="snark",
-        conversation_id=_conversation("snark", "nick", "thread-observed"),
+        conversation_id=_conversation("snark", "operator", "thread-observed"),
     )
     body = {
         "model": "openai_chatgpt/gpt-5.4",
@@ -407,7 +407,7 @@ def test_parallel_responses_calls_reuse_pool_without_header_or_payload_crosstalk
             request_id=f"request-{index}",
             provider=adapter.name,
             bot_id=f"bot-{index}",
-            conversation_id=_conversation(f"bot-{index}", "nick", f"thread-{index}"),
+            conversation_id=_conversation(f"bot-{index}", "operator", f"thread-{index}"),
         )
         contexts.append(context)
         body = {
@@ -436,7 +436,7 @@ def test_parallel_responses_calls_reuse_pool_without_header_or_payload_crosstalk
     }
     for index, output in enumerate(outputs):
         call = calls_by_payload[f"payload-{index}"]
-        expected = _conversation(f"bot-{index}", "nick", f"thread-{index}")
+        expected = _conversation(f"bot-{index}", "operator", f"thread-{index}")
         assert call["body"]["prompt_cache_key"] == expected
         assert call["options"]["set_default_headers"]["session_id"] == expected
         assert f"payload-{index}".encode() in output
@@ -471,7 +471,7 @@ def test_parallel_proxy_streams_make_progress_without_serialization(
             request_id=f"r{index}",
             provider="mock",
             bot_id=f"bot-{index}",
-            conversation_id=_conversation(f"bot-{index}", "nick", f"t{index}"),
+            conversation_id=_conversation(f"bot-{index}", "operator", f"t{index}"),
         )
         return b"".join(
             [

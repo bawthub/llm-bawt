@@ -23,9 +23,9 @@ def engine():
             ('foreign','other','active')
         """)
         conn.exec_driver_sql("""INSERT INTO turn_logs (id,bot_id,user_id,created_at,status) VALUES
-            ('old','fixture','nick',1,'streaming'),
-            ('new','fixture','nick',2,'streaming'),
-            ('queued','fixture','nick',3,'reserved')
+            ('old','fixture','operator',1,'streaming'),
+            ('new','fixture','operator',2,'streaming'),
+            ('queued','fixture','operator',3,'reserved')
         """)
     yield engine
     engine.dispose()
@@ -39,22 +39,22 @@ def pointer(engine):
 
 
 def test_newest_admission_stamps_even_if_later_reservation_exists(engine):
-    accept_session_binding(engine, turn_id="new", bot_id="fixture", user_id="nick", session_id="second")
+    accept_session_binding(engine, turn_id="new", bot_id="fixture", user_id="operator", session_id="second")
     assert pointer(engine) == "second"
 
 
 def test_older_delayed_binding_cannot_rewind_or_start_inference(engine):
-    accept_session_binding(engine, turn_id="new", bot_id="fixture", user_id="nick", session_id="second")
+    accept_session_binding(engine, turn_id="new", bot_id="fixture", user_id="operator", session_id="second")
     with pytest.raises(AdmissionFenceLost, match="superseded"):
-        accept_session_binding(engine, turn_id="old", bot_id="fixture", user_id="nick", session_id="first")
+        accept_session_binding(engine, turn_id="old", bot_id="fixture", user_id="operator", session_id="first")
     assert pointer(engine) == "second"
 
 
 @pytest.mark.parametrize("turn,bot,user,session", [
-    ("queued", "fixture", "nick", "first"),
+    ("queued", "fixture", "operator", "first"),
     ("new", "fixture", "wrong", "first"),
-    ("new", "other", "nick", "first"),
-    ("missing", "fixture", "nick", "first"),
+    ("new", "other", "operator", "first"),
+    ("missing", "fixture", "operator", "first"),
 ])
 def test_unaccepted_or_wrong_owner_never_stamps(engine, turn, bot, user, session):
     with pytest.raises(AdmissionFenceLost):
@@ -64,10 +64,10 @@ def test_unaccepted_or_wrong_owner_never_stamps(engine, turn, bot, user, session
 
 def test_lost_claim_and_cross_bot_session_fail_before_stamp(engine):
     with pytest.raises(AdmissionFenceLost, match="no longer held"):
-        accept_session_binding(engine, turn_id="new", bot_id="fixture", user_id="nick",
+        accept_session_binding(engine, turn_id="new", bot_id="fixture", user_id="operator",
                                session_id="second", claim=type("Claim", (), {"fence": lambda *_: False})())
     with pytest.raises(ValueError, match="Cannot accept"):
-        accept_session_binding(engine, turn_id="new", bot_id="fixture", user_id="nick", session_id="foreign")
+        accept_session_binding(engine, turn_id="new", bot_id="fixture", user_id="operator", session_id="foreign")
     assert pointer(engine) is None
 
 
@@ -75,5 +75,5 @@ def test_terminal_turn_cannot_accept_a_delayed_binding(engine):
     with engine.begin() as conn:
         conn.execute(text("UPDATE turn_logs SET ended_at=4, status='completed' WHERE id='new'"))
     with pytest.raises(AdmissionFenceLost):
-        accept_session_binding(engine, turn_id="new", bot_id="fixture", user_id="nick", session_id="second")
+        accept_session_binding(engine, turn_id="new", bot_id="fixture", user_id="operator", session_id="second")
     assert pointer(engine) is None

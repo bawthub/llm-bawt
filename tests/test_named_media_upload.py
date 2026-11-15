@@ -29,7 +29,7 @@ def store(tmp_path):
 
 
 def upload(store, raw, **kw):
-    return store.upload(raw, "audio/wav", "tool_generated", "nick", **kw)
+    return store.upload(raw, "audio/wav", "tool_generated", "operator", **kw)
 
 
 def test_repeated_upload_reuses_one_object_and_row_without_changing_saved_asset(store):

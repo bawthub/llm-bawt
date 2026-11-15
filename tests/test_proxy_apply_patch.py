@@ -442,7 +442,7 @@ def test_command_and_send_request_round_trip():
 
     env = Mixin()._build_sdk_env(
         use_proxy=True, model=req.model, subagent_model=None, force_refresh=False,
-        bot_id="vex", session_key="vex:nick", thread_session_id="thread-1",
+        bot_id="vex", session_key="vex:operator", thread_session_id="thread-1",
         request_id="request-1", apply_patch=req.apply_patch,
     )
     headers = dict(line.split(": ", 1) for line in env["ANTHROPIC_CUSTOM_HEADERS"].splitlines())

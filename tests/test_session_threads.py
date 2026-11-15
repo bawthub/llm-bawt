@@ -240,7 +240,7 @@ def live_managers(private_app_pg):
 
     # Cleanup: remove all three test-owned partitions before their sessions.
     from llm_bawt.memory.postgresql import PARENT_TABLES, partition_name
-    m = make("nick")
+    m = make("operator")
     with m._backend.engine.begin() as conn:
         for parent in PARENT_TABLES:
             conn.execute(text(f"DROP TABLE IF EXISTS {partition_name(parent, bot)}"))
@@ -263,10 +263,10 @@ def _active_rows(mgr, bot, user):
 class TestRegistryInvariantsLiveDB:
     def test_two_managers_converge_on_one_active_session(self, live_managers):
         bot, make = live_managers["bot"], live_managers["make"]
-        a = make("nick").get_or_create_active_session(bot_id=bot, user_id="nick")
-        b = make("nick").get_or_create_active_session(bot_id=bot, user_id="nick")
+        a = make("operator").get_or_create_active_session(bot_id=bot, user_id="operator")
+        b = make("operator").get_or_create_active_session(bot_id=bot, user_id="operator")
         assert a == b
-        assert len(_active_rows(make("nick"), bot, "nick")) == 1
+        assert len(_active_rows(make("operator"), bot, "operator")) == 1
 
     def test_concurrent_first_writes_leave_exactly_one_active(self, live_managers):
         bot, make = live_managers["bot"], live_managers["make"]
@@ -288,21 +288,21 @@ class TestRegistryInvariantsLiveDB:
 
     def test_rotate_closes_old_and_opens_new_atomically(self, live_managers):
         bot, make = live_managers["bot"], live_managers["make"]
-        m = make("nick")
-        old = m.get_or_create_active_session(bot_id=bot, user_id="nick")
-        new = m.rotate_session(bot_id=bot, user_id="nick", working_memory_mode="pinned")
+        m = make("operator")
+        old = m.get_or_create_active_session(bot_id=bot, user_id="operator")
+        new = m.rotate_session(bot_id=bot, user_id="operator", working_memory_mode="pinned")
         assert new != old
-        rows = _active_rows(m, bot, "nick")
+        rows = _active_rows(m, bot, "operator")
         assert [r[0] for r in rows] == [new]
-        assert m.get_or_create_active_session(bot_id=bot, user_id="nick") == new
+        assert m.get_or_create_active_session(bot_id=bot, user_id="operator") == new
 
     def test_activate_switches_back_to_old_thread(self, live_managers):
         bot, make = live_managers["bot"], live_managers["make"]
-        m = make("nick")
-        current = m.get_or_create_active_session(bot_id=bot, user_id="nick")
-        newer = m.rotate_session(bot_id=bot, user_id="nick", working_memory_mode="pinned")
-        assert m.activate_session(current, bot_id=bot, user_id="nick") is True
-        rows = _active_rows(m, bot, "nick")
+        m = make("operator")
+        current = m.get_or_create_active_session(bot_id=bot, user_id="operator")
+        newer = m.rotate_session(bot_id=bot, user_id="operator", working_memory_mode="pinned")
+        assert m.activate_session(current, bot_id=bot, user_id="operator") is True
+        rows = _active_rows(m, bot, "operator")
         assert [r[0] for r in rows] == [current]
         assert newer not in [r[0] for r in rows]
 

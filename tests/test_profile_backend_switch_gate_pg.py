@@ -136,7 +136,7 @@ def test_switch_out_mid_hold_is_admitted_and_leaves_the_roster_alone(rig):
         conn.execute(text("""
             INSERT INTO turn_logs (id, created_at, path, stream, bot_id, user_id, status,
                                    user_prompt, response_text, ended_at, agent_request_id)
-            VALUES (:id, now(), '/test', true, :bot, 'nick', 'streaming', '', '', NULL, :req)
+            VALUES (:id, now(), '/test', true, :bot, 'operator', 'streaming', '', '', NULL, :req)
         """), {"id": turn_id, "bot": agent, "req": f"req-{turn_id}"})
     gate = rig.hold()
     roster = rig.members(gate)

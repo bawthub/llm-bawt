@@ -150,7 +150,7 @@ class _ProxyHarness(ClaudeEventMixin):
     _backend_name = "claude-code"
 
     def __init__(self):
-        self._proxy_request_sessions = {"req_1": "codex:nick"}
+        self._proxy_request_sessions = {"req_1": "codex:operator"}
         self._trigger_message_ids = {}
         self.events = []
 

@@ -89,7 +89,7 @@ def test_poll_device_flow_persists_broker_bundle_and_descriptor(monkeypatch) -> 
     access_token = _jwt({"exp": 2_000_000_000})
     id_token = _jwt(
         {
-            "email": "nick@example.com",
+            "email": "operator@example.com",
             "https://api.openai.com/auth": {
                 "chatgpt_account_id": "account-1",
                 "chatgpt_plan_type": "plus",

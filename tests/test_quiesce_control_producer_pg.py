@@ -31,7 +31,7 @@ from tests.test_ops_quiesce_pg import rig  # noqa: F401
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("private_app_pg")]
 
-USER = "nick"  # the rig's fixture user
+USER = "operator"  # the rig's fixture user
 MESSAGE = "Please stop at the next safe point."
 LEGACY_CLAUDE_CAPS = "cancel_queued,escalate,next,now"  # a pre-TASK-1243 claude-code row decodes to all
 

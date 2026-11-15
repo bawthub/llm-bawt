@@ -43,7 +43,7 @@ def test_claude_legacy_preflight_and_parser_agree(message, is_reset, remaining, 
     bridge = make_bridge()
     redis = SimpleNamespace(xack=AsyncMock())
     result = asyncio.run(prepare_send(bridge, {
-        "request_id": "request", "session_key": "review-bot:nick", "bot_id": "review-bot",
+        "request_id": "request", "session_key": "review-bot:operator", "bot_id": "review-bot",
         "model": "fixture", "message": message, "thread_session_id": "thread",
         "explicit_thread": "1" if explicit else "0", "inject_messages": "[]",
     }, "redis-message", redis))
@@ -65,7 +65,7 @@ def test_claude_legacy_preflight_and_parser_agree(message, is_reset, remaining, 
 def test_claude_structured_follow_up_remains_byte_preserving(message):
     bridge = make_bridge()
     result = asyncio.run(prepare_send(bridge, {
-        "request_id": "request", "session_key": "review-bot:nick", "bot_id": "review-bot",
+        "request_id": "request", "session_key": "review-bot:operator", "bot_id": "review-bot",
         "model": "fixture", "message": message, "thread_session_id": "thread",
         "bridge_reset_action": "reset_follow_up", "inject_messages": "[]",
     }, "redis-message", SimpleNamespace(xack=AsyncMock())))

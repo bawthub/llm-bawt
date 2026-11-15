@@ -547,7 +547,7 @@ def test_upload_file_stores_bytes_verbatim(store: MediaStore) -> None:
     """A PDF goes under files/<aa>/<bb>/<sha> untouched, mime + name kept."""
     raw = b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\n%%EOF\n" * 20
     asset = store.upload(
-        raw, "application/pdf", "agent_attachment", owner_user_id="nick", filename="report.pdf"
+        raw, "application/pdf", "agent_attachment", owner_user_id="operator", filename="report.pdf"
     )
     assert asset.kind == "file"
     assert asset.mime_type == "application/pdf"
@@ -581,8 +581,8 @@ def test_upload_file_octet_stream_default_and_mime_normalised(store: MediaStore)
 
 def test_upload_file_dedups_by_raw_sha(store: MediaStore) -> None:
     raw = b"same bytes, different names"
-    first = store.upload(raw, "text/plain", "agent_attachment", owner_user_id="nick", filename="a.txt")
-    second = store.upload(raw, "text/plain", "agent_attachment", owner_user_id="nick", filename="b.txt")
+    first = store.upload(raw, "text/plain", "agent_attachment", owner_user_id="operator", filename="a.txt")
+    second = store.upload(raw, "text/plain", "agent_attachment", owner_user_id="operator", filename="b.txt")
     assert first.id == second.id
     # First name wins — the row is content-addressed.
     assert second.filename == "a.txt"
@@ -591,16 +591,16 @@ def test_upload_file_dedups_by_raw_sha(store: MediaStore) -> None:
 
 def test_upload_file_self_heals_missing_blob(store: MediaStore) -> None:
     raw = b"heal me" * 100
-    first = store.upload(raw, "text/plain", "agent_attachment", owner_user_id="nick", filename="h.txt")
+    first = store.upload(raw, "text/plain", "agent_attachment", owner_user_id="operator", filename="h.txt")
     blob = _file_key(store, first.sha256)
     blob.unlink()
-    second = store.upload(raw, "text/plain", "agent_attachment", owner_user_id="nick", filename="h.txt")
+    second = store.upload(raw, "text/plain", "agent_attachment", owner_user_id="operator", filename="h.txt")
     assert second.id == first.id
     assert blob.exists() and blob.read_bytes() == raw
 
 
 def test_file_thumb_and_preview_unsupported(store: MediaStore) -> None:
-    asset = store.upload(b"log line\n" * 10, "text/plain", "agent_attachment", owner_user_id="nick", filename="x.log")
+    asset = store.upload(b"log line\n" * 10, "text/plain", "agent_attachment", owner_user_id="operator", filename="x.log")
     with pytest.raises(UnsupportedVariant):
         store.read_variant(asset.id, "thumb")
     with pytest.raises(UnsupportedVariant):
@@ -615,7 +615,7 @@ def test_file_thumb_and_preview_unsupported(store: MediaStore) -> None:
 
 
 def test_delete_file_removes_blob_and_row(store: MediaStore) -> None:
-    asset = store.upload(b"bye" * 50, "application/zip", "agent_attachment", owner_user_id="nick", filename="z.zip")
+    asset = store.upload(b"bye" * 50, "application/zip", "agent_attachment", owner_user_id="operator", filename="z.zip")
     blob = _file_key(store, asset.sha256)
     assert blob.exists()
     store.delete(asset.id)
@@ -627,7 +627,7 @@ def test_delete_file_removes_blob_and_row(store: MediaStore) -> None:
 def test_forced_file_kind_keeps_png_verbatim(store: MediaStore) -> None:
     """kind='file' bypasses the WebP pipeline even for a PNG."""
     raw = _png_bytes(100, 80)
-    asset = store.upload_file(raw, "image/png", "agent_attachment", owner_user_id="nick", filename="raw.png")
+    asset = store.upload_file(raw, "image/png", "agent_attachment", owner_user_id="operator", filename="raw.png")
     assert asset.kind == "file"
     assert asset.mime_type == "image/png"
     data, mime = store.read_variant(asset.id, "original")

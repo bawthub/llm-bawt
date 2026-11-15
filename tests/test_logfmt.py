@@ -131,9 +131,9 @@ def test_json_summary_values_are_not_cut(capture):
 
 
 def test_whole_message_cap_keeps_inline_correlation(capture):
-    logging.getLogger("llm_bawt.x").error("event %s req=keep-this-request session=al:nick", "y" * 4100)
+    logging.getLogger("llm_bawt.x").error("event %s req=keep-this-request session=al:operator", "y" * 4100)
     (line,) = lines(capture)
-    assert "req=keep-this-request" in line and "session=al:nick" in line
+    assert "req=keep-this-request" in line and "session=al:operator" in line
     assert "len=" in line
 
 

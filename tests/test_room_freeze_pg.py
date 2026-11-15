@@ -32,15 +32,15 @@ def _freeze(gated, bot, *, admit_user):
                          scope=GateScope.for_bots(bot), ttl_seconds=900, admit_user=admit_user)
 
 
-def _user_says(gated, deliveries, bot, text="nick, iterating live"):
+def _user_says(gated, deliveries, bot, text="fixture-user, iterating live"):
     gated.senders.append(bot)
     queue = OrdinaryTurnQueue(SimpleNamespace(engine=gated.store.engine), deliveries)
     request = ChatCompletionRequest(
-        bot_id=bot, user="nick", model="fixture", stream=True,
+        bot_id=bot, user="fixture-user", model="fixture", stream=True,
         messages=[ChatMessage(role="user", content=text)],
         user_message_id=str(uuid.uuid4()), assistant_message_id=str(uuid.uuid4()),
     )
-    return queue.decide(request=request, bot_id=bot, user_id="nick", user_prompt=text)
+    return queue.decide(request=request, bot_id=bot, user_id="fixture-user", user_prompt=text)
 
 
 @pytest.mark.integration
@@ -79,7 +79,7 @@ def test_room_freeze_admits_the_users_chat_and_queues_bot_work_until_thaw(gated)
 
     decision = _user_says(gated, deliveries, bot)
     user_row = deliveries.get(decision.delivery_id)
-    assert user_row.metadata["send_now"] == {"user_id": "nick", "gate_ids": [frozen.gate_id]}
+    assert user_row.metadata["send_now"] == {"user_id": "fixture-user", "gate_ids": [frozen.gate_id]}
 
     claimed = _claim(deliveries, bot)
     assert claimed is not None and claimed.id == decision.delivery_id
@@ -121,12 +121,12 @@ def test_bot_authored_ordinary_start_is_never_stamped(gated):
     gated.senders.append(sender)
     queue = OrdinaryTurnQueue(SimpleNamespace(engine=gated.store.engine), deliveries)
     request = ChatCompletionRequest(
-        bot_id=bot, user="nick", model="fixture", stream=True,
+        bot_id=bot, user="fixture-user", model="fixture", stream=True,
         messages=[ChatMessage(role="user", content="from a bot")],
         user_message_id=str(uuid.uuid4()), assistant_message_id=str(uuid.uuid4()),
     )
     request._internal_inter_bot_sender_id = sender
-    decision = queue.decide(request=request, bot_id=bot, user_id="nick", user_prompt="from a bot")
+    decision = queue.decide(request=request, bot_id=bot, user_id="fixture-user", user_prompt="from a bot")
     assert "send_now" not in deliveries.get(decision.delivery_id).metadata
     assert _claim(deliveries, bot) is None
 

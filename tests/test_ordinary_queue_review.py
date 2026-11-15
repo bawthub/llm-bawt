@@ -35,7 +35,7 @@ def test_retry_of_queued_new_does_not_rotate_durable_thread_twice(monkeypatch):
     )
     monkeypatch.setattr(
         "llm_bawt.service.chat_streaming.validate_inter_bot_claim",
-        lambda *_: AuthorReference.user("nick"),
+        lambda *_: AuthorReference.user("operator"),
     )
     monkeypatch.setattr(
         "llm_bawt.service.chat_streaming.turn_admission_claim",
@@ -46,7 +46,7 @@ def test_retry_of_queued_new_does_not_rotate_durable_thread_twice(monkeypatch):
         Mock(side_effect=RuntimeError("transient setup error after rotation")),
     )
     request = ChatCompletionRequest(
-        bot_id="test-review", user="nick", model="test-model", stream=True,
+        bot_id="test-review", user="operator", model="test-model", stream=True,
         messages=[ChatMessage(role="user", content="/new")],
         user_message_id="00000000-0000-4000-8000-000000000001",
         assistant_message_id="00000000-0000-4000-8000-000000000002",

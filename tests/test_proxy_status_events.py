@@ -7,7 +7,7 @@ class StatusHarness(ClaudeEventMixin):
     _backend_name = "claude-code"
 
     def __init__(self):
-        self._proxy_request_sessions = {"req_1": "codex:nick"}
+        self._proxy_request_sessions = {"req_1": "codex:operator"}
         self._trigger_message_ids = {"req_1": "user_1"}
         self.events = []
 

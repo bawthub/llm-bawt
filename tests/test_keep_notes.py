@@ -21,7 +21,7 @@ LIST_NOTE = {
         {"text": {"text": "baking"}, "checked": False, "childListItems": [{"text": {"text": "flour"}, "checked": True}]},
     ]}},
     "permissions": [
-        {"name": "notes/abc/permissions/o1", "role": "OWNER", "email": "nick@example.com"},
+        {"name": "notes/abc/permissions/o1", "role": "OWNER", "email": "operator@example.com"},
         {"name": "notes/abc/permissions/w1", "role": "WRITER", "user": {"email": "pal@example.com"}},
     ],
     "attachments": [{"name": "notes/abc/attachments/att1", "mimeType": ["image/png", "bogus mime"]}],
@@ -54,7 +54,7 @@ def api(manager, key):
             body = json.loads(request.content)
             nid = f"new{len(state['notes'])}"
             state["notes"][nid] = {"name": f"notes/{nid}", **body,
-                                   "permissions": [{"name": f"notes/{nid}/permissions/o", "role": "OWNER", "email": "nick@example.com"}]}
+                                   "permissions": [{"name": f"notes/{nid}/permissions/o", "role": "OWNER", "email": "operator@example.com"}]}
             return httpx.Response(200, json=state["notes"][nid])
         nid = path.split("/")[3]
         if nid not in state["notes"]:

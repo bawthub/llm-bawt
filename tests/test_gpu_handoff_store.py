@@ -20,18 +20,18 @@ def store():
 
 def test_scoped_one_use_offer_and_generation_fencing(store):
     assert store.status().owner == "unknown"
-    token, offered = store.offer(user="nick", target="video", actions=("park_voice", "stop_stt"), expected_generation=0)
+    token, offered = store.offer(user="operator", target="video", actions=("park_voice", "stop_stt"), expected_generation=0)
     assert offered.generation == 1
     with pytest.raises(HandoffConflict):
-        store.offer(user="nick", target="voice", actions=("start_tts",), expected_generation=0)
+        store.offer(user="operator", target="voice", actions=("start_tts",), expected_generation=0)
     with pytest.raises(HandoffConflict):
         store.confirm(user="someone_else", token=token, expected_generation=1)
     with pytest.raises(HandoffConflict):
-        store.confirm(user="nick", token="wrong", expected_generation=1)
-    started = store.confirm(user="nick", token=token, expected_generation=1)
+        store.confirm(user="operator", token="wrong", expected_generation=1)
+    started = store.confirm(user="operator", token=token, expected_generation=1)
     assert (started.phase, started.generation, started.actions) == ("transitioning", 2, ("park_voice", "stop_stt"))
     with pytest.raises(HandoffConflict):
-        store.confirm(user="nick", token=token, expected_generation=1)
+        store.confirm(user="operator", token=token, expected_generation=1)
     with pytest.raises(HandoffConflict):
         store.begin_action(generation=2, action="stop_stt")
     assert store.begin_action(generation=2, action="park_voice").pending_action == "park_voice"
@@ -51,8 +51,8 @@ def test_scoped_one_use_offer_and_generation_fencing(store):
 def test_video_claim_requires_owner_and_blocks_switch(store):
     with pytest.raises(HandoffConflict, match="does not belong"):
         store.claim_video("render-1")
-    token, offer = store.offer(user="nick", target="video", actions=("verify",), expected_generation=0)
-    transition = store.confirm(user="nick", token=token, expected_generation=offer.generation)
+    token, offer = store.offer(user="operator", target="video", actions=("verify",), expected_generation=0)
+    transition = store.confirm(user="operator", token=token, expected_generation=offer.generation)
     store.begin_action(generation=transition.generation, action="verify")
     store.finish_action(generation=transition.generation, action="verify")
     store.complete(generation=transition.generation, target="video")
@@ -60,11 +60,11 @@ def test_video_claim_requires_owner_and_blocks_switch(store):
     assert store.active_video_jobs() == 1
     store.claim_video("render-2")
     assert store.active_video_jobs() == 2
-    token, offer = store.offer(user="nick", target="voice", actions=("unload_wan",), expected_generation=store.status().generation)
+    token, offer = store.offer(user="operator", target="voice", actions=("unload_wan",), expected_generation=store.status().generation)
     assert offer.target == "voice" and token
     # Offering alone leaves video admission open; confirming closes it atomically.
     store.claim_video("render-3")
-    assert store.confirm(user="nick", token=token, expected_generation=offer.generation).phase == "draining"
+    assert store.confirm(user="operator", token=token, expected_generation=offer.generation).phase == "draining"
     with pytest.raises(HandoffConflict, match="does not belong"):
         store.claim_video("render-4")
     for job_id in ("render-1", "render-2", "render-3"):
@@ -78,8 +78,8 @@ def test_video_claim_requires_owner_and_blocks_switch(store):
 
 
 def test_orphaned_video_claim_needs_recovery_not_replay(store):
-    token, offer = store.offer(user="nick", target="video", actions=("verify",), expected_generation=0)
-    transition = store.confirm(user="nick", token=token, expected_generation=offer.generation)
+    token, offer = store.offer(user="operator", target="video", actions=("verify",), expected_generation=0)
+    transition = store.confirm(user="operator", token=token, expected_generation=offer.generation)
     store.begin_action(generation=transition.generation, action="verify")
     store.finish_action(generation=transition.generation, action="verify")
     store.complete(generation=transition.generation, target="video")
@@ -90,10 +90,10 @@ def test_orphaned_video_claim_needs_recovery_not_replay(store):
     with pytest.raises(HandoffConflict):
         store.claim_video("new-render")
     with pytest.raises(HandoffConflict):
-        store.offer(user="nick", target="video", actions=("stop_moshi_tts",),
+        store.offer(user="operator", target="video", actions=("stop_moshi_tts",),
                     expected_generation=recovered.generation)
     # Recovery may restore voice, but the worker reset retains uncertain claims.
-    token, offer = store.offer(user="nick", target="voice", actions=("reset_video_worker",),
+    token, offer = store.offer(user="operator", target="voice", actions=("reset_video_worker",),
                                expected_generation=recovered.generation)
     assert offer.target == "voice" and store.active_video_jobs() == 1
 
@@ -101,8 +101,8 @@ def test_orphaned_video_claim_needs_recovery_not_replay(store):
 def test_idle_video_worker_restart_keeps_owner(store):
     # Ownership is "voice parked, Moshi stopped"; an idle worker restart changes
     # neither, and each render re-verifies the lease and VRAM before its claim.
-    token, offer = store.offer(user="nick", target="video", actions=("verify",), expected_generation=0)
-    transition = store.confirm(user="nick", token=token, expected_generation=offer.generation)
+    token, offer = store.offer(user="operator", target="video", actions=("verify",), expected_generation=0)
+    transition = store.confirm(user="operator", token=token, expected_generation=offer.generation)
     store.begin_action(generation=transition.generation, action="verify")
     store.finish_action(generation=transition.generation, action="verify")
     before = store.complete(generation=transition.generation, target="video")
@@ -117,8 +117,8 @@ def test_idle_video_worker_restart_keeps_owner(store):
 
 
 def test_stop_requires_receipt_before_advance(store):
-    token, offer = store.offer(user="nick", target="video", actions=("stop_moshi_stt",), expected_generation=0)
-    transition = store.confirm(user="nick", token=token, expected_generation=offer.generation)
+    token, offer = store.offer(user="operator", target="video", actions=("stop_moshi_stt",), expected_generation=0)
+    transition = store.confirm(user="operator", token=token, expected_generation=offer.generation)
     store.begin_action(generation=transition.generation, action="stop_moshi_stt")
     with pytest.raises(HandoffConflict, match="receipt"):
         store.finish_action(generation=transition.generation, action="stop_moshi_stt")
@@ -127,32 +127,32 @@ def test_stop_requires_receipt_before_advance(store):
 
 
 def test_new_offer_invalidates_prior_consent(store):
-    old, _ = store.offer(user="nick", target="video", actions=("stop_stt",), expected_generation=0)
-    new, state = store.offer(user="nick", target="video", actions=("stop_stt", "stop_tts"), expected_generation=1)
+    old, _ = store.offer(user="operator", target="video", actions=("stop_stt",), expected_generation=0)
+    new, state = store.offer(user="operator", target="video", actions=("stop_stt", "stop_tts"), expected_generation=1)
     with pytest.raises(HandoffConflict):
-        store.confirm(user="nick", token=old, expected_generation=1)
-    assert store.confirm(user="nick", token=new, expected_generation=state.generation).phase == "transitioning"
+        store.confirm(user="operator", token=old, expected_generation=1)
+    assert store.confirm(user="operator", token=new, expected_generation=state.generation).phase == "transitioning"
 
 
 def test_expired_offer_fails_closed(store, monkeypatch):
     import llm_bawt.media.gpu_handoff_store as module
     monkeypatch.setattr(module.time, "time", lambda: 1000)
-    token, state = store.offer(user="nick", target="video", actions=("stop_stt",), expected_generation=0, ttl=1)
+    token, state = store.offer(user="operator", target="video", actions=("stop_stt",), expected_generation=0, ttl=1)
     monkeypatch.setattr(module.time, "time", lambda: 1001)
     with pytest.raises(HandoffConflict):
-        store.confirm(user="nick", token=token, expected_generation=state.generation)
+        store.confirm(user="operator", token=token, expected_generation=state.generation)
 
 
 def test_crash_recovery_never_replays_operation(store):
-    token, state = store.offer(user="nick", target="video", actions=("stop_stt",), expected_generation=0)
-    started = store.confirm(user="nick", token=token, expected_generation=state.generation)
+    token, state = store.offer(user="operator", target="video", actions=("stop_stt",), expected_generation=0)
+    started = store.confirm(user="operator", token=token, expected_generation=state.generation)
     store.begin_action(generation=started.generation, action="stop_stt")
     store.record_job(generation=started.generation, action="stop_stt", job_id="ops-123")
     recovered = GpuHandoffStore(store.engine).mark_interrupted()
     assert (recovered.owner, recovered.phase, recovered.last_job_id) == ("unknown", "recovery_required", "ops-123")
     assert store.mark_interrupted() == recovered
     with pytest.raises(HandoffConflict):
-        store.offer(user="nick", target="video", actions=("stop_stt",), expected_generation=recovered.generation)
+        store.offer(user="operator", target="video", actions=("stop_stt",), expected_generation=recovered.generation)
 
 
 def test_moshi_operations_are_exact_and_disabled():
@@ -168,7 +168,7 @@ def test_moshi_operations_are_exact_and_disabled():
 
 def test_invalid_offer_does_not_mutate(store):
     with pytest.raises(ValueError):
-        store.offer(user="nick", target="video", actions=(), expected_generation=0)
+        store.offer(user="operator", target="video", actions=(), expected_generation=0)
     assert store.status().generation == 0
 
 

@@ -1,6 +1,6 @@
 """TASK-1234 Fix 1: classify a durable delivery only after its turn row is final.
 
-Incident a67418db (Nick -> Snark): the real run ended with an HTTP 429. The
+Incident a67418db (Operator -> Snark): the real run ended with an HTTP 429. The
 stream worker hands an upstream failure to the chat stream (ending the
 dispatcher's drain) *before* it writes ``status=error`` and finalizes. Each
 attempt read the row while it still said ``streaming``, so the TASK-1095

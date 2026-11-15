@@ -133,7 +133,7 @@ def test_operator_fts_uses_the_same_parser(engine):
 
 
 def test_stored_vector_never_leaves_sql(engine):
-    """Nick 2026-10-24: every bot gets content_tsv only if it never reaches a model."""
+    """Operator 2026-10-24: every bot gets content_tsv only if it never reaches a model."""
     access = warm_policy_resolver(engine).resolve_sync(None)
     searcher = CrossBotMessageSearcher(engine, lambda rows, _source: rows)
     backend = PostgreSQLMessageMixin()

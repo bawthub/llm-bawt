@@ -62,7 +62,7 @@ def harness(monkeypatch):
             if isinstance(event, BaseException):
                 raise event
             if state.abort:
-                bridge._session_queue.cancel_event("review-bot:nick").set()
+                bridge._session_queue.cancel_event("review-bot:operator").set()
             yield event
 
     async def run_streamed(prompt, options):
@@ -77,7 +77,7 @@ def harness(monkeypatch):
                                 resume_thread=MagicMock(return_value=thread))
     bridge._ensure_codex = MagicMock(return_value=state.sdk)
     state.fields = {
-        "request_id": "reset-run", "session_key": "review-bot:nick", "bot_id": "review-bot",
+        "request_id": "reset-run", "session_key": "review-bot:operator", "bot_id": "review-bot",
         "message": TASK, "model": "codex-fixture", "trigger_message_id": "task-trigger",
         "thread_session_id": "successor-thread", "thread_resume_id": "previous-provider",
         "bridge_reset_action": "reset_follow_up", "inject_messages": "[]",
@@ -150,7 +150,7 @@ def test_clean_follow_up_proves_exact_binding_and_keeps_task_answer(harness, sta
     done = [event for event in events if event.kind == AgentEventKind.ASSISTANT_DONE]
     assert len(done) == 1 and done[0].text == ANSWER
     assert (done[0].run_id, done[0].trigger_message_id, done[0].provider,
-            done[0].session_key) == ("reset-run", "task-trigger", "codex", "review-bot:nick")
+            done[0].session_key) == ("reset-run", "task-trigger", "codex", "review-bot:operator")
     assert done[0].raw == {"new_session_ack": {
         "thread_session_id": "successor-thread", "provider_session_id": "fresh-provider",
         "clean_start": False, **seed_receipt([]),
@@ -303,7 +303,7 @@ def test_standalone_ack_waits_for_existing_session_work(harness):
         ready, release = asyncio.Event(), asyncio.Event()
 
         async def occupy():
-            async with harness.bridge._session_queue.active("review-bot:nick", request_id="existing"):
+            async with harness.bridge._session_queue.active("review-bot:operator", request_id="existing"):
                 ready.set()
                 await release.wait()
 

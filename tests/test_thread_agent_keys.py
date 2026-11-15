@@ -49,7 +49,7 @@ class TestResolveAgentSessionKey:
         assert resolve_agent_session_key(meta, "claude-code") is None
 
     def test_routing_key_guard(self):
-        meta = {"agent_session_keys": {"claude_code": "byte:nick"}}
+        meta = {"agent_session_keys": {"claude_code": "byte:operator"}}
         assert resolve_agent_session_key(meta, "claude-code") is None
 
     def test_claude_model_metadata_does_not_block_resume(self):
@@ -96,7 +96,7 @@ class TestSendRequestThreadFields:
     def _base_fields(self, **extra):
         return {
             "request_id": "req_x",
-            "session_key": "byte:nick",
+            "session_key": "byte:operator",
             "message": "hi",
             "model": "m1",
             **extra,
@@ -134,7 +134,7 @@ class TestSendRequestThreadFields:
 
         req = SendRequest.from_fields(
             self._base_fields(
-                thread_session_id="thread-1", thread_resume_id="byte:nick",
+                thread_session_id="thread-1", thread_resume_id="byte:operator",
             )
         )
         assert req.thread_session_id == "thread-1"
@@ -196,7 +196,7 @@ class TestClaudeNewPreprocessing:
             message,
             explicit_thread=explicit_thread,
             bot_slug="snark",
-            session_key="snark:nick",
+            session_key="snark:operator",
             request_id="req-1",
             model="model-1",
             context_window=372_000,
@@ -354,7 +354,7 @@ def _fake_llm_bawt(
     )
     return SimpleNamespace(
         bot=SimpleNamespace(agent_backend=backend, slug="byte"),
-        user_id="nick",
+        user_id="operator",
         client=SimpleNamespace(_bot_config=bc),
         history_manager=SimpleNamespace(_db_backend=db_backend),
     )
@@ -431,11 +431,11 @@ class TestMCPShortTermSessionContract:
         )
         manager = _MCPShortTermManager(memory)
 
-        assert manager.get_active_session(bot_id="byte", user_id="nick") == {
+        assert manager.get_active_session(bot_id="byte", user_id="operator") == {
             "id": "active-1",
         }
         assert manager.get_or_create_active_session(
-            bot_id="byte", user_id="nick",
+            bot_id="byte", user_id="operator",
         ) == "active-1"
         assert calls == ["get", "create"]
 
@@ -635,7 +635,7 @@ def live_thread(private_app_pg):
     from llm_bawt.memory.postgresql import PostgreSQLShortTermManager
 
     bot = f"_t252_pytest_{uuid.uuid4().hex[:8]}"
-    user = "nick"
+    user = "operator"
     from tests.pg_isolation import require_test_db_config
     config = require_test_db_config()
     manager = PostgreSQLShortTermManager(config, bot_id=bot, user_id=user)
@@ -723,7 +723,7 @@ class TestAgentKeyEndpointLiveDB:
         from fastapi import HTTPException
 
         with pytest.raises(HTTPException) as exc:
-            self._put(live_thread, key="byte:nick")
+            self._put(live_thread, key="byte:operator")
         assert exc.value.status_code == 422
 
     def test_legacy_completed_rows_migrate_idempotently(self, live_thread):
@@ -737,7 +737,7 @@ class TestAgentKeyEndpointLiveDB:
             conn.execute(
                 text(
                     "INSERT INTO sessions (id, bot_id, user_id, started_at, "
-                    "ended_at, status) VALUES (:id, :b, 'nick', "
+                    "ended_at, status) VALUES (:id, :b, 'operator', "
                     "NOW() - INTERVAL '2 days', NOW() - INTERVAL '1 day', "
                     "'completed')"
                 ),

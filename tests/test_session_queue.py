@@ -16,15 +16,15 @@ def test_completed_task_cannot_clear_newer_active_task() -> None:
 
         first = asyncio.create_task(wait_for(release_first))
         second = asyncio.create_task(wait_for(release_second))
-        queue.set_active_task("codex:nick", first)
-        queue.set_active_task("codex:nick", second)
+        queue.set_active_task("codex:operator", first)
+        queue.set_active_task("codex:operator", second)
 
         release_first.set()
         await first
         await asyncio.sleep(0)
 
-        assert queue.has_active_task("codex:nick")
-        assert queue.cancel_active("codex:nick") is True
+        assert queue.has_active_task("codex:operator")
+        assert queue.cancel_active("codex:operator") is True
         try:
             await second
         except asyncio.CancelledError:
@@ -41,12 +41,12 @@ def test_queued_task_never_replaces_lock_holder_as_active() -> None:
         second_entered = asyncio.Event()
 
         async def first_send() -> None:
-            async with queue.active("codex:nick"):
+            async with queue.active("codex:operator"):
                 first_entered.set()
                 await release_first.wait()
 
         async def second_send() -> None:
-            async with queue.active("codex:nick"):
+            async with queue.active("codex:operator"):
                 second_entered.set()
 
         first = asyncio.create_task(first_send())
@@ -55,7 +55,7 @@ def test_queued_task_never_replaces_lock_holder_as_active() -> None:
         await asyncio.sleep(0)
 
         assert not second_entered.is_set()
-        assert queue.cancel_active("codex:nick") is True
+        assert queue.cancel_active("codex:operator") is True
         try:
             await first
         except asyncio.CancelledError:
@@ -63,7 +63,7 @@ def test_queued_task_never_replaces_lock_holder_as_active() -> None:
 
         await second
         assert second_entered.is_set()
-        assert not queue.has_active_task("codex:nick")
+        assert not queue.has_active_task("codex:operator")
 
     asyncio.run(run())
 
@@ -77,13 +77,13 @@ def test_queued_task_emits_heartbeats_without_losing_queue_position() -> None:
         heartbeats: list[str] = []
 
         async def first_send() -> None:
-            async with queue.active("snark:nick"):
+            async with queue.active("snark:operator"):
                 first_entered.set()
                 await release_first.wait()
 
         async def second_send() -> None:
             async with queue.active(
-                "snark:nick",
+                "snark:operator",
                 on_wait=lambda: heartbeats.append("queued"),
                 wait_interval=0.01,
             ):
@@ -96,14 +96,14 @@ def test_queued_task_emits_heartbeats_without_losing_queue_position() -> None:
 
         assert len(heartbeats) >= 2
         assert not second_entered.is_set()
-        assert queue.has_active_task("snark:nick")
+        assert queue.has_active_task("snark:operator")
 
         release_first.set()
         await first
         await second
 
         assert second_entered.is_set()
-        assert not queue.has_active_task("snark:nick")
+        assert not queue.has_active_task("snark:operator")
 
     asyncio.run(run())
 
@@ -114,11 +114,11 @@ def test_uncontended_task_does_not_emit_queue_heartbeat() -> None:
         heartbeats: list[str] = []
 
         async with queue.active(
-            "loopy:nick",
+            "loopy:operator",
             on_wait=lambda: heartbeats.append("queued"),
             wait_interval=0.01,
         ):
-            assert queue.has_active_task("loopy:nick")
+            assert queue.has_active_task("loopy:operator")
 
         assert heartbeats == []
 

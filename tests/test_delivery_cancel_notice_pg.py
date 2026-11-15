@@ -41,7 +41,7 @@ def _send(ctx, sender, target, message="please run the migration", **extra):
     record, _ = ctx.deliveries.enqueue(
         sender_bot_id=sender, target_bot_id=target, message=message,
         payload={"messages": [{"role": "user", "content": message}], "bot_id": target,
-                 "user": "nick", "stream": True},
+                 "user": "operator", "stream": True},
         **extra,
     )
     return record
@@ -85,7 +85,7 @@ def test_each_cancelled_bot_delivery_gets_exactly_one_notice(notices):
     assert (notice["sender_bot_id"], notice["target_bot_id"]) == (SYSTEM_BOT_ID, sender)
     assert (notice["status"], notice["message_kind"]) == ("QUEUED", cn.NOTICE_KIND)
     assert notice["metadata_json"]["cancelled_delivery_id"] == plain.id
-    assert notice["payload_json"]["user"] == "nick" and notice["payload_json"]["bot_id"] == sender
+    assert notice["payload_json"]["user"] == "operator" and notice["payload_json"]["bot_id"] == sender
     assert plain.id in notice["message"] and target in notice["message"]
     assert "Stopped by user" in notice["message"]
     assert "please run the migration on staging" in notice["message"]  # whitespace-flattened excerpt
@@ -142,7 +142,7 @@ def test_user_authored_scheduled_and_self_sent_rows_are_never_read_or_stamped(no
     from llm_bawt.message_authorship import AuthorReference
 
     bot, other = notices.bot(), notices.bot()
-    user_chat = _send(notices, bot, bot, "nick's own chat", author=AuthorReference.user("nick"),
+    user_chat = _send(notices, bot, bot, "operator's own chat", author=AuthorReference.user("operator"),
                       metadata={"ordinary_chat": {"session_id": None, "stream": True}})
     self_sent = _send(notices, bot, bot, "a note to self")
     scheduled = _send(notices, other, bot, "scheduled prompt")

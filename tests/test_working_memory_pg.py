@@ -329,7 +329,7 @@ def test_policy_gates_tools_but_not_owner_cleanup(wm):
     assert _code(lambda: wm.service.owner_list(wm.bots["protected"], wm.user)) == "protected_bot"
     assert _code(lambda: wm.service.owner_delete(wm.bots["protected"], wm.user, on["id"], hard=True)) == "protected_bot"
 
-    # Disabling stops the tools at once; Nick can still read and clean up.
+    # Disabling stops the tools at once; the user can still read and clean up.
     wm.settings.set_value("bot", wm.bots["on"], KEY, False)
     assert _code(lambda: wm.service.bot_list(wm.context())) == "not_enabled"
     assert [i["id"] for i in wm.service.owner_list(wm.bots["on"], wm.user)["items"]] == [on["id"]]

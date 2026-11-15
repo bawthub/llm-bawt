@@ -266,7 +266,7 @@ def test_successful_compaction_reports_turn_delta_not_session_total(monkeypatch)
     asyncio.run(harness._finalize_result_message(
         _result(5.40),
         request_id="req-compact",
-        session_key="caid:nick",
+        session_key="caid:operator",
         seq=0,
         text_parts=[],
         assistant_snapshot_text="",

@@ -77,9 +77,9 @@ def test_failed_mcp_tool_context_fetch_is_retried(monkeypatch):
     bridge._app_api_url = "http://app"
 
     async def run():
-        first = await bridge._get_mcp_tool_context("al", "nick")
-        second = await bridge._get_mcp_tool_context("al", "nick")
-        third = await bridge._get_mcp_tool_context("al", "nick")
+        first = await bridge._get_mcp_tool_context("al", "operator")
+        second = await bridge._get_mcp_tool_context("al", "operator")
+        third = await bridge._get_mcp_tool_context("al", "operator")
         return first, second, third
 
     first, second, third = asyncio.run(run())

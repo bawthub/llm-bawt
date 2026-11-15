@@ -87,9 +87,9 @@ def test_other_session_load_cannot_unload_a_model_before_its_generation():
     async def run():
         loader = _Loader()
         bridge = _bridge(loader)
-        a = _send(bridge, "ra", "bot-a:nick", "A")
+        a = _send(bridge, "ra", "bot-a:operator", "A")
         await asyncio.to_thread(loader.loading_a.wait, 5)
-        b = _send(bridge, "rb", "bot-b:nick", "B")
+        b = _send(bridge, "rb", "bot-b:operator", "B")
         for _ in range(20):  # let B reach its load (or the model lock)
             await asyncio.sleep(0)
         loader.gate_a.set()
@@ -111,7 +111,7 @@ def test_stop_does_not_unload_under_a_running_generation():
         loader = _Loader()
         bridge = _bridge(loader)
         bridge.SHUTDOWN_UNLOAD_WAIT = 0.05
-        a = _send(bridge, "ra", "bot-a:nick", "A")
+        a = _send(bridge, "ra", "bot-a:operator", "A")
         await asyncio.to_thread(loader.loading_a.wait, 5)
         await bridge.stop()  # A holds the model: no unload
         unloads_at_stop = list(loader.unloads)

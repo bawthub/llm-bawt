@@ -30,7 +30,7 @@ def _client(monkeypatch, *, botchat_route=False, stream_events=None):
     monkeypatch.setattr(route, "get_service", lambda: service)
     app = FastAPI()
     app.include_router(route.router)
-    path = ("/v1/botchat/test-bot/nick/chat/completions" if botchat_route
+    path = ("/v1/botchat/test-bot/operator/chat/completions" if botchat_route
             else "/v1/chat/completions")
     return TestClient(app), service, path
 
@@ -216,7 +216,7 @@ def test_comment_consumer_can_disconnect_before_observer_starts(monkeypatch):
         yield "data: [DONE]\n\n"
 
     request = ChatCompletionRequest(
-        model="test-model", bot_id="test-bot", user="nick", stream=True,
+        model="test-model", bot_id="test-bot", user="operator", stream=True,
         messages=[ChatMessage(role="user", content="hello")],
     )
     service = SimpleNamespace(chat_completion_stream=stream)
@@ -236,7 +236,7 @@ def test_delivery_in_flight_is_observed_until_terminal(monkeypatch):
 
     record = SimpleNamespace(id="delivery-1", status="IN_FLIGHT", last_error=None,
                              target_bot_id="test-bot", author_entity_type="user",
-                             author_entity_id="nick", user_message_id=RECEIPT["user_message_id"],
+                             author_entity_id="operator", user_message_id=RECEIPT["user_message_id"],
                              turn_id="turn-1", metadata={"ordinary_chat": {"digest": "test"}})
     delivery = SimpleNamespace(get=lambda _id: record)
     polled = asyncio.Event()
@@ -248,13 +248,13 @@ def test_delivery_in_flight_is_observed_until_terminal(monkeypatch):
 
     monkeypatch.setattr("llm_bawt.service.delivery_reply.asyncio.sleep", wait_for_next_poll)
     turn = SimpleNamespace(ended_at=1, status="ok", error_text=None,
-                           bot_id="test-bot", user_id="nick",
+                           bot_id="test-bot", user_id="operator",
                            trigger_message_id=RECEIPT["user_message_id"], response_text="done")
     turns = SimpleNamespace(get_turn=lambda _id: turn)
 
     async def wait():
         task = asyncio.create_task(wait_for_delivery_reply(
-            delivery, turns, "delivery-1", bot_id="test-bot", user_id="nick",
+            delivery, turns, "delivery-1", bot_id="test-bot", user_id="operator",
             user_message_id=RECEIPT["user_message_id"], timeout_seconds=2,
         ))
         await asyncio.wait_for(polled.wait(), timeout=1)

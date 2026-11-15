@@ -21,7 +21,7 @@ from tests.test_turn_gates_pg import _activate, _members, _spec, gated  # noqa: 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("private_app_pg")]
 
 
-def _streaming(engine, bot, *, backend=None, caps=None, request_id=None, user="nick"):
+def _streaming(engine, bot, *, backend=None, caps=None, request_id=None, user="operator"):
     turn_id = f"turn-{uuid.uuid4().hex}"
     with engine.begin() as conn:
         conn.execute(sa_text("""

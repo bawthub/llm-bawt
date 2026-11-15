@@ -34,7 +34,7 @@ QUEUED = {
 
 def _request(**update) -> ChatCompletionRequest:
     return ChatCompletionRequest(
-        model="test-model", bot_id="caid", user="nick", user_message_id=MSG,
+        model="test-model", bot_id="caid", user="operator", user_message_id=MSG,
         messages=[ChatMessage(role="user", content="hello")], **update,
     )
 
@@ -75,7 +75,7 @@ def test_direct_starts_bypass_the_ordinary_queue(monkeypatch, is_agent, claim, b
     monkeypatch.setattr("llm_bawt.service.ordinary_turn_queue.admit_agent_request", admit)
     assert admit_ordinary_agent_turn(
         SimpleNamespace(), bot, _request(), is_agent_backend=is_agent, admission_claim=claim,
-        bot_id="caid", user_id="nick", user_prompt="hello", trigger_message_id=MSG,
+        bot_id="caid", user_id="operator", user_prompt="hello", trigger_message_id=MSG,
     ) is None
 
 
@@ -90,7 +90,7 @@ def test_harness_only_durable_bot_is_queued_and_announced(monkeypatch, row_statu
     decision = admit_ordinary_agent_turn(
         SimpleNamespace(_inter_bot_dispatcher=dispatcher),
         SimpleNamespace(agent_backend=None, harness="codex"), _request(),
-        is_agent_backend=True, admission_claim=None, bot_id="caid", user_id="nick",
+        is_agent_backend=True, admission_claim=None, bot_id="caid", user_id="operator",
         user_prompt="hello", trigger_message_id=MSG,
     )
     assert decision.delivery_id == "delivery-x"

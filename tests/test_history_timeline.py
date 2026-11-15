@@ -73,7 +73,7 @@ def window_db(monkeypatch):
             "session_id TEXT, author_entity_type TEXT, author_entity_id TEXT)"
         ))
         conn.execute(text("CREATE TABLE sessions (id TEXT, bot_id TEXT, user_id TEXT)"))
-        conn.execute(text("INSERT INTO sessions (id, bot_id, user_id) VALUES ('sA', 'bot', 'nick'), ('sB', 'bot', 'other')"))
+        conn.execute(text("INSERT INTO sessions (id, bot_id, user_id) VALUES ('sA', 'bot', 'operator'), ('sB', 'bot', 'other')"))
         for r in rows:
             conn.execute(text(
                 "INSERT INTO messages_p_bot (id, role, content, timestamp, session_id) "
@@ -124,7 +124,7 @@ def test_history_pages_keep_timeline_owner_after_jump(window_db, monkeypatch):
     app = FastAPI()
     app.include_router(history_pages.read_router)
     with TestClient(app) as client:
-        query = "bot_id=bot&user_id=nick"
+        query = "bot_id=bot&user_id=operator"
         around = client.get(f"/v1/history/around?{query}&message_id=m03&before=2&after=2")
         assert around.status_code == 200
         assert [m["id"] for m in around.json()["messages"]] == ["m01", "m02", "m03", "m04", "m05"]
@@ -196,7 +196,7 @@ def test_build_timeline_folds_groups():
     ]
     meta = {"s1": {"title": "Rail work", "status": "archived"}, "s2": {"title": None, "status": "active"}}
     first = {"s2": {"first_message_text": "why is it slow\nmore detail",
-                    "initiated_by": {"kind": "user", "id": "nick"}}}
+                    "initiated_by": {"kind": "user", "id": "operator"}}}
     days, sessions, version = build_timeline(groups, meta, first)
 
     assert [d.date for d in days] == ["2026-09-01", "2026-09-02"]
@@ -216,7 +216,7 @@ def test_build_timeline_folds_groups():
     assert (s1.title, s1.label_source, s1.status) == ("Rail work", "title", "archived")
     assert (s2.title, s2.label_source) == ("why is it slow more detail", "first_prompt")
     assert s2.first_message_text == "why is it slow more detail"
-    assert s2.initiated_by == {"kind": "user", "id": "nick"}
+    assert s2.initiated_by == {"kind": "user", "id": "operator"}
     assert s1.first_message_text is None and s1.initiated_by is None
     assert version == "10:45.0"
 
@@ -250,13 +250,13 @@ def test_default_timeline_is_exact_seven_local_days(monkeypatch):
     app = FastAPI()
     app.include_router(history_timeline.router)
     with TestClient(app) as client:
-        response = client.get("/v1/history/timeline?bot_id=snark&user_id=nick&tz=America/New_York")
+        response = client.get("/v1/history/timeline?bot_id=snark&user_id=operator&tz=America/New_York")
         assert response.status_code == 200
         coverage = response.json()["coverage"]
         assert (date.fromisoformat(coverage["to_date"]) - date.fromisoformat(coverage["from_date"])) == timedelta(days=6)
         assert calls[0][2:] == (False, False)  # never extend the seven-day default
         wider_start = (datetime.now(ET).date() - timedelta(days=29)).isoformat()
-        wider = client.get(f"/v1/history/timeline?bot_id=snark&user_id=nick&mode=recent&from_date={wider_start}")
+        wider = client.get(f"/v1/history/timeline?bot_id=snark&user_id=operator&mode=recent&from_date={wider_start}")
         assert wider.status_code == 200
         assert calls[1][2:] == (True, False)  # deliberate wider preset retains fallback
 
@@ -320,7 +320,7 @@ def test_timeline_repository_constant_sql_and_owner_predicates():
 
     for count in (10, 1000):
         engine = Engine()
-        result = timeline_rows(engine, "messages_p_snark", "snark", "nick", None,
+        result = timeline_rows(engine, "messages_p_snark", "snark", "operator", None,
                                "America/New_York", 1., 100.)
         assert len(result[0]) == count
         assert len(engine.conn.calls) == 3
@@ -330,13 +330,13 @@ def test_timeline_repository_constant_sql_and_owner_predicates():
                  if "AS k(id, bot_id, user_id)" not in sql and "AS summary_count" not in sql]
         assert len(owned) == 1
         assert all("owner.user_id = :user_id" in sql for sql, _ in owned)
-        assert all(params["user_id"] == "nick" for _, params in owned)
+        assert all(params["user_id"] == "operator" for _, params in owned)
         # TASK-2061: the shared first-message read joins sessions on the owner key.
         (first_sql, first_params), = [c for c in engine.conn.calls
                                     if "AS k(id, bot_id, user_id)" in c[0]]
         assert "s.user_id IS NOT DISTINCT FROM k.user_id" in first_sql
         assert len(first_params["ids"]) == count and "own" in first_params["ids"]
-        assert first_params["users"] == ["nick"] * count
+        assert first_params["users"] == ["operator"] * count
         assert first_params["bots"] == ["snark"] * count
         assert "FROM messages_p_snark m1" in first_sql
         group_sql, group_params = engine.conn.calls[0]

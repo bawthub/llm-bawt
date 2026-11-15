@@ -9,11 +9,11 @@ from tests.test_session_lifecycle_admission import engine, pointer  # noqa: F401
 
 
 def test_cancelled_newer_accepted_binding_still_fences_older_worker(engine):
-    accept_session_binding(engine, turn_id="new", bot_id="fixture", user_id="nick", session_id="second")
+    accept_session_binding(engine, turn_id="new", bot_id="fixture", user_id="operator", session_id="second")
     with engine.begin() as conn:
         conn.execute(text("UPDATE turn_logs SET status='cancelled', ended_at=4 WHERE id='new'"))
     with pytest.raises(AdmissionFenceLost, match="superseded"):
-        accept_session_binding(engine, turn_id="old", bot_id="fixture", user_id="nick", session_id="first")
+        accept_session_binding(engine, turn_id="old", bot_id="fixture", user_id="operator", session_id="first")
     assert pointer(engine) == "second"
 
 

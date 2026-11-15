@@ -106,7 +106,7 @@ def _engine():
         LlmResponseRecord.__table__,
     ])
     with Session(engine) as session:
-        session.add(TurnLog(id="turn", bot_id="al", user_id="nick", status="streaming", trigger_message_id="m"))
+        session.add(TurnLog(id="turn", bot_id="al", user_id="operator", status="streaming", trigger_message_id="m"))
         session.commit()
     return engine
 

@@ -18,7 +18,7 @@ HUMAN = {"id": "h1", "role": "user", "content": "I adopted a third dog named Bis
          "author_entity_type": "user", "author_entity_id": "u"}
 REPLY = {"id": "r1", "role": "assistant", "content": "Congrats on Biscuit!",
          "author_entity_type": "bot", "author_entity_id": "self"}
-FACT = ExtractedFact(content="Nick has a dog named Biscuit", tags=["pets"],
+FACT = ExtractedFact(content="Operator has a dog named Biscuit", tags=["pets"],
                      importance=0.9, source_message_ids=["h1"])
 
 
@@ -133,7 +133,7 @@ def test_poison_batch_is_closed_after_bounded_attempts(monkeypatch: pytest.Monke
 def test_final_attempt_that_recovers_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
     memory = _Memory()
     service, backend, task = _service(monkeypatch, memory)
-    reply = '{"facts": [{"content": "Nick has a dog named Biscuit", "tags": ["pets"], "importance": 0.9, "source_message_ids": ["h1"]}]}'
+    reply = '{"facts": [{"content": "Operator has a dog named Biscuit", "tags": ["pets"], "importance": 0.9, "source_message_ids": ["h1"]}]}'
     replies: list[Any] = [TimeoutError("t1"), TimeoutError("t2"), reply]
 
     class _Flaky:
@@ -204,7 +204,7 @@ def test_profile_write_failure_is_raised_when_asked(monkeypatch: pytest.MonkeyPa
         raise RuntimeError("profile store down")
 
     monkeypatch.setattr("llm_bawt.mcp_server.server._get_profile_manager", boom)
-    fact = ExtractedFact(content="Nick has a dog named Biscuit", tags=["pets"], importance=0.9,
+    fact = ExtractedFact(content="Operator has a dog named Biscuit", tags=["pets"], importance=0.9,
                          source_message_ids=["h1"], profile_attribute={"category": "fact", "key": "pets"})
     config = SimpleNamespace(MEMORY_PROFILE_ATTRIBUTE_ENABLED=True)
     assert profile_mod.extract_profile_attributes_from_fact(fact, "u", config) is False  # type: ignore[arg-type]
@@ -265,16 +265,16 @@ def test_idempotent_candidate_is_not_duplicated() -> None:
     kw = dict(entity_type=EntityType.USER, entity_id="u", category="fact", key="pets",
               confidence=0.9, source="extracted")
 
-    first = pm.add_candidate(value="Nick has a dog named Biscuit", source_message_id="h1", **kw)
-    again = pm.add_candidate(value="Nick has a dog named Biscuit", source_message_id="h1", idempotent=True, **kw)
+    first = pm.add_candidate(value="Operator has a dog named Biscuit", source_message_id="h1", **kw)
+    again = pm.add_candidate(value="Operator has a dog named Biscuit", source_message_id="h1", idempotent=True, **kw)
     # A second fact from the same message under the same key stays distinct.
-    cat = pm.add_candidate(value="Nick has a cat named Miso", source_message_id="h1", idempotent=True, **kw)
-    unsourced = pm.add_candidate(value="Nick has a parrot", **kw)
-    unsourced_again = pm.add_candidate(value="Nick has a parrot", idempotent=True, **kw)
-    plain = pm.add_candidate(value="Nick has a dog named Biscuit", source_message_id="h1", **kw)
+    cat = pm.add_candidate(value="Operator has a cat named Miso", source_message_id="h1", idempotent=True, **kw)
+    unsourced = pm.add_candidate(value="Operator has a parrot", **kw)
+    unsourced_again = pm.add_candidate(value="Operator has a parrot", idempotent=True, **kw)
+    plain = pm.add_candidate(value="Operator has a dog named Biscuit", source_message_id="h1", **kw)
 
     assert again.id == first.id
-    assert cat.id != first.id and cat.value == "Nick has a cat named Miso"
+    assert cat.id != first.id and cat.value == "Operator has a cat named Miso"
     assert unsourced_again.id == unsourced.id
     assert plain.id != first.id  # default behavior unchanged
     with Session(engine) as session:
@@ -313,9 +313,9 @@ def test_two_facts_one_message_partial_profile_failure(monkeypatch: pytest.Monke
     service, backend, task = _service(monkeypatch, memory)
     service.config = SimpleNamespace(MEMORY_PROFILE_ATTRIBUTE_ENABLED=True)  # type: ignore[attr-defined]
     attr = {"category": "fact", "key": "pets"}
-    dog = ExtractedFact(content="Nick has a dog named Biscuit", tags=["pets"], importance=0.9,
+    dog = ExtractedFact(content="Operator has a dog named Biscuit", tags=["pets"], importance=0.9,
                         source_message_ids=["h1"], profile_attribute=attr)
-    cat = ExtractedFact(content="Nick has a cat named Miso", tags=["pets"], importance=0.9,
+    cat = ExtractedFact(content="Operator has a cat named Miso", tags=["pets"], importance=0.9,
                         source_message_ids=["h1"], profile_attribute=attr)
     _extract_script(monkeypatch, [[dog, cat], [dog, cat]])
     monkeypatch.setattr(MemoryExtractionService, "determine_memory_actions",
@@ -329,7 +329,7 @@ def test_two_facts_one_message_partial_profile_failure(monkeypatch: pytest.Monke
     assert backend.processed == ["h1", "r1"]
     with Session(engine) as session:
         values = sorted(r.value for r in session.exec(select(ProfileAttribute)).all())
-    assert values == ["Nick has a cat named Miso", "Nick has a dog named Biscuit"]
+    assert values == ["Operator has a cat named Miso", "Operator has a dog named Biscuit"]
 
 
 def test_failure_marks_run_failed(monkeypatch: pytest.MonkeyPatch) -> None:

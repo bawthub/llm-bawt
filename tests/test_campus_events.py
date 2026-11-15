@@ -296,7 +296,7 @@ def test_active_uses_the_executing_request_record_only():
     from llm_bawt.service.routes.campus import _active
     records = {
         # An older housed thread's records must not decide a new mansion turn.
-        "agent:turn:sess:claude-code:b:nick": "agent:commands:house:h1",
+        "agent:turn:sess:claude-code:b:operator": "agent:commands:house:h1",
         "agent:turn:req:old": "agent:commands:house:h1",
         "agent:turn:req:r2": "agent:commands:house:h2",
         "agent:turn:req:r3": "agent:commands",

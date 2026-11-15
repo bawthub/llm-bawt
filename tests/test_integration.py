@@ -123,7 +123,7 @@ class TestToolLoopFullFlow:
         # Mock client that returns a tool call, then final answer
         responses = [
             "Thought: Getting profile\nAction: get_user_profile",
-            "Thought: I have the profile\nFinal Answer: Your name is Nick."
+            "Thought: I have the profile\nFinal Answer: Your name is Operator."
         ]
         call_idx = [0]
         
@@ -139,7 +139,7 @@ class TestToolLoopFullFlow:
         # Mock executor to avoid real tool execution
         with patch('llm_bawt.tools.loop.ToolExecutor') as mock_executor_class:
             mock_executor = Mock()
-            mock_executor.execute.return_value = "Profile: name=Nick"
+            mock_executor.execute.return_value = "Profile: name=Operator"
             mock_executor_class.return_value = mock_executor
 
             loop = ToolLoop(user_id="test", tool_format=ToolFormat.REACT)
@@ -148,7 +148,7 @@ class TestToolLoopFullFlow:
             # Tool was executed
             assert mock_executor.execute.called
             # Got final answer
-            assert "Nick" in result
+            assert "Operator" in result
 
     def test_tool_loop_continues_after_execution(self):
         """After tool execution, loop should query LLM again for response."""
@@ -197,11 +197,11 @@ class TestStreamingToolLoop:
                 yield "Action: get_user_profile"
             else:
                 # Second call: final response
-                yield "Your profile shows name=Nick"
+                yield "Your profile shows name=Operator"
 
         with patch('llm_bawt.tools.streaming.ToolExecutor') as mock_executor_class:
             mock_executor = Mock()
-            mock_executor.execute.return_value = "name=Nick, occupation=developer"
+            mock_executor.execute.return_value = "name=Operator, occupation=developer"
             mock_executor_class.return_value = mock_executor
 
             result_chunks = list(stream_with_tools(
@@ -214,7 +214,7 @@ class TestStreamingToolLoop:
 
             # Should have yielded the final response
             full_result = "".join(result_chunks)
-            assert "Nick" in full_result
+            assert "Operator" in full_result
 
     def test_streaming_no_tool_yields_directly(self):
         """Non-tool responses should stream through immediately."""
@@ -276,7 +276,7 @@ class TestStreamingToolLoop:
 
         with patch('llm_bawt.tools.streaming.ToolExecutor') as mock_executor_class:
             mock_executor = Mock()
-            mock_executor.execute.return_value = "name=Nick"
+            mock_executor.execute.return_value = "name=Operator"
             mock_executor_class.return_value = mock_executor
 
             list(stream_with_tools(
@@ -291,7 +291,7 @@ class TestStreamingToolLoop:
         assert len(details) == 1
         assert details[0]["tool"] == "get_user_profile"
         assert details[0]["parameters"] == {}
-        assert details[0]["result"] == "name=Nick"
+        assert details[0]["result"] == "name=Operator"
         assert details[0]["iteration"] == 1
 
 

@@ -64,7 +64,7 @@ def test_stream_direct_reset_forwards_empty_seed_to_agent_client(monkeypatch):
         timing_holder=[0, 0], token_usage_holder=[None], tool_call_details_holder=[],
         tool_context_holder=[""], trigger_message_id=None, tts_scrub=None,
         tts_scrubber=None, turn_log_id="turn", user_attachments=[],
-        user_author=None, user_id="nick", user_prompt="/new",
+        user_author=None, user_id="operator", user_prompt="/new",
         thread_binding={"thread_session_id": "new-thread"},
         bridge_reset_action="reset_only", bridge_prompt=None, chat_reset=None,
         task_turn_capability=None, execution=None,

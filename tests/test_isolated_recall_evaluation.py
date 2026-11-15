@@ -31,7 +31,7 @@ def _tokens(value: object) -> int:
     ))
 
 
-def _scope(bot_id: str = "vex", user_id: str = "nick") -> RecallScope:
+def _scope(bot_id: str = "vex", user_id: str = "operator") -> RecallScope:
     return RecallScope(bot_id=bot_id, user_id=user_id, session_id="evaluation-session",
                        excluded_bot_ids=frozenset({"protected-fixture-bot"}))
 
@@ -69,13 +69,13 @@ class SelectingSynthesizer:
 @pytest.mark.parametrize("case", _CASES, ids=lambda case: case["name"])
 async def test_large_retrieval_preserves_oracle_evidence_without_parent_dump(case):
     records = [Evidence(source=_SOURCE[row["kind"]], id=row["id"],
-                        bot_id="vex", user_id="nick", text=row["text"])
+                        bot_id="vex", user_id="operator", text=row["text"])
                for row in case["records"]]
     # The baseline is a legacy full-record dump; recall's provider contract
     # instead delivers bounded snippets. A separate test checks that a provider
     # violating this contract fails closed rather than dumping its payload.
     source = records[0].source
-    records.append(Evidence(source=source, id="distractor", bot_id="vex", user_id="nick",
+    records.append(Evidence(source=source, id="distractor", bot_id="vex", user_id="operator",
                             text=_NOISE * case["noise_repeat"]))
     sources = tuple(dict.fromkeys(row.source for row in records))
     providers = [FixtureProvider(name, [replace(row, text=row.text[:2400])
@@ -122,7 +122,7 @@ class UntrustedSynthesizer:
     RuntimeError("BULK_HISTORY_NOT_FOR_PARENT: provider secret exception contents"),
 ])
 async def test_bad_synthesis_never_falls_back_to_raw_evidence(response):
-    evidence = Evidence(source="messages", id="known", bot_id="vex", user_id="nick",
+    evidence = Evidence(source="messages", id="known", bot_id="vex", user_id="operator",
                         text="Deployment was not approved. " + _NOISE * 3)
     synth = UntrustedSynthesizer(response)
     service = RecallService(providers=[FixtureProvider("messages", [evidence])], synthesizer=synth)
@@ -139,9 +139,9 @@ async def test_bad_synthesis_never_falls_back_to_raw_evidence(response):
 async def test_wrong_user_and_bot_evidence_never_reaches_synthesizer():
     rows = [Evidence(source="messages", id="wrong-user", bot_id="vex", user_id="someone-else",
                      text="Different user's private result."),
-            Evidence(source="messages", id="wrong-bot", bot_id="other-bot", user_id="nick",
+            Evidence(source="messages", id="wrong-bot", bot_id="other-bot", user_id="operator",
                      text="Different bot's private result."),
-            Evidence(source="messages", id="protected", bot_id="protected-fixture-bot", user_id="nick",
+            Evidence(source="messages", id="protected", bot_id="protected-fixture-bot", user_id="operator",
                      text="Excluded source.")]
     synth = UntrustedSynthesizer('{"findings": []}')
     service = RecallService(providers=[FixtureProvider("messages", rows)], synthesizer=synth)
@@ -154,7 +154,7 @@ async def test_wrong_user_and_bot_evidence_never_reaches_synthesizer():
 
 @pytest.mark.asyncio
 async def test_followup_handle_cannot_cross_user_bot_or_session():
-    item = Evidence(source="messages", id="known", bot_id="vex", user_id="nick",
+    item = Evidence(source="messages", id="known", bot_id="vex", user_id="operator",
                     text="The verified setting is disabled.")
     provider = FixtureProvider("messages", [item])
     synth = SelectingSynthesizer("messages", "known", "The verified setting is disabled.")
@@ -163,7 +163,7 @@ async def test_followup_handle_cannot_cross_user_bot_or_session():
     assert first["status"] == "ok"
     calls_before = len(provider.calls)
     scopes = [_scope(user_id="someone-else"), _scope(bot_id="other-bot"),
-              RecallScope(bot_id="vex", user_id="nick", session_id="different-session")]
+              RecallScope(bot_id="vex", user_id="operator", session_id="different-session")]
     for scope in scopes:
         result = await service.recall(RecallRequest(query="Tell me more", sources=("messages",),
                                                    handle=first["handle"]), scope)
@@ -177,13 +177,13 @@ async def test_followup_handle_cannot_cross_user_bot_or_session():
 @pytest.mark.asyncio
 async def test_followup_refreshes_evidence_without_importing_parent_transcript():
     provider = FixtureProvider("messages", [Evidence(source="messages", id="old", bot_id="vex",
-                               user_id="nick", text="The queue was paused.")])
+                               user_id="operator", text="The queue was paused.")])
     synth = SelectingSynthesizer("messages", "old", "The queue was paused.")
     service = RecallService(providers=[provider], synthesizer=synth)
     first = await service.recall(RecallRequest(query="What happened to the queue?", sources=("messages",)),
                                  _scope())
     assert first["status"] == "ok"
-    provider.records = [Evidence(source="messages", id="new", bot_id="vex", user_id="nick",
+    provider.records = [Evidence(source="messages", id="new", bot_id="vex", user_id="operator",
                                  text="The queue is now resumed.")]
     synth.source_id = "new"
     synth.quote = "The queue is now resumed."
@@ -202,7 +202,7 @@ async def test_followup_refreshes_evidence_without_importing_parent_transcript()
 @pytest.mark.parametrize("budget", [400, 1000, 1600])
 async def test_entire_serialized_packet_obeys_requested_budget(budget):
     text = "A verified fact with a useful source. " * 5
-    rows = [Evidence(source="messages", id=f"record-{index}", bot_id="vex", user_id="nick", text=text)
+    rows = [Evidence(source="messages", id=f"record-{index}", bot_id="vex", user_id="operator", text=text)
             for index in range(6)]
     output = json.dumps({"findings": [{"source": "messages", "id": row.id, "quote": row.text}
                                       for row in rows]})

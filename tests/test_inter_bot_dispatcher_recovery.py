@@ -93,7 +93,7 @@ def _dispatcher(check: _Check, changes: StateChanges | None = None):
     events = check.events
     dispatcher = InterBotDeliveryDispatcher.__new__(InterBotDeliveryDispatcher)
     dispatcher.service = SimpleNamespace(
-        config=SimpleNamespace(DEFAULT_USER="nick"),
+        config=SimpleNamespace(DEFAULT_USER="operator"),
         _redis_subscriber=SimpleNamespace(connected=True),
     )
     dispatcher.store = _Store(events, changes)

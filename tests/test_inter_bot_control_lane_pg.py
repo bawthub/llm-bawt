@@ -34,7 +34,7 @@ from tests.test_ops_quiesce_pg import rig  # noqa: F401
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("private_app_pg")]
 
-USER = "nick"  # the rig's turn rows are owned by this fixture user
+USER = "operator"  # the rig's turn rows are owned by this fixture user
 
 
 def _turn(rig, *, backend="claude-code", session="sess-held", status="streaming", caps=None):

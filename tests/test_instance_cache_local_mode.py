@@ -83,14 +83,14 @@ class TestLocalModeCachePoisoning:
         enabled request arrives for the same (model, bot, user)."""
         svc = _make_service()
         poisoned = _fake_instance(local_mode=True)
-        cache_key = ("test-model", "byte", "nick", False)
+        cache_key = ("test-model", "byte", "operator", False)
         svc._llm_bawt_cache[(*cache_key[:3], True)] = poisoned
 
         with patch("llm_bawt.service.core.ServiceLLMBawt") as MockCls:
             fresh = _fake_instance(local_mode=False)
             MockCls.return_value = fresh
 
-            result = svc._get_llm_bawt("test-model", "byte", "nick", local_mode=False)
+            result = svc._get_llm_bawt("test-model", "byte", "operator", local_mode=False)
 
         # Must NOT return the poisoned instance
         assert result is not poisoned
@@ -107,10 +107,10 @@ class TestLocalModeCachePoisoning:
         """A memory-enabled cached instance is reused for memory-enabled requests."""
         svc = _make_service()
         good = _fake_instance(local_mode=False)
-        cache_key = ("test-model", "byte", "nick", False)
+        cache_key = ("test-model", "byte", "operator", False)
         svc._llm_bawt_cache[cache_key] = good
 
-        result = svc._get_llm_bawt("test-model", "byte", "nick", local_mode=False)
+        result = svc._get_llm_bawt("test-model", "byte", "operator", local_mode=False)
 
         assert result is good  # cache hit
 
@@ -118,26 +118,26 @@ class TestLocalModeCachePoisoning:
         """Disabling augmentation must never borrow a warm memory-enabled object."""
         svc = _make_service()
         good = _fake_instance(local_mode=False)
-        cache_key = ("test-model", "byte", "nick", False)
+        cache_key = ("test-model", "byte", "operator", False)
         svc._llm_bawt_cache[cache_key] = good
         local = _fake_instance(local_mode=True)
         with patch("llm_bawt.service.core.ServiceLLMBawt", return_value=local) as build:
-            result = svc._get_llm_bawt("test-model", "byte", "nick", local_mode=True)
+            result = svc._get_llm_bawt("test-model", "byte", "operator", local_mode=True)
         assert result is local
         assert result.memory is None
         assert build.call_args.kwargs["local_mode"] is True
         assert svc._llm_bawt_cache[cache_key] is good
-        assert svc._get_llm_bawt("test-model", "byte", "nick", local_mode=False) is good
-        assert svc._get_llm_bawt("test-model", "byte", "nick", local_mode=True) is local
+        assert svc._get_llm_bawt("test-model", "byte", "operator", local_mode=False) is good
+        assert svc._get_llm_bawt("test-model", "byte", "operator", local_mode=True) is local
 
     def test_local_mode_true_cached_reused_for_true_request(self) -> None:
         """A local-mode cached instance is fine for another local-mode request."""
         svc = _make_service()
         local = _fake_instance(local_mode=True)
-        cache_key = ("test-model", "byte", "nick", True)
+        cache_key = ("test-model", "byte", "operator", True)
         svc._llm_bawt_cache[cache_key] = local
 
-        result = svc._get_llm_bawt("test-model", "byte", "nick", local_mode=True)
+        result = svc._get_llm_bawt("test-model", "byte", "operator", local_mode=True)
 
         assert result is local  # cache hit
 
@@ -155,7 +155,7 @@ class TestReloadPoisonRecovery:
 
         # Pre-existing good instance
         good_original = _fake_instance(local_mode=False)
-        svc._llm_bawt_cache[("test-model", "byte", "nick", False)] = good_original
+        svc._llm_bawt_cache[("test-model", "byte", "operator", False)] = good_original
 
         # Step 1: reload-bots nukes cache
         svc.invalidate_all_instances()
@@ -165,7 +165,7 @@ class TestReloadPoisonRecovery:
         with patch("llm_bawt.service.core.ServiceLLMBawt") as MockCls:
             no_mem_instance = _fake_instance(local_mode=True)
             MockCls.return_value = no_mem_instance
-            result1 = svc._get_llm_bawt("test-model", "byte", "nick", local_mode=True)
+            result1 = svc._get_llm_bawt("test-model", "byte", "operator", local_mode=True)
 
         assert result1 is no_mem_instance
         assert result1.local_mode is True
@@ -174,7 +174,7 @@ class TestReloadPoisonRecovery:
         with patch("llm_bawt.service.core.ServiceLLMBawt") as MockCls:
             mem_instance = _fake_instance(local_mode=False)
             MockCls.return_value = mem_instance
-            result2 = svc._get_llm_bawt("test-model", "byte", "nick", local_mode=False)
+            result2 = svc._get_llm_bawt("test-model", "byte", "operator", local_mode=False)
 
         # Fix must discard the poisoned instance and create a new one
         assert result2 is not no_mem_instance
@@ -182,7 +182,7 @@ class TestReloadPoisonRecovery:
         assert result2.local_mode is False
 
         # Step 4: Subsequent memory-enabled requests should get the good instance
-        result3 = svc._get_llm_bawt("test-model", "byte", "nick", local_mode=False)
+        result3 = svc._get_llm_bawt("test-model", "byte", "operator", local_mode=False)
         assert result3 is mem_instance  # cache hit
 
 
@@ -197,23 +197,23 @@ class TestCrossBotIsolation:
         svc = _make_service()
         poisoned_byte = _fake_instance(local_mode=True)
         good_nova = _fake_instance(local_mode=False)
-        svc._llm_bawt_cache[("test-model", "byte", "nick", True)] = poisoned_byte
-        svc._llm_bawt_cache[("test-model", "nova", "nick", False)] = good_nova
+        svc._llm_bawt_cache[("test-model", "byte", "operator", True)] = poisoned_byte
+        svc._llm_bawt_cache[("test-model", "nova", "operator", False)] = good_nova
 
         # nova request should still get the good instance
-        result = svc._get_llm_bawt("test-model", "nova", "nick", local_mode=False)
+        result = svc._get_llm_bawt("test-model", "nova", "operator", local_mode=False)
         assert result is good_nova
 
     def test_sync_soul_invalidates_only_target_bot(self) -> None:
         """invalidate_bot_instances only evicts the named bot."""
         svc = _make_service()
-        svc._llm_bawt_cache[("test-model", "snark", "nick", False)] = _fake_instance(local_mode=False)
-        svc._llm_bawt_cache[("test-model", "byte", "nick", False)] = _fake_instance(local_mode=False)
+        svc._llm_bawt_cache[("test-model", "snark", "operator", False)] = _fake_instance(local_mode=False)
+        svc._llm_bawt_cache[("test-model", "byte", "operator", False)] = _fake_instance(local_mode=False)
 
         removed = svc.invalidate_bot_instances("snark")
         assert removed == 1
-        assert ("test-model", "byte", "nick", False) in svc._llm_bawt_cache
-        assert ("test-model", "snark", "nick", False) not in svc._llm_bawt_cache
+        assert ("test-model", "byte", "operator", False) in svc._llm_bawt_cache
+        assert ("test-model", "snark", "operator", False) not in svc._llm_bawt_cache
 
 
 # ---------------------------------------------------------------------------
@@ -228,9 +228,9 @@ class TestMissingLocalModeAttribute:
         non-local (memory-enabled), so no eviction for memory requests."""
         svc = _make_service()
         old = SimpleNamespace(client=MagicMock(), memory=MagicMock(), _db_available=True)  # no local_mode attr
-        svc._llm_bawt_cache[("test-model", "byte", "nick", False)] = old
+        svc._llm_bawt_cache[("test-model", "byte", "operator", False)] = old
 
-        result = svc._get_llm_bawt("test-model", "byte", "nick", local_mode=False)
+        result = svc._get_llm_bawt("test-model", "byte", "operator", local_mode=False)
         # Should be treated as local_mode=False → reused
         assert result is old
 
@@ -249,7 +249,7 @@ class TestFailedMemoryInitEviction:
         is discarded when has_database_credentials returns True."""
         svc = _make_service()
         broken = _fake_instance(local_mode=False, memory=None, _db_available=False)
-        cache_key = ("test-model", "snark", "nick", False)
+        cache_key = ("test-model", "snark", "operator", False)
         svc._llm_bawt_cache[cache_key] = broken
 
         with (
@@ -258,7 +258,7 @@ class TestFailedMemoryInitEviction:
         ):
             fresh = _fake_instance(local_mode=False)
             MockCls.return_value = fresh
-            result = svc._get_llm_bawt("test-model", "snark", "nick", local_mode=False)
+            result = svc._get_llm_bawt("test-model", "snark", "operator", local_mode=False)
 
         assert result is not broken
         assert result is fresh
@@ -269,11 +269,11 @@ class TestFailedMemoryInitEviction:
         cached instance (there's nothing to retry)."""
         svc = _make_service()
         broken = _fake_instance(local_mode=False, memory=None, _db_available=False)
-        cache_key = ("test-model", "snark", "nick", False)
+        cache_key = ("test-model", "snark", "operator", False)
         svc._llm_bawt_cache[cache_key] = broken
 
         with patch("llm_bawt.utils.config.has_database_credentials", return_value=False):
-            result = svc._get_llm_bawt("test-model", "snark", "nick", local_mode=False)
+            result = svc._get_llm_bawt("test-model", "snark", "operator", local_mode=False)
 
         assert result is broken  # no point retrying
 
@@ -282,10 +282,10 @@ class TestFailedMemoryInitEviction:
         requires_memory=False — this is intentional, not a failure."""
         svc = _make_service()
         no_mem_ok = _fake_instance(local_mode=False, memory=None, _db_available=True)
-        cache_key = ("test-model", "spark", "nick", False)
+        cache_key = ("test-model", "spark", "operator", False)
         svc._llm_bawt_cache[cache_key] = no_mem_ok
 
-        result = svc._get_llm_bawt("test-model", "spark", "nick", local_mode=False)
+        result = svc._get_llm_bawt("test-model", "spark", "operator", local_mode=False)
 
         assert result is no_mem_ok  # intentionally no memory — keep it
 
@@ -293,10 +293,10 @@ class TestFailedMemoryInitEviction:
         """A normal instance with working memory is never evicted."""
         svc = _make_service()
         good = _fake_instance(local_mode=False, memory=MagicMock(), _db_available=True)
-        cache_key = ("test-model", "byte", "nick", False)
+        cache_key = ("test-model", "byte", "operator", False)
         svc._llm_bawt_cache[cache_key] = good
 
-        result = svc._get_llm_bawt("test-model", "byte", "nick", local_mode=False)
+        result = svc._get_llm_bawt("test-model", "byte", "operator", local_mode=False)
 
         assert result is good
 
@@ -311,7 +311,7 @@ class TestFailedMemoryInitEviction:
         with patch("llm_bawt.service.core.ServiceLLMBawt") as MockCls:
             broken = _fake_instance(local_mode=False, memory=None, _db_available=False)
             MockCls.return_value = broken
-            result1 = svc._get_llm_bawt("test-model", "snark", "nick", local_mode=False)
+            result1 = svc._get_llm_bawt("test-model", "snark", "operator", local_mode=False)
 
         assert result1 is broken
         assert result1.memory is None
@@ -323,7 +323,7 @@ class TestFailedMemoryInitEviction:
         ):
             recovered = _fake_instance(local_mode=False)
             MockCls.return_value = recovered
-            result2 = svc._get_llm_bawt("test-model", "snark", "nick", local_mode=False)
+            result2 = svc._get_llm_bawt("test-model", "snark", "operator", local_mode=False)
 
         assert result2 is not broken
         assert result2 is recovered

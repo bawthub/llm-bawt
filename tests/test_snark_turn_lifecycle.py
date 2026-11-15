@@ -30,7 +30,7 @@ def test_buffered_result_after_long_sibling_does_not_false_timeout():
         async def results():
             yield UserMessage(content=[ToolResultBlock(tool_use_id="bash", content="cancelled", is_error=True)])
 
-        await watchdog.receive_next(results(), request_id="request", session_key="snark:nick")
+        await watchdog.receive_next(results(), request_id="request", session_key="snark:operator")
         assert watchdog.active_tools == ()
     asyncio.run(run())
 
@@ -49,7 +49,7 @@ def test_overdue_tool_drain_window_is_bounded():
 
         with pytest.raises(TurnWatchdogTimeout):
             await asyncio.wait_for(watchdog.receive_next(
-                silent(), request_id="request", session_key="snark:nick",
+                silent(), request_id="request", session_key="snark:operator",
             ), timeout=0.2)
     asyncio.run(run())
 
@@ -62,12 +62,12 @@ def test_cancel_queued_request_preserves_active_and_next_waiter():
         entered = []
 
         async def active():
-            async with queue.active("snark:nick", request_id="active"):
+            async with queue.active("snark:operator", request_id="active"):
                 started.set()
                 await release.wait()
 
         async def waiting(request):
-            async with queue.active("snark:nick", request_id=request):
+            async with queue.active("snark:operator", request_id=request):
                 entered.append(request)
 
         first = asyncio.create_task(active())
@@ -75,17 +75,17 @@ def test_cancel_queued_request_preserves_active_and_next_waiter():
         doomed = asyncio.create_task(waiting("doomed"))
         next_task = asyncio.create_task(waiting("next"))
         await asyncio.sleep(0)
-        assert not queue.cancel_request("other:nick", "doomed")
-        assert queue.cancel_request("snark:nick", "doomed")
+        assert not queue.cancel_request("other:operator", "doomed")
+        assert queue.cancel_request("snark:operator", "doomed")
         with pytest.raises(asyncio.CancelledError):
             await doomed
         assert not first.done()
-        assert not queue.cancel_request("snark:nick", "missing")
+        assert not queue.cancel_request("snark:operator", "missing")
         release.set()
         await asyncio.gather(first, next_task)
         assert entered == ["next"]
         assert queue._request_tasks == {}
-        assert not queue.is_busy("snark:nick")
+        assert not queue.is_busy("snark:operator")
     asyncio.run(run())
 
 
@@ -103,9 +103,9 @@ def test_request_cancel_rpc_never_uses_session_wide_abort():
     redis = SimpleNamespace(xack=AsyncMock())
     asyncio.run(scope["_handle_rpc"](owner, {
         "method": "chat.cancel", "request_id": "rpc-1",
-        "params": {"sessionKey": "snark:nick", "requestId": "doomed"},
+        "params": {"sessionKey": "snark:operator", "requestId": "doomed"},
     }, "entry", redis))
-    owner._session_queue.stop_request.assert_called_once_with("snark:nick", "doomed")
+    owner._session_queue.stop_request.assert_called_once_with("snark:operator", "doomed")
     owner._session_queue.cancel_active.assert_not_called()
     owner._session_queue.signal_cancel.assert_not_called()
     owner._publisher.publish_rpc_result.assert_called_once_with("rpc-1", {
@@ -144,13 +144,13 @@ def test_app_timeout_cancels_only_supported_request_and_preserves_error(monkeypa
 
     local.subscribe_run = timeout
     monkeypatch.setattr(transport, "RedisSubscriber", lambda url: local)
-    owner = SimpleNamespace(name=backend, _resolve_session_key=lambda config: "snark:nick",
+    owner = SimpleNamespace(name=backend, _resolve_session_key=lambda config: "snark:operator",
                             _thread_local=threading.local())
     with pytest.raises(TimeoutError, match="original inactivity error"):
         list(scope["stream_raw"](owner, "test", {"request_id": "doomed"}))
     if backend == "claude-code":
         local.send_rpc.assert_awaited_once_with(
-            "chat.cancel", {"sessionKey": "snark:nick", "requestId": "doomed"},
+            "chat.cancel", {"sessionKey": "snark:operator", "requestId": "doomed"},
             request_id="cancel_doomed", backend="claude-code",
         )
     else:

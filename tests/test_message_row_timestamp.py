@@ -1,6 +1,6 @@
 """TASK-1234 Fix 3: a retry must not move a user message's timestamp.
 
-Incident a67418db: Nick's user row moved from ~20:30:09 to 20:39:01 when the
+Incident a67418db: Operator's user row moved from ~20:30:09 to 20:39:01 when the
 durable delivery was retried, landing it after Al's 20:37:16 reply. The user
 row's timestamp is first-write-wins; assistant partial->final upserts keep
 refreshing theirs.

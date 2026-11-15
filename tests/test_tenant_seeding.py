@@ -36,7 +36,7 @@ def test_standard_paths_include_openai_platform_responses_route():
 
 
 def test_first_agent_prompt_seed_is_generic():
-    """No owner name, no personal traits — it's a tenant starter, not Nick's bot."""
+    """No owner name, no personal traits — it's a tenant starter, not Operator's bot."""
     lowered = FIRST_AGENT_PROMPT_SEED.lower()
     for forbidden in ("nick", "nova", "mira", "personal ai assistant"):
         assert forbidden not in lowered

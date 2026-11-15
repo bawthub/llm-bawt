@@ -28,7 +28,7 @@ from tests.test_fts_query_pg import assert_no_stored_vector, result_columns
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("private_app_pg")]
 
 NOW = 1_800_000_000.0
-USER = "nick"
+USER = "operator"
 # slug -> include_in_global_search. "empty" is public and holds no messages.
 # "priv" is private through the legacy column, "tagged" through a tag only.
 BOTS = {"pub": True, "pub2": True, "empty": True, "priv": False, "tagged": True}
@@ -210,7 +210,7 @@ def test_5_handle_cannot_carry_a_caller_into_a_protected_partition(world):
 def test_6_user_pin(world):
     world.session("s_eve", "pub", user="eve")
     world.message("pub", "s_eve", "TASK-781 eve said", author=("user", "eve"))
-    world.message("pub", "s_eve", "TASK-781 nick in eve's session")
+    world.message("pub", "s_eve", "TASK-781 operator in eve's session")
     world.message("pub", "s_eve", "TASK-781 reply to eve", role="assistant", author=("bot", "pub"))
     assert world.find(query="TASK-781") == nothing("TASK-781")
 

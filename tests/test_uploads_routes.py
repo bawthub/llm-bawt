@@ -456,7 +456,7 @@ def test_post_pdf_multipart_stored_as_file(client: TestClient, monkeypatch: pyte
     raw = b"%PDF-1.4 fake pdf body " * 50
     resp = client.post(
         "/v1/uploads?source=agent_attachment",
-        headers={"X-Entity-Id": "nick"},
+        headers={"X-Entity-Id": "operator"},
         files={"file": ("Quarterly Report.pdf", raw, "application/pdf")},
     )
     assert resp.status_code == 200, resp.text
@@ -494,7 +494,7 @@ def test_post_text_file_json_data_url_with_filename(client: TestClient) -> None:
     data_url = "data:text/plain;base64," + base64.b64encode(raw).decode("ascii")
     resp = client.post(
         "/v1/uploads",
-        headers={"X-Entity-Id": "nick"},
+        headers={"X-Entity-Id": "operator"},
         json={"data_url": data_url, "filename": "../../etc/notes\x00.txt"},
     )
     assert resp.status_code == 200, resp.text
@@ -510,7 +510,7 @@ def test_post_octet_stream_guesses_mime_from_extension(client: TestClient) -> No
     """``curl -F file=@x.csv`` sends octet-stream — the extension should win."""
     resp = client.post(
         "/v1/uploads",
-        headers={"X-Entity-Id": "nick"},
+        headers={"X-Entity-Id": "operator"},
         files={"file": ("data.csv", b"a,b\n1,2\n", "application/octet-stream")},
     )
     assert resp.status_code == 200, resp.text
@@ -520,7 +520,7 @@ def test_post_octet_stream_guesses_mime_from_extension(client: TestClient) -> No
 def test_post_octet_stream_png_extension_takes_image_pipeline(client: TestClient) -> None:
     resp = client.post(
         "/v1/uploads",
-        headers={"X-Entity-Id": "nick"},
+        headers={"X-Entity-Id": "operator"},
         files={"file": ("shot.png", _png_bytes(320, 200), "application/octet-stream")},
     )
     assert resp.status_code == 200, resp.text
@@ -533,7 +533,7 @@ def test_post_octet_stream_png_extension_takes_image_pipeline(client: TestClient
 def test_unknown_binary_forced_to_attachment(client: TestClient) -> None:
     resp = client.post(
         "/v1/uploads",
-        headers={"X-Entity-Id": "nick"},
+        headers={"X-Entity-Id": "operator"},
         files={"file": ("mystery", b"\x00\x01\x02\x03" * 10, "application/octet-stream")},
     )
     assert resp.status_code == 200, resp.text
@@ -548,7 +548,7 @@ def test_html_and_svg_never_served_inline(client: TestClient) -> None:
         ("logo.svg", "image/svg+xml", b"<svg xmlns='http://www.w3.org/2000/svg'/>"),
     ):
         resp = client.post(
-            "/v1/uploads", headers={"X-Entity-Id": "nick"}, files={"file": (name, payload, mime)}
+            "/v1/uploads", headers={"X-Entity-Id": "operator"}, files={"file": (name, payload, mime)}
         )
         assert resp.status_code == 200, resp.text
         get = client.get(resp.json()["urls"]["original"])
@@ -558,17 +558,17 @@ def test_html_and_svg_never_served_inline(client: TestClient) -> None:
 def test_file_size_cap_is_separate_from_image_cap(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LLM_BAWT_MAX_FILE_UPLOAD_BYTES", "1024")
     ok = client.post(
-        "/v1/uploads", headers={"X-Entity-Id": "nick"}, files={"file": ("s.txt", b"x" * 1024, "text/plain")}
+        "/v1/uploads", headers={"X-Entity-Id": "operator"}, files={"file": ("s.txt", b"x" * 1024, "text/plain")}
     )
     assert ok.status_code == 200
     too_big = client.post(
-        "/v1/uploads", headers={"X-Entity-Id": "nick"}, files={"file": ("b.txt", b"x" * 1025, "text/plain")}
+        "/v1/uploads", headers={"X-Entity-Id": "operator"}, files={"file": ("b.txt", b"x" * 1025, "text/plain")}
     )
     assert too_big.status_code == 413
     assert "kind=file" in too_big.json()["detail"]
     # Images are still governed by the 15 MB cap, not the file cap.
     img = client.post(
-        "/v1/uploads", headers={"X-Entity-Id": "nick"}, files={"file": ("p.png", _png_bytes(200, 200), "image/png")}
+        "/v1/uploads", headers={"X-Entity-Id": "operator"}, files={"file": ("p.png", _png_bytes(200, 200), "image/png")}
     )
     assert img.status_code == 200
 
@@ -578,7 +578,7 @@ def test_image_response_has_content_disposition_and_public_url(
 ) -> None:
     monkeypatch.setenv("LLM_BAWT_PUBLIC_ORIGIN", "https://app.example.test/")
     resp = client.post(
-        "/v1/uploads", headers={"X-Entity-Id": "nick"}, files={"file": ("cat photo.jpg", _png_bytes(100, 100), "image/png")}
+        "/v1/uploads", headers={"X-Entity-Id": "operator"}, files={"file": ("cat photo.jpg", _png_bytes(100, 100), "image/png")}
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -602,7 +602,7 @@ def test_public_url_is_same_origin_relative_without_an_origin(
     else:
         monkeypatch.setenv("LLM_BAWT_PUBLIC_ORIGIN", blank)
     resp = client.post(
-        "/v1/uploads", headers={"X-Entity-Id": "nick"}, files={"file": ("n.txt", b"n", "text/plain")}
+        "/v1/uploads", headers={"X-Entity-Id": "operator"}, files={"file": ("n.txt", b"n", "text/plain")}
     )
     assert resp.status_code == 200
     body = resp.json()
@@ -612,7 +612,7 @@ def test_public_url_is_same_origin_relative_without_an_origin(
 
 def test_unicode_filename_gets_rfc5987_fallback(client: TestClient) -> None:
     resp = client.post(
-        "/v1/uploads", headers={"X-Entity-Id": "nick"}, files={"file": ("résumé.txt", b"cv", "text/plain")}
+        "/v1/uploads", headers={"X-Entity-Id": "operator"}, files={"file": ("résumé.txt", b"cv", "text/plain")}
     )
     assert resp.status_code == 200, resp.text
     get = client.get(resp.json()["urls"]["original"])
@@ -623,10 +623,10 @@ def test_unicode_filename_gets_rfc5987_fallback(client: TestClient) -> None:
 
 def test_delete_file_asset(client: TestClient) -> None:
     resp = client.post(
-        "/v1/uploads", headers={"X-Entity-Id": "nick"}, files={"file": ("d.zip", b"PK\x03\x04junk", "application/zip")}
+        "/v1/uploads", headers={"X-Entity-Id": "operator"}, files={"file": ("d.zip", b"PK\x03\x04junk", "application/zip")}
     )
     aid = resp.json()["asset_id"]
-    assert client.delete(f"/v1/uploads/{aid}", headers={"X-Entity-Id": "nick"}).status_code == 204
+    assert client.delete(f"/v1/uploads/{aid}", headers={"X-Entity-Id": "operator"}).status_code == 204
     assert client.get(f"/v1/uploads/{aid}").status_code == 404
 
 

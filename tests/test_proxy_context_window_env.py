@@ -36,7 +36,7 @@ def _env(
         subagent_model=None,
         force_refresh=False,
         bot_id="qlocal",
-        session_key="qlocal:nick",
+        session_key="qlocal:operator",
         thread_session_id="thread-1",
         request_id="request-1",
         context_window=context_window,
@@ -119,7 +119,7 @@ def test_proxy_turn_routes_every_explicit_subagent_tier_to_proxy_model() -> None
         subagent_model=None,
         force_refresh=False,
         bot_id="snark",
-        session_key="snark:nick",
+        session_key="snark:operator",
         thread_session_id="thread-1",
         request_id="request-1",
         context_window=272_000,
@@ -139,7 +139,7 @@ def test_proxy_turn_routes_tiers_to_configured_subagent_override() -> None:
         subagent_model="openai_chatgpt/gpt-5.6-luna",
         force_refresh=False,
         bot_id="snark",
-        session_key="snark:nick",
+        session_key="snark:operator",
         thread_session_id="thread-1",
         request_id="request-1",
         context_window=272_000,
@@ -197,7 +197,7 @@ def test_no_compact_threshold_sets_no_window(monkeypatch) -> None:
 
 def _fields(**extra) -> dict:
     return {
-        "request_id": "r1", "session_key": "caid:nick", "bot_id": "caid", "message": "hi",
+        "request_id": "r1", "session_key": "caid:operator", "bot_id": "caid", "message": "hi",
         "model": "claude-opus-5-5", **extra,
     }
 

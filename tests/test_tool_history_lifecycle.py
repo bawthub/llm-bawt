@@ -17,12 +17,12 @@ def test_history_exposes_parent_terminal_signal_without_completing_tool(monkeypa
     timestamp = datetime(2026, 9, 27, tzinfo=timezone.utc)
     row = SimpleNamespace(
         id="turn-history", created_at=timestamp, request_id=None,
-        model=None, bot_id="snark", user_id="nick",
+        model=None, bot_id="snark", user_id="operator",
         trigger_message_id="user-history", ended_at=timestamp if ended else None,
     )
     with Session(engine) as session:
         session.add(ToolCallRecord(
-            turn_id=row.id, bot_id="snark", user_id="nick", tool_name="Bash",
+            turn_id=row.id, bot_id="snark", user_id="operator", tool_name="Bash",
             call_id="call-history", started_at=timestamp.timestamp(), result_text="",
             exec_tracked=tracking, exec_started_at=execution,
         ))
@@ -30,7 +30,7 @@ def test_history_exposes_parent_terminal_signal_without_completing_tool(monkeypa
     store = SimpleNamespace(engine=engine, list_turns=lambda **kwargs: ([row], 1))
     monkeypatch.setattr(routes, "get_turn_log_store", lambda: store)
     response = routes.get_tool_call_events(
-        bot_id="snark", user_id="nick", message_id=None, message_ids=["user-history"],
+        bot_id="snark", user_id="operator", message_id=None, message_ids=["user-history"],
         after=None, before=None, since_hours=168, limit=200,
     )
     event = response.events[0]

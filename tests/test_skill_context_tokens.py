@@ -77,7 +77,7 @@ def test_skill_size_persists_in_result_meta_without_replacing_ack_count():
     payload = ToolResultPayload.from_value("Launching skill: llm-bawt")
     event = {
         "turn_id": "turn", "call_id": "call", "tool_use_id": "tool",
-        "bot_id": "loopy", "user_id": "nick", "tool_name": "Skill",
+        "bot_id": "loopy", "user_id": "operator", "tool_name": "Skill",
         "result": payload.preview,
         "tool_result_payload": {**payload.to_dict(), "skill_context_tokens": 2400},
         "ts": 123.0, "is_error": False,
@@ -107,7 +107,7 @@ def test_failed_or_unmeasured_skills_do_not_report_context_size():
         payload = ToolResultPayload.from_value("Launching skill")
         public = coordinator.end({
             "turn_id": "turn", "call_id": call_id, "tool_use_id": call_id,
-            "bot_id": "loopy", "user_id": "nick", "tool_name": "Skill",
+            "bot_id": "loopy", "user_id": "operator", "tool_name": "Skill",
             "result": payload.preview,
             "tool_result_payload": {**payload.to_dict(), "skill_context_tokens": reported},
             "ts": 123.0, "is_error": is_error,

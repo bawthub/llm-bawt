@@ -29,7 +29,7 @@ def _name(ctx, role):
 def _send(ctx, sender, target, *, waited=True, connection=None):
     from llm_bawt.inter_bot_delivery import InterBotDeliveryStore
 
-    payload = {"messages": [{"role": "user", "content": "hi"}], "bot_id": target, "user": "nick"}
+    payload = {"messages": [{"role": "user", "content": "hi"}], "bot_id": target, "user": "operator"}
     if waited:
         payload["reply_mode"] = "waited"
     record, _ = InterBotDeliveryStore(ctx.store.config).enqueue(

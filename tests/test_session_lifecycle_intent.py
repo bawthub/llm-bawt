@@ -10,7 +10,7 @@ from llm_bawt.service.session_lifecycle.intent import (
 
 def _intent(**overrides):
     options = dict(
-        bot_id="byte", user_id="nick", author=AuthorReference.user("nick"),
+        bot_id="byte", user_id="operator", author=AuthorReference.user("operator"),
         continuity=Continuity.CONFIGURED, admission=Admission.WAIT,
         origin=Origin.CHAT_COMMAND, idempotency_key="delivery-one",
     )
@@ -24,7 +24,7 @@ def test_system_is_bot_author_but_not_conversation_owner():
         admission=Admission.SKIP, expected_session_id="s1",
         expected_usage_turn_id="turn-1", job_id="job-1", run_id="run-1",
     )
-    assert intent.bot_id == "byte" and intent.user_id == "nick"
+    assert intent.bot_id == "byte" and intent.user_id == "operator"
     assert intent.author.to_dict()["entity_id"] == "system"
     assert intent.continuity is Continuity.CONFIGURED
 

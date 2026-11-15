@@ -353,11 +353,11 @@ def test_ops_run_records_approved_caller_provenance():
     from types import SimpleNamespace
     from llm_bawt.ops.approved_admission import approved_provenance
 
-    row = SimpleNamespace(id="mcp-appr-abc", bot_id="snark", user_id="nick",
+    row = SimpleNamespace(id="mcp-appr-abc", bot_id="snark", user_id="operator",
                           turn_id="turn-1", session_key="sk-1", backend="claude-code")
     assert approved_provenance(row) == {
         "caller_bot_id": "snark",
-        "caller_user_id": "nick",
+        "caller_user_id": "operator",
         "caller_turn_id": "turn-1",
         "caller_session_key": "sk-1",
         "caller_backend": "claude-code",
@@ -374,7 +374,7 @@ def test_direct_ops_run_provenance_ignores_an_approved_context():
     )
 
     token = _approved_caller_context.set(ApprovedCallerContext(
-        bot_id="snark", user_id="nick", turn_id="turn-1", session_key="sk-1",
+        bot_id="snark", user_id="operator", turn_id="turn-1", session_key="sk-1",
         backend="claude-code", approval_request_id="mcp-appr-abc"))
     try:
         assert ops_tools._caller_provenance() == {}

@@ -43,7 +43,7 @@ def test_inter_bot_nonstream_turn_publishes_visible_lifecycle(
     monkeypatch, sender_mode: str,
 ) -> None:
     service = BackgroundService.__new__(BackgroundService)
-    service.config = SimpleNamespace(DEFAULT_BOT="nova", DEFAULT_USER="nick")
+    service.config = SimpleNamespace(DEFAULT_BOT="nova", DEFAULT_USER="operator")
     service._inter_bot_dispatcher = SimpleNamespace(
         store=SimpleNamespace(
             engine=object(),  # admission claim is constructed; persistence is mocked below
@@ -130,7 +130,7 @@ def test_inter_bot_nonstream_turn_publishes_visible_lifecycle(
         "model": "test-model",
         "messages": [ChatMessage(role="user", content="background prompt")],
         "bot_id": "loopy",
-        "user": "nick",
+        "user": "operator",
         "stream": False,
         "user_message_id": "user-visible",
     }
@@ -195,7 +195,7 @@ def test_inter_bot_nonstream_turn_start_prefers_request_session_over_archived_se
     events go to the dead thread and the pane on the fresh session gates
     them out as "wrong thread"."""
     service = BackgroundService.__new__(BackgroundService)
-    service.config = SimpleNamespace(DEFAULT_BOT="nova", DEFAULT_USER="nick")
+    service.config = SimpleNamespace(DEFAULT_BOT="nova", DEFAULT_USER="operator")
     service._inter_bot_dispatcher = SimpleNamespace(
         store=SimpleNamespace(
             engine=object(),  # admission claim is constructed; persistence is mocked below
@@ -264,7 +264,7 @@ def test_inter_bot_nonstream_turn_start_prefers_request_session_over_archived_se
         model="test-model",
         messages=[ChatMessage(role="user", content="reset delivery")],
         bot_id="loopy",
-        user="nick",
+        user="operator",
         stream=False,
         user_message_id="user-reset",
         # request.session_id = the NEW (target) session id the dispatcher
@@ -332,7 +332,7 @@ def test_finalize_turn_saves_history() -> None:
         user_prompt="hi",
         model="test-model",
         bot_id="proto",
-        user_id="nick",
+        user_id="operator",
         elapsed_ms=12.5,
         stream=False,
     )
@@ -378,7 +378,7 @@ def test_finalize_turn_persists_non_streaming_agent_usage(monkeypatch) -> None:
         user_prompt="prompt",
         model="test-model",
         bot_id="proto",
-        user_id="nick",
+        user_id="operator",
         elapsed_ms=20.0,
         stream=False,
     )
@@ -493,7 +493,7 @@ def test_finalize_turn_prefers_explicit_streaming_usage(monkeypatch) -> None:
         user_prompt="prompt",
         model="test-model",
         bot_id="proto",
-        user_id="nick",
+        user_id="operator",
         elapsed_ms=20.0,
         stream=True,
         token_usage=explicit,
@@ -532,7 +532,7 @@ def test_finalize_turn_extracts_agent_backend_tools(monkeypatch) -> None:
         user_prompt="prompt",
         model="test-model",
         bot_id="proto",
-        user_id="nick",
+        user_id="operator",
         elapsed_ms=20.0,
         stream=True,
     )
@@ -666,7 +666,7 @@ def test_worker_finalize_error_falls_back_to_error_status() -> None:
             user_prompt="hi",
             model="test-model",
             bot_id="proto",
-            user_id="nick",
+            user_id="operator",
             elapsed_ms=elapsed_ms,
             stream=True,
         )

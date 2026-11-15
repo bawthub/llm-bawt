@@ -173,7 +173,7 @@ def test_health_field_shape_and_the_retired_key(key, value):
 
 @pytest.mark.parametrize("declared, tag", [
     ("bawthub-backend", "bawthub-backend:latest"), ("bawthub-backend:latest", "bawthub-backend:latest"),
-    ("bawthub-backend:dev-1.2", "bawthub-backend:dev-1.2"), ("nick/backend", "nick/backend:latest"),
+    ("bawthub-backend:dev-1.2", "bawthub-backend:dev-1.2"), ("operator/backend", "operator/backend:latest"),
 ])
 def test_a_declared_image_is_the_builds_local_tag(declared, tag):
     assert built_image_tag(declared) == tag

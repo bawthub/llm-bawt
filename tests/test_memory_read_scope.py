@@ -81,7 +81,7 @@ class _Profiles:
                 entity_id=e, email=None, display_name=e, description=None, color=None,
                 avatar=None, avatar_render=None, is_service=False, summary=None,
                 summary_updated_at=None, created_at=None)
-            for e in ("nick", "Alice", "bob")
+            for e in ("fixture-user", "Alice", "bob")
         ]
 
     def get_all_attributes(self, _t, _e):

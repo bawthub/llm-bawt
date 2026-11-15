@@ -14,7 +14,7 @@ from llm_bawt.tools.parser import ToolCall
 
 
 def _executor(**kwargs) -> ToolExecutor:
-    kwargs.setdefault("user_id", "nick")
+    kwargs.setdefault("user_id", "operator")
     kwargs.setdefault("bot_id", "fixture-bot")
     return ToolExecutor(**kwargs)
 
@@ -124,7 +124,7 @@ def test_conflicting_insert_returns_the_winning_row():
     lookups = iter([None, winner])  # pre-check misses, post-conflict lookup hits
     store.get_by_sha256 = lambda sha: next(lookups)
     row = store.insert(sha256="a" * 64, mime_type="image/webp", original_mime_type="image/png",
-                       size_bytes=1, width=1, height=1, source="chat_upload", owner_user_id="nick")
+                       size_bytes=1, width=1, height=1, source="chat_upload", owner_user_id="operator")
     assert row == winner
     assert "ON CONFLICT (sha256) WHERE storage_key IS NULL DO NOTHING" in executed[0]
 
@@ -277,7 +277,7 @@ def test_profile_update_by_id_is_bound_to_current_user():
     out = ex.execute(ToolCall(name="profile", arguments={"action": "update", "attribute_id": 7,
                                                          "value": "x"}, raw_text=""))
     assert profiles.updates[0]["entity_type"] == EntityType.USER
-    assert profiles.updates[0]["entity_id"] == "nick"
+    assert profiles.updates[0]["entity_id"] == "operator"
     assert "not found" in out
 
 
@@ -304,7 +304,7 @@ def test_home_set_never_auto_picks_among_multiple_matches():
 def test_over_budget_batch_answers_every_tool_call_id():
     from llm_bawt.tools.loop import ToolLoop
 
-    loop = ToolLoop(user_id="nick", config=SimpleNamespace(MAX_TOOL_CALLS_PER_TURN=1), tool_format="native")
+    loop = ToolLoop(user_id="operator", config=SimpleNamespace(MAX_TOOL_CALLS_PER_TURN=1), tool_format="native")
     handler = SimpleNamespace(format_result=lambda name, result, tool_call_id=None, error=None: {
         "role": "tool", "tool_call_id": tool_call_id, "content": error or result})
     calls = [SimpleNamespace(name="time", arguments={}, raw_text="", tool_call_id=f"c{i}") for i in range(4)]
@@ -356,7 +356,7 @@ def test_selecting_current_model_cancels_pending_switch(lifecycle):
 
 
 def test_scoped_reselect_replaces_owner_pending_switch(lifecycle):
-    owner = ("bot", "nick")
+    owner = ("bot", "operator")
     lifecycle.switch_model("B", owner=owner)
     lifecycle.switch_model("A", owner=owner)
     assert lifecycle.clear_pending_switch(owner=owner) == "A"
@@ -365,16 +365,16 @@ def test_scoped_reselect_replaces_owner_pending_switch(lifecycle):
 def test_scoped_switch_ignores_other_owners_global_model(lifecycle):
     # Owner A runs cached model A; owner B registered B last (global alias).
     lifecycle._current_model_alias = "B"
-    owner_a = ("bot-a", "nick")
+    owner_a = ("bot-a", "operator")
     ok, msg = lifecycle.switch_model("B", owner=owner_a)
     assert ok and "Already using" not in msg
     assert lifecycle.clear_pending_switch(owner=owner_a) == "B"
 
 
 def test_pending_switch_only_reaches_its_owner(lifecycle):
-    lifecycle.switch_model("B", owner=("bot-a", "nick"))
-    assert lifecycle.clear_pending_switch(owner=("bot-c", "nick")) is None
-    assert lifecycle.clear_pending_switch(owner=("BOT-A", "nick")) == "B"
+    lifecycle.switch_model("B", owner=("bot-a", "operator"))
+    assert lifecycle.clear_pending_switch(owner=("bot-c", "operator")) is None
+    assert lifecycle.clear_pending_switch(owner=("BOT-A", "operator")) == "B"
 
 
 # --- MCP status probe (item 25) --------------------------------------------

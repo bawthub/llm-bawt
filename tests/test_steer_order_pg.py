@@ -22,7 +22,7 @@ from tests.test_turn_gates_pg import _open, gated  # noqa: F401  (gated is a fix
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("private_app_pg")]
 
 
-def _send(gated, bot, content, *, user="nick", session_id=None, voice=False):
+def _send(gated, bot, content, *, user="operator", session_id=None, voice=False):
     """Admit one composer send exactly as /v1/chat/completions does."""
     if bot not in gated.senders:
         gated.senders.append(bot)  # ordinary rows are sent "from" the target
@@ -38,7 +38,7 @@ def _send(gated, bot, content, *, user="nick", session_id=None, voice=False):
     return deliveries, decision.delivery_id
 
 
-def _ahead(gated, bot, *, user="nick", session_id="s-live"):
+def _ahead(gated, bot, *, user="operator", session_id="s-live"):
     return queued_send_ahead(gated.store.engine, bot_id=bot, user_id=user, session_id=session_id)
 
 

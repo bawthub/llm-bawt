@@ -122,11 +122,11 @@ def setup(tmp_path):
 
 
 async def offer(controller):
-    return await controller.offer(user="nick", expected_generation=0, calibration=True)
+    return await controller.offer(user="operator", expected_generation=0, calibration=True)
 
 
 async def confirm(controller, offered, **overrides):
-    args = dict(user="nick", token=offered["token"], expected_generation=offered["generation"], approved=True)
+    args = dict(user="operator", token=offered["token"], expected_generation=offered["generation"], approved=True)
     return await controller.confirm(**(args | overrides))
 
 
@@ -226,7 +226,7 @@ def test_expired_and_replaced_offers_do_not_run(setup, monkeypatch):
 
     async def run():
         old = await offer(controller)
-        new = await controller.offer(user="nick", expected_generation=old["generation"], calibration=True)
+        new = await controller.offer(user="operator", expected_generation=old["generation"], calibration=True)
         with pytest.raises(HandoffConflict):
             await confirm(controller, old)
         monkeypatch.setattr("llm_bawt.media.gpu_handoff_store.time.time", lambda: new["expires_at"] + 1)
@@ -239,7 +239,7 @@ def test_expired_and_replaced_offers_do_not_run(setup, monkeypatch):
 def test_ordinary_offer_does_not_invent_a_memory_budget(setup):
     store, adapter, controller = setup
     with pytest.raises(HandoffConflict, match="measured profile"):
-        asyncio.run(controller.offer(user="nick", expected_generation=0, calibration=False))
+        asyncio.run(controller.offer(user="operator", expected_generation=0, calibration=False))
     assert store.status().generation == 0
     assert not adapter.effects
 
@@ -268,21 +268,21 @@ def test_operator_routes_expose_the_tested_contract(setup, monkeypatch):
     app.include_router(media_handoff.router)
     with TestClient(app) as client:
         path = "/v1/media/local-video/handoff"
-        assert client.post(path + "/offer", json={"user": "nick", "expected_generation": 0}).status_code == 409
-        offered = client.post(path + "/offer", json={"user": "nick", "expected_generation": 0, "calibration": True})
+        assert client.post(path + "/offer", json={"user": "operator", "expected_generation": 0}).status_code == 409
+        offered = client.post(path + "/offer", json={"user": "operator", "expected_generation": 0, "calibration": True})
         assert offered.status_code == 200
         data = offered.json()
-        payload = {"user": "nick", "expected_generation": data["generation"], "token": data["token"], "approved": True}
+        payload = {"user": "operator", "expected_generation": data["generation"], "token": data["token"], "approved": True}
         assert client.post(path + "/confirm", json=payload).json()["owner"] == "video_calibration"
         assert client.post(path + "/confirm", json=payload).status_code == 409
         assert client.post(path + "/confirm", json=payload | {"approved": "true"}).status_code == 422
 
 
 async def restore(controller, store):
-    offered = await controller.offer_restore(user="nick", expected_generation=store.status().generation)
-    generation = await controller.accept_restore(user="nick", token=offered["token"],
+    offered = await controller.offer_restore(user="operator", expected_generation=store.status().generation)
+    generation = await controller.accept_restore(user="operator", token=offered["token"],
                                                  expected_generation=offered["generation"], approved=True)
-    await controller.execute_restore(user="nick", generation=generation)
+    await controller.execute_restore(user="operator", generation=generation)
     return offered
 
 
@@ -319,7 +319,7 @@ def test_restore_recovers_fenced_state_and_clears_stale_claims(setup):
     assert (state.owner, state.phase) == ("voice", "idle")
     assert store.active_video_jobs() == 1  # Reset cannot erase an uncertain render's evidence.
     with pytest.raises(HandoffConflict, match="Active video"):
-        asyncio.run(controller.offer(user="nick", expected_generation=state.generation, calibration=True))
+        asyncio.run(controller.offer(user="operator", expected_generation=state.generation, calibration=True))
 
 
 def test_restore_refuses_while_rendering(setup):
@@ -327,7 +327,7 @@ def test_restore_refuses_while_rendering(setup):
     asyncio.run(confirm(controller, asyncio.run(offer(controller))))
     adapter.render_active = True
     with pytest.raises(HandoffConflict, match="still running"):
-        asyncio.run(controller.offer_restore(user="nick", expected_generation=store.status().generation))
+        asyncio.run(controller.offer_restore(user="operator", expected_generation=store.status().generation))
     assert store.status().owner == "video_calibration"
 
 
@@ -358,7 +358,7 @@ def _fenced_after_calibration_switch(setup, monkeypatch):
 def test_resume_video_from_recovery_verifies_live_state_without_side_effects(setup, monkeypatch):
     store, adapter, controller, fenced = _fenced_after_calibration_switch(setup, monkeypatch)
     effects = list(adapter.effects)
-    result = asyncio.run(controller.resume_video(user="nick", expected_generation=fenced.generation))
+    result = asyncio.run(controller.resume_video(user="operator", expected_generation=fenced.generation))
     assert result["owner"] == "video"
     assert adapter.effects == effects  # no park/stop/start/reset
     state = store.status()
@@ -383,5 +383,5 @@ def test_resume_video_refuses_when_live_state_is_not_videos(setup, monkeypatch, 
     else:
         monkeypatch.setattr(store, "calibration", lambda: None)
     with pytest.raises(HandoffConflict):
-        asyncio.run(controller.resume_video(user="nick", expected_generation=generation))
+        asyncio.run(controller.resume_video(user="operator", expected_generation=generation))
     assert store.status().phase == "recovery_required"

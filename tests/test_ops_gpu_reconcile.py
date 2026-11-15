@@ -125,12 +125,12 @@ def test_recreate_first_blocks_handoff(store):
     state = store.status()
     assert (state.phase, state.reconcile_key) == ("gpu_reconciling", "k1")
     with pytest.raises(HandoffConflict):
-        store.offer(user="nick", target="video", actions=("park_voice",), expected_generation=state.generation)
+        store.offer(user="operator", target="video", actions=("park_voice",), expected_generation=state.generation)
     assert store.admits("k1", "any") and not store.admits("k2", "any")
 
 
 def test_handoff_first_blocks_recreate(store):
-    store.offer(user="nick", target="video", actions=("park_voice",), expected_generation=0)
+    store.offer(user="operator", target="video", actions=("park_voice",), expected_generation=0)
     with pytest.raises(HandoffConflict) as err:
         reserve(store)
     assert err.value.code == "gpu_not_idle" and store.status().reconcile_key is None
@@ -209,7 +209,7 @@ def test_release_is_key_checked_and_idempotent(store):
     assert not store.release_gpu_reconcile("k1")
     state = store.status()
     assert (state.phase, state.reconcile_key, state.owner) == ("idle", None, "voice")
-    store.offer(user="nick", target="video", actions=("park_voice",), expected_generation=state.generation)
+    store.offer(user="operator", target="video", actions=("park_voice",), expected_generation=state.generation)
 
 
 # ── Known outcomes release; uncertain ones hold ─────────────────────────────

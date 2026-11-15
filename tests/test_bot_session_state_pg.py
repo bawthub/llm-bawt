@@ -38,7 +38,7 @@ def _sessions(conn):
         status VARCHAR(16), session_metadata JSONB)
     """)
     conn.exec_driver_sql("""INSERT INTO sessions (id, bot_id, user_id, status)
-        VALUES ('first', 'fixture', 'nick', 'archived'),
+        VALUES ('first', 'fixture', 'operator', 'archived'),
                ('second', 'fixture', 'other-user', 'active')
     """)
 

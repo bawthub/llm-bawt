@@ -1,4 +1,4 @@
-"""TASK-2121: the "finished" quiesce ack and Nick's verbatim definition of it.
+"""TASK-2121: the "finished" quiesce ack and Operator's verbatim definition of it.
 
 The resume behavior itself is in tests/test_ops_quiesce_resume_pg.py.
 """
@@ -41,7 +41,7 @@ def test_the_definition_is_verbatim_in_the_quiesce_request():
     assert FINISHED_NOTE_RULE in DEFAULT_QUIESCE_REQUEST
     assert DEFAULT_QUIESCE_REQUEST.startswith("[Ops quiesce request:")
     assert DEFAULT_QUIESCE_REQUEST.endswith("]")
-    # Nick's wording, spot-checked so an edit to the constant is deliberate.
+    # the user's wording, spot-checked so an edit to the constant is deliberate.
     for wording in ('if this bot were never woken again, nothing would be lost, half-applied or forgotten',
                     'When in doubt: "stopping". A wasted resume turn is cheap; silently dropped work is not.',
                     'Never ack "finished" to avoid being resumed'):

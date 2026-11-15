@@ -106,18 +106,18 @@ def test_the_real_watchdog_error_is_recognized():
 def test_next_turn_after_restart_gets_the_notice(registry):
     engine = _Engine(_row(status="aborted", request_json=SHUTDOWN))
     out = notice.with_cutoff_notice("do the thing", engine=engine, bot_id="al",
-                                    session_key="al:nick", request_id="req_new")
+                                    session_key="al:operator", request_id="req_new")
     assert out == TURN_CUTOFF_NOTICE.format(
         cause=notice.RESTART_CAUSE, ended_at="2026-10-29 19:54:57Z") + "\n\ndo the thing"
     assert "Nobody rejected" in out
-    assert engine.params == {"bot_id": "al", "session_key": "al:nick", "request_id": "req_new"}
+    assert engine.params == {"bot_id": "al", "session_key": "al:operator", "request_id": "req_new"}
 
 
 def test_bot_override_is_used(registry):
     registry[notice.TURN_CUTOFF_NOTICE_KEY] = "CUT by {cause} at {ended_at}"
     engine = _Engine(_row(status="error", error_text="x produced no event for 600s"))
     out = notice.with_cutoff_notice("m", engine=engine, bot_id="al",
-                                    session_key="al:nick", request_id="r")
+                                    session_key="al:operator", request_id="r")
     assert out == f"CUT by {notice.WATCHDOG_CAUSE} at 2026-10-29 19:54:57Z\n\nm"
 
 
@@ -125,7 +125,7 @@ def test_broken_override_falls_back_to_the_default(registry):
     registry[notice.TURN_CUTOFF_NOTICE_KEY] = "missing {nope}"
     engine = _Engine(_row(status="aborted", request_json=SHUTDOWN))
     out = notice.with_cutoff_notice("m", engine=engine, bot_id="al",
-                                    session_key="al:nick", request_id="r")
+                                    session_key="al:operator", request_id="r")
     assert out.startswith("[System notice:")
 
 
@@ -134,7 +134,7 @@ def test_broken_override_falls_back_to_the_default(registry):
 ])
 def test_prompt_is_unchanged_without_a_cutoff(registry, engine):
     assert notice.with_cutoff_notice("m", engine=engine, bot_id="al",
-                                     session_key="al:nick", request_id="r") == "m"
+                                     session_key="al:operator", request_id="r") == "m"
 
 
 @pytest.mark.parametrize("prompt, reset_action", [
@@ -149,7 +149,7 @@ def test_cutoff_then_session_command_is_left_untouched(registry, prompt, reset_a
     from agent_bridge.maintenance import is_new_command
 
     engine = _Engine(_row(status="aborted", request_json=SHUTDOWN))
-    out = notice.with_cutoff_notice(prompt, engine=engine, bot_id="al", session_key="al:nick",
+    out = notice.with_cutoff_notice(prompt, engine=engine, bot_id="al", session_key="al:operator",
                                     request_id="r", reset_action=reset_action)
     assert out == prompt
     assert engine.params is None  # no lookup at all
@@ -160,5 +160,5 @@ def test_cutoff_then_session_command_is_left_untouched(registry, prompt, reset_a
 def test_newspaper_is_not_a_command(registry):
     engine = _Engine(_row(status="aborted", request_json=SHUTDOWN))
     out = notice.with_cutoff_notice("/newspaper idea", engine=engine, bot_id="al",
-                                    session_key="al:nick", request_id="r")
+                                    session_key="al:operator", request_id="r")
     assert out.startswith("[System notice:")

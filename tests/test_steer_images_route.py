@@ -21,7 +21,7 @@ REF = {"asset_id": "ma_1", "kind": "image"}
 
 def _steer(chat, service, *, ids=("ma_1",), priority="next", **kw):
     return asyncio.run(chat.steer_active_turn(service, chat.ChatSteerRequest(
-        turn_id="turn-live", bot_id="target", user_id="nick", message_id="message-steer",
+        turn_id="turn-live", bot_id="target", user_id="operator", message_id="message-steer",
         message="what is this?", priority=priority, attachment_ids=list(ids),
     ), **kw))
 

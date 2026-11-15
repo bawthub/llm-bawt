@@ -105,8 +105,8 @@ def test_uncertain_spawn_keeps_video_claim_and_requires_recovery(monkeypatch, tm
 
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     ledger = GpuHandoffStore(engine)
-    token, offered = ledger.offer(user="nick", target="video", actions=("verify",), expected_generation=0)
-    transition = ledger.confirm(user="nick", token=token, expected_generation=offered.generation)
+    token, offered = ledger.offer(user="operator", target="video", actions=("verify",), expected_generation=0)
+    transition = ledger.confirm(user="operator", token=token, expected_generation=offered.generation)
     ledger.begin_action(generation=transition.generation, action="verify")
     ledger.finish_action(generation=transition.generation, action="verify")
     ledger.complete(generation=transition.generation, target="video")
@@ -139,8 +139,8 @@ def test_queued_video_jobs_share_worker_and_release_claims(monkeypatch, tmp_path
 
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     ledger = GpuHandoffStore(engine)
-    token, offered = ledger.offer(user="nick", target="video", actions=("verify",), expected_generation=0)
-    transition = ledger.confirm(user="nick", token=token, expected_generation=offered.generation)
+    token, offered = ledger.offer(user="operator", target="video", actions=("verify",), expected_generation=0)
+    transition = ledger.confirm(user="operator", token=token, expected_generation=offered.generation)
     ledger.begin_action(generation=transition.generation, action="verify")
     ledger.finish_action(generation=transition.generation, action="verify")
     ledger.complete(generation=transition.generation, target="video")
@@ -172,9 +172,9 @@ def test_queued_video_jobs_share_worker_and_release_claims(monkeypatch, tmp_path
         second = await jobs.submit(VideoRequest(prompt="second"))
         assert ledger.active_video_jobs() == 2
         assert jobs.status(second["id"])["status"] == "pending"
-        token, proposed = ledger.offer(user="nick", target="voice", actions=("reset_video_worker",),
+        token, proposed = ledger.offer(user="operator", target="voice", actions=("reset_video_worker",),
                                        expected_generation=ledger.status().generation)
-        assert ledger.confirm(user="nick", token=token, expected_generation=proposed.generation).phase == "draining"
+        assert ledger.confirm(user="operator", token=token, expected_generation=proposed.generation).phase == "draining"
         # App restart loses the executor, not the worker's accepted queue.
         assert ledger.mark_interrupted().phase == "recovery_required"
         with pytest.raises(HTTPException) as exc:
@@ -198,8 +198,8 @@ def test_video_queue_limit_rejects_without_claim(monkeypatch, tmp_path) -> None:
 
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     ledger = GpuHandoffStore(engine)
-    token, offered = ledger.offer(user="nick", target="video", actions=("verify",), expected_generation=0)
-    transition = ledger.confirm(user="nick", token=token, expected_generation=offered.generation)
+    token, offered = ledger.offer(user="operator", target="video", actions=("verify",), expected_generation=0)
+    transition = ledger.confirm(user="operator", token=token, expected_generation=offered.generation)
     ledger.begin_action(generation=transition.generation, action="verify")
     ledger.finish_action(generation=transition.generation, action="verify")
     ledger.complete(generation=transition.generation, target="video")
@@ -247,8 +247,8 @@ def test_worker_failure_blocks_entire_queue_and_retains_claims(monkeypatch, tmp_
 
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     ledger = GpuHandoffStore(engine)
-    token, offered = ledger.offer(user="nick", target="video", actions=("verify",), expected_generation=0)
-    transition = ledger.confirm(user="nick", token=token, expected_generation=offered.generation)
+    token, offered = ledger.offer(user="operator", target="video", actions=("verify",), expected_generation=0)
+    transition = ledger.confirm(user="operator", token=token, expected_generation=offered.generation)
     ledger.begin_action(generation=transition.generation, action="verify")
     ledger.finish_action(generation=transition.generation, action="verify")
     ledger.complete(generation=transition.generation, target="video")
@@ -297,8 +297,8 @@ def test_model_delete_rejects_durable_video_claim(monkeypatch, tmp_path) -> None
 
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     ledger = GpuHandoffStore(engine)
-    token, offered = ledger.offer(user="nick", target="video", actions=("verify",), expected_generation=0)
-    transition = ledger.confirm(user="nick", token=token, expected_generation=offered.generation)
+    token, offered = ledger.offer(user="operator", target="video", actions=("verify",), expected_generation=0)
+    transition = ledger.confirm(user="operator", token=token, expected_generation=offered.generation)
     ledger.begin_action(generation=transition.generation, action="verify")
     ledger.finish_action(generation=transition.generation, action="verify")
     ledger.complete(generation=transition.generation, target="video")
@@ -440,8 +440,8 @@ def _video_owned_ledger(engine):
     from llm_bawt.media.gpu_handoff_store import GpuHandoffStore
 
     ledger = GpuHandoffStore(engine)
-    token, offered = ledger.offer(user="nick", target="video", actions=("verify",), expected_generation=0)
-    transition = ledger.confirm(user="nick", token=token, expected_generation=offered.generation)
+    token, offered = ledger.offer(user="operator", target="video", actions=("verify",), expected_generation=0)
+    transition = ledger.confirm(user="operator", token=token, expected_generation=offered.generation)
     ledger.begin_action(generation=transition.generation, action="verify")
     ledger.finish_action(generation=transition.generation, action="verify")
     ledger.complete(generation=transition.generation, target="video")

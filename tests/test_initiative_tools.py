@@ -40,7 +40,7 @@ def rig(monkeypatch):
     monkeypatch.setattr(it, "BotTags", _Tags)
     monkeypatch.setattr(it, "current_task_turn_context", lambda: TaskTurnContext(
         session_id="sess-1", turn_id="turn-1", trigger_message_id="msg-1",
-        bot_id=state["bot"], user_id="nick", issued_at=0))
+        bot_id=state["bot"], user_id="operator", issued_at=0))
     monkeypatch.setattr(it.httpx, "AsyncClient", lambda **kw: real_client(
         transport=httpx.MockTransport(handle), **kw))
     return state

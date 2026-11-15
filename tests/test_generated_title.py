@@ -55,14 +55,14 @@ def test_chat_write_path_schedules_title_for_user_messages(monkeypatch):
     calls, rows = [], []
     monkeypatch.setattr(gt, "schedule_session_title", lambda engine, **kw: calls.append((engine, kw)))
     manager = object.__new__(PostgreSQLShortTermManager)
-    manager.bot_id, manager.user_id = "bot-a", "nick"
+    manager.bot_id, manager.user_id = "bot-a", "operator"
     manager._backend = type("B", (), {"engine": "ENG", "add_message": lambda self, **kw: rows.append(kw)})()
 
     mid = manager.add_message("user", "How do I rebase?", session_id="s1")
     manager.add_message("assistant", "Like this", session_id="s1")
 
     assert len(rows) == 2
-    assert calls == [("ENG", {"session_id": "s1", "bot_id": "bot-a", "user_id": "nick",
+    assert calls == [("ENG", {"session_id": "s1", "bot_id": "bot-a", "user_id": "operator",
                               "message_id": mid, "content": "How do I rebase?"})]
 
 
@@ -73,7 +73,7 @@ def test_chat_write_survives_title_hook_failure(monkeypatch):
         raise RuntimeError("x")
     monkeypatch.setattr(gt, "schedule_session_title", boom)
     manager = object.__new__(PostgreSQLShortTermManager)
-    manager.bot_id, manager.user_id = "bot-a", "nick"
+    manager.bot_id, manager.user_id = "bot-a", "operator"
     manager._backend = type("B", (), {"engine": None, "add_message": lambda self, **kw: None})()
     assert manager.add_message("user", "hi", session_id="s1")
 
@@ -114,7 +114,7 @@ def test_mcp_client_write_schedules_title_for_user_messages(monkeypatch):
 
     calls = []
     monkeypatch.setattr(gt, "schedule_session_title", lambda engine, **kw: calls.append((engine, kw)))
-    principal = type("P", (), {"bot_id": "codex", "user_id": "nick"})()
+    principal = type("P", (), {"bot_id": "codex", "user_id": "operator"})()
     msgs = iter(["m-user", "m-bot"])
     client = type("C", (), {"_service_principal": principal,
                             "add_message": lambda self, **kw: type("M", (), {"id": next(msgs), "session_id": None})()})()
@@ -122,7 +122,7 @@ def test_mcp_client_write_schedules_title_for_user_messages(monkeypatch):
 
     assert manager.add_message("user", "How do I rebase?") == "m-user"
     manager.add_message("assistant", "Like this")
-    assert calls == [(None, {"session_id": None, "bot_id": "codex", "user_id": "nick",
+    assert calls == [(None, {"session_id": None, "bot_id": "codex", "user_id": "operator",
                              "message_id": "m-user", "content": "How do I rebase?"})]
 
 

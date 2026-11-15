@@ -173,7 +173,7 @@ def test_result_usage_keeps_cost_accounting_and_turn_totals():
     seq = asyncio.run(harness._finalize_result_message(
         msg,
         request_id="req-1",
-        session_key="snark:nick",
+        session_key="snark:operator",
         seq=0,
         text_parts=["done"],
         assistant_snapshot_text="",
@@ -223,7 +223,7 @@ def test_successful_compact_persists_lifecycle_in_usage(monkeypatch):
     asyncio.run(harness._finalize_result_message(
         msg,
         request_id="req-compact",
-        session_key="snark:nick",
+        session_key="snark:operator",
         seq=0,
         text_parts=[],
         assistant_snapshot_text="",
@@ -257,7 +257,7 @@ def test_successful_compact_without_metadata_still_records_the_boundary(monkeypa
     asyncio.run(harness._finalize_result_message(
         msg,
         request_id="req-compact",
-        session_key="snark:nick",
+        session_key="snark:operator",
         seq=0,
         text_parts=[],
         assistant_snapshot_text="",

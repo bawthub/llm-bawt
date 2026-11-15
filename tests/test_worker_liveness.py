@@ -102,7 +102,7 @@ async def _drain(watchdog, stream):
     seen = []
     while True:
         try:
-            seen.append(await watchdog.receive_next(stream, request_id="r", session_key="snark:nick"))
+            seen.append(await watchdog.receive_next(stream, request_id="r", session_key="snark:operator"))
         except StopAsyncIteration:
             return seen
 

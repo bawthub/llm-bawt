@@ -77,7 +77,7 @@ def test_update_turn_stamps_ended_at_from_created_at_plus_latency():
         s.add(TurnLog(
             id="turn",
             bot_id="caid",
-            user_id="nick",
+            user_id="operator",
             status="streaming",
             created_at=created_at,
         ))
@@ -97,7 +97,7 @@ def test_timeout_transition_persists_partial_token_usage():
         session.add(TurnLog(
             id="turn-partial-usage",
             bot_id="snark",
-            user_id="nick",
+            user_id="operator",
             status="streaming",
         ))
         session.commit()
@@ -148,7 +148,7 @@ def test_successful_late_completion_repairs_stale_timeout_ended_at():
         s.add(TurnLog(
             id="turn",
             bot_id="caid",
-            user_id="nick",
+            user_id="operator",
             status="timeout",
             end_reason="timeout",
             created_at=created_at,

@@ -37,7 +37,7 @@ STALE = "Done. The idle context reset job continuity setting now uses **Messages
 CORRECTION = "No summaries. I said message history"
 CONFIRMATION = ("Fixed it, sorry about that. It is now **Messages only**, the reset carries "
                 "`continuity: inline` and nothing else changes for this one.")
-QUESTION = "What continuity setting did Nick ask for on the idle context reset job, and what did I set it to?"
+QUESTION = "What continuity setting did Operator ask for on the idle context reset job, and what did I set it to?"
 
 
 @pytest.fixture(scope="module")
@@ -94,7 +94,7 @@ def rig(engine):
 def thread_with_dense_competitors(rig):
     """Five dense older hits outrank the stale answer; the confirmation ranks below six."""
     other = rig.add_session(str(uuid.uuid4()), status="archived")
-    dense = "Idle context reset job: continuity setting for the idle context reset job, Nick asked."
+    dense = "Idle context reset job: continuity setting for the idle context reset job, Operator asked."
     for hours in range(5):
         rig.add(dense, at=rig.now - DAY - hours * 3600, session=other)
     base = rig.now - 600
@@ -177,7 +177,7 @@ def test_recency_lifts_the_terse_newer_statement_over_an_older_dense_one(rig):
     assert [row.id for row in rig.recall("continuity setting")] == [new, old]
 
 
-LOGIN_QUESTION = ("What happened when Nick ran gizmoctl auth login openai-codex in March, "
+LOGIN_QUESTION = ("What happened when Operator ran gizmoctl auth login openai-codex in March, "
                      "and what was the error?")
 
 
@@ -186,13 +186,13 @@ def test_coverage_outranks_recency_for_an_old_exact_answer(rig):
     march = rig.add("Ran `gizmoctl auth login openai-codex` and it failed with: error: unknown "
                     "command 'auth'. The login subcommand moved.", at=rig.now - 225 * DAY)
     recent = [rig.add(text_, at=rig.now - 60 * (i + 1)) for i, text_ in enumerate([
-        "Nick, that error is gone now.",
-        "What happened with the deploy? Nick asked about it.",
+        "Operator, that error is gone now.",
+        "What happened with the deploy? Operator asked about it.",
         "The error in the log was a timeout.",
-        "Nick ran the migration in March.",
+        "Operator ran the migration in March.",
         "Nothing happened after the restart.",
         "Error budget is fine.",
-        "Nick said the error happened twice.",
+        "Operator said the error happened twice.",
     ])]
     rows = rig.recall(LOGIN_QUESTION)
     assert rows[0].id == march

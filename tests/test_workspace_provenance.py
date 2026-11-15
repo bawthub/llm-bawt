@@ -37,7 +37,7 @@ def snapshot(
         turn_id=turn_id,
         trigger_message_id=f"msg-{turn_id}",
         bot_id="caid",
-        user_id="nick",
+        user_id="operator",
         created_at=created_at,
         repo_key="workspace",
         repo_label="bawthub",
@@ -160,21 +160,21 @@ def test_route_reads_only_matching_metadata_before_any_blob_or_turn_lookup(monke
 
     now = datetime(2026, 10, 24, tzinfo=timezone.utc)
     rows = [TurnChangedFile(id=i + 1, turn_id=f"irrelevant-{i}", bot_id="agent",
-                            user_id="nick", created_at=now, repo_key="workspace",
+                            user_id="operator", created_at=now, repo_key="workspace",
                             repo_label="bawthub", path=f"src/unrelated-{i}.ts")
             for i in range(1400)]
     for index in range(7):
         rows.append(TurnChangedFile(
-            id=1401 + index, turn_id=f"match-{index}", bot_id="agent", user_id="nick",
+            id=1401 + index, turn_id=f"match-{index}", bot_id="agent", user_id="operator",
             created_at=now, repo_key="workspace", repo_label="bawthub",
-            path=(f"/home/nick/dev/bawthub/src/match-{index}.ts" if index % 2
+            path=(f"/home/operator/dev/bawthub/src/match-{index}.ts" if index % 2
                   else f"src/match-{index}.ts"),
             old_path=f"src/old-{index}.ts" if index == 0 else None,
             change_kind="renamed" if index == 0 else "modified",
             before_sha256=sha256_text("before\n"), after_sha256=sha256_text("after\n"),
         ))
     rows.append(TurnChangedFile(id=1500, turn_id="other-repo", bot_id="agent",
-                                user_id="nick", created_at=now, repo_key="llm-bawt",
+                                user_id="operator", created_at=now, repo_key="llm-bawt",
                                 repo_label="llm-bawt", path="src/match-0.ts"))
     fetched = []
 
@@ -208,9 +208,9 @@ def test_route_reads_only_matching_metadata_before_any_blob_or_turn_lookup(monke
     monkeypatch.setattr(route, "get_turn_log_store", lambda: SimpleNamespace(engine=object()))
     monkeypatch.setattr(route, "Session", SessionStub)
     payload = WorkspaceProvenanceRequest(
-        user_id="nick", status_fingerprint="stable", files=[{
+        user_id="operator", status_fingerprint="stable", files=[{
             "repo_id": "bawthub", "repo_key": "bawthub",
-            "repo_aliases": ["bawthub", "/home/nick/dev/bawthub"],
+            "repo_aliases": ["bawthub", "/home/operator/dev/bawthub"],
             "path": f"src/match-{index}.ts", "staged": index == 0,
             "status": "R" if index == 0 else "M", "old_text": "before\n", "new_text": "after\n",
         } for index in range(7)],

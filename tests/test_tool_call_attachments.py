@@ -55,7 +55,7 @@ def engine():
         engine, tables=[TurnLog.__table__, ToolCallRecord.__table__, ToolCallResultPayloadRecord.__table__],
     )
     with Session(engine) as session:
-        session.add(TurnLog(id="turn", bot_id="al", user_id="nick", status="ok",
+        session.add(TurnLog(id="turn", bot_id="al", user_id="operator", status="ok",
                             trigger_message_id="msg-1", ended_at=datetime.now(timezone.utc)))
         session.commit()
     return engine
@@ -72,7 +72,7 @@ def assets(monkeypatch):
 def _end(coordinator: ToolEventCoordinator, call_id: str, attachments, *, is_error=False) -> dict:
     return coordinator.end({
         "turn_id": "turn", "call_id": call_id, "tool_use_id": f"tu-{call_id}",
-        "tool_name": "generate_image", "bot_id": "al", "user_id": "nick",
+        "tool_name": "generate_image", "bot_id": "al", "user_id": "operator",
         "result": "ok", "ts": 150.0, "is_error": is_error, "attachments": attachments,
     })
 
@@ -104,7 +104,7 @@ def test_replayed_tool_end_without_media_preserves_refs(engine):
     # Approval resolution / replay rewrites the result without attachments.
     ToolCallStore(engine).save_result(
         turn_id="turn", call_id="c1", tool_use_id="tu-c1", tool_name="generate_image",
-        bot_id="al", user_id="nick", payload=ToolResultPayload.from_value("ok again"),
+        bot_id="al", user_id="operator", payload=ToolResultPayload.from_value("ok again"),
         ended_at=160.0, is_error=False,
     )
     assert json.loads(_row(engine, "c1").attachments_json) == [{"asset_id": "ma_a", "kind": "image"}]
@@ -128,7 +128,7 @@ def test_tool_calls_api_rehydrates_each_card_once(engine, assets, monkeypatch):
     monkeypatch.setattr(routes, "get_turn_log_store", lambda: store)
 
     response = routes.get_tool_call_events(
-        bot_id="al", user_id="nick", message_id=None, message_ids=None,
+        bot_id="al", user_id="operator", message_id=None, message_ids=None,
         after=None, before=None, since_hours=168, limit=200,
     )
     calls = {c["call_id"]: c for c in response.model_dump()["events"][0]["tool_calls"]}

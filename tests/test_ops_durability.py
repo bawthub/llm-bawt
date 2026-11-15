@@ -295,12 +295,12 @@ def test_http_pagination_attribution_and_conflict(system, monkeypatch):
     app = FastAPI()
     app.include_router(routes.router)
     with TestClient(app) as client:
-        result = client.post("/v1/ops/jobs", json={"operation": op.slug, "actor": "operator", "caller_user_id": "nick", "idempotency_key": "http"})
+        result = client.post("/v1/ops/jobs", json={"operation": op.slug, "actor": "operator", "caller_user_id": "fixture-user", "idempotency_key": "http"})
         assert result.status_code == 202
         job = result.json()
         assert job["id"] == job["job_id"]
         assert job["caller"]["actor"] == "operator"
-        assert job["caller"]["user_id"] == "nick"
+        assert job["caller"]["user_id"] == "fixture-user"
         response = client.get("/v1/ops/jobs?limit=1&offset=3").json()
         assert response == {"jobs": [], "total": 1, "limit": 1, "offset": 3}
         live = client.get("/v1/ops/jobs/live")

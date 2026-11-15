@@ -227,7 +227,7 @@ def test_event_stream_error_frame_hides_driver_text(monkeypatch):
     monkeypatch.setattr(event_stream, "RedisSubscriber", Subscriber)
 
     async def collect():
-        return [c async for c in event_stream._unified_event_stream("redis://unused", ["caid"], "nick", "w")]
+        return [c async for c in event_stream._unified_event_stream("redis://unused", ["caid"], "operator", "w")]
 
     frames = asyncio.run(collect())
     error = json.loads(frames[-1].strip().split("\n")[1].removeprefix("data: "))

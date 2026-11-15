@@ -155,8 +155,8 @@ class _DownEngine:
 
 def test_storage_failure_is_unavailable_not_empty():
     store = WorkingMemoryStore(_DownEngine())
-    assert _code(lambda: store.list_items("vex", "nick")) == "unavailable"
-    assert _code(lambda: store.create("vex", "nick", {"objective": "x"}, idempotency_key=str(uuid.uuid4()),
+    assert _code(lambda: store.list_items("vex", "operator")) == "unavailable"
+    assert _code(lambda: store.create("vex", "operator", {"objective": "x"}, idempotency_key=str(uuid.uuid4()),
                                       actor=Actor("bot", "vex"))) == "unavailable"
     assert _code(lambda: WorkingMemoryStore(create_engine("sqlite://"))) == "unavailable"
 

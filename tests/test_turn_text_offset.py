@@ -23,7 +23,7 @@ def subscriber_over(events: list[dict]) -> RedisSubscriber:
 
 
 def offset(events: list[dict], **kwargs) -> int | None:
-    return asyncio.run(subscriber_over(events).turn_text_offset("caid", "nick", "turn-live", **kwargs))
+    return asyncio.run(subscriber_over(events).turn_text_offset("caid", "operator", "turn-live", **kwargs))
 
 
 def text(at: int, delta: str, turn: str = "turn-live") -> dict:

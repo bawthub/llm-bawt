@@ -108,7 +108,7 @@ def test_redis_command_carries_db_derived_claude_timeout() -> None:
 
     subscriber._pub_redis.xadd = fake_xadd  # type: ignore[method-assign]
     _run(subscriber.send_command(
-        session_key="snark:nick",
+        session_key="snark:operator",
         message="hello",
         request_id="req-1",
         mcp_tool_timeout_ms=330_000,
@@ -122,7 +122,7 @@ def test_claude_request_parses_mcp_timeout() -> None:
 
     request = SendRequest.from_fields({
         "request_id": "req-1",
-        "session_key": "snark:nick",
+        "session_key": "snark:operator",
         "bot_id": "snark",
         "message": "hello",
         "model": "openai_chatgpt/gpt-5.6-sol",
@@ -137,7 +137,7 @@ def test_claude_request_normalizes_catalog_transport_policy() -> None:
 
     fields = {
         "request_id": "req-1",
-        "session_key": "snark:nick",
+        "session_key": "snark:operator",
         "bot_id": "snark",
         "message": "hello",
         "model": "openai_chatgpt/gpt-6-astra",

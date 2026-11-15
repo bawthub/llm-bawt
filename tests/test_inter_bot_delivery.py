@@ -36,11 +36,11 @@ pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("private_app_pg")
 
 @pytest.fixture
 def delivery_store(monkeypatch):
-    # Claim and overflow cases use 'nick' as the synthetic owner. Do not
-    # inherit a runner's DEFAULT_USER (unset in CI, set to nick on echo).
-    monkeypatch.setenv("LLM_BAWT_DEFAULT_USER", "nick")
+    # Claim and overflow cases use 'operator' as the synthetic owner. Do not
+    # inherit a runner's DEFAULT_USER (unset in CI, set to operator on echo).
+    monkeypatch.setenv("LLM_BAWT_DEFAULT_USER", "operator")
     store = isolated_pg_store(InterBotDeliveryStore)
-    assert store.config.DEFAULT_USER == "nick"
+    assert store.config.DEFAULT_USER == "operator"
     if store.engine is None:
         pytest.skip("PostgreSQL unavailable")
     token = uuid.uuid4().hex
@@ -130,7 +130,7 @@ def test_stream_without_user_uuid_never_reattaches_to_provisional_trigger(delive
 
     async def submit():
         request = ChatCompletionRequest(
-            bot_id=target, user="nick", model="test-model", stream=True,
+            bot_id=target, user="operator", model="test-model", stream=True,
             messages=[ChatMessage(role="user", content="same prompt")],
         )
         chunks = [chunk async for chunk in service.chat_completion_stream(request)]
@@ -212,14 +212,14 @@ def test_delivery_persists_explicit_user_author(delivery_store):
         sender,
         target,
         "UI commit request",
-        author=AuthorReference.user("Nick"),
+        author=AuthorReference.user("Operator"),
     )
 
     assert duplicate is False
-    assert record.author == AuthorReference.user("nick")
+    assert record.author == AuthorReference.user("operator")
     assert record.to_api()["author"] == {
         "entity_type": "user",
-        "entity_id": "nick",
+        "entity_id": "operator",
         "status": "canonical",
     }
 
@@ -460,7 +460,7 @@ def test_busy_target_and_dispatch_race_requeue_safely(delivery_store):
             INSERT INTO turn_logs (
                 id, created_at, path, stream, bot_id, user_id, status,
                 user_prompt, response_text, ended_at
-            ) VALUES (:id, now(), '/test', true, :target, 'nick', 'streaming', '', '', NULL)
+            ) VALUES (:id, now(), '/test', true, :target, 'operator', 'streaming', '', '', NULL)
         """), {"id": active_id, "target": target})
     assert store.claim_next(target, claim_owner="test-owner", steer_capable=False) is None
 
@@ -482,7 +482,7 @@ def test_busy_target_and_dispatch_race_requeue_safely(delivery_store):
             stream=True,
             model="test",
             bot_id=target,
-            user_id="nick",
+            user_id="operator",
             status="streaming",
             latency_ms=None,
             user_prompt="user turn",
@@ -510,8 +510,8 @@ def test_active_claude_turn_claims_steering_without_new_turn(delivery_store):
                 user_prompt, response_text, agent_session_key,
                 agent_request_id, ended_at
             ) VALUES (
-                :id, now(), '/test', true, :target, 'nick', 'streaming',
-                'working', '', 'snark:nick', 'req-active', NULL
+                :id, now(), '/test', true, :target, 'operator', 'streaming',
+                'working', '', 'snark:operator', 'req-active', NULL
             )
         """), {"id": active_id, "target": target})
 
@@ -536,11 +536,11 @@ def test_user_delivery_does_not_steer_another_users_active_turn(delivery_store):
         payload={
             "messages": [{"role": "user", "content": "UI request"}],
             "bot_id": target,
-            "user": "nick",
+            "user": "operator",
             "prefer_steer": True,
             "stream": False,
         },
-        author=AuthorReference.user("nick"),
+        author=AuthorReference.user("operator"),
     )
     active_id = f"turn-other-user-{uuid.uuid4().hex}"
     with store.engine.begin() as conn:
@@ -570,7 +570,7 @@ def test_active_claude_not_ready_still_claims_steering_for_retry(delivery_store)
             INSERT INTO turn_logs (
                 id, created_at, path, stream, bot_id, user_id, status,
                 user_prompt, response_text, ended_at
-            ) VALUES (:id, now(), '/test', true, :target, 'nick',
+            ) VALUES (:id, now(), '/test', true, :target, 'operator',
                       'streaming', '', '', NULL)
         """), {"id": active_id, "target": target})
 
@@ -624,7 +624,7 @@ def test_active_unsupported_backend_stays_queued_until_idle(delivery_store):
             INSERT INTO turn_logs (
                 id, created_at, path, stream, bot_id, user_id, status,
                 user_prompt, response_text, ended_at
-            ) VALUES (:id, now(), '/test', true, :target, 'nick',
+            ) VALUES (:id, now(), '/test', true, :target, 'operator',
                       'streaming', '', '', NULL)
         """), {"id": active_id, "target": target})
     assert store.claim_next(
@@ -643,8 +643,8 @@ def test_accepted_steer_retry_never_converts_to_new_turn(delivery_store):
                 id, created_at, path, stream, bot_id, user_id, status,
                 user_prompt, response_text, agent_session_key,
                 agent_request_id, ended_at
-            ) VALUES (:id, now(), '/test', true, :target, 'nick',
-                      'streaming', '', '', 'snark:nick', 'req-active', NULL)
+            ) VALUES (:id, now(), '/test', true, :target, 'operator',
+                      'streaming', '', '', 'snark:operator', 'req-active', NULL)
         """), {"id": active_id, "target": target})
     first = store.claim_next(
         target, claim_owner="owner-one", steer_capable=True
@@ -679,7 +679,7 @@ def test_not_ready_retry_refunds_attempt_and_keeps_steer_target(delivery_store):
             INSERT INTO turn_logs (
                 id, created_at, path, stream, bot_id, user_id, status,
                 user_prompt, response_text, ended_at
-            ) VALUES (:id, now(), '/test', true, :target, 'nick',
+            ) VALUES (:id, now(), '/test', true, :target, 'operator',
                       'streaming', '', '', NULL)
         """), {"id": active_id, "target": target})
 
@@ -708,8 +708,8 @@ def test_definitive_unaccepted_steer_waits_for_rejected_turn_then_falls_back_onc
                 id, created_at, path, stream, bot_id, user_id, status,
                 user_prompt, response_text, agent_session_key,
                 agent_request_id, ended_at
-            ) VALUES (:id, now(), '/test', true, :target, 'nick',
-                      'streaming', '', '', 'snark:nick', 'req-old', NULL)
+            ) VALUES (:id, now(), '/test', true, :target, 'operator',
+                      'streaming', '', '', 'snark:operator', 'req-old', NULL)
         """), {"id": active_id, "target": target})
 
     claimed = store.claim_next(target, claim_owner="owner-one", steer_capable=True)
@@ -830,7 +830,7 @@ def test_active_turn_older_than_thirty_minutes_still_blocks(delivery_store):
                 user_prompt, response_text, ended_at
             ) VALUES (
                 :id, now() - interval '31 minutes', '/test', true, :target,
-                'nick', 'streaming', '', '', NULL
+                'operator', 'streaming', '', '', NULL
             )
         """), {"id": active_id, "target": target})
     assert store.claim_next(target, claim_owner="test-owner", steer_capable=False) is None
@@ -1058,7 +1058,7 @@ def test_reset_without_history_rotates_once_and_reserves_new_thread(delivery_sto
     with store.engine.begin() as conn:
         conn.execute(sa_text("""
             INSERT INTO sessions (id, bot_id, user_id, status, started_at)
-            VALUES (:id, :bot, 'nick', 'active', now())
+            VALUES (:id, :bot, 'operator', 'active', now())
         """), {"id": old_session, "bot": target})
     record, _ = store.enqueue(
         sender_bot_id=sender,
@@ -1067,7 +1067,7 @@ def test_reset_without_history_rotates_once_and_reserves_new_thread(delivery_sto
         payload={
             "messages": [{"role": "user", "content": "clean callback"}],
             "bot_id": target,
-            "user": "nick",
+            "user": "operator",
             "stream": False,
         },
         idempotency_key="clean-once",
@@ -1099,7 +1099,7 @@ def test_reset_without_history_rotates_once_and_reserves_new_thread(delivery_sto
     with store.engine.connect() as conn:
         sessions = conn.execute(sa_text("""
             SELECT id, status FROM sessions
-            WHERE bot_id=:bot AND user_id='nick' ORDER BY started_at
+            WHERE bot_id=:bot AND user_id='operator' ORDER BY started_at
         """), {"bot": target}).all()
         assert sessions == [(old_session, "archived"), (claimed.new_session_id, "active")]
 
@@ -1111,13 +1111,13 @@ def test_reset_policy_waits_for_active_turn_before_rotation(delivery_store):
     with store.engine.begin() as conn:
         conn.execute(sa_text("""
             INSERT INTO sessions (id, bot_id, user_id, status, started_at)
-            VALUES (:id, :bot, 'nick', 'active', now())
+            VALUES (:id, :bot, 'operator', 'active', now())
         """), {"id": old_session, "bot": target})
         conn.execute(sa_text("""
             INSERT INTO turn_logs (
                 id, created_at, path, stream, bot_id, user_id, status,
                 user_prompt, response_text, ended_at
-            ) VALUES (:id, now(), '/test', true, :bot, 'nick', 'streaming', '', '', NULL)
+            ) VALUES (:id, now(), '/test', true, :bot, 'operator', 'streaming', '', '', NULL)
         """), {"id": active_turn, "bot": target})
     record, _ = store.enqueue(
         sender_bot_id=sender,
@@ -1168,7 +1168,7 @@ def test_confirmed_overflow_rotates_same_delivery_once(delivery_store):
         ensure_bot_partitions(conn, target)
         conn.execute(sa_text("""
             INSERT INTO sessions (id, bot_id, user_id, status, started_at)
-            VALUES (:id, :bot, 'nick', 'active', now())
+            VALUES (:id, :bot, 'operator', 'active', now())
         """), {"id": old_session, "bot": target})
     original, _ = _enqueue(store, sender, target, "overflow recovery")
     from llm_bawt.memory.postgresql import _sanitize_table_name
@@ -1304,7 +1304,7 @@ def test_list_filters_run_in_sql_before_limit(delivery_store):
     )
     chat_rows = [
         store.enqueue(
-            sender_bot_id=sender, target_bot_id=target, message=f"nick chat {i}",
+            sender_bot_id=sender, target_bot_id=target, message=f"operator chat {i}",
             payload={"messages": [{"role": "user", "content": "hi"}], "bot_id": target, "stream": False},
             metadata={"ordinary_chat": {"session_id": "s"}},
         )[0]
@@ -1417,7 +1417,7 @@ def test_stop_on_finished_orphan_then_lease_expiry_settles_turn_and_drains(deliv
         conn.execute(sa_text("""
             UPDATE turn_logs SET status='streaming', agent_session_key=:key, agent_request_id=:req
             WHERE id=:id
-        """), {"id": original.turn_id, "key": f"{target}:nick", "req": f"req_{original.id}"})
+        """), {"id": original.turn_id, "key": f"{target}:operator", "req": f"req_{original.id}"})
 
     # No in-process follower survives the restart; the bridge already finished.
     rpc = AsyncMock(return_value={
@@ -1487,7 +1487,7 @@ def _orphaned_claim(store, sender, target, *, stopped=True, ended=True, policy=S
     original, _ = store.enqueue(
         sender_bot_id=sender, target_bot_id=target, message="claimed by the old app",
         payload={"messages": [{"role": "user", "content": "claimed by the old app"}],
-                 "bot_id": target, "user": "nick", "stream": False},
+                 "bot_id": target, "user": "operator", "stream": False},
         session_policy=policy, reset_reason="test" if policy != SessionPolicy.CONTINUE else None,
     )
     following, _ = _enqueue(store, sender, target, "must not wait out the lease")
@@ -1616,7 +1616,7 @@ def test_stop_racing_consumption_never_revokes_a_live_runs_delivery(delivery_sto
                 other.execute(sa_text("""
                     UPDATE turn_logs SET status='streaming', agent_session_key=:key, agent_request_id=:req
                     WHERE id=:id AND status='reserved'
-                """), {"id": original.turn_id, "key": f"{target}:nick", "req": f"req_{original.id}"})
+                """), {"id": original.turn_id, "key": f"{target}:operator", "req": f"req_{original.id}"})
             consumed.append(True)
         real_lock_target(conn, bot_id)
 
@@ -1689,7 +1689,7 @@ def test_rearm_keeps_audits_but_drops_per_attempt_keys(delivery_store):
             "id": original.turn_id,
             "j": json.dumps({"messages": [], **audits, "abort_cause": {"cause": "host_shutdown"}}),
         })
-        write_reservation(conn, turn_id=original.turn_id, bot_id=target, user_id="nick",
+        write_reservation(conn, turn_id=original.turn_id, bot_id=target, user_id="operator",
                           user_prompt=original.message, request_json={"messages": [], "attempt": 2},
                           trigger_message_id=original.user_message_id)
     rearmed = json.loads(TurnLogStore(store.config).get_turn(original.turn_id).request_json)
@@ -1714,7 +1714,7 @@ def _rearm(store, original, attempt):
     from llm_bawt.service.turn_admission import write_reservation
 
     with store.engine.begin() as conn:
-        assert write_reservation(conn, turn_id=original.turn_id, bot_id=original.target_bot_id, user_id="nick",
+        assert write_reservation(conn, turn_id=original.turn_id, bot_id=original.target_bot_id, user_id="operator",
                                  user_prompt=original.message, request_json={"messages": [], "attempt": attempt},
                                  trigger_message_id=original.user_message_id)
     return TurnLogStore(store.config).get_turn(original.turn_id)

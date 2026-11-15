@@ -17,7 +17,7 @@ class FakeRequest:
     async def body(self):
         return json.dumps({
             "target": {"id": "room"}, "type": "Create",
-            "actor": {"name": "Nick", "id": "users/nick"},
+            "actor": {"name": "Operator", "id": "users/operator"},
             "object": {"id": self.message_id, "content": json.dumps({"message": "Help"})},
         }).encode()
 
@@ -59,7 +59,7 @@ async def test_accepted_talk_registers_exact_reply_before_ack_and_notifies_once(
     wakes = []
 
     async def complete(request):
-        assert request.user == "nick"
+        assert request.user == "operator"
         return {"object": receipt_kind, "delivery_id" if source_type == "delivery" else "turn_id": reference,
                 "user_message_id": request.user_message_id}
 
@@ -80,7 +80,7 @@ async def test_accepted_talk_registers_exact_reply_before_ack_and_notifies_once(
     assert subscriptions[0].source_type == source_type
     assert subscriptions[0].source_id == reference
     assert subscriptions[0].reply_to == 42
-    assert subscriptions[0].user_id == "nick"
+    assert subscriptions[0].user_id == "operator"
     assert len(talk) == 1
     assert talk[0]["reply_to"] == 42
     assert wakes == ["nova", "nova"]

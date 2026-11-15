@@ -104,7 +104,7 @@ def test_userless_legacy_name_is_unchanged(tmp_path) -> None:
 def test_owner_key_encoding_is_pinned() -> None:
     from llm_bawt.utils.history import owner_file_key
 
-    assert owner_file_key("dash", "nick") == (
+    assert owner_file_key("dash", "operator") == (
         "50f80ca7e66d770eecc6898b5936debd2127d262616a9a85a17758b4e0cdeec9"
     )
 
@@ -133,7 +133,7 @@ class _Stop(Exception):
 
 class _Service:
     _default_bot = "dash"
-    config = SimpleNamespace(DEFAULT_USER="nick")
+    config = SimpleNamespace(DEFAULT_USER="operator")
 
     def __init__(self) -> None:
         self.users: list[str] = []

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """EPIC TASK-217 deterministic proof harness (TASK-362, P0.5).
 
-Nick's central requirement: a re-runnable command whose output is the
+Operator's central requirement: a re-runnable command whose output is the
 *receipt* for what has actually shipped vs what is still pending. Verify
 with bytes, never claim.
 
@@ -320,7 +320,7 @@ def _find_frontend_src() -> str | None:
     candidates = [
         os.environ.get("BAWTHUB_FRONTEND_SRC"),
         "/home/bridge/dev/bawthub/frontend/src",
-        "/home/nick/dev/bawthub/frontend/src",
+        "/home/operator/dev/bawthub/frontend/src",
         os.path.join(os.path.dirname(__file__), "..", "..", "bawthub", "frontend", "src"),
     ]
     for c in candidates:

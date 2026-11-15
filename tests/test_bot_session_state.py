@@ -18,10 +18,10 @@ def conn():
         """)
         connection.exec_driver_sql("INSERT INTO bot_profiles (slug) VALUES ('fixture'), ('other')")
         connection.exec_driver_sql("""INSERT INTO sessions (id, bot_id, user_id, status) VALUES
-            ('old', 'fixture', 'nick', 'archived'),
+            ('old', 'fixture', 'operator', 'archived'),
             ('latest', 'fixture', 'another-user', 'active'),
-            ('deleted', 'fixture', 'nick', 'deleted'),
-            ('foreign', 'other', 'nick', 'active')
+            ('deleted', 'fixture', 'operator', 'deleted'),
+            ('foreign', 'other', 'operator', 'active')
         """)
         yield connection
     engine.dispose()

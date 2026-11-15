@@ -190,7 +190,7 @@ def end_turn(store, record, *, status="aborted", audit=None):
     request = {"messages": [], **(audit or {})}
     with store.engine.begin() as conn:
         write_reservation(conn, turn_id=record.turn_id, bot_id=record.target_bot_id,
-                          user_id="nick", user_prompt=record.message, request_json=request,
+                          user_id="operator", user_prompt=record.message, request_json=request,
                           trigger_message_id=record.user_message_id)
         conn.execute(text("""
             UPDATE turn_logs SET status=:status, end_reason=:status, ended_at=now()
@@ -258,7 +258,7 @@ def test_restart_child_of_bot_request_replies_to_the_original_sender(delivery, t
 def test_forged_original_author_on_a_user_request_is_replaced(delivery, turn_cleanup):
     store, slug = delivery
     original = store.enqueue(
-        sender_bot_id=slug, target_bot_id=slug, message="hi", author=AuthorReference.user("nick"),
+        sender_bot_id=slug, target_bot_id=slug, message="hi", author=AuthorReference.user("operator"),
         payload={"messages": [{"role": "user", "content": "hi"}], "bot_id": slug},
         idempotency_key="user-original",
         metadata={"retry_original_author": {"entity_type": "bot", "entity_id": "victim"}},
@@ -268,7 +268,7 @@ def test_forged_original_author_on_a_user_request_is_replaced(delivery, turn_cle
     child, _ = restart_retry_delivery(store, original.id)
 
     # The forged value is replaced by the real (user) author: no bot reply note.
-    assert child.metadata["retry_original_author"] == AuthorReference.user("nick").to_dict()
+    assert child.metadata["retry_original_author"] == AuthorReference.user("operator").to_dict()
     assert delivery_reply_channel_note(child) is None
 
 
@@ -439,7 +439,7 @@ def test_stale_host_shutdown_cause_does_not_qualify_the_next_attempt(delivery, t
     def arm(attempt):
         with store.engine.begin() as conn:
             write_reservation(conn, turn_id=original.turn_id, bot_id=original.target_bot_id,
-                              user_id="nick", user_prompt=original.message,
+                              user_id="operator", user_prompt=original.message,
                               request_json={"messages": [], "attempt": attempt},
                               trigger_message_id=original.user_message_id)
 
@@ -539,7 +539,7 @@ def test_restart_child_of_an_ordinary_chat_send_is_published_to_its_user(deliver
     """The child is system-authored, but its lifecycle belongs to the user who sent it."""
     store, slug = delivery
     original = store.enqueue(
-        sender_bot_id=slug, target_bot_id=slug, message="hi", author=AuthorReference.user("nick"),
+        sender_bot_id=slug, target_bot_id=slug, message="hi", author=AuthorReference.user("operator"),
         payload={"messages": [{"role": "user", "content": "hi"}], "bot_id": slug},
         idempotency_key="chat-original",
         metadata={"ordinary_chat": {"session_id": "s-1", "stream": True}},
@@ -551,7 +551,7 @@ def test_restart_child_of_an_ordinary_chat_send_is_published_to_its_user(deliver
 
     child_event = events[-1]
     assert child_event["status"] == "QUEUED" and child_event["delivery_id"] != original.id
-    assert child_event["user_id"] == "nick" and child_event["ordinary_chat"] is True
+    assert child_event["user_id"] == "operator" and child_event["ordinary_chat"] is True
     assert child_event["bot_id"] == slug and child_event["session_id"] == "s-1"
 
 

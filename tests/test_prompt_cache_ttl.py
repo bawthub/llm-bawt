@@ -116,8 +116,8 @@ def test_publisher_and_send_request_round_trip() -> None:
 
     publisher = CommandPublisherMixin()
     publisher._pub_redis = Redis()
-    asyncio.run(publisher.send_command("byte:nick", "hi", "r1", prompt_cache_ttl="5m"))
-    asyncio.run(publisher.send_command("byte:nick", "hi", "r2"))
+    asyncio.run(publisher.send_command("byte:operator", "hi", "r1", prompt_cache_ttl="5m"))
+    asyncio.run(publisher.send_command("byte:operator", "hi", "r2"))
     assert seen[0]["prompt_cache_ttl"] == "5m"
     assert "prompt_cache_ttl" not in seen[1]
     assert SendRequest.from_fields(seen[0]).prompt_cache_ttl == "5m"
@@ -136,7 +136,7 @@ def _env(*, use_proxy: bool, ttl: str | None, model: str = "claude-opus-5-5") ->
         subagent_model=None,
         force_refresh=False,
         bot_id="byte",
-        session_key="byte:nick",
+        session_key="byte:operator",
         thread_session_id="thread-1",
         request_id="request-1",
         prompt_cache_ttl=ttl,

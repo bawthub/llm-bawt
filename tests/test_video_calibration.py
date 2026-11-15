@@ -21,9 +21,9 @@ MEASUREMENT = {"gpu_uuid": "GPU-test", "total_mib": 15500, "device_total_mib": 1
 def reserved(tmp_path):
     engine = fast_sqlite_engine(tmp_path / "calibration.db", check_same_thread=False)
     ledger = GpuHandoffStore(engine)
-    token, offer = ledger.offer(user="nick", target="video_calibration", actions=("park_voice",), expected_generation=0,
+    token, offer = ledger.offer(user="operator", target="video_calibration", actions=("park_voice",), expected_generation=0,
         plan={"calibration_profile": CALIBRATION_PROFILE, "observed": {"gpu": {"uuid": "GPU-test", "total_mib": 16000}}})
-    transition = ledger.confirm(user="nick", token=token, expected_generation=offer.generation)
+    transition = ledger.confirm(user="operator", token=token, expected_generation=offer.generation)
     ledger.begin_action(generation=transition.generation, action="park_voice")
     ledger.record_voice_lease(generation=transition.generation, lease_id="a" * 32)
     ledger.finish_action(generation=transition.generation, action="park_voice")
@@ -81,11 +81,11 @@ def test_insufficient_margin_keeps_ordinary_video_blocked(reserved):
 
 def test_voice_offer_does_not_block_calibration_but_confirmation_drains_it(reserved):
     ledger, state, _ = reserved
-    token, proposed = ledger.offer(user="nick", target="voice", actions=("reset_video_worker",),
+    token, proposed = ledger.offer(user="operator", target="voice", actions=("reset_video_worker",),
                                    expected_generation=state.generation)
     ledger.claim_calibration("accepted", generation=state.generation,
                              profile=video_profile(VideoRequest(prompt="test")))
-    draining = ledger.confirm(user="nick", token=token, expected_generation=proposed.generation)
+    draining = ledger.confirm(user="operator", token=token, expected_generation=proposed.generation)
     assert draining.phase == "draining"
     with pytest.raises(HandoffConflict):
         ledger.claim_calibration("late", generation=state.generation,
@@ -102,13 +102,13 @@ def test_reoffers_and_interrupted_drain_keep_original_calibration_reservation(re
     ledger, state, _ = reserved
     profile = video_profile(VideoRequest(prompt="test"))
     # The first unconfirmed offer is replaced; neither may change admission.
-    _, first = ledger.offer(user="nick", target="voice", actions=("reset_video_worker",),
+    _, first = ledger.offer(user="operator", target="voice", actions=("reset_video_worker",),
                             expected_generation=state.generation)
-    token, second = ledger.offer(user="nick", target="voice", actions=("reset_video_worker",),
+    token, second = ledger.offer(user="operator", target="voice", actions=("reset_video_worker",),
                                  expected_generation=first.generation)
     ledger.claim_calibration("accepted", generation=state.generation, profile=profile)
     if phase != "offered":
-        started = ledger.confirm(user="nick", token=token, expected_generation=second.generation)
+        started = ledger.confirm(user="operator", token=token, expected_generation=second.generation)
         assert started.phase == "draining"
     if phase == "recovery_required":
         assert ledger.mark_interrupted().phase == "recovery_required"
@@ -119,7 +119,7 @@ def test_reoffers_and_interrupted_drain_keep_original_calibration_reservation(re
     if phase == "offered":
         assert after.owner == "video" and after.phase == "idle"
         with pytest.raises(HandoffConflict):
-            ledger.confirm(user="nick", token=token, expected_generation=second.generation)
+            ledger.confirm(user="operator", token=token, expected_generation=second.generation)
     elif phase == "draining":
         assert (after.owner, after.phase) == ("video", "draining")
         assert ledger.finish_drain(generation=after.generation).phase == "transitioning"

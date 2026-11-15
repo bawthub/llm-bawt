@@ -101,7 +101,7 @@ def test_first_bot_defaults_report_unregistered_prompt_as_503():
 
 
 def test_wizard_keeps_no_route_table_or_model_writer_of_its_own():
-    """Nick, TASK-1297: the wizard uses the admin code paths, not a parallel copy."""
+    """Operator, TASK-1297: the wizard uses the admin code paths, not a parallel copy."""
     for name in ("FIRST_BOT_PROVIDERS", "first_bot_provider", "TenantSeeder", "get_adapter",
                  "_tool_eligibility", "_require_tool_capable", "_agent_profile_fields",
                  "DEFAULT_FIRST_BOT_PROMPT"):

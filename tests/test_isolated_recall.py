@@ -936,7 +936,7 @@ def test_markers_inside_a_word_still_match_literally():
     assert ground_quote("set the maintenance*model to grok", "We set the maintenance_model to grok.") is None
 
 
-# Nick 2026-10-21: NO PROMPTS ARE EVER HARDCODED. The recall instructions are a
+# the user 2026-10-21: NO PROMPTS ARE EVER HARDCODED. The recall instructions are a
 # prompt-registry key resolved per call; what is budgeted is what is sent.
 class RegistryModel(Model):
     def __init__(self, system):

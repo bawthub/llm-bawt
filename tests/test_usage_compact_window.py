@@ -43,7 +43,7 @@ def test_live_interrupted_and_result_fallback_share_capped_window(proxy):
     snapshot = {"input_tokens": 25_000, "cache_read_input_tokens": 175_000,
                 "output_tokens": 10}
     publisher = LiveUsagePublisher(
-        harness, "req", "caid:nick", model, model, 1_000_000,
+        harness, "req", "caid:operator", model, model, 1_000_000,
         compact_threshold=250_000,
     )
     assert publisher.publish(0, assistant_usage=snapshot) == 1

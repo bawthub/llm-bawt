@@ -22,7 +22,7 @@ def test_concurrent_claims_reuse_one_delivery_new_thread():
     if engine is None:
         pytest.skip("private PostgreSQL unavailable")
     bot = f"test-new-{uuid.uuid4().hex}"
-    user = "nick"
+    user = "operator"
     old_id = str(uuid.uuid4())
     key = f"delivery-{uuid.uuid4().hex}"
     with engine.begin() as conn:

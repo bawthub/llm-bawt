@@ -125,7 +125,7 @@ def test_ensure_schema_removes_legacy_overlap_columns():
 
 def test_save_and_read_roundtrip(store):
     n = store.save_turn_files(
-        turn_id="turn-1", bot_id="snark", user_id="nick",
+        turn_id="turn-1", bot_id="snark", user_id="operator",
         trigger_message_id="msg-1",
         files=[_mod("a.py", "old\n", "new\n", additions=1, deletions=1)],
     )
@@ -140,7 +140,7 @@ def test_save_and_read_roundtrip(store):
 
 def test_summary_shape_and_totals(store):
     store.save_turn_files(
-        turn_id="turn-2", bot_id="snark", user_id="nick", trigger_message_id="msg-2",
+        turn_id="turn-2", bot_id="snark", user_id="operator", trigger_message_id="msg-2",
         files=[
             _mod("a.py", "x", "y", additions=3, deletions=2),
             ChangedFileInput(repo_key="repoA", repo_label="llm-bawt", path="new.py",

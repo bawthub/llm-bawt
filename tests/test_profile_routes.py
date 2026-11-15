@@ -27,8 +27,8 @@ class _ProfileManager:
 
     def get_profile(self, _entity_type, _entity_id):
         return SimpleNamespace(
-            email="nick@example.com",
-            display_name="Nick",
+            email="operator@example.com",
+            display_name="Operator",
             description=None,
             color="#012f7b",
             avatar=self.avatar,
@@ -51,7 +51,7 @@ def test_update_typed_profile_clears_cached_avatar_render(monkeypatch) -> None:
 
     result = profile_routes.update_typed_profile(
         "user",
-        "nick",
+        "operator",
         ProfileUpdateRequest(avatar=""),
     )
 

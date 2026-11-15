@@ -15,12 +15,12 @@ from llm_bawt.service.routes import settings
 def test_global_config_stream_is_subscribed_by_each_window_without_cross_user_turns():
     async def exercise():
         sub = object.__new__(RedisSubscriber)
-        nick = unified_stream_keys(["al"], "nick", include_global=True)
+        operator = unified_stream_keys(["al"], "operator", include_global=True)
         guest = unified_stream_keys(["al"], "guest", include_global=True)
-        regular = unified_stream_keys(["al"], "nick")
-        assert GLOBAL_CONFIG_STREAM in nick and GLOBAL_CONFIG_STREAM in guest
-        assert "events:al:guest" not in nick
-        assert "events:al:nick" not in guest
+        regular = unified_stream_keys(["al"], "operator")
+        assert GLOBAL_CONFIG_STREAM in operator and GLOBAL_CONFIG_STREAM in guest
+        assert "events:al:guest" not in operator
+        assert "events:al:operator" not in guest
         assert GLOBAL_CONFIG_STREAM not in regular
 
         sub._pub_redis = SimpleNamespace(xadd=AsyncMock(return_value="123-0"))

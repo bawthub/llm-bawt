@@ -214,12 +214,12 @@ def test_service_bot_init_applies_codex_default_model(monkeypatch):
     service = ServiceLLMBawt.__new__(ServiceLLMBawt)
     service.client = DummyAgentBackendClient()
     service.bot_id = "builder"
-    service.user_id = "nick"
+    service.user_id = "operator"
     service.config = config
 
     ServiceLLMBawt._init_bot(service, config)
 
     assert service.client._bot_config["session_key"] == "bot:user"
     assert service.client._bot_config["bot_id"] == "builder"
-    assert service.client._bot_config["user_id"] == "nick"
+    assert service.client._bot_config["user_id"] == "operator"
     assert service.client._bot_config["model"] == "gpt-5.5"

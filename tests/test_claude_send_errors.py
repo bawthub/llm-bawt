@@ -168,7 +168,7 @@ def test_auth_retry_status_is_silent_before_self_heal():
             "error_status": 401,
             "error": "authentication_failed",
         },
-        session_key="snark:nick",
+        session_key="snark:operator",
         phase_tracker=tracker,
     )
 
@@ -188,7 +188,7 @@ def test_generic_retry_status_is_transient_phase_not_reply_text():
             "error_status": 529,
             "error": "overloaded_error",
         },
-        session_key="snark:nick",
+        session_key="snark:operator",
         phase_tracker=tracker,
     )
 

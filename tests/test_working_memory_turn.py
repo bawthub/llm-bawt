@@ -204,7 +204,7 @@ class _Boom:
 
 def test_protected_bot_renders_nothing_before_any_read(private_bots):
     private_bots.add("fixture-private")
-    assert render.render_section(_Boom(), bot_id="Fixture-Private", user_id="nick", session_id="s") is None
+    assert render.render_section(_Boom(), bot_id="Fixture-Private", user_id="operator", session_id="s") is None
 
 
 def test_policy_failure_fails_closed(monkeypatch):

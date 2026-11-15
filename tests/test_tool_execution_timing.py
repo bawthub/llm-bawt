@@ -16,7 +16,7 @@ from llm_bawt.service.tool_event_coordinator import ToolEventCoordinator
 from llm_bawt.service.tool_execution_stamps import ToolExecutionStamps
 from llm_bawt.service.turn_logs import TurnLog
 
-ENVELOPE = {"turn_id": "turn", "trigger_message_id": "m", "bot_id": "al", "user_id": "nick"}
+ENVELOPE = {"turn_id": "turn", "trigger_message_id": "m", "bot_id": "al", "user_id": "operator"}
 
 
 @pytest.fixture
@@ -26,18 +26,18 @@ def engine():
         engine, tables=[TurnLog.__table__, ToolCallRecord.__table__, ToolCallResultPayloadRecord.__table__],
     )
     with Session(engine) as session:
-        session.add(TurnLog(id="turn", bot_id="al", user_id="nick", status="ok", trigger_message_id="m"))
+        session.add(TurnLog(id="turn", bot_id="al", user_id="operator", status="ok", trigger_message_id="m"))
         session.commit()
     return engine
 
 
 def _start(coord, call_id, ts=100.0):
-    coord.start({"turn_id": "turn", "bot_id": "al", "user_id": "nick", "call_id": call_id,
+    coord.start({"turn_id": "turn", "bot_id": "al", "user_id": "operator", "call_id": call_id,
                  "tool_use_id": f"tu-{call_id}", "tool_name": "Bash", "arguments": {}, "ts": ts})
 
 
 def _end(coord, call_id, ts):
-    coord.end({"turn_id": "turn", "bot_id": "al", "user_id": "nick", "call_id": call_id,
+    coord.end({"turn_id": "turn", "bot_id": "al", "user_id": "operator", "call_id": call_id,
                "tool_use_id": f"tu-{call_id}", "tool_name": "Bash", "result": "ok", "ts": ts,
                "is_error": False})
 

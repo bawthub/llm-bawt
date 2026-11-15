@@ -13,7 +13,7 @@ import pytest
 from agent_bridge.events import AgentEventKind
 from codex_bridge.bridge import CodexBridge
 
-SESSION = "vex:nick"
+SESSION = "vex:operator"
 
 
 def _git(cwd: Path, *args: str) -> None:

@@ -20,7 +20,7 @@ from llm_bawt.service.inter_bot_dispatcher import (
 def _dispatcher(subscriber):
     dispatcher = object.__new__(InterBotDeliveryDispatcher)
     dispatcher.service = SimpleNamespace(
-        _redis_subscriber=subscriber, config=SimpleNamespace(DEFAULT_USER="nick"),
+        _redis_subscriber=subscriber, config=SimpleNamespace(DEFAULT_USER="operator"),
     )
     dispatcher.store = SimpleNamespace(engine=None)
     return dispatcher

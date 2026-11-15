@@ -63,7 +63,7 @@ def engine():
     eng.dispose()
 
 
-def insert(engine, id, *, bot_id="nova", user="nick", status="active", metadata=None):
+def insert(engine, id, *, bot_id="nova", user="operator", status="active", metadata=None):
     with engine.begin() as conn:
         conn.execute(text(
             "INSERT INTO sessions (id,bot_id,user_id,status,session_metadata) "
@@ -81,22 +81,22 @@ def rows(engine, **where):
 
 def test_rotation_drops_stale_sdk_key_for_every_user_of_that_bot_only(engine):
     stale = {"agent_session_keys": {"claude_code": "sdk-from-last-week"}}
-    insert(engine, "nick-old", metadata=stale)
+    insert(engine, "operator-old", metadata=stale)
     insert(engine, "smoke-old", user="smoke")
     insert(engine, "archived", status="archived")
     insert(engine, "other-bot", bot_id="caid", metadata=stale)
 
     rotated = dict(rotate_active_threads(engine, "nova"))
 
-    assert set(rotated) == {"nick", "smoke"}
+    assert set(rotated) == {"operator", "smoke"}
     active = rows(engine, bot_id="nova", status="active")
     assert {r["id"] for r in active} == set(rotated.values())
-    fresh = next(r for r in active if r["user_id"] == "nick")
+    fresh = next(r for r in active if r["user_id"] == "operator")
     # The resolver the bridge binding uses finds nothing to resume -> cold start + seed.
     assert resolve_agent_session_key(json.loads(fresh["session_metadata"]), "claude-code") is None
-    old = rows(engine, id="nick-old")[0]
+    old = rows(engine, id="operator-old")[0]
     assert old["status"] == "archived"
-    assert json.loads(old["session_metadata"])["reset_successor_id"] == rotated["nick"]
+    assert json.loads(old["session_metadata"])["reset_successor_id"] == rotated["operator"]
     assert rows(engine, id="other-bot")[0]["status"] == "active"
 
 
@@ -174,7 +174,7 @@ def _persist(monkeypatch, previous, profile, *, rotate=None):
     monkeypatch.setattr(settings, "_effective_bot_settings", lambda *_args: {})
     monkeypatch.setattr(settings, "_to_profile_response", lambda profile, settings, tags=None: profile)
     monkeypatch.setattr(settings, "rotate_active_threads", rotate or (
-        lambda engine, slug: (calls.append(slug), [("nick", "fresh-thread")])[1]
+        lambda engine, slug: (calls.append(slug), [("operator", "fresh-thread")])[1]
     ))
     asyncio.run(settings._persist_bot_profile({"slug": "nova"}, create_only=False))
     return calls, subscriber
@@ -184,7 +184,7 @@ def test_chat_to_agent_save_rotates_and_tells_the_ui(monkeypatch):
     calls, subscriber = _persist(monkeypatch, CHAT, CLAUDE_PROXY)
     assert calls == ["nova"]
     args = subscriber.publish_tool_event.await_args.args
-    assert args[:2] == ("nova", "nick")
+    assert args[:2] == ("nova", "operator")
     assert args[2]["_type"] == "thread_switched"
     assert args[2]["new_session_id"] == "fresh-thread"
     assert args[2]["source"] == RUNTIME_SWITCH_SOURCE

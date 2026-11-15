@@ -143,8 +143,8 @@ def test_bridge_stream_follows_bawt_house():
 
 def test_zero_houses_is_byte_identical():
     plain, housed = FakeRedis(), FakeRedis()
-    run(Publisher(plain).send_command("al:nick", "hi", "req_1", backend="claude-code", bot_id="al"))
-    run(Publisher(housed).send_command("al:nick", "hi", "req_1", backend="claude-code", bot_id="al",
+    run(Publisher(plain).send_command("al:operator", "hi", "req_1", backend="claude-code", bot_id="al"))
+    run(Publisher(housed).send_command("al:operator", "hi", "req_1", backend="claude-code", bot_id="al",
                                        house=None))
     assert plain.streams == housed.streams
     assert list(plain.streams) == [MANSION]
@@ -158,9 +158,9 @@ def test_zero_houses_is_byte_identical():
 def test_zero_houses_follow_ups_stay_in_the_mansion():
     redis = FakeRedis()
     sub = subscriber(redis)
-    run(sub.send_tool_result("al:nick", "tu_1", "x", backend="claude-code", request_id="req_1"))
-    run(sub.send_approval_grant(session_key="al:nick", grant_key="g", backend="claude-code"))
-    run(sub.send_rpc("chat.abort", {"sessionKey": "al:nick", "requestId": "req_1"}, "abort_1",
+    run(sub.send_tool_result("al:operator", "tu_1", "x", backend="claude-code", request_id="req_1"))
+    run(sub.send_approval_grant(session_key="al:operator", grant_key="g", backend="claude-code"))
+    run(sub.send_rpc("chat.abort", {"sessionKey": "al:operator", "requestId": "req_1"}, "abort_1",
                      backend="claude-code", bot_id="al"))
     assert list(redis.streams) == [MANSION]
     assert redis.streams[MANSION][2]["bot_id"] == "al"
@@ -172,12 +172,12 @@ def test_zero_houses_follow_ups_stay_in_the_mansion():
 def test_live_house_gets_new_commands_with_epoch_and_turn_record():
     redis = FakeRedis()
     redis.kv[lease_key("h1", "claude-code")] = "7"
-    run(Publisher(redis).send_command("al:nick", "hi", "req_1", backend="claude-code", bot_id="al",
+    run(Publisher(redis).send_command("al:operator", "hi", "req_1", backend="claude-code", bot_id="al",
                                       house="h1"))
     assert list(redis.streams) == [H1]
     assert redis.streams[H1][0][EPOCH_FIELD] == "7"
     assert redis.kv[houses.turn_request_key("req_1")] == H1
-    assert redis.kv[houses.turn_session_key("claude-code", "al:nick")] == H1
+    assert redis.kv[houses.turn_session_key("claude-code", "al:operator")] == H1
 
 
 def test_lease_is_per_backend():
@@ -204,13 +204,13 @@ def test_follow_ups_follow_the_turn():
     redis = FakeRedis()
     redis.kv[lease_key("h1", "claude-code")] = "1"
     sub = subscriber(redis)
-    run(sub.send_command("al:nick", "hi", "req_1", backend="claude-code", bot_id="al", house="h1"))
-    run(sub.send_steer(session_key="al:nick", message="more", message_id="m1",
+    run(sub.send_command("al:operator", "hi", "req_1", backend="claude-code", bot_id="al", house="h1"))
+    run(sub.send_steer(session_key="al:operator", message="more", message_id="m1",
                        backend="claude-code", target_request_id="req_1", timeout_s=1))
-    run(sub.send_tool_result("al:nick", "tu_1", "x", backend="claude-code", request_id="req_1"))
-    run(sub.send_approval_grant(session_key="al:nick", grant_key="g", backend="claude-code",
+    run(sub.send_tool_result("al:operator", "tu_1", "x", backend="claude-code", request_id="req_1"))
+    run(sub.send_approval_grant(session_key="al:operator", grant_key="g", backend="claude-code",
                                 request_id="req_1"))
-    run(sub.send_rpc("chat.abort", {"sessionKey": "al:nick", "requestId": "req_1"}, "abort_1",
+    run(sub.send_rpc("chat.abort", {"sessionKey": "al:operator", "requestId": "req_1"}, "abort_1",
                      backend="claude-code", bot_id="al"))
     actions = [f["action"] for f in redis.streams[H1]]
     assert actions == ["chat.send", "chat.steer", "chat.tool_result", "approval.grant", "rpc.call"]
@@ -257,11 +257,11 @@ def test_killed_house_never_double_executes():
 
         # A turn runs in the house, and another send is queued behind it.
         pub = Publisher(redis)
-        await pub.send_command("al:nick", "a", "req_a", backend="claude-code", house="h1")
-        await pub.send_command("al:nick", "b", "req_b", backend="claude-code", house="h1")
+        await pub.send_command("al:operator", "a", "req_a", backend="claude-code", house="h1")
+        await pub.send_command("al:operator", "b", "req_b", backend="claude-code", house="h1")
         sent_a, sent_b = redis.streams[H1]
         assert await gate_send(slot, sent_a, "1-0", redis, group="g", publisher=done)
-        queue.live.add(("al:nick", "req_a"))
+        queue.live.add(("al:operator", "req_a"))
         slot._task.cancel()
 
         # The house dies: its lease expires. New work goes to the mansion with a
@@ -272,7 +272,7 @@ def test_killed_house_never_double_executes():
         async def notify(*args):
             notices.append(args)
 
-        await pub.send_command("al:nick", "c", "req_c", backend="claude-code", house="h1",
+        await pub.send_command("al:operator", "c", "req_c", backend="claude-code", house="h1",
                                on_house_fallback=notify)
         assert [f["request_id"] for f in redis.streams[MANSION]] == ["req_c"]
         assert len(notices) == 1
@@ -289,7 +289,7 @@ def test_killed_house_never_double_executes():
         reborn._task.cancel()
 
         # A republish of the same request id can't land anywhere new.
-        await pub.send_command("al:nick", "b", "req_b", backend="claude-code", house="h1")
+        await pub.send_command("al:operator", "b", "req_b", backend="claude-code", house="h1")
         assert len(redis.streams[H1]) == 2
     run(go())
 
@@ -321,10 +321,10 @@ def test_retry_keeps_the_first_route():
     """F1: a deduplicated retry after the house comes up must not move r1."""
     redis = FakeRedis()
     pub = Publisher(redis)
-    run(pub.send_command("al:nick", "hi", "r1", backend="claude-code", house="h1"))
+    run(pub.send_command("al:operator", "hi", "r1", backend="claude-code", house="h1"))
     assert redis.kv[houses.turn_request_key("r1")] == MANSION
     redis.kv[lease_key("h1", "claude-code")] = "1"
-    run(pub.send_command("al:nick", "hi", "r1", backend="claude-code", house="h1"))
+    run(pub.send_command("al:operator", "hi", "r1", backend="claude-code", house="h1"))
     assert list(redis.streams) == [MANSION]
     assert run(follow_up_stream(redis, request_id="r1")) == MANSION
 
@@ -334,17 +334,17 @@ def test_fallback_turn_does_not_inherit_a_stale_session_record():
     redis = FakeRedis()
     pub = Publisher(redis)
     redis.kv[lease_key("h1", "claude-code")] = "1"
-    run(pub.send_command("al:nick", "a", "r_old", backend="claude-code", house="h1"))
+    run(pub.send_command("al:operator", "a", "r_old", backend="claude-code", house="h1"))
     run(redis.delete(lease_key("h1", "claude-code")))
-    run(pub.send_command("al:nick", "b", "r_new", backend="claude-code", house="h1"))
+    run(pub.send_command("al:operator", "b", "r_new", backend="claude-code", house="h1"))
     assert run(follow_up_stream(redis, request_id="r_new", backend="claude-code",
-                                session_key="al:nick")) == MANSION
+                                session_key="al:operator")) == MANSION
     # A request record is authoritative even when a session record disagrees.
-    redis.kv[houses.turn_session_key("claude-code", "al:nick")] = H1
+    redis.kv[houses.turn_session_key("claude-code", "al:operator")] = H1
     assert run(follow_up_stream(redis, request_id="r_new", backend="claude-code",
-                                session_key="al:nick")) == MANSION
+                                session_key="al:operator")) == MANSION
     sub = subscriber(redis)
-    run(sub.send_rpc("chat.abort", {"sessionKey": "al:nick", "requestId": "r_new"}, "abort_1",
+    run(sub.send_rpc("chat.abort", {"sessionKey": "al:operator", "requestId": "r_new"}, "abort_1",
                      backend="claude-code"))
     assert redis.streams[MANSION][-1]["action"] == "rpc.call"
 

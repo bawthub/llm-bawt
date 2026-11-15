@@ -26,7 +26,7 @@ from llm_bawt.models.message import Message
 from llm_bawt.service.schemas import ChatCompletionRequest, ChatMessage
 from llm_bawt.service.session_lifecycle.execution import NativeSelectedHistory
 
-BOT, USER = "caid", "nick"
+BOT, USER = "caid", "operator"
 SID = "10000000-0000-4000-8000-000000000001"
 OTHER_SID = "10000000-0000-4000-8000-000000000002"
 MID = "20000000-0000-4000-8000-000000000001"

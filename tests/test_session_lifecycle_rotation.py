@@ -19,7 +19,7 @@ def engine():
         """)
         conn.exec_driver_sql("INSERT INTO bot_profiles (slug) VALUES ('fixture')")
         conn.exec_driver_sql("""INSERT INTO sessions (id,bot_id,user_id,status,session_metadata)
-            VALUES ('old','fixture','nick','active','{}'),
+            VALUES ('old','fixture','operator','active','{}'),
                    ('later','fixture','other','archived','{}')""")
     yield engine
     engine.dispose()
@@ -29,7 +29,7 @@ def test_first_rotation_stamps_pointer_and_lineage_in_caller_transaction(engine)
     lifecycle = {"action": "reset_retain_history", "old_session_id": "old", "delivery_id": "delivery-one"}
     with engine.begin() as conn:
         assert SessionResetLineage.rotate(
-            engine, bot_id="fixture", user_id="nick", new_id="successor",
+            engine, bot_id="fixture", user_id="operator", new_id="successor",
             idempotency_key="delivery-one", connection=conn,
             context_lifecycle=lifecycle, accept_pointer=True, working_memory_mode="pinned",
         )
@@ -43,7 +43,7 @@ def test_first_rotation_stamps_pointer_and_lineage_in_caller_transaction(engine)
 
 
 def test_keyed_replay_does_not_rewind_later_accepted_session(engine):
-    opts = dict(bot_id="fixture", user_id="nick", new_id="successor",
+    opts = dict(bot_id="fixture", user_id="operator", new_id="successor",
                 idempotency_key="delivery-one", accept_pointer=True,
                 working_memory_mode="pinned")
     assert SessionResetLineage.rotate(engine, **opts)
@@ -60,7 +60,7 @@ def test_typed_new_manager_stamps_pointer_and_keyed_replay_does_not_rewind(engin
 
     manager = object.__new__(PostgreSQLShortTermManager)
     manager._backend = SimpleNamespace(engine=engine)
-    manager.bot_id, manager.user_id = "fixture", "nick"
+    manager.bot_id, manager.user_id = "fixture", "operator"
     successor = manager.rotate_session(idempotency_key="typed-new", accept_pointer=True,
                                        working_memory_mode="pinned")
     with engine.begin() as conn:
@@ -78,7 +78,7 @@ def test_typed_new_manager_stamps_pointer_and_keyed_replay_does_not_rewind(engin
 
 def test_pointer_failure_rolls_back_session_archive(engine):
     with pytest.raises(ValueError, match="Cannot accept"):
-        SessionResetLineage.rotate(engine, bot_id="unknown", user_id="nick",
+        SessionResetLineage.rotate(engine, bot_id="unknown", user_id="operator",
                                    new_id="successor", accept_pointer=True,
                                    working_memory_mode="pinned")
     with engine.connect() as conn:

@@ -21,7 +21,7 @@ def _run(coro: Any) -> Any:
     return asyncio.run(coro)
 
 
-def _ctx(bot: str, *, session: str | None = None, user: str = "nick",
+def _ctx(bot: str, *, session: str | None = None, user: str = "operator",
          turn: str = "turn-abc") -> TaskTurnContext:
     """Trusted caller context; defaults to the bot's active default-user thread."""
     return TaskTurnContext(session_id=session or f"sess-{bot}", turn_id=turn,
@@ -87,8 +87,8 @@ class Harness:
         self.private = set(private)
         self.tags_down = False
         self.tag_reads = 0
-        # Active default-user ("nick") thread per bot, as GET /v1/sessions/active.
-        self.active = {slug: {"id": f"sess-{slug}", "user_id": "nick"}
+        # Active default-user ("operator") thread per bot, as GET /v1/sessions/active.
+        self.active = {slug: {"id": f"sess-{slug}", "user_id": "operator"}
                        for slug in [*profiles, "al", "snark"]}
         self.patches: list[tuple[str, int]] = []
         self.enqueued: list[dict] = []
@@ -273,7 +273,7 @@ def test_untrusted_caller_continuation_refused_before_switch(monkeypatch):
 
 def test_non_default_user_continuation_refused_before_switch(monkeypatch):
     # Bot-authored deliveries run as DEFAULT_USER; another user's follow-up
-    # would land in Nick's thread (Snark P1).
+    # would land in the user's thread (Snark P1).
     h = Harness(monkeypatch, {"al": _profile("al", 2158, "claude-opus-5-5", "claude-code")},
                 caller=_ctx("al", user="guest", session="sess-guest"))
 

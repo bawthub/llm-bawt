@@ -51,10 +51,10 @@ def _old_turn(store, bot, *, status="streaming", request_id="req-orphan", age_se
         conn.execute(sa_text("""
             INSERT INTO turn_logs (id, created_at, path, stream, bot_id, user_id, status, user_prompt,
                                    response_text, agent_backend, agent_session_key, agent_request_id, ended_at)
-            VALUES (:id, now() - make_interval(secs => :age), '/test', true, :bot, 'nick', :status, '', '',
+            VALUES (:id, now() - make_interval(secs => :age), '/test', true, :bot, 'operator', :status, '', '',
                     :backend, :key, :req, NULL)
         """), {"id": turn_id, "age": age_seconds, "bot": bot, "status": status, "backend": backend,
-               "key": f"{bot}:nick" if request_id else None, "req": request_id})
+               "key": f"{bot}:operator" if request_id else None, "req": request_id})
     return turn_id
 
 
@@ -108,10 +108,10 @@ def _old_protocol_turn(store, bot):
         # Simulate an expired follower, not a healthy newly admitted turn.
         fields["follower_lease_until"] = datetime.now(timezone.utc) - timedelta(minutes=1)
         conn.execute(TurnLog.__table__.insert().values(
-            id=turn_id, bot_id=bot, user_id="nick", status="streaming",
+            id=turn_id, bot_id=bot, user_id="operator", status="streaming",
             created_at=datetime.now(timezone.utc) - timedelta(minutes=15),
             response_text="durable protocol partial", agent_backend="claude-code",
-            agent_session_key=f"{bot}:nick", agent_request_id=f"req-{uuid.uuid4().hex}",
+            agent_session_key=f"{bot}:operator", agent_request_id=f"req-{uuid.uuid4().hex}",
             **fields,
         ))
     return turn_id
@@ -245,7 +245,7 @@ def _reserved_for(store, bot, owner):
         conn.execute(sa_text("""
             INSERT INTO turn_logs (id, created_at, path, stream, bot_id, user_id, status, user_prompt,
                                    request_json, response_text, ended_at)
-            VALUES (:id, now(), '/v1/chat/completions', false, :bot, 'nick', 'reserved', '', :j, '', NULL)
+            VALUES (:id, now(), '/v1/chat/completions', false, :bot, 'operator', 'reserved', '', :j, '', NULL)
         """), {"id": turn_id, "bot": bot, "j": json.dumps({"reservation_owner": owner})})
     return turn_id
 
@@ -394,13 +394,13 @@ def test_one_query_by_run_id_rebuilds_the_sweep_report(delivery_store, approvals
     stalled = _reserved_for(store, other, token)
     _lapse(store, request_id)
     tools = _old_turn(store, target, request_id=None)
-    ToolCallStore(store.engine).save_start(turn_id=tools, bot_id=target, user_id="nick", call_id="c1", tool_name="Bash")
+    ToolCallStore(store.engine).save_start(turn_id=tools, bot_id=target, user_id="operator", call_id="c1", tool_name="Bash")
     with store.engine.begin() as conn:
         conn.execute(sa_text("UPDATE turn_logs SET status='error', ended_at=now() WHERE id=:id"), {"id": tools})
 
     report = asyncio.run(RecoverySweep(store.engine, probe=Probe(NOT_FOUND)).run(
-        dry_run=False, bots=[target, other], actor="nick"))
-    assert report["actor"] == "nick"
+        dry_run=False, bots=[target, other], actor="operator"))
+    assert report["actor"] == "operator"
     done = {step["step"]: step["done"] for step in report["steps"]}
     assert _ids(done["orphan_turns"]) == [orphan] and _ids(done["unresolved_tools"]) == [tools]
     assert sorted(_ids(done["reservations"])) == sorted([cancelled.turn_id, stalled])
@@ -412,7 +412,7 @@ def test_one_query_by_run_id_rebuilds_the_sweep_report(delivery_store, approvals
     assert rows["deliveries"][0]["recovery"]["released_reservation"] == cancelled.turn_id
     assert rows["jobs"] == []
     tool_stamp = next(r for r in rows["turns"] if r["id"] == tools)["recovery"]["tools_interrupted"]
-    assert (tool_stamp["count"], tool_stamp["actor"]) == (1, "nick")
+    assert (tool_stamp["count"], tool_stamp["actor"]) == (1, "operator")
 
 
 def test_an_unowned_ordinary_reservation_is_reported_never_released(delivery_store):  # noqa: F811
@@ -422,7 +422,7 @@ def test_an_unowned_ordinary_reservation_is_reported_never_released(delivery_sto
         conn.execute(sa_text("""
             INSERT INTO turn_logs (id, created_at, path, stream, bot_id, user_id, status, user_prompt,
                                    request_json, response_text, ended_at)
-            VALUES (:id, now(), '/v1/chat/completions', false, :bot, 'nick', 'reserved', '', '{}', '', NULL)
+            VALUES (:id, now(), '/v1/chat/completions', false, :bot, 'operator', 'reserved', '', '{}', '', NULL)
         """), {"id": turn_id, "bot": target})
     step = _step(asyncio.run(RecoverySweep(store.engine).run(
         dry_run=False, bots=[target], steps=["reservations"])), "reservations")
@@ -454,7 +454,7 @@ def test_open_tool_calls_on_an_ended_turn_are_interrupted(delivery_store):  # no
     store, _, target = delivery_store
     turn_id = _old_turn(store, target)
     calls = ToolCallStore(store.engine)
-    calls.save_start(turn_id=turn_id, bot_id=target, user_id="nick", call_id="c1", tool_name="Bash")
+    calls.save_start(turn_id=turn_id, bot_id=target, user_id="operator", call_id="c1", tool_name="Bash")
     with store.engine.begin() as conn:
         conn.execute(sa_text("UPDATE turn_logs SET status='error', ended_at=now() WHERE id=:id"), {"id": turn_id})
     step = _step(asyncio.run(RecoverySweep(store.engine).run(
@@ -482,7 +482,7 @@ def test_purge_runs_only_when_asked(delivery_store, approvals):  # noqa: F811
     report = asyncio.run(sweep.run(dry_run=False))
     assert "purge_ops" not in {step["step"] for step in report["steps"]}
     assert approvals.get_request(card).status == "pending"
-    step = _step(asyncio.run(sweep.run(dry_run=False, purge_ops=True, actor="nick", steps=["post_check"])), "purge_ops")
+    step = _step(asyncio.run(sweep.run(dry_run=False, purge_ops=True, actor="operator", steps=["post_check"])), "purge_ops")
     assert _ids(step["done"], "id") == [card]
     assert approvals.get_request(card).status == "cancelled"
 
@@ -556,7 +556,7 @@ def test_the_bridge_probe_settles_only_a_turn_its_recorded_bridge_reports_absent
     assert _ids(step["done"]) == [recorded]
     assert [(e["turn_id"], e["why"]) for e in step["ambiguous"]] == [(unrecorded, "run.status unaddressed")]
     assert subscriber.calls == [{"method": "run.status", "backend": "codex",
-                                 "params": {"sessionKey": f"{target}:nick", "requestId": "req-recorded"}}]
+                                 "params": {"sessionKey": f"{target}:operator", "requestId": "req-recorded"}}]
     recovery = json.loads(TurnLogStore(store.config).get_turn(recorded).request_json)["recovery"]
     assert recovery["probe"] == {"state": "not_found", "backend": "codex", "boot_id": "boot-new", "detail": ""}
     assert TurnLogStore(store.config).get_turn(unrecorded).ended_at is None
@@ -619,10 +619,10 @@ def test_binding_a_bridge_request_records_its_backend(delivery_store):  # noqa: 
     turn_id = _old_turn(store, target, request_id=None, age_seconds=0)
     turns = TurnLogStore(store.config)
     TurnExecution(turn_id, threading.Event(), is_agent=True, store=turns).bind_bridge(
-        backend="codex", session_key=f"{target}:nick", request_id="req-bound")
+        backend="codex", session_key=f"{target}:operator", request_id="req-bound")
     row = turns.get_turn(turn_id)
     assert (row.agent_backend, row.agent_session_key, row.agent_request_id) == (
-        "codex", f"{target}:nick", "req-bound")
+        "codex", f"{target}:operator", "req-bound")
 
 
 def _consume_inside_the_lock_window(monkeypatch, store, turn_id):
@@ -838,7 +838,7 @@ def _run_then_requeue(store, sender, target, text):
             UPDATE turn_logs SET status='streaming', request_json='{"messages": [], "user_stop": null}',
                 agent_session_key=:key, agent_request_id='req-ran'
             WHERE id=:id
-        """), {"id": delivery.turn_id, "key": f"{target}:nick"})
+        """), {"id": delivery.turn_id, "key": f"{target}:operator"})
         conn.execute(sa_text("UPDATE inter_bot_deliveries SET lease_expires_at=now() - interval '1 second'"
                              " WHERE id=:id"), {"id": delivery.id})
     assert [row.status for row in store.recover_expired() if row.id == delivery.id] == ["QUEUED"]
@@ -995,7 +995,7 @@ def test_two_runs_releasing_one_deliverys_reservations_each_find_it(delivery_sto
         conn.execute(sa_text("""
             INSERT INTO turn_logs (id, created_at, path, stream, bot_id, user_id, status, user_prompt,
                                    request_json, response_text, ended_at)
-            VALUES (:id, now(), '/v1/chat/completions', false, :bot, 'nick', 'reserved', '', :j, '', NULL)
+            VALUES (:id, now(), '/v1/chat/completions', false, :bot, 'operator', 'reserved', '', :j, '', NULL)
         """), {"id": again, "bot": target, "j": json.dumps({"inter_bot_delivery_id": delivery.id})})
     second = asyncio.run(sweep.run(dry_run=False, bots=[target], steps=["reservations"]))
     assert _ids(_step(second, "reservations")["done"]) == [again]

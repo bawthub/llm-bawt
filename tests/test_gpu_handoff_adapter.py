@@ -45,12 +45,12 @@ def test_snapshot_dispatch_is_scoped_and_idempotent():
         snapshots = await adapter.prepare_operations()
         await adapter.check_operations(snapshots)
         assert not ops.calls  # Preparing an offer never means dispatching.
-        await adapter.dispatch(snapshots[0], user="nick", generation=2)
+        await adapter.dispatch(snapshots[0], user="operator", generation=2)
         assert ops.calls[0]["approved_snapshot"] == snapshots[0]
         assert ops.calls[0]["operation_slug"] == STOP_OPERATIONS[0]
         assert ops.calls[0]["args"] == {}
         assert ops.calls[0]["idempotency_key"] == f"gpu-handoff:2:{STOP_OPERATIONS[0]}"
-        assert ops.calls[0]["caller_user_id"] == "nick"
+        assert ops.calls[0]["caller_user_id"] == "operator"
         assert ops.calls[0]["caller_backend"] == "http-operator"
     asyncio.run(run())
 

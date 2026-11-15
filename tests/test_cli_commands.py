@@ -428,7 +428,7 @@ class TestLLMUsers:
     def test_user_profile_with_explicit_user(self, service_up):
         if not service_up:
             pytest.skip("Service not running")
-        o = assert_ok(run(f"{LLM} --user nick --user-profile", timeout=15), "--user nick --user-profile")
+        o = assert_ok(run(f"{LLM} --user operator --user-profile", timeout=15), "--user operator --user-profile")
         assert no_traceback(o)
 
 
@@ -705,7 +705,7 @@ class TestLLMMemoryProfiles:
     def test_list_attrs_for_user(self, service_up):
         if not service_up:
             pytest.skip("Service not running")
-        o = assert_ok(run(f"{LLM_MEMORY} --bot {BOT} --list-attrs nick", timeout=15), "--list-attrs nick")
+        o = assert_ok(run(f"{LLM_MEMORY} --bot {BOT} --list-attrs operator", timeout=15), "--list-attrs operator")
         assert no_traceback(o)
 
     @pytest.mark.service

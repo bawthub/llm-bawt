@@ -139,7 +139,7 @@ def _run_init_bot(monkeypatch, bot, defined_models, config=None):
     service = ServiceLLMBawt.__new__(ServiceLLMBawt)
     service.client = _DummyAgentBackendClient()
     service.bot_id = "loopy"
-    service.user_id = "nick"
+    service.user_id = "operator"
     service.config = config
     ServiceLLMBawt._init_bot(service, config)
     return service

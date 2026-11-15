@@ -83,7 +83,7 @@ def test_each_writer_moves_only_its_topic_and_notifies(stores):
 
     state = stores.gpu.status()
     assert _notifies(stores.engine, lambda: stores.gpu.offer(
-        user="nick", target="video", actions=("stop_moshi_tts",), expected_generation=state.generation))
+        user="operator", target="video", actions=("stop_moshi_tts",), expected_generation=state.generation))
     assert check() == {"gpu"}
 
     assert _notifies(stores.engine, lambda: stores.releases.create(

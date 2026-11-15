@@ -59,12 +59,12 @@ def _save(store: ToolCallStore, content: str):
     with store.engine.begin() as conn:
         conn.execute(
             text("INSERT INTO turn_logs (id, created_at, path, stream, bot_id, user_id, status, user_prompt)"
-                 " VALUES (:id, now(), '/v1/chat/completions', false, 'test-nul-bot', 'nick', 'ok', 'probe')"),
+                 " VALUES (:id, now(), '/v1/chat/completions', false, 'test-nul-bot', 'operator', 'ok', 'probe')"),
             {"id": turn},
         )
     return store.save_result(
         turn_id=turn, call_id="call-1", tool_use_id="tu-1", tool_name="Read",
-        bot_id="test-nul-bot", user_id="nick", payload=ToolResultPayload.from_value(content),
+        bot_id="test-nul-bot", user_id="operator", payload=ToolResultPayload.from_value(content),
         ended_at=None, is_error=False,
     )
 
@@ -83,7 +83,7 @@ def test_nul_result_persists_with_exact_bytes_in_object_store(store, monkeypatch
         assert row.result_sha256 == hashlib.sha256(NUL_RESULT.encode()).hexdigest()
         assert row.result_blob_key == row.result_sha256
         assert session.get(ToolCallResultPayloadRecord, record_id) is None
-    page = store.page(record_id, bot_id="test-nul-bot", user_id="nick", offset=0, limit=100)
+    page = store.page(record_id, bot_id="test-nul-bot", user_id="operator", offset=0, limit=100)
     assert page is not None and page.content == NUL_RESULT
 
 
@@ -93,7 +93,7 @@ def test_nul_result_persists_without_object_store(store, monkeypatch):
     record_id, available = _save(store, NUL_RESULT)
 
     assert record_id is not None and available is True
-    page = store.page(record_id, bot_id="test-nul-bot", user_id="nick", offset=0, limit=100)
+    page = store.page(record_id, bot_id="test-nul-bot", user_id="operator", offset=0, limit=100)
     assert page is not None
     assert page.content == NUL_RESULT.replace("\x00", "�")
     assert page.total_chars == len(NUL_RESULT)

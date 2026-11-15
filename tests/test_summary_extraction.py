@@ -17,7 +17,7 @@ def test_empty_llm_reply_is_a_failed_call_not_zero_facts(monkeypatch, call) -> N
     monkeypatch.setattr(service, "_extract_with_heuristics", lambda *a, **k: fallback)
     if call == "summary":
         out = service.extract_from_summary(
-            summary_text="Summary: Nick adopted a third dog named Pixel.\nKey Details: Pixel is a beagle.",
+            summary_text="Summary: Operator adopted a third dog named Pixel.\nKey Details: Pixel is a beagle.",
             session_start=0, session_end=1, summary_id="s1", use_llm=True)
     else:
         out = service.extract_from_conversation(

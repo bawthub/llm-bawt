@@ -20,8 +20,8 @@ def day(text: str) -> float:
 
 @pytest.mark.parametrize("query,start,end,residual", [
     # The three replayed temporal misses.
-    ("What happened when Nick ran openclaw auth login openai-codex in March, and what was the error?",
-     "2026-03-01", "2026-04-01", "What happened when Nick ran openclaw auth login openai-codex , and what was the error?"),
+    ("What happened when Operator ran openclaw auth login openai-codex in March, and what was the error?",
+     "2026-03-01", "2026-04-01", "What happened when Operator ran openclaw auth login openai-codex , and what was the error?"),
     ("who split inter_bot_delivery.py around 00:19Z Oct 26",
      "2026-10-26", "2026-10-27", "who split inter_bot_delivery.py around 00:19Z"),
     ("Vex AltTab clone local path October 24 2026", "2026-10-24", "2026-10-25", "Vex AltTab clone local path"),

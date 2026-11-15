@@ -95,13 +95,13 @@ def test_stable_bridge_request_id_publishes_one_command():
 
     async def send_twice():
         await subscriber.send_command(
-            session_key="snark:nick",
+            session_key="snark:operator",
             message="TASK-700 READY",
             request_id="req_delivery_stable",
             bot_id="snark",
         )
         await subscriber.send_command(
-            session_key="snark:nick",
+            session_key="snark:operator",
             message="TASK-700 READY",
             request_id="req_delivery_stable",
             bot_id="snark",
@@ -219,7 +219,7 @@ def test_empty_seed_is_serialized_as_explicit_decision():
     fake.eval = eval_script
     subscriber._pub_redis = fake
     _run(subscriber.send_command(
-        session_key="snark:nick",
+        session_key="snark:operator",
         message="clean",
         request_id="req-empty-seed",
         inject_messages=[],
@@ -244,7 +244,7 @@ def test_responses_transport_is_serialized_into_bridge_command():
     fake.eval = eval_script
     subscriber._pub_redis = fake
     _run(subscriber.send_command(
-        session_key="snark:nick",
+        session_key="snark:operator",
         message="parallel",
         request_id="req-transport",
         responses_transport="sse",
@@ -671,7 +671,7 @@ def test_ended_never_ready_turn_is_definitively_not_active():
     turn = SimpleNamespace(
         id="turn-ended-before-ready",
         bot_id="snark",
-        user_id="nick",
+        user_id="operator",
         status="error",
         ended_at=datetime.now(timezone.utc),
         agent_session_key=None,
@@ -689,7 +689,7 @@ def test_ended_never_ready_turn_is_definitively_not_active():
                 message="continue safely",
                 message_id="interbot-ended-before-ready",
                 bot_id="snark",
-                user_id="nick",
+                user_id="operator",
             ),
             steer_request_id="steer_delivery_ended_before_ready",
         ))

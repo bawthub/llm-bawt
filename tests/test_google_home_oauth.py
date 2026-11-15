@@ -19,7 +19,7 @@ from llm_bawt.service.routes import google_home_probe as route
 
 SETTINGS = ProbeSettings(
     enabled=True, project_id="bawthub-00a0bf", client_id="loopy-google-home-probe",
-    allowed_subject="nick", allowed_email="owner@example.com", public_origin="https://app.example.com",
+    allowed_subject="operator", allowed_email="owner@example.com", public_origin="https://app.example.com",
     sso_auth_url="http://sso.internal:4180/oauth2/auth", sso_signin_url="https://auth.example.com/oauth2/start",
 )
 SECRET = "test-only-client-secret-" + "x" * 32
@@ -86,11 +86,11 @@ def test_one_use_consent_code_refresh_and_hash_only_storage(store):
     issued = store.exchange(exchange)
     with pytest.raises(OAuthError):
         store.exchange(exchange)
-    assert store.authenticate("Bearer " + issued["access_token"]) == "nick"
+    assert store.authenticate("Bearer " + issued["access_token"]) == "operator"
     refreshed = store.exchange(dict(grant_type="refresh_token", refresh_token=issued["refresh_token"]))
     assert "refresh_token" not in refreshed
     assert refreshed["access_token"] != issued["access_token"]
-    assert store.authenticate("Bearer " + refreshed["access_token"]) == "nick"
+    assert store.authenticate("Bearer " + refreshed["access_token"]) == "operator"
     with store.engine.connect() as conn:
         rows = str(conn.execute(select(_tokens)).all())
     for secret in (consent, result["code"], issued["access_token"], issued["refresh_token"], refreshed["access_token"]):
@@ -138,7 +138,7 @@ def test_disconnect_revokes_pending_and_issued_credentials(store):
     fresh = tokens(store)
     with pytest.raises(ProbeUnauthorized):
         store.revoke("Bearer " + issued["access_token"])
-    assert store.authenticate("Bearer " + fresh["access_token"]) == "nick"
+    assert store.authenticate("Bearer " + fresh["access_token"]) == "operator"
 
 
 @pytest.mark.parametrize("changes", [{"client_id": "other"}, {"allowed_subject": "other"}, {"required_scope": "other"}])
@@ -177,7 +177,7 @@ async def test_sso_response_not_browser_headers_proves_identity(store, status, e
             with pytest.raises(expected):
                 await auth.browser_identity("sso=session", http)
         else:
-            assert await auth.browser_identity("sso=session", http) == "nick"
+            assert await auth.browser_identity("sso=session", http) == "operator"
 
 
 @pytest.fixture
@@ -186,7 +186,7 @@ def client(store, monkeypatch):
     async def browser(cookie, http):
         if "sso=session" not in cookie:
             raise ProbeUnauthorized()
-        return "nick"
+        return "operator"
     monkeypatch.setattr(auth, "browser_identity", browser)
     class Captures:
         def record(self, key, value):
@@ -237,7 +237,7 @@ def test_full_http_link_refresh_capture_unlink(client):
         grant_type="refresh_token", refresh_token=issued["refresh_token"])).status_code == 200
     bearer = {"Authorization": "Bearer " + issued["access_token"]}
     body = {"requestId": "sync", "inputs": [{"intent": "action.devices.SYNC"}]}
-    assert http.post(route.BASE + "/fulfillment", json=body, headers=bearer).json()["payload"]["agentUserId"] == "nick"
+    assert http.post(route.BASE + "/fulfillment", json=body, headers=bearer).json()["payload"]["agentUserId"] == "operator"
     body["inputs"][0]["intent"] = "action.devices.DISCONNECT"
     result = http.post(route.BASE + "/fulfillment", json=body, headers=bearer)
     assert result.status_code == 200 and result.content == b""
@@ -309,7 +309,7 @@ def test_form_limits_and_bad_encoding(client):
 def test_store_survives_reconstruction(store):
     issued = tokens(store)
     restored = ProbeOAuthStore(store.engine, SETTINGS)
-    assert restored.authenticate("Bearer " + issued["access_token"]) == "nick"
+    assert restored.authenticate("Bearer " + issued["access_token"]) == "operator"
     assert restored.exchange(dict(grant_type="refresh_token", refresh_token=issued["refresh_token"]))["access_token"]
 
 

@@ -56,7 +56,7 @@ def upstream(manager, *, token=None, user=None, keep_status=200, token_status=20
             })
         if request.url.path == "/v1/userinfo":
             return httpx.Response(200, json=user if user is not None else {
-                "sub": "google-123", "email": "nick@example.com", "email_verified": True,
+                "sub": "google-123", "email": "operator@example.com", "email_verified": True,
             })
         return httpx.Response(keep_status, json=keep_body if keep_body is not None else {"notes": [{"title": "PRIVATE NOTE"}]})
     transport = httpx.MockTransport(handle)
@@ -143,7 +143,7 @@ def test_success_persists_verified_identity_encrypted_tokens_without_notes(manag
     flow, params = start(manager, "/setup")
     assert finish(manager, flow, params) == "/setup"
     record = manager.store.load("google-keep")
-    assert record.account == "nick@example.com"
+    assert record.account == "operator@example.com"
     assert record.secret["refresh_token"] == "refresh-secret"
     assert record.meta["read_only"] is False
     assert not manager.descriptor("google-keep")["reauthorization_required"]
@@ -303,7 +303,7 @@ def test_expired_state_never_reaches_google(manager):
     ({"token": {"scope": "email"}}, "missing_keep_scope"),
     ({"token": {"scope": "https://www.googleapis.com/auth/keep.readonly", "access_token": "access", "refresh_token": "refresh"}}, "missing_keep_scope"),
     ({"token": {"scope": KEEP_SCOPE, "access_token": "access"}}, "offline_access_required"),
-    ({"user": {"email": "nick@example.com", "sub": "123", "email_verified": False}}, "account_verification_failed"),
+    ({"user": {"email": "operator@example.com", "sub": "123", "email_verified": False}}, "account_verification_failed"),
 ])
 def test_failure_never_creates_connection(manager, options, error):
     upstream(manager, **options)

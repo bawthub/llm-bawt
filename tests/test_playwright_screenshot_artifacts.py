@@ -108,13 +108,13 @@ def test_upload_data_url_returns_canonical_envelope(monkeypatch) -> None:
 
     monkeypatch.setattr("httpx.AsyncClient", Client)
     result = asyncio.run(bridge._upload_data_url(
-        "data:image/png;base64,aW1hZ2U=", "nick", "toolu_shot"
+        "data:image/png;base64,aW1hZ2U=", "operator", "toolu_shot"
     ))
 
     assert result == artifact
     assert captured["url"] == "http://app:8642/v1/uploads"
     assert captured["params"] == {"source": "agent_attachment"}
-    assert captured["headers"] == {"X-Entity-Id": "nick"}
+    assert captured["headers"] == {"X-Entity-Id": "operator"}
     assert captured["json"]["filename"] == "image-toolu_shot.png"
 
 
@@ -144,7 +144,7 @@ def test_upload_data_url_rejects_response_without_asset_id(monkeypatch) -> None:
 
     monkeypatch.setattr("httpx.AsyncClient", Client)
     assert asyncio.run(bridge._upload_data_url(
-        "data:image/png;base64,aW1hZ2U=", "nick", "toolu_shot"
+        "data:image/png;base64,aW1hZ2U=", "operator", "toolu_shot"
     )) is None
 
 
@@ -159,7 +159,7 @@ def test_post_tool_hook_returns_curlable_urls_and_preserves_output() -> None:
 
     bridge._persist_screenshot_artifacts = persist  # type: ignore[method-assign]
     hook = bridge._make_post_tool_use_hook(
-        session_key="loopy:nick",
+        session_key="loopy:operator",
         screenshot_artifacts_by_tool_use_id=artifacts_by_tool,
     )
 
@@ -174,7 +174,7 @@ def test_post_tool_hook_returns_curlable_urls_and_preserves_output() -> None:
     assert "updatedMCPToolOutput" not in specific
     assert uploads == [(
         _hook_input()["tool_response"]["content"],
-        "loopy:nick",
+        "loopy:operator",
         "toolu_shot",
     )]
 
@@ -187,7 +187,7 @@ def test_post_tool_hook_failure_is_model_visible_without_fake_urls() -> None:
 
     bridge._persist_screenshot_artifacts = persist  # type: ignore[method-assign]
     hook = bridge._make_post_tool_use_hook(
-        session_key="loopy:nick",
+        session_key="loopy:operator",
         screenshot_artifacts_by_tool_use_id={},
     )
     result = asyncio.run(hook(_hook_input(), "toolu_shot", {"signal": None}))
@@ -199,7 +199,7 @@ def test_post_tool_hook_failure_is_model_visible_without_fake_urls() -> None:
 def test_post_tool_hook_ignores_non_screenshot_and_named_file_result() -> None:
     bridge = _bridge()
     hook = bridge._make_post_tool_use_hook(
-        session_key="loopy:nick",
+        session_key="loopy:operator",
         screenshot_artifacts_by_tool_use_id={},
     )
     assert asyncio.run(hook(
@@ -239,7 +239,7 @@ def test_tool_end_reuses_cached_upload_and_deduplicates_turn_refs() -> None:
     seq = asyncio.run(bridge._on_user_message_tool_results(
         msg,
         request_id="req",
-        session_key="loopy:nick",
+        session_key="loopy:operator",
         seq=0,
         tool_names_by_id={
             "toolu_shot": "mcp__playwright__browser_take_screenshot",
@@ -279,7 +279,7 @@ def test_tool_end_retries_after_post_tool_upload_failure() -> None:
     asyncio.run(bridge._on_user_message_tool_results(
         msg,
         request_id="req",
-        session_key="loopy:nick",
+        session_key="loopy:operator",
         seq=0,
         tool_names_by_id={
             "toolu_shot": "mcp__playwright__browser_take_screenshot",

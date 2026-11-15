@@ -153,7 +153,7 @@ def _bridge(monkeypatch, redis, *, close_gate: threading.Event | None = None, na
 def _consume(backend, execution, outcome, **config):
     try:
         outcome["items"] = list(backend.stream_raw("hello", {
-            "session_key": "test:nick", "request_id": "req-1", "turn_execution": execution, **config,
+            "session_key": "test:operator", "request_id": "req-1", "turn_execution": execution, **config,
         }))
     except Exception as exc:  # noqa: BLE001 - the test inspects the type
         outcome["error"] = exc
@@ -311,7 +311,7 @@ def turn_store(tmp_path):
     store.engine = engine
     store.ttl_hours = None
     with Session(engine) as session:
-        session.add(TurnLog(id="A", bot_id="test", user_id="nick", status="streaming",
+        session.add(TurnLog(id="A", bot_id="test", user_id="operator", status="streaming",
                             created_at=datetime.now(timezone.utc)))
         session.commit()
     return store

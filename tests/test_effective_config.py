@@ -45,7 +45,7 @@ def test_effective_config_reports_provider_prompt_provenance_and_order():
         ),
         config_resolver=_Resolver(),
         bot_id="loopy",
-        user_id="nick",
+        user_id="operator",
         resolved_model_alias="gpt-5.6-sol",
         _include_summaries=True,
         _tts_mode=False,

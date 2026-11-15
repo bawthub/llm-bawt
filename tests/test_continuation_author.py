@@ -27,7 +27,7 @@ MCP = AuthorReference("system", "approval-continuation:mcp")
 HARNESS = AuthorReference("system", "approval-continuation:harness")
 
 
-def _writer_author(service, request, user_id="nick"):
+def _writer_author(service, request, user_id="operator"):
     """The exact expression both chat writers evaluate (chat_streaming/chat_nonstream)."""
     inter_bot_author = validate_inter_bot_claim(service, request)
     return inter_bot_author or continuation_author(request) or AuthorReference.user(user_id)
@@ -121,7 +121,7 @@ def test_unclaimed_request_is_never_a_system_author():
     })
     assert request._internal_approval_claim is None
     assert continuation_author(request) is None
-    assert _writer_author(FakeService(), request) == AuthorReference.user("nick")
+    assert _writer_author(FakeService(), request) == AuthorReference.user("operator")
 
 
 def test_inter_bot_author_still_wins():
