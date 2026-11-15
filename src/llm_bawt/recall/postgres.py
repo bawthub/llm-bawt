@@ -17,17 +17,17 @@ from llm_bawt.bot_tags import SNAPSHOT_SQL, TagPolicyUnavailable, TagSnapshot
 from llm_bawt.memory.ownership import MemoryAuthority
 
 from .budgets import DATABASE_WORKER, compact_json
-
-logger = logging.getLogger(__name__)
 from .contracts import (
     COVERAGE_BUCKETS, FOLLOW_ON_WINDOW_SECONDS, MAX_FOLLOW_ONS_PER_HIT, MAX_RECORD_CHARS, MAX_SOURCE_RECORDS,
-    RECENCY_HALF_WEIGHT_DAYS, Evidence, RecallError, RecallScope, SourceProvider, WindowedEvidence,
+    RECENCY_HALF_WEIGHT_DAYS, Evidence, EvidenceBatch, RecallError, RecallScope, SourceProvider, WindowedEvidence,
 )
 
 from .command_facts import MAX_COMMAND_CHARS, command_facts, safe_path
 from llm_bawt.service.tool_call_store import FILE_PATH_SQL, FILE_PATH_TOOLS_SQL
 from .excerpts import fts_query, query_terms, sql_window, term_coverage, terms_for
 from .temporal import time_window
+
+logger = logging.getLogger(__name__)
 
 # Unknown authors, legacy NULL user sessions, summaries and deleted sessions do
 # not establish provenance. An imported bot message is not caller-owned evidence.
@@ -641,11 +641,11 @@ class ToolArgSource(PostgresSource):
         LIMIT :candidate_limit
     """
 
-    async def _path_rows(self, params: dict, pattern: str) -> list[dict]:
-        """Path candidates, or none when the pattern is too broad to finish.
+    async def _path_rows(self, params: dict, pattern: str) -> list[dict] | None:
+        """Path candidates, or None when the pattern is too broad to finish.
 
         A broad pattern loses only the path facts under its own shorter
-        timeout; clone facts from the same source are still returned.
+        timeout; clone facts are still returned and coverage is partial.
         """
         try:
             return await DATABASE_WORKER.run(self.database.read, self.path_statement,
@@ -653,7 +653,7 @@ class ToolArgSource(PostgresSource):
                                              PATH_TIMEOUT_MS)
         except Exception as error:
             logger.warning("tool_args path candidates skipped class=%s", type(error).__name__)
-            return []
+            return None
 
     def extra_params(self, scope: RecallScope, query: str) -> dict:
         allowed = sorted(scope.allowed_bot_ids - scope.excluded_bot_ids)
@@ -673,7 +673,7 @@ class ToolArgSource(PostgresSource):
         except Exception as error:
             raise RecallError("source_unavailable") from error
         path_rows = await self._path_rows(params, pattern) if pattern else []
-        candidates = [(row, tool_call_fact(row)) for row in [*rows, *path_rows]]
+        candidates = [(row, tool_call_fact(row)) for row in [*rows, *(path_rows or [])]]
         ranked = []
         for row, facts in candidates:
             if not facts:
@@ -688,7 +688,12 @@ class ToolArgSource(PostgresSource):
             if score[1]:
                 ranked.append((score, row, facts))
         ranked.sort(key=lambda item: item[0], reverse=True)
-        return [Evidence(self.source, row["id"], scope.bot_id, scope.user_id, facts,
-                         at=utc_iso(row.get("at")), source_bot=row.get("source_bot"),
-                         session_id=row.get("session_id"))
-                for _, row, facts in ranked[:MAX_SOURCE_RECORDS]]
+        batch = EvidenceBatch(
+            Evidence(self.source, row["id"], scope.bot_id, scope.user_id, facts,
+                     at=utc_iso(row.get("at")), source_bot=row.get("source_bot"),
+                     session_id=row.get("session_id"))
+            for _, row, facts in ranked[:MAX_SOURCE_RECORDS])
+        if path_rows is None:
+            # Paths were not searched; never report a complete no_match.
+            batch.partial.add("paths_unavailable")
+        return batch

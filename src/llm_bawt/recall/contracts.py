@@ -15,7 +15,7 @@ Source = Literal["messages", "memories", "tasks", "task_details", "tool_evidence
 DEFAULT_SOURCES: tuple[Source, ...] = ("messages", "memories", "tasks")
 TASK_SOURCES = frozenset({"tasks", "task_details"})
 # Fixed reasons a source's coverage is partial beyond withheld records.
-PARTIAL_REASONS = frozenset({"reviews_truncated", "reviews_unavailable"})
+PARTIAL_REASONS = frozenset({"reviews_truncated", "reviews_unavailable", "paths_unavailable"})
 MAX_RECORDS = 24
 MAX_SOURCE_RECORDS = 6
 # Message ranking/expansion policy (TASK-1210), kept together on purpose.

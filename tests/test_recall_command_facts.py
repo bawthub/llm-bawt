@@ -13,6 +13,7 @@ import pytest
 
 from llm_bawt.recall.command_facts import command_facts, safe_path, safe_repo
 from llm_bawt.recall.contracts import RecallScope
+from llm_bawt.recall.contracts import PARTIAL_REASONS
 from llm_bawt.recall.postgres import PATH_TIMEOUT_MS, PUBLIC_HISTORY_AUTHORITY, ToolArgSource, tool_arg_facts
 
 SCOPE = RecallScope("caller", "operator", "session-a", frozenset({"excluded"}),
@@ -207,13 +208,25 @@ def test_path_pattern_drops_question_and_file_tool_words():
 
 
 @pytest.mark.asyncio
-async def test_a_path_query_timeout_keeps_clone_facts():
-    """A too-broad path pattern loses only path facts, not the source."""
-    database = Database([call("2", "cd /tmp && git clone https://github.com/example/widget w")])
+@pytest.mark.parametrize("clones, found", [
+    ([call("2", "cd /tmp && git clone https://github.com/example/widget w")], ["2"]),
+    ([], []),
+])
+async def test_a_path_query_timeout_keeps_clone_facts_and_marks_partial(clones, found):
+    """A too-broad path pattern loses only path facts, and coverage says so."""
+    database = Database(clones)
     database.path_error = RuntimeError("canceling statement due to statement timeout")
     evidence = await ToolArgSource(database).search("where was the widget cloned", SCOPE, ())
-    assert [item.id for item in evidence] == ["2"]
+    assert [item.id for item in evidence] == found
+    assert evidence.partial == {"paths_unavailable"} and "paths_unavailable" in PARTIAL_REASONS
     assert database.timeouts == [2000, PATH_TIMEOUT_MS] and PATH_TIMEOUT_MS < 2000
+
+
+@pytest.mark.asyncio
+async def test_searched_paths_leave_coverage_complete():
+    database = Database([call("2", "cd /tmp && git clone https://github.com/example/widget w")])
+    evidence = await ToolArgSource(database).search("where was the widget cloned", SCOPE, ())
+    assert evidence.partial == set()
 
 
 @pytest.mark.asyncio
