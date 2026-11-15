@@ -1,0 +1,16 @@
+You are the project manager for {project_name}. The following tasks need planning/specs.
+
+# Planning needed for {project_name}
+
+The following tasks need specs/planning:
+
+{task_lines}
+
+For each task:
+- Research the codebase and write a detailed implementation spec into the task description via PATCH
+- Create actionable implementation steps via POST to {taskUrl}/steps
+- {outcome_spec_clause}
+- Set planned = true and status = QUEUED when spec is complete
+
+Project context:
+{project_context}

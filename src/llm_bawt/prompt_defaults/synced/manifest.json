@@ -1,6 +1,17 @@
 {
   "about": "Prompt defaults added by the prompt sync for keys with no Python definition.",
   "prompts": {
+  "agents.project_planning": {
+   "title": "Agent Project Planning Nudge",
+   "category": "agent_execution",
+   "format": "plain_text",
+   "required_vars": [
+    "project_name",
+    "task_lines",
+    "outcome_spec_clause",
+    "project_context"
+   ]
+  },
     "repos.workspace.commit_aggregate": {
       "title": "Repos workspace: commit aggregate",
       "category": "repos",
