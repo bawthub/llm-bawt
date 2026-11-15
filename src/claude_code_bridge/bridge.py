@@ -395,14 +395,7 @@ class ClaudeCodeBridge(
 
 
 
-    # ----- Screenshot persistence (Playwright -> media store) -----
-
-    #: Tool tails whose image-bearing results we persist to the media store so
-    #: the app can attach them to the reply (browsable per turn + inline card).
-    #: - browser_take_screenshot: Playwright screenshots.
-    #: - generate_image: Grok Imagine output (TASK-599). The tool already stored
-    #:   the identical raw bytes, so this re-upload dedups to the same asset.
-    _IMAGE_RESULT_TOOL_TAILS = frozenset({"browser_take_screenshot", "generate_image"})
+    # Screenshot persistence lives in agent_bridge.tool_images (TASK-1324).
 
 
 

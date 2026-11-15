@@ -304,6 +304,7 @@ class CodexBridge(
         model: str | None = None,
         token_usage: dict | None = None,
         extra_raw: dict | None = None,
+        attachments: list[dict] | None = None,
     ) -> None:
         # TASK-1689: shorten only shell tool-card display; prose and other
         # tools' args/results round-trip byte-identical.
@@ -331,6 +332,7 @@ class CodexBridge(
             timestamp=datetime.now(timezone.utc),
             raw=dict(extra_raw or {}),
             token_usage=token_usage,
+            attachments=attachments,
             provider=self._backend_name,
             # Inherit from the active run so every event for this request
             # (TOOL_START, TOOL_END, ASSISTANT_*, RUN_*) carries the same

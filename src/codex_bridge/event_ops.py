@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_bridge.events import AgentEventKind
+from agent_bridge.tool_images import ToolImageMixin
 from agent_bridge.tool_results import ToolResultPayload
 
 from .reset_evidence import CodexResetEvidence
@@ -18,8 +19,11 @@ from .rollout_usage import TokenCounts
 
 logger = logging.getLogger("codex_bridge.bridge")
 
+#: item_buffers key collecting the turn's persisted image refs (TASK-1324).
+TURN_IMAGES_KEY = "__turn_images__"
 
-class CodexEventMixin:
+
+class CodexEventMixin(ToolImageMixin):
     """Codex SDK event translation + tool/usage emission (TASK-555).
 
     Split out of ``CodexBridge`` (TASK-555). Composed back on via
@@ -246,6 +250,7 @@ class CodexEventMixin:
                 model=actual_model_ref[0],
                 token_usage=token_usage,
                 extra_raw={"new_session_ack": reset_ack} if reset_ack else None,
+                attachments=item_buffers.get(TURN_IMAGES_KEY) or None,
             )
             item_buffers["__done_emitted__"] = True
             return seq, False, usage
@@ -369,6 +374,7 @@ class CodexEventMixin:
                         )
                 return seq, False, None
 
+            await self._persist_mcp_images(item, session_key, item_buffers)
             seq = self._emit_tool_end(
                 item, request_id, session_key, seq, item_buffers, text_parts,
             )
@@ -595,7 +601,8 @@ class CodexEventMixin:
             result = self._dig(item, "result") or self._dig(item, "error") or ""
             seq += 1
             self._publish_tool_end(request_id, session_key, seq,
-                                   tool_name=tool_name, result=result)
+                                   tool_name=tool_name, result=result,
+                                   attachments=buf.get("attachments"))
             return seq
 
         if item_type in ("dynamicToolCall", "dynamic_tool_call"):
@@ -640,6 +647,7 @@ class CodexEventMixin:
         *,
         tool_name: str,
         result: Any,
+        attachments: list[dict] | None = None,
     ) -> None:
         """Publish TOOL_END with a string preview plus the versioned payload."""
         payload = self._tool_result_payload(result)
@@ -649,7 +657,45 @@ class CodexEventMixin:
             tool_name=tool_name,
             tool_result=payload.preview,
             tool_result_payload=payload.to_dict(),
+            attachments=attachments or None,
         )
+
+    async def _persist_mcp_images(
+        self, item: Any, session_key: str, item_buffers: dict,
+    ) -> None:
+        """TASK-1324: upload a completed MCP image result to the media store.
+
+        Stores this call's ``{asset_id, kind}`` refs on its buffer for the
+        TOOL_END card and appends them to the turn's list for ASSISTANT_DONE,
+        matching the Claude bridge. Upload failure never breaks the turn.
+        """
+        item_type = self._dig(item, "type") or self._dig(item, "kind") or ""
+        if item_type not in ("mcpToolCall", "mcp_tool_call"):
+            return
+        item_id = self._dig(item, "id") or ""
+        buf = item_buffers.setdefault(item_id, {})
+        if not self._is_image_result_tool(buf.get("tool_name") or self._dig(item, "tool")):
+            return
+        result = self._dig(item, "result")
+        dump = getattr(result, "model_dump", None)
+        if callable(dump) and not isinstance(result, (str, dict, list)):
+            result = dump(mode="json")
+        content = result.get("content") if isinstance(result, dict) else result
+        if not isinstance(content, list):
+            return
+        try:
+            refs = self._artifact_refs(
+                await self._persist_screenshot_artifacts(content, session_key, item_id or None)
+            )
+        except Exception:
+            logger.warning("MCP image persist failed (item_id=%s)", item_id, exc_info=True)
+            return
+        if not refs:
+            return
+        buf["attachments"] = refs
+        turn = item_buffers.setdefault(TURN_IMAGES_KEY, [])
+        known = {ref.get("asset_id") for ref in turn}
+        turn.extend(ref for ref in refs if ref.get("asset_id") not in known)
 
     @staticmethod
     def _note_method(note: Any) -> str:
