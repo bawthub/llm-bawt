@@ -130,12 +130,19 @@ class TurnLogStore:
                         & TurnLog.terminal_history_projected_at.is_not(None)
                     ),
                 ))
-                from .egress_capture_store import EgressCaptureStore
-                EgressCaptureStore(self.engine).delete_before(session, cutoff)
                 session.commit()
             self.__class__._last_cleanup_at = now
         except Exception as e:
             logger.debug("Turn log TTL cleanup skipped: %s", e)
+        try:
+            # Separate transaction: egress capture expiry must never roll back
+            # turn-log expiry (TASK-502).
+            from .egress_capture_store import EgressCaptureStore
+            with Session(self.engine) as session:
+                EgressCaptureStore(self.engine).delete_before(session, cutoff)
+                session.commit()
+        except Exception as e:
+            logger.debug("Egress capture TTL cleanup skipped: %s", e)
 
     def save_turn(
         self,
