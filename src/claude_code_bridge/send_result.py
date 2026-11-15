@@ -10,6 +10,7 @@ from agent_bridge.events import AgentEventKind
 
 from ._bridge_helpers import _fmt_tokens, _read_latest_compact_metadata
 from .context_breakdown import compact_context_breakdown
+from .reasoning_ledger import record_thinking, resident_reasoning
 from .send_usage import CONTEXT_BREAKDOWN_UNAVAILABLE
 from .send_errors import retry_exhausted_text
 
@@ -159,6 +160,8 @@ class ClaudeResultMixin:
         self, sdk_client, *, request_id: str, session_key: str, seq: int,
         model: str, final_usage: dict | None, use_proxy: bool = False,
         session_start: str | None = None,
+        session_id: str | None = None,
+        thinking_by_message: dict[str, int] | None = None,
     ) -> int:
         """Read /context after DONE on the still-owned SDK client.
 
@@ -168,6 +171,9 @@ class ClaudeResultMixin:
         resident total and window authoritative. A failed or slow control read
         keeps the published values and adds only ``context_breakdown_status``.
         """
+        if not use_proxy and thinking_by_message:
+            # TASK-2343: before the read, so this turn's thinking counts as resident.
+            await asyncio.to_thread(record_thinking, session_id, thinking_by_message)
         if isinstance(final_usage, dict) and final_usage.get("context_action") == "compact":
             return seq
         started = time.monotonic()
@@ -192,6 +198,13 @@ class ClaudeResultMixin:
             return seq
         if session_start in {"clean", "seeded"}:
             breakdown["session_start"] = session_start
+        if not use_proxy and isinstance(breakdown.get("message_breakdown"), dict):
+            # TASK-2343: earlier turns' thinking stays in context; its blocks are
+            # redacted, so only the API-reported counts can size it.
+            resident = await asyncio.to_thread(resident_reasoning, session_id)
+            if resident is not None:
+                breakdown["message_breakdown"]["reasoningTokens"] = resident[0]
+                breakdown["message_breakdown"]["reasoningComplete"] = resident[1]
         usage = {**(final_usage or {}), "context_breakdown": breakdown, "usage_status": "final"}
         if not use_proxy:
             native_total = native.get("totalTokens")

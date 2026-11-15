@@ -109,6 +109,9 @@ class LiveUsagePublisher:
     visible_output_chars: int = 0
     _request_sources: dict[int, str | None] = field(default_factory=dict)
     _main_reasoning: dict[int, int] = field(default_factory=dict)
+    # TASK-2343: Anthropic message id per main-thread request, for the
+    # resident-reasoning sidecar.
+    _main_message_ids: dict[int, str] = field(default_factory=dict)
 
     def observe_stream_event(self, event: dict, source: str | None = None) -> None:
         """Track each upstream request: message_start opens one, deltas update it.
@@ -131,6 +134,8 @@ class LiveUsagePublisher:
             self.request_usages.append({})
             self._open_requests[source] = len(self.request_usages) - 1
             self._request_sources[len(self.request_usages) - 1] = source
+            if source is None and isinstance(message, dict) and isinstance(message.get("id"), str):
+                self._main_message_ids[len(self.request_usages) - 1] = message["id"]
             self._merge_request_usage(source, message.get("usage") if isinstance(message, dict) else None)
         elif kind == "message_delta":
             self._merge_request_usage(source, event.get("usage"))
@@ -145,10 +150,26 @@ class LiveUsagePublisher:
             value = usage.get(key)
             if isinstance(value, (int, float)) and value > 0:
                 current[key] = int(value)
-        # TASK-1586: exact reasoning, reported by the OpenAI proxy only.
+        # TASK-1586: exact reasoning from the OpenAI proxy. TASK-2343: Anthropic
+        # reports it too, as output_tokens_details.thinking_tokens (API-measured;
+        # the thinking text itself is redacted).
         reasoning = usage.get("reasoning_output_tokens")
-        if source is None and isinstance(reasoning, (int, float)) and reasoning >= 0:
+        details = usage.get("output_tokens_details")
+        if not isinstance(reasoning, (int, float)) and isinstance(details, dict):
+            reasoning = details.get("thinking_tokens")
+        if (
+            source is None and isinstance(reasoning, (int, float))
+            and not isinstance(reasoning, bool) and reasoning >= 0
+        ):
             self._main_reasoning[index] = int(reasoning)
+
+    def thinking_by_message(self) -> dict[str, int]:
+        """Main-thread ``{message_id: thinking_tokens}`` for requests that reported it."""
+        return {
+            self._main_message_ids[i]: tokens
+            for i, tokens in self._main_reasoning.items()
+            if i in self._main_message_ids
+        }
 
     def request_totals(self) -> dict | None:
         """Sum of every upstream request's input so far; None before the first."""
@@ -171,8 +192,9 @@ class LiveUsagePublisher:
         """The turn's reasoning share of output as ``(tokens, source)``.
 
         Exact when every main-thread request reported it (OpenAI via the
-        proxy); otherwise estimated as output minus visible output. Clamped
-        to ``0..output``; None when no stream was observed.
+        proxy, or Anthropic's thinking_tokens); otherwise estimated as output
+        minus visible output. Clamped to ``0..output``; None when no stream
+        was observed.
         """
         if output_tokens <= 0 or not self.request_usages:
             return None

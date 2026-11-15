@@ -868,6 +868,8 @@ class ClaudeSendMixin(
                                     model=actual_model, final_usage=terminal_usage[0],
                                     use_proxy=use_proxy,
                                     session_start=session_start if turn_session_id else None,
+                                    session_id=turn_session_id,
+                                    thinking_by_message=live_usage.thinking_by_message(),
                                 )
                                 break
                         aborted = aborted or (cancel_event is not None and cancel_event.is_set())
