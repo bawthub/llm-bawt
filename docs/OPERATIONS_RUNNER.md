@@ -148,9 +148,14 @@ The disabled seed `llm-bawt.operation-sequence` uses
 `{"action":"operation_sequence","operations":["allowed.catalog-slug", ...]}`.
 Its invocation is `{"steps":[{"operation":"allowed.catalog-slug","args":{}}, ...]}`,
 with one to six ordered steps. The catalog owns both the allowed operations
-and the closed argument schema; extend that schema alongside an allowlist
-change when admitting argument-bearing children. Existing rows are never
-silently changed by seeding.
+and the closed parent/step shape. Each step's `args` is explicitly an open
+object at the parent layer; ordinary child admission validates it against that
+child's own schema/defaults and resolves its runtime-source guard. For example,
+a guarded `restart-app` takes its required `expected_runtime_sha` here, not in
+the parent's schema. Unknown child arguments still fail child admission.
+Existing rows are never silently changed by seeding: update only the nested
+`args` schema on an existing sequence row, preserving its allowed operations,
+enablement and other operator-owned settings.
 
 The initial action requires critical risk and all-agent quiesce for the
 entire window. It permits health-configured restart/start and app/tagged
@@ -1304,7 +1309,9 @@ should namespace their own explicit keys.
   cannot be reconstructed and are not fabricated. Legacy active jobs without
   snapshots reconcile to lost; never execute them using today's catalog.
 - The supported schema subset is explicit; malformed/unsupported keywords are
-  rejected rather than ignored. Empty `{}` means no args, all nested objects are
-  closed, array items/types and numeric/string constraints are checked. Defaults
+  rejected rather than ignored. Empty `{}` means no args; objects are closed
+  unless `additionalProperties: true` is explicit. Declared properties still
+  retain their required/type/value checks inside an open object. Array
+  items/types and numeric/string constraints are checked. Defaults
   must themselves be valid declared values; required caller fields can remain
   absent in the defaults object.

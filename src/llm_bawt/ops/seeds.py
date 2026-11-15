@@ -688,8 +688,8 @@ _PLAN_SEEDS: list[dict[str, Any]] = [{
 
 
 # TASK-1263: one approval and worker for a bounded, caller-ordered sequence.
-# These existing rows all accept no arguments. Each child must independently
-# be enabled and pass its normal admission checks; this seed enables nothing.
+# Each child owns its argument schema and runtime-source guard, validated by
+# ordinary child admission. This seed enables nothing.
 _SEQUENCE_OPERATIONS = [
     "llm-bawt.restart-app",
     "bawthub.restart-frontend",
@@ -722,7 +722,9 @@ _SEQUENCE_SEEDS: list[dict[str, Any]] = [{
                 "required": ["operation", "args"],
                 "properties": {
                     "operation": {"type": "string", "enum": _SEQUENCE_OPERATIONS},
-                    "args": {"type": "object", "additionalProperties": False, "properties": {}},
+                    # Child prepare_invocation validates this object against
+                    # the selected operation's current schema and defaults.
+                    "args": {"type": "object", "additionalProperties": True},
                 },
             },
         },

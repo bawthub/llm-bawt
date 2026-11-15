@@ -2,6 +2,9 @@
 # ruff: noqa: F811 - the imported repo fixture is a parameter by design
 import json
 
+import pytest
+
+from llm_bawt.ops import OpsDispatchError
 from llm_bawt.ops.execution_mode import with_card_lines
 from llm_bawt.ops.runtime_source import bind_runtime_source, valid_runtime_binding
 from llm_bawt.ops.sequence_approval import approval_text
@@ -14,13 +17,12 @@ from tests.test_ops_sequence_admission import HEALTH, child, prepare, rig, step
 from tests.test_ops_sequence_worker import Docker, invoke, receipt, request_file
 
 
-def sequence_rig(repo, tmp_path, *, mixed):
+def sequence_rig(repo, tmp_path, *, mixed, slug="test.first"):
     spec = {**extended_spec(repo, mixed=mixed), **HEALTH}
     schema = extended_schema(mixed=mixed)
     r = rig(
-        [child(spec=spec, args_schema_json=json.dumps(schema),
+        [child(slug, spec=spec, args_schema_json=json.dumps(schema),
                args_defaults_json='{"allow_dirty":false}')],
-        argument_properties=schema["properties"],
         release_verifier=type("Published", (), {"branch_contains": lambda *_: True})(),
     )
     r.executor.add("app")
@@ -33,6 +35,38 @@ def sequence_rig(repo, tmp_path, *, mixed):
     r.executor.runtime_source_approval = lambda spec, args: bind_runtime_source(
         api, spec, args, container, tag="review")
     return r
+
+
+def test_restart_app_child_uses_its_own_schema_and_guarded_sha(repo, tmp_path):
+    revision = git(repo, "rev-parse", "HEAD").strip()
+    r = sequence_rig(repo, tmp_path, mixed=False, slug="llm-bawt.restart-app")
+    args = {"expected_runtime_sha": revision}
+    snapshot = prepare(r, [step("llm-bawt.restart-app", args)])
+    nested = snapshot["sequence"]["steps"][0]["snapshot"]
+    assert nested["input_args"] == args
+    assert nested["resolved_args"] == {**args, "allow_dirty": False}
+    assert nested["runtime_source"]["expected_runtime_sha"] == revision
+    assert nested["runtime_source"]["source_commit"]["head"] == revision
+    assert nested["runtime_source"]["publication"] == "published"
+    assert valid_runtime_binding(nested)
+    assert nested == r.service.prepare_invocation("llm-bawt.restart-app", args)
+    assert r.service._verify_snapshot(snapshot, r.parent.slug, snapshot["input_args"]) == snapshot
+    assert r.executor.dispatch_calls == [] and r.store.list_jobs() == []
+
+
+@pytest.mark.parametrize("args,match", [
+    ({}, "required property 'expected_runtime_sha'"),
+    ({"expected_runtime_sha": "not-a-sha"}, "does not match pattern"),
+    ({"expected_runtime_sha": "a" * 40, "unknown": True}, "unknown property 'unknown'"),
+    ({"expected_runtime_sha": "a" * 40, "allow_dirty": "false"}, "expected boolean"),
+])
+def test_restart_app_child_refuses_invalid_args_without_dispatch(repo, tmp_path, args, match):
+    r = sequence_rig(repo, tmp_path, mixed=False, slug="llm-bawt.restart-app")
+    with pytest.raises(OpsDispatchError, match=match) as caught:
+        prepare(r, [step("llm-bawt.restart-app", args)])
+    assert caught.value.code == "args_invalid"
+    assert r.executor.checked == [] and r.executor.preflighted == []
+    assert r.executor.dispatch_calls == [] and r.store.list_jobs() == []
 
 
 def test_explicit_null_target_runs_in_sequence(repo, tmp_path, monkeypatch):

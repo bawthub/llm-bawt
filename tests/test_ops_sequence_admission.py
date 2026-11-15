@@ -114,7 +114,7 @@ def all_labels_match(labels, wanted):
                (item.split("=", 1) for item in wanted))
 
 
-def rig(children=None, *, parent=None, argument_properties=None, release_verifier=None):
+def rig(children=None, *, parent=None, release_verifier=None):
     rows = children if children is not None else [
         child(), child("test.second", name="second"),
     ]
@@ -128,7 +128,6 @@ def rig(children=None, *, parent=None, argument_properties=None, release_verifie
     schema = json.loads(SEED["args_schema_json"])
     properties = schema["properties"]["steps"]["items"]["properties"]
     properties["operation"]["enum"] = allowed
-    properties["args"]["properties"] = argument_properties or {}
     data = {
         **SEED, "enabled": True,
         "command_script": json.dumps({"action": sequence.ACTION, "operations": allowed}),
@@ -167,6 +166,9 @@ def test_seed_is_disabled_critical_bounded_and_references_only_existing_eligible
     steps = schema["properties"]["steps"]
     assert steps["minItems"] == 1 and steps["maxItems"] == sequence.MAX_STEPS == 6
     assert steps["items"]["properties"]["operation"]["enum"] == spec["operations"]
+    assert steps["items"]["properties"]["args"] == {"type": "object", "additionalProperties": True}
+    assert "llm-bawt.restart-bridge" not in spec["operations"]
+    assert "llm-bawt.restart-house" not in spec["operations"]
     budgets = []
     for slug in spec["operations"]:
         row = catalog[slug]
@@ -362,9 +364,7 @@ def test_child_arguments_defaults_and_sensitive_display_use_normal_prepare():
         spec={"action": "restart", "container_name_from_arg": "target", **HEALTH},
         args_schema_json=json.dumps(schema), args_defaults_json='{"token":"private-default"}',
     )
-    r = rig([row], argument_properties={
-        "target": {"type": "string"}, "token": {"type": "string"},
-    })
+    r = rig([row])
     r.executor.add("first")
     snapshot = prepare(r, [step(args={"target": "first"})])
     bound = snapshot["sequence"]["steps"][0]
@@ -377,6 +377,8 @@ def test_child_arguments_defaults_and_sensitive_display_use_normal_prepare():
     # The parent accepts any string here; only the child's own enum rejects this.
     refused(r, [step(args={"target": "unlisted"})], code="args_invalid", match="not in enum")
     refused(r, [step()], code="args_invalid", match="required property 'target'")
+    refused(r, [step(args={"target": "first", "unknown": True})],
+            code="args_invalid", match="unknown property 'unknown'")
 
 
 @pytest.mark.parametrize("kind", ["app", "tagged"])

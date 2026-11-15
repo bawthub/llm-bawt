@@ -1,7 +1,8 @@
 """Strict, deliberately bounded JSON Schema subset for the operations catalog.
 
-Unsupported keywords are rejected, not silently ignored. All objects are closed;
-``{}`` at the root means no arguments. No external references or dependencies.
+Unsupported keywords are rejected, not silently ignored. Objects are closed
+unless ``additionalProperties: true`` is explicit; ``{}`` at the root means
+no arguments. No external references or dependencies.
 """
 from __future__ import annotations
 
@@ -65,7 +66,7 @@ def _check_schema(schema: Any, path: str, *, root: bool = False) -> None:
     if "x-sensitive" in schema and type(schema["x-sensitive"]) is not bool:
         fail("x-sensitive must be boolean")
     if "additionalProperties" in schema and not isinstance(schema["additionalProperties"], bool):
-        fail("additionalProperties must be boolean (objects are always closed)")
+        fail("additionalProperties must be boolean")
     if "properties" in schema and kind != "object":
         fail("properties requires object type")
     props = schema.get("properties", {})
@@ -115,7 +116,8 @@ def _validate(value: Any, schema: dict, path: str, *, partial: bool = False) -> 
         errors.append(f"{path}: value not in enum")
     if kind == "object":
         props = schema.get("properties", {})
-        errors += [f"{path}: unknown property {k!r}" for k in value if k not in props]
+        if schema.get("additionalProperties") is not True:
+            errors += [f"{path}: unknown property {k!r}" for k in value if k not in props]
         if not partial:
             errors += [f"{path}: required property {k!r} missing" for k in schema.get("required", []) if k not in value]
         for k in value.keys() & props.keys():

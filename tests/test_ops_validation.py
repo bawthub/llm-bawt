@@ -2,8 +2,8 @@
 
 Verifies the minimal in-house JSON Schema validator:
 
-* unknown properties are ALWAYS rejected (even if the schema omits
-  ``additionalProperties: false`` — TASK-639 invariant)
+* unknown properties are rejected by default, including when the schema omits
+  ``additionalProperties: false``; only explicit true opens an object
 * required properties are enforced
 * type / enum / minLength / maxLength / pattern / minimum / maximum
 * defaults fill absent declared keys but never introduce undeclared keys
@@ -25,6 +25,29 @@ def _schema(**over):
 
 def test_empty_schema_accepts_empty_args():
     assert validate_args({}, _schema()) == {}
+
+
+@pytest.mark.parametrize("additional", [None, False])
+def test_objects_remain_closed_by_default_at_every_depth(additional):
+    nested = {"type": "object", "properties": {}}
+    if additional is not None:
+        nested["additionalProperties"] = additional
+    with pytest.raises(ArgValidationError, match="unknown property 'unknown'"):
+        validate_args({"child": {"unknown": 1}}, _schema(properties={"child": nested}))
+
+
+def test_explicit_open_object_preserves_json_but_validates_declared_properties():
+    nested = {"type": "object", "additionalProperties": True,
+              "properties": {"count": {"type": "integer"}}, "required": ["count"]}
+    schema = _schema(properties={"child": nested})
+    args = {"child": {"count": 1, "expected_runtime_sha": "a" * 40, "extra": {"items": [True, None]}}}
+    assert validate_args(args, schema) == args
+    with pytest.raises(ArgValidationError, match="expected integer"):
+        validate_args({"child": {"count": "1"}}, schema)
+    with pytest.raises(ArgValidationError, match="required property 'count'"):
+        validate_args({"child": {"extra": True}}, schema)
+    with pytest.raises(ArgValidationError, match="unknown property 'outside'"):
+        validate_args({**args, "outside": True}, schema)
 
 
 def test_unknown_property_is_rejected_even_when_schema_permits():
