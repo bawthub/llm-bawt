@@ -39,6 +39,7 @@ FULL_BOT = {
                     "prompt_stale": {"since": "2026-11-14T02:00:00+00:00",
                                      "changed_at": "2026-11-14T02:00:00+00:00", "sections": ["tags", "skills"]}},
         "location": {"runtime": "house", "house": "h1", "house_live": True},
+        "steerable": True,
     },
 }
 
@@ -69,6 +70,15 @@ def test_a_compact_bot_keeps_gate_and_unreadable_state():
 
     unread = {**FULL_BOT, "state": {**FULL_BOT["state"], "gated": None, "gate": None}}
     assert inter_bot_tools._compact_bot(unread)["gated"] is None  # unknown is never "not gated"
+
+
+def test_a_compact_bot_names_only_a_bot_that_is_not_known_to_steer():
+    def steer(value):
+        return inter_bot_tools._compact_bot({**FULL_BOT, "state": {**FULL_BOT["state"], "steerable": value}})
+
+    assert "steerable" not in steer(True)  # the common case costs nothing
+    assert steer(False)["steerable"] is False
+    assert steer(None)["steerable"] is None  # unknown is never "steerable"
 
 
 

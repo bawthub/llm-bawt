@@ -802,6 +802,33 @@ def _live_states(profiles: list) -> dict[str, dict]:
     )
 
 
+def _steerable(profiles: list) -> dict[str, bool | None]:
+    """Whether a new run of each bot accepts a steer (TASK-1328).
+
+    The dispatcher's own answer: ``bot_steer_caps`` of the bot as it loads it
+    for a claim. A turn already running keeps the capabilities it bound with.
+    A bot that can't be loaded is null (unknown), never false.
+    """
+    from llm_bawt.bots import BotManager
+    from llm_bawt.steer_capabilities import NEXT, bot_steer_caps
+    from llm_bawt.utils.config import Config
+
+    try:
+        manager = BotManager(Config())
+    except Exception:
+        logger.warning("bot steer capabilities: bot registry unavailable", exc_info=True)
+        return {row.slug: None for row in profiles}
+    out: dict[str, bool | None] = {}
+    for row in profiles:
+        try:
+            bot = manager.get_bot(row.slug)
+            out[row.slug] = None if bot is None else NEXT in bot_steer_caps(bot)
+        except Exception:
+            logger.warning("bot steer capabilities: %s unreadable", row.slug, exc_info=True)
+            out[row.slug] = None
+    return out
+
+
 async def _add_task_titles(states: dict[str, dict]) -> None:
     """Fill ``title`` on each resolved turn task from BawtHub; null if unreadable."""
     from .task_api import api_get
@@ -959,6 +986,8 @@ def _compact_bot(entry: dict) -> dict:
     session = state.get("session")
     if isinstance(session, dict) and session.get("prompt_stale"):
         row["prompt_stale"] = True
+    if state.get("steerable") is not True:  # false, or null when unknown
+        row["steerable"] = state.get("steerable")
     if state.get("unavailable"):
         row["unavailable"] = state["unavailable"]
     return row
@@ -1008,11 +1037,15 @@ async def list_available_bots(
     ``state.location`` (TASK-2116): where the bot's new turns run, resolved like
     the dispatcher (house lease, then the backend's bridge), never from the
     model; see ``llm_bawt.bot_location``. ``location`` filters on it.
+    ``state.steerable`` (TASK-1328): whether a message sent while the bot is
+    busy can steer its next run instead of queueing as a new turn; the
+    dispatcher's own ``bot_steer_caps`` answer, null when unknown.
 
     ``detail`` (TASK-2249): "compact" (default) projects each bot to
     ``_compact_bot`` (slug, tags, capabilities, provider, non-unknown quota,
     turn/last turn kind, task ref and time, queued, gated/gate, approvals,
-    location, prompt_stale, unavailable); empty and null fields are left out.
+    location, prompt_stale, steerable only when not true, unavailable); empty
+    and null fields are left out, except ``steerable: null`` (unknown).
     "full" returns every field above.
     """
     from llm_bawt.bot_location import location_runtimes, read_locations
@@ -1054,6 +1087,7 @@ async def list_available_bots(
     routed = profiles + [row for row in every if row.slug == caller]
     facts, caller_provider = await asyncio.to_thread(_route_facts, routed, caller, turn_id)
     states = await asyncio.to_thread(_live_states, profiles) if include_state and profiles else {}
+    steerable = await asyncio.to_thread(_steerable, profiles) if include_state and profiles else {}
     await _add_task_titles(states)
     listed = []
     for row in profiles:
@@ -1073,6 +1107,7 @@ async def list_available_bots(
             "same_provider_as_caller": same,
         }
         if include_state:
-            entry["state"] = {**states[row.slug], "location": locations[row.slug]}
+            entry["state"] = {**states[row.slug], "location": locations[row.slug],
+                              "steerable": steerable.get(row.slug)}
         listed.append(entry if detail == "full" else _compact_bot(entry))
     return listed

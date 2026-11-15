@@ -91,6 +91,12 @@ def policy(monkeypatch):
     monkeypatch.setattr(tools, "_role_capabilities", role_capabilities)
     monkeypatch.setattr(tools, "_profile_rows", profile_rows)
     monkeypatch.setattr(tools, "_live_states", live_states)
+
+    def steerable(profiles):
+        state["order"].append("steerable")
+        return {row.slug: row.slug != "fixture-quiet" for row in profiles}
+
+    monkeypatch.setattr(tools, "_steerable", steerable)
     return state
 
 
@@ -114,9 +120,73 @@ def test_discovery_lists_only_public_and_quiet_bots_with_their_tags(policy):
 def test_state_is_read_once_for_the_visible_bots_only(policy):
     listed = asyncio.run(tools.list_available_bots(detail="full"))
 
-    assert policy["order"] == ["policy", "capabilities", "profiles", "routes", "state"]
+    assert policy["order"] == ["policy", "capabilities", "profiles", "routes", "state", "steerable"]
     assert policy["state_reads"] == [["fixture-public", "fixture-quiet"]]
     assert [bot["state"]["fixture"] for bot in listed] == ["fixture-public", "fixture-quiet"]
+    assert [bot["state"]["steerable"] for bot in listed] == [True, False]
+
+
+def test_compact_rows_name_only_the_bot_that_cannot_steer(policy):
+    listed = asyncio.run(tools.list_available_bots())
+
+    assert ["steerable" in bot for bot in listed] == [False, True]
+    assert listed[1]["steerable"] is False
+
+
+class _Manager:
+    """Stand-in for the dispatcher's ``BotManager``: bots by slug, or a failure."""
+
+    bots: dict[str, Any] = {}
+
+    def __init__(self, config=None):
+        if self.bots is None:
+            raise RuntimeError("registry down")
+
+    def get_bot(self, slug):
+        bot = self.bots.get(slug)
+        if isinstance(bot, Exception):
+            raise bot
+        return bot
+
+
+def _steer_rows(monkeypatch, bots):
+    import llm_bawt.bots as bots_module
+    import llm_bawt.utils.config as config_module
+
+    monkeypatch.setattr(_Manager, "bots", bots)
+    monkeypatch.setattr(bots_module, "BotManager", _Manager)
+    monkeypatch.setattr(config_module, "Config", lambda: object())
+    return tools._steerable([_profile(slug) for slug in ("a", "b", "c", "d", "e")])
+
+
+def test_steerable_is_the_dispatchers_bot_steer_caps_answer(monkeypatch):
+    def bot(backend, **config):
+        return SimpleNamespace(agent_backend=backend, agent_backend_config=config)
+
+    got = _steer_rows(monkeypatch, {
+        "a": bot("claude-code"),
+        "b": bot("codex", codex_transport="app_server"),  # next-only still steers
+        "c": bot("codex"),  # codex exec never steers
+        "e": RuntimeError("bad row"),
+    })  # "d" is not in the registry
+
+    assert got == {"a": True, "b": True, "c": False, "d": None, "e": None}
+
+
+def test_steerable_and_the_dispatcher_share_one_helper(monkeypatch):
+    import llm_bawt.service.inter_bot_dispatcher as dispatcher
+    import llm_bawt.steer_capabilities as caps
+
+    assert dispatcher.bot_steer_caps is caps.bot_steer_caps
+    monkeypatch.setattr(caps, "bot_steer_caps",
+                        lambda b: caps.ALL_STEER_CAPS if b.agent_backend == "x" else caps.NO_STEER_CAPS)
+    got = _steer_rows(monkeypatch, {s: SimpleNamespace(agent_backend="x" if s == "a" else "y")
+                                    for s in "abcde"})
+    assert got == {"a": True, "b": False, "c": False, "d": False, "e": False}
+
+
+def test_an_unreadable_registry_leaves_steerable_unknown_and_still_lists(monkeypatch):
+    assert set(_steer_rows(monkeypatch, None).values()) == {None}
 
 
 @pytest.mark.parametrize("tag", ["reviewer", " Reviewer "])
