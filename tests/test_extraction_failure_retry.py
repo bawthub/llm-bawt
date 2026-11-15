@@ -233,7 +233,11 @@ def test_profile_failure_after_memory_write_is_retried(monkeypatch: pytest.Monke
                         MemoryExtractionService._determine_actions_with_heuristics)
     calls: list[bool] = []
 
-    def profile_write(*, fact: Any, user_id: str, config: Any, raise_errors: bool, idempotent: bool) -> bool:
+    def profile_write(
+        *, fact: Any, user_id: str, config: Any, raise_errors: bool,
+        idempotent: bool, enabled: bool | None = None,
+    ) -> bool:
+        assert enabled is True
         calls.append(idempotent)
         if len(calls) == 1:
             raise RuntimeError("profile store down")
