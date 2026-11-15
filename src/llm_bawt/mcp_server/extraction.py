@@ -58,6 +58,7 @@ def extract_profile_attributes_from_fact(
     *,
     raise_errors: bool = False,
     idempotent: bool = False,
+    enabled: bool | None = None,
 ) -> bool:
     """Extract profile attributes from a fact if the LLM identified it as one.
 
@@ -93,7 +94,7 @@ def extract_profile_attributes_from_fact(
     source_message_id = str(source_ids[0])[:100] if source_ids else None
     
     # Check if profile extraction is enabled
-    if not getattr(config, "MEMORY_PROFILE_ATTRIBUTE_ENABLED", True):
+    if not (enabled if enabled is not None else getattr(config, "MEMORY_PROFILE_ATTRIBUTE_ENABLED", True)):
         logger.debug("[Profile] Profile extraction disabled")
         return False
     

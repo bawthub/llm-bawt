@@ -1,4 +1,4 @@
-# Scheduled job parameters (TASK-1197)
+# Scheduled job parameters (TASK-1197, TASK-1198)
 
 Maintenance job configuration remains in `scheduled_jobs`. The opt-in
 `JobParameterRegistry` supplies validated models and JSON Schema metadata;
@@ -34,9 +34,11 @@ scheduler or a replacement for legacy runtime settings.
 ```
 
 Updates lock the job row and commit together. Parameters merge with stored values
-and are validated before commit. Omitted parameters receive model defaults;
-explicit nulls, unknown fields, booleans-as-integers and numeric strings are
-rejected. Cadence is an integer from 1 through 525600 minutes. Enabling a paused
+and are validated before commit. Omitted parameters inherit their documented
+defaults. Common patch fields reject explicit null; unknown fields,
+booleans-as-integers and numeric strings are rejected. Legacy null optional
+model/path/assignee/package values retain their inherited meaning. Cadence is
+an integer from 1 through 525600 minutes. Enabling a paused
 job or changing its interval schedules the next occurrence one interval after
 save. Parameter-only changes do not alter the next-run timestamp. Disabling does
 not cancel an in-flight run. Prompt schedules are excluded: their separate
@@ -103,16 +105,50 @@ Busy checks, session/measurement fences, provider evidence and receipt validatio
 remain mandatory. Threshold configuration does not initialize missing accepted
 session pointers: the existing-session rollout gap is a separate issue.
 
-## Extending in TASK-1198
+## Remaining maintenance jobs (TASK-1198)
 
-For each remaining job, first trace its actual runtime settings and shared
-consumers. Add a `JobParameters` model and register its job type only when its
-execution path consumes those validated effective values. Initialize/migrate
-from the existing effective settings with explicit precedence; never silently
-replace operator choices with new defaults. Keep genuinely shared service/model
-settings global. Do not remove old global controls while other consumers need
-them. Until registered and integrated, legacy config JSON remains opaque to this
-framework and existing execution paths continue unchanged.
+The existing Automation editor consumes these registered flat schemas. Prompt
+schedules retain their separate owner-scoped API and are not maintenance jobs.
+This is a read-time migration, not a data rewrite: saved job JSON wins over
+current shared defaults, then the historical code default. Reads, restart and
+unrelated parameter patches do not materialize inherited defaults into storage.
+Cadence and enablement remain the existing row fields; bootstrap never rewrites
+an existing row. Blank model inherits the same global resolution and fallback
+policy as before; choosing an explicit model disables fallback as before.
+
+| Job | Editable controls and prior effective source |
+| --- | --- |
+| Profile maintenance | `entity_id`, `entity_type` from saved JSON (defaults user/user); `dry_run=false`; optional explicit `model`, otherwise shared profile/maintenance model. |
+| Memory consolidation | `entity_id` from JSON (system); `dry_run=false`. Consolidation-only task flags remain fixed. |
+| Memory decay | `entity_id` from JSON (system); `dry_run=false`. Decay-only task flags remain fixed. |
+| History summarization | JSON user/system, heuristic fallback/true, chunk tokens/4000, model override; session gap, minimum messages, protected turns and trigger inherit `summarization_job` unless overridden. Fact importance and profile extraction inherit the shared extraction settings unless overridden. |
+| Memory extraction | JSON user/system, batch size/50 (1–1000), model override; enabled, minimum importance and profile extraction inherit the existing shared extraction config unless overridden. |
+| Media GC | JSON user/system, grace days/7, dry run/false. |
+| Tool-result GC | JSON user/system, retention days/14, dry run/false. |
+| Harness version check | JSON user/system, constraints path/installed pins, packages/installed list, assignee/none, priority/MEDIUM. Empty optional values retain those defaults. |
+| Playground expiry | JSON user/system. Trash retention remains shared with the Playground UI. |
+
+The history eligibility probe and worker receive the same session controls.
+Both raw-message and post-summary fact extraction consume their own job's
+importance/profile options. A local profile option also reaches the inner
+profile helper; it never changes the shared config for manual extraction.
+Post-summary extraction retains its independent model and lack of the raw
+extraction enabled gate. Explicit zero trigger and nonpositive chunk limits
+retain model-budget and no-split semantics respectively.
+
+### Controls intentionally kept shared
+
+Manual MCP extraction still uses extraction enablement/importance/profile
+settings. Manual summarization and `/new` still use `summarization_job`.
+Model aliases, endpoint credentials, fallback/spending policy, context limits,
+embedding model/dimension and scheduler poll interval remain service-wide.
+Maintenance decay half-life also controls chat retrieval scoring; consolidation
+and pruning algorithms retain their existing numeric defaults (including the
+consolidator's 0.75 threshold), without introducing ignored numeric parameters.
+Profile attribute importance stays at the effective inner 0.7 threshold; the
+unused similarly named config field is not newly activated. Playground trash
+retention is also used to display deletion deadlines. None of these shared
+controls is removed or duplicated as a new authoritative global setting.
 
 Focused verification: `tests/test_job_parameters.py`, existing idle-reset and
 lifecycle-intent/scheduler tests, plus frontend configuration/proxy tests. No live

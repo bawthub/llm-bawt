@@ -225,6 +225,7 @@ class BackgroundTasksMixin:
         summarization_results: list[dict],
         bot_id: str,
         user_id: str,
+        parameters: dict | None = None,
     ) -> dict:
         """Extract facts from newly created summaries using an API model.
 
@@ -266,8 +267,13 @@ class BackgroundTasksMixin:
                 "extraction_method": "skipped",
             }
 
-        min_importance = getattr(self.config, "MEMORY_EXTRACTION_MIN_IMPORTANCE", 0.5)
-        profile_enabled = getattr(self.config, "MEMORY_PROFILE_ATTRIBUTE_ENABLED", True)
+        parameters = parameters or {}
+        min_importance = parameters.get(
+            "min_importance", getattr(self.config, "MEMORY_EXTRACTION_MIN_IMPORTANCE", 0.5),
+        )
+        profile_enabled = parameters.get(
+            "profile_enabled", getattr(self.config, "MEMORY_PROFILE_ATTRIBUTE_ENABLED", True),
+        )
 
         total_facts = 0
         total_stored = 0
@@ -400,6 +406,7 @@ class BackgroundTasksMixin:
                                 fact=fact,
                                 user_id=user_id,
                                 config=self.config,
+                                enabled=profile_enabled,
                             )
                     except Exception as e:
                         log.warning(f"Failed to process memory action {action.action}: {e}")
@@ -478,7 +485,12 @@ class BackgroundTasksMixin:
         bot_id = task.bot_id or self._default_bot
         # TASK-610: Tier-1 job params from the ONE global dict (model + trigger
         # below). model=None => inherit maintenance_model, as before.
-        job = self.config.resolve_summarization_job()
+        job = {**self.config.resolve_summarization_job(), **{
+            key: task.payload[key] for key in (
+                "session_gap_seconds", "min_messages_per_session",
+                "protected_recent_turns", "trigger_tokens",
+            ) if key in task.payload
+        }}
         requested_model = (
             task.payload.get("model")
             or job.get("model")
@@ -540,6 +552,10 @@ class BackgroundTasksMixin:
             summarize_fn=summarize_with_loaded_client,
             settings_getter=resolver.resolve,
             max_context_tokens=max_context_tokens,
+            **({"job_parameters": job} if any(key in task.payload for key in (
+                "session_gap_seconds", "min_messages_per_session",
+                "protected_recent_turns", "trigger_tokens",
+            )) else {}),
         )
 
         # Remote API call — already on the bounded bg pool via process_task
@@ -564,6 +580,7 @@ class BackgroundTasksMixin:
             result.get("results", []),
             bot_id=bot_id,
             user_id=profile_user_id,
+            parameters=task.payload,
         )
         result["extraction"] = extraction_results
 
@@ -591,7 +608,7 @@ class BackgroundTasksMixin:
         batch_size = max(1, min(int(task.payload.get("batch_size", 50)), 1000))
 
         # Check config gate
-        if not getattr(self.config, "MEMORY_EXTRACTION_ENABLED", True):
+        if not task.payload.get("extraction_enabled", getattr(self.config, "MEMORY_EXTRACTION_ENABLED", True)):
             return {"skipped": True, "reason": "Memory extraction disabled in config"}
 
         # Get a PostgreSQL backend directly for message table access.
@@ -674,8 +691,12 @@ class BackgroundTasksMixin:
         use_llm = extraction_client is not None
 
         extraction_service = MemoryExtractionService(llm_client=extraction_client)
-        min_importance = getattr(self.config, "MEMORY_EXTRACTION_MIN_IMPORTANCE", 0.5)
-        profile_enabled = getattr(self.config, "MEMORY_PROFILE_ATTRIBUTE_ENABLED", True)
+        min_importance = task.payload.get(
+            "min_importance", getattr(self.config, "MEMORY_EXTRACTION_MIN_IMPORTANCE", 0.5),
+        )
+        profile_enabled = task.payload.get(
+            "profile_enabled", getattr(self.config, "MEMORY_PROFILE_ATTRIBUTE_ENABLED", True),
+        )
 
         # Build conversation chunks for extraction — group consecutive messages
         conversation = [
@@ -840,6 +861,7 @@ class BackgroundTasksMixin:
                                     config=self.config,
                                     raise_errors=True,
                                     idempotent=retry,
+                                    enabled=profile_enabled,
                                 )
                             except Exception as e:
                                 failed_actions += 1

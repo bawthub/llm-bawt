@@ -981,6 +981,7 @@ class HistorySummarizer:
         summarize_batch_fn: "Callable[[list[Session]], dict[int, str] | None] | None" = None,
         settings_getter: "Callable[[str, Any], Any] | None" = None,
         max_context_tokens: int = 0,
+        job_parameters: dict | None = None,
     ):
         self.config = config
         self.bot_id = require_bot_id(bot_id, "HistorySummarizer")
@@ -998,7 +999,7 @@ class HistorySummarizer:
         # Budget-driven summarization settings — TASK-610: the ONE global-only
         # Tier-1 job dict (was three per-bot _setting reads with legacy env
         # fallbacks). Job scheduling params are global, not bot-aware.
-        job = config.resolve_summarization_job()
+        job = {**config.resolve_summarization_job(), **(job_parameters or {})}
         self.session_gap_seconds = job["session_gap_seconds"]
         self.min_messages_per_session = job["min_messages_per_session"]
         self.protected_recent_turns = int(job["protected_recent_turns"])

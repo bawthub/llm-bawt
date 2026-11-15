@@ -16,6 +16,13 @@ from ..scheduler import JobRun, JobStatus, JobType, ScheduledJob, create_schedul
 router = APIRouter()
 
 
+def _parameter_config(job_type):
+    """Only these defaults inherit shared runtime configuration."""
+    return get_service().config if job_type in (
+        JobType.HISTORY_SUMMARIZATION, JobType.MEMORY_EXTRACTION,
+    ) else None
+
+
 def _mark_jobs_changed() -> None:
     """Tell open Automation pages (TASK-2109); never fails the write."""
     try:
@@ -104,10 +111,12 @@ def update_job_configuration(job_id: str, patch: JobConfigurationPatch):
             raise HTTPException(status_code=404, detail="Scheduled maintenance job not found")
         try:
             if "parameters" in patch.model_fields_set:
-                job.config_json = JobParameterRegistry.merge(job.job_type, job.config_json, patch.parameters)
+                job.config_json = JobParameterRegistry.merge(
+                    job.job_type, job.config_json, patch.parameters, config=_parameter_config(job.job_type),
+                )
             # Invalid parameters may be paused, but never enabled through this API.
             if patch.enabled is True and job.job_type in JobParameterRegistry.models:
-                JobParameterRegistry.resolve(job.job_type, job.config_json)
+                JobParameterRegistry.resolve(job.job_type, job.config_json, config=_parameter_config(job.job_type))
         except ValidationError as exc:
             errors = exc.errors(include_context=False, include_input=False, include_url=False)
             for error in errors:
@@ -180,7 +189,7 @@ def list_scheduled_jobs(
                     job_type=job.job_type.value if hasattr(job.job_type, "value") else str(job.job_type),
                     bot_id=job.bot_id,
                     enabled=job.enabled,
-                    **JobParameterRegistry.describe(job.job_type, job.config_json),
+                    **JobParameterRegistry.describe(job.job_type, job.config_json, config=_parameter_config(job.job_type)),
                     interval_minutes=job.interval_minutes,
                     last_run_at=job.last_run_at,
                     next_run_at=job.next_run_at,

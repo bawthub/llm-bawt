@@ -74,9 +74,9 @@ def test_listing_effective_defaults_and_unmigrated_compatibility(api):
     assert reset["parameters"] == {"resident_tokens_gt": 100000, "idle_minutes_gt": 15, "protected_bot_ids": [],
                                    "continuity": "configured", **STALE_DEFAULTS}
     assert reset["parameter_schema"]["properties"]["idle_minutes_gt"]["minimum"] == 1
-    assert rows["legacy"]["parameter_schema"] is None
+    assert rows["legacy"]["parameter_schema"]["properties"]["entity_id"]["default"] == "system"
     assert rows["legacy"]["parameters"] is None
-    assert rows["legacy"]["configuration_error"] is None
+    assert rows["legacy"]["configuration_error"]  # TASK-1198 now registers decay; unknown stored key needs repair.
 
 
 def test_patch_persists_and_resumes_without_immediate_execution(api):
@@ -300,10 +300,10 @@ def test_claim_reconstructs_durable_policy_before_rechecking(monkeypatch):
     assert checked == [params]
 
 
-def test_registry_rejects_nonobjects_and_leaves_legacy_configs_unparsed():
+def test_registry_rejects_nonobjects_and_leaves_unregistered_configs_unparsed():
     with pytest.raises(ValueError):
         JobParameterRegistry.resolve("idle_context_reset", "[]")
-    assert JobParameterRegistry.describe("memory_decay", "not-json")["configuration_error"] is None
+    assert JobParameterRegistry.describe("send_prompt", "not-json")["configuration_error"] is None
 
 
 def test_scheduler_uses_saved_parameters_and_records_them(api, monkeypatch):

@@ -390,6 +390,7 @@ class JobScheduler:
                     status=JobStatus.RUNNING,
                     result_json=JobParameterRegistry.run_snapshot(
                         job.job_type, job.config_json, job.interval_minutes,
+                        config=getattr(self.task_processor, "config", None),
                     ),
                 )
                 session.add(run)
@@ -407,9 +408,17 @@ class JobScheduler:
         error_message: str | None = None
 
         try:
+            snapshot = json.loads(result_json) if result_json else {}
+            if snapshot.get("configuration_error"):
+                raise ValueError(snapshot["configuration_error"])
+            # Both the activity probe and worker use the claimed policy, even
+            # if inherited settings change between those two operations.
+            policy_job = job.model_copy(update={
+                "config_json": json.dumps(snapshot["parameters"]),
+            }) if snapshot.get("parameters") is not None else job
             should_run, skip_reason = await loop.run_in_executor(
                 None,
-                lambda: self._has_new_activity_for_job(job),
+                lambda: self._has_new_activity_for_job(policy_job),
             )
             if not should_run:
                 status = JobStatus.SKIPPED
@@ -446,7 +455,9 @@ class JobScheduler:
                     error_message = "One or more reset operations failed or remain unconfirmed"
             else:
                 # Create and execute task based on job type
-                task = self._create_task_for_job(job)
+                task = await loop.run_in_executor(
+                    None, lambda: self._create_task_for_job(policy_job),
+                )
                 if task:
                     task_result = await self.task_processor.process_task(task)
                     # TaskResult has .result (dict) and .status
@@ -658,7 +669,12 @@ class JobScheduler:
 
             # TASK-610: Tier-1 job params from the ONE global dict (model +
             # trigger below). model=None => inherit maintenance_model, as before.
-            sum_job = config.resolve_summarization_job()
+            sum_job = {**config.resolve_summarization_job(), **{
+                key: job_config[key] for key in (
+                    "session_gap_seconds", "min_messages_per_session",
+                    "protected_recent_turns", "trigger_tokens",
+                ) if key in job_config
+            }}
             requested_model = (
                 job_config.get("model")
                 or sum_job.get("model")
@@ -708,6 +724,10 @@ class JobScheduler:
                 bot_id=bot_id,
                 settings_getter=resolver.resolve,
                 max_context_tokens=max_context_tokens,
+                **({"job_parameters": sum_job} if any(key in job_config for key in (
+                    "session_gap_seconds", "min_messages_per_session",
+                    "protected_recent_turns", "trigger_tokens",
+                )) else {}),
             )
             eligible_sessions = summarizer.preview_summarizable_sessions()
             count = len(eligible_sessions)
@@ -733,7 +753,12 @@ class JobScheduler:
 
     def _has_new_activity_for_job(self, job: ScheduledJob) -> tuple[bool, str | None]:
         """Return whether this job has relevant new activity since last run."""
-        config = self._parse_config_json(job.config_json)
+        from .job_parameters import JobParameterRegistry
+
+        config = (JobParameterRegistry.resolve(
+            job.job_type, job.config_json, config=getattr(self.task_processor, "config", None),
+        ).model_dump(mode="json") if job.job_type in JobParameterRegistry.models
+                  else self._parse_config_json(job.config_json))
         last_run_at = job.last_run_at
 
         try:
@@ -804,7 +829,21 @@ class JobScheduler:
         return True, None
     
     def _create_task_for_job(self, job: ScheduledJob):
-        """Create a Task from a ScheduledJob."""
+        """Use the same effective controls as the API and the run snapshot."""
+        from .job_parameters import JobParameterRegistry
+
+        if job.job_type not in JobParameterRegistry.models:
+            return None
+        config = JobParameterRegistry.resolve(
+            job.job_type, job.config_json, config=getattr(self.task_processor, "config", None),
+        ).model_dump(mode="json")
+        task = self._build_task_for_job(job, config)
+        if task is not None:
+            task.payload.update(config)
+        return task
+
+    def _build_task_for_job(self, job: ScheduledJob, config: dict):
+        """Keep task routing and each maintenance operation's fixed flags."""
         from llm_bawt.service.tasks import (
             create_history_summarization_task,
             create_maintenance_task,
@@ -815,19 +854,16 @@ class JobScheduler:
             create_playground_expiry_task,
             create_tool_result_gc_task,
         )
-        
+
         if job.job_type == JobType.PROFILE_MAINTENANCE:
-            # For profile maintenance, entity_id comes from config or is the bot's user
-            config = self._parse_config_json(job.config_json)
-            entity_id = config.get("entity_id", "user")  # Default user
+            entity_id = config["entity_id"]
             return create_profile_maintenance_task(
                 entity_id=entity_id,
-                entity_type=config.get("entity_type", "user"),
+                entity_type=config["entity_type"],
                 bot_id=job.bot_id,
             )
         elif job.job_type == JobType.MEMORY_CONSOLIDATION:
-            config = self._parse_config_json(job.config_json)
-            entity_id = config.get("entity_id", "system")
+            entity_id = config["entity_id"]
             return create_maintenance_task(
                 bot_id=job.bot_id,
                 user_id=entity_id,
@@ -836,8 +872,7 @@ class JobScheduler:
                 run_decay_pruning=False,
             )
         elif job.job_type == JobType.MEMORY_DECAY:
-            config = self._parse_config_json(job.config_json)
-            entity_id = config.get("entity_id", "system")
+            entity_id = config["entity_id"]
             return create_maintenance_task(
                 bot_id=job.bot_id,
                 user_id=entity_id,
@@ -846,50 +881,44 @@ class JobScheduler:
                 run_decay_pruning=True,
             )
         elif job.job_type == JobType.HISTORY_SUMMARIZATION:
-            config = self._parse_config_json(job.config_json)
             return create_history_summarization_task(
                 bot_id=job.bot_id,
-                user_id=config.get("user_id", "system"),
-                use_heuristic_fallback=config.get("use_heuristic_fallback", True),
-                max_tokens_per_chunk=config.get("max_tokens_per_chunk", 4000),
-                model=config.get("model"),
+                user_id=config["user_id"],
+                use_heuristic_fallback=config["use_heuristic_fallback"],
+                max_tokens_per_chunk=config["max_tokens_per_chunk"],
+                model=config["model"],
             )
         elif job.job_type == JobType.MEMORY_EXTRACTION:
-            config = self._parse_config_json(job.config_json)
             return create_memory_extraction_task(
                 bot_id=job.bot_id,
-                user_id=config.get("user_id", "system"),
-                batch_size=config.get("batch_size", 50),
-                model=config.get("model"),
+                user_id=config["user_id"],
+                batch_size=config["batch_size"],
+                model=config["model"],
             )
         elif job.job_type == JobType.MEDIA_GC:
-            config = self._parse_config_json(job.config_json)
             return create_media_assets_gc_task(
-                grace_days=int(config.get("grace_days", 7)),
-                dry_run=bool(config.get("dry_run", False)),
+                grace_days=config["grace_days"],
+                dry_run=config["dry_run"],
                 bot_id=job.bot_id or "system",
-                user_id=config.get("user_id", "system"),
+                user_id=config["user_id"],
             )
         elif job.job_type == JobType.TOOL_RESULT_GC:
-            config = self._parse_config_json(job.config_json)
             return create_tool_result_gc_task(
-                retention_days=int(config.get("retention_days", 14)),
-                dry_run=bool(config.get("dry_run", False)),
+                retention_days=config["retention_days"],
+                dry_run=config["dry_run"],
                 bot_id=job.bot_id or "system",
-                user_id=config.get("user_id", "system"),
+                user_id=config["user_id"],
             )
         elif job.job_type == JobType.PLAYGROUND_EXPIRY:
-            config = self._parse_config_json(job.config_json)
             return create_playground_expiry_task(
                 bot_id=job.bot_id or "system",
-                user_id=config.get("user_id", "system"),
+                user_id=config["user_id"],
             )
         elif job.job_type == JobType.HARNESS_VERSION_CHECK:
-            config = self._parse_config_json(job.config_json)
             return create_harness_version_check_task(
                 config=config,
                 bot_id=job.bot_id or "system",
-                user_id=config.get("user_id", "system"),
+                user_id=config["user_id"],
             )
 
         return None
