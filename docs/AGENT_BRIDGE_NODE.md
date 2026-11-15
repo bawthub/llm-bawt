@@ -44,6 +44,8 @@ or credential is used. Only amd64 was exercised on the deployment host; arm64
 has a verified upstream checksum but still needs a native build/runtime test.
 
 `.dockerignore` excludes `.env` and `.env.*`, including incident backups.
+`.gitignore` ignores the same names, except the tracked `.env.docker` and an
+`.env.example`, so a `.env.bak-*` backup cannot be committed by accident.
 
 ## Activation: separate authorization required
 

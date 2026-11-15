@@ -71,7 +71,12 @@ __pypackages__/
 celerybeat-schedule
 celerybeat.pid
 *.sage.py
+# Runtime secrets, local overrides and incident backups (.env.bak-*) stay untracked.
 .env
+.env.*
+# Tracked, non-secret variants and committed examples.
+!.env.docker
+!.env.example
 .venv
 env/
 venv/
