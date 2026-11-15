@@ -192,6 +192,15 @@ async def test_source_selects_on_admitted_facts_only_and_admits_no_command_text(
     assert params["bots"] == ["caller", "peer"] and "excluded" not in params["delivery_authors"]
 
 
+def test_path_pattern_drops_question_and_file_tool_words():
+    # These words match most recorded paths; on live data they pushed the
+    # path query past the recall statement timeout.
+    from llm_bawt.recall.postgres import path_term_pattern
+
+    assert path_term_pattern("which files did caid edit for chatdebug") == "(caid|chatdebug)"
+    assert path_term_pattern("which files were edited") is None
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("command, banned", [
     (f"# note; git clone https://github.com/example/r {SECRET}", SECRET),

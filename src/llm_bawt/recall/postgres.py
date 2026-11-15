@@ -553,13 +553,27 @@ def tool_call_fact(row: dict) -> str | None:
     return file_path_fact(row.get("tool_name"), row.get("path"))
 
 
+PATH_NOISE_TERMS = frozenset({
+    "which", "what", "where", "when", "who", "how", "did", "does", "was", "were",
+    "the", "and", "for", "from", "with", "into", "that", "this", "any", "all",
+    "file", "files", "path", "paths", "edit", "edits", "edited", "editing",
+    "read", "reads", "reading", "write", "writes", "wrote", "written", "writing",
+    "change", "changed", "changes", "touch", "touched", "open", "opened",
+    "bot", "bots", "task", "tasks",
+})
+
+
 def path_term_pattern(query: str) -> str | None:
     """Case-insensitive alternation of the query's terms that a trigram index can use.
 
     Terms are lowercase alphanumeric (query_terms), so they need no regex escaping;
     shorter than three characters, a trigram index can't narrow them.
+    Question and file-tool words ("which files were edited") match tens of
+    thousands of paths and push the recheck past the statement timeout, so
+    they never select paths.
     """
-    terms = [term for term in query_terms(query) if len(term) >= 3]
+    terms = [term for term in query_terms(query)
+             if len(term) >= 3 and term not in PATH_NOISE_TERMS]
     return f"({'|'.join(terms)})" if terms else None
 
 
