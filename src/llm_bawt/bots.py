@@ -442,10 +442,6 @@ def get_system_prompt(name: str) -> str | None:
     return _SYSTEM_PROMPTS.get(name)
 
 
-# Initialize bots on module load (loads from DB if available)
-_load_bots_config()
-
-
 class BotManager:
     """Manages bot loading and retrieval."""
 
@@ -566,6 +562,7 @@ def get_bot(slug: str) -> Bot | None:
     Returns:
         The Bot instance, or None if not found
     """
+    _check_reload()
     return BUILTIN_BOTS.get(slug.lower().strip())
 
 
