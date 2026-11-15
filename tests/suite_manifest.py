@@ -117,6 +117,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_ops_gate_custody_pg.py::",
     "test_ops_gate_start_pg.py::",
     "test_ops_gate_retire_pg.py::",
+    "test_ops_bell_pg.py::",
     "test_system_events_pg.py::",
     "test_inter_bot_delivery_events_pg.py::",
     "test_ops_quiesce_visibility_pg.py::",
