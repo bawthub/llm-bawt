@@ -92,7 +92,8 @@ class FakeConnection:
 
     def execute(self, statement, *_args, **_kwargs):
         self.statements.append(statement)
-        return SimpleNamespace()
+        # No rows: probes such as the pg_trgm check see "absent".
+        return SimpleNamespace(first=lambda: None)
 
 
 class FakeEngine:
