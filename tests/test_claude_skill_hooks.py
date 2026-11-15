@@ -184,6 +184,8 @@ def test_install_replaces_legacy_scripts_and_keeps_other_hooks():
     assert hooks["PreToolUse"][0]["hooks"] == [guard]
     assert hooks["PreToolUse"][1] == {"matcher": "Bash", "hooks": [
         {"type": "command", "command": hook_command("git-gate"), "timeout": 10}]}
+    assert hooks["PreToolUse"][2] == {"matcher": "Bash", "hooks": [
+        {"type": "command", "command": hook_command("environment-gate"), "timeout": 10}]}
     assert hooks["PostToolUse"] == [{"matcher": "Skill", "hooks": [
         {"type": "command", "command": hook_command("record"), "timeout": 10}]}]
     assert hooks["SessionStart"][-1]["hooks"][0]["command"] == hook_command("resume-reminder")

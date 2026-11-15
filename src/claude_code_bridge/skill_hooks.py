@@ -1,12 +1,14 @@
 """Claude CLI hooks that track which skills a session has in context (TASK-1691).
 
-Three hooks, one command (``python -m claude_code_bridge.skill_hooks <name>``):
+Hooks share one command (``python -m claude_code_bridge.skill_hooks <name>``):
 
 * ``record`` (PostToolUse, Skill): appends the loaded skill to a per-session
   marker file.
 * ``git-gate`` (PreToolUse, Bash git): denies a mutating git command until a
   git-relevant skill is in context: loaded with the Skill tool this session,
   or injected into this turn's system prompt.
+* ``environment-gate`` (PreToolUse, Bash): refuses uv/pip commands targeting
+  the shared checkout's host-owned environment before a tool can execute them.
 * ``resume-reminder`` (SessionStart, resume/compact): warns that skills loaded
   with the Skill tool did not survive the lossy summary. Injected skills did:
   the system prompt is sent again on every turn.
@@ -136,7 +138,7 @@ def _deny(reason: str) -> dict:
                                    "permissionDecisionReason": reason}}
 
 
-def _segments(command: str) -> list[list[str]]:
+def _segments(command: str, *, preserve_scopes: bool = False) -> list[list[str]]:
     """Split a shell command into simple-command word lists.
 
     Separators (``;``, ``&``, ``|``, newlines, parentheses for subshells and
@@ -151,6 +153,10 @@ def _segments(command: str) -> list[list[str]]:
     segments: list[list[str]] = [[]]
     for token in lexer:
         if token and set(token) <= set(";&|()"):
+            if preserve_scopes:
+                for char in token:
+                    if char in "()":
+                        segments.extend([[char], []])
             segments.append([])
         elif token != "$":
             segments[-1].append(token)
@@ -299,7 +305,14 @@ def resume_reminder(data: Mapping, env: Mapping[str, str]) -> dict | None:
                                    "additionalContext": text}}
 
 
-HOOKS = {"record": record, "git-gate": git_gate, "resume-reminder": resume_reminder}
+def environment_gate(data: Mapping, env: Mapping[str, str]) -> dict | None:
+    from .environment_guard import environment_gate as gate
+
+    return gate(data, env)
+
+
+HOOKS = {"record": record, "git-gate": git_gate, "environment-gate": environment_gate,
+         "resume-reminder": resume_reminder}
 
 #: (event, matcher, ``if`` rule, hook name) for each settings entry we own.
 _ENTRIES = (
@@ -307,6 +320,7 @@ _ENTRIES = (
     # No ``if`` rule: git also runs inside subshells, ``cd x && git ...`` and
     # ``bash -c``; the gate parses every Bash command itself.
     ("PreToolUse", "Bash", None, "git-gate"),
+    ("PreToolUse", "Bash", None, "environment-gate"),
     ("SessionStart", None, None, "resume-reminder"),
 )
 #: The untracked host scripts these hooks replace; their entries are removed.
@@ -339,7 +353,9 @@ def install_settings(settings: dict) -> dict:
             isinstance(hooks.get(event, []), list) for event, *_ in _ENTRIES):
         return dict(settings)
     updated = dict(hooks)
-    for event, matcher, rule, name in _ENTRIES:
+    # Remove old entries once per event, before appending any owned hooks.
+    # Two PreToolUse hooks must not remove each other on installation.
+    for event in dict.fromkeys(entry[0] for entry in _ENTRIES):
         groups = []
         for group in updated.get(event, []):
             if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
@@ -348,13 +364,15 @@ def install_settings(settings: dict) -> dict:
             kept = [hook for hook in group["hooks"] if not _is_ours(hook)]
             if kept or not group["hooks"]:
                 groups.append({**group, "hooks": kept})
+        updated[event] = groups
+    for event, matcher, rule, name in _ENTRIES:
         hook = {"type": "command", "command": hook_command(name), "timeout": 10}
         if rule:
             hook["if"] = rule
         group = {"hooks": [hook]}
         if matcher:
             group["matcher"] = matcher
-        updated[event] = [*groups, group]
+        updated[event] = [*updated[event], group]
     return {**settings, "hooks": updated}
 
 

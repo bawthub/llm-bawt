@@ -6,6 +6,22 @@ It rejects concurrent suites on the same host and exits nonzero on failed
 selection, missing PostgreSQL suites, PostgreSQL/local skips, or a slow unit.
 Do not use `pytest -m ""`: that bypasses the external-target boundary.
 
+### Bridge shells and the shared environment
+
+The bridge's installed Bash PreToolUse hook rejects `uv run`, `uv sync`,
+environment-changing `uv pip`/`pip` commands and environment creation when they
+target the shared workspace's `llm-bawt/.venv`. Admission happens before uv or
+Python starts: even a focused `uv run pytest tests/test_file.py` can otherwise
+recreate that host-owned environment with a bridge-only interpreter.
+
+This is not a blanket ban on pytest, ruff or uv. Use a task-local environment in
+an isolated worktree, or the repository's Make target on the configured test
+host. Existing-environment focused checks stay allowed; broad checks still use
+the heavy queue and full suites use `make gate`. The hook follows the shell cwd,
+`cd`, uv's directory/project options, explicit environment targets and common
+shell wrappers. It is an accident guard, not a security boundary or a complete
+shell interpreter. No dependency installation is performed by the hook.
+
 | Command | Selection | Requirements |
 | --- | --- | --- |
 | `make test` | Hermetic unit tests; **setup + call + teardown <1 s** per case, <1.5 s for `real_process` cases (`LLM_BAWT_UNIT_TIME_BUDGET_SECONDS`, `LLM_BAWT_REAL_PROCESS_TIME_BUDGET_SECONDS`, see below) | Python only |
