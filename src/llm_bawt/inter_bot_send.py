@@ -11,6 +11,7 @@ detail), plus the ``steer_only`` mode.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Iterable
 from typing import Any, Callable, Literal
 from uuid import uuid4
@@ -41,6 +42,9 @@ from .request_identity import AdmissionUnavailable, IdentityConflict, InvalidIde
 logger = logging.getLogger(__name__)
 
 SendModeName = Literal["steer_or_idle", "when_idle", "steer_only"]
+
+# A message that is only a slash command ("/new", "/clear"); prose mentioning one is fine.
+_BARE_SLASH_COMMAND = re.compile(r"/[A-Za-z][\w-]*")
 
 # Fields a bot tool must never set: each changes another bot's turn. The real
 # fence is the MCP tool schema (bots_send_message builds a fixed body without
@@ -511,6 +515,13 @@ class DeliverySender:
             or body.message.split(maxsplit=1)[0] != "/compact"
         ):
             raise DeliveryRefused(status_code=422, detail="Compaction maintenance requires an idle Claude /compact command")
+        if not compact_maintenance and _BARE_SLASH_COMMAND.fullmatch(body.message.strip()):
+            # A delivered "/new" arrives as sender-attributed text and resets nothing (TASK-1594).
+            raise DeliveryRefused(status_code=422, detail=(
+                f"A bare {body.message.strip()!r} is delivered as plain text, not run as a command. "
+                "To reset the target session, send your follow-up message with "
+                "session_policy='reset_retain_history' (or 'reset_without_history') and delivery='when_idle'."
+            ))
         verbatim = compact_maintenance or bool(body.raw_message)
         formatted = body.message if verbatim else _format_delivery_message(body.message, author)
         payload = {

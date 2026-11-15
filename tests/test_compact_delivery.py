@@ -52,7 +52,7 @@ def test_tagged_maintenance_preserves_entire_command(delivery_route, message):
     assert fields["payload"]["max_tokens"] is None
 
 
-@pytest.mark.parametrize("message", ["/compact", "Please /compact", "/compact details"])
+@pytest.mark.parametrize("message", ["Please /compact", "/compact details", "/new then rerun the check"])
 def test_ordinary_callbacks_still_keep_authorship_wrapper(delivery_route, message):
     dispatcher, _ = delivery_route
     asyncio.run(route.create_delivery(_body(message)))
@@ -62,8 +62,8 @@ def test_ordinary_callbacks_still_keep_authorship_wrapper(delivery_route, messag
 
 @pytest.mark.parametrize("kind,metadata,message", [
     ("CONTEXT_MAINTENANCE", {"context_action": "health"}, "inspect context"),
-    ("CONTEXT_MAINTENANCE", {}, "/compact"),
-    ("READY", {"context_action": "compact"}, "/compact"),
+    ("CONTEXT_MAINTENANCE", {}, "/compact details"),
+    ("READY", {"context_action": "compact"}, "/compact details"),
     (None, {"context_action": "compact"}, "ordinary callback"),
 ])
 def test_non_compact_maintenance_and_partial_tags_keep_wrapper(delivery_route, kind, metadata, message):
@@ -171,3 +171,15 @@ def test_mcp_through_real_route_and_preflight(delivery_route, monkeypatch):
         assert enqueued["idempotency_key"] == "fixture-key"
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("message", ["/new", "  /new\n", "/clear", "/compact", "/reset-session"])
+def test_bare_slash_command_rejected_with_session_policy_pointer(delivery_route, message):
+    """TASK-1594: a bare "/new" would arrive as wrapped text and reset nothing."""
+    dispatcher, _ = delivery_route
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(route.create_delivery(_body(message)))
+    assert error.value.status_code == 422
+    assert "session_policy='reset_retain_history'" in str(error.value.detail)
+    dispatcher.store.enqueue.assert_not_called()
+
