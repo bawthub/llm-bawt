@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 
 from llm_bawt.service.pending_tool_calls import PendingToolCallCorrelator
+from llm_bawt.service import tool_event_interceptor as tei
 from llm_bawt.service.tool_event_interceptor import ToolEventInterceptor, js_len
 from llm_bawt.service.turn_stream_context import _TEXT_DELTA_FLUSH_CHARS
 
@@ -124,7 +126,26 @@ def test_protocol_checkpoints_complete_text_and_reasoning_before_events():
     h.svc._update_turn_log.assert_not_called()
 
 
-def test_protocol_reasoning_batches_are_checkpointed_before_publish():
+class _FakeClock:
+    """The interceptor's monotonic clock, advanced only by the test (TASK-2335)."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    fake = _FakeClock()
+    # Only the interceptor's clock: the global time module stays real for pytest.
+    monkeypatch.setattr(tei, "time", SimpleNamespace(monotonic=fake.monotonic, time=time.time))
+    return fake
+
+
+def test_protocol_reasoning_batches_are_checkpointed_before_publish(clock):
+    """Size-only batching: the frozen clock keeps a slow run from adding a timed flush."""
     h = _make()
     h.ctx.terminal_follower = Mock()
     checkpoints = []
@@ -141,6 +162,26 @@ def test_protocol_reasoning_batches_are_checkpointed_before_publish():
     assert checkpoints[1][0]["reasoning"] == "r" * 1024
     assert checkpoints[2][0]["text_value"] == "Answer"
     assert out[-1] == "Answer"
+
+
+def test_protocol_reasoning_flushes_a_small_batch_after_a_quarter_second(clock):
+    h = _make()
+    h.ctx.terminal_follower = Mock()
+
+    def chunks():
+        for i in range(3):
+            if i == 2:
+                clock.now += 0.249  # still inside the window: no flush yet
+            yield {"event": "reasoning", "text": "r"}
+        clock.now += 0.001  # 0.25 s since the batch started
+        yield {"event": "reasoning", "text": "s"}
+        yield {"event": "reasoning", "text": "t"}
+
+    list(h.it.run(chunks()))
+    offsets = [event["reasoning_offset"] for event in h.published if event["_type"] == "reasoning_delta"]
+    assert offsets[0] == 0
+    assert h.ctx.terminal_follower.write_partial.call_args_list[0].kwargs["reasoning"] == "rrrs"
+    assert offsets[1:2] == [4]  # the next batch starts after the timed flush
 
 
 def test_protocol_fence_loss_stops_before_any_partial_event():
