@@ -52,6 +52,20 @@ def _row(row: dict, path: str, size: int, fields: tuple[str, ...]) -> dict:
             for key in fields if key in row}
 
 
+def _attachments(task: dict, size: int | None = None) -> dict:
+    rows = task.get("imageUrls") or []
+    out = {"total": len(rows), "path": "/task/imageUrls"}
+    if size is not None:
+        out["preview"] = _preview(_json(rows[:RECENT_LIMIT]), "/task/imageUrls", size)
+    if rows:
+        out["fetch"] = (
+            "View images with attachment_get(ref=<listed reference>); pass the reference unchanged, "
+            "without prepending a host. The tool validates legacy absolute URLs and reports unsupported references. "
+            "Use a TASK-N reference to view the task's images, or read /task/imageUrls for the full list."
+        )
+    return out
+
+
 def _steps(task: dict, size: int) -> dict:
     rows = task.get("steps") or []
     # Keep the running work and next pending action, even with a long completed
@@ -89,10 +103,11 @@ def _summary(task: dict, reviews: Any, project: Any, size: int) -> dict:
         if key in task:
             out[key] = _preview(task[key], f"/task/{key}", size * 3)
     out["steps"] = _steps(task, max(40, size // 2))
-    for key in ("dependsOn", "dependedOnBy", "checkLinks", "imageUrls"):
+    for key in ("dependsOn", "dependedOnBy", "checkLinks"):
         rows = task.get(key) or []
         out[key] = {"total": len(rows), "path": f"/task/{key}",
                     "preview": _preview(_json(rows[:RECENT_LIMIT]), f"/task/{key}", size)}
+    out["imageUrls"] = _attachments(task, size)
     if isinstance(reviews, dict) and isinstance(reviews.get("reviews"), list):
         out["reviews"] = {"total": reviews.get("total"), "shown": min(len(reviews["reviews"]), RECENT_LIMIT),
                           "path": "/reviews", "next_cursor": reviews.get("nextCursor"),
@@ -233,6 +248,7 @@ async def read_task(api_get: ApiGet, task_id: str, *, tool: str, path: str | Non
         for size in (100, 40, 20, 0):
             header = _row(task, "/task", 64, ("id", "shortId", "status", "priority", "agentBotId"))
             header.update(_row(task, "/task", size, ("title", "blockedReason", "response")))
+            header["imageUrls"] = _attachments(task)
             result = {"view": "summary", "task": header, "history_omitted": True,
                       "detail": _read(tool, task_id, path="/task", max_chars=budget),
                       "note": "Open detail paths for description, steps, reviews and project context."}

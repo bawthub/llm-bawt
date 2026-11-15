@@ -157,6 +157,44 @@ async def complete(reader, arguments):
 
 
 @pytest.mark.parametrize("reader", [task_tools.get_task, project_tools.get_task_context])
+@pytest.mark.parametrize("budget", [2000, 8000])
+def test_attachment_briefing_guides_tool_access_without_rewriting_stored_refs(monkeypatch, reader, budget):
+    api = Api()
+    refs = [
+        "/api/chat/uploads/ma_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "/api/uploads/serve/originals/image.png",
+        "https://legacy.example/api/uploads/serve/originals/old.png",
+        "blob:browser-local",
+    ]
+    api.task["imageUrls"] = refs.copy()
+    install(monkeypatch, api)
+    result = run(reader("TASK-1907", max_chars=budget))
+    images = result["task"]["imageUrls"]
+    assert images["total"] == 4
+    assert images["path"] == "/task/imageUrls"
+    assert "attachment_get(ref=<listed reference>)" in images["fetch"]
+    assert "without prepending a host" in images["fetch"]
+    assert "validates legacy absolute URLs" in images["fetch"]
+    assert "TASK-N" in images["fetch"]
+    assert wire_size(result) <= budget
+    # Detail pages remain lossless, including legacy or unsupported references.
+    value, _, _ = run(complete(reader, {
+        "task_id": "TASK-1907", "path": images["path"], "max_chars": budget,
+    }))
+    assert value == refs == api.task["imageUrls"]
+
+
+@pytest.mark.parametrize("reader", [task_tools.get_task, project_tools.get_task_context])
+def test_empty_attachment_briefing_has_no_fetch_instruction(monkeypatch, reader):
+    api = Api()
+    api.task["imageUrls"] = []
+    install(monkeypatch, api)
+    images = run(reader("TASK-1907"))["task"]["imageUrls"]
+    assert images["total"] == 0
+    assert "fetch" not in images
+
+
+@pytest.mark.parametrize("reader", [task_tools.get_task, project_tools.get_task_context])
 def test_complete_raw_task_is_lossless_including_unknown_fields(monkeypatch, reader):
     api = Api()
     install(monkeypatch, api)
