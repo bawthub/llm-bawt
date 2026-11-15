@@ -9,7 +9,8 @@
     "project_name",
     "task_lines",
     "outcome_spec_clause",
-    "project_context"
+    "project_context",
+    "taskUrl"
    ]
   },
     "repos.workspace.commit_aggregate": {
