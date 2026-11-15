@@ -501,7 +501,11 @@ class ClaudeActiveRun:
             # mean the CLI processed the request without delivering its receipt.
             self._escalations[message_id] = "escalation_uncertain"
             self.steering_attempted = True
-            self._expected_interrupt_results += 1
+            # TASK-595: same idle-background rule as a now-steer.
+            idle_saved = self._release_idle_wait() if self._idle_background_wait() else None
+            boundary_armed = idle_saved is None
+            if boundary_armed:
+                self._expected_interrupt_results += 1
             interrupted = False
             barrier_done = False
             replacement_attempted = False
@@ -587,7 +591,10 @@ class ClaudeActiveRun:
             except BaseException as exc:
                 # If no replacement was accepted, do not wait indefinitely for
                 # one after consuming the aborted turn's ResultMessage.
-                self._expected_interrupt_results = max(0, self._expected_interrupt_results - 1)
+                if boundary_armed:
+                    self._expected_interrupt_results = max(0, self._expected_interrupt_results - 1)
+                elif not interrupted:
+                    self._restore_idle_wait(idle_saved)
                 if interrupted:
                     self._settle_failed_sweep(
                         exc,
@@ -895,6 +902,28 @@ class ClaudeActiveRun:
                 status = msg.patch.get("status")
             self.note_task_frame(subtype, getattr(msg, "task_id", None), status)
 
+    def _idle_background_wait(self) -> bool:
+        """A parent result is held for background tasks and no notification
+        turn is live: that query already ended, so an interrupt emits no
+        result for it (TASK-595)."""
+        return self._background_result is not None and not self._injected_notification_active
+
+    def _release_idle_wait(self) -> tuple[Any, bool]:
+        """Drop the idle wait's stale fallback; the replacement owns the next
+        result. Returns what :meth:`_restore_idle_wait` needs on failure."""
+        saved = (self._take_background_result(), self._background_wait)
+        self._background_wait = False
+        logger.info(
+            "Steer replaces idle background wait: request=%s tasks=%s",
+            self.request_id, sorted(self._active_tasks),
+        )
+        return saved
+
+    def _restore_idle_wait(self, saved: tuple[Any, bool]) -> None:
+        # Nothing reached the CLI: the parent is still waiting as before.
+        if self._background_result is None:
+            self._background_result, self._background_wait = saved
+
     def _take_background_result(self) -> Any:
         result, self._background_result = self._background_result, None
         return result
@@ -1077,27 +1106,14 @@ class ClaudeActiveRun:
             self._refuse_new_command()
 
             self.steering_attempted = True
-            # TASK-595: a parent result held for idle background tasks has
-            # already ended its query, so the interrupt produces no second
-            # result for it. The replacement owns the next result; drop the
-            # obsolete fallback rather than arm a boundary nothing will fill.
-            # An active notification turn is still a live query and keeps the
-            # normal interrupt accounting.
-            idle_wait = (
-                self._background_result is not None
-                and not self._injected_notification_active
-            )
-            boundary_armed = not idle_wait
+            # TASK-595: an idle background wait has no live query to emit an
+            # interrupt result, so arm no boundary; the replacement owns the
+            # next result. An active notification turn keeps normal accounting.
+            idle_saved = self._release_idle_wait() if self._idle_background_wait() else None
+            boundary_armed = idle_saved is None
             if boundary_armed:
                 self._expected_interrupt_results += 1
                 self._pending_now_interrupts += 1
-            else:
-                self._take_background_result()
-                self._background_wait = False
-                logger.info(
-                    "Now-steer replaces idle background wait: request=%s tasks=%s",
-                    self.request_id, sorted(self._active_tasks),
-                )
             interrupted = False
             loop = asyncio.get_running_loop()
             deadline = loop.time() + self._steer_timeout_s
@@ -1137,6 +1153,8 @@ class ClaudeActiveRun:
                         0, self._expected_interrupt_results - 1
                     )
                     self._pending_now_interrupts = max(0, self._pending_now_interrupts - 1)
+                elif not interrupted:
+                    self._restore_idle_wait(idle_saved)
                 if interrupted:
                     try:
                         await self._tear_down()

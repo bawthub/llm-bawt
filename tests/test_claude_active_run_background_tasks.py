@@ -129,3 +129,33 @@ async def test_now_steer_during_idle_background_wait_owns_next_result():
         assert _results(yielded) == ["replacement answer"]
     finally:
         run.mark_completed()
+
+
+@pytest.mark.anyio
+async def test_escalation_during_idle_background_wait_owns_next_result():
+    """Codex r2 B1: escalation follows the same idle-wait rule as now-steer."""
+    from tests.test_claude_active_run_next_steer import CMD, FRAME, _INIT, _next
+
+    client = _FakeClient()
+    run = _run(client, background_tasks=True)
+    consumer = asyncio.create_task(_consume_until_result(run))
+    for frame in (_INIT, _started("a"), _result("standing by")):
+        client._query.frames.put_nowait(frame)
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert run._background_result is not None
+    try:
+        await _next(run, "replacement answer", CMD)
+        await run.escalate(CMD, interrupt_frame=FRAME)
+        assert run._expected_interrupt_results == 0
+        assert run._background_result is None
+        client._query.frames.put_nowait(_notified("a"))
+        client._query.frames.put_nowait(_result("replacement answer"))
+        client._query.frames.put_nowait(None)
+        yielded = await asyncio.wait_for(consumer, 5)
+        assert _results(yielded) == ["replacement answer"]
+    finally:
+        if not consumer.done():
+            consumer.cancel()
+            await asyncio.gather(consumer, return_exceptions=True)
+        run.mark_completed()
