@@ -43,10 +43,16 @@ class _ConnectReportingTransport(httpx.HTTPTransport):
 
 
 def _reporting_http_client(base_url: str) -> httpx.Client:
-    from openai import DefaultHttpxClient
-
-    return DefaultHttpxClient(transport=_ConnectReportingTransport(
-        base_url, limits=httpx.Limits(max_connections=1000, max_keepalive_connections=100)))
+    # TASK-2339: a plain httpx.Client, not openai.DefaultHttpxClient. From
+    # openai 3 that class is an httpx2.Client, and an httpx transport inside it
+    # fails every request with a bare AssertionError (incompatible request
+    # stream). The SDK accepts a plain httpx client; mirror its defaults.
+    return httpx.Client(
+        transport=_ConnectReportingTransport(
+            base_url, limits=httpx.Limits(max_connections=1000, max_keepalive_connections=100)),
+        timeout=httpx.Timeout(600.0, connect=5.0),
+        follow_redirects=True,
+    )
 
 
 class OpenAIClient(LLMClient):
@@ -578,8 +584,8 @@ class OpenAIClient(LLMClient):
             logger.error(f"Error during OpenAI API request: {e}")
             return f"ERROR: OpenAI API Error - {_api_error_text(e)}"
         except Exception as e:
-            logger.error(f"Unexpected error during OpenAI streaming: {e}")
-            return f"ERROR: Unexpected error - {e}"
+            logger.error("Unexpected error during OpenAI streaming: %s: %s", type(e).__name__, e, exc_info=True)
+            return f"ERROR: Unexpected error - {type(e).__name__}: {e}"
 
     def _iterate_openai_chunks(self, stream: Iterator) -> Iterator[str]:
         """Iterates through OpenAI stream chunks and yields content."""
@@ -597,8 +603,8 @@ class OpenAIClient(LLMClient):
             if self._is_stream_disconnect_error(e):
                 logger.warning("Streaming disconnected for model '%s': %s", self.model, e)
                 raise
-            logger.error(f"\nUnexpected error during OpenAI stream iteration: {e}")
-            yield f"\nERROR: Unexpected error - {e}"
+            logger.error("Unexpected error during OpenAI stream iteration: %s: %s", type(e).__name__, e, exc_info=True)
+            yield f"\nERROR: Unexpected error - {type(e).__name__}: {e}"
 
     def _get_full_response(self, api_messages: List[dict], plaintext_output: bool, payload: dict) -> str:
         """Gets the full response without streaming."""
@@ -628,8 +634,10 @@ class OpenAIClient(LLMClient):
             logger.error(f"Error making OpenAI API request: {e}")
             return f"ERROR: OpenAI API Error - {_api_error_text(e)}"
         except Exception as e:
-            logger.error(f"Unexpected error during OpenAI request: {e}")
-            return f"ERROR: Unexpected error - {e}"
+            # Log the type and traceback: some failures (e.g. AssertionError)
+            # have an empty message and were invisible (TASK-2339).
+            logger.error("Unexpected error during OpenAI request: %s: %s", type(e).__name__, e, exc_info=True)
+            return f"ERROR: Unexpected error - {type(e).__name__}: {e}"
 
     def get_styling(self) -> tuple[str | None, str]:
         """Return OpenAI specific styling."""

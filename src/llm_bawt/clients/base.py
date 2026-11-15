@@ -23,6 +23,16 @@ def api_error_text(error: Exception) -> str:
     classify the string later (maintenance fallback), so the status must survive.
     """
     text = str(error)
+    # TASK-2339: openai 3 keeps the body in the message only for an
+    # ``{"error": {"message": ...}}`` reply; a plain-text or other JSON body
+    # (gateways, our proxy's {"detail": ...}) leaves just "Error code: N".
+    # Keep that reason in the text, as openai 2 did.
+    body = getattr(error, "body", None)
+    if body not in (None, "", {}, []):
+        piece = body if isinstance(body, str) else repr(body)
+        message = body.get("message") if isinstance(body, dict) else None
+        if piece not in text and not (isinstance(message, str) and message and message in text):
+            text = f"{text} - {piece}"
     status = getattr(error, "status_code", None)
     if isinstance(status, int) and not text.startswith("Error code:"):
         return f"Error code: {status} - {text}"

@@ -239,10 +239,12 @@ def test_stream_failure_before_output_is_a_real_http_status(harness, monkeypatch
     monkeypatch.setattr(adapter, "observe_receipt", AsyncMock(return_value={
         "status": "FAILED", "error": "Cannot accept session for bot"}))
     harness.service.stream_events = QUEUED_STREAM
-    with pytest.raises(openai.APIStatusError, match="Cannot accept session") as raised:
+    with pytest.raises(openai.APIStatusError) as raised:
         harness.sdk(headers).chat.completions.create(
             model="test-model", messages=MESSAGES, stream=True, extra_body=EXTRA)
     assert raised.value.status_code == 502
+    # openai 3 leaves a non-OpenAI-shaped body out of str(); the body carries it.
+    assert "Cannot accept session" in repr(raised.value.body)
 
 
 @pytest.mark.parametrize(("error", "status"), [
