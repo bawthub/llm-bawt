@@ -399,8 +399,10 @@ def test_two_lock_waits_share_one_absolute_write_deadline(sweep, monkeypatch):
         table_lock.release(after=1.3)
         counts = sweep.run_once()
     drained = sweep.drain(gate_id)[turn_id]
-    # The UPDATE's lock wait gets only the time left (~0.4s). A fresh 1s would
-    # outlast the table lock's release at 1.3s and the write would land.
+    # End to end on real locks, the write misses its deadline and never lands.
+    # That the UPDATE's wait gets only the time left (not a fresh 1s, which the
+    # pre-commit check would also turn into WRITE_DEADLINE) is pinned by
+    # test_quiesce_exit's test_each_statement_gets_only_the_time_left_before_the_one_deadline.
     assert counts == {WRITE_DEADLINE: 1}, (counts, drained)
     assert drained == (False, "no_execution_exit")
 

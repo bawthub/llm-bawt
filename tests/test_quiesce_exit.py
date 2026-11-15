@@ -446,6 +446,39 @@ def test_a_transaction_past_its_deadline_rolls_back_instead_of_committing(monkey
     assert outcome == ["rollback"]
 
 
+def test_each_statement_gets_only_the_time_left_before_the_one_deadline(monkeypatch):
+    """Loopy r2 A2(2): per-statement timeouts must share one absolute deadline.
+
+    A fresh budget per statement still ends in WriteDeadline at the pre-commit
+    check, so only the budgets themselves tell the two apart.
+    """
+    from contextlib import contextmanager
+
+    clock = _Clock()
+    monkeypatch.setattr(quiesce_exit, "time", clock)
+    hooks = []
+    monkeypatch.setattr(quiesce_exit, "event", SimpleNamespace(
+        listen=lambda _conn, _name, fn: hooks.append(fn), remove=lambda *_: None))
+    budgets = []
+    cursor = SimpleNamespace(execute=lambda _sql, params: budgets.append(params["ms"]))
+
+    class Engine:
+        @contextmanager
+        def begin(self):
+            yield SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+
+    with quiesce_exit._transaction(Engine(), clock.now + 1.0) as conn:
+        (bound,) = hooks
+        bound(conn, cursor, "SELECT", {}, None, False)
+        clock.now += 0.5  # the first statement waited on a row lock
+        bound(conn, cursor, "UPDATE", {}, None, False)
+        clock.now += 0.5  # the second used up exactly what was left
+        with pytest.raises(WriteDeadline):
+            bound(conn, cursor, "UPDATE", {}, None, False)
+        clock.now -= 0.5  # let the block commit normally
+    assert budgets == ["1000ms", "500ms"]  # a fresh budget would repeat 1000ms
+
+
 def test_a_member_whose_turn_was_rebound_is_not_probed():
     asked = []
 
