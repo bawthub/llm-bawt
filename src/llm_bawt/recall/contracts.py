@@ -147,6 +147,19 @@ class EvidenceBatch(list[Evidence]):
         self.partial: set[str] = set()
 
 
+class WindowedEvidence(list[Evidence]):
+    """Message hits for a dated question, with the period that was searched.
+
+    ``time_window`` is ``{"from", "to", "applied"}``: ISO dates of the padded
+    period, and whether hits came from inside it (False: nothing matched in
+    the period, so the whole history was searched instead).
+    """
+
+    def __init__(self, values=(), time_window: dict | None = None):
+        super().__init__(values)
+        self.time_window = time_window
+
+
 class SourceProvider(ABC):
     source: Source
     # Rows a source may return: direct hits are always capped at

@@ -5,6 +5,7 @@ from abc import abstractmethod
 from datetime import datetime, timezone
 import json
 import re
+import time
 
 from llm_bawt.retrieval.find_query import parse as parse_find_query
 from llm_bawt.retrieval.find import like_pattern
@@ -17,12 +18,13 @@ from llm_bawt.memory.ownership import MemoryAuthority
 from .budgets import DATABASE_WORKER, compact_json
 from .contracts import (
     COVERAGE_BUCKETS, FOLLOW_ON_WINDOW_SECONDS, MAX_FOLLOW_ONS_PER_HIT, MAX_RECORD_CHARS, MAX_SOURCE_RECORDS,
-    RECENCY_HALF_WEIGHT_DAYS, Evidence, RecallError, RecallScope, SourceProvider,
+    RECENCY_HALF_WEIGHT_DAYS, Evidence, RecallError, RecallScope, SourceProvider, WindowedEvidence,
 )
 
 from .command_facts import MAX_COMMAND_CHARS, command_facts, safe_path
 from llm_bawt.service.tool_call_store import FILE_PATH_SQL, FILE_PATH_TOOLS_SQL
 from .excerpts import fts_query, query_terms, sql_window, term_coverage, terms_for
+from .temporal import time_window
 
 # Unknown authors, legacy NULL user sessions, summaries and deleted sessions do
 # not establish provenance. An imported bot message is not caller-owned evidence.
@@ -60,6 +62,21 @@ PUBLIC_HISTORY_AUTHORITY = """
       OR (m.role = 'user' AND m.author_entity_type = 'bot'
           AND m.author_entity_id = ANY(CAST(:delivery_authors AS text[]))))
 """
+
+# Direct message hits stay inside the question's time window (TASK-1558); an
+# unwindowed search binds the full epoch range. Follow-ons are exempt: they are
+# bounded by their hit's FOLLOW_ON_WINDOW_SECONDS instead. Inside a window,
+# recency is measured from the window's end, not from now.
+_IN_WINDOW = "AND m.timestamp >= :since AND m.timestamp < :until"
+UNBOUNDED_WINDOW = {"since": 0.0, "until": 1e12, "rank_at": 1e12}
+# The lexical tiers cap candidates before scoring. Across all history that cap
+# keeps the newest matches (bounded cost); inside a time window the period is
+# small enough to keep the messages that share the most query lexemes instead,
+# so the period's late chatter cannot crowd out its actual answer.
+_WINDOW_LEXICAL_ORDER = """cardinality(ARRAY(
+                SELECT unnest(tsvector_to_array(to_tsvector('english',
+                       array_to_string(CAST(:terms AS text[]), ' '))))
+                INTERSECT SELECT unnest(tsvector_to_array(m.content_tsv)))) DESC,"""
 
 
 def delivery_authors(scope: RecallScope) -> list[str]:
@@ -164,14 +181,19 @@ class PostgresSource(SourceProvider):
         return self.statement
 
     async def search(self, query: str, scope: RecallScope, task_ids: tuple[str, ...]) -> list[Evidence]:
+        return await self._search(query, scope, {})
+
+    async def _search(self, query: str, scope: RecallScope, bound: dict,
+                      statement: str | None = None) -> list[Evidence]:
         tsquery = fts_query(query)
         if not tsquery:
             return []
         params = {"query": tsquery, "bot": scope.bot_id, "partition": partition_id(scope.bot_id),
                   "user": scope.user_id, "limit": MAX_SOURCE_RECORDS, "chars": MAX_RECORD_CHARS,
-                  "phrase": query.lower(), "terms": terms_for(query), **self.extra_params(scope, query)}
+                  "phrase": query.lower(), "terms": terms_for(query), **self.extra_params(scope, query),
+                  **bound}
         try:
-            rows = await DATABASE_WORKER.run(self.database.read, self.statement_for(query), params)
+            rows = await DATABASE_WORKER.run(self.database.read, statement or self.statement_for(query), params)
         except RecallError:
             raise
         except Exception as error:
@@ -192,6 +214,26 @@ class PostgresSource(SourceProvider):
 class MessageSource(PostgresSource):
     source = "messages"
     max_records = MAX_SOURCE_RECORDS * (1 + MAX_FOLLOW_ONS_PER_HIT)
+    clock = staticmethod(time.time)
+
+    async def search(self, query: str, scope: RecallScope, task_ids: tuple[str, ...]) -> list[Evidence]:
+        """A dated question searches its period first (TASK-1558).
+
+        The time phrase leaves the lexical terms, since the window now carries
+        it. If nothing in the period matches, the whole history is searched
+        with the original question and coverage says the window was not applied.
+        """
+        window = time_window(query, self.clock())
+        if window is None:
+            return await self._search(query, scope, {})
+        if fts_query(window.residual):
+            rows = await self._search(window.residual, scope, {
+                "since": window.since, "until": window.until, "rank_at": window.until},
+                self.statement_for(window.residual, windowed=True))
+            if rows:
+                return WindowedEvidence(rows, {**window.label(), "applied": True})
+        rows = await self._search(query, scope, {})
+        return WindowedEvidence(rows, {**window.label(), "applied": False})
     # Every candidate tier is capped before coverage/rank or full content is
     # projected. Literal exact tiers use the existing trigram-backed semantics of
     # messages_find; lexical tiers use the stored indexed content_tsv. The broad
@@ -205,7 +247,7 @@ class MessageSource(PostgresSource):
             JOIN unnest(CAST(:bots AS text[]), CAST(:parts AS text[]))
                  AS p(source_bot, partition) ON m.bot_id = p.partition
             JOIN sessions s ON s.id = m.session_id
-            WHERE {PUBLIC_HISTORY_AUTHORITY} AND :focus_enabled
+            WHERE {PUBLIC_HISTORY_AUTHORITY} {_IN_WINDOW} AND :focus_enabled
               AND m.content_tsv @@ plainto_tsquery('english', :focus)
               AND __FOCUS_EXACT__
             ORDER BY CASE WHEN m.author_entity_type = 'bot'
@@ -220,7 +262,7 @@ class MessageSource(PostgresSource):
             JOIN unnest(CAST(:bots AS text[]), CAST(:parts AS text[]))
                  AS p(source_bot, partition) ON m.bot_id = p.partition
             JOIN sessions s ON s.id = m.session_id
-            WHERE {PUBLIC_HISTORY_AUTHORITY} AND :topic_enabled AND __EXACT_ALL__
+            WHERE {PUBLIC_HISTORY_AUTHORITY} {_IN_WINDOW} AND :topic_enabled AND __EXACT_ALL__
               AND m.content_tsv @@ plainto_tsquery('english', :topic)
               AND NOT EXISTS (SELECT 1 FROM focused)
             ORDER BY ts_rank(m.content_tsv, to_tsquery('english', :query)) DESC,
@@ -232,7 +274,7 @@ class MessageSource(PostgresSource):
             JOIN unnest(CAST(:bots AS text[]), CAST(:parts AS text[]))
                  AS p(source_bot, partition) ON m.bot_id = p.partition
             JOIN sessions s ON s.id = m.session_id
-            WHERE {PUBLIC_HISTORY_AUTHORITY} AND __EXACT_ALL__
+            WHERE {PUBLIC_HISTORY_AUTHORITY} {_IN_WINDOW} AND __EXACT_ALL__
               AND NOT EXISTS (SELECT 1 FROM focused)
               AND NOT EXISTS (SELECT 1 FROM exact_topic)
             ORDER BY ts_rank(m.content_tsv, to_tsquery('english', :query)) DESC,
@@ -244,7 +286,7 @@ class MessageSource(PostgresSource):
             JOIN unnest(CAST(:bots AS text[]), CAST(:parts AS text[]))
                  AS p(source_bot, partition) ON m.bot_id = p.partition
             JOIN sessions s ON s.id = m.session_id
-            WHERE {PUBLIC_HISTORY_AUTHORITY} AND __EXACT_ANY__
+            WHERE {PUBLIC_HISTORY_AUTHORITY} {_IN_WINDOW} AND __EXACT_ANY__
               AND NOT EXISTS (SELECT 1 FROM focused)
               AND NOT EXISTS (SELECT 1 FROM exact_topic)
               AND NOT EXISTS (SELECT 1 FROM exact_all)
@@ -257,14 +299,14 @@ class MessageSource(PostgresSource):
             JOIN unnest(CAST(:bots AS text[]), CAST(:parts AS text[]))
                  AS p(source_bot, partition) ON m.bot_id = p.partition
             JOIN sessions s ON s.id = m.session_id
-            WHERE {PUBLIC_HISTORY_AUTHORITY}
+            WHERE {PUBLIC_HISTORY_AUTHORITY} {_IN_WINDOW}
               AND :allow_lexical
               AND m.content_tsv @@ plainto_tsquery('english', :strong)
               AND NOT EXISTS (SELECT 1 FROM focused)
               AND NOT EXISTS (SELECT 1 FROM exact_topic)
               AND NOT EXISTS (SELECT 1 FROM exact_all)
               AND NOT EXISTS (SELECT 1 FROM exact_any)
-            ORDER BY m.timestamp DESC, m.id LIMIT :candidate_limit
+            ORDER BY __LEXICAL_ORDER__ m.timestamp DESC, m.id LIMIT :candidate_limit
         ), loose AS MATERIALIZED (
             SELECT m.id, m.bot_id AS partition, p.source_bot, m.session_id, m.timestamp,
                    FALSE AS exact_match
@@ -272,7 +314,7 @@ class MessageSource(PostgresSource):
             JOIN unnest(CAST(:bots AS text[]), CAST(:parts AS text[]))
                  AS p(source_bot, partition) ON m.bot_id = p.partition
             JOIN sessions s ON s.id = m.session_id
-            WHERE {PUBLIC_HISTORY_AUTHORITY}
+            WHERE {PUBLIC_HISTORY_AUTHORITY} {_IN_WINDOW}
               AND :allow_lexical
               AND m.content_tsv @@ to_tsquery('english', :query)
               AND NOT EXISTS (SELECT 1 FROM focused)
@@ -280,7 +322,7 @@ class MessageSource(PostgresSource):
               AND NOT EXISTS (SELECT 1 FROM exact_all)
               AND NOT EXISTS (SELECT 1 FROM exact_any)
               AND NOT EXISTS (SELECT 1 FROM strong)
-            ORDER BY m.timestamp DESC, m.id LIMIT :candidate_limit
+            ORDER BY __LEXICAL_ORDER__ m.timestamp DESC, m.id LIMIT :candidate_limit
         ), candidates AS MATERIALIZED (
             SELECT * FROM focused UNION ALL SELECT * FROM exact_topic
             UNION ALL SELECT * FROM exact_all UNION ALL SELECT * FROM exact_any
@@ -297,7 +339,7 @@ class MessageSource(PostgresSource):
                                      INTERSECT SELECT unnest(tsvector_to_array(m.content_tsv)))) AS matched,
                    cardinality(q.lexemes) AS possible,
                    ts_rank(m.content_tsv, to_tsquery('english', :query))
-                   / (1 + GREATEST(0, extract(epoch FROM now()) - c.timestamp)
+                   / (1 + GREATEST(0, LEAST(extract(epoch FROM now()), :rank_at) - c.timestamp)
                           / 86400.0 / {RECENCY_HALF_WEIGHT_DAYS}) AS score
             FROM candidates c JOIN messages m ON m.id = c.id AND m.bot_id = c.partition
             CROSS JOIN query_lexemes q
@@ -376,14 +418,15 @@ class MessageSource(PostgresSource):
             endpoints = ("b1", f"b{numbers.index(count[1].lower()) + 1}") if count else ()
         return (marker.group().lower(), *endpoints)
 
-    def statement_for(self, query: str) -> str:
+    def statement_for(self, query: str, *, windowed: bool = False) -> str:
         exact = self.exact_literals(query)
         clauses = [f"m.content ILIKE :exact_{i}" for i in range(len(exact))]
         # A focused review cannot suppress exact search for a different task.
         # Require every explicit identity in the query before its candidate cap.
         return (self.statement.replace("__FOCUS_EXACT__", "(" + " AND ".join(clauses) + ")" if clauses else "TRUE")
                 .replace("__EXACT_ALL__", "(" + " AND ".join(clauses) + ")" if clauses else "FALSE")
-                .replace("__EXACT_ANY__", "(" + " OR ".join(clauses) + ")" if clauses else "FALSE"))
+                .replace("__EXACT_ANY__", "(" + " OR ".join(clauses) + ")" if clauses else "FALSE")
+                .replace("__LEXICAL_ORDER__", _WINDOW_LEXICAL_ORDER if windowed else ""))
 
     def extra_params(self, scope: RecallScope, query: str) -> dict:
         parsed = parse_find_query(query[:512])
@@ -411,7 +454,7 @@ class MessageSource(PostgresSource):
                 "topic_enabled": bool(topic), "topic": " ".join(topic),
                 "strong": " ".join(strong), "query": search, "terms": terms,
                 "allow_lexical": not exact or bool(parsed.parts),
-                "candidate_limit": 96,
+                "candidate_limit": 96, **UNBOUNDED_WINDOW,
                 **{f"exact_{i}": like_pattern(token) for i, token in enumerate(exact)}}
 
 

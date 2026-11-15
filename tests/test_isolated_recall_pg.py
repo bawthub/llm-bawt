@@ -11,6 +11,7 @@ Run: pytest -m integration tests/test_isolated_recall_pg.py
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 import time
 import uuid
 
@@ -201,6 +202,21 @@ def test_coverage_outranks_recency_for_an_old_exact_answer(rig):
     newer = rig.add("Ran gizmoctl auth login openai-codex: error, unknown command.",
                     at=rig.now - 3 * DAY)
     assert [row.id for row in rig.recall(LOGIN_QUESTION)][:2] == [newer, march]
+
+
+def test_named_date_reaches_the_answer_that_recency_buries(rig):
+    """TASK-1558 replay miss: the clone path from a named day lost to newer asks."""
+    when = rig.now - 60 * DAY
+    stamp = datetime.fromtimestamp(when, UTC)
+    answer = rig.add("Vex cloned the community repo to local path /tmp/atc.", at=when)
+    newer = {rig.add(f"Where is the Vex AltTab community clone local path? ({i})",
+                     at=rig.now - 60 * (i + 1)) for i in range(8)}
+    question = "Vex AltTab community clone local path"
+    assert answer not in [row.id for row in rig.recall(question)]
+    rows = rig.recall(f"{question} {stamp:%B} {stamp.day} {stamp.year}")
+    assert rows[0].id == answer
+    assert not newer & {row.id for row in rows}
+    assert rows.time_window["applied"] is True
 
 
 def test_literal_receipt_beats_new_generic_history_and_keeps_provenance(rig):

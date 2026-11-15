@@ -79,6 +79,7 @@ A single compact JSON text block (no duplicate structured-output copy):
 - `coverage`: per-source success/no-match, counts and prefix-fallback counts;
   task results additionally report semantic/keyword/explicit mode and withheld
   candidates. Incomplete task provenance is `partial`, not a clean no-match.
+  A dated question's messages coverage includes `time_window` (see Messages).
   An individual source timeout/failure is `unavailable` with a generic code;
   healthy sources may still yield cited findings, marked incomplete. A mixed
   unavailable/empty search is `insufficient_evidence`, never `no_match`; all
@@ -162,6 +163,18 @@ rank work across a whole history partition. Missing single-piece identifiers
 do not degrade to generic old fragments. Coverage buckets (`COVERAGE_BUCKETS`)
 rank the share of query lexemes matched, then full-text rank decays by a
 14-day recency term.
+
+A question that names a time searches that period first (TASK-1558,
+`recall/temporal.py`): an ISO date, a month and day, a month with a year or a
+leading preposition ("in March"), or a plain relative day ("yesterday", "last
+Tuesday", "three weeks ago"). Bare "may" and "march" with a number are verbs,
+not dates. The period is padded by a day each side for time zones; the time
+phrase leaves the lexical terms; every direct-hit tier is limited to the period;
+recency is measured from the period's end; and the lexical tiers keep the
+candidates that share the most query lexemes rather than the newest ones. If
+nothing in the period matches, the whole history is searched with the original
+question. Messages coverage then carries `time_window`
+(`{"from", "to", "applied"}`); `applied: false` means the fallback ran.
 This selects at most six **hits**. Each hit carries up to two **follow-ons**
 (`MAX_FOLLOW_ONS_PER_HIT`): the next messages in the same partition and session
 within 30 minutes, under the identical authority filters. Follow-ons reach

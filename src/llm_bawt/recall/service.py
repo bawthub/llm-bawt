@@ -357,6 +357,9 @@ class RecallService:
                 # Reported only when nonzero: coverage is paid per source in
                 # every packet's output budget.
                 coverage[source]["head_fallbacks"] = head_fallbacks
+            window = getattr(rows, "time_window", None)
+            if isinstance(window, dict) and set(window) == {"from", "to", "applied"}:
+                coverage[source]["time_window"] = dict(window)
             depth = getattr(provider, "depth", None)
             if depth in {"key_fields", "details"}:
                 coverage[source]["depth"] = depth
