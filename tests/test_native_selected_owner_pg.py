@@ -23,7 +23,7 @@ from sqlalchemy import text
 from starlette.testclient import TestClient
 
 from llm_bawt.bot_access import service as service_codec
-from llm_bawt.bots import Bot
+from llm_bawt.bots import Bot, BotManager
 from llm_bawt.service.background_service import BackgroundService
 from llm_bawt.service.core import ServiceLLMBawt
 from llm_bawt.service.schemas import ChatCompletionRequest
@@ -71,6 +71,9 @@ def native_runtime(request, real_storage, rig, monkeypatch):
     monkeypatch.setattr("llm_bawt.sessions.generated_title.schedule_session_title",
                         lambda *args, **kwargs: None)
     runtime = request.getfixturevalue("http_runtime")
+    # Like pool/schema bootstrap, lazy bot-profile loading is provisioning,
+    # not part of the warmed request's history SQL budget.
+    BotManager(rig.config).list_bots()
     model_calls, appends, reads, admissions = [], [], [], []
     real_owned = sessions._owned_session_or_404
     measure_admission = [True]
