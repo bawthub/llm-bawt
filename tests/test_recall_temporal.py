@@ -32,6 +32,14 @@ def day(text: str) -> float:
     ("Dec 31 release", "2025-12-31", "2026-01-01", "release"),  # no year: latest past one
     ("decisions in May 2025", "2025-05-01", "2025-06-01", "decisions in"),
     ("since March what changed", "2026-03-01", "2026-10-27", "what changed"),
+    # A range word governs every date form, not just a bare month (review B1).
+    ("what changed since March 2025", "2025-03-01", "2026-10-27", "what changed"),
+    ("deploys since 2025-03-01", "2025-03-01", "2026-10-27", "deploys"),
+    ("deploys from the 3rd of June", "2026-06-03", "2026-10-27", "deploys"),
+    ("what was planned until March", "1970-01-02", "2026-04-01", "what was planned"),
+    ("gate runs before Oct 3", "1970-01-02", "2026-10-03", "gate runs"),
+    ("gate runs after Oct 3", "2026-10-04", "2026-10-27", "gate runs"),
+    ("throughout March 2025", "2025-03-01", "2025-04-01", "throughout"),
 ])
 def test_explicit_time_phrases_set_a_padded_window(query, start, end, residual):
     window = time_window(query, NOW)
@@ -52,6 +60,10 @@ def test_explicit_time_phrases_set_a_padded_window(query, start, end, residual):
 ])
 def test_ordinary_questions_have_no_window(query):
     assert time_window(query, NOW) is None
+
+
+def test_an_empty_range_is_no_window():
+    assert time_window("anything after Oct 30 2026", NOW) is None
 
 
 def test_latest_question_line_with_a_hint_wins():

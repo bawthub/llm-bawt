@@ -25,7 +25,12 @@ WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", 
 _MONTH = "(?:" + "|".join(sorted(MONTHS, key=len, reverse=True)) + r")\.?"
 _DAY = r"(?:[12][0-9]|3[01]|0?[1-9])(?:st|nd|rd|th)?"
 _YEAR = r"(?:19|20)[0-9]{2}"
-_LEAD = r"(?:in|during|from|since|until|through|throughout|early|mid|late|end\s+of|start\s+of|of)"
+_LEAD = (r"(?:in|during|from|since|after|before|until|till|through|throughout|"
+         r"early|mid|late|end\s+of|start\s+of|of)")
+# Range words turn a date into an open range: since/from/after run to now;
+# until/till/through/before run from the start of history.
+_RANGE_WORDS = ("since", "from", "after", "before", "until", "till", "through")
+OPEN_START = date(1970, 1, 2)
 # Most specific first; a matched span is consumed before broader patterns run.
 _PATTERNS = (
     ("iso", re.compile(rf"\b(?P<y>{_YEAR})-(?P<m>0[1-9]|1[0-2])-(?P<d>0[1-9]|[12][0-9]|3[01])"
@@ -96,11 +101,7 @@ def _span(kind: str, match: re.Match, today: date) -> tuple[date, date] | None:
         if kind in {"month_year", "lead_month"}:
             month = MONTHS[groups["mon"].lower().rstrip(".")]
             year = int(groups["y"]) if groups.get("y") else _latest_year(today, month, None)
-            start, end = _month_span(year, month)
-            if match.group().lower().startswith("since"):
-                # "since March" is an open range up to today.
-                end = max(end, today + timedelta(days=1))
-            return start, end
+            return _month_span(year, month)
         if kind == "ago":
             count = _WORD_NUMBERS.get(groups["n"].lower()) or int(groups["n"])
             days = count * (7 if groups["unit"].lower().startswith("week") else 1)
@@ -134,6 +135,32 @@ def _span(kind: str, match: re.Match, today: date) -> tuple[date, date] | None:
         return None
 
 
+def _qualifier(kind: str, match: re.Match) -> str | None:
+    """The range word governing this date: inside "since March", or just before it."""
+    if kind == "lead_month":
+        word = match.group().split()[0].lower()
+    else:
+        before = re.search(rf"\b({'|'.join(_RANGE_WORDS)})\s+(?:the\s+)?$",
+                           match.string[:match.start()], re.IGNORECASE)
+        word = before.group(1).lower() if before else None
+    return word if word in _RANGE_WORDS else None
+
+
+def _ranged(word: str | None, span: tuple[date, date], today: date) -> tuple[date, date] | None:
+    """Apply a range word to a date's own span; None when the range is empty."""
+    start, end = span
+    now_end = today + timedelta(days=1)
+    if word in {"since", "from"}:
+        start, end = start, max(end, now_end)
+    elif word == "after":
+        start, end = end, now_end
+    elif word in {"until", "till", "through"}:
+        start = OPEN_START
+    elif word == "before":
+        start, end = OPEN_START, start
+    return (start, end) if start < end else None
+
+
 def _parse_line(line: str, today: date) -> tuple[date, date, str] | None:
     spans: list[tuple[date, date]] = []
     residual = line
@@ -147,11 +174,19 @@ def _parse_line(line: str, today: date) -> tuple[date, date, str] | None:
             span = _span(kind, match, today)
             if span is None:
                 return match.group()
+            # Every date form honours a preceding range word, so "since March
+            # 2025" and "since 2025-03-01" run to now, not just that month/day.
+            span = _ranged(_qualifier(kind, match), span, today)
+            if span is None:
+                return match.group()
             spans.append(span)
-            return " "
+            return "\x00"
         residual = pattern.sub(consume, residual)
     if not spans:
         return None
+    # A range word before a consumed date leaves with it.
+    residual = re.sub(rf"\b(?:{'|'.join(_RANGE_WORDS)})\s+(?:the\s+)?\x00", " ", residual,
+                      flags=re.IGNORECASE).replace("\x00", " ")
     return min(s for s, _ in spans), max(e for _, e in spans), re.sub(r"\s+", " ", residual).strip()
 
 

@@ -219,6 +219,18 @@ def test_named_date_reaches_the_answer_that_recency_buries(rig):
     assert rows.time_window["applied"] is True
 
 
+def test_since_a_dated_month_keeps_the_later_correction(rig):
+    """Review B1: "since <Month YYYY>" runs to now, so an in-month hit can't hide a later fix."""
+    when = rig.now - 200 * DAY
+    stamp = datetime.fromtimestamp(when, UTC)
+    original = rig.add("Deployment target changed to the blue cluster.", at=when)
+    correction = rig.add("Correction: the deployment target changed back to the green cluster.",
+                         at=rig.now - 30 * DAY)
+    rows = rig.recall(f"what deployment target changed since {stamp:%B} {stamp.year}")
+    assert {original, correction} <= {row.id for row in rows}
+    assert rows.time_window["applied"] is True
+
+
 def test_literal_receipt_beats_new_generic_history_and_keeps_provenance(rig):
     receipt = rig.add("TASK-1144 app recreate 8ee7d89 succeeded; live health checks passed.",
                       at=rig.now - 80 * DAY)

@@ -168,7 +168,9 @@ A question that names a time searches that period first (TASK-1558,
 `recall/temporal.py`): an ISO date, a month and day, a month with a year or a
 leading preposition ("in March"), or a plain relative day ("yesterday", "last
 Tuesday", "three weeks ago"). Bare "may" and "march" with a number are verbs,
-not dates. The period is padded by a day each side for time zones; the time
+not dates. A range word before any of these forms opens the period: "since",
+"from" and "after" run to now; "until", "till", "through" and "before" run from
+the start of history. A range that would be empty leaves the question unwindowed. The period is padded by a day each side for time zones; the time
 phrase leaves the lexical terms; every direct-hit tier is limited to the period;
 recency is measured from the period's end; and the lexical tiers keep the
 candidates that share the most query lexemes rather than the newest ones. If
