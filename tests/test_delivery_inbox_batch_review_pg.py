@@ -72,7 +72,7 @@ def test_accepted_batch_does_not_fence_user_bypass(gated, batch):
     _send(gated, bot, "held backlog")
     user = _user_chat(gated, deliveries, bot)
     _backstop_gate(gated, bot)
-    stamp_send_now(deliveries.engine, user.id, "operator")
+    stamp_send_now(deliveries.engine, user.id, "nick")
     candidate = deliveries.claim_next(bot, claim_owner="worker", steer_capable=True)
     assert candidate is not None and candidate.id == user.id
 

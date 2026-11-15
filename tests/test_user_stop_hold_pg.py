@@ -182,15 +182,15 @@ def _hold(gated, bot, ttl=600):
         return open_or_extend(conn, bot, ttl)
 
 
-def _user_chat(gated, deliveries, bot, message="operator, while the bot is held"):
+def _user_chat(gated, deliveries, bot, message="nick, while the bot is held"):
     """The user's own chat row as ``ordinary_turn_queue`` writes it: user-authored,
     self-addressed, ``ordinary_chat`` metadata."""
     from llm_bawt.message_authorship import AuthorReference
 
     gated.senders.append(bot)
     record, _ = deliveries.enqueue(
-        sender_bot_id=bot, target_bot_id=bot, author=AuthorReference.user("operator"), message=message,
-        payload={"messages": [{"role": "user", "content": message}], "bot_id": bot, "user": "operator",
+        sender_bot_id=bot, target_bot_id=bot, author=AuthorReference.user("nick"), message=message,
+        payload={"messages": [{"role": "user", "content": message}], "bot_id": bot, "user": "nick",
                  "stream": True},
         metadata={"ordinary_chat": {"session_id": None, "stream": True}},
     )
