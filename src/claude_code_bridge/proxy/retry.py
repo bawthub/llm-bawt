@@ -292,6 +292,11 @@ class RetryLease:
         self._registry._release(self)
 
 
+#: TASK-2349: incomplete-tool carriers per bridge turn. Two covers every turn
+#: seen with repeated argument stalls; a third stall still ends the turn.
+MAX_TOOL_RECOVERIES_PER_TURN = 2
+
+
 class RetryBudgetRegistry:
     """One attempt counter and one active sampler per request/body fingerprint.
 
@@ -306,7 +311,7 @@ class RetryBudgetRegistry:
     def __init__(self, *, max_entries: int = 4096) -> None:
         self.max_entries = max_entries
         self._entries: dict[tuple[str, str], _BudgetEntry] = {}
-        self._tool_recovered: set[str] = set()
+        self._tool_recovered: dict[str, int] = {}
         self._terminal_tool_failures: dict[str, str] = {}
         self._generation = 0
         self._lock = threading.Lock()
@@ -385,11 +390,13 @@ class RetryBudgetRegistry:
                 self._entries.pop(lease._key)
 
     def claim_tool_recovery(self, request_id: str) -> bool:
-        """One carrier per bridge turn, including SDK continuation-body changes."""
+        """Up to MAX_TOOL_RECOVERIES_PER_TURN carriers per bridge turn, including
+        SDK continuation-body changes."""
         with self._lock:
-            if request_id in self._tool_recovered:
+            used = self._tool_recovered.get(request_id, 0)
+            if used >= MAX_TOOL_RECOVERIES_PER_TURN:
                 return False
-            self._tool_recovered.add(request_id)
+            self._tool_recovered[request_id] = used + 1
             return True
 
     def fail_tool_request(self, request_id: str, cause: str) -> None:
@@ -400,7 +407,7 @@ class RetryBudgetRegistry:
     def clear_request(self, request_id: str) -> None:
         """Drop this turn's side-effect/recovery tombstones and spent policies."""
         with self._lock:
-            self._tool_recovered.discard(request_id)
+            self._tool_recovered.pop(request_id, None)
             self._terminal_tool_failures.pop(request_id, None)
             for key in [key for key in self._entries if key[0] == request_id]:
                 del self._entries[key]

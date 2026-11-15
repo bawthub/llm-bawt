@@ -5,11 +5,15 @@ import json
 import pytest
 
 from claude_code_bridge.proxy import routes
-from claude_code_bridge.proxy.retry import ReplayRefusedError, RetryBudgetRegistry, RetryPolicy
+from claude_code_bridge.proxy.retry import (
+    MAX_TOOL_RECOVERIES_PER_TURN, ReplayRefusedError, RetryBudgetRegistry, RetryPolicy,
+)
 from claude_code_bridge.proxy.tool_recovery import CARRIER_NAME, carrier_allowed
 from claude_code_bridge.send_errors import classify_terminal_error
 from tests import virtual_clock
-from tests.test_proxy_progress_recovery import BODY, MODEL, THINKING, TOOL, Harness, parse_message, success_frames
+from tests.test_proxy_progress_recovery import (
+    BODY, MODEL, THINKING, TOOL, Feed, Harness, parse_message, success_frames,
+)
 
 
 def stalled_frames(*, repetition=False, complete=False, siblings=False):
@@ -87,7 +91,7 @@ def test_incomplete_stall_recovers_then_fresh_call_can_succeed(monkeypatch, mode
     virtual_clock.run_timing(run())
 
 
-@pytest.mark.parametrize("reason", ["parallel", "catalog_collision", "prior_carrier", "turn_allowance"])
+@pytest.mark.parametrize("reason", ["parallel", "catalog_collision", "turn_allowance"])
 def test_ambiguous_or_repeated_stall_fails_with_real_cause_and_blocks_empty_resampling(monkeypatch, reason):
     async def run():
         h = Harness(monkeypatch, "sse", stalled_frames(siblings=reason == "parallel"), success_frames())
@@ -95,12 +99,9 @@ def test_ambiguous_or_repeated_stall_fails_with_real_cause_and_blocks_empty_resa
         body = copy.deepcopy(BODY)
         if reason == "catalog_collision":
             body["tools"].append({"name": CARRIER_NAME, "input_schema": {"type": "object"}})
-        if reason == "prior_carrier":
-            body["messages"].append({"role": "assistant", "content": [
-                {"type": "tool_use", "id": "notice", "name": CARRIER_NAME, "input": {}},
-            ]})
         if reason == "turn_allowance":
-            assert budgets.claim_tool_recovery(h.context.request_id)
+            for _ in range(MAX_TOOL_RECOVERIES_PER_TURN):
+                assert budgets.claim_tool_recovery(h.context.request_id)
         try:
             result = events(await collect(h, body, budgets))
             assert result[-1]["type"] == "error"
@@ -136,8 +137,10 @@ def test_completed_arguments_remain_terminal_not_substituted(monkeypatch):
 
 def test_turn_cleanup_releases_carrier_cap_and_pinned_failure():
     budgets = RetryBudgetRegistry()
-    assert budgets.claim_tool_recovery("turn")
+    for _ in range(MAX_TOOL_RECOVERIES_PER_TURN):
+        assert budgets.claim_tool_recovery("turn")
     assert not budgets.claim_tool_recovery("turn")
+    assert budgets.claim_tool_recovery("another turn")
     budgets.fail_tool_request("turn", "typed cause")
     with pytest.raises(ReplayRefusedError, match="typed cause"):
         budgets.acquire("turn", "new", RetryPolicy)
@@ -173,3 +176,74 @@ def test_typed_tool_failure_overrides_misleading_sdk_output_cap_only_on_proxy():
                                         proxy_tool_error=cause)
     assert text == cause and raw["error_code"] == "upstream_tool_arguments"
     assert classify_terminal_error(sdk, proxy_tool_error=cause) == (str(sdk), None)
+
+
+def _after_failed_turn(body):
+    """TASK-2349 incident shape: a turn used a carrier, then died. The CLI drops
+    its API-error message and merges the carrier's tool_result into the next
+    prompt's user message."""
+    body["messages"].extend([
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "notice", "name": CARRIER_NAME, "input": {}},
+        ]},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "notice", "is_error": True,
+             "content": "No such tool available"},
+            {"type": "text", "text": "A new task from the next turn"},
+        ]},
+    ])
+    return body
+
+
+def test_carrier_from_an_earlier_bridge_turn_does_not_block_this_turn(monkeypatch):
+    async def run():
+        h = Harness(monkeypatch, "sse", stalled_frames(), success_frames())
+        budgets = RetryBudgetRegistry()
+        try:
+            frames = await collect(h, _after_failed_turn(copy.deepcopy(BODY)), budgets)
+            result = events(frames)
+            assert not any(e["type"] == "error" for e in result)
+            assert [e["content_block"]["name"] for e in result
+                    if e.get("content_block", {}).get("type") == "tool_use"] == [CARRIER_NAME]
+        finally:
+            await h.adapter.close()
+    virtual_clock.run_timing(run())
+
+
+def test_history_scan_still_caps_clients_without_a_turn_id():
+    body = _after_failed_turn({"messages": []})
+    assert not carrier_allowed(body)
+    assert carrier_allowed(body, scan_history=False)
+    body["tools"] = [{"name": CARRIER_NAME}]
+    assert not carrier_allowed(body, scan_history=False)
+
+
+def test_second_stall_in_one_turn_recovers_and_third_is_terminal(monkeypatch):
+    async def run():
+        h = Harness(monkeypatch, "sse", stalled_frames(), stalled_frames())
+        h.feeds.append(Feed(stalled_frames()))
+        h.create.side_effect = h.feeds
+        budgets = RetryBudgetRegistry()
+        body = copy.deepcopy(BODY)
+        try:
+            for attempt in range(1, MAX_TOOL_RECOVERIES_PER_TURN + 2):
+                frames = await collect(h, body, budgets)
+                result = events(frames)
+                if attempt <= MAX_TOOL_RECOVERIES_PER_TURN:
+                    assert not any(e["type"] == "error" for e in result)
+                    content = json.loads((await parse_message(frames)).model_dump_json())["content"]
+                    carrier = [b for b in content if b["type"] == "tool_use"]
+                    assert [b["name"] for b in carrier] == [CARRIER_NAME]
+                    body = {**body, "messages": body["messages"] + [
+                        {"role": "assistant", "content": content},
+                        {"role": "user", "content": [{"type": "tool_result",
+                                                      "tool_use_id": carrier[0]["id"],
+                                                      "is_error": True, "content": "unavailable"}]},
+                    ]}
+                else:
+                    assert result[-1]["type"] == "error"
+                    assert "already used" in result[-1]["error"]["message"]
+            assert h.attempts == MAX_TOOL_RECOVERIES_PER_TURN + 1
+        finally:
+            await h.adapter.close()
+    virtual_clock.run_timing(run())

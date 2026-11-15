@@ -278,7 +278,8 @@ async def _proxy_iter(
             status_code = 500
     except ToolArgumentGenerationError as e:
         slot = guard.replacement_slot()
-        allowed = (e.incomplete and slot is not None and carrier_allowed(body)
+        allowed = (e.incomplete and slot is not None
+                   and carrier_allowed(body, scan_history=lease is None)
                    and (lease is None or budgets.claim_tool_recovery(context.request_id)))
         if allowed:
             guard.close()

@@ -21,6 +21,7 @@ from claude_code_bridge.proxy.chatgpt_transport import (
 )
 from claude_code_bridge.proxy.request_context import ProxyCancellationRegistry, ProxyRequestContext
 from claude_code_bridge.proxy.retry import (
+    MAX_TOOL_RECOVERIES_PER_TURN,
     FailureBucket,
     RetryBudgetRegistry,
     RetryPolicy,
@@ -106,7 +107,8 @@ def test_oversize_call_without_carrier_fails_once_with_size_cause(monkeypatch):
     async def run():
         h = oversize_harness(monkeypatch, "sse")
         budgets = RetryBudgetRegistry()
-        assert budgets.claim_tool_recovery(h.context.request_id)  # carrier already used this turn
+        for _ in range(MAX_TOOL_RECOVERIES_PER_TURN):  # carrier allowance spent this turn
+            assert budgets.claim_tool_recovery(h.context.request_id)
         body = copy.deepcopy(BODY)
         try:
             result = events(await collect(h, body, budgets))

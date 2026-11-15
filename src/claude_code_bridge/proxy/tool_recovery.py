@@ -33,10 +33,19 @@ class ToolArgumentGenerationError(RuntimeError):
                 f"tool={self.tool_name} held_arg_chars={self.held_chars}; tool did not run")
 
 
-def carrier_allowed(body: dict) -> bool:
-    """One substitution per model conversation turn; never shadow a real tool."""
+def carrier_allowed(body: dict, *, scan_history: bool = True) -> bool:
+    """Never shadow a real tool; without a turn id, one substitution per model turn.
+
+    TASK-2349: bridge requests pass ``scan_history=False`` because the turn-scoped
+    retry registry already caps them. The history scan can't see turn boundaries:
+    after a failed turn the CLI drops its error message and merges the old
+    carrier's tool_result into the next prompt's user message, so the scan ran
+    past the new prompt and refused every stall in the following turn.
+    """
     if any(tool.get("name") == CARRIER_NAME for tool in body.get("tools", [])):
         return False
+    if not scan_history:
+        return True
     for message in reversed(body.get("messages", [])):
         content = message.get("content", [])
         blocks = content if isinstance(content, list) else []
