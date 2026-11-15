@@ -17,6 +17,7 @@ from llm_bawt.bot_tags import SNAPSHOT_SQL, TagPolicyUnavailable, TagSnapshot
 from llm_bawt.memory.ownership import MemoryAuthority
 
 from .budgets import DATABASE_WORKER, compact_json
+from .db_errors import db_sqlstate, is_transient_db_error
 from .contracts import (
     COVERAGE_BUCKETS, FOLLOW_ON_WINDOW_SECONDS, MAX_FOLLOW_ONS_PER_HIT, MAX_RECORD_CHARS, MAX_SOURCE_RECORDS,
     RECENCY_HALF_WEIGHT_DAYS, Evidence, EvidenceBatch, RecallError, RecallScope, SourceProvider, WindowedEvidence,
@@ -123,7 +124,21 @@ class RecallDatabase:
     def __init__(self, engine):
         self.engine = engine
 
-    def read(self, statement: str, params: dict, timeout_ms: int = 2000) -> list[dict]:
+    def read(self, statement: str, params: dict, timeout_ms: int = 2000,
+             retry_transient: bool = True) -> list[dict]:
+        """Read once, retrying exactly once on a transient database error."""
+        try:
+            return self._read_once(statement, params, timeout_ms)
+        except RecallError:
+            raise
+        except Exception as error:
+            if not retry_transient or not is_transient_db_error(error):
+                raise
+            logger.warning("recall db read retrying class=%s sqlstate=%s",
+                           type(error).__name__, db_sqlstate(error))
+        return self._read_once(statement, params, timeout_ms)
+
+    def _read_once(self, statement: str, params: dict, timeout_ms: int) -> list[dict]:
         if self.engine is None:
             raise RecallError("source_unavailable")
         # PostgreSQL enforces read-only mode; no provisioning, access counters,
@@ -650,7 +665,7 @@ class ToolArgSource(PostgresSource):
         try:
             return await DATABASE_WORKER.run(self.database.read, self.path_statement,
                                              {**params, "path_pattern": pattern},
-                                             PATH_TIMEOUT_MS)
+                                             PATH_TIMEOUT_MS, False)
         except Exception as error:
             logger.warning("tool_args path candidates skipped class=%s", type(error).__name__)
             return None

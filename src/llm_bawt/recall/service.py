@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .budgets import clip, compact_json, tokens
 from .completion import CALLING_BOT, input_tokens
+from .db_errors import db_sqlstate
 from .contracts import (
     MAX_FOLLOW_ONS_PER_HIT, MAX_INPUT_TOKENS, MAX_MODEL_BYTES, MAX_QUERY_TOKENS, MAX_QUOTE_CHARS,
     MAX_QUOTE_TOKENS, MAX_RECORD_CHARS,
@@ -337,8 +338,9 @@ class RecallService:
                     code = error.code if isinstance(error, RecallError) and error.code in {
                         "timeout", "busy"} else "source_unavailable"
                 root = error.__cause__ or error
-                logger.warning("recall source failed source=%s class=%s elapsed_ms=%d",
-                               source, type(root).__name__, round((time.monotonic() - source_start) * 1000))
+                logger.warning("recall source failed source=%s class=%s sqlstate=%s elapsed_ms=%d",
+                               source, type(root).__name__, db_sqlstate(root),
+                               round((time.monotonic() - source_start) * 1000))
                 coverage[source] = {"status": "unavailable", "records": 0, "error_code": code}
                 continue
             if not isinstance(rows, list):
