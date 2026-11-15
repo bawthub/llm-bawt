@@ -27,6 +27,9 @@ class BotPolicyReceipt:
                   AND delivery_mode='turn'
                   AND session_policy IN ('reset_retain_history', 'reset_without_history')
                   AND metadata_json->'new_session_receipt' IS NULL
+                  -- A settled Stop is not a successful reset awaiting a receipt.
+                  AND NOT (metadata_json @>
+                      '{"stopped_after_start": true, "new_session_ambiguous": true}'::jsonb)
                 ORDER BY updated_at LIMIT 50
             """)).mappings().all()
         settled = []

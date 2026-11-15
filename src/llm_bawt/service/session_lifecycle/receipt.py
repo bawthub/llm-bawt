@@ -60,6 +60,9 @@ class NewSessionReceipt:
                   AND metadata_json->'new_session_intent'->>'origin' IN ('chat_command', 'scheduler')
                   AND session_policy='continue'
                   AND metadata_json->'new_session_receipt' IS NULL
+                  -- A settled Stop is not a successful reset awaiting a receipt.
+                  AND NOT (metadata_json @>
+                      '{"stopped_after_start": true, "new_session_ambiguous": true}'::jsonb)
                 ORDER BY updated_at LIMIT 50
             """)).mappings().all()
         settled = []

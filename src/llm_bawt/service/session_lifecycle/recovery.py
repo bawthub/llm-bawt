@@ -24,6 +24,8 @@ class NewSessionRecovery:
                   AND metadata_json->'new_session_intent'->>'origin' IN ('chat_command', 'scheduler')
                   AND session_policy='continue'
                   AND metadata_json->'new_session_receipt' IS NULL
+                  AND NOT (metadata_json @>
+                      '{"stopped_after_start": true, "new_session_ambiguous": true}'::jsonb)
                 RETURNING *
             """), {"id": delivery_id, "reason": reason[:4000]}).mappings().one_or_none()
             DeliveryTransitionEvents.stage(conn, row, reason_code="reset_receipt_missing")
@@ -42,6 +44,8 @@ class NewSessionRecovery:
                   AND transport_accepted_at IS NOT NULL AND delivery_mode='turn'
                   AND session_policy IN ('reset_retain_history', 'reset_without_history')
                   AND metadata_json->'new_session_receipt' IS NULL
+                  AND NOT (metadata_json @>
+                      '{"stopped_after_start": true, "new_session_ambiguous": true}'::jsonb)
                 RETURNING *
             """), {"id": delivery_id, "reason": reason[:4000]}).mappings().one_or_none()
             DeliveryTransitionEvents.stage(conn, row, reason_code="reset_receipt_missing")

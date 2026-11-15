@@ -346,8 +346,10 @@ def test_accepted_reset_dispatch_timeout_never_replays(rig, real_lifecycle, mode
 @pytest.mark.parametrize("recovery", ["direct", "lease"])
 @pytest.mark.parametrize("started", [False, True])
 def test_recorded_stop_wins_accepted_reset_recovery(rig, real_lifecycle, mode, source, recovery, started):
+    from llm_bawt.service.session_lifecycle.policy_receipt import BotPolicyReceipt
     from llm_bawt.service.session_lifecycle.recovery import NewSessionRecovery
 
+    NewSessionOutbox(rig.engine)
     claim = accepted_reset(rig, real_lifecycle, mode)
     # Model a legacy open turn: Stop committed, then the app died before settle.
     audit = {"abort_request": {"source": source, "requested_at": "2026-01-01T00:00:00+00:00"}}
@@ -375,7 +377,23 @@ def test_recorded_stop_wins_accepted_reset_recovery(rig, real_lifecycle, mode, s
     assert "never replay" in row.metadata["new_session_ambiguous_reason"]
     assert row.claim_token is None
     assert row.next_retry_at is None
+    # The same leader iteration runs both receipt pumps after lease recovery.
+    # Stop is already a settled, explicitly ambiguous reset, not a new failure.
+    assert NewSessionReceipt.reconcile_typed(rig.engine) == []
+    assert BotPolicyReceipt.reconcile(rig.engine) == []
+    assert NewSessionRecovery.fail_missing_typed_receipt(
+        rig.engine, claim.id, "stale receipt failure",
+    ) is None
+    assert NewSessionRecovery.fail_missing_policy_receipt(
+        rig.engine, claim.id, "stale receipt failure",
+    ) is None
+    current = real_lifecycle.store.get(claim.id)
+    assert current.status == row.status and current.last_error == row.last_error
+    assert "new_session_receipt" not in current.metadata
     with rig.engine.connect() as conn:
+        assert conn.execute(text("""
+            SELECT count(*) FROM new_session_event_outbox WHERE delivery_id=:id
+        """), {"id": claim.id}).scalar_one() == 0
         assert tuple(conn.execute(text("""
             SELECT claim_owner, lease_expires_at FROM inter_bot_deliveries WHERE id=:id
         """), {"id": claim.id}).one()) == (None, None)
@@ -394,11 +412,40 @@ def test_recorded_stop_wins_accepted_reset_recovery(rig, real_lifecycle, mode, s
             conn, delivery_id=claim.id, claim_token=claim.claim_token, reason="late failure",
         ) is None
     assert real_lifecycle.store.recover_expired() == []
+    assert NewSessionReceipt.reconcile_typed(rig.engine) == []
+    assert BotPolicyReceipt.reconcile(rig.engine) == []
     assert real_lifecycle.store.claim_next(rig.bot, claim_owner="retry", steer_capable=False) is None
     with rig.engine.connect() as conn:
         assert conn.execute(text("""
             SELECT ended_at FROM turn_logs WHERE id=:turn
         """), {"turn": claim.turn_id}).scalar_one() == turn["ended_at"]
+
+
+@pytest.mark.parametrize("mode", ["structured", "policy"])
+@pytest.mark.parametrize("markers", [
+    {}, {"stopped_after_start": True}, {"new_session_ambiguous": True},
+    {"stopped_after_start": False, "new_session_ambiguous": True},
+    {"stopped_after_start": True, "new_session_ambiguous": False},
+    {"stopped_after_start": "true", "new_session_ambiguous": True},
+    {"stopped_after_start": True, "new_session_ambiguous": "true"},
+])
+def test_missing_reset_receipts_still_fail_without_exact_stopped_ambiguous_pair(
+    rig, real_lifecycle, mode, markers,
+):
+    from llm_bawt.service.session_lifecycle.policy_receipt import BotPolicyReceipt
+
+    claim = accepted_reset(rig, real_lifecycle, mode)
+    with rig.engine.begin() as conn:
+        conn.execute(text("""
+            UPDATE inter_bot_deliveries SET status='DELIVERED',
+                metadata_json=metadata_json || CAST(:markers AS jsonb) WHERE id=:id
+        """), {"id": claim.id, "markers": json.dumps(markers)})
+    reconcile = NewSessionReceipt.reconcile_typed if mode == "structured" else BotPolicyReceipt.reconcile
+    assert [row.id for row in reconcile(rig.engine)] == [claim.id]
+    current = real_lifecycle.store.get(claim.id)
+    assert current.status == "FAILED"
+    assert current.metadata["new_session_ambiguous"] is True
+    assert "new_session_receipt" not in current.metadata
 
 
 @pytest.mark.parametrize("mode", ["structured", "policy"])
