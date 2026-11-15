@@ -164,7 +164,8 @@ class Database:
 
     def read(self, sql, params):
         self.reads.append((sql, params))
-        return self.rows
+        # The file-path query (TASK-1567) is covered on PostgreSQL; here it finds nothing.
+        return [] if "path_pattern" in params else self.rows
 
 
 def call(row_id, command, *, bot="peer", at=None):
@@ -186,7 +187,8 @@ async def test_source_selects_on_admitted_facts_only_and_admits_no_command_text(
     assert evidence[0].text == "attempted clone repo=https://github.com/example/widget dest=/tmp/w"
     assert (evidence[0].source, evidence[0].source_bot, evidence[0].session_id) == ("tool_args", "peer", "s-1")
     assert all(SECRET not in item.text and "curl" not in item.text for item in evidence)
-    [(sql, params)] = database.reads
+    (sql, params), (_, path_params) = database.reads
+    assert path_params["path_pattern"] == "(widget|cloned)"
     assert params["bots"] == ["caller", "peer"] and "excluded" not in params["delivery_authors"]
 
 

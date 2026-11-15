@@ -20,7 +20,8 @@ from .contracts import (
     RECENCY_HALF_WEIGHT_DAYS, Evidence, RecallError, RecallScope, SourceProvider,
 )
 
-from .command_facts import MAX_COMMAND_CHARS, command_facts
+from .command_facts import MAX_COMMAND_CHARS, command_facts, safe_path
+from llm_bawt.service.tool_call_store import FILE_PATH_SQL, FILE_PATH_TOOLS_SQL
 from .excerpts import fts_query, query_terms, sql_window, term_coverage, terms_for
 
 # Unknown authors, legacy NULL user sessions, summaries and deleted sessions do
@@ -489,6 +490,36 @@ def tool_arg_facts(arguments: object) -> str | None:
     return "\n".join(fact.render() for fact in facts) or None
 
 
+# The file tools whose path is projected (TASK-1567); the SQL extracts only the
+# path, so no other argument text reaches Python.
+FILE_PATH_OPS = {"Read": "read", "Write": "write", "Edit": "edit"}
+
+
+def file_path_fact(tool_name: object, path: object) -> str | None:
+    """``attempted <op> path=<path>`` for a safe path from a file tool, else None."""
+    op = FILE_PATH_OPS.get(tool_name) if isinstance(tool_name, str) else None
+    if op is None or not isinstance(path, str) or not safe_path(path):
+        return None
+    return f"attempted {op} path={path}"
+
+
+def tool_call_fact(row: dict) -> str | None:
+    """The admitted facts of one tool_args row: Bash command facts or a file-path fact."""
+    if row.get("tool_name", "Bash") == "Bash":
+        return tool_arg_facts(row.get("arguments"))
+    return file_path_fact(row.get("tool_name"), row.get("path"))
+
+
+def path_term_pattern(query: str) -> str | None:
+    """Case-insensitive alternation of the query's terms that a trigram index can use.
+
+    Terms are lowercase alphanumeric (query_terms), so they need no regex escaping;
+    shorter than three characters, a trigram index can't narrow them.
+    """
+    terms = [term for term in query_terms(query) if len(term) >= 3]
+    return f"({'|'.join(terms)})" if terms else None
+
+
 class ToolArgSource(PostgresSource):
     """Opt-in structured facts from recorded commands (TASK-1557; command_facts).
 
@@ -521,6 +552,31 @@ class ToolArgSource(PostgresSource):
         ORDER BY c.created_at DESC, c.id
         LIMIT :candidate_limit
     """
+    # TASK-1567: file tool calls whose extracted path matches a query term.
+    # Only the path leaves the database. The tool predicate and path
+    # expression match ix_tool_call_records_file_path_trgm exactly.
+    path_statement = f"""
+        WITH candidates AS MATERIALIZED (
+            SELECT t.id, t.bot_id, t.user_id, t.turn_id, t.created_at, t.tool_name,
+                   {FILE_PATH_SQL} AS path
+            FROM tool_call_records t
+            WHERE t.{FILE_PATH_TOOLS_SQL}
+              AND {FILE_PATH_SQL} ~* :path_pattern
+              AND t.bot_id = ANY(CAST(:bots AS text[])) AND t.user_id = :user
+        )
+        SELECT c.id::text AS id, c.tool_name, c.path, c.created_at AS at,
+               p.source_bot, m.session_id
+        FROM candidates c
+        JOIN unnest(CAST(:bots AS text[]), CAST(:parts AS text[]))
+             AS p(source_bot, partition) ON c.bot_id = p.source_bot
+        JOIN turn_logs turns ON turns.id = c.turn_id
+          AND turns.bot_id = c.bot_id AND turns.user_id = c.user_id
+        JOIN messages m ON m.id = turns.trigger_message_id AND m.bot_id = p.partition
+        JOIN sessions s ON s.id = m.session_id
+        WHERE {PUBLIC_HISTORY_AUTHORITY}
+        ORDER BY c.created_at DESC, c.id
+        LIMIT :candidate_limit
+    """
 
     def extra_params(self, scope: RecallScope, query: str) -> dict:
         allowed = sorted(scope.allowed_bot_ids - scope.excluded_bot_ids)
@@ -531,23 +587,27 @@ class ToolArgSource(PostgresSource):
     async def search(self, query: str, scope: RecallScope, task_ids: tuple[str, ...]) -> list[Evidence]:
         if not fts_query(query):
             return []
+        params = {"user": scope.user_id, **self.extra_params(scope, query)}
+        pattern = path_term_pattern(query)
         try:
-            rows = await DATABASE_WORKER.run(self.database.read, self.statement,
-                                             {"user": scope.user_id, **self.extra_params(scope, query)})
+            rows = await DATABASE_WORKER.run(self.database.read, self.statement, params)
+            path_rows = (await DATABASE_WORKER.run(self.database.read, self.path_statement,
+                                                   {**params, "path_pattern": pattern})
+                         if pattern else [])
         except RecallError:
             raise
         except Exception as error:
             raise RecallError("source_unavailable") from error
+        candidates = [(row, tool_call_fact(row)) for row in [*rows, *path_rows]]
         ranked = []
-        for row in rows:
-            facts = tool_arg_facts(row["arguments"])
+        for row, facts in candidates:
             if not facts:
                 continue
             # Selection uses only admitted bytes (facts and the server-owned
             # source bot): a term that matched only in the raw command never
             # selects the call. Operand matches rank above label matches
-            # ("clone", "repo"), which every candidate shares.
-            operands = re.sub(r"\b(?:attempted|clone|repo|dest)\b=?", " ", facts)
+            # ("clone", "read", "path"), which every candidate of a kind shares.
+            operands = re.sub(r"\b(?:attempted|clone|repo|dest|read|write|edit|path)\b=?", " ", facts)
             labelled = f"{facts}\n{row.get('source_bot') or ''}"
             score = (term_coverage(operands, query), term_coverage(labelled, query))
             if score[1]:

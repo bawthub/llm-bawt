@@ -178,6 +178,24 @@ def _pg_text(value: str) -> str:
     return value.replace("\x00", "�") if "\x00" in value else value
 
 
+# TASK-1567: the file path of a recorded Read/Write/Edit call, and nothing else
+# from its arguments. Anchored at the JSON start and stepping only over simple
+# leading key/value pairs, so a "file_path" inside a string value never
+# matches; a path with a quote or backslash escape yields NULL. Recall queries
+# must use this exact expression and predicate so PostgreSQL picks the index.
+# Written for SQLAlchemy text(): its colons are escaped so "(?:true" is not
+# read as a bind parameter.
+FILE_PATH_TOOLS_SQL = "tool_name IN ('Read', 'Write', 'Edit')"
+FILE_PATH_SQL = (
+    "substring(arguments_json from "
+    """'^\\{(?:"[a-z_]+": (?:true|false|null|-?[0-9]+|"[^"\\\\]*"), )*"file_path": "([^"\\\\]+)"')"""
+).replace(":", "\\:")
+FILE_PATH_INDEX_SQL = (
+    "CREATE INDEX IF NOT EXISTS ix_tool_call_records_file_path_trgm ON tool_call_records "
+    f"USING gin (({FILE_PATH_SQL}) gin_trgm_ops) WHERE {FILE_PATH_TOOLS_SQL}"
+)
+
+
 class ToolCallStore:
     _schema_guard = SchemaBootstrapGuard()
 
@@ -222,6 +240,10 @@ class ToolCallStore:
             )
             for statement in statements:
                 conn.execute(sa_text(statement))
+            # Path recall works without it, only slower; never fail startup
+            # on an installation without pg_trgm.
+            if conn.execute(sa_text("SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm'")).first():
+                conn.execute(sa_text(FILE_PATH_INDEX_SQL))
 
         self._schema_guard.run(self.engine, "tool-call-store", bootstrap)
 

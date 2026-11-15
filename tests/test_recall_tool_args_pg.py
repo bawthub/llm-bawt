@@ -35,7 +35,7 @@ def engine(private_app_pg):
         engine.dispose()
 
 
-def add_call(rig, *, bot, trigger, command, user=USER):
+def add_call(rig, *, bot, trigger, command=None, user=USER, tool="Bash", arguments=None):
     turn = f"turn-{uuid.uuid4().hex}"
     with rig.engine.begin() as conn:
         conn.execute(text("""INSERT INTO turn_logs (id, created_at, path, stream, bot_id, user_id, status,
@@ -44,9 +44,10 @@ def add_call(rig, *, bot, trigger, command, user=USER):
                      {"id": turn, "bot": bot, "user": user, "message": trigger})
         return str(conn.execute(text("""INSERT INTO tool_call_records
                 (turn_id, bot_id, user_id, tool_name, iteration, created_at, arguments_json, result_text)
-            VALUES (:turn, :bot, :user, 'Bash', 1, now(), :arguments, 'RESULT BODY') RETURNING id"""),
-                                {"turn": turn, "bot": bot, "user": user,
-                                 "arguments": json.dumps({"command": command})}).scalar_one())
+            VALUES (:turn, :bot, :user, :tool, 1, now(), :arguments, 'RESULT BODY') RETURNING id"""),
+                                {"turn": turn, "bot": bot, "user": user, "tool": tool,
+                                 "arguments": arguments if arguments is not None
+                                 else json.dumps({"command": command})}).scalar_one())
 
 
 def peer_trigger(rig, peer, *, user=USER):
@@ -85,3 +86,41 @@ def test_tool_args_reads_searchable_bots_only_and_admits_only_facts(engine):
     stranger = RecallScope(rig.bot, "someone-else", rig.session, frozenset(), frozenset({rig.bot, peer}))
     [hidden] = asyncio.run(drilldown._resolve("tool_args", [entry], stranger))
     assert hidden["available"] is False and "snippet" not in hidden
+
+
+def test_tool_args_admits_file_tool_paths_and_nothing_else(engine):
+    """TASK-1567: Read/Write/Edit calls project only ``attempted <op> path=<path>``."""
+    from llm_bawt.service.tool_call_store import ToolCallStore
+
+    ToolCallStore(engine).ensure_schema()  # the path index, where pg_trgm exists
+    rig = Rig(engine)
+    peer = f"peer{uuid.uuid4().hex[:10]}"
+
+    def call(tool, arguments):
+        return add_call(rig, bot=peer, trigger=peer_trigger(rig, peer), tool=tool,
+                        arguments=json.dumps(arguments))
+
+    edit = call("Edit", {"replace_all": False, "file_path": "/srv/gizmo/widget.py",
+                         "old_string": f"token = '{SECRET}'", "new_string": "x"})
+    read = call("Read", {"file_path": "/srv/gizmo/notes.md", "limit": 20})
+    # A "file_path" inside a string value is not the call's path; the real
+    # path is unsafe (credential file), so nothing is admitted.
+    call("Write", {"file_path": "/srv/gizmo/.env",
+                   "content": '{"file_path": "/srv/gizmo/decoy.py"}'})
+    call("Read", {"file_path": "/srv/gizmo/../etc/passwd"})
+    call("Read", {"limit": 5, "file_path": "/srv/gizmo/\"quoted\".py"})
+    call("Grep", {"path": "/srv/gizmo/grep.py", "pattern": "gizmo"})
+    scope = RecallScope(rig.bot, USER, rig.session, frozenset(), frozenset({rig.bot, peer}))
+    evidence = asyncio.run(ToolArgSource(RecallDatabase(engine)).search("which gizmo files were edited", scope, ()))
+    assert sorted((item.id, item.text) for item in evidence) == sorted([
+        (edit, "attempted edit path=/srv/gizmo/widget.py"),
+        (read, "attempted read path=/srv/gizmo/notes.md"),
+    ])
+    assert SECRET not in json.dumps([item.text for item in evidence])
+    assert all(item.source_bot == peer and item.session_id for item in evidence)
+
+    drilldown = EvidenceDrilldown(RecallDatabase(engine), PostgresLedger(engine), TaskSource())
+    [shown] = asyncio.run(drilldown._resolve(
+        "tool_args", [{"source": "tool_args", "id": edit, "source_bot": peer}], scope))
+    assert shown["available"] is True and shown["snippet"] == "attempted edit path=/srv/gizmo/widget.py"
+    assert SECRET not in json.dumps(shown)

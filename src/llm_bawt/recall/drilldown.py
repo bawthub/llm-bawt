@@ -12,7 +12,7 @@ Authority is re-applied on every read:
 - tasks pass the same shared-task authority as recall, else they are withheld;
 - a message, memory or tool receipt that no longer passes its source's
   authority query is listed as ``available: false`` with no content; so is a
-  tool_args call, which is shown only as its re-projected command facts.
+  tool_args call, which is shown only as its re-projected command or file-path facts.
 """
 from __future__ import annotations
 
@@ -23,8 +23,9 @@ from .contracts import TASK_SOURCES, RecallError, RecallScope
 from .ledger import LedgerRecord, PostgresLedger
 from .postgres import (
     MESSAGE_AUTHORITY, PUBLIC_HISTORY_AUTHORITY, TOOL_ARG_CHARS, RecallDatabase, delivery_authors,
-    partition_id, tool_arg_facts,
+    partition_id, tool_call_fact,
 )
+from llm_bawt.service.tool_call_store import FILE_PATH_SQL, FILE_PATH_TOOLS_SQL
 from .task_source import TaskSource
 
 MAX_PAGE = 50
@@ -72,11 +73,13 @@ _TOOL_SNIPPETS = f"""
 # Command facts are re-projected from the call under the current trigger-message
 # authority; the arguments themselves never leave this module (TASK-1557).
 _TOOL_ARG_ROWS = f"""
-    SELECT t.id::text AS id, left(t.arguments_json, :argument_chars) AS arguments
+    SELECT t.id::text AS id, t.tool_name,
+           CASE WHEN t.tool_name = 'Bash' THEN left(t.arguments_json, :argument_chars) END AS arguments,
+           CASE WHEN t.{FILE_PATH_TOOLS_SQL} THEN {FILE_PATH_SQL} END AS path
     FROM unnest(CAST(:ids AS text[]), CAST(:parts AS text[]), CAST(:bots AS text[]))
          AS p(id, partition, source_bot)
     JOIN tool_call_records t ON t.id::text = p.id AND t.bot_id = p.source_bot
-      AND t.user_id = :user AND t.tool_name = 'Bash'
+      AND t.user_id = :user AND (t.tool_name = 'Bash' OR t.{FILE_PATH_TOOLS_SQL})
     JOIN turn_logs turns ON turns.id = t.turn_id
       AND turns.bot_id = t.bot_id AND turns.user_id = t.user_id
     JOIN messages m ON m.id = turns.trigger_message_id AND m.bot_id = p.partition
@@ -230,8 +233,8 @@ class EvidenceDrilldown:
         except Exception as error:
             raise RecallError("source_unavailable") from error
         if source == "tool_args":
-            # A call whose command no longer projects a fact is unavailable.
-            projected = ((row["id"], tool_arg_facts(row["arguments"])) for row in rows)
+            # A call that no longer projects a fact is unavailable.
+            projected = ((row["id"], tool_call_fact(row)) for row in rows)
             rows = [{"id": row_id, "snippet": facts[:SNIPPET_CHARS], "more": len(facts) > SNIPPET_CHARS}
                     for row_id, facts in projected if facts]
         found = {str(row["id"]): row for row in rows}
