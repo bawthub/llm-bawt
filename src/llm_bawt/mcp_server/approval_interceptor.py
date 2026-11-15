@@ -213,6 +213,7 @@ class ApprovalAwareFastMCP(MCPServer):
         try:
             import redis.asyncio as aioredis
 
+            from agent_bridge.user_events import publish_user_event
             from ..utils.config import Config
 
             config = getattr(self, "_approval_config", None) or Config()
@@ -221,11 +222,9 @@ class ApprovalAwareFastMCP(MCPServer):
                 return
             client = aioredis.from_url(config.REDIS_URL, decode_responses=True)
             try:
-                await client.xadd(
-                    f"events:{payload['bot_id']}:{payload['user_id']}",
-                    {"payload": json.dumps(payload, ensure_ascii=False, default=str)},
-                    maxlen=5000,
-                    approximate=True,
+                await publish_user_event(
+                    client, payload["bot_id"], payload["user_id"],
+                    json.dumps(payload, ensure_ascii=False, default=str),
                 )
             finally:
                 await client.aclose()

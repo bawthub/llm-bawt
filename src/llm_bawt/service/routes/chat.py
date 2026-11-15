@@ -762,9 +762,8 @@ async def answer_question(question_id: str, request: QuestionAnswerRequest) -> Q
             from ...agent_backends.agent_bridge import get_agent_subscriber
             sub = get_agent_subscriber()
             if sub is not None:
-                await sub._redis.xadd(  # type: ignore[attr-defined]
-                    f"events:{request.bot_id}:{request.user_id}",
-                    {"payload": json.dumps({
+                await sub.publish_user_event(
+                    request.bot_id, request.user_id, json.dumps({
                         "_type": "question_answered",
                         "bot_id": request.bot_id,
                         "user_id": request.user_id,
@@ -772,9 +771,7 @@ async def answer_question(question_id: str, request: QuestionAnswerRequest) -> Q
                         "turn_id": row.turn_id,
                         "answer": answer_text,
                         "ts": time.time(),
-                    }, ensure_ascii=False, default=str)},
-                    maxlen=5000,
-                    approximate=True,
+                    }, ensure_ascii=False, default=str),
                 )
         except Exception:
             log.debug("failed to publish question_answered for id=%s", question_id, exc_info=True)

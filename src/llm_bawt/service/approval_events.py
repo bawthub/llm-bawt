@@ -63,11 +63,8 @@ async def publish_approval_resolved(
             resolution_message=resolver.resolution_message,
         )
     try:
-        await subscriber._redis.xadd(
-            f"events:{bot_id}:{user_id}",
-            {"payload": json.dumps(event, ensure_ascii=False, default=str)},
-            maxlen=5000,
-            approximate=True,
+        await subscriber.publish_user_event(
+            bot_id, user_id, json.dumps(event, ensure_ascii=False, default=str),
         )
     except Exception:  # noqa: BLE001
         log.debug("failed to publish approval_resolved for %s", request_id, exc_info=True)

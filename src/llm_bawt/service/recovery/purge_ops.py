@@ -39,6 +39,7 @@ from ...approval_models import (
     ToolApprovalRequest,
     _utcnow,
     awaits_ops_admission,
+    decode_stored_mcp_result,
 )
 from ...ops.models import JOB_CANCELLED, JOB_TERMINAL_STATES, OpsJob
 from ..approval_events import publish_approval_resolved
@@ -195,12 +196,7 @@ def purged_resolutions(engine, request_ids: list[str]) -> list[dict[str, Any]]:
                             .order_by(ToolApprovalRequest.id)).all()
         events = []
         for row in rows:
-            result: Any = None
-            if row.result_json:
-                try:
-                    result = json.loads(row.result_json)
-                except json.JSONDecodeError:
-                    result = row.result_json
+            result = decode_stored_mcp_result(row.result_json)
             events.append({
                 "bot_id": row.bot_id, "user_id": row.user_id, "request_id": row.id,
                 "turn_id": row.turn_id, "status": row.status, "tool_use_id": row.tool_use_id,

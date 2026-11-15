@@ -284,13 +284,15 @@ class _Redis:
 def _run_purge_step(engine, monkeypatch, redis, *, dry_run=False):
     import asyncio
     from datetime import datetime, timezone
-    from types import SimpleNamespace
+    from agent_bridge.subscriber import RedisSubscriber
 
     from llm_bawt.service.recovery import purge_ops as module
     from llm_bawt.service.recovery.base import SweepScope
     from llm_bawt.service.recovery.sweep import PurgeOpsStep
 
-    monkeypatch.setattr(module, "get_agent_subscriber", lambda: SimpleNamespace(_redis=redis))
+    subscriber = RedisSubscriber.__new__(RedisSubscriber)
+    subscriber._redis = redis
+    monkeypatch.setattr(module, "get_agent_subscriber", lambda: subscriber)
     scope = SweepScope(engine=engine, now=datetime.now(timezone.utc), dry_run=dry_run, stamp=RunStamp.new("snark"))
     return asyncio.run(PurgeOpsStep().run(scope))
 

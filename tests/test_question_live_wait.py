@@ -62,18 +62,21 @@ class FakeBridge(ClaudeApprovalMixin, ClaudeCommandMixin):
 class FakeRedis:
     def __init__(self):
         self.acks = []
+        self.events = []
 
     async def xack(self, *args):
         self.acks.append(args)
 
     async def xadd(self, *args, **kwargs):
-        pass
+        self.events.append((args, kwargs))
 
 
 @pytest.fixture
 def app(monkeypatch, store):
+    from agent_bridge.subscriber import RedisSubscriber
     redis = FakeRedis()
-    subscriber = SimpleNamespace(_redis=redis)
+    subscriber = RedisSubscriber.__new__(RedisSubscriber)
+    subscriber._redis = redis
 
     async def send_tool_result(session_key, question_id, result, **kwargs):
         subscriber.sent.append((session_key, question_id, result))
@@ -93,6 +96,30 @@ def app(monkeypatch, store):
         lambda: subscriber,
     )
     return subscriber
+
+
+def test_question_answered_preserves_exact_payload(store, app, monkeypatch):
+    monkeypatch.setattr(chat.time, "time", lambda: 123.5)
+    add(store, live=False)
+    result = asyncio.run(chat.answer_question("t1", chat.QuestionAnswerRequest(
+        bot_id="loopy", user_id="nick", result="café 雪")))
+    assert result.ok
+    assert app._redis.events == [(
+        ("events:loopy:nick", {"payload":
+            '{"_type": "question_answered", "bot_id": "loopy", "user_id": "nick", '
+            '"question_id": "t1", "turn_id": "turn", "answer": "café 雪", "ts": 123.5}'}),
+        {"maxlen": 5000, "approximate": True},
+    )]
+
+
+def test_question_publish_failure_does_not_fail_the_answer(store, app, monkeypatch):
+    from unittest.mock import AsyncMock
+    add(store, live=False)
+    app._redis.xadd = AsyncMock(side_effect=ConnectionError("offline"))
+    response = asyncio.run(chat.answer_question("t1", chat.QuestionAnswerRequest(
+        bot_id="loopy", user_id="nick", result="Yes")))
+    assert response.ok
+    assert store.get("t1").status == "answered"
 
 
 def test_setting_resolves_each_turn_and_zero_survives_payload(monkeypatch):

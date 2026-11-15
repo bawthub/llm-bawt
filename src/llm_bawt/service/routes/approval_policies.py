@@ -51,6 +51,7 @@ from ...approval_policies import (
     BOT_RESOLVER_PREFIX,
     RESOLVED_VIA_USER,
     awaits_ops_admission,
+    decode_stored_mcp_result,
     is_approved_ops_run,
 )
 
@@ -344,12 +345,7 @@ def _stored_mcp_resolution(row) -> dict[str, Any]:
     clients must not finalize the tool card from it (TASK-1220).
     """
     awaiting = awaits_ops_admission(row)
-    result: Any = None
-    if row.result_json:
-        try:
-            result = json.loads(row.result_json)
-        except json.JSONDecodeError:
-            result = row.result_json
+    result = decode_stored_mcp_result(row.result_json)
     response = {
         "ok": awaiting or (row.execution_state in (EXEC_SUCCEEDED, EXEC_SKIPPED) and not bool(row.result_is_error)),
         "detail": "already_resolved",

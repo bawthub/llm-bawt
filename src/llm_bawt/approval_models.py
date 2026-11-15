@@ -37,6 +37,16 @@ from agent_bridge.approval import (
 logger = logging.getLogger(__name__)
 
 
+def decode_stored_mcp_result(result_json: str | None) -> Any:
+    """Read a stored result, retaining legacy non-JSON text unchanged."""
+    if not result_json:
+        return None
+    try:
+        return json.loads(result_json)
+    except json.JSONDecodeError:
+        return result_json
+
+
 class ApprovalStoreUnavailable(RuntimeError):
     """Policy source unavailable; never equivalent to an empty policy bundle."""
 

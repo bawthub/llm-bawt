@@ -281,7 +281,10 @@ def test_resolve_route_for_ops_run_marks_card_and_fanout_without_result(monkeypa
             events.append((stream, json.loads(fields["payload"])))
 
     monkeypatch.setattr(routes, "ToolCallStore", FakeToolCallStore)
-    monkeypatch.setattr(routes, "_subscriber", lambda: SimpleNamespace(_redis=FakeRedis()))
+    from agent_bridge.subscriber import RedisSubscriber
+    subscriber = RedisSubscriber.__new__(RedisSubscriber)
+    subscriber._redis = FakeRedis()
+    monkeypatch.setattr(routes, "_subscriber", lambda: subscriber)
     monkeypatch.setattr(routes, "_store", lambda: store)
     app = FastAPI()
     app.include_router(routes.router)

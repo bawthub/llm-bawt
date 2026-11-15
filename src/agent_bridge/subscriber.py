@@ -16,6 +16,7 @@ from redis.asyncio import BlockingConnectionPool
 
 from .command_publisher import CommandPublisherMixin
 from .consumer_group import GroupReader
+from .user_events import publish_user_event
 from .houses import follow_up_stream
 from .events import AgentEvent, AgentEventKind
 from .run_contract import DONE_FIELD, RunContractError, RunTerminal, run_terminal_key
@@ -552,6 +553,12 @@ class RedisSubscriber(CommandPublisherMixin):
         keys = unified_stream_keys(bot_ids, user_id, include_global=include_global,
                                    include_system=include_system)
         return UiStreamReader(self._redis, consumer_id, keys)
+
+    async def publish_user_event(
+        self, bot_id: str, user_id: str, payload: str,
+    ) -> str:
+        """Publish an encoded UI event; the caller owns best-effort handling."""
+        return await publish_user_event(self._redis, bot_id, user_id, payload)
 
     async def publish_tool_event(
         self,

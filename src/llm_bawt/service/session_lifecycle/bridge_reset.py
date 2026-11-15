@@ -130,10 +130,7 @@ class BridgeSessionResetMixin:
                     socket_connect_timeout=1.0,
                 )
                 self._thread_event_redis = client
-            from agent_bridge.publisher import (
-                UNIFIED_EVENTS_PREFIX,
-                UNIFIED_STREAM_MAXLEN,
-            )
+            from agent_bridge.user_events import publish_user_event
 
             from ..runtime_switch_rotation import thread_switched_event
 
@@ -141,12 +138,7 @@ class BridgeSessionResetMixin:
                 thread_switched_event(bot_id, uid, new_session_id, source),
                 ensure_ascii=False,
             )
-            client.xadd(
-                f"{UNIFIED_EVENTS_PREFIX}{bot_id}:{uid}",
-                {"payload": payload},
-                maxlen=UNIFIED_STREAM_MAXLEN,
-                approximate=True,
-            )
+            publish_user_event(client, bot_id, uid, payload)
             log.info(
                 "thread_switched published: bot=%s user=%s -> %s (%s)",
                 bot_id, uid, new_session_id, source,
