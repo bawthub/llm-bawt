@@ -86,7 +86,7 @@ def test_every_memory_client_tool_call_is_registered():
             "messages_preview_since_minutes"} <= {name for _, _, name in calls}
 
 
-def _local_dict(name: str, scope: ast.AST) -> tuple[list[ast.expr | None], set[str], set[str]] | None:
+def _local_dict(name: str, scope: ast.AST, before_line: int) -> tuple[list[ast.expr | None], set[str], set[str]] | None:
     """Keys of ``name = {...}`` in the calling function, all ``name["k"] = ...`` additions,
     and the definite ones: additions that are top-level statements of the function body
     (nested under ``if``/loops they may not run, so they never satisfy a required parameter)."""
@@ -105,7 +105,7 @@ def _local_dict(name: str, scope: ast.AST) -> tuple[list[ast.expr | None], set[s
                 if not (isinstance(target.slice, ast.Constant) and isinstance(target.slice.value, str)):
                     return None
                 conditional.add(target.slice.value)
-                if id(node) in top_level:
+                if id(node) in top_level and node.lineno < before_line:
                     definite.add(target.slice.value)
     return (keys, conditional, definite) if found else None
 
@@ -120,7 +120,7 @@ def _argument_problems(name: str, call: ast.Call, signature: _Signature,
     definite: set[str] = set()
     if isinstance(params, ast.Dict):
         dict_keys = list(params.keys)
-    elif isinstance(params, ast.Name) and scope is not None and (local := _local_dict(params.id, scope)):
+    elif isinstance(params, ast.Name) and scope is not None and (local := _local_dict(params.id, scope, call.lineno)):
         dict_keys, added, definite = local
     else:
         return ["arguments must be a dict literal so their names can be checked"]
@@ -174,6 +174,8 @@ def test_argument_guard_rejects_renamed_and_missing_parameters():
     assert _argument_problems("t", fn.body[-1].value, signature, fn) == []
     fn = ast.parse('def f():\n    a = {}\n    if x:\n        a["bot_id"] = b\n    c._call_server("t", a)').body[0]
     assert _argument_problems("t", fn.body[-1].value, signature, fn) == ["missing required ['bot_id']"]
+    fn = ast.parse('def f():\n    a = {}\n    c._call_server("t", a)\n    a["bot_id"] = b').body[0]
+    assert _argument_problems("t", fn.body[1].value, signature, fn) == ["missing required ['bot_id']"]
     assert _registered_tool_names() == set(_registered_tools())
     bare = ast.parse("@mcp.tool()\ndef bare_tool(x): ...").body[0]
     assert _tool_name(bare) == "bare_tool"
