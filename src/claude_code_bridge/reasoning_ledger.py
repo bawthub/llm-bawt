@@ -151,6 +151,23 @@ def _thinking_message_ids(transcript: Path) -> tuple[list[str], bool]:
                 }
                 resident = {m: None for m in resident if m in kept_messages}
                 continue
+            attachment = entry.get("attachment") if entry.get("type") == "attachment" else None
+            if isinstance(attachment, dict) and attachment.get("type") == "thinking_stripped":
+                # Earlier thinking is replaced on the wire: all of it, or from one
+                # message (and block) onward.
+                start = attachment.get("from") if attachment.get("scope") == "partial" else None
+                order = list(resident)
+                if isinstance(start, dict) and start.get("messageId") in resident:
+                    cut = order.index(start["messageId"])
+                    if start.get("thinkingIndex") not in (0, None):
+                        certain = False  # that message keeps part of its thinking
+                    resident = {m: None for m in order[:cut]}
+                else:
+                    if attachment.get("scope") != "all":
+                        certain = False
+                    resident = {}
+                dropped = {}
+                continue
             # The CLI also keeps a pre-boundary row that a later row hangs off.
             if parent is not None and parent in dropped:
                 revived = dropped.pop(parent)

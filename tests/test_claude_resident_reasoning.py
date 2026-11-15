@@ -134,6 +134,22 @@ def test_row_parented_across_the_boundary_keeps_its_parent(transcript):
     assert reasoning_ledger.resident_reasoning("sess") == (40, True)
 
 
+def _stripped(**attachment):
+    return {"type": "attachment", "attachment": {"type": "thinking_stripped", **attachment}}
+
+
+@pytest.mark.parametrize("marker, expected", [
+    (_stripped(scope="all"), (5, True)),
+    (_stripped(scope="partial", **{"from": {"messageId": "msg_b", "thinkingIndex": 0}}), (25, True)),
+    (_stripped(scope="partial", **{"from": {"messageId": "msg_b", "thinkingIndex": 1}}), (25, False)),
+    (_stripped(scope="partial", **{"from": {"messageId": "unknown"}}), (5, False)),
+])
+def test_thinking_stripped_marker_removes_earlier_thinking(transcript, marker, expected):
+    transcript(_assistant("msg_a"), _assistant("msg_b"), marker, _assistant("msg_c"))
+    reasoning_ledger.record_thinking("sess", {"msg_a": 20, "msg_b": 300, "msg_c": 5})
+    assert reasoning_ledger.resident_reasoning("sess") == expected
+
+
 def test_compaction_without_preservation_drops_everything_before_it(transcript):
     transcript(
         _assistant("msg_old", uuid="a1"),
