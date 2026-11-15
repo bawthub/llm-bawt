@@ -11,7 +11,7 @@ from .models import JOB_SUCCEEDED, JOB_TERMINAL_STATES, OpsJob
 
 def append_job_transition(emitter: SystemEventEmitter | None, conn, job: OpsJob) -> None:
     # TASK-1183: opted-in operations' bell entries. Independent of the event
-    # ledger, so staged even when it is unavailable; never raises.
+    # ledger, so staged even when it is unavailable. Atomic with the transition.
     bell.stage(conn, job)
     if emitter is None:
         return

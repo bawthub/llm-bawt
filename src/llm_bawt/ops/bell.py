@@ -7,8 +7,8 @@ admitted; a snapshot without the key is off.
 
 Staging rides the single chokepoint for winning job transitions
 (:func:`.events.append_job_transition`): the row is inserted in the job's own
-transaction, inside a savepoint, so a lost CAS stages nothing and a staging
-failure never fails the job write. Each ``{job}:{phase}`` key is unique, so a
+transaction, so a lost CAS stages nothing and the transition and its rows
+commit or roll back together. Opted-out jobs never touch the outbox. Each ``{job}:{phase}`` key is unique, so a
 retried transition cannot add a second entry. A start is staged only from
 real evidence (a RUNNING transition, or ``started_at`` on a terminal job);
 none is invented for a job that never ran.
@@ -107,30 +107,29 @@ def _insert(conn):
 
 
 def stage(conn, job: OpsJob | None) -> int:
-    """Stage this transition's bell rows in ``conn``'s transaction. Never raises.
+    """Stage this transition's bell rows in ``conn``'s transaction.
 
-    Returns how many new rows were staged (0 on a repeat, opt-out or error).
+    Returns how many new rows were staged (0 on a repeat or opt-out). An
+    opted-in job's insert failure propagates and rolls back the transition with
+    it, so a committed transition always has its rows (no silent loss); the
+    transition's own retry path then re-stages them. Opted-out jobs never touch
+    the outbox, so it cannot affect them.
     """
     if job is None:
         return 0
-    try:
-        phases = phases_for(job)
-        if not phases or not wants_bell(job):
-            return 0
-        added = 0
-        with conn.begin_nested():
-            for phase in phases:
-                stmt = _insert(conn).values(
-                    event_key=f"{job.id}:{phase}", job_id=job.id, phase=phase,
-                    created_at=_utcnow(), attempts=0, next_attempt_at=_utcnow(),
-                ).on_conflict_do_nothing(index_elements=["event_key"])
-                added += conn.execute(stmt).rowcount or 0
-        if added:
-            notify_in_transaction(conn)  # wake the app pump at commit
-        return added
-    except Exception:  # noqa: BLE001 - a bell never blocks its job transition
-        logger.exception("ops bell staging failed for job %s", getattr(job, "id", "?"))
+    phases = phases_for(job)
+    if not phases or not wants_bell(job):
         return 0
+    added = 0
+    for phase in phases:
+        stmt = _insert(conn).values(
+            event_key=f"{job.id}:{phase}", job_id=job.id, phase=phase,
+            created_at=_utcnow(), attempts=0, next_attempt_at=_utcnow(),
+        ).on_conflict_do_nothing(index_elements=["event_key"])
+        added += conn.execute(stmt).rowcount or 0
+    if added:
+        notify_in_transaction(conn)  # wake the app pump at commit
+    return added
 
 
 # ---------------------------------------------------------------------------

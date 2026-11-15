@@ -117,13 +117,31 @@ def test_editing_the_operation_never_changes_an_admitted_job():
     assert _rows(store) == []
 
 
-def test_staging_failure_never_fails_the_job_write():
+def test_staging_failure_rolls_back_the_transition_with_it():
+    # Atomic outbox: a committed transition always has its bell rows. A failed
+    # insert fails the transition (left for its retry path), never loses a row.
     store = _store()
     job = _job(store, _op(store))
+    store.mark_dispatching(job.id, host_unit_name="u")
+    OpsBellOutbox.__table__.drop(store.engine)
+    try:
+        store.mark_running(job.id)
+    except Exception:  # noqa: BLE001 - any DB error is the expected outcome
+        pass
+    else:
+        raise AssertionError("transition committed without its bell row")
+    assert store.get_job(job.id).state == "dispatching"
+    OpsBellOutbox.__table__.create(store.engine)
+    assert store.mark_running(job.id).state == "running"  # the retry stages it
+    assert [r["phase"] for r in _rows(store)] == [STARTED]
+
+
+def test_outbox_faults_never_touch_opted_out_jobs():
+    store = _store()
+    job = _job(store, _op(store), notify=False)
     OpsBellOutbox.__table__.drop(store.engine)
     store.mark_dispatching(job.id, host_unit_name="u")
     assert store.mark_running(job.id).state == "running"
-    assert store.get_job(job.id).state == "running"
 
 
 def test_severity_and_payload_never_name_the_calling_bot():
