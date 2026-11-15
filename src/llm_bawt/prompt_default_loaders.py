@@ -231,6 +231,12 @@ def load_approvals_approver_resolved() -> str:
     return DEFAULT_APPROVER_RESOLVED
 
 
+def load_ops_blocked_notification() -> str:
+    from .service.ops_blocked_notification import DEFAULT_BLOCKED_INSTRUCTIONS
+
+    return DEFAULT_BLOCKED_INSTRUCTIONS
+
+
 def load_ops_quiesce_receipt() -> str:
     from .ops.quiesce_prompts import DEFAULT_RECEIPT
 

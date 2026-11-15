@@ -74,6 +74,7 @@ from .prompt_default_loaders import (
     load_memory_maintenance_intent_content_only,
     load_memory_maintenance_intent_system,
     load_memory_maintenance_intent_with_context,
+    load_ops_blocked_notification,
     load_ops_quiesce_end_turn_new_turn,
     load_ops_quiesce_end_turn_no_receipt,
     load_ops_quiesce_receipt,
@@ -803,6 +804,19 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
             "receipt outbox. JSON identifies the job and exact commit workload; "
             "a wake is not verified host gate proof or SHIP authority. Never "
             "automatically retry or push. Target-bot overrides supported."
+        )},
+    ),
+    "ops.blocked_notification": PromptDefinition(
+        key="ops.blocked_notification",
+        title="Ops Preflight Blocked Notice",
+        category="agent_execution",
+        loader=load_ops_blocked_notification,
+        metadata={"notes": (
+            "Instructions after the fixed OPS_BLOCKED header and dynamic job JSON. "
+            "The approved job is still queued, not completed; no action was submitted "
+            "by this preflight attempt. Do not re-issue ops_run or submit another job. "
+            "Used verbatim; blank/unavailable text falls back to the product default. "
+            "Target-bot overrides supported."
         )},
     ),
     "ops.quiesce_receipt": PromptDefinition(

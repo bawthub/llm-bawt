@@ -3,8 +3,36 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 
 from ..bot_identities import SYSTEM_BOT_ID
+
+logger = logging.getLogger(__name__)
+
+PROMPT_KEY = "ops.blocked_notification"
+DEFAULT_BLOCKED_INSTRUCTIONS = (
+    "The approved job is still queued because preflight failed. No action "
+    "was submitted by that preflight attempt. Do not submit another job or "
+    "re-issue ops_run. Report the blocker; inspect this same job with "
+    "ops_job_status. The existing job may run after prerequisites recover. "
+    "Its terminal receipt will be delivered separately."
+)
+
+
+def blocked_notification_prompt(bot_id: str) -> str:
+    """Resolve the target bot's instructions, retaining the default on failure."""
+    try:
+        from ..prompt_registry import get_prompt_resolver
+
+        resolved = get_prompt_resolver().resolve(
+            PROMPT_KEY, scope_type="bot", scope_id=bot_id,
+        )
+        if resolved and (resolved.body or "").strip():
+            return resolved.body
+    except Exception as error:
+        logger.warning("ops prompt %s resolve failed, using seed: %s", PROMPT_KEY, error)
+    return DEFAULT_BLOCKED_INSTRUCTIONS
+
 
 class OpsBlockedNotifier:
     """One warning per approved job/error, without consuming its final receipt."""
@@ -27,11 +55,7 @@ class OpsBlockedNotifier:
             "[Ops preflight blocked — not a completion receipt]\n"
             + json.dumps({"job_id": job_id, "operation": result.get("operation"),
                           "state": "queued", "error_text": error}, sort_keys=True)
-            + "\nThe approved job is still queued because preflight failed. No action "
-            "was submitted by that preflight attempt. Do not submit another job or "
-            "re-issue ops_run. Report the blocker; inspect this same job with "
-            "ops_job_status. The existing job may run after prerequisites recover. "
-            "Its terminal receipt will be delivered separately."
+            + "\n" + blocked_notification_prompt(row.bot_id)
         )
         record, duplicate = dispatcher.store.enqueue(
             sender_bot_id=SYSTEM_BOT_ID, target_bot_id=row.bot_id,
