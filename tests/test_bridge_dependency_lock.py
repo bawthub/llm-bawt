@@ -36,7 +36,6 @@ KNOWN_DRIFT = {
     "cffi": ("2.1.1", "2.0.0"),  # transitive: cryptography
     "cryptography": ("50.0.1", "46.0.5"),  # transitive: llm-bawt core imports it at bridge start
     "fastapi": ("0.141.1", "0.135.1"),  # DIRECT: imported by bridge code
-    "hiredis": ("3.4.2", "3.3.0"),  # optional redis accelerator, loaded with redis
     "packaging": ("26.3", "26.0"),  # transitive: openai-codex; not loaded by bridge code
     "pillow": ("12.3.0", "12.1.1"),  # llm-bawt requirement; not loaded by bridge code
     "psycopg2-binary": ("2.9.13", "2.9.11"),  # llm-bawt requirement; not loaded by bridge code
@@ -44,7 +43,6 @@ KNOWN_DRIFT = {
     "pydantic-core": ("2.46.5", "2.41.5"),  # transitive: pydantic
     "pyjwt": ("2.15.0", "2.11.0"),  # transitive: mcp; not loaded by bridge code
     "python-multipart": ("0.0.32", "0.0.22"),  # transitive: mcp
-    "redis": ("8.1.0", "7.2.1"),  # DIRECT: imported by bridge code
     "rpds-py": ("2026.6.3", "0.30.0"),  # transitive: jsonschema/referencing (mcp)
     "sqlalchemy": ("2.1.1", "2.0.48"),  # llm-bawt requirement; not loaded by bridge code
     "sse-starlette": ("3.4.11", "3.3.2"),  # transitive: mcp
@@ -129,11 +127,11 @@ def test_detector_catches_each_kind_of_drift():
     assert any(p.startswith("fastapi:") and "uv.lock" in p for p in drift_problems(
         pins, _lock(**{"claude-agent-sdk": "0.2.160", "redis": "8.1.0"})))
     # Drift that disappears must be removed from the table.
-    assert any(p.startswith("redis:") and "drop it" in p for p in drift_problems(
-        pins.replace("redis==8.1.0", "redis==7.2.1"), lock.replace("8.1.0", "7.2.1")))
+    assert any(p.startswith("fastapi:") and "drop it" in p for p in drift_problems(
+        pins, lock.replace("0.135.1", "0.141.1")))
 
 
-def test_aligned_minor_packages_cannot_drift_again():
+def test_aligned_packages_cannot_drift_again():
     for name, version in {
         "anyio": "4.15.1",
         "uvicorn": "0.54.0",
@@ -141,6 +139,8 @@ def test_aligned_minor_packages_cannot_drift_again():
         "httptools": "0.9.0",
         "openai": "3.19.2",
         "jiter": "0.17.0",
+        "redis": "8.1.0",
+        "hiredis": "3.4.2",
     }.items():
         assert name not in KNOWN_DRIFT
         pins = f"claude-agent-sdk==0.2.160\n{name}=={version}\n"
