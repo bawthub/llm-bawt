@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter, Query
 
+from ...utils.token_estimate import estimate_message_tokens
 from ..dependencies import get_service
 from ..http_errors import internal_error
 from ..logging import get_service_logger
@@ -153,7 +154,7 @@ def build_context_seed(
     summary_count = sum(1 for m in seed_msgs if m.role == "summary")
     convo_count = sum(1 for m in seed_msgs if m.role in ("user", "assistant"))
     # Same per-message estimate as estimate_messages_tokens, on trimmed content.
-    approx_tokens = sum(len(c) // 4 + 4 for c in seed_contents)
+    approx_tokens = sum(estimate_message_tokens(c) for c in seed_contents)
     ts_values = [
         float(getattr(m, "timestamp", 0.0) or 0.0)
         for m in seed_msgs

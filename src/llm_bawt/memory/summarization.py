@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from .summarization import Session
 
 from llm_bawt.utils.error_text import safe_error_text
+from llm_bawt.utils.token_estimate import estimate_message_tokens, estimate_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -618,8 +619,7 @@ def find_budget_overflow_sessions(
 
 def _estimate_msg_tokens(msg: dict) -> int:
     """Estimate token cost of a single message dict (4 chars/token + overhead)."""
-    content = msg.get("content", "") or ""
-    return len(content) // 4 + 4
+    return estimate_message_tokens(msg.get("content", "") or "")
 
 
 def estimate_session_token_savings(session: Session) -> int:
@@ -653,11 +653,6 @@ def format_session_for_summarization(session: Session) -> str:
         content = msg.get("content", "").strip()
         lines.append(f"{summary_label(speaker)}: {content}")
     return "\n".join(lines)
-
-
-def estimate_tokens(text: str) -> int:
-    """Rough token estimation (4 chars per token average)."""
-    return len(text) // 4
 
 
 def split_session_into_chunks(
@@ -863,7 +858,7 @@ def summarize_session_with_client(
         scope_id=bot_id,
     )
     # Conservative budget to reduce context overflows on smaller models.
-    if len(prompt) // 4 > max_prompt_tokens:
+    if estimate_tokens(prompt) > max_prompt_tokens:
         logger.warning(
             "Summarization prompt too large (%d chars) for session %s; skipping LLM",
             len(prompt), session.session_id,

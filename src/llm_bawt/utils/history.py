@@ -12,6 +12,7 @@ from ..clients.base import LLMClient
 from ..models.message import Message
 from rich.rule import Rule
 from .config import Config
+from .token_estimate import estimate_message_tokens, estimate_tokens  # noqa: F401  (estimate_tokens re-exported)
 from ..setting_definitions import HISTORY_SCOPES, setting_default
 
 if TYPE_CHECKING:
@@ -122,21 +123,12 @@ def effective_history_scope(config_resolver, override: str | None = None) -> str
     return str(config_resolver.resolve_config_setting("history_scope").value or "inline+summaries")
 
 
-def estimate_tokens(text: str) -> int:
-    """Rough token estimate for a text string.
-
-    Uses ~4 chars per token as a fast heuristic, within 10-15%
-    of tiktoken for English text. No external dependencies.
-    """
-    return len(text) // 4
-
-
 def estimate_messages_tokens(messages: list) -> int:
     """Estimate total tokens for a list of Message objects.
 
     Adds a small per-message overhead for role/framing.
     """
-    return sum(len(m.content) // 4 + 4 for m in messages)
+    return sum(estimate_message_tokens(m.content) for m in messages)
 
 
 class ContextBudgetError(RuntimeError):
