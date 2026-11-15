@@ -173,6 +173,7 @@ def test_undecryptable_record_never_falls_back_to_env(forms, env, monkeypatch):
 
 
 def test_store_down_never_falls_back_to_env(env, monkeypatch):
+    monkeypatch.setattr(connection_secrets, "has_connection_store", lambda config: True)
     _store_down(monkeypatch)
     with pytest.raises(ObjectStoreUnavailable) as caught:
         resolve_s3_config(None)

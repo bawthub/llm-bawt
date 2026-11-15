@@ -175,6 +175,7 @@ def test_undecryptable_record_never_falls_back_to_env(store, monkeypatch):
 
 
 def test_store_down_never_falls_back_to_env(monkeypatch):
+    monkeypatch.setattr(connection_secrets, "has_connection_store", lambda config: True)
     monkeypatch.setattr(connection_secrets, "_store", lambda config, kind: _store(None))
     _env(monkeypatch, "sonarr")
     with pytest.raises(ArrUnavailable) as caught:
