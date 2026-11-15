@@ -28,7 +28,7 @@ WORKDIR /app
 
 # Copy ONLY files needed for dependency installation first (for layer caching)
 # This ensures source code changes don't invalidate the venv cache
-COPY pyproject.toml uv.lock install.sh ./
+COPY pyproject.toml setup.cfg uv.lock install.sh ./
 RUN chmod +x install.sh
 
 # Create virtual environment and install dependencies using install.sh
@@ -112,6 +112,7 @@ WORKDIR /app
 COPY --from=base /app/.venv /app/.venv
 COPY --from=base /app/src /app/src
 COPY --from=base /app/pyproject.toml /app/pyproject.toml
+COPY --from=base /app/setup.cfg /app/setup.cfg
 COPY --from=base /app/server.sh /app/server.sh
 COPY --from=base /app/docker/agent-bridge-constraints.txt /app/docker/agent-bridge-constraints.txt
 

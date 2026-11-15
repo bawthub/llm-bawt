@@ -39,7 +39,7 @@ WORKDIR /app
 # --- Dependency layer (cached independently of source changes) ---
 # Resolve + install deps for the CPU extras WITHOUT the project so this layer
 # stays cached when only src/ changes.
-COPY pyproject.toml uv.lock ./
+COPY pyproject.toml setup.cfg uv.lock ./
 RUN uv sync --locked --no-dev --no-install-project \
         --extra mcp --extra service --extra search
 

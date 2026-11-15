@@ -98,7 +98,7 @@ RUN set -eux; \
 WORKDIR /app
 
 # Copy project metadata for dependency resolution
-COPY pyproject.toml ./
+COPY pyproject.toml setup.cfg ./
 
 # Copy the full src tree.
 # Previously this only copied the three bridge packages, but the editable
