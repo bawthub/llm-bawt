@@ -313,10 +313,15 @@ def test_model_pricing_threshold_is_independent_of_window_and_compaction():
     from dataclasses import replace
 
     endpoint = _endpoint(32, "opus", "anthropic-api", "anthropic", "anthropic-messages", "claude-opus-5-5")
-    assert "pricing_threshold" not in ModelCatalog([endpoint]).resolve("opus")
+    # Unset -> the 200k default.
+    assert ModelCatalog([endpoint]).resolve("opus")["pricing_threshold"] == 200_000
 
-    tuned = replace(endpoint, model=replace(endpoint.model, pricing_threshold=200_000))
+    tuned = replace(endpoint, model=replace(endpoint.model, pricing_threshold=128_000))
     resolved = ModelCatalog([tuned]).resolve("opus")
-    assert resolved["pricing_threshold"] == 200_000
+    assert resolved["pricing_threshold"] == 128_000
     assert "compact_threshold" not in resolved
     assert resolved.get("context_window") == ModelCatalog([endpoint]).resolve("opus").get("context_window")
+
+    # 0 -> disabled: no threshold reaches the UI.
+    off = replace(endpoint, model=replace(endpoint.model, pricing_threshold=0))
+    assert "pricing_threshold" not in ModelCatalog([off]).resolve("opus")

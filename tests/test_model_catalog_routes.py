@@ -242,7 +242,8 @@ def test_model_write_pricing_threshold_is_optional_and_positive():
     assert "pricing_threshold" not in unset.model_fields_set
     assert ModelWrite(**base, pricing_threshold=200_000).pricing_threshold == 200_000
     assert "pricing_threshold" in ModelWrite(**base, pricing_threshold=None).model_fields_set
-    for bad in (0, -1):
+    assert ModelWrite(**base, pricing_threshold=0).pricing_threshold == 0  # disabled
+    for bad in (-1, -200_000):
         with pytest.raises(ValidationError):
             ModelWrite(**base, pricing_threshold=bad)
 

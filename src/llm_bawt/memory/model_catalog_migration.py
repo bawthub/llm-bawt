@@ -122,12 +122,13 @@ ALTER TABLE models DROP CONSTRAINT IF EXISTS models_compact_threshold_positive;
 ALTER TABLE models ADD CONSTRAINT models_compact_threshold_positive
     CHECK (compact_threshold IS NULL OR compact_threshold > 0);
 
--- Per-model long-context pricing tier boundary (input tokens); NULL = no
--- warning. Display-only: independent of context window and compaction.
+-- Per-model long-context pricing tier boundary (input tokens). NULL = the
+-- 200,000 default; 0 = no warning. Display-only: independent of context
+-- window and compaction.
 ALTER TABLE models ADD COLUMN IF NOT EXISTS pricing_threshold INTEGER;
-ALTER TABLE models DROP CONSTRAINT IF EXISTS models_pricing_threshold_positive;
-ALTER TABLE models ADD CONSTRAINT models_pricing_threshold_positive
-    CHECK (pricing_threshold IS NULL OR pricing_threshold > 0);
+ALTER TABLE models DROP CONSTRAINT IF EXISTS models_pricing_threshold_nonnegative;
+ALTER TABLE models ADD CONSTRAINT models_pricing_threshold_nonnegative
+    CHECK (pricing_threshold IS NULL OR pricing_threshold >= 0);
 """
 
 

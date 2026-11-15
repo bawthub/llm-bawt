@@ -45,8 +45,9 @@ class ModelWrite(BaseModel):
     # Claude Code auto-compact window. None = global agent_compact_threshold.
     # Bounds mirror the CLI's accepted CLAUDE_CODE_AUTO_COMPACT_WINDOW range.
     compact_threshold: int | None = Field(default=None, ge=100_000, le=1_000_000)
-    # Long-context pricing tier boundary (input tokens). None = no warning.
-    pricing_threshold: int | None = Field(default=None, gt=0)
+    # Long-context pricing tier boundary (input tokens). None = the default
+    # (DEFAULT_PRICING_THRESHOLD); 0 = no warning for this model.
+    pricing_threshold: int | None = Field(default=None, ge=0)
 
 
 class AccessPathWrite(BaseModel):

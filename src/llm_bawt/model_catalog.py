@@ -59,6 +59,18 @@ def bot_model_ref(config: Any, bot: Any) -> str | None:
     return getattr(bot, "default_model", None)
 
 
+# Common provider long-context pricing boundary (input tokens). Crossing it can
+# reprice every token in the request, not only the excess. Display-only.
+DEFAULT_PRICING_THRESHOLD = 200_000
+
+
+def effective_pricing_threshold(stored: int | None) -> int | None:
+    """Catalog value -> warning threshold: unset = default, 0 = disabled."""
+    if stored is None:
+        return DEFAULT_PRICING_THRESHOLD
+    return stored if stored > 0 else None
+
+
 @dataclass(frozen=True)
 class ModelIdentity:
     id: int
@@ -375,8 +387,9 @@ class ModelCatalog:
             config["context_window"] = context_window
         if endpoint.model.compact_threshold is not None:
             config["compact_threshold"] = endpoint.model.compact_threshold
-        if endpoint.model.pricing_threshold is not None:
-            config["pricing_threshold"] = endpoint.model.pricing_threshold
+        pricing_threshold = effective_pricing_threshold(endpoint.model.pricing_threshold)
+        if pricing_threshold is not None:
+            config["pricing_threshold"] = pricing_threshold
         tool_support = (
             endpoint.tool_support_override or endpoint.model.default_tool_support
         )
