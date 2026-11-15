@@ -107,6 +107,8 @@ class LiveUsagePublisher:
     # tool_use input). Thinking is excluded; its share is estimated as
     # output_tokens minus these characters' estimated tokens.
     visible_output_chars: int = 0
+    _request_sources: dict[int, str | None] = field(default_factory=dict)
+    _main_reasoning: dict[int, int] = field(default_factory=dict)
 
     def observe_stream_event(self, event: dict, source: str | None = None) -> None:
         """Track each upstream request: message_start opens one, deltas update it.
@@ -128,6 +130,7 @@ class LiveUsagePublisher:
             message = event.get("message")
             self.request_usages.append({})
             self._open_requests[source] = len(self.request_usages) - 1
+            self._request_sources[len(self.request_usages) - 1] = source
             self._merge_request_usage(source, message.get("usage") if isinstance(message, dict) else None)
         elif kind == "message_delta":
             self._merge_request_usage(source, event.get("usage"))
@@ -142,6 +145,10 @@ class LiveUsagePublisher:
             value = usage.get(key)
             if isinstance(value, (int, float)) and value > 0:
                 current[key] = int(value)
+        # TASK-1586: exact reasoning, reported by the OpenAI proxy only.
+        reasoning = usage.get("reasoning_output_tokens")
+        if source is None and isinstance(reasoning, (int, float)) and reasoning >= 0:
+            self._main_reasoning[index] = int(reasoning)
 
     def request_totals(self) -> dict | None:
         """Sum of every upstream request's input so far; None before the first."""
@@ -160,13 +167,22 @@ class LiveUsagePublisher:
             ),
         }
 
-    def estimated_reasoning_tokens(self, output_tokens: int) -> int | None:
-        """Thinking tokens estimated from output minus visible output; None
-        when no stream was observed."""
+    def reasoning_tokens(self, output_tokens: int) -> tuple[int, str] | None:
+        """The turn's reasoning share of output as ``(tokens, source)``.
+
+        Exact when every main-thread request reported it (OpenAI via the
+        proxy); otherwise estimated as output minus visible output. Clamped
+        to ``0..output``; None when no stream was observed.
+        """
         if output_tokens <= 0 or not self.request_usages:
             return None
-        visible = self.visible_output_chars // _CHARS_PER_TOKEN
-        return min(max(output_tokens - visible, 0), output_tokens)
+        main_requests = [i for i, src in self._request_sources.items() if src is None]
+        if main_requests and all(i in self._main_reasoning for i in main_requests):
+            tokens, source = sum(self._main_reasoning[i] for i in main_requests), "exact"
+        else:
+            tokens = output_tokens - self.visible_output_chars // _CHARS_PER_TOKEN
+            source = "estimated"
+        return min(max(tokens, 0), output_tokens), source
 
     def with_totals(self, usage: dict | None) -> dict | None:
         """Attach the turn's request totals to a usage payload."""

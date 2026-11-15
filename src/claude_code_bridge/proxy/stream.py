@@ -226,6 +226,17 @@ def _extract_usage(resp: Any) -> tuple[int, int, int, int]:
     return input_tokens, output_tokens, cache_read, 0
 
 
+def _extract_reasoning(resp: Any) -> int | None:
+    """``usage.output_tokens_details.reasoning_tokens``; None when unreported."""
+    usage = _usage_get(resp, "usage", None)
+    details = _usage_get(usage, "output_tokens_details", None) if usage is not None else None
+    value = _usage_get(details, "reasoning_tokens", None) if details is not None else None
+    try:
+        return max(int(value), 0) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 async def responses_to_anthropic_sse(
     upstream_stream: AsyncIterator[Any],
     anthropic_model: str,
@@ -335,6 +346,7 @@ async def responses_to_anthropic_sse(
     saw_refusal = False
     explicit_stop: str | None = None
     input_tokens = output_tokens = cache_read = cache_create = 0
+    reasoning_tokens: int | None = None
 
     def _open_start_frame(kind: str, idx: int, **extra: Any) -> bytes:
         if kind == "thinking":
@@ -665,6 +677,7 @@ async def responses_to_anthropic_sse(
                 resp = getattr(event, "response", None)
                 if resp is not None:
                     input_tokens, output_tokens, cache_read, cache_create = _extract_usage(resp)
+                    reasoning_tokens = _extract_reasoning(resp)
                     # TASK-714 (review #4): stash usage on state so the retry loop
                     # can pick the FINAL successful attempt's numbers, not the
                     # sum across aborted attempts. Callback still fires for
@@ -699,6 +712,7 @@ async def responses_to_anthropic_sse(
                 explicit_stop = "max_tokens"
                 if resp is not None:
                     input_tokens, output_tokens, cache_read, cache_create = _extract_usage(resp)
+                    reasoning_tokens = _extract_reasoning(resp)
                     if state is not None:
                         state.usage_snapshot = (input_tokens, output_tokens, cache_read, cache_create)
                     if on_usage is not None:
@@ -915,6 +929,9 @@ async def responses_to_anthropic_sse(
                     "output_tokens": output_tokens or 0,
                     "cache_creation_input_tokens": cache_create or 0,
                     "cache_read_input_tokens": cache_read or 0,
+                    # TASK-1586: OpenAI's exact reasoning share of output.
+                    **({"reasoning_output_tokens": reasoning_tokens}
+                       if reasoning_tokens is not None else {}),
                 },
             },
         )

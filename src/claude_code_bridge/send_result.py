@@ -42,7 +42,7 @@ class ClaudeResultMixin:
         compact_threshold: int | None = None,
         capture_usage: Callable[[dict | None], None] | None = None,
         turn_request_totals: dict | None = None,
-        estimate_reasoning: Callable[[int], int | None] | None = None,
+        estimate_reasoning: Callable[[int], tuple[int, str] | None] | None = None,
     ) -> int:
         full_text = "".join(text_parts)
         if not full_text and assistant_snapshot_text:
@@ -138,8 +138,8 @@ class ClaudeResultMixin:
             if reasoning is not None:
                 token_usage_payload = {
                     **token_usage_payload,
-                    "reasoning_tokens": reasoning,
-                    "reasoning_source": "estimated",
+                    "reasoning_tokens": reasoning[0],
+                    "reasoning_source": reasoning[1],
                 }
         seq += 1
         self._publish_event(
