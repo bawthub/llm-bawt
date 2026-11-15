@@ -92,6 +92,7 @@ def list_models():
             model_id=info.get("model_id"),
             description=info.get("description"),
             pricing=_coerce_pricing(info.get("pricing")),
+            pricing_threshold=info.get("pricing_threshold"),
             endpoint_id=info.get("endpoint_id"),
             access_path=path_key,
             eligibility=(

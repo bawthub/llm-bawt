@@ -45,6 +45,9 @@ class ModelInfo(BaseModel):
     model_id: str | None = None
     description: str | None = None
     pricing: ModelPricing | None = None
+    # Input-token count above which the provider bills a higher long-context
+    # tier. Display-only warning; None = no warning. Unrelated to compaction.
+    pricing_threshold: int | None = None
     endpoint_id: int | None = None
     access_path: str | None = None
     eligibility: RouteEligibility | None = None

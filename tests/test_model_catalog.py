@@ -307,3 +307,16 @@ def test_model_compact_threshold_reaches_dispatch_config_only_when_set():
 
     tuned = replace(endpoint, model=replace(endpoint.model, compact_threshold=400_000))
     assert ModelCatalog([tuned]).resolve("opus", harness="claude-code")["compact_threshold"] == 400_000
+
+
+def test_model_pricing_threshold_is_independent_of_window_and_compaction():
+    from dataclasses import replace
+
+    endpoint = _endpoint(32, "opus", "anthropic-api", "anthropic", "anthropic-messages", "claude-opus-5-5")
+    assert "pricing_threshold" not in ModelCatalog([endpoint]).resolve("opus")
+
+    tuned = replace(endpoint, model=replace(endpoint.model, pricing_threshold=200_000))
+    resolved = ModelCatalog([tuned]).resolve("opus")
+    assert resolved["pricing_threshold"] == 200_000
+    assert "compact_threshold" not in resolved
+    assert resolved.get("context_window") == ModelCatalog([endpoint]).resolve("opus").get("context_window")

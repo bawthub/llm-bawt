@@ -45,6 +45,8 @@ class ModelWrite(BaseModel):
     # Claude Code auto-compact window. None = global agent_compact_threshold.
     # Bounds mirror the CLI's accepted CLAUDE_CODE_AUTO_COMPACT_WINDOW range.
     compact_threshold: int | None = Field(default=None, ge=100_000, le=1_000_000)
+    # Long-context pricing tier boundary (input tokens). None = no warning.
+    pricing_threshold: int | None = Field(default=None, gt=0)
 
 
 class AccessPathWrite(BaseModel):
@@ -254,10 +256,12 @@ def put_catalog_model(model_key: str, request: ModelWrite):
     sql = """
         INSERT INTO models
             (key, vendor, display_name, description, default_context_window,
-             default_tool_support, compact_threshold, created_at, updated_at)
+             default_tool_support, compact_threshold, pricing_threshold,
+             created_at, updated_at)
         VALUES
             (:key, :vendor, :display_name, :description, :default_context_window,
-             :default_tool_support, :compact_threshold, NOW(), NOW())
+             :default_tool_support, :compact_threshold, :pricing_threshold,
+             NOW(), NOW())
         ON CONFLICT (key) DO UPDATE SET
             vendor = EXCLUDED.vendor,
             display_name = EXCLUDED.display_name,
@@ -268,6 +272,8 @@ def put_catalog_model(model_key: str, request: ModelWrite):
             -- callers that don't know it can't silently clear it.
             compact_threshold = CASE WHEN :compact_threshold_sent
                 THEN EXCLUDED.compact_threshold ELSE models.compact_threshold END,
+            pricing_threshold = CASE WHEN :pricing_threshold_sent
+                THEN EXCLUDED.pricing_threshold ELSE models.pricing_threshold END,
             updated_at = NOW()
         RETURNING *
     """
@@ -276,6 +282,7 @@ def put_catalog_model(model_key: str, request: ModelWrite):
             "key": model_key,
             **request.model_dump(),
             "compact_threshold_sent": "compact_threshold" in request.model_fields_set,
+            "pricing_threshold_sent": "pricing_threshold" in request.model_fields_set,
         }
         row = dict(conn.execute(text(sql), params).mappings().one())
     _refresh_catalog()
@@ -406,7 +413,7 @@ def list_endpoints(
         SELECT e.*, m.key AS model_key, m.vendor AS model_vendor,
                m.display_name, m.description,
                m.default_context_window, m.default_tool_support,
-               m.compact_threshold,
+               m.compact_threshold, m.pricing_threshold,
                a.key AS access_path_key, a.vendor AS access_vendor,
                a.protocol, a.base_url, a.auth_mechanism, a.engine_kind
         FROM model_endpoints e

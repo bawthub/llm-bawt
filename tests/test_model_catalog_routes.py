@@ -234,6 +234,19 @@ def test_model_write_compact_threshold_is_optional_and_bounded():
             ModelWrite(**base, compact_threshold=bad)
 
 
+def test_model_write_pricing_threshold_is_optional_and_positive():
+    base = {"vendor": "anthropic", "display_name": "Opus", "default_context_window": 1_000_000}
+    unset = ModelWrite(**base)
+    assert unset.pricing_threshold is None
+    # Omitted means "not sent", so an older client's PUT keeps the stored value.
+    assert "pricing_threshold" not in unset.model_fields_set
+    assert ModelWrite(**base, pricing_threshold=200_000).pricing_threshold == 200_000
+    assert "pricing_threshold" in ModelWrite(**base, pricing_threshold=None).model_fields_set
+    for bad in (0, -1):
+        with pytest.raises(ValidationError):
+            ModelWrite(**base, pricing_threshold=bad)
+
+
 # TASK-2022: PATCH merges partial updates so a one-flag toggle can't null fields.
 _STORED_ENDPOINT = {
     "id": 2177,
