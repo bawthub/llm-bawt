@@ -5,7 +5,6 @@ import asyncio
 from contextlib import ExitStack
 import json
 import socket
-import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Event
@@ -23,15 +22,14 @@ from llm_bawt.ops.health_http import OpsHealthServer, _HealthProtocol, create_he
 from llm_bawt.ops.health_runtime import OpsHealthRuntime
 from llm_bawt.ops.health_state import ExecutorModeSample, HealthSample, OpsHealthState
 from llm_bawt.ops.reconciler import OpsReconciler
+from tests.hang_guard import finishes
 
 HANG_GUARD_S = 10.0  # thread handshakes; only reached if one hangs
-STALL_S = 10.0  # a stalled collector/handler: well past close()'s 2s join deadline
 
 
 def _stall(entered, release):
     entered.set()
-    # timing-ok: deliberate stall; returning on timeout only lets the thread exit
-    release.wait(STALL_S)
+    release.wait()  # every test sets release in its finally
 
 
 def _until_stopped(stop):
@@ -350,18 +348,15 @@ def test_http_survives_blocked_reconciler_and_collectors_and_shutdown_is_bounded
     try:
         assert entered.wait(HANG_GUARD_S)
         clock.advance(31)
-        before = time.monotonic()
-        assert request(server, "/health/live") == (200, {"status": "ok"})
-        assert request(server, "/health/ready")[0] == 503
-        assert request(server, "/v1/health/containers")[0] == 503
-        assert request(server, "/v1/health/services")[0] == 503
-        # timing-ok: real HTTP requests answer from cached state; waiting on the stalled collectors takes 10s
-        assert time.monotonic() - before < 1
-        before = time.monotonic()
-        server.close()
+        # The collectors stay stalled until the finally below, so a request or a
+        # close that waited on them would never return.
+        answers = finishes(lambda: [request(server, path) for path in (
+            "/health/live", "/health/ready", "/v1/health/containers", "/v1/health/services")],
+            what="health requests during stalled collectors")
+        assert answers[0] == (200, {"status": "ok"})
+        assert [code for code, _ in answers[1:]] == [503, 503, 503]
+        finishes(server.close, what="close with stalled collectors")
         assert runtime.stop.is_set()  # FastAPI lifespan, not the test, stops workers
-        # timing-ok: real thread joins: close's 2s worker deadline vs collectors stalled for 10s
-        assert time.monotonic() - before < 3.5
         assert not server.thread.is_alive()
         assert len(runtime.workers) == 6  # DB, catalog, Docker, Docker events, reconciler, watchdog
     finally:

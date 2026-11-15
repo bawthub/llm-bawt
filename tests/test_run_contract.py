@@ -478,8 +478,8 @@ def test_claude_done_follows_the_teardown(monkeypatch):
         harness._publisher.publish_run_done.assert_called_once()
         teardown = harness._publisher.publish_run_done.call_args.kwargs["teardown"]
         assert (teardown.disconnect, teardown.signal, teardown.exited) == ("ok", "none", False)
-        # timing-ok: a unit check (milliseconds, not s or us); 100x headroom over the 50ms hold
-        assert 50 <= teardown.elapsed_ms < 5000
+        # The unit is pinned exactly by test_claude_teardown_measures_its_own_wall_time.
+        assert teardown.elapsed_ms >= 50
         assert harness._run_terminals == {}
     asyncio.run(asyncio.wait_for(run(), timeout=5))
 

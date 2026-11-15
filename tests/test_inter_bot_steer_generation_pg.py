@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import threading
-import time
 from types import SimpleNamespace
 
 import pytest
@@ -22,6 +21,7 @@ from llm_bawt.inter_bot_delivery import DELIVERED, DISPATCHING, QUEUED, STEERING
 from llm_bawt.service.inter_bot_dispatcher import InterBotDeliveryDispatcher
 from llm_bawt.service.inter_bot_dispatcher_steer import SteerGeneration
 from llm_bawt.service.turn_logs import TurnLogStore
+from tests.hang_guard import finishes
 from tests.test_inter_bot_delivery import _enqueue, delivery_store  # noqa: F401  (fixture)
 from tests.test_inter_bot_steer_generation import _Bridge
 
@@ -329,10 +329,8 @@ def test_same_sender_batches_on_one_loop_serialize_without_blocking_it(batches):
     """Loopy r1 B1: two submits on one event loop must not deadlock the loop."""
     batches.submit("k1")
     batches.submit("k2")
-    started = time.monotonic()
-    (first, accepted), (second, refused) = batches.on_one_loop("k3", "k4")
-    # timing-ok: hang guard: a deadlocked loop never returns; a pass takes milliseconds
-    assert time.monotonic() - started < 5
+    (first, accepted), (second, refused) = finishes(
+        lambda: batches.on_one_loop("k3", "k4"), what="two submits on one loop")
     assert first == 202 and len(accepted["deliveries"]) == 3
     assert second == 429 and refused["error"] == "fanout_rate_limited"
     assert batches.count() == 9
@@ -352,11 +350,9 @@ def test_a_batch_held_by_another_process_is_refused_busy_not_waited_on(batches):
         other.execute(sa_text(
             "SELECT pg_advisory_xact_lock(hashtext('inter-bot-fanout'), hashtext(:s))"
         ), {"s": batches.sender})
-        started = time.monotonic()
+        # Waiting would block until `other` lets go, which only happens after this returns.
         with pytest.raises(batches.send.DeliveryRefused) as refused:
-            batches.submit("k1")
-        # timing-ok: hang guard on a real PG lock: waiting blocks while `other` holds it; a refusal is immediate
-        assert time.monotonic() - started < 5
+            finishes(lambda: batches.submit("k1"), what="submit against a held batch lock")
     assert refused.value.status_code == 429
     assert refused.value.detail["error"] == "fanout_busy"
     assert refused.value.detail["retryable"] is True

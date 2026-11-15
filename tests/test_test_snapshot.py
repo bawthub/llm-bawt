@@ -14,6 +14,7 @@ import time
 import pytest
 
 from scripts import test_snapshot as snap
+from tests.hang_guard import finishes
 
 SCRIPT = Path(snap.__file__).resolve()
 # The gate's contract is real git plumbing on a scratch repo; a fake would test nothing.
@@ -734,13 +735,10 @@ def test_stop_group_kills_a_descendant_that_outlives_its_leader(tmp_path):
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         child = wait_for(pid_file)
-        started = time.monotonic()
-        snap.stop_group(proc, (0.2, 0.2))
+        finishes(lambda: snap.stop_group(proc, (0.2, 0.2)), what="stop_group on an ignoring child")
         assert proc.poll() is not None
         assert not live(child), f"descendant {child} survived stop_group"
         assert not snap.group_alive(proc.pid)
-        # timing-ok: real process group: stop_group's own waits plus 1s headroom; a stuck group never returns
-        assert time.monotonic() - started < 0.2 + 0.2 + 5 + 1
     finally:
         try:
             os.killpg(proc.pid, signal.SIGKILL)

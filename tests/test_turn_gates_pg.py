@@ -37,6 +37,7 @@ from llm_bawt.service.turn_gates import (
     release_gates,
     stamp_member_exit,
 )
+from tests.hang_guard import finishes
 from tests.pg_isolation import isolated_pg_store
 from tests.pg_lock_wait import wait_blocked_by
 from tests.test_turn_admission import _mcp_claim
@@ -844,14 +845,15 @@ def test_drop_columns_behind_an_open_reader_is_skipped_and_retried_next_time(gat
             txn = holder.begin()
             holder.execute(sa_text(f"SELECT count(*) FROM {table}"))
             try:
-                with engine.begin() as conn:
-                    conn.execute(sa_text("SET LOCAL lock_timeout = '10s'"))
-                    started = time.monotonic()
-                    assert drop_columns(conn, table, ["retired"], lock_timeout="200ms") == []
-                    # timing-ok: real PG lock_timeout: its own 200ms vs the caller's 10s
-                    assert time.monotonic() - started < 3  # its own timeout, not the caller's 10s
-                    assert conn.execute(sa_text("SELECT current_setting('lock_timeout')")).scalar_one() == "10s"
-                    conn.execute(sa_text(f"SELECT retired FROM {table}"))  # the txn is still usable
+                def contract():
+                    with engine.begin() as conn:
+                        # The caller waits forever: only drop_columns' own 200ms can end the wait.
+                        conn.execute(sa_text("SET LOCAL lock_timeout = 0"))
+                        assert drop_columns(conn, table, ["retired"], lock_timeout="200ms") == []
+                        assert conn.execute(sa_text("SELECT current_setting('lock_timeout')")).scalar_one() == "0"
+                        conn.execute(sa_text(f"SELECT retired FROM {table}"))  # the txn is still usable
+
+                finishes(contract, what="drop_columns behind a held reader")
             finally:
                 txn.rollback()
         with engine.begin() as conn:

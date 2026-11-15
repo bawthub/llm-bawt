@@ -5,7 +5,6 @@ import asyncio
 import io
 import json
 import threading
-import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -355,8 +354,6 @@ def test_real_native_worker_finalizes_within_the_grace_and_stop_confirms_it(stor
     the event loop. The worker's own terminal must be visible to Stop's bounded
     wait, so Stop returns worker_finalized well inside the grace, not on its
     timeout fallback."""
-    from llm_bawt.service import turn_abort
-
     closed, waiting = [], threading.Event()
     def stream(*args, **kwargs):
         try:
@@ -373,16 +370,13 @@ def test_real_native_worker_finalizes_within_the_grace_and_stop_confirms_it(stor
     thread.start()
     try:
         assert waiting.wait(5)
-        started = time.monotonic()
         result = asyncio.run(abort_turn(service(store), store.get_turn("A"), source="chat_stop", peer=None))
-        elapsed = time.monotonic() - started
     finally:
         owner.cancel_event.set()
         thread.join(HANG_GUARD_S)
         assert not thread.is_alive()
+    # worker_finalized, not worker_unfinalized: the worker's terminal landed inside the grace.
     assert result == "aborted:worker_finalized"
-    # timing-ok: a real worker thread; the result names worker_finalized, and 1s vs the 5s grace shows it was not waited out
-    assert elapsed < turn_abort.WORKER_FINALIZE_GRACE_SECONDS / 5
     stop = json.loads(store.get_turn("A").request_json)["user_stop"]
     assert (stop["bridge_state"], stop["confirmed"], stop["settled"]) == ("worker_finalized", True, False)
     _assert_worker_closed_with_partial(store, ctx, closed, chunks, events)

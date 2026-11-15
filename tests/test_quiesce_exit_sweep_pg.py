@@ -316,10 +316,9 @@ def test_a_write_blocked_past_the_pass_deadline_ends_and_never_lands_later(sweep
     sweep.bridge.terminals[req] = RunTerminal(req, "claude-code", BOOT, TeardownReport(exited=True))
     _deadlines(sweep, monkeypatch)
     with _TurnLock(sweep.engine, turn_id):
-        started = time.monotonic()
+        # WRITE_DEADLINE, and _TurnLock's check that the test (not its hang guard)
+        # released the lock, prove the pass ended on its budget instead of waiting.
         assert sweep.run_once() == {WRITE_DEADLINE: 1}
-        # timing-ok: real PG lock: the 1.5s budget vs the 30s lock hold
-        assert time.monotonic() - started < 3.0  # budget 1.5s; the lock is held for 30s
     time.sleep(0.5)  # the lock is gone: nothing still in flight may now commit
     assert sweep.drain(gate_id)[turn_id] == (False, "no_execution_exit")
     assert "execution_exit" not in (sweep.sql("SELECT request_json FROM turn_logs WHERE id=:t",
@@ -398,14 +397,11 @@ def test_two_lock_waits_share_one_absolute_write_deadline(sweep, monkeypatch):
     with _TurnLock(sweep.engine, turn_id) as row_lock, _ShareTableLock(sweep.engine, turn_id) as table_lock:
         row_lock.release(after=0.6)
         table_lock.release(after=1.3)
-        started = time.monotonic()
         counts = sweep.run_once()
-        elapsed = time.monotonic() - started
     drained = sweep.drain(gate_id)[turn_id]
-    assert counts == {WRITE_DEADLINE: 1}, (counts, elapsed, drained)
-    # The UPDATE's lock wait gets only the time left (~0.4s), not a fresh 1s.
-    # timing-ok: real PG lock_timeout: the remaining ~0.4s vs a fresh 1s (>=1.4s total)
-    assert elapsed < 1.2, elapsed
+    # The UPDATE's lock wait gets only the time left (~0.4s). A fresh 1s would
+    # outlast the table lock's release at 1.3s and the write would land.
+    assert counts == {WRITE_DEADLINE: 1}, (counts, drained)
     assert drained == (False, "no_execution_exit")
 
 
