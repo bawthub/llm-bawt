@@ -54,12 +54,12 @@ def test_send_now_refuses_bot_rows_other_users_and_unheld_rows(gated):
     engine = gated.store.engine
 
     with pytest.raises(SendNowRefused) as unheld:
-        stamp_send_now(engine, user.id, "operator")
+        stamp_send_now(engine, user.id, "nick")
     assert unheld.value.status_code == 409 and unheld.value.detail == "not_held"
 
     _quiesce(gated, bot)
     with pytest.raises(SendNowRefused) as foreign:
-        stamp_send_now(engine, bot_row.id, "operator")
+        stamp_send_now(engine, bot_row.id, "nick")
     assert foreign.value.status_code == 403
     with pytest.raises(SendNowRefused) as other_user:
         stamp_send_now(engine, user.id, "someone-else")
@@ -74,7 +74,7 @@ def test_stamped_user_row_runs_under_a_live_quiesce_and_is_rostered(gated):
     _owner, gate = _quiesce(gated, bot)
     assert _claim(deliveries, bot) is None  # everything is held
 
-    result = stamp_send_now(gated.store.engine, user.id, "operator")
+    result = stamp_send_now(gated.store.engine, user.id, "nick")
     assert result["gate_ids"] == [gate.id]
 
     claimed = _claim(deliveries, bot)
@@ -86,7 +86,7 @@ def test_stamped_user_row_runs_under_a_live_quiesce_and_is_rostered(gated):
     with gated.store.engine.connect() as conn:
         audit = gate_escalations(conn, gate.id)
     assert [(a["kind"], a["subject"], a["actor"], a["outcome"], a["turn_id"]) for a in audit] == [
-        (KIND_USER_SEND_NOW, user.id, "user:operator", "turn_started", claimed.turn_id)]
+        (KIND_USER_SEND_NOW, user.id, "user:nick", "turn_started", claimed.turn_id)]
 
 
 @pytest.mark.integration
@@ -104,7 +104,7 @@ def test_a_revoked_unstarted_capture_of_the_same_turn_becomes_accepted(gated):
             disposition=REVOKED_UNSTARTED, producer_kind="delivery", producer_id=user.id,
             control_state="not_needed",
         ))
-    stamp_send_now(gated.store.engine, user.id, "operator")
+    stamp_send_now(gated.store.engine, user.id, "nick")
 
     claimed = _claim(deliveries, bot)
 
@@ -121,7 +121,7 @@ def test_a_run_without_now_is_never_next_steered_and_runs_after_its_turn(gated):
     user = _user_chat(gated, deliveries, bot)
     turn = _open(gated.store, bot)
     _quiesce(gated, bot)
-    stamp_send_now(gated.store.engine, user.id, "operator")
+    stamp_send_now(gated.store.engine, user.id, "nick")
 
     assert deliveries.claim_next(bot, claim_owner="worker", steer_capable=frozenset({"next"})) is None
     with gated.store.engine.begin() as conn:
@@ -137,7 +137,7 @@ def test_busy_target_takes_the_stamped_row_as_a_steer(gated):
     user = _user_chat(gated, deliveries, bot)
     _open(gated.store, bot)
     _quiesce(gated, bot)
-    stamp_send_now(gated.store.engine, user.id, "operator")
+    stamp_send_now(gated.store.engine, user.id, "nick")
 
     claimed = deliveries.claim_next(bot, claim_owner="worker", steer_capable=frozenset({"next", "now"}))
 
@@ -161,7 +161,7 @@ def test_composer_steer_refused_under_quiesce_can_enqueue_then_send_now(gated):
     user = _user_chat(gated, deliveries, bot)
     assert _claim(deliveries, bot) is None
     assert _row(deliveries, user.id)["status"] == "QUEUED"
-    stamp_send_now(engine, user.id, "operator")
+    stamp_send_now(engine, user.id, "nick")
     claimed = deliveries.claim_next(bot, claim_owner="worker", steer_capable=frozenset({"now", "next"}))
     assert claimed and claimed.id == user.id and claimed.status == "STEERING"
     assert claimed.target_turn_id == turn
@@ -185,7 +185,7 @@ def test_steer_check_passes_only_the_stamped_generations(gated):
     user = _user_chat(gated, deliveries, bot)
     turn = _open(gated.store, bot)
     owner, gate = _quiesce(gated, bot)
-    stamp_send_now(gated.store.engine, user.id, "operator")
+    stamp_send_now(gated.store.engine, user.id, "nick")
     engine = gated.store.engine
 
     assert check_steer(engine, bot, turn_id=turn, send_now=user.id) is None
