@@ -257,12 +257,14 @@ class BotTagStore:
         new_slug = values.pop("slug", slug)
         with _prompt_key_conflicts(values.get("prompt_key")), self.engine.begin() as conn:
             self._lock_role(conn, slug)
+            if "prompt_key" in values:
+                # Claim the key before any write: a claimant holding it may be
+                # waiting on this rename's catalog rows.
+                self._require_free_prompt_key(conn, values["prompt_key"], slug)
             if new_slug != slug:
                 self._rename(conn, slug, new_slug)
                 policy_changed(conn)
                 slug = new_slug
-            if "prompt_key" in values:
-                self._require_free_prompt_key(conn, values["prompt_key"], slug)
             if values:
                 sets = ", ".join(
                     "capabilities = CAST(:capabilities AS jsonb)" if key == "capabilities"
@@ -423,8 +425,10 @@ class BotTagStore:
         duplicates keep the unique index from being built, nothing else stops
         two writers both seeing the key free and both committing it. The
         check runs after the lock, so it sees any holder that committed first.
-        Callers take it after their role row lock and before writing, and
-        take at most one key lock per transaction, so key locks can't cycle.
+        Callers take it after their role row lock and before any write, and
+        take at most one key lock per transaction. A claimant waiting on the
+        key has written nothing, so whoever holds it never waits on that
+        claimant's rows, and no cycle can form.
         """
         if key is None:
             return

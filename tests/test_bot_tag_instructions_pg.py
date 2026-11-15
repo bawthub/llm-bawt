@@ -277,11 +277,45 @@ def _holders(tags, key):
             {"k": key}).scalars())
 
 
-def _waiting_on_advisory_lock(tags) -> bool:
+def _waiting_on_a_lock(tags) -> bool:
     with tags.rig.engine.connect() as conn:
         return bool(conn.execute(text(
-            "SELECT EXISTS (SELECT 1 FROM pg_locks"
-            " WHERE locktype = 'advisory' AND NOT granted)")).scalar_one())
+            "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE NOT granted)")).scalar_one())
+
+
+def _race(tags, monkeypatch, first_claim, second_claim,
+          pause_after="_require_free_prompt_key"):
+    """Run ``first_claim`` until just after its ``pause_after`` store step,
+    start ``second_claim``, wait until it blocks (or finishes), then let both
+    finish. Returns both futures, already finished."""
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    checked, release = threading.Event(), threading.Event()
+    step = getattr(BotTagStore, pause_after)
+
+    def pausing_step(*args):
+        result = step(*args)
+        if threading.current_thread().name.startswith("first"):
+            checked.set()
+            assert release.wait(30)
+        return result
+
+    monkeypatch.setattr(BotTagStore, pause_after, staticmethod(pausing_step))
+    with ThreadPoolExecutor(1, thread_name_prefix="first") as first_pool, \
+         ThreadPoolExecutor(1, thread_name_prefix="second") as second_pool:
+        first = first_pool.submit(first_claim)
+        assert checked.wait(30)
+        later = second_pool.submit(second_claim)
+        deadline = time.monotonic() + 10
+        while not later.done() and not _waiting_on_a_lock(tags):
+            assert time.monotonic() < deadline, "second claimant neither blocked nor finished"
+            time.sleep(0.02)
+        release.set()
+        for future in (first, later):
+            future.exception(30)
+    return first, later
 
 
 @pytest.mark.parametrize("second", ["create", "patch"])
@@ -289,23 +323,9 @@ def test_without_the_index_concurrent_claims_of_one_free_key_admit_one(tags, mon
                                                                          second):
     """TASK-1468: the first claimant pauses after its free-key check and before
     its write; the second claimant must wait for it, then get a 409."""
-    import threading
-    import time
-    from concurrent.futures import ThreadPoolExecutor
-
     _legacy_shared_key(tags)
     tags.client.post("/v1/bot-tags", json={"slug": "fixture_other", "name": "Other"})
     store = BotTagStore(tags.rig.engine)
-    checked, release = threading.Event(), threading.Event()
-    require = BotTagStore._require_free_prompt_key
-
-    def pausing_require(conn, key, slug):
-        require(conn, key, slug)
-        if threading.current_thread().name.startswith("first"):
-            checked.set()
-            assert release.wait(30)
-
-    monkeypatch.setattr(BotTagStore, "_require_free_prompt_key", staticmethod(pausing_require))
     key = "role.fixture_new"
 
     def claim_second():
@@ -313,22 +333,46 @@ def test_without_the_index_concurrent_claims_of_one_free_key_admit_one(tags, mon
             return store.create_role("fixture_b", "B", prompt_key=key)
         return store.update_role("fixture_other", {"prompt_key": key})
 
-    with ThreadPoolExecutor(1, thread_name_prefix="first") as first_pool, \
-         ThreadPoolExecutor(1, thread_name_prefix="second") as second_pool:
-        first = first_pool.submit(store.create_role, "fixture_a", "A", prompt_key=key)
-        assert checked.wait(30)
-        later = second_pool.submit(claim_second)
-        deadline = time.monotonic() + 10
-        while not later.done() and not _waiting_on_advisory_lock(tags):
-            assert time.monotonic() < deadline, "second claimant neither blocked nor finished"
-            time.sleep(0.02)
-        release.set()
-        assert first.result(30).prompt_key == key
-        with pytest.raises(TagConflict, match="belongs to bot tag 'fixture_a'"):
-            later.result(30)
+    first, later = _race(tags, monkeypatch,
+                         lambda: store.create_role("fixture_a", "A", prompt_key=key),
+                         claim_second)
 
+    assert first.result().prompt_key == key
+    with pytest.raises(TagConflict, match="belongs to bot tag 'fixture_a'"):
+        later.result()
     assert _holders(tags, key) == ["fixture_a"]
     assert _holders(tags, "role.fixture_old") == ["fixture_old_a", "fixture_old_b"]
+
+
+def test_without_the_index_a_rename_claiming_a_key_never_deadlocks_a_create(tags,
+                                                                          monkeypatch):
+    """Codex r1: a rename that writes catalog rows before claiming its key,
+    against a create of the old slug that holds the key and waits on those
+    rows, deadlocks. Claiming first makes it one success and one 409."""
+    _legacy_shared_key(tags)
+    tags.client.post("/v1/bot-tags", json={"slug": "fixture_other", "name": "Other"})
+    store = BotTagStore(tags.rig.engine)
+    key = "role.fixture_new"
+
+    first, later = _race(
+        tags, monkeypatch,
+        lambda: store.update_role("fixture_other",
+                                  {"slug": "fixture_renamed", "prompt_key": key}),
+        lambda: store.create_role("fixture_other", "Other again", prompt_key=key),
+        pause_after="_rename")  # after the rename has deleted fixture_other
+
+    assert first.result().slug == "fixture_renamed"
+    with pytest.raises(TagConflict, match="belongs to bot tag 'fixture_renamed'"):
+        later.result()
+    assert _holders(tags, key) == ["fixture_renamed"]
+    assert _get_slug_absent(tags, "fixture_other")
+    assert _holders(tags, "role.fixture_old") == ["fixture_old_a", "fixture_old_b"]
+
+
+def _get_slug_absent(tags, slug) -> bool:
+    with tags.rig.engine.connect() as conn:
+        return not conn.execute(text("SELECT EXISTS (SELECT 1 FROM bot_tag_catalog"
+                                     " WHERE slug = :s)"), {"s": slug}).scalar_one()
 
 
 def test_the_index_is_built_once_the_operator_repairs_the_shared_key(tags):
