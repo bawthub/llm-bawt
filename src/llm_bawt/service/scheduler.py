@@ -13,6 +13,7 @@ from sqlmodel import Field, SQLModel, Session, select
 from sqlalchemy import Column, DateTime, Text, text
 from sqlalchemy import delete as sa_delete, update as sa_update
 from ..bot_identities import SYSTEM_BOT_ID, WILDCARD_BOT_ID
+from ..bot_tags import BehaviorTag, BotTags
 from ..runtime_settings import RuntimeSettingsResolver
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,14 @@ class JobType(str, Enum):
     PLAYGROUND_EXPIRY = "playground_expiry"
     SEND_PROMPT = "send_prompt"
     IDLE_CONTEXT_RESET = "idle_context_reset"
+
+
+# Wildcard jobs that skip bots tagged inactive (TASK-1440).
+_INACTIVE_EXCLUDED_JOBS = frozenset({
+    JobType.MEMORY_EXTRACTION,
+    JobType.MEMORY_CONSOLIDATION,
+    JobType.MEMORY_DECAY,
+})
 
 
 class ScheduledJob(SQLModel, table=True):
@@ -295,6 +304,15 @@ class JobScheduler:
                 return [bot.slug for bot in BotManager(self.task_processor.config).list_bots()]
 
             all_bots = await asyncio.to_thread(list_bot_slugs)
+            if job.job_type in _INACTIVE_EXCLUDED_JOBS and all_bots:
+                # Memory maintenance skips bots tagged inactive (TASK-1440).
+                # Private bots keep theirs. An unreadable snapshot answers
+                # "inactive" for every bot, so nothing runs.
+                tags = await asyncio.to_thread(BotTags(self.engine).snapshot)
+                skipped = [b for b in all_bots if tags.has(b, BehaviorTag.INACTIVE)]
+                if skipped:
+                    logger.debug("Wildcard job %s skipping inactive bots: %s", job.job_type, skipped)
+                all_bots = [b for b in all_bots if b not in skipped]
             if not all_bots:
                 logger.debug("No bots found for wildcard job %s", job.job_type)
                 return
