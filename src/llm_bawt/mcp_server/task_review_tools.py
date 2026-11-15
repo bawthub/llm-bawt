@@ -139,6 +139,13 @@ class FindingResolutionInput(TypedDict):
     note: NotRequired[str | None]
 
 
+class FindingDeferralInput(TypedDict):
+    # Scoped r2 evidence, not a resolution: a deferred Blocker stays OPEN.
+    finding_id: str
+    task: str
+    scope_step: str
+
+
 _FINDING_OPTIONAL = frozenset({"file", "line", "failure_scenario"})
 _RESOLUTION_OPTIONAL = frozenset({"revision", "task", "note"})
 
@@ -167,6 +174,13 @@ def _resolution_payload(resolution: FindingResolutionInput) -> dict:
     return out
 
 
+def _deferral_payload(deferral: FindingDeferralInput) -> dict:
+    out = dict(deferral)
+    out["findingId"] = out.pop("finding_id")
+    out["scopeStep"] = out.pop("scope_step")
+    return out
+
+
 @mcp.tool(name="tasks_reviews_add")
 async def add_task_review(
     task_id: str,
@@ -179,6 +193,7 @@ async def add_task_review(
     findings: list[ReviewFindingInput] | None = None,
     rechecks_review_id: str | None = None,
     resolutions: list[FindingResolutionInput] | None = None,
+    deferrals: list[FindingDeferralInput] | None = None,
 ) -> dict:
     """Append a review decision or comment without overwriting the executor response.
 
@@ -199,6 +214,9 @@ async def add_task_review(
             a 1-2000 character note without revision. Revision: bare 7-64 hex
             Git SHA or ops-catalog:<slug>@v<positive-version>#sha256:<64-hex>.
             Catalog evidence is format-validated, not existence-checked.
+        deferrals: Signed r2 only (rechecks_review_id); finding_id, follow-up task,
+            scope_step evidence. BawtHub validates evidence. COMMENT may defer
+            a Blocker, which stays OPEN and still prevents APPROVE.
 
     Returns:
         The review receipt as returned by BawtHub, or an error dict. This does
@@ -207,7 +225,7 @@ async def add_task_review(
     """
     result = await _record_review(
         task_id, stage, verdict, body, bot_id, target_revision, idempotency_key,
-        findings, rechecks_review_id, resolutions,
+        findings, rechecks_review_id, resolutions, deferrals,
     )
     if isinstance(result, dict) and not result.get("error"):
         await notify_review_owner(task_id, bot_id, result)
@@ -263,13 +281,15 @@ async def notify_review_owner(task_id: str, reviewer: str, review: dict) -> dict
 
 async def _record_review(
     task_id, stage, verdict, body, bot_id, target_revision, idempotency_key,
-    findings, rechecks_review_id, resolutions,
+    findings, rechecks_review_id, resolutions, deferrals,
 ) -> dict:
     if not bot_id.strip():
         return {"error": "bot_id is required for review attribution"}
     recheck = rechecks_review_id is not None
     if resolutions is not None and not recheck:
         return {"error": "resolutions need rechecks_review_id", "code": "invalid_review"}
+    if deferrals is not None and not recheck:
+        return {"error": "deferrals need rechecks_review_id", "code": "invalid_review"}
     if recheck and idempotency_key is None:
         return {"error": "a recheck needs idempotency_key", "code": "invalid_review"}
     payload = {"stage": stage, "verdict": verdict, "body": body}
@@ -291,6 +311,8 @@ async def _record_review(
         signed_arguments["rechecks_review_id"] = rechecks_review_id
     if resolutions is not None:
         signed_arguments["resolutions"] = resolutions
+    if deferrals is not None:
+        signed_arguments["deferrals"] = deferrals
     # TASK-1249: models come from the caller's signed turn, never from
     # arguments or the body. A bad or foreign credential is refused.
     try:
@@ -313,6 +335,8 @@ async def _record_review(
     if recheck:
         path = _internal_path(task_id, rechecks_review_id, "recheck")
         internal["resolutions"] = [_resolution_payload(item) for item in resolutions or []]
+        if deferrals is not None:
+            internal["deferrals"] = [_deferral_payload(item) for item in deferrals]
     else:
         path = _internal_path(task_id)
     try:

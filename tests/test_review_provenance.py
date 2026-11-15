@@ -120,7 +120,7 @@ def _review(capability=None, *, bot_id=REVIEWER, body="Reviewed on model-x@path-
 def _provenance(payload):
     return {key: value for key, value in payload.items()
             if key not in {"stage", "verdict", "body", "targetRevision", "idempotencyKey",
-                           "actorBotId"}}
+                           "actorBotId", "findings", "resolutions", "deferrals"}}
 
 
 def test_a_signed_review_records_turn_models_and_ignores_the_body(world, fernet):
@@ -324,6 +324,41 @@ def test_a_signed_recheck_goes_to_the_recheck_route_with_wire_resolutions(world,
         {"findingId": "finding-1", "resolution": "FIXED", "revision": "abc1234"}]
     assert payload["provenance"] == "signed_turn" and payload["actorBotId"] == REVIEWER
     assert payload["idempotencyKey"] == "TASK-7:r2"
+
+
+def _deferral_recheck():
+    return task_review_tools.add_task_review(
+        "TASK-7", "IMPLEMENTATION", "COMMENT", "Scoped follow-up.", REVIEWER,
+        rechecks_review_id="review-r1", idempotency_key="TASK-7:r2",
+        deferrals=[{"finding_id": "finding-1", "task": "TASK-8", "scope_step": "scope-step-1"}],
+    )
+
+
+def test_a_signed_comment_recheck_carries_deferrals_with_turn_provenance(world, fernet):
+    assert _signed(_capability(), _deferral_recheck()) == {"id": "review-1"}
+    [payload] = world["posts"]
+    assert world["paths"] == ["/internal/tasks/TASK-7/reviews/review-r1/recheck"]
+    assert payload["deferrals"] == [
+        {"findingId": "finding-1", "task": "TASK-8", "scopeStep": "scope-step-1"}]
+    assert payload["verdict"] == "COMMENT" and payload["resolutions"] == []
+    assert payload["actorBotId"] == REVIEWER
+    assert _provenance(payload) == {
+        "provenance": "signed_turn",
+        "reviewerModel": "model-r@path-r", "reviewerProvider": "vendor-r",
+        "requesterBotId": AUTHOR, "requesterModel": "model-a@path-a",
+        "authorModel": None, "authorProvider": None, "crossProvider": None,
+        "provenanceNotes": [AUTHOR_NOTE],
+    }
+
+
+@pytest.mark.parametrize("credential", [None, "foreign", "forged"])
+def test_deferral_recheck_requires_the_reviewers_signed_turn(world, fernet, credential):
+    capability = (_capability(bot_id="fixture-other") if credential == "foreign"
+                  else "not-a-token" if credential == "forged" else None)
+    expected = ({"error": "recheck_requires_signed_turn", "code": "recheck_requires_signed_turn"}
+                if credential is None else {"error": "caller_unavailable"})
+    assert _signed(capability, _deferral_recheck()) == expected
+    assert world["posts"] == [] and world["gets"] == [] and world["delivery_reads"] == []
 
 
 def test_an_unsigned_recheck_is_refused_before_any_request(world):

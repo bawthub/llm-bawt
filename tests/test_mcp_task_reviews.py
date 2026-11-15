@@ -1,6 +1,7 @@
 """Task-owned review MCP proxy contracts (TASK-1147)."""
 
 import asyncio
+import json
 
 import httpx
 import pytest
@@ -220,12 +221,15 @@ def test_internal_route_404_is_missing_only_when_it_is_not_json(internal):
         "error": "Review not found", "status": 404, "code": "review_not_found"}
 
 
-def test_signed_review_rule_errors_keep_code_and_details(internal, signed):
+@pytest.mark.parametrize("optional", [
+    {}, {"deferrals": [{"finding_id": "f1", "task": "TASK-9", "scope_step": "step-1"}]},
+])
+def test_signed_review_rule_errors_keep_code_and_details(internal, signed, optional):
     internal["respond"] = lambda request: httpx.Response(409, json={
         "error": "Blocker still open", "code": "blocker_unresolved", "details": {"findingIds": ["f1"]}})
     assert run(task_review_tools.add_task_review(
         "TASK-1", "IMPLEMENTATION", "APPROVE", "ok", "loopy",
-        idempotency_key="k", rechecks_review_id="r1", resolutions=[],
+        idempotency_key="k", rechecks_review_id="r1", resolutions=[], **optional,
     )) == {"error": "Blocker still open", "status": 409, "code": "blocker_unresolved",
            "details": {"findingIds": ["f1"]}}
     [request] = internal["requests"]
@@ -251,7 +255,10 @@ def test_signed_review_falls_back_to_public_route_on_an_old_bawthub(monkeypatch,
     }, {"X-Agent-Bot-Id": "loopy"})]
 
 
-def test_recheck_and_resolution_never_fall_back(monkeypatch, internal, signed):
+@pytest.mark.parametrize("optional", [
+    {}, {"deferrals": [{"finding_id": "f1", "task": "TASK-9", "scope_step": "step-1"}]},
+])
+def test_recheck_and_resolution_never_fall_back(monkeypatch, internal, signed, optional):
     internal["respond"] = lambda request: httpx.Response(404, text="404 Not Found")
 
     async def fake_post(path, json, headers=None):
@@ -260,7 +267,7 @@ def test_recheck_and_resolution_never_fall_back(monkeypatch, internal, signed):
     monkeypatch.setattr(task_review_tools, "_api_post", fake_post)
     assert run(task_review_tools.add_task_review(
         "TASK-1", "IMPLEMENTATION", "APPROVE", "ok", "loopy",
-        idempotency_key="k", rechecks_review_id="r1",
+        idempotency_key="k", rechecks_review_id="r1", **optional,
     )) == {"error": "This BawtHub build cannot record rechecks yet", "code": "recheck_unavailable"}
     assert run(task_review_tools.resolve_review_finding(
         "TASK-1", "r1", "f1", "WITHDRAWN", "loopy",
@@ -290,6 +297,107 @@ async def test_review_tool_discovery_types_rechecks_and_resolution():
     resolve = tools["tasks_reviews_resolve_finding"].input_schema
     assert set(resolve["required"]) == {"task_id", "review_id", "finding_id", "resolution", "bot_id"}
     assert resolve["properties"]["resolution"]["enum"] == ["FIXED", "DEFERRED", "WITHDRAWN"]
+
+
+@pytest.mark.anyio
+async def test_review_tool_discovery_types_deferrals_with_nested_ref():
+    tools = {tool.name: tool for tool in await FastMCP.list_tools(mcp)}
+    add = tools["tasks_reviews_add"].input_schema
+    assert "deferrals" not in add["required"]
+    alternatives = add["properties"]["deferrals"]["anyOf"]
+    assert {"type": "null"} in alternatives
+    array = next(item for item in alternatives if item.get("type") == "array")
+    assert array["items"] == {"$ref": "#/$defs/FindingDeferralInput"}
+    entry = add["$defs"]["FindingDeferralInput"]
+    assert set(entry["required"]) == {"finding_id", "task", "scope_step"}
+    assert set(entry["properties"]) == {"finding_id", "task", "scope_step"}
+    assert all(item["type"] == "string" for item in entry["properties"].values())
+
+
+@pytest.mark.parametrize("deferrals", [
+    [],
+    [{"finding_id": "Finding-A", "task": "TASK-9", "scope_step": "Scope-Step-X"},
+     {"finding_id": "Finding-B", "task": "task-cuid", "scope_step": "scope-step-y"}],
+])
+def test_comment_recheck_signs_exact_deferrals_and_sends_wire_case(
+    monkeypatch, internal, signed, deferrals,
+):
+    signed_calls = []
+
+    def capture(bot_id, arguments):
+        signed_calls.append((bot_id, arguments))
+        return object()
+
+    monkeypatch.setattr(task_review_tools, "signed_review_turn", capture)
+    internal["respond"] = lambda request: httpx.Response(200, json={"id": "r2"})
+    assert run(task_review_tools.add_task_review(
+        "TASK-1", "IMPLEMENTATION", "COMMENT", "Scoped follow-up", "loopy",
+        target_revision="abc1234", idempotency_key="TASK-1:r2",
+        rechecks_review_id="r1", deferrals=deferrals,
+    )) == {"id": "r2"}
+    assert signed_calls == [("loopy", {
+        "task_id": "TASK-1", "stage": "IMPLEMENTATION", "verdict": "COMMENT",
+        "body": "Scoped follow-up", "bot_id": "loopy", "target_revision": "abc1234",
+        "idempotency_key": "TASK-1:r2", "rechecks_review_id": "r1", "deferrals": deferrals,
+    })]
+    [request] = internal["requests"]
+    assert request.url.path == "/internal/tasks/TASK-1/reviews/r1/recheck"
+    assert json.loads(request.content) == {
+        "stage": "IMPLEMENTATION", "verdict": "COMMENT", "body": "Scoped follow-up",
+        "targetRevision": "abc1234", "idempotencyKey": "TASK-1:r2",
+        "provenance": "signed_turn", "actorBotId": "loopy", "resolutions": [],
+        "deferrals": [
+            {"findingId": item["finding_id"], "task": item["task"], "scopeStep": item["scope_step"]}
+            for item in deferrals
+        ],
+    }
+    # Wire conversion must not rename or normalize the signed caller's evidence.
+    assert all(set(item) == {"finding_id", "task", "scope_step"} for item in deferrals)
+
+
+@pytest.mark.parametrize("optional", [{}, {"deferrals": None}])
+@pytest.mark.parametrize("recheck", [False, True])
+def test_omitted_deferrals_preserve_legacy_signed_arguments_and_wire(
+    monkeypatch, internal, signed, optional, recheck,
+):
+    signed_calls = []
+
+    def capture(bot_id, arguments):
+        signed_calls.append(arguments)
+        return object()
+
+    monkeypatch.setattr(task_review_tools, "signed_review_turn", capture)
+    internal["respond"] = lambda request: httpx.Response(200, json={"id": "review-1"})
+    recheck_args = {"rechecks_review_id": "r1"} if recheck else {}
+    assert run(task_review_tools.add_task_review(
+        "TASK-1", "IMPLEMENTATION", "COMMENT", "note", "loopy",
+        idempotency_key="key", **recheck_args, **optional,
+    )) == {"id": "review-1"}
+    # Exact pre-deferral arguments keep the legacy canonical invocation hash.
+    assert signed_calls == [{
+        "task_id": "TASK-1", "stage": "IMPLEMENTATION", "verdict": "COMMENT",
+        "body": "note", "bot_id": "loopy", "target_revision": None,
+        "idempotency_key": "key", **recheck_args,
+    }]
+    [request] = internal["requests"]
+    assert "deferrals" not in json.loads(request.content)
+
+
+@pytest.mark.parametrize("deferrals", [
+    [], [{"finding_id": "f1", "task": "TASK-9", "scope_step": "step-1"}],
+])
+def test_deferrals_require_recheck_before_any_identity_or_request(monkeypatch, deferrals):
+    def unexpected(*args, **kwargs):
+        raise AssertionError("deferrals without r1 must fail before identity or I/O")
+
+    monkeypatch.setattr(task_review_tools, "signed_review_turn", unexpected)
+    monkeypatch.setattr(task_review_tools, "_api_get", unexpected)
+    monkeypatch.setattr(task_review_tools, "_api_post", unexpected)
+    monkeypatch.setattr(task_review_tools, "_internal_post", unexpected)
+    assert run(task_review_tools.add_task_review(
+        "TASK-1", "IMPLEMENTATION", "COMMENT", "note", "loopy",
+        idempotency_key="key", deferrals=deferrals,
+    )) == {"error": "deferrals need rechecks_review_id", "code": "invalid_review"}
 
 
 def test_null_or_empty_optional_entry_fields_are_not_sent():

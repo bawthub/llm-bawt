@@ -335,7 +335,10 @@ async def test_catalog_token_budgets():
     # messages_restore_ignored so a pinned owner scopes them: 19,060 (+63).
     # TASK-2238: tasks_create check_links (a bot-created REVIEW task requires
     # them, so creating one was impossible): 19,167 (+107).
-    assert total <= 19167, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-1825: optional deferrals with typed finding_id/task/scope_step:
+    # measured 19,248 (+81). Structured r2 scope evidence replaces prose;
+    # a deferred Blocker remains OPEN. No description warnings were removed.
+    assert total <= 19248, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 
