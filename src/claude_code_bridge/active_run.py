@@ -83,6 +83,8 @@ _UNSTARTED = frozenset({"sent", "queued"})
 _ACCEPTED = frozenset({"queued", "started", "completed"})
 _REJECTED = LIFECYCLE_REJECTED
 _STARTED = LIFECYCLE_STARTED
+# Mirrors claude_agent_sdk.types.TERMINAL_TASK_STATUSES.
+_TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "stopped", "killed"})
 
 # ``proof`` values on a published lifecycle (see the module docstring); the
 # two proven-not-run proofs are shared with the app (steer_contract).
@@ -227,6 +229,13 @@ class ClaudeActiveRun:
     # result; the replacement query may not have returned yet (TASK-1879).
     _pending_now_interrupts: int = 0
     _injected_notification_active: bool = False
+    # TASK-595: background subagents. When enabled, a result that arrives while
+    # CLI tasks are still running is withheld; the task-notification turn's
+    # result that follows once every task has settled ends the run instead.
+    background_tasks: bool = False
+    _active_tasks: set[str] = field(default_factory=set)
+    _background_wait: bool = False
+    _background_result: Any = None
     _completed: asyncio.Event = field(default_factory=asyncio.Event)
     _steer_timeout_s: float = field(default=8.0, repr=False)
     # command_uuid -> last lifecycle state for ``next`` injections.
@@ -839,6 +848,57 @@ class ClaudeActiveRun:
         return not any(state == "started" or (not eof and state in _UNSTARTED)
                        for state in self._commands.values())
 
+    def note_task_frame(self, subtype: Any, task_id: Any, status: Any = None) -> None:
+        """Track CLI background tasks from ``task_started/updated/notification`` frames."""
+        if not task_id:
+            return
+        task_id = str(task_id)
+        if subtype == "task_started":
+            self._active_tasks.add(task_id)
+        elif subtype == "task_notification" or (
+            subtype == "task_updated" and status in _TERMINAL_TASK_STATUSES
+        ):
+            self._active_tasks.discard(task_id)
+
+    def _background_hold(self, result: Any, origin_kind: str | None) -> str:
+        """Decide a result's fate under background tasks (TASK-595).
+
+        Returns ``"pass"`` (existing handling), ``"hold"`` (withhold: tasks are
+        still running and the CLI will re-invoke the model) or ``"own"`` (a
+        task-notification turn of this run with nothing left in flight; it
+        ends the run like a human result).
+        """
+        if not self.background_tasks or self._expected_interrupt_results > 0:
+            return "pass"
+        if origin_kind is None:
+            if not self._active_tasks:
+                return "pass"
+        elif origin_kind != "task-notification" or not self._background_wait:
+            # A notification result before this run waited on anything is
+            # stale work from an earlier run; keep ignoring it.
+            return "pass"
+        if self._active_tasks:
+            self._background_wait = True
+            logger.info(
+                "Holding result for background tasks: request=%s tasks=%s",
+                self.request_id, sorted(self._active_tasks),
+            )
+            return "hold"
+        self._background_wait = False
+        return "own"
+
+    def _note_task_message(self, msg: Any) -> None:
+        subtype = getattr(msg, "subtype", None)
+        if subtype in ("task_started", "task_updated", "task_notification"):
+            status = getattr(msg, "status", None)
+            if status is None and isinstance(getattr(msg, "patch", None), dict):
+                status = msg.patch.get("status")
+            self.note_task_frame(subtype, getattr(msg, "task_id", None), status)
+
+    def _take_background_result(self) -> Any:
+        result, self._background_result = self._background_result, None
+        return result
+
     def _hold_result(self, result: Any) -> None:
         self._withheld_result = result
         self._withheld_started_commands = {
@@ -875,8 +935,20 @@ class ClaudeActiveRun:
             async for msg in self.client.receive_messages():
                 if isinstance(msg, TaskNotificationMessage):
                     self._injected_notification_active = True
+                self._note_task_message(msg)
                 if isinstance(msg, ResultMessage):
                     stale_kind = _nonhuman_result_origin(msg)
+                    fate = self._background_hold(msg, stale_kind)
+                    if fate == "hold":
+                        self._background_result = msg
+                        if stale_kind == "task-notification":
+                            self._injected_notification_active = False
+                        continue
+                    if fate == "own":
+                        self._background_result = None
+                        if stale_kind == "task-notification":
+                            self._injected_notification_active = False
+                        stale_kind = None
                     if stale_kind is not None:
                         boundary = self._injected_interrupt_boundary(msg, stale_kind)
                         if stale_kind == "task-notification":
@@ -892,6 +964,8 @@ class ClaudeActiveRun:
                     if self._expected_interrupt_results <= 0:
                         msg = self._finish(msg)
                 yield msg
+            if self._background_result is not None:
+                yield self._finish(self._take_background_result())
             return
 
         from claude_agent_sdk._internal.message_parser import parse_message
@@ -908,6 +982,12 @@ class ClaudeActiveRun:
                     self._cli_capabilities = set(capabilities) if isinstance(capabilities, list) else set()
                 elif data.get("subtype") == "task_notification":
                     self._injected_notification_active = True
+                if data.get("subtype") in ("task_started", "task_updated", "task_notification"):
+                    patch = data.get("patch")
+                    self.note_task_frame(
+                        data.get("subtype"), data.get("task_id"),
+                        data.get("status") or (patch.get("status") if isinstance(patch, dict) else None),
+                    )
             if isinstance(data, dict) and data.get("type") == "command_lifecycle":
                 command = str(data.get("command_uuid") or "")
                 state = str(data.get("state") or "")
@@ -930,6 +1010,17 @@ class ClaudeActiveRun:
                 continue
             if isinstance(msg, ResultMessage):
                 stale_kind = _nonhuman_result_origin(msg)
+                fate = self._background_hold(msg, stale_kind)
+                if fate == "hold":
+                    self._background_result = msg
+                    if stale_kind == "task-notification":
+                        self._injected_notification_active = False
+                    continue
+                if fate == "own":
+                    self._background_result = None
+                    if stale_kind == "task-notification":
+                        self._injected_notification_active = False
+                    stale_kind = None
                 if stale_kind is not None:
                     boundary = self._injected_interrupt_boundary(msg, stale_kind)
                     if stale_kind == "task-notification":
@@ -965,6 +1056,14 @@ class ClaudeActiveRun:
             else:
                 self._take_held_result()
                 raise RuntimeError("sdk_stream_ended_with_started_steers")
+        elif self._background_result is not None:
+            # The CLI ended before every background task reported. Finish on
+            # the last result rather than leave the request without one.
+            logger.warning(
+                "SDK stream ended with background tasks in flight: request=%s tasks=%s",
+                self.request_id, sorted(self._active_tasks),
+            )
+            yield self._finish(self._take_background_result())
 
     async def _steer_now(self, replacement_prompt: str, *, images: tuple = ()) -> None:
         """Interrupt current work and inject ``replacement_prompt`` into the run.

@@ -183,7 +183,11 @@ class ClaudeStreamMixin:
         # 2.1.191: flag on → tool_result carries the agent's answer,
         # single ResultMessage; flag off → "running in background"
         # stub + task-notification + second ResultMessage).
-        sdk_env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] = "1"
+        # TASK-595: ``LLM_BAWT_CLAUDE_BACKGROUND_TASKS=1`` lets subagents run in
+        # the background; ``ClaudeActiveRun`` then holds the first result and
+        # finishes on the task-notification turn. Unset keeps this kill switch.
+        if not background_tasks_enabled():
+            sdk_env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] = "1"
         # TASK-1691: the skills this turn's system prompt already carries, for
         # the harness hooks (``skill_hooks``) to count as loaded.
         from .skill_hooks import injected_skills_env
@@ -805,3 +809,10 @@ class ClaudeStreamMixin:
                     if tool_arguments_by_id is not None:
                         tool_arguments_by_id.pop(block.tool_use_id, None)
         return seq
+
+
+def background_tasks_enabled() -> bool:
+    """True when the bridge consumes background subagents (TASK-595)."""
+    import os
+
+    return os.environ.get("LLM_BAWT_CLAUDE_BACKGROUND_TASKS", "").strip().lower() in ("1", "true", "yes")

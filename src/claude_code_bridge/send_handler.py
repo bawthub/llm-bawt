@@ -40,7 +40,7 @@ from .run_terminal import RunTerminalLatch
 from .send_admission import ClaudeSendAdmissionMixin
 from .send_preflight import SendPreflight
 from .send_result import ClaudeResultMixin
-from .send_stream import ClaudeStreamMixin
+from .send_stream import ClaudeStreamMixin, background_tasks_enabled
 from .send_stream_events import StreamBlockState
 from .send_usage import ClaudeUsageMixin, LiveUsagePublisher, turn_session_ledger
 from .response_tracker import ResponseTracker
@@ -541,6 +541,7 @@ class ClaudeSendMixin(
                             request_id=request_id,
                             maintenance=is_compact_command(message),
                             teardown=teardown,
+                            background_tasks=background_tasks_enabled(),
                             # TASK-1300: every origin, with the proof the app
                             # needs to re-queue or fence a bot delivery.
                             on_command_lifecycle=lambda payload: _publish_run_signal(
