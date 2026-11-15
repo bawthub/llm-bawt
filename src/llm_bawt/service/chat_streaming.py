@@ -741,7 +741,7 @@ class ChatStreamingMixin(BridgeSessionResetMixin):
                             }
                             yield (f"data: {json.dumps(data)}\n\n")
 
-                    # Emit animation event (tts_mode only, normal completion only)
+                    # Emit animation event (avatar visible, normal completion only)
                     if animation_holder[0]:
                         anim_data = {"object": "service.animation", "animation": animation_holder[0]}
                         yield (f"data: {json.dumps(anim_data)}\n\n")

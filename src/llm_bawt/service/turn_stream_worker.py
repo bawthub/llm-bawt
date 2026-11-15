@@ -181,11 +181,11 @@ class TurnStreamWorker(TurnStreamPublishMixin):
             # below, before the sentinel is enqueued. The classifier
             # only runs when an avatar is actually visible so we don't
             # waste CPU on a response no one can see animated.
-            _animations: list = list(request.animations or []) if llm_bawt._tts_mode else []
+            # TASK-533: typed replies animate too — a visible avatar and a
+            # catalog are enough; TTS mode only changes how the reply sounds.
+            _animations: list = list(request.animations or [])
             _avatar_visible: bool = bool(request.avatar_visible) if request.avatar_visible is not None else False
-            _run_classifier = bool(
-                llm_bawt._tts_mode and _avatar_visible and _animations
-            )
+            _run_classifier = bool(_avatar_visible and _animations)
             llm_bawt._avatar_visible = _avatar_visible
             log.debug(
                 "🎬 tts_mode=%s (req=%s bot=%s) avatar_visible=%s %d animations classifier=%s",
