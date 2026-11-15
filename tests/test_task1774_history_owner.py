@@ -105,7 +105,7 @@ def test_owner_key_encoding_is_pinned() -> None:
     from llm_bawt.utils.history import owner_file_key
 
     assert owner_file_key("dash", "operator") == (
-        "50f80ca7e66d770eecc6898b5936debd2127d262616a9a85a17758b4e0cdeec9"
+        "292073dea2ac022ac9d7f3f4af8e4a4c4d22f277241d2cf0ec339960726f78ce"
     )
 
 

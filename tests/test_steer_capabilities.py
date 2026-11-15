@@ -108,7 +108,7 @@ def test_a_capability_refusal_falls_back_before_acceptance_only(error):
 
 def _turn(**fields):
     return SimpleNamespace(**{
-        "id": "turn-live", "bot_id": "target", "user_id": "nick", "ended_at": None,
+        "id": "turn-live", "bot_id": "target", "user_id": "operator", "ended_at": None,
         "status": "streaming", "agent_session_key": "session-key", "agent_request_id": "req",
         "trigger_message_id": "trigger", **fields,
     })
@@ -138,7 +138,7 @@ def _harness(monkeypatch, steer_store_factory, turn, *, bot_backend=None, result
 
 def _steer(chat, service, priority="next"):
     return asyncio.run(chat.steer_active_turn(service, chat.ChatSteerRequest(
-        turn_id="turn-live", bot_id="target", user_id="nick", message_id="message-steer",
+        turn_id="turn-live", bot_id="target", user_id="operator", message_id="message-steer",
         message="hello", priority=priority,
     )))
 
@@ -206,7 +206,7 @@ def test_escalate_and_cancel_refuse_without_their_capability(monkeypatch, steer_
     chat, _service, subscriber = _harness(monkeypatch, steer_store_factory, _turn(agent_backend="codex", agent_steer_caps=caps))
     with pytest.raises(HTTPException) as raised:
         asyncio.run(getattr(chat, route)(chat.ChatSteerEscalateRequest(
-            turn_id="turn-live", message_id="message-1", bot_id="target", user_id="nick")))
+            turn_id="turn-live", message_id="message-1", bot_id="target", user_id="operator")))
     assert (raised.value.status_code, raised.value.detail) == (409, code)
     subscriber.send_steer.assert_not_awaited()
 
@@ -216,7 +216,7 @@ def test_escalate_and_cancel_address_the_pinned_runs_backend(monkeypatch, steer_
     turn = _turn(agent_backend="codex", agent_steer_caps="cancel_queued,escalate,next")
     chat, _service, subscriber = _harness(monkeypatch, steer_store_factory, turn, result={"ok": True, "detail": "done"})
     asyncio.run(getattr(chat, route)(chat.ChatSteerEscalateRequest(
-        turn_id="turn-live", message_id="message-1", bot_id="target", user_id="nick")))
+        turn_id="turn-live", message_id="message-1", bot_id="target", user_id="operator")))
     assert subscriber.send_steer.await_args.kwargs["backend"] == "codex"
 
 

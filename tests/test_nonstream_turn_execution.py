@@ -25,7 +25,7 @@ from llm_bawt.service.turn_execution import turn_executions
 
 def _service(execute_llm_query, *, model_type: str = "claude-code") -> BackgroundService:
     service = BackgroundService.__new__(BackgroundService)
-    service.config = SimpleNamespace(DEFAULT_BOT="nova", DEFAULT_USER="nick")
+    service.config = SimpleNamespace(DEFAULT_BOT="nova", DEFAULT_USER="operator")
     service._redis_subscriber = SimpleNamespace(publish_tool_event=AsyncMock())
     service._resolve_request_model = Mock(return_value=("test-model", []))
     service._persist_turn_log = Mock(return_value=None)
@@ -59,7 +59,7 @@ def _request() -> ChatCompletionRequest:
         model="test-model",
         messages=[ChatMessage(role="user", content="do the task")],
         bot_id="caid",
-        user="nick",
+        user="operator",
         stream=False,
         user_message_id="00000000-0000-4000-8000-000000000001",
     )
@@ -326,7 +326,7 @@ def test_rejected_agent_new_has_no_thread_side_effects(explicit, monkeypatch, _i
     )
     request = ChatCompletionRequest(
         model="test-model", messages=[ChatMessage(role="user", content="/new")],
-        bot_id="caid", user="nick", stream=stream,
+        bot_id="caid", user="operator", stream=stream,
     )
     if explicit:
         request.session_id = "selected-thread"
@@ -398,7 +398,7 @@ def test_accepted_agent_new_seeds_outgoing_then_routes_to_fresh_thread(monkeypat
     )
     request = ChatCompletionRequest(
         model="test-model", messages=[ChatMessage(role="user", content=prompt)],
-        bot_id="caid", user="nick", stream=stream,
+        bot_id="caid", user="operator", stream=stream,
     )
     if mode != "typed":
         request.inter_bot_session_policy = (
@@ -452,8 +452,8 @@ def test_original_runtime_stream_passes_only_row_verified_service_context(monkey
     service = _service(Mock())
     llm = service._get_llm_bawt.return_value
     llm.bot.slug = "caid"
-    llm.user_id = "nick"
-    row = {"id": "successor", "bot_id": "caid", "user_id": "nick", "session_metadata": {}}
+    llm.user_id = "operator"
+    row = {"id": "successor", "bot_id": "caid", "user_id": "operator", "session_metadata": {}}
     if row_kind == "other_user":
         row["user_id"] = "other_fixture_user"
     llm.history_manager = SimpleNamespace(_db_backend=SimpleNamespace(
@@ -497,7 +497,7 @@ def test_post_admission_agent_setup_failure_closes_turn(monkeypatch, stream):
     )
     request = ChatCompletionRequest(
         model="test-model", messages=[ChatMessage(role="user", content="/new")],
-        bot_id="caid", user="nick", stream=stream,
+        bot_id="caid", user="operator", stream=stream,
     )
 
     async def run():
@@ -668,7 +668,7 @@ def _protocol_admission(service, monkeypatch):
     monkeypatch.setattr(TerminalFollower, "start", start)
     llm = service._get_llm_bawt.return_value
     llm.history_manager = SimpleNamespace(_db_backend=SimpleNamespace(
-        bot_id="caid", user_id="nick",
+        bot_id="caid", user_id="operator",
         get_or_create_active_session=Mock(return_value="canonical-native"),
     ))
     return protocol, llm
