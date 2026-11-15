@@ -47,10 +47,18 @@ NOTIFICATIONS = "notifications"
 #: TASK-1184: an operator freeze was placed or thawed (marked by the admin
 #: gates route, the only writer). Expiry is time-based; clients re-read then.
 FREEZE = "freeze"
+#: TASK-1184: an operation-catalog row was created, edited, disabled or deleted.
+OPS_CATALOG = "ops_catalog"
+#: TASK-1184: a Playground artifact arrived or its mailbox state moved (any
+#: client, bot send or purge).
+PLAYGROUND = "playground"
+#: TASK-1184: a utility-model call recorded a usage row (inside or outside a turn).
+UTILITY_USAGE = "utility_usage"
 
 #: Every topic a browser may receive. Closed: the client ignores anything else.
 TOPICS = frozenset({OPS_JOBS, OPS_RELEASES, GPU, QUEUE_HOLD, APPROVAL_POLICIES, MEDIA, SCHEDULES,
-                    MAINTENANCE_JOBS, DELIVERIES, NOTIFICATIONS, FREEZE})
+                    MAINTENANCE_JOBS, DELIVERIES, NOTIFICATIONS, FREEZE, OPS_CATALOG, PLAYGROUND,
+                    UTILITY_USAGE})
 
 #: Bursts of commits inside this window produce one fingerprint pass.
 MIN_INTERVAL_SECONDS = 1.0
@@ -82,6 +90,16 @@ _FINGERPRINTS: dict[str, str] = {
         "  FILTER (WHERE state IN ('pending', 'queued', 'running')), ''))"
         " FROM prompt_occurrences"
     ),
+    # Edits bump version; create and hard delete move the count.
+    OPS_CATALOG: "SELECT count(*), coalesce(sum(version), 0), max(updated_at) FROM ops_operations",
+    PLAYGROUND: (
+        "SELECT count(*), md5(coalesce(string_agg(id || ':' || coalesce(opened_at::text, '')"
+        "  || ':' || coalesce(archived_at::text, '') || ':' || coalesce(trashed_at::text, '')"
+        "  || ':' || coalesce(expired_at::text, ''), ',' ORDER BY id), ''))"
+        " FROM playground_artifacts"
+    ),
+    # Append-only; the primary key index answers this without a scan.
+    UTILITY_USAGE: "SELECT max(id) FROM utility_usage",
 }
 
 
@@ -231,6 +249,6 @@ async def run_state_watcher(service: Any, engine: Any) -> None:
     await watcher.run()
 
 
-__all__ = ["APPROVAL_POLICIES", "EVENT_TYPE", "FREEZE", "GPU", "MAINTENANCE_JOBS", "MEDIA", "NOTIFICATIONS", "OPS_JOBS", "OPS_RELEASES",
-           "QUEUE_HOLD", "SCHEDULES", "StateWatcher", "TOPICS", "mark", "nudge", "publish_state_changed",
+__all__ = ["APPROVAL_POLICIES", "EVENT_TYPE", "FREEZE", "GPU", "MAINTENANCE_JOBS", "MEDIA", "NOTIFICATIONS", "OPS_CATALOG", "OPS_JOBS",
+           "OPS_RELEASES", "PLAYGROUND", "QUEUE_HOLD", "SCHEDULES", "UTILITY_USAGE", "StateWatcher", "TOPICS", "mark", "nudge", "publish_state_changed",
            "read_fingerprints", "run_state_watcher", "state_changed_event", "watcher_of"]

@@ -116,3 +116,53 @@ def test_rolled_back_write_does_not_notify(stores):
             pass
 
     assert _notifies(stores.engine, write) is False
+
+
+def test_catalog_mailbox_and_utility_writers_publish_their_topics(private_app_pg):
+    """TASK-1184: the three producers that replaced dashboard reconcile timers."""
+    from datetime import datetime, timezone
+
+    from llm_bawt.playground.store import PlaygroundStore
+    from llm_bawt.service.usage import utility_usage
+
+    ops = OpsStore(private_app_pg)
+    engine = ops.engine
+    playground = PlaygroundStore(engine)
+    with engine.begin() as conn:
+        utility_usage.bootstrap_utility_usage_schema(conn)
+    watcher = StateWatcher(SimpleNamespace(_redis_subscriber=_Subscriber()), engine)
+    watcher._last = watcher._read()
+    for topic in ("ops_catalog", "playground", "utility_usage"):
+        assert topic in watcher._last, topic
+
+    def check():
+        return asyncio.run(watcher.check())
+
+    slug = f"test.state-{uuid.uuid4().hex[:8]}"
+    assert _notifies(engine, lambda: ops.create_operation(dict(
+        slug=slug, title="t", description="d", enabled=True, target_host="",
+        command_script='{"action":"restart","container_name":"test"}',
+        args_schema_json='{"type":"object","additionalProperties":false,"properties":{}}',
+        args_defaults_json="{}", timeout_seconds=60, start_delay_seconds=0, risk_level="low",
+        category="restart")))
+    assert check() == {"ops_catalog"}
+    assert _notifies(engine, lambda: ops.update_operation(slug, {"enabled": False}))
+    assert check() == {"ops_catalog"}
+
+    artifact = f"pg-{uuid.uuid4().hex[:12]}"
+    assert _notifies(engine, lambda: playground.insert({
+        "id": artifact, "user_id": "u", "sender_bot_id": "b", "title": "t", "kind": "text",
+        "mime": "text/plain", "size_bytes": 1, "inline_content": "x"}))
+    assert check() == {"playground"}
+    for action in ("read", "archive", "trash", "restore"):
+        assert _notifies(engine, lambda action=action: playground.set_state(artifact, "u", action))
+        assert check() == {"playground"}, action
+    assert _notifies(engine, lambda: playground.mark_expired(artifact, "u"))
+    assert check() == {"playground"}
+
+    row = utility_usage.build_row(caller="prompt_expansion", bot_id=None, model="m", box={},
+                                  estimate={"input_tokens": 1}, elapsed_ms=1, outcome="ok")
+    row["created_at"] = datetime.now(timezone.utc)
+    assert _notifies(engine, lambda: utility_usage.record(row, engine=engine))
+    assert check() == {"utility_usage"}
+    assert check() == set()

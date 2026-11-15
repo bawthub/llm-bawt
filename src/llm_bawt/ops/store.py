@@ -19,6 +19,7 @@ from sqlalchemy import func, inspect, or_, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, SQLModel, select
 
+from ..service.commit_wake import notify_in_transaction
 from ..system_events import SystemEventEmitter
 from ..utils.config import Config, has_database_credentials
 from ..utils.schema import SchemaBootstrapGuard
@@ -395,6 +396,9 @@ class OpsStore:
             # Delivered only if this transaction commits.
             session.execute(text("SELECT pg_notify(:channel, :slug)"),
                             {"channel": CATALOG_CHANGED_CHANNEL, "slug": slug})
+            # TASK-1184: also wake the app's state watcher (topic ``ops_catalog``)
+            # so open catalog views refresh; delivered only on commit.
+            notify_in_transaction(session.connection())
 
     @staticmethod
     def _record_revision(session, row):

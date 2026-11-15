@@ -120,6 +120,11 @@ def record(row: dict, *, engine: Any = None) -> None:
                 VALUES (:created_at, :caller, :bot_id, :model, :input_tokens, :cache_read_tokens,
                     :cache_write_tokens, :output_tokens, :estimated, :elapsed_ms, :outcome)
             """), row)
+            # TASK-1184: wake the state watcher (topic ``utility_usage``) so an
+            # open usage view refreshes, including for calls outside a turn.
+            from ..commit_wake import notify_in_transaction
+
+            notify_in_transaction(conn)
     except Exception:  # noqa: BLE001
         logger.warning("utility usage row not recorded (%s)", row.get("caller"), exc_info=True)
 

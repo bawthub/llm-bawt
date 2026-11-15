@@ -45,6 +45,7 @@ from sqlalchemy import (
 from sqlalchemy.engine import Engine
 
 from ..media.assets import _encode_crockford
+from ..service.commit_wake import notify_in_transaction
 from ..utils.schema import SchemaBootstrapGuard
 
 logger = logging.getLogger(__name__)
@@ -174,6 +175,7 @@ class PlaygroundStore:
     def insert(self, row: dict[str, Any]) -> dict[str, Any]:
         values = {**row, "created_at": row.get("created_at") or _now()}
         with self.engine.begin() as conn:
+            notify_in_transaction(conn)  # TASK-1184: open mailboxes refresh (topic ``playground``)
             conn.execute(insert(artifacts).values(**values))
         return values
 
@@ -186,6 +188,7 @@ class PlaygroundStore:
         token = secrets.token_urlsafe(32)
         mine = and_(artifacts.c.id == artifact_id, artifacts.c.user_id == user_id)
         with self.engine.begin() as conn:
+            notify_in_transaction(conn)  # TASK-1184: open mailboxes refresh (topic ``playground``)
             row = conn.execute(
                 update(artifacts)
                 .where(mine, artifacts.c.expired_at.is_(None))
@@ -218,6 +221,7 @@ class PlaygroundStore:
         if trashed_before is not None:
             guard.append(artifacts.c.trashed_at < trashed_before)
         with self.engine.begin() as conn:
+            notify_in_transaction(conn)  # TASK-1184: open mailboxes refresh (topic ``playground``)
             changed = conn.execute(
                 update(artifacts)
                 .where(*cond, *guard)
@@ -249,6 +253,7 @@ class PlaygroundStore:
         }[action]
         mine = [artifacts.c.id == artifact_id, artifacts.c.user_id == user_id]
         with self.engine.begin() as conn:
+            notify_in_transaction(conn)  # TASK-1184: open mailboxes refresh (topic ``playground``)
             conn.execute(update(artifacts).where(*mine, artifacts.c.expired_at.is_(None)).values(**values))
             row = conn.execute(select(*artifacts.c).where(*mine)).mappings().first()
         return dict(row) if row is not None else None
