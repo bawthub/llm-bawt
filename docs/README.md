@@ -13,3 +13,4 @@ have been removed.
 - [BACKGROUND_SCHEDULER.md](./BACKGROUND_SCHEDULER.md)
 - [approval-policies.md](./approval-policies.md)
 - [usage-endpoint.md](./usage-endpoint.md)
+- [OBJECT_STORE_MIGRATION.md](./OBJECT_STORE_MIGRATION.md) — credential rotation vs bucket/endpoint migration
