@@ -76,6 +76,32 @@ def test_non_image_tool_and_failed_upload_attach_nothing():
     assert TURN_IMAGES_KEY not in buffers
 
 
+def test_code_mode_json_wrapped_image_is_unwrapped_and_base64_stripped():
+    import json
+
+    big = "aW1h" * 20_000
+    inner = {"content": [
+        {"type": "text", "text": "shot"},
+        {"type": "image", "data": big, "mimeType": "image/png"},
+    ]}
+    item = {"type": "mcpToolCall", "id": "w", "tool": "browser_take_screenshot",
+            "result": {"content": [{"type": "text", "text": json.dumps(inner)}]}}
+
+    async def upload(data_url, user_id, tool_use_id):
+        return {"asset_id": "ma_w", "urls": {"original": "/v1/uploads/ma_w"}}
+
+    bridge = _bridge([])
+    bridge._upload_data_url = upload
+    _complete(bridge, item, {})
+
+    (event,) = _tool_ends(bridge)
+    assert event.attachments == [{"asset_id": "ma_w", "kind": "image"}]
+    published = event.to_dict()
+    assert big[:200] not in (event.tool_result or "")
+    assert big[:200] not in json.dumps(published.get("tool_result_payload"))
+    assert "http://app:8642/v1/uploads/ma_w" in json.dumps(published.get("tool_result_payload"))
+
+
 def test_sdk_model_result_is_dumped_before_extraction():
     class Result:
         def model_dump(self, mode="json"):

@@ -65,6 +65,46 @@ class ToolImageMixin:
                 refs.append({"asset_id": asset_id, "kind": "image"})
         return refs
 
+    def _absolute_artifact_url(self, path: object) -> str | None:
+        if not isinstance(path, str) or not path:
+            return None
+        if path.startswith(("http://", "https://")):
+            return path
+        if not self._app_api_url:
+            return path
+        return f"{self._app_api_url.rstrip('/')}/{path.lstrip('/')}"
+
+    def _format_screenshot_artifacts(self, artifacts: list[dict]) -> str:
+        """Render canonical upload envelopes as model-visible curlable URLs."""
+        lines = [
+            "[Playwright Screenshot Artifact] The screenshot is stored durably. "
+            "Use these URLs with curl if you need the raw artifact; paste the "
+            "`public` link if the user should be able to open it:",
+        ]
+        rendered = 0
+        for artifact in artifacts:
+            if not isinstance(artifact, dict) or not artifact.get("asset_id"):
+                continue
+            rendered += 1
+            meta = [
+                f"asset_id={artifact['asset_id']}",
+                f"type={artifact.get('mime_type') or 'image'}",
+            ]
+            if artifact.get("width") and artifact.get("height"):
+                meta.append(f"{artifact['width']}x{artifact['height']}")
+            lines.append(f"{rendered}. " + "  ".join(meta))
+            urls = artifact.get("urls") if isinstance(artifact.get("urls"), dict) else {}
+            for label in ("original", "preview", "thumb"):
+                absolute = self._absolute_artifact_url(urls.get(label))
+                if absolute:
+                    lines.append(f"   {label}: {absolute}")
+            # TASK-847: the user-facing BawtHub link. Only this one is
+            # clickable by the user — the URLs above are internal.
+            public_url = artifact.get("public_url")
+            if isinstance(public_url, str) and public_url:
+                lines.append(f"   public (share with user): {public_url}")
+        return "\n".join(lines) if rendered else ""
+
     async def _persist_screenshot_artifacts(
         self, content: list, session_key: str, tool_use_id: str | None,
     ) -> list[dict]:

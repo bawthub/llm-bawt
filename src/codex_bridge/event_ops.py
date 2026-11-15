@@ -598,7 +598,10 @@ class CodexEventMixin(ToolImageMixin):
 
         if item_type in ("mcpToolCall", "mcp_tool_call"):
             tool_name = buf.get("tool_name") or self._dig(item, "tool") or "mcp_tool"
-            result = self._dig(item, "result") or self._dig(item, "error") or ""
+            result = (
+                buf.get("published_result")
+                or self._dig(item, "result") or self._dig(item, "error") or ""
+            )
             seq += 1
             self._publish_tool_end(request_id, session_key, seq,
                                    tool_name=tool_name, result=result,
@@ -660,6 +663,27 @@ class CodexEventMixin(ToolImageMixin):
             attachments=attachments or None,
         )
 
+    @classmethod
+    def _unwrap_code_mode_content(cls, content: list) -> list | None:
+        """Codex code mode wraps an MCP result as JSON text:
+        ``content[i].text == '{"content": [{type:text}, {type:image,...}]}'``.
+        Return the inner content list when a text block holds one with an
+        image, else None."""
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "text":
+                continue
+            text = block.get("text")
+            if not isinstance(text, str) or not text.lstrip().startswith("{"):
+                continue
+            try:
+                parsed = json.loads(text)
+            except ValueError:
+                continue
+            inner = parsed.get("content") if isinstance(parsed, dict) else None
+            if isinstance(inner, list) and any(cls._extract_image_block(b) for b in inner):
+                return inner
+        return None
+
     async def _persist_mcp_images(
         self, item: Any, session_key: str, item_buffers: dict,
     ) -> None:
@@ -683,13 +707,25 @@ class CodexEventMixin(ToolImageMixin):
         content = result.get("content") if isinstance(result, dict) else result
         if not isinstance(content, list):
             return
+        inner = self._unwrap_code_mode_content(content)
+        if inner is not None:
+            content = inner
         try:
-            refs = self._artifact_refs(
-                await self._persist_screenshot_artifacts(content, session_key, item_id or None)
+            artifacts = await self._persist_screenshot_artifacts(
+                content, session_key, item_id or None,
             )
+            refs = self._artifact_refs(artifacts)
         except Exception:
             logger.warning("MCP image persist failed (item_id=%s)", item_id, exc_info=True)
             return
+        # The published result: unwrapped content (ToolResultPayload strips
+        # image bytes) plus the curlable URL block, per the Claude bridge.
+        url_block = self._format_screenshot_artifacts(artifacts)
+        if inner is not None or url_block:
+            published = list(content)
+            if url_block:
+                published.append({"type": "text", "text": url_block})
+            buf["published_result"] = {"content": published}
         if not refs:
             return
         buf["attachments"] = refs
