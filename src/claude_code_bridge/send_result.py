@@ -42,6 +42,7 @@ class ClaudeResultMixin:
         compact_threshold: int | None = None,
         capture_usage: Callable[[dict | None], None] | None = None,
         turn_request_totals: dict | None = None,
+        estimate_reasoning: Callable[[int], int | None] | None = None,
     ) -> int:
         full_text = "".join(text_parts)
         if not full_text and assistant_snapshot_text:
@@ -131,6 +132,15 @@ class ClaudeResultMixin:
         if token_usage_payload and turn_request_totals:
             # TASK-1961: every upstream request in the turn, not just the last.
             token_usage_payload = {**token_usage_payload, "turn_request_totals": turn_request_totals}
+        if token_usage_payload and estimate_reasoning is not None:
+            # TASK-1586: Anthropic doesn't split thinking out of output_tokens.
+            reasoning = estimate_reasoning(int(token_usage_payload.get("output_tokens") or 0))
+            if reasoning is not None:
+                token_usage_payload = {
+                    **token_usage_payload,
+                    "reasoning_tokens": reasoning,
+                    "reasoning_source": "estimated",
+                }
         seq += 1
         self._publish_event(
             request_id, session_key, seq,

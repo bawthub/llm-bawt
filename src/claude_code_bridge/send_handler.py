@@ -849,6 +849,7 @@ class ClaudeSendMixin(
                                     cost_baseline_usd=cost_baseline_usd,
                                     capture_usage=lambda usage: terminal_usage.__setitem__(0, usage),
                                     turn_request_totals=live_usage.request_totals(),
+                                    estimate_reasoning=live_usage.estimated_reasoning_tokens,
                                     compact_status=compact_status,
                                     compact_error_msg=compact_error_msg,
                                     turn_session_id=turn_session_id,

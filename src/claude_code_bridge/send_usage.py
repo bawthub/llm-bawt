@@ -28,6 +28,9 @@ from ._bridge_helpers import (
 
 from .context_env import effective_context_window
 
+# Same rough ratio as llm_bawt.utils.token_estimate (the bridge can't import it).
+_CHARS_PER_TOKEN = 4
+
 logger = logging.getLogger("claude_code_bridge.bridge")
 
 # Post-DONE /context read: per-attempt cap and attempt count. Together they
@@ -100,6 +103,10 @@ class LiveUsagePublisher:
     # gauge); these sum all of them so cache hit rate covers the whole turn.
     request_usages: list[dict] = field(default_factory=list)
     _open_requests: dict[str | None, int] = field(default_factory=dict)
+    # TASK-1586: characters of the main thread's visible output (text and
+    # tool_use input). Thinking is excluded; its share is estimated as
+    # output_tokens minus these characters' estimated tokens.
+    visible_output_chars: int = 0
 
     def observe_stream_event(self, event: dict, source: str | None = None) -> None:
         """Track each upstream request: message_start opens one, deltas update it.
@@ -108,6 +115,15 @@ class LiveUsagePublisher:
         main thread), so concurrent subagent streams update their own request.
         """
         kind = event.get("type")
+        if kind == "content_block_delta" and source is None:
+            delta = event.get("delta")
+            if isinstance(delta, dict):
+                piece = delta.get("text") if delta.get("type") == "text_delta" else (
+                    delta.get("partial_json") if delta.get("type") == "input_json_delta" else None
+                )
+                if isinstance(piece, str):
+                    self.visible_output_chars += len(piece)
+            return
         if kind == "message_start":
             message = event.get("message")
             self.request_usages.append({})
@@ -143,6 +159,14 @@ class LiveUsagePublisher:
                 1 for u in self.request_usages if u.get("cache_read_input_tokens", 0) > 0
             ),
         }
+
+    def estimated_reasoning_tokens(self, output_tokens: int) -> int | None:
+        """Thinking tokens estimated from output minus visible output; None
+        when no stream was observed."""
+        if output_tokens <= 0 or not self.request_usages:
+            return None
+        visible = self.visible_output_chars // _CHARS_PER_TOKEN
+        return min(max(output_tokens - visible, 0), output_tokens)
 
     def with_totals(self, usage: dict | None) -> dict | None:
         """Attach the turn's request totals to a usage payload."""

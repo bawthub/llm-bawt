@@ -342,3 +342,33 @@ async def test_turn_usage_is_none_without_sdk_usage_or_a_confirmed_rollout(tmp_p
         sdk_usage({"input": 7_740_000, "cached": 7_400_000, "output": 27_000}),
         thread=thread, model="gpt-6",
     ) is None
+
+
+def _reasoning_event(total: tuple[int, int, int], last: tuple[int, int, int]) -> str:
+    def counts(c):
+        out, reasoning = c[1], c[2]
+        return {**_counts(c[0], 0, out), "reasoning_output_tokens": reasoning}
+    return _event({"type": "token_count", "info": {
+        "total_token_usage": counts(total), "last_token_usage": counts(last)}})
+
+
+def test_turn_reasoning_is_the_delta_of_thread_totals():
+    # TASK-1586: thread totals (input, output, reasoning); turn 2 = two calls.
+    lines = [
+        _event({"type": "task_started"}),
+        _reasoning_event((100, 50, 30), (100, 50, 30)),
+        _event({"type": "task_started"}),
+        _reasoning_event((300, 90, 50), (200, 40, 20)),
+        _reasoning_event((450, 160, 110), (150, 70, 60)),
+    ]
+    turn = parse_latest_turn(lines)
+    assert turn is not None
+    usage = turn.to_token_usage()
+    assert usage["output_tokens"] == 110
+    assert usage["reasoning_tokens"] == 80 == 110 - 30
+    assert usage["reasoning_source"] == "exact"
+
+
+def test_reasoning_is_bounded_by_output_and_never_negative():
+    assert TokenCounts(output=10, reasoning=25).bounded_reasoning == 10
+    assert TokenCounts(output=10, reasoning=-3).bounded_reasoning == 0

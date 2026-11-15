@@ -52,6 +52,8 @@ class TokenCounts:
     cached: int = 0
     cache_write: int = 0
     output: int = 0
+    # Subset of ``output`` (OpenAI counts reasoning inside output tokens).
+    reasoning: int = 0
 
     @classmethod
     def from_mapping(cls, raw: Any) -> TokenCounts | None:
@@ -63,6 +65,7 @@ class TokenCounts:
                 cached=int(raw.get("cached_input_tokens") or 0),
                 cache_write=int(raw.get("cache_write_input_tokens") or 0),
                 output=int(raw.get("output_tokens") or 0),
+                reasoning=int(raw.get("reasoning_output_tokens") or 0),
             )
         except (TypeError, ValueError):
             return None
@@ -83,7 +86,8 @@ class TokenCounts:
         return cls.from_mapping({
             key: getattr(usage, key, 0)
             for key in ("input_tokens", "cached_input_tokens",
-                        "cache_write_input_tokens", "output_tokens")
+                        "cache_write_input_tokens", "output_tokens",
+                        "reasoning_output_tokens")
         })
 
     def __sub__(self, other: TokenCounts) -> TokenCounts:
@@ -92,7 +96,13 @@ class TokenCounts:
             cached=self.cached - other.cached,
             cache_write=self.cache_write - other.cache_write,
             output=self.output - other.output,
+            reasoning=self.reasoning - other.reasoning,
         )
+
+    @property
+    def bounded_reasoning(self) -> int:
+        """Reasoning clamped to ``0 <= reasoning <= output``."""
+        return min(max(self.reasoning, 0), max(self.output, 0))
 
     def is_call(self) -> bool:
         """Plausible as one model call: no negatives, cached buckets within input."""
@@ -126,6 +136,9 @@ class RolloutTurnUsage:
             "cache_read_tokens": last.cached,
             "cache_creation_tokens": last.cache_write,
             "output_tokens": self.turn_total.output,
+            # Exact: delta of the thread's running reasoning total.
+            "reasoning_tokens": self.turn_total.bounded_reasoning,
+            "reasoning_source": "exact",
             "context_window": None,  # the caller fills these from the catalog
             "max_output_tokens": None,
             "total_cost_usd": None,
