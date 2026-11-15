@@ -33,8 +33,6 @@ KNOWN_DRIFT = {
     "annotated-types": ("0.8.0", "0.7.0"),  # transitive: pydantic
     "attrs": ("26.1.0", "25.4.0"),  # transitive: jsonschema/referencing (mcp)
     "certifi": ("2026.7.22", "2026.2.25"),  # transitive: httpx/httpcore TLS roots
-    "cffi": ("2.1.1", "2.0.0"),  # transitive: cryptography
-    "cryptography": ("50.0.1", "46.0.5"),  # transitive: llm-bawt core imports it at bridge start
     "fastapi": ("0.141.1", "0.135.1"),  # DIRECT: imported by bridge code
     "packaging": ("26.3", "26.0"),  # transitive: openai-codex; not loaded by bridge code
     "pillow": ("12.3.0", "12.1.1"),  # llm-bawt requirement; not loaded by bridge code
@@ -141,6 +139,8 @@ def test_aligned_packages_cannot_drift_again():
         "hiredis": "3.4.2",
         "sqlalchemy": "2.1.1",
         "websockets": "17.1",
+        "cryptography": "50.0.1",
+        "cffi": "2.1.1",
     }.items():
         assert name not in KNOWN_DRIFT
         pins = f"claude-agent-sdk==0.2.160\n{name}=={version}\n"
