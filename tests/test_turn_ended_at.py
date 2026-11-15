@@ -117,7 +117,11 @@ def test_timeout_transition_persists_partial_token_usage():
     row = _row(store, "turn-partial-usage")
     assert row.status == "timeout"
     assert row.end_reason == "error"
-    assert json.loads(row.token_usage_json) == usage
+    assert json.loads(row.token_usage_json) == {
+        **usage,
+        "cost_kind": "unknown",
+        "total_cost_usd": None,
+    }
     assert row.ended_at is not None
 
 
