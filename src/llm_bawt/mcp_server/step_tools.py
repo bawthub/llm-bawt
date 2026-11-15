@@ -314,3 +314,47 @@ async def set_steps(
     if not isinstance(result, list):
         return result if isinstance(result, dict) else {"result": result}
     return _receipt(task_id, result, count_by_status(result))
+
+
+@mcp.tool(name="steps_reorder")
+async def reorder_steps(
+    task_id: str,
+    step_ids: list[str],
+    bot_id: str | None = None,
+) -> dict[str, Any]:
+    """Reorder existing steps without replacing their IDs, outputs or statuses.
+
+    Supply the full list of step IDs in the desired order for an unambiguous
+    checklist order. The existing server endpoint assigns listed IDs indices
+    starting at zero, ignores IDs belonging to other tasks, and leaves omitted
+    steps' indices unchanged. A partial list can therefore produce tied indices.
+
+    Args:
+        task_id: Parent task ID (cuid) or shortId (e.g. "TASK-42").
+        step_ids: Nonempty list of unique, nonblank step IDs in desired order.
+        bot_id: Your bot ID for activity attribution.
+
+    Returns:
+        Compact receipt with every resulting step's id/title/status in server
+        order and stepStatusCounts. Outputs are not echoed. Error dict on failure.
+    """
+    if (
+        not isinstance(step_ids, list)
+        or not step_ids
+        or any(not isinstance(step_id, str) or not step_id.strip() for step_id in step_ids)
+    ):
+        return {"error": "step_ids must be a nonempty list of nonblank step IDs"}
+    if len(set(step_ids)) != len(step_ids):
+        return {"error": "step_ids must contain unique step IDs"}
+    logger.debug("MCP tool invoked: tools/reorder_steps task=%s count=%d", task_id, len(step_ids))
+    try:
+        result = await _api_post(
+            f"/tasks/{task_id}/steps/reorder",
+            json={"stepIds": step_ids},
+            headers=_headers(bot_id),
+        )
+    except httpx.HTTPStatusError as e:
+        return _http_error(e)
+    if not isinstance(result, list):
+        return result if isinstance(result, dict) else {"result": result}
+    return _receipt(task_id, result, count_by_status(result))

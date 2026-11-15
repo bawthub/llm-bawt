@@ -206,7 +206,9 @@ async def test_catalog_token_budgets():
     # TASK-2190: playground_send, one-time-view artifacts for the user (+32): 5,104.
     # TASK-1534: activity_get names its change history and cursor (+1): 5,105.
     # TASK-2279: messages_forget, one owner-scoped select/ignore/memory delete (+31): 5,136.
-    assert sum(descriptions) <= 5136, f"Descriptions grew to {sum(descriptions)} tokens"
+    # TASK-434: steps_reorder adds a bounded typed adapter and preservation/
+    # partial-order caveats. Measured descriptions: 5,158.
+    assert sum(descriptions) <= 5158, f"Descriptions grew to {sum(descriptions)} tokens"
     definitions = [{"name": f"mcp__bawthub__{t.name}", "description": t.description or "", "input_schema": t.input_schema} for t in tools]
     total = len(encoder.encode(json.dumps(definitions, ensure_ascii=False, separators=(",", ":"))))
     # TASK-900: explicit X search adds ~160 tokens; measured catalog 11,239.
@@ -338,7 +340,9 @@ async def test_catalog_token_budgets():
     # TASK-1825: optional deferrals with typed finding_id/task/scope_step:
     # measured 19,248 (+81). Structured r2 scope evidence replaces prose;
     # a deferred Blocker remains OPEN. No description warnings were removed.
-    assert total <= 19248, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-434: steps_reorder(task_id, step_ids: list[str], bot_id), using
+    # existing endpoint and flat/deferred tool surface. Measured 19,370.
+    assert total <= 19370, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 
