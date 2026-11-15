@@ -190,3 +190,82 @@ def test_failed_responses_stream_keeps_measured_spend_but_never_releases_tools()
     with pytest.raises(RuntimeError, match="response.failed"):
         list(client.stream_with_tools(MESSAGES))
     assert client.get_token_usage()["total_cost_usd"] == pytest.approx(0.0023)
+
+
+def test_overlapping_turns_on_one_cached_client_keep_separate_billed_totals():
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    from llm_bawt.clients.direct_usage import direct_turn_usage_scope
+
+    client = make_client(ResponsesClient, Mock(return_value=response()))
+    first, second, third = (Barrier(2, timeout=5) for _ in range(3))
+
+    def turn_a():
+        with direct_turn_usage_scope():
+            client.begin_turn_usage()
+            client.query_with_tools(MESSAGES)
+            first.wait()
+            second.wait()  # B has begun and recorded its request.
+            client.query_with_tools(MESSAGES)
+            client.query_with_tools(MESSAGES)
+            third.wait()
+            return TurnLifecycleMixin._resolve_turn_token_usage(NS(client=client), None)
+
+    def turn_b():
+        with direct_turn_usage_scope():
+            first.wait()
+            client.begin_turn_usage()
+            client.query_with_tools(MESSAGES)
+            second.wait()
+            third.wait()  # A has finished its other tool-loop requests.
+            return TurnLifecycleMixin._resolve_turn_token_usage(NS(client=client), None)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        a, b = pool.submit(turn_a), pool.submit(turn_b)
+        a, b = a.result(timeout=10), b.result(timeout=10)
+    assert a["cost_kind"] == b["cost_kind"] == "billed"
+    assert a["turn_request_totals"]["requests"] == 3
+    assert b["turn_request_totals"]["requests"] == 1
+    assert a["total_cost_usd"] == pytest.approx(0.0069)
+    assert b["total_cost_usd"] == pytest.approx(0.0023)
+
+
+def test_worker_scope_excludes_other_clients_and_clears_no_inference_or_error_turns():
+    from llm_bawt.clients.direct_usage import direct_turn_usage_scope
+
+    client = make_client(ResponsesClient, Mock(return_value=response()))
+    other = make_client(ResponsesClient, Mock(return_value=response()))
+    with pytest.raises(RuntimeError, match="worker failed"):
+        with direct_turn_usage_scope():
+            client.begin_turn_usage()
+            other.query_with_tools(MESSAGES)
+            assert other.get_token_usage() is None
+            assert client.get_token_usage() is None
+            client.query_with_tools(MESSAGES)
+            assert client.get_token_usage()["turn_request_totals"]["requests"] == 1
+            raise RuntimeError("worker failed")
+    with direct_turn_usage_scope():
+        assert TurnLifecycleMixin._resolve_turn_token_usage(NS(client=client), None) is None
+        # An unbound auxiliary call cannot revive the prior worker's snapshot.
+        client.query_with_tools(MESSAGES)
+        assert client.get_token_usage() is None
+
+
+def test_actual_stream_worker_boundary_clears_usage_even_when_next_turn_skips_begin():
+    from llm_bawt.service.turn_stream_worker import TurnStreamWorker
+
+    client = make_client(ResponsesClient, Mock(return_value=response()))
+    worker = TurnStreamWorker(NS(
+        thread_binding={}, task_turn_capability=None, bot_id="fixture", user_id="fixture",
+    ))
+
+    def infer():
+        client.begin_turn_usage()
+        client.query_with_tools(MESSAGES)
+        return client.get_token_usage()
+
+    worker._stream_to_queue_with_context = infer
+    assert worker._stream_to_queue()["total_cost_usd"] == pytest.approx(0.0023)
+    worker._stream_to_queue_with_context = client.get_token_usage
+    assert worker._stream_to_queue() is None

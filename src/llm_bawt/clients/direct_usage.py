@@ -1,8 +1,38 @@
 """Measured usage for one direct-chat turn, including every tool-loop request."""
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
 from decimal import Decimal
 from typing import Any
+
+
+_active_turn: ContextVar[tuple[object, DirectTurnUsage] | None] = ContextVar(
+    "direct_turn_usage", default=None,
+)
+
+
+@contextmanager
+def direct_turn_usage_scope():
+    """Keep a worker's usage private, including no-inference and error paths."""
+    token = _active_turn.set(None)
+    try:
+        yield
+    finally:
+        _active_turn.reset(token)
+
+
+def begin_direct_turn_usage(client: Any) -> None:
+    _active_turn.set((client, DirectTurnUsage(
+        client.model_definition, context_window=client.effective_context_window,
+        max_output_tokens=client.effective_max_tokens,
+    )))
+
+
+def current_direct_turn_usage(client: Any) -> DirectTurnUsage | None:
+    active = _active_turn.get()
+    # Recall/maintenance clients in this context are not the chat-turn client.
+    return active[1] if active is not None and active[0] is client else None
 
 
 class DirectTurnUsage:

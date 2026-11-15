@@ -23,7 +23,9 @@ def report_usage(client: Any, response: Any) -> None:
     if response is None:
         return
     try:
-        turn_usage = getattr(client, "_direct_turn_usage", None)
+        from .direct_usage import current_direct_turn_usage
+
+        turn_usage = current_direct_turn_usage(client)
         if turn_usage is not None:
             turn_usage.record(response)
     except Exception:  # noqa: BLE001

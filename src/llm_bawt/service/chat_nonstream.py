@@ -333,6 +333,7 @@ class ChatNonStreamMixin:
             loop = asyncio.get_event_loop()
             llm_start_time = time.time()
             cancelled = False
+            direct_token_usage_holder: list[dict | None] = [None]
             terminal_snapshot = None
             terminal_finalizing = False
             from .turn_terminal_finalize import NonstreamTerminalMetadata
@@ -778,7 +779,7 @@ class ChatNonStreamMixin:
 
                 return response
 
-            def _do_query():
+            def _do_query_scoped():
                 nonlocal terminal_finalizing
                 # ContextVars must be bound INSIDE the executor thread. Native
                 # reset provenance covers its query; agent history separately
@@ -827,6 +828,18 @@ class ChatNonStreamMixin:
                         except Exception:
                             log.exception("Protocol nonstream terminal failed for %s", turn_log_id)
                     raise
+
+            def _do_query():
+                from ..clients.direct_usage import direct_turn_usage_scope
+
+                with direct_turn_usage_scope():
+                    try:
+                        return _do_query_scoped()
+                    finally:
+                        if not is_agent_backend:
+                            # Executor ContextVars do not flow back to the HTTP
+                            # task. Carry only this worker's frozen snapshot.
+                            direct_token_usage_holder[0] = self._resolve_turn_token_usage(llm_bawt, None)
 
             try:
                 # In-process GPU inference is gone (local models run in
@@ -904,9 +917,9 @@ class ChatNonStreamMixin:
                 )
 
             if publish_nonstream_lifecycle and terminal_scope.follower is None:
-                token_usage = None
+                token_usage = direct_token_usage_holder[0]
                 get_token_usage = getattr(llm_bawt.client, "get_token_usage", None)
-                if callable(get_token_usage):
+                if is_agent_backend and callable(get_token_usage):
                     token_usage = get_token_usage()
                 if response_text:
                     await self._publish_nonstream_turn_event(

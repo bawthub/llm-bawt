@@ -40,6 +40,7 @@ class TurnStreamWorker(TurnStreamPublishMixin):
         # binding. Keep it thread/request-local through history + finalization;
         # never attach it to the cached MemoryClient or forward agent headers.
         from ..bot_access.service import bind_service_turn
+        from ..clients.direct_usage import direct_turn_usage_scope
 
         ctx = self.ctx
         binding = ctx.thread_binding or {}
@@ -57,7 +58,7 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                 bot_id=ctx.bot_id, user_id=ctx.user_id, turn_id=ctx.turn_log_id,
                 trigger_message_id=ctx.trigger_message_id,
             )
-        with bind_service_turn(capability):
+        with bind_service_turn(capability), direct_turn_usage_scope():
             return self._stream_to_queue_with_context()
 
     def _stream_to_queue_with_context(self):

@@ -54,15 +54,14 @@ class LLMClient(ABC):
 
     def begin_turn_usage(self) -> None:
         """Start one app-owned direct turn, never reset inside its tool loop."""
-        from .direct_usage import DirectTurnUsage
+        from .direct_usage import begin_direct_turn_usage
 
-        self._direct_turn_usage = DirectTurnUsage(
-            self.model_definition, context_window=self.effective_context_window,
-            max_output_tokens=self.effective_max_tokens,
-        )
+        begin_direct_turn_usage(self)
 
     def get_token_usage(self) -> dict | None:
-        usage = getattr(self, "_direct_turn_usage", None)
+        from .direct_usage import current_direct_turn_usage
+
+        usage = current_direct_turn_usage(self)
         return usage.snapshot() if usage is not None else None
 
     @property

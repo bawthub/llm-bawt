@@ -279,6 +279,42 @@ def test_chat_backend_nonstream_turn_does_not_register(_isolate) -> None:
     assert _isolate == []
 
 
+def test_direct_usage_is_carried_from_worker_to_nonstream_terminal_event(monkeypatch, _isolate):
+    from llm_bawt.clients.base import LLMClient
+    from llm_bawt.clients.responses_client import ResponsesClient
+    from llm_bawt.clients.usage_hook import report_usage
+    from llm_bawt.message_authorship import AuthorReference
+
+    client = ResponsesClient.__new__(ResponsesClient)
+    LLMClient.__init__(client, "fixture-model", SimpleNamespace(
+        PLAIN_OUTPUT=True, get_model_context_window=lambda _: 128000,
+        get_model_max_tokens=lambda _: 4096,
+    ), {"type": "openai", "access_path": "xai-chat", "access_vendor": "xai",
+        "protocol": "responses"})
+    captured = []
+
+    def execute(*_args, **_kwargs):
+        client.begin_turn_usage()
+        report_usage(client, {"usage": {
+            "input_tokens": 1000, "output_tokens": 100, "cost_in_usd_ticks": 40_000_000,
+        }})
+        return "done", "", []
+
+    service = _service(execute, model_type="openai")
+    service._get_llm_bawt.return_value.client = client
+    service._finalize_turn.side_effect = lambda **_: captured.append(client.get_token_usage())
+    monkeypatch.setattr("llm_bawt.service.chat_nonstream.validate_inter_bot_claim",
+                        lambda *_: AuthorReference.bot("fixture-sender"))
+    service._publish_nonstream_turn_event = AsyncMock()
+    asyncio.run(service.chat_completion(_claimed(_request())))
+    terminal = next(call.kwargs["event"] for call in service._publish_nonstream_turn_event.call_args_list
+                    if call.kwargs["event"]["_type"] == "turn_complete")
+    assert captured[0]["total_cost_usd"] == 0.004
+    assert terminal["token_usage"] == captured[0]
+    assert terminal["token_usage"]["cost_kind"] == "billed"
+    assert client.get_token_usage() is None
+
+
 @pytest.mark.parametrize("stream", [True, False], ids=["stream", "nonstream"])
 def test_failed_admission_does_not_cancel_running_chat_generation(stream, monkeypatch):
     from llm_bawt.service.turn_admission import AdmissionUnavailable
