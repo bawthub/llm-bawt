@@ -129,6 +129,9 @@ class TurnStreamWorker(TurnStreamPublishMixin):
             )
 
         try:
+            begin_usage = getattr(llm_bawt.client, "begin_turn_usage", None)
+            if not is_agent_backend and callable(begin_usage):
+                begin_usage()
             terminal_follower = getattr(ctx, "terminal_follower", None)
             if terminal_follower is not None:
                 terminal_follower.check()

@@ -115,6 +115,10 @@ def _frozen_path(usage: dict | None) -> str | None:
 
 
 def _cost(usage: dict) -> Decimal | None:
+    # Legacy rows are still bounded by their frozen, metered access-path adapter.
+    # New explicitly non-billed amounts must never enter the spend ledger.
+    if usage.get("cost_kind") not in (None, "billed"):
+        return None
     raw = usage.get("total_cost_usd")
     if isinstance(raw, bool) or raw is None:
         return None

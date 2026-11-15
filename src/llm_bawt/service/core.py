@@ -678,6 +678,9 @@ class ServiceLLMBawt(BaseLLMBawt):
         _is_agent_backend = str(
             (getattr(self.client, "model_definition", None) or {}).get("type", "")
         ).strip() in ("agent_backend", "claude-code")
+        begin_usage = getattr(self.client, "begin_turn_usage", None)
+        if not _is_agent_backend and callable(begin_usage):
+            begin_usage()
         # An explicit [] is proof of a clean reset, not an absent seed. Only
         # agent backends accept this request-local bridge argument.
         _q_kwargs = (

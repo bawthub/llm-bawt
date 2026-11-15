@@ -3,10 +3,42 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time
 from typing import Any
 
 log = logging.getLogger(__name__)
+
+
+def classify_turn_cost(usage: dict[str, Any]) -> dict[str, Any]:
+    """Give dollars their frozen route's meaning, without treating auth as billing.
+
+    Subscription equivalents are retained for audit, never as spend. Unknown
+    routes cannot authorize a dollar claim; local inference has no token bill.
+    """
+    result = dict(usage)
+    access = usage.get("access_path")
+    access = access if isinstance(access, dict) else {}
+    raw = usage.get("total_cost_usd")
+    cost = raw if isinstance(raw, (int, float)) and not isinstance(raw, bool) else None
+    if cost is not None and (not math.isfinite(cost) or cost < 0):
+        cost = None
+    if access.get("vendor") == "local" or access.get("engine_kind") in ("llama-cpp", "vllm", "ollama"):
+        kind, cost = "none", 0.0
+    elif access.get("billing_mode") == "subscription":
+        kind = "notional" if cost is not None else "none"
+    elif access.get("billing_mode") == "metered":
+        explicit = usage.get("cost_kind")
+        if explicit in ("notional", "none", "unknown"):
+            kind = explicit
+            if kind != "notional":
+                cost = None
+        else:
+            kind = "billed" if cost is not None else "unknown"
+    else:
+        kind, cost = "unknown", None
+    result.update(cost_kind=kind, total_cost_usd=cost)
+    return result
 
 
 def access_path_snapshot(catalog: Any, model_ref: str | None) -> dict[str, Any] | None:
@@ -53,7 +85,7 @@ def encode_token_usage(
         snapshot = access_path_snapshot(catalog, model_ref)
         if snapshot is not None:
             token_usage = {**token_usage, "access_path": snapshot}
-    return json.dumps(token_usage, ensure_ascii=False, default=str)
+    return json.dumps(classify_turn_cost(token_usage), ensure_ascii=False, default=str)
 
 
 class TurnUsageCoordinator:

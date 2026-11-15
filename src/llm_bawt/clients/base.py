@@ -52,6 +52,19 @@ class LLMClient(ABC):
         force_term = not self.config.PLAIN_OUTPUT
         self.console = Console(force_terminal=force_term)
 
+    def begin_turn_usage(self) -> None:
+        """Start one app-owned direct turn, never reset inside its tool loop."""
+        from .direct_usage import DirectTurnUsage
+
+        self._direct_turn_usage = DirectTurnUsage(
+            self.model_definition, context_window=self.effective_context_window,
+            max_output_tokens=self.effective_max_tokens,
+        )
+
+    def get_token_usage(self) -> dict | None:
+        usage = getattr(self, "_direct_turn_usage", None)
+        return usage.snapshot() if usage is not None else None
+
     @property
     def effective_max_tokens(self) -> int:
         """Model output CAPABILITY for API-request parameterization.

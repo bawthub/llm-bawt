@@ -261,12 +261,15 @@ class ResponsesClient(LLMClient):
         content_buffer = ""
         # Track function calls: item_id -> {call_id, name, arguments}
         func_calls: dict[str, dict] = {}
+        usage_response = None
 
         try:
             stream = self.client.responses.create(**payload)
 
             for event in stream:
                 etype = getattr(event, "type", "")
+                if etype in {"response.completed", "response.failed", "response.incomplete"}:
+                    usage_response = getattr(event, "response", None)
                 if etype in {"response.failed", "response.incomplete", "error"}:
                     # Never release accumulated tool calls from a failed response.
                     # Keep provider error payloads out of the raised message.
@@ -341,6 +344,8 @@ class ResponsesClient(LLMClient):
         except Exception as e:
             logger.error("Responses API streaming error for model '%s': %s", self.model, e)
             raise
+        finally:
+            report_usage(self, usage_response if usage_response is not None else {"usage": {}})
 
     def stream_raw(self, messages: List[Message], stop: list[str] | str | None = None, **kwargs) -> Iterator[str]:
         """Stream raw text chunks via Responses API (no tool handling)."""
@@ -370,6 +375,7 @@ class ResponsesClient(LLMClient):
                 payload["tool_choice"] = tool_choice
 
         response = self.client.responses.create(**payload)
+        report_usage(self, response)
 
         content = ""
         tool_calls_payload: list[dict[str, Any]] = []

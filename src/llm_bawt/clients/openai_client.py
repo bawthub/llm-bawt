@@ -158,6 +158,8 @@ class OpenAIClient(LLMClient):
 
     def _chat_create_with_fallback(self, payload: dict):
         """Call chat.completions.create with fallback across token param names."""
+        if payload.get("stream"):
+            payload = {**payload, "stream_options": {"include_usage": True}}
         current_key = next((k for k in self._TOKEN_PARAM_CANDIDATES if k in payload), self._initial_token_param_key())
         current_val = payload.get(current_key, self.effective_max_tokens)
         keys_to_try = [current_key] + [k for k in self._TOKEN_PARAM_CANDIDATES if k != current_key]
@@ -168,7 +170,7 @@ class OpenAIClient(LLMClient):
             self._set_token_param(try_payload, key, int(current_val))
             attempted_without_temp_top_p = False
             try:
-                return self.client.chat.completions.create(**try_payload)
+                return self._create_with_optional_usage(try_payload)
             except httpx.HTTPStatusError as e:
                 self._log_http_error(e, try_payload)
                 body = ""
@@ -199,7 +201,7 @@ class OpenAIClient(LLMClient):
                         try_payload_no_temp.pop('top_p', None)
                         attempted_without_temp_top_p = True
                         try:
-                            return self.client.chat.completions.create(**try_payload_no_temp)
+                            return self._create_with_optional_usage(try_payload_no_temp)
                         except OpenAIError as e2:
                             m2 = _api_error_text(e2).lower()
                             if ("unsupported parameter" in m2 and any(k in m2 for k in ("max_tokens", "max_completion_tokens", "max_output_tokens"))):
@@ -219,6 +221,31 @@ class OpenAIClient(LLMClient):
                 break
         if last_err:
             raise last_err
+
+    def _create_with_optional_usage(self, payload: dict):
+        try:
+            return self.client.chat.completions.create(**payload)
+        except (OpenAIError, httpx.HTTPStatusError) as error:
+            message = str(error).lower()
+            if "stream_options" not in payload or not any(
+                field in message for field in ("stream_options", "include_usage")
+            ) or not any(word in message for word in ("unsupported", "not supported", "unrecognized", "unknown", "extra")):
+                raise
+            # Compatibility only: no usage from this endpoint remains unknown.
+            return self.client.chat.completions.create(**{
+                key: value for key, value in payload.items() if key != "stream_options"
+            })
+
+    def _usage_chunks(self, stream: Iterator) -> Iterator:
+        """Observe one completed invocation, including usage-only empty choices."""
+        measured = None
+        try:
+            for chunk in stream:
+                if getattr(chunk, "usage", None) is not None:
+                    measured = chunk
+                yield chunk
+        finally:
+            report_usage(self, measured if measured is not None else {"usage": {}})
 
     @staticmethod
     def _as_int(value: Any, default: int) -> int:
@@ -359,7 +386,7 @@ class OpenAIClient(LLMClient):
             tool_calls_acc: dict[int, dict] = {}  # index -> {id, function: {name, arguments}}
             content_buffer = ""
 
-            for chunk in stream:
+            for chunk in self._usage_chunks(stream):
                 delta = chunk.choices[0].delta if chunk.choices else None
                 if not delta:
                     continue
@@ -526,6 +553,7 @@ class OpenAIClient(LLMClient):
             payload["top_p"] = self._as_float(kwargs.get("top_p"), self.config.TOP_P)
 
         completion = self._chat_create_with_fallback(payload)
+        report_usage(self, completion)
         message = completion.choices[0].message
         content = message.content or ""
         tool_calls_payload: list[dict[str, Any]] = []
@@ -590,8 +618,8 @@ class OpenAIClient(LLMClient):
     def _iterate_openai_chunks(self, stream: Iterator) -> Iterator[str]:
         """Iterates through OpenAI stream chunks and yields content."""
         try:
-            for chunk in stream:
-                content = chunk.choices[0].delta.content
+            for chunk in self._usage_chunks(stream):
+                content = chunk.choices[0].delta.content if chunk.choices else None
                 if content:
                     yield content
         except OpenAIError as e:

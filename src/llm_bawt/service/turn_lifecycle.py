@@ -125,12 +125,12 @@ class TurnLifecycleMixin:
 
     @staticmethod
     def _resolve_turn_token_usage(llm_bawt: Any, explicit_usage: dict | None) -> dict | None:
-        """Prefer streamed usage, then the agent backend's last partial/final result."""
+        """Prefer streamed usage, then the client's measured partial/final result."""
         if isinstance(explicit_usage, dict) and explicit_usage:
             return explicit_usage
         client = getattr(llm_bawt, "client", None)
         get_token_usage = getattr(client, "get_token_usage", None)
-        if isinstance(client, AgentBackendClient) and callable(get_token_usage):
+        if callable(get_token_usage):
             usage = get_token_usage()
             if isinstance(usage, dict) and usage:
                 return usage

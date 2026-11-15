@@ -92,7 +92,8 @@ def test_encode_keeps_a_caller_supplied_snapshot(snapshot) -> None:
         side_effect=AssertionError("replaced caller snapshot"),
     ):
         encoded = json.loads(encode_token_usage(frozen, model_ref="qwen-local@local-vllm", catalog=_catalog()))
-    assert encoded == frozen
+    assert encoded == {**frozen, "cost_kind": "unknown", "total_cost_usd": None}
+    assert "cost_kind" not in frozen
 
 
 def test_encode_degrades_without_catalog_or_known_ref() -> None:
