@@ -29,6 +29,7 @@ NON_HISTORY_TOOLS = frozenset({
     "tasks_update", "tasks_delete",
     "tasks_add_dependency", "tasks_remove_dependency", "tasks_promote", "tasks_regenerate",
     "tasks_create", "tasks_get_context", "steps_update", "steps_delete", "steps_add", "steps_set",
+    "steps_reorder",
     "projects_list", "projects_get", "projects_create", "projects_update", "projects_get_context",
     "projects_delete", "activity_get", "initiative_state", "ops_list_operations", "ops_run",
     "ops_job_status", "ops_quiesce_ack", "media_lookup", "media_add", "media_queue", "media_history",
