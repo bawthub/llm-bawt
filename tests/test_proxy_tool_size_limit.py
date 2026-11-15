@@ -95,6 +95,7 @@ def test_productive_oversize_call_tells_model_once_without_resampling(monkeypatc
             assert "smaller" in text
             assert h.attempts == 1, "an oversize call must not be re-sampled"
             assert not any(s.get("state") in {"retrying", "reconnecting"} for s in h.statuses)
+            # timing-ok: virtual clock (run_timing): loop.time() is exact and never waits
             assert elapsed < DEFAULT_ARGUMENT_STREAM_TIMEOUT + 30
         finally:
             await h.adapter.close()
