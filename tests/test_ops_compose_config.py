@@ -64,7 +64,7 @@ def test_translate_projects_the_real_compose_shape():
     ({"volumes": [{"type": "tmpfs", "target": "/tmp"}]}, "unsupported_compose_key"),
     ({"volumes": [{"type": "bind", "source": "relative", "target": "/x"}]}, "unsupported_compose_key"),
     ({"volumes": [{"type": "volume", "source": "undeclared", "target": "/x"}]}, "unsupported_compose_key"),
-    ({"volumes": [{"type": "bind", "source": "/a", "target": "/x", "bind": {"propagation": "shared"}}]},
+    ({"volumes": [{"type": "bind", "source": "/a", "target": "/x", "bind": {"propagation": "bogus"}}]},
      "unsupported_compose_key"),
     ({"restart": "sometimes"}, "unsupported_compose_key"),
     ({"extra_hosts": ["nohost"]}, "unsupported_compose_key"),
@@ -578,3 +578,69 @@ def test_a_moved_target_still_refuses_a_bind_that_does_not_move_with_its_checkou
     with pytest.raises(ComposeError) as caught:
         _evaluate(api)
     assert caught.value.code == "mount_source_changed" and caught.value.names == [TOKEN_TARGET]
+
+
+# ── bind propagation (TASK-2332) ───────────────────────────────────────────
+
+_MEDIA = {"type": "bind", "source": "/mnt/media", "target": "/media", "bind": {"create_host_path": True}}
+
+
+def _media(**bind):
+    return dict(_MEDIA, bind=dict(_MEDIA["bind"], **bind))
+
+
+def test_translate_keeps_a_supported_propagation_mode():
+    mounts = _desired(volumes=[_media(propagation="rslave")])["mounts"]
+    assert mounts["/media"] == {"type": "bind", "source": "/mnt/media", "read_only": False, "propagation": "rslave"}
+
+
+def test_default_propagation_is_modelled_as_absent():
+    assert "propagation" not in _desired(volumes=[_media(propagation="rprivate")])["mounts"]["/media"]
+    assert "propagation" not in _desired(volumes=[_media()])["mounts"]["/media"]
+
+
+def _with_media_mount(propagation):
+    container = _container()
+    host = container["HostConfig"]
+    mount = {"Type": "bind", "Source": "/mnt/media", "Target": "/media"}
+    if propagation:
+        mount["BindOptions"] = {"Propagation": propagation, "CreateMountpoint": True}
+    host["Mounts"] = list(host.get("Mounts") or []) + [mount]
+    return container
+
+
+def _with_media(volumes):
+    return _desired(volumes=compose_project()["services"]["frontend-prod"]["volumes"] + volumes)
+
+
+def test_running_rslave_mount_matches_desired_rslave_without_drift():
+    desired = _with_media([_media(propagation="rslave")])
+    assert drift(normalized(desired, IMAGE), normalized(running(_with_media_mount("rslave")), IMAGE)) == []
+
+
+def test_explicit_rprivate_on_the_container_is_not_drift():
+    desired = _with_media([_media()])
+    assert drift(normalized(desired, IMAGE), normalized(running(_with_media_mount("rprivate")), IMAGE)) == []
+
+
+@pytest.mark.parametrize("have, want", [(None, "rslave"), ("rslave", None), ("rshared", "rslave")])
+def test_propagation_change_is_named_drift(have, want):
+    desired = _with_media([_media(propagation=want)] if want else [_media()])
+    names = drift(normalized(desired, IMAGE), normalized(running(_with_media_mount(have)), IMAGE))
+    assert names == ["mount:~/media"]
+
+
+def test_binds_string_round_trips_propagation():
+    container = _container()
+    container["HostConfig"]["Binds"] = ["/mnt/media:/media:ro,rslave"]
+    assert running(container)["mounts"]["/media"] == {"type": "bind", "source": "/mnt/media", "read_only": True,
+                                                      "propagation": "rslave"}
+
+
+def test_apply_desired_emits_propagation_in_binds():
+    container = _container()
+    body = {"Env": [], "Labels": {}, "HostConfig": container["HostConfig"], "Image": REF,
+            "NetworkingConfig": {"EndpointsConfig": {}}}
+    desired = _desired(volumes=[_media(propagation="rslave"), dict(_media(), target="/plain")])
+    out = apply_desired(body, container, desired, container_name=NAME, service="frontend-prod", rendered_hash="h")
+    assert out["HostConfig"]["Binds"] == ["/mnt/media:/media:rw,rslave", "/mnt/media:/plain:rw"]

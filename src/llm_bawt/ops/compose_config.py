@@ -66,7 +66,18 @@ _LOCAL_IMAGE = re.compile(r"(?P<name>[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?
 # inline JSON (``seccomp=/x.json``) is not modelled and refuses.
 _SECURITY_OPT = re.compile(r"[a-z][a-z-]{0,31}[=:][A-Za-z0-9_.-]{1,64}")
 _VOLUME_KEYS = frozenset({"type", "source", "target", "read_only", "bind", "volume"})
-_BIND_KEYS = frozenset({"create_host_path"})
+_BIND_KEYS = frozenset({"create_host_path", "propagation"})
+# Docker bind propagation modes. ``rprivate`` is the daemon default and is
+# modelled as absent so an explicit default never reads as drift (TASK-2332).
+_PROPAGATION = frozenset({"rprivate", "private", "rshared", "shared", "rslave", "slave"})
+_DEFAULT_PROPAGATION = "rprivate"
+
+
+def _mount(kind: str, source: str, read_only: bool, propagation: str | None = None) -> dict:
+    mount = {"type": kind, "source": source, "read_only": read_only}
+    if propagation and propagation != _DEFAULT_PROPAGATION:
+        mount["propagation"] = propagation
+    return mount
 _RESTART = re.compile(r"(no|always|unless-stopped|on-failure)(?::([0-9]{1,3}))?")
 _PORT_KEYS = frozenset({"target", "published", "protocol", "host_ip", "mode"})
 _PORT_PROTOCOLS = frozenset({"tcp", "udp"})
@@ -690,6 +701,9 @@ def translate(rendered: dict, spec: dict, image_ref: str, profile: ServiceProfil
             raise ComposeError("unsupported_compose_key", ["volumes"])
         if set(volume.get("bind") or {}) - _BIND_KEYS or (volume.get("volume") or {}):
             raise ComposeError("unsupported_compose_key", ["volumes"])
+        propagation = (volume.get("bind") or {}).get("propagation")
+        if propagation is not None and propagation not in _PROPAGATION:
+            raise ComposeError("unsupported_compose_key", ["volumes.bind.propagation"])
         kind, source, target = volume.get("type"), volume.get("source"), volume.get("target")
         if not isinstance(target, str) or not target.startswith("/") or target in mounts:
             raise ComposeError("unsupported_compose_key", ["volumes.target"])
@@ -702,7 +716,7 @@ def translate(rendered: dict, spec: dict, image_ref: str, profile: ServiceProfil
             source = declared.get("name") or f"{project}_{source}"
         else:
             raise ComposeError("unsupported_compose_key", ["volumes.type"])
-        mounts[target] = {"type": kind, "source": source, "read_only": bool(volume.get("read_only"))}
+        mounts[target] = _mount(kind, source, bool(volume.get("read_only")), propagation)
     top_networks = rendered.get("networks") or {}
     networks = []
     raw_networks = service.get("networks") or {"default": None}
@@ -749,7 +763,8 @@ def _parse_bind(raw: str) -> tuple[str, dict]:
     source, target = parts[0], parts[1]
     options = parts[2].split(",") if len(parts) > 2 else []
     kind = "bind" if source.startswith("/") else "volume"
-    return target, {"type": kind, "source": source, "read_only": "ro" in options}
+    propagation = next((o for o in options if o in _PROPAGATION), None)
+    return target, _mount(kind, source, "ro" in options, propagation)
 
 
 def running(container: dict) -> dict:
@@ -764,9 +779,9 @@ def running(container: dict) -> dict:
         target, mount = _parse_bind(raw)
         mounts[target] = mount
     for mount in host.get("Mounts") or []:
-        mounts[mount.get("Target")] = {"type": (mount.get("Type") or "").lower(),
-                                       "source": mount.get("Source") or "",
-                                       "read_only": bool(mount.get("ReadOnly"))}
+        mounts[mount.get("Target")] = _mount((mount.get("Type") or "").lower(), mount.get("Source") or "",
+                                             bool(mount.get("ReadOnly")),
+                                             (mount.get("BindOptions") or {}).get("Propagation"))
     policy = host.get("RestartPolicy") or {}
     ports = {key: sorted(({"HostIp": b.get("HostIp") or "", "HostPort": b.get("HostPort") or ""}
                           for b in bindings), key=lambda b: (b["HostIp"], b["HostPort"]))
@@ -979,6 +994,7 @@ def apply_desired(body: dict, old: dict, desired: dict, *, container_name: str, 
     body["Labels"] = labels
     host = body["HostConfig"] = dict(body["HostConfig"])
     host["Binds"] = [f"{m['source']}:{target}:{'ro' if m['read_only'] else 'rw'}"
+                     + (f",{m['propagation']}" if m.get("propagation") else "")
                      for target, m in sorted(desired["mounts"].items())]
     host["Mounts"] = None
     host["ExtraHosts"] = list(desired["extra_hosts"]) or None
