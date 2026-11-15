@@ -46,7 +46,6 @@ KNOWN_DRIFT = {
     "rpds-py": ("2026.6.3", "0.30.0"),  # transitive: jsonschema/referencing (mcp)
     "sse-starlette": ("3.4.11", "3.3.2"),  # transitive: mcp
     "typing-inspection": ("0.4.4", "0.4.2"),  # transitive: pydantic/fastapi/mcp
-    "websockets": ("17.1", "16.0"),  # DIRECT: imported by bridge code
 }
 
 
@@ -141,6 +140,7 @@ def test_aligned_packages_cannot_drift_again():
         "redis": "8.1.0",
         "hiredis": "3.4.2",
         "sqlalchemy": "2.1.1",
+        "websockets": "17.1",
     }.items():
         assert name not in KNOWN_DRIFT
         pins = f"claude-agent-sdk==0.2.160\n{name}=={version}\n"
