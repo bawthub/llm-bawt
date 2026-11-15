@@ -119,14 +119,14 @@ policy as before; choosing an explicit model disables fallback as before.
 | Job | Editable controls and prior effective source |
 | --- | --- |
 | Profile maintenance | `entity_id`, `entity_type` from saved JSON (defaults user/user); `dry_run=false`; optional explicit `model`, otherwise shared profile/maintenance model. |
-| Memory consolidation | `entity_id` from JSON (system); `dry_run=false`. Consolidation-only task flags remain fixed. |
-| Memory decay | `entity_id` from JSON (system); `dry_run=false`. Decay-only task flags remain fixed. |
+| Memory consolidation | Legacy `entity_id` task routing identity from JSON (system), **not a memory-owner filter**; `dry_run=false`. Bot-wide scope and consolidation-only task flags remain fixed. |
+| Memory decay | Legacy `entity_id` task routing identity from JSON (system), **not a memory-owner filter**; `dry_run=false`. Bot-wide scope and decay-only task flags remain fixed. |
 | History summarization | JSON user/system, heuristic fallback/true, chunk tokens/4000, model override; session gap, minimum messages, protected turns and trigger inherit `summarization_job` unless overridden. Fact importance and profile extraction inherit the shared extraction settings unless overridden. |
 | Memory extraction | JSON user/system, batch size/50 (1–1000), model override; enabled, minimum importance and profile extraction inherit the existing shared extraction config unless overridden. |
-| Media GC | JSON user/system, grace days/7, dry run/false. |
-| Tool-result GC | JSON user/system, retention days/14, dry run/false. |
-| Harness version check | JSON user/system, constraints path/installed pins, packages/installed list, assignee/none, priority/MEDIUM. Empty optional values retain those defaults. |
-| Playground expiry | JSON user/system. Trash retention remains shared with the Playground UI. |
+| Media GC | JSON routing identity/system (not a scope filter), grace days/7, dry run/false. |
+| Tool-result GC | JSON routing identity/system (not a scope filter), retention days/14, dry run/false. |
+| Harness version check | JSON routing identity/system, constraints path/installed pins, packages/installed list, assignee/none, priority/MEDIUM. Empty optional values retain those defaults. |
+| Playground expiry | JSON routing identity/system (not a scope filter). Trash retention remains shared with the Playground UI. |
 
 The history eligibility probe and worker receive the same session controls.
 Both raw-message and post-summary fact extraction consume their own job's

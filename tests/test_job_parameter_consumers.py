@@ -8,6 +8,47 @@ from llm_bawt.memory.extraction.service import ExtractedFact, MemoryExtractionSe
 from llm_bawt.service.background_tasks import BackgroundTasksMixin
 
 
+@pytest.mark.parametrize("job_type", ["memory_consolidation", "memory_decay"])
+def test_maintenance_identity_is_documented_routing_not_a_memory_owner_filter(job_type):
+    import json
+
+    from llm_bawt.service.job_parameters import JobParameterRegistry
+    from llm_bawt.service.scheduler import JobScheduler, JobType, ScheduledJob
+
+    schema = JobParameterRegistry.describe(job_type, None)["parameter_schema"]["properties"]["entity_id"]
+    assert schema["title"] == "Task routing identity"
+    assert "not a memory-owner filter" in schema["description"]
+    assert "all memories for the target bot" in schema["description"]
+    service = BackgroundTasksMixin()
+    client = SimpleNamespace(run_maintenance=Mock(return_value={"dry_run": True}))
+    service.get_memory_client = Mock(return_value=client)
+    scheduler = JobScheduler(None, None)
+    for owner in ("owner-a", "owner-b"):
+        job = ScheduledJob(
+            job_type=JobType(job_type), bot_id="fixture",
+            config_json=json.dumps({"entity_id": owner, "dry_run": True}),
+        )
+        task = scheduler._create_task_for_job(job)
+        assert task.user_id == owner  # Historical routing is preserved.
+        assert service._process_maintenance(task) == {"dry_run": True}
+    assert [call.args for call in service.get_memory_client.call_args_list] == [("fixture",), ("fixture",)]
+    calls = client.run_maintenance.call_args_list
+    assert calls[0] == calls[1]  # Both local and remote clients receive bot-wide operations.
+    assert calls[0].kwargs["dry_run"] is True
+    assert calls[0].kwargs["run_consolidation"] is (job_type == "memory_consolidation")
+    assert calls[0].kwargs["run_decay_pruning"] is (job_type == "memory_decay")
+    assert "entity_id" not in calls[0].kwargs and "user_id" not in calls[0].kwargs
+
+
+@pytest.mark.parametrize("job_type", ["media_gc", "tool_result_gc", "harness_version_check", "playground_expiry"])
+def test_system_jobs_do_not_advertise_routing_identity_as_a_scope_filter(job_type):
+    from llm_bawt.service.job_parameters import JobParameterRegistry
+
+    schema = JobParameterRegistry.describe(job_type, None)["parameter_schema"]["properties"]["user_id"]
+    assert schema["title"] == "Task routing identity"
+    assert "does not restrict" in schema["description"]
+
+
 @pytest.mark.parametrize("source", ["messages", "summaries"])
 @pytest.mark.parametrize("overrides, expected", [
     ({}, 0),

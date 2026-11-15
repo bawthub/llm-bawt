@@ -41,7 +41,11 @@ class ProfileMaintenanceParameters(JobParameters):
 
 
 class MemoryMaintenanceParameters(JobParameters):
-    entity_id: str = Field(default="system", min_length=1, title="Memory owner")
+    entity_id: str = Field(
+        default="system", min_length=1, title="Task routing identity",
+        description=("Legacy task routing identity only, not a memory-owner filter. "
+                     "Maintenance processes all memories for the target bot."),
+    )
     dry_run: StrictBool = Field(default=False, title="Dry run")
 
 
@@ -120,7 +124,10 @@ class IdleContextResetParameters(JobParameters):
 
 
 class SystemJobParameters(JobParameters):
-    user_id: str = Field(default="system", min_length=1, title="User")
+    user_id: str = Field(
+        default="system", min_length=1, title="Task routing identity",
+        description="Task routing identity only; it does not restrict this system-wide job's data scope.",
+    )
 
 
 class MediaGcParameters(SystemJobParameters):
