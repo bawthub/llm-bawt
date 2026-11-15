@@ -163,11 +163,13 @@ class Database:
         self.rows = rows
         self.reads = []
         self.timeouts = []
+        self.retries = []
         self.path_error = None
 
-    def read(self, sql, params, timeout_ms=2000):
+    def read(self, sql, params, timeout_ms=2000, retry_transient=True):
         self.reads.append((sql, params))
         self.timeouts.append(timeout_ms)
+        self.retries.append(retry_transient)
         if "path_pattern" in params and self.path_error:
             raise self.path_error
         # The file-path query (TASK-1567) is covered on PostgreSQL; here it finds nothing.
@@ -220,6 +222,8 @@ async def test_a_path_query_timeout_keeps_clone_facts_and_marks_partial(clones, 
     assert [item.id for item in evidence] == found
     assert evidence.partial == {"paths_unavailable"} and "paths_unavailable" in PARTIAL_REASONS
     assert database.timeouts == [2000, PATH_TIMEOUT_MS] and PATH_TIMEOUT_MS < 2000
+    # The best-effort path read takes one short attempt; the main read may retry.
+    assert database.retries == [True, False]
 
 
 @pytest.mark.asyncio
