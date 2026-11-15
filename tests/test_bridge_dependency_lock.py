@@ -37,8 +37,6 @@ KNOWN_DRIFT = {
     "cryptography": ("50.0.1", "46.0.5"),  # transitive: llm-bawt core imports it at bridge start
     "fastapi": ("0.141.1", "0.135.1"),  # DIRECT: imported by bridge code
     "hiredis": ("3.4.2", "3.3.0"),  # optional redis accelerator, loaded with redis
-    "jiter": ("0.17.0", "0.13.0"),  # transitive: openai response parsing
-    "openai": ("3.19.2", "2.24.0"),  # DIRECT: lazy imports in bridge proxy (chatgpt_transport, adapters.base)
     "packaging": ("26.3", "26.0"),  # transitive: openai-codex; not loaded by bridge code
     "pillow": ("12.3.0", "12.1.1"),  # llm-bawt requirement; not loaded by bridge code
     "psycopg2-binary": ("2.9.13", "2.9.11"),  # llm-bawt requirement; not loaded by bridge code
@@ -141,6 +139,8 @@ def test_aligned_minor_packages_cannot_drift_again():
         "uvicorn": "0.54.0",
         "typing-extensions": "4.16.0",
         "httptools": "0.9.0",
+        "openai": "3.19.2",
+        "jiter": "0.17.0",
     }.items():
         assert name not in KNOWN_DRIFT
         pins = f"claude-agent-sdk==0.2.160\n{name}=={version}\n"
