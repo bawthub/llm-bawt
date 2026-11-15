@@ -76,17 +76,21 @@ class _Profiles:
         self.detail_calls: list[str] = []
 
     def list_profiles(self, entity_type):
-        return [SimpleNamespace(entity_id=e) for e in ("nick", "Alice", "bob")]
-
-    def get_profile(self, _t, entity_id):
-        self.detail_calls.append(entity_id)
-        return SimpleNamespace(
-            email=None, display_name=entity_id, description=None, color=None,
-            avatar=None, avatar_render=None, is_service=False, summary=None,
-            summary_updated_at=None, created_at=None)
+        return [
+            SimpleNamespace(
+                entity_id=e, email=None, display_name=e, description=None, color=None,
+                avatar=None, avatar_render=None, is_service=False, summary=None,
+                summary_updated_at=None, created_at=None)
+            for e in ("nick", "Alice", "bob")
+        ]
 
     def get_all_attributes(self, _t, _e):
         return []
+
+    def get_live_attributes_by_entity(self, _t, entity_ids):
+        # The list route batches attribute reads; record which rows it read.
+        self.detail_calls.extend(entity_ids)
+        return {str(e).strip().lower(): [] for e in entity_ids}
 
 
 @pytest.fixture
