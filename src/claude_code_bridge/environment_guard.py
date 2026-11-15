@@ -12,6 +12,8 @@ import os
 import re
 import shutil
 
+from agent_bridge.bridge_token import BROKER
+
 
 DENY_REASON = (
     "BLOCKED: this command can rewrite the shared checkout's host-owned .venv "
@@ -240,7 +242,7 @@ def _unsafe(command: str, cwd: Path, env: Mapping[str, str], shared: Path,
 def environment_gate(data: Mapping, env: Mapping[str, str]) -> dict | None:
     from .skill_hooks import _deny
 
-    if env.get("BAWT_AGENT_BRIDGE") != "1" and not env.get("BRIDGE_BROKER_TOKEN_FILE"):
+    if env.get("BAWT_AGENT_BRIDGE") != "1" and not env.get(BROKER.file_env):
         return None
     command = (data.get("tool_input") or {}).get("command")
     if not isinstance(command, str):
