@@ -21,6 +21,8 @@ INJECTED_FIELD = "injected_skills"
 #: ``skills`` makes the SDK default them to user+project only, which would
 #: silently drop local settings (hooks, permissions) for a managed bot.
 CLAUDE_DEFAULT_SETTING_SOURCES = ("user", "project", "local")
+#: Manifest ``basis`` for a catalog-minus-disables selection (TASK-1550).
+DENY_BASIS = "deny"
 
 
 class SkillSelectionError(ValueError):
@@ -33,10 +35,16 @@ class ManagedSelection:
 
     Built from the resolver's manifest (``SkillResolution.manifest``); its
     ``entries`` are the applied skills, available and injected alike.
+
+    ``disabled`` is set only for a deny-list manifest (``basis: "deny"``, the
+    catalog minus explicit disables). Such a session keeps the harness's own
+    skills (bundled/plugin) that nobody disabled (TASK-1550); ``None`` is an
+    explicit allow-list and stays exact.
     """
 
     refs: tuple[str, ...]
     manifest_sha: str
+    disabled: tuple[str, ...] | None = None
 
     @classmethod
     def from_manifest(cls, manifest: Mapping) -> ManagedSelection:
@@ -49,7 +57,15 @@ class ManagedSelection:
         refs = [entry.get("ref") if isinstance(entry, Mapping) else None for entry in entries]
         if not all(isinstance(ref, str) and _REF.fullmatch(ref) for ref in refs):
             raise SkillSelectionError("skill selection has an invalid ref")
-        return cls(tuple(dict.fromkeys(refs)), sha)
+        disabled = None
+        if manifest.get("basis") == DENY_BASIS:
+            raw = manifest.get("disabled")
+            if not isinstance(raw, list) or not all(
+                isinstance(ref, str) and _REF.fullmatch(ref) for ref in raw
+            ):
+                raise SkillSelectionError("deny-list skill selection has an invalid disabled list")
+            disabled = tuple(dict.fromkeys(raw))
+        return cls(tuple(dict.fromkeys(refs)), sha, disabled)
 
     @classmethod
     def from_field(cls, raw: str | None) -> ManagedSelection | None:
@@ -63,8 +79,12 @@ class ManagedSelection:
         return cls.from_manifest(data)
 
     def to_field(self) -> str:
-        return json.dumps({"entries": [{"ref": ref} for ref in self.refs],
-                           "manifest_sha": self.manifest_sha}, separators=(",", ":"))
+        data: dict = {"entries": [{"ref": ref} for ref in self.refs],
+                      "manifest_sha": self.manifest_sha}
+        if self.disabled is not None:
+            data["basis"] = DENY_BASIS
+            data["disabled"] = list(self.disabled)
+        return json.dumps(data, separators=(",", ":"))
 
 
 def injected_field(refs) -> str:
@@ -109,7 +129,31 @@ def claude_skill_names(selection: ManagedSelection | None = None) -> tuple[str, 
 def claude_skill_options(selection: ManagedSelection | None = None) -> dict:
     if selection is None:
         return {}
+    if selection.disabled is not None:
+        # Deny-list: every skill the CLI knows (its bundled ones included),
+        # with the explicit disables refused by claude_skill_denials().
+        return {"skills": "all",
+                "setting_sources": list(CLAUDE_DEFAULT_SETTING_SOURCES)}
     # ``skills`` filters the listing and allow-lists Skill(name); an empty
     # list hides every skill. Settings sources stay the CLI's own.
     return {"skills": list(selection.refs),
             "setting_sources": list(CLAUDE_DEFAULT_SETTING_SOURCES)}
+
+
+def proxy_skill_scope(selection: ManagedSelection | None) -> tuple[bool, tuple[str, ...]]:
+    """(widen with advertised skills, explicit disables) for the proxy.
+
+    Ambient and deny-list runs widen; an explicit allow-list stays exact.
+    """
+    if selection is None:
+        return True, ()
+    if selection.disabled is not None:
+        return True, selection.disabled
+    return False, ()
+
+
+def claude_skill_denials(selection: ManagedSelection | None = None) -> list[str]:
+    """``disallowed_tools`` rules refusing a deny-list selection's disables."""
+    if selection is None or not selection.disabled:
+        return []
+    return [f"Skill({ref})" for ref in selection.disabled]

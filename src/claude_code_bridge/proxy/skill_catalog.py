@@ -75,10 +75,18 @@ def advertised_skill_names(body: dict) -> list[str]:
 
 
 def callable_skill_names(
-    body: dict, catalog: tuple[str, ...], *, ambient: bool
+    body: dict, catalog: tuple[str, ...], *, ambient: bool,
+    disabled: tuple[str, ...] = (),
 ) -> tuple[str, ...]:
-    """The Skill enum for this request; a managed catalog is never widened."""
+    """The Skill enum for this request.
+
+    An allow-list catalog is never widened. Ambient and deny-list runs add the
+    advertised skills. Explicit disables are removed in every case.
+    """
+    blocked = set(disabled)
     if not ambient:
-        return catalog
+        return tuple(n for n in catalog if n not in blocked)
     merged = [*catalog, *advertised_skill_names(body)]
-    return tuple(dict.fromkeys(n for n in merged if _NAME_RE.fullmatch(n)))[:_MAX_NAMES]
+    return tuple(dict.fromkeys(
+        n for n in merged if _NAME_RE.fullmatch(n) and n not in blocked
+    ))[:_MAX_NAMES]

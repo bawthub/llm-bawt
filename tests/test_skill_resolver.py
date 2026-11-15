@@ -221,7 +221,9 @@ def test_the_allow_list_is_the_catalog_minus_disables_and_is_stable():
                                 {"ref": "b", "mode": "enable", "source": "fake"},
                                 {"ref": "d", "mode": "enable", "source": "fake"}]
     assert first["injected"] == [{"ref": "a", "content_sha": "sha-a-10"}]
-    edited = resolve(_facts(), rows, _Source({"a": 11, "b": 10, "c": 10, "d": 10}), CAPS).manifest()
+    # TASK-1550: marked deny-list so the harness keeps its undisabled own skills.
+    assert first["basis"] == "deny" and first["disabled"] == ["c"]
+    edited =resolve(_facts(), rows, _Source({"a": 11, "b": 10, "c": 10, "d": 10}), CAPS).manifest()
     added = resolve(_facts(), rows, _Source({"a": 10, "b": 10, "c": 10, "d": 10, "e": 1}),
                     CAPS).manifest()
     demoted = resolve(_facts(), [_bot("a", "enable"), *rows[1:]], source, CAPS).manifest()

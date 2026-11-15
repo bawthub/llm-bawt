@@ -27,6 +27,8 @@ REQUEST_HEADER = "X-LLM-Bawt-Request-ID"
 RESPONSES_TRANSPORT_HEADER = "X-LLM-Bawt-Responses-Transport"
 OPENROUTER_PROVIDER_HEADER = "X-LLM-Bawt-OpenRouter-Provider"
 SKILL_NAMES_HEADER = "X-LLM-Bawt-Skill-Names"
+#: TASK-1550: a deny-list selection's explicit disables, never callable.
+SKILL_DISABLED_HEADER = "X-LLM-Bawt-Skill-Disabled"
 
 _OPAQUE_ID_RE = re.compile(r"^[a-f0-9]{32}$")
 _SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
@@ -110,6 +112,8 @@ class ProxyRequestContext:
     skill_names: tuple[str, ...] = ()
     # TASK-1550: no managed selection; the proxy may add advertised skills.
     skill_scope_ambient: bool = False
+    # Explicit disables; removed from the Skill enum whatever the scope.
+    skill_disabled: tuple[str, ...] = ()
     started_at: float = 0.0
     account_hash: str = "default"
     active_provider: int = 0
@@ -226,4 +230,7 @@ def custom_header_env(context: ProxyRequestContext) -> str:
             lines.append(f"{SKILL_NAMES_HEADER}: {','.join(names[:256])}")
     if context.skill_scope_ambient:
         lines.append(f"{SKILL_SCOPE_HEADER}: {AMBIENT_SCOPE}")
+    disabled = [name for name in context.skill_disabled if _SKILL_NAME_RE.fullmatch(name)]
+    if disabled:
+        lines.append(f"{SKILL_DISABLED_HEADER}: {','.join(disabled[:256])}")
     return "\n".join(lines)

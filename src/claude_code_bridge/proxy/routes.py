@@ -37,6 +37,7 @@ from .request_context import (
     OPENROUTER_PROVIDER_HEADER,
     REQUEST_HEADER,
     RESPONSES_TRANSPORT_HEADER,
+    SKILL_DISABLED_HEADER,
     SKILL_NAMES_HEADER,
     ProxyRequestContext,
     valid_conversation_identity,
@@ -614,6 +615,7 @@ async def messages(request: Request) -> JSONResponse | StreamingResponse:
             body,
             valid_skill_names(request_headers.get(SKILL_NAMES_HEADER)),
             ambient=parse_skill_scope(request_headers.get(SKILL_SCOPE_HEADER)),
+            disabled=valid_skill_names(request_headers.get(SKILL_DISABLED_HEADER)),
         ),
         status_callback=getattr(
             getattr(getattr(request, "app", None), "state", None),

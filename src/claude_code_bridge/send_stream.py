@@ -203,12 +203,17 @@ class ClaudeStreamMixin:
             # ANTHROPIC_AUTH_TOKEN inside the CLI; clear it so
             # the SDK doesn't fall back to api.anthropic.com.
             sdk_env["CLAUDE_CODE_OAUTH_TOKEN"] = ""
-            from agent_bridge.skill_selection import ManagedSelection, claude_skill_names
+            from agent_bridge.skill_selection import (
+                ManagedSelection,
+                claude_skill_names,
+                proxy_skill_scope,
+            )
 
             # The durable DB thread is the canonical conversation boundary.
             # Normal app dispatch always supplies it; the request id is a
             # non-prompt fallback for legacy/direct bridge commands.
             managed_skills = ManagedSelection.from_field(skill_selection)
+            skill_widen, skill_disabled = proxy_skill_scope(managed_skills)
             conversation_id = durable_conversation_identity(
                 bot_id=bot_id,
                 session_key=session_key,
@@ -225,7 +230,10 @@ class ClaudeStreamMixin:
                     strict_tools=strict_tools,
                     apply_patch=apply_patch,
                     skill_names=claude_skill_names(managed_skills),
-                    skill_scope_ambient=managed_skills is None,
+                    # TASK-1550: a deny-list selection widens like ambient,
+                    # minus its explicit disables; an allow-list stays exact.
+                    skill_scope_ambient=skill_widen,
+                    skill_disabled=skill_disabled,
                 )
             )
             # TASK-546: Override every internal/subagent model selector with a
@@ -305,10 +313,18 @@ class ClaudeStreamMixin:
                 headers = dict(bawthub.get("headers") or {})
                 headers["X-LLM-Bawt-Task-Turn-Context"] = task_turn_capability
                 bawthub["headers"] = headers
-        from agent_bridge.skill_selection import ManagedSelection, claude_skill_options
+        from agent_bridge.skill_selection import (
+            ManagedSelection,
+            claude_skill_denials,
+            claude_skill_options,
+        )
 
+        selection = ManagedSelection.from_field(skill_selection)
+        skill_denials = claude_skill_denials(selection)
+        if skill_denials:
+            disallowed_tools = [*(disallowed_tools or []), *skill_denials]
         return ClaudeAgentOptions(
-            **claude_skill_options(ManagedSelection.from_field(skill_selection)),
+            **claude_skill_options(selection),
             model=model,
             # TASK-1318: the CLI records the system prompt when a session
             # starts (and on the first turn after a manual /compact) and

@@ -349,3 +349,64 @@ def test_ambient_bundled_skill_reaches_both_translated_enums(surface) -> None:
     assert sanitize_tool_arguments(
         {"skill": "dataviz;"}, "Skill", allowed_skill_names=names
     ) == {"skill": "dataviz"}
+
+
+# TASK-1550: a deny-list manifest (catalog minus disables) keeps the harness's
+# bundled skills; an explicit allow-list stays exact; disables always win.
+def _published_selection(manifest: dict):
+    """The selection as the bridge receives it from the command field."""
+    from agent_bridge.skill_selection import ManagedSelection
+
+    return ManagedSelection.from_field(ManagedSelection.from_manifest(manifest).to_field())
+
+
+def _deny_manifest(catalog: tuple[str, ...], disabled: tuple[str, ...]) -> dict:
+    return {"basis": "deny", "disabled": list(disabled), "harness": "claude",
+            "entries": [{"ref": ref} for ref in catalog if ref not in disabled],
+            "manifest_sha": "a" * 64}
+
+
+def _bridge_run(monkeypatch, manifest: dict) -> tuple[dict, list[str], tuple[str, ...]]:
+    """CLI skill options, CLI denials, and the proxy route's resolved Skill enum."""
+    from agent_bridge.skill_selection import (
+        claude_skill_denials, claude_skill_names, claude_skill_options, proxy_skill_scope,
+    )
+    from claude_code_bridge.proxy.request_context import ProxyRequestContext, custom_header_env
+
+    selection = _published_selection(manifest)
+    widen, disabled = proxy_skill_scope(selection)
+    env = custom_header_env(ProxyRequestContext(
+        request_id="r", provider="p", skill_names=claude_skill_names(selection),
+        skill_scope_ambient=widen, skill_disabled=disabled))
+    headers = dict(line.split(": ", 1) for line in env.splitlines())
+    names = _route_skill_names(monkeypatch, headers, _advertising_body())
+    return claude_skill_options(selection), claude_skill_denials(selection), names
+
+
+def test_deny_list_manifest_keeps_bundled_skills(monkeypatch) -> None:
+    options, denials, names = _bridge_run(
+        monkeypatch, _deny_manifest((*SKILLS, "murmur"), ("murmur",)))
+    assert options["skills"] == "all"
+    assert denials == ["Skill(murmur)"]
+    assert names == (*SKILLS, "dataviz", "plugin:review")
+
+
+def test_allow_list_manifest_stays_exact(monkeypatch) -> None:
+    manifest = {"entries": [{"ref": "bawthub"}], "manifest_sha": "b" * 64}
+    options, denials, names = _bridge_run(monkeypatch, manifest)
+    assert options["skills"] == ["bawthub"]
+    assert denials == []
+    assert names == ("bawthub",)
+
+
+def test_explicit_disables_win_over_catalog_and_advertised(monkeypatch) -> None:
+    options, denials, names = _bridge_run(
+        monkeypatch, _deny_manifest(SKILLS, ("llm-bawt", "dataviz")))
+    assert denials == ["Skill(llm-bawt)", "Skill(dataviz)"]
+    assert names == ("agent-system", "bawthub", "plugin:review")
+    # Even an allow-list catalog that names a disabled skill drops it.
+    from claude_code_bridge.proxy.skill_catalog import callable_skill_names
+
+    assert callable_skill_names({}, SKILLS, ambient=False, disabled=("bawthub",)) == (
+        "agent-system", "llm-bawt",
+    )

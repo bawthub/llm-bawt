@@ -155,6 +155,10 @@ class SkillResolution:
             return None
         injected = {e.ref for e in self.injected}
         body = {
+            # TASK-1550: catalog minus disables, so the harness keeps its own
+            # (bundled/plugin) skills that nobody disabled.
+            "basis": "deny",
+            "disabled": sorted(disabled),
             "harness": self.harness,
             "entries": [{"ref": ref, "mode": INJECT if ref in injected else ENABLE,
                          "source": self.source_kind}
