@@ -35,7 +35,7 @@ from typing import AsyncIterator, ClassVar
 import httpx
 
 from .base import ProviderAdapter
-from ..request_context import ProxyRequestContext
+from ..request_context import ProxyRequestContext, report_egress
 from ..passthrough_telemetry import PassthroughTelemetry
 from ...provider_key_broker import (
     BrokerKeyError,
@@ -210,6 +210,7 @@ class AnthropicPassthroughAdapter(ProviderAdapter):
             len(body.get("messages") or []),
         )
 
+        report_egress(context, body, transport="anthropic_messages")
         client = await self.http_client()
         upstream_started = time.perf_counter()
         if context is not None and context.local_setup_ms is None:

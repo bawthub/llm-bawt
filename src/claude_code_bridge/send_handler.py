@@ -1086,6 +1086,7 @@ class ClaudeSendMixin(
                 self._discard_changed_file_request(request_id)
                 self._proxy_request_sessions.pop(request_id, None)
                 getattr(self, "_proxy_tool_errors", {}).pop(request_id, None)
+                getattr(self, "_proxy_egress_seq", {}).pop(request_id, None)
                 self._turn_phase_trackers.pop(request_id, None)
                 self._trigger_message_ids.pop(request_id, None)
                 await async_redis.xack(COMMANDS_STREAM, "claude-code-bridge", msg_id)

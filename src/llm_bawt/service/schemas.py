@@ -351,6 +351,9 @@ class TurnLogDetail(BaseModel):
     # TASK-2110: per-LLM-response records (ordinal derived per host parent).
     responses: list[dict[str, Any]] = Field(default_factory=list)
     workers: list[dict[str, Any]] = Field(default_factory=list)  # TASK-2169
+    # TASK-502: provider-bound bodies captured at proxy egress, per upstream
+    # call. Empty for bots that bypass the proxy (native Anthropic).
+    egress_requests: list[dict[str, Any]] = Field(default_factory=list)
     error_text: str | None = None
     animation: str | None = None
     agent_session_key: str | None = None

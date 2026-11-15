@@ -22,6 +22,7 @@ import httpx
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed, InvalidStatus
 
+from .request_context import report_egress
 from .responses_progress import ResponsesProgress
 
 logger = logging.getLogger(__name__)
@@ -238,7 +239,8 @@ class ChatGPTResponsesTransport:
                 from openai import AsyncStream
                 from openai.types.responses import ResponseStreamEvent
 
-                stream.http = await http_client.post(
+                report_egress(context, request, transport="chatgpt_lite_sse")
+                stream.http =await http_client.post(
                     "/responses", body=request, cast_to=object, stream=True,
                     stream_cls=AsyncStream[ResponseStreamEvent],
                     options={"headers": http_headers},
@@ -254,6 +256,9 @@ class ChatGPTResponsesTransport:
                 metadata["ws_request_header_x_openai_internal_codex_responses_lite"] = "true"
                 if session.turn_state:
                     metadata["x-codex-turn-state"] = session.turn_state
+                report_egress(
+                    context, {"type": "response.create", **request}, transport="chatgpt_lite_ws",
+                )
                 await asyncio.wait_for(session.socket.send(json.dumps({"type": "response.create", **request})), 60)
                 stream.response = session.socket.response
             return stream

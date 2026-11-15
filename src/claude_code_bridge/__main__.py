@@ -125,6 +125,7 @@ def main() -> None:
             host="127.0.0.1",
             port=proxy_port,
             status_callback=bridge.publish_proxy_status,
+            egress_callback=bridge.publish_proxy_egress,
         )
 
     logger.info(

@@ -96,6 +96,8 @@ class TurnLogStore:
         WorkerLifecycleStore(self.engine).ensure_schema()
         from .changed_files_store import ChangedFilesStore
         ChangedFilesStore(self.engine).ensure_schema()
+        from .egress_capture_store import EgressCaptureStore
+        EgressCaptureStore(self.engine).ensure_schema()
 
         self._schema_guard.run(self.engine, "turn-log-store", bootstrap_turn_log_schema)
         ensure_gate_schema(self.engine)  # every admission here asks the system gate
@@ -128,6 +130,8 @@ class TurnLogStore:
                         & TurnLog.terminal_history_projected_at.is_not(None)
                     ),
                 ))
+                from .egress_capture_store import EgressCaptureStore
+                EgressCaptureStore(self.engine).delete_before(session, cutoff)
                 session.commit()
             self.__class__._last_cleanup_at = now
         except Exception as e:
@@ -658,6 +662,17 @@ class TurnLogStore:
         self._cleanup_expired_if_due()
         with Session(self.engine) as session:
             return session.exec(select(TurnLog).where(TurnLog.id == turn_id)).first()
+
+    def turn_id_for_agent_request(self, request_id: str) -> str | None:
+        """The turn bound to a bridge request id (TASK-502 egress capture)."""
+        if self.engine is None or not request_id:
+            return None
+        with Session(self.engine) as session:
+            return session.exec(
+                select(TurnLog.id)
+                .where(TurnLog.agent_request_id == request_id)
+                .order_by(TurnLog.created_at.desc())
+            ).first()
 
     def reserve_idle_turn(self, **kwargs) -> bool:
         """Fenced idle reservation (see ``turn_admission.reserve_turn``).

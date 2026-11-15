@@ -32,6 +32,8 @@ _OPAQUE_ID_RE = re.compile(r"^[a-f0-9]{32}$")
 _SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 
 ProxyStatusCallback = Callable[[str, dict[str, Any]], None]
+# (request_id, capture) where capture holds the provider-bound body only.
+ProxyEgressCallback = Callable[[str, dict[str, Any]], None]
 logger = logging.getLogger(__name__)
 
 
@@ -126,6 +128,8 @@ class ProxyRequestContext:
     serving_provider: str | None = None
     attempt: int = 0
     status_callback: ProxyStatusCallback | None = field(default=None, repr=False)
+    # TASK-502: receives the final provider-bound body of every attempt.
+    egress_callback: ProxyEgressCallback | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if not self.started_at:
@@ -149,6 +153,29 @@ class ProxyRequestContext:
         self.cached_tokens = cached_tokens
         self.cache_creation_tokens = _created
 
+    def report_egress(self, body: dict[str, Any], *, transport: str) -> None:
+        """Record the exact body sent upstream for this attempt (TASK-502).
+
+        Called after every adapter and transport rewrite. Credentials travel
+        in headers, which are never captured.
+        """
+        if self.egress_callback is None:
+            return
+        try:
+            self.egress_callback(self.request_id, {
+                "provider": self.provider,
+                "bot_id": self.bot_id,
+                "attempt": self.attempt or 1,
+                "transport": transport,
+                "body": body,
+            })
+        except Exception:
+            # Audit capture must never fail the model request.
+            logger.warning(
+                "Proxy egress callback failed request_id=%s", self.request_id,
+                exc_info=True,
+            )
+
     def report_status(self, status: dict[str, Any]) -> None:
         """Publish transient proxy progress without adding assistant text."""
         if self.status_callback is None:
@@ -164,6 +191,13 @@ class ProxyRequestContext:
                 status.get("state"),
                 exc_info=True,
             )
+
+
+def report_egress(context: Any, body: dict[str, Any], *, transport: str) -> None:
+    """Capture a provider-bound body when the caller has a request context."""
+    report = getattr(context, "report_egress", None)
+    if report is not None:
+        report(body, transport=transport)
 
 
 def custom_header_env(context: ProxyRequestContext) -> str:

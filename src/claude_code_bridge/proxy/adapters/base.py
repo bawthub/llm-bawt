@@ -32,7 +32,7 @@ from typing import Any, AsyncIterator, ClassVar
 import httpx
 
 from ..errors import final_error_frame as _final_error_frame
-from ..request_context import ProxyRequestContext
+from ..request_context import ProxyRequestContext, report_egress
 from .. import retry as retry_mod
 from ..stream import TranslatorState
 from ..repetition_breaker import RepetitionLoopError
@@ -234,6 +234,7 @@ class ProviderAdapter(ABC):
         """Ordinary HTTP, supervised independently of the selected model."""
         from ..responses_supervisor import ResponsesSSEStream
 
+        report_egress(context, body, transport="responses_http")
         stream = ResponsesSSEStream(
             lambda: client.responses.create(**body), context=context,
         )

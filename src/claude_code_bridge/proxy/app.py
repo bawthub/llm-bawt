@@ -21,7 +21,11 @@ from .adapters import close_all, start_all
 from .claude_oauth import ClaudeOAuthGateway, router as claude_oauth_router
 from .routes import router as messages_router
 from .errors import anthropic_http_exception_handler
-from .request_context import ProxyCancellationRegistry, ProxyStatusCallback
+from .request_context import (
+    ProxyCancellationRegistry,
+    ProxyEgressCallback,
+    ProxyStatusCallback,
+)
 from .retry import RetryBudgetRegistry
 
 logger = logging.getLogger(__name__)
@@ -43,6 +47,7 @@ async def _lifespan(app: FastAPI):
 def create_app(
     status_callback: ProxyStatusCallback | None = None,
     cancellation_registry: ProxyCancellationRegistry | None = None,
+    egress_callback: ProxyEgressCallback | None = None,
 ) -> FastAPI:
     app = FastAPI(
         title="Claude Code Bridge — Anthropic-compatible proxy",
@@ -59,6 +64,7 @@ def create_app(
     )
     app.add_exception_handler(StarletteHTTPException, anthropic_http_exception_handler)
     app.state.proxy_status_callback = status_callback
+    app.state.proxy_egress_callback = egress_callback
     app.state.proxy_cancellations = cancellation_registry or ProxyCancellationRegistry()
     app.state.proxy_retry_budgets = RetryBudgetRegistry()
     app.include_router(messages_router)
@@ -83,11 +89,14 @@ class ProxyServer:
         port: int = 0,
         *,
         status_callback: ProxyStatusCallback | None = None,
+        egress_callback: ProxyEgressCallback | None = None,
     ) -> None:
         self._host = host
         self._requested_port = port
         self._cancellations = ProxyCancellationRegistry()
-        self._app = create_app(status_callback, self._cancellations)
+        self._app = create_app(
+            status_callback, self._cancellations, egress_callback=egress_callback,
+        )
         self._server: Optional[uvicorn.Server] = None
         self._serve_task: Optional[asyncio.Task[None]] = None
         self._actual_port: Optional[int] = None

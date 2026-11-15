@@ -159,6 +159,50 @@ class ClaudeEventMixin(ToolImageMixin):
         )
         self._publish_run_event_with_changed_file(request_id, event)
 
+    def publish_proxy_egress(self, request_id: str, capture: dict) -> None:
+        """Ship one provider-bound proxy body to the app's turn log (TASK-502).
+
+        Serialized now, because adapters may keep mutating the dict after
+        send; posted in the background so capture never delays the model call.
+        """
+        if not self._app_api_url or not self._proxy_request_sessions.get(request_id):
+            return
+        import asyncio
+        import json
+
+        seqs = self.__dict__.setdefault("_proxy_egress_seq", {})
+        seqs[request_id] = seq = seqs.get(request_id, 0) + 1
+        payload = {
+            **{k: v for k, v in capture.items() if k != "body"},
+            "request_id": request_id,
+            "seq": seq,
+            "captured_at": datetime.now(timezone.utc).isoformat(),
+            "body_json": json.dumps(capture.get("body"), ensure_ascii=False, default=str),
+        }
+        task = asyncio.get_running_loop().create_task(self._post_proxy_egress(payload))
+        pending = self.__dict__.setdefault("_proxy_egress_tasks", set())
+        pending.add(task)
+        task.add_done_callback(pending.discard)
+
+    async def _post_proxy_egress(self, payload: dict) -> None:
+        import httpx
+
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    f"{self._app_api_url}/v1/turn-logs/egress", json=payload,
+                )
+            if resp.status_code >= 400:
+                logger.warning(
+                    "Proxy egress capture rejected request_id=%s: %s %s",
+                    payload["request_id"], resp.status_code, resp.text[:200],
+                )
+        except Exception:
+            logger.warning(
+                "Proxy egress capture failed request_id=%s", payload["request_id"],
+                exc_info=True,
+            )
+
     def publish_proxy_status(self, request_id: str, status: dict) -> None:
         """Bridge an in-process proxy status onto the active Redis run."""
         session_key = self._proxy_request_sessions.get(request_id)

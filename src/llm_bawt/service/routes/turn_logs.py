@@ -633,6 +633,34 @@ async def bot_latest_activity(
     return {"active": True, **snap}
 
 
+class EgressCaptureIn(BaseModel):
+    """One provider-bound proxy body from an agent bridge (TASK-502)."""
+    request_id: str = Field(min_length=1, max_length=128)
+    seq: int = Field(ge=1)
+    attempt: int = Field(default=1, ge=1)
+    provider: str | None = Field(default=None, max_length=64)
+    transport: str | None = Field(default=None, max_length=64)
+    captured_at: str | None = None
+    body_json: str
+
+
+@router.post("/v1/turn-logs/egress", tags=["Debug"])
+def record_turn_egress(capture: EgressCaptureIn):
+    """Attach a proxy egress capture to the turn bound to its request id."""
+    store = get_turn_log_store()
+    if store.engine is None:
+        raise HTTPException(status_code=503, detail="Turn logs DB unavailable")
+    turn_id = store.turn_id_for_agent_request(capture.request_id)
+    if turn_id is None:
+        raise HTTPException(status_code=404, detail="No turn bound to request_id")
+    from ..egress_capture_store import EgressCaptureStore
+
+    created = EgressCaptureStore(store.engine).record(
+        turn_id=turn_id, capture=capture.model_dump(),
+    )
+    return {"turn_id": turn_id, "created": created}
+
+
 @router.get("/v1/turn-logs/{turn_id}", response_model=TurnLogDetail, tags=["Debug"])
 def get_turn_log(turn_id: str):
     """Get one persisted turn log by ID."""
@@ -667,6 +695,7 @@ def get_turn_log(turn_id: str):
         tool_calls=parsed_tools,
         responses=_turn_responses(store, [row]).get(row.id, []),
         workers=_turn_workers(store, [row]).get(row.id, []),
+        egress_requests=_turn_egress(store, row.id),
         error_text=row.error_text,
         animation=getattr(row, "animation", None),
         agent_session_key=getattr(row, "agent_session_key", None),
@@ -678,6 +707,16 @@ def get_turn_log(turn_id: str):
         parent_turn_id=getattr(row, "parent_turn_id", None),
         question=_question_for_turn(service, row),
     )
+
+
+def _turn_egress(store: TurnLogStore, turn_id: str) -> list[dict]:
+    from ..egress_capture_store import EgressCaptureStore
+
+    try:
+        return EgressCaptureStore(store.engine).for_turn(turn_id)
+    except Exception:
+        log.warning("Turn egress captures unavailable turn_id=%s", turn_id, exc_info=True)
+        return []
 
 
 def _question_for_turn(service, row) -> dict | None:

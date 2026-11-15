@@ -620,6 +620,11 @@ async def messages(request: Request) -> JSONResponse | StreamingResponse:
             "proxy_status_callback",
             None,
         ),
+        egress_callback=getattr(
+            getattr(getattr(request, "app", None), "state", None),
+            "proxy_egress_callback",
+            None,
+        ),
     )
 
     cancellations = getattr(

@@ -19,7 +19,7 @@ import httpx
 
 from ..stream_cc import chat_completions_to_anthropic_sse
 from ..translate_cc import anthropic_to_chat_completions
-from ..request_context import ProxyRequestContext
+from ..request_context import ProxyRequestContext, report_egress
 from .base import ProviderAdapter
 from ...provider_key_broker import (
     BrokerKeyError,
@@ -101,6 +101,7 @@ class KimiCodingAdapter(ProviderAdapter):
             len(body.get("messages") or []),
         )
 
+        report_egress(context, body, transport="chat_completions")
         client = await self.http_client()
         async with client.stream(
             "POST", url, json=body, headers=headers, timeout=_TIMEOUT
