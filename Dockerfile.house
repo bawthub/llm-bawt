@@ -8,7 +8,9 @@ USER root
 # app's dev/service/mcp/search extras live in a separate environment for focused
 # tests; it is not a full-unit or full-gate environment (see docs/HEAVY_QUEUE.md).
 COPY pyproject.toml setup.cfg uv.lock README.md LICENSE /app/
-RUN UV_PROJECT_ENVIRONMENT=/opt/house-tests uv sync --frozen --no-dev \
+# Older bridge bases may carry setuptools residue from before setup.cfg.
+RUN rm -rf /app/src/llm_bawt.egg-info \
+    && UV_PROJECT_ENVIRONMENT=/opt/house-tests uv sync --frozen --no-dev \
         --extra dev --extra service --extra mcp --extra search \
     && ln -s /opt/house-tests/bin/pytest /usr/local/bin/pytest \
     && chown -R bridge:bridge /opt/house-tests

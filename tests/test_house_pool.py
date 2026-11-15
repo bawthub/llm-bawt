@@ -272,6 +272,7 @@ def test_image_keeps_tests_separate_from_harness_environment():
     assert "COPY pyproject.toml setup.cfg uv.lock README.md LICENSE /app/" in dockerfile
     assert "UV_PROJECT_ENVIRONMENT=/opt/house-tests uv sync --frozen --no-dev" in dockerfile
     assert "--extra dev --extra service --extra mcp --extra search" in dockerfile
+    assert dockerfile.index("rm -rf /app/src/llm_bawt.egg-info") < dockerfile.index("uv sync")
     assert "uv pip install" not in dockerfile
     assert "gpt-" not in dockerfile
     assert "USER bridge" in dockerfile
