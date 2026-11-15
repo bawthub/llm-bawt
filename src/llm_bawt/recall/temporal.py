@@ -146,23 +146,37 @@ def _qualifier(kind: str, match: re.Match) -> str | None:
     return word if word in _RANGE_WORDS else None
 
 
-def _ranged(word: str | None, span: tuple[date, date], today: date) -> tuple[date, date] | None:
-    """Apply a range word to a date's own span; None when the range is empty."""
-    start, end = span
-    now_end = today + timedelta(days=1)
-    if word in {"since", "from"}:
-        start, end = start, max(end, now_end)
-    elif word == "after":
-        start, end = end, now_end
-    elif word in {"until", "till", "through"}:
-        start = OPEN_START
-    elif word == "before":
-        start, end = OPEN_START, start
+def _compose(dated: list[tuple[str | None, tuple[date, date]]],
+             today: date) -> tuple[date, date] | None:
+    """Combine every date on a line into one range; None when it is empty.
+
+    since/from/after give a lower bound, until/till/through/before an upper
+    bound, and a plain date covers its own span. A side with no bound stays
+    open, so "from Oct 3 to Oct 9" ends with Oct 9 while "since March" runs to
+    now. Each date is classified before any side is opened, so one open date
+    never swallows the other end of an explicit range.
+    """
+    starts: list[date] = []
+    ends: list[date] = []
+    for word, (start, end) in dated:
+        if word in {"since", "from"}:
+            starts.append(start)
+        elif word == "after":
+            starts.append(end)
+        elif word in {"until", "till", "through"}:
+            ends.append(end)
+        elif word == "before":
+            ends.append(start)
+        else:
+            starts.append(start)
+            ends.append(end)
+    start = min(starts) if starts else OPEN_START
+    end = max(ends) if ends else today + timedelta(days=1)
     return (start, end) if start < end else None
 
 
 def _parse_line(line: str, today: date) -> tuple[date, date, str] | None:
-    spans: list[tuple[date, date]] = []
+    dated: list[tuple[str | None, tuple[date, date]]] = []
     residual = line
     for kind, pattern in _PATTERNS:
         def consume(match: re.Match) -> str:
@@ -174,20 +188,20 @@ def _parse_line(line: str, today: date) -> tuple[date, date, str] | None:
             span = _span(kind, match, today)
             if span is None:
                 return match.group()
-            # Every date form honours a preceding range word, so "since March
+            # Every date form keeps its preceding range word, so "since March
             # 2025" and "since 2025-03-01" run to now, not just that month/day.
-            span = _ranged(_qualifier(kind, match), span, today)
-            if span is None:
-                return match.group()
-            spans.append(span)
+            dated.append((_qualifier(kind, match), span))
             return "\x00"
         residual = pattern.sub(consume, residual)
-    if not spans:
+    if not dated:
+        return None
+    span = _compose(dated, today)
+    if span is None:
         return None
     # A range word before a consumed date leaves with it.
     residual = re.sub(rf"\b(?:{'|'.join(_RANGE_WORDS)})\s+(?:the\s+)?\x00", " ", residual,
                       flags=re.IGNORECASE).replace("\x00", " ")
-    return min(s for s, _ in spans), max(e for _, e in spans), re.sub(r"\s+", " ", residual).strip()
+    return span[0], span[1], re.sub(r"\s+", " ", residual).strip()
 
 
 def time_window(query: str, now: float) -> TimeWindow | None:

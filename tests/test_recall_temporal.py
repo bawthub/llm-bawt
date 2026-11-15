@@ -40,6 +40,11 @@ def day(text: str) -> float:
     ("gate runs before Oct 3", "1970-01-02", "2026-10-03", "gate runs"),
     ("gate runs after Oct 3", "2026-10-04", "2026-10-27", "gate runs"),
     ("throughout March 2025", "2025-03-01", "2025-04-01", "throughout"),
+    # An explicit end bounds the range; one open date can't swallow it (review B2).
+    ("deployment changes from Oct 3 to Oct 9", "2026-10-03", "2026-10-10", "deployment changes to"),
+    ("gate runs after Oct 3 and before Oct 9", "2026-10-04", "2026-10-09", "gate runs and"),
+    ("since Sep 1 until Oct 9", "2026-09-01", "2026-10-10", ""),
+    ("from 2025-03-01 through March 2025", "2025-03-01", "2025-04-01", ""),
 ])
 def test_explicit_time_phrases_set_a_padded_window(query, start, end, residual):
     window = time_window(query, NOW)
@@ -64,6 +69,7 @@ def test_ordinary_questions_have_no_window(query):
 
 def test_an_empty_range_is_no_window():
     assert time_window("anything after Oct 30 2026", NOW) is None
+    assert time_window("anything after Oct 9 and before Oct 3", NOW) is None
 
 
 def test_latest_question_line_with_a_hint_wins():

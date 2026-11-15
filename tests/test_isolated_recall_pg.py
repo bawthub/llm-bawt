@@ -231,6 +231,25 @@ def test_since_a_dated_month_keeps_the_later_correction(rig):
     assert rows.time_window["applied"] is True
 
 
+@pytest.mark.parametrize("shape", ["from {a} to {b}", "after {a} and before {b}"])
+def test_a_closed_date_range_keeps_newer_matches_out(rig, shape):
+    """Review B2: an explicit end date bounds the range, so recent matches can't crowd the answer."""
+    when = rig.now - 60 * DAY
+
+    def spoken(at: float) -> str:
+        stamp = datetime.fromtimestamp(at, UTC)
+        return f"{stamp:%B} {stamp.day} {stamp.year}"
+
+    answer = rig.add("Deployment change: rollout target moved to the blue cluster.", at=when)
+    newer = {rig.add(f"Deployment change: rollout target moved to the blue cluster ({i}).",
+                     at=rig.now - 60 * (i + 1)) for i in range(8)}
+    bounds = shape.format(a=spoken(when - 3 * DAY), b=spoken(when + 3 * DAY))
+    rows = rig.recall(f"deployment change rollout target {bounds}")
+    assert rows[0].id == answer
+    assert not newer & {row.id for row in rows}
+    assert rows.time_window["applied"] is True
+
+
 def test_literal_receipt_beats_new_generic_history_and_keeps_provenance(rig):
     receipt = rig.add("TASK-1144 app recreate 8ee7d89 succeeded; live health checks passed.",
                       at=rig.now - 80 * DAY)
