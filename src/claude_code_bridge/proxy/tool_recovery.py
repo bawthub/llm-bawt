@@ -11,6 +11,13 @@ from dataclasses import dataclass
 from typing import Iterator
 
 CARRIER_NAME = "ToolArgumentsIncomplete"
+DEFAULT_GUIDANCE = "After its error result, generate a NEW complete call to the original tool."
+# TASK-2330: re-issuing the same oversize call would hit the same limit.
+TOO_LARGE_GUIDANCE = (
+    "The call was too large to finish. After its error result, make a much smaller "
+    "call: split the content across several calls or write it in parts, and avoid "
+    "pasting large generated output (diffs, lock files, logs) into tool arguments."
+)
 
 
 @dataclass
@@ -19,6 +26,7 @@ class ToolArgumentGenerationError(RuntimeError):
     held_chars: int
     cause: str
     incomplete: bool = True
+    guidance: str | None = None
 
     def __str__(self) -> str:
         return (f"Upstream tool argument generation failed: {self.cause}; "
@@ -47,7 +55,7 @@ def recovery_frames(error: ToolArgumentGenerationError, *, index: int, call_id: 
     """Replace only the withheld suffix, preserving already-forwarded indexes."""
     message = (f"{error}. None of the 1 withheld tool calls ran. "
                "The next unavailable tool is a recovery notice, not an executable call. "
-               "After its error result, generate a NEW complete call to the original tool. "
+               f"{error.guidance or DEFAULT_GUIDANCE} "
                "Do not assume any side effects or repeat already completed calls.")
     events = [
         {"type": "content_block_start", "index": index, "content_block": {"type": "text", "text": ""}},

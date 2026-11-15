@@ -25,9 +25,10 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from .adapters import lookup
 from .errors import anthropic_error, auth_failed_error, final_error_frame
 from .retry import (
-    BrokerAuthorizationError, ReplayRefusedError, RetryAdmissionError, RetryBudgetRegistry,
+    BrokerAuthorizationError, CallInFlightError, ReplayRefusedError, RetryAdmissionError,
+    RetryBudgetRegistry,
 )
-from .heartbeat import DEFAULT_INTERVAL, with_heartbeat
+from .heartbeat import _PING_FRAME, DEFAULT_INTERVAL, with_heartbeat
 from .tool_recovery import ToolArgumentGenerationError, carrier_allowed, recovery_frames
 from .observability import OBSERVABILITY
 from .request_context import (
@@ -58,6 +59,11 @@ except ValueError:
     _PING_INTERVAL = DEFAULT_INTERVAL
 
 logger = logging.getLogger(__name__)
+
+# TASK-2330: an identical SDK resend waits this long for the proxy's own
+# in-flight attempt (which may be mid-retry) before it is refused.
+_IN_FLIGHT_WAIT_S = 600.0
+_IN_FLIGHT_POLL_S = 0.5
 
 router = APIRouter()
 _SSE_BOUNDARY = re.compile(rb"\r?\n\r?\n")
@@ -183,11 +189,30 @@ async def _proxy_iter(
             # charged here for every adapter, including passthrough adapters;
             # the Responses adapter charges its own subsequent attempts.
             recover = getattr(adapter, "prepare_auth_recovery", None)
-            lease = budgets.acquire(
-                context.request_id, fingerprint,
-                lambda: adapter.retry_policy(upstream_model, context),
-                allow_auth_probe=callable(recover),
-            )
+            # TASK-2330: an SDK resend can arrive while the proxy's own attempt
+            # for the same body is still sampling. Wait for it, keeping this
+            # connection alive, then admit normally; never sample twice.
+            waited = 0.0
+            while lease is None:
+                try:
+                    lease = budgets.acquire(
+                        context.request_id, fingerprint,
+                        lambda: adapter.retry_policy(upstream_model, context),
+                        allow_auth_probe=callable(recover),
+                    )
+                except CallInFlightError:
+                    if waited >= _IN_FLIGHT_WAIT_S:
+                        raise CallInFlightError(
+                            "This same model call is already running in the proxy (its "
+                            f"own retry is in progress); this resend waited {waited:.0f}s "
+                            "and was not sampled"
+                        ) from None
+                    if cancellations is not None and cancellations.is_cancelled(context.request_id):
+                        raise asyncio.CancelledError from None
+                    if _PING_INTERVAL > 0 and waited % _PING_INTERVAL < _IN_FLIGHT_POLL_S:
+                        yield _PING_FRAME
+                    await asyncio.sleep(_IN_FLIGHT_POLL_S)
+                    waited += _IN_FLIGHT_POLL_S
             context.retry_lease = lease
             if lease.auth_probe:
                 prepared = await recover(body, upstream_model, context)

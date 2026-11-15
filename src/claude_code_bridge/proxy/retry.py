@@ -125,6 +125,8 @@ class RetryDecision:
 DEFAULT_MAX_ATTEMPTS = 3
 # One supervised reconnect, then a terminal error (no outer CLI retry loop).
 MAX_PROGRESS_STALL_ATTEMPTS = 2
+# Supervised-timeout phase for the per-tool-call argument duration cap.
+ARGUMENT_SIZE_LIMIT_PHASE = "arguments"
 DEFAULT_BASE_BACKOFF_S = 0.2
 DEFAULT_BACKOFF_CAP_S = 5.0
 DEFAULT_JITTER_S = 0.2
@@ -183,6 +185,13 @@ class RetryPolicy:
 
 class RetryAdmissionError(RuntimeError):
     """The proxy must reject a duplicate or exhausted call before sampling."""
+
+
+class CallInFlightError(RetryAdmissionError):
+    """TASK-2330: the identical call is still sampling under the proxy's own retry.
+
+    The route waits for it to finish rather than refusing an SDK resend at once.
+    """
 
 
 class ReplayRefusedError(RetryAdmissionError):
@@ -328,7 +337,7 @@ class RetryBudgetRegistry:
                 entry = _BudgetEntry(policy=policy_factory())
                 self._entries[key] = entry
             if entry.active:
-                raise RetryAdmissionError("Identical model call already running")
+                raise CallInFlightError("Identical model call already running")
             if entry.tool_committed:
                 raise ReplayRefusedError("Completed or partial tool call cannot be replayed")
             if entry.output_committed:
@@ -505,6 +514,10 @@ def classify_stream_exception(exc: BaseException) -> FailureBucket:
     # unfinished thinking summaries. Their exhausted budget is terminal to the
     # CLI; ordinary transient failures retain their existing retry policy.
     if getattr(exc, "proxy_retry_owner", False):
+        # TASK-2330: the per-call argument cap is a deliberate size limit that
+        # fires while arguments are still streaming. Re-sampling repeats it.
+        if getattr(exc, "phase", None) == ARGUMENT_SIZE_LIMIT_PHASE:
+            return FailureBucket.C_PERMANENT
         return FailureBucket.G_PROGRESS_STALL
 
     # Same table works — mid-stream we just don't get status codes as often,

@@ -621,20 +621,30 @@ class ProviderAdapter(ABC):
 
             # The route's dispatch guard can replace one withheld, incomplete
             # ordinary tool with a non-executable error carrier. No resampling.
+            stall_phase = getattr(stream_exc, "phase", None)
             if (context is not None and getattr(context, "recover_incomplete_tools", False)
                     and state.open_block is not None and state.open_block.get("kind") == "tool"
-                    and (getattr(stream_exc, "phase", None) == "whitespace"
+                    and (stall_phase in {"whitespace", retry_mod.ARGUMENT_SIZE_LIMIT_PHASE}
                          or isinstance(stream_exc, RepetitionLoopError))):
-                from ..tool_recovery import ToolArgumentGenerationError
+                from ..tool_recovery import TOO_LARGE_GUIDANCE, ToolArgumentGenerationError
                 name, chars, parses = _held_tool_fields(state.open_block)
                 discard_stream = getattr(upstream_stream, "discard", None)
                 if discard_stream is not None:
                     await discard_stream()
-                cause = ("upstream whitespace stall" if getattr(stream_exc, "phase", None) == "whitespace"
-                         else "upstream argument repetition")
+                guidance = None
+                if stall_phase == retry_mod.ARGUMENT_SIZE_LIMIT_PHASE:
+                    # TASK-2330: a size cap, not a stall; the same call cannot fit.
+                    cause = ("tool call too large: arguments were still streaming "
+                             "at the per-call time limit")
+                    guidance = TOO_LARGE_GUIDANCE
+                elif stall_phase == "whitespace":
+                    cause = "upstream whitespace stall"
+                else:
+                    cause = "upstream argument repetition"
                 raise ToolArgumentGenerationError(
                     name, int(chars), f"{type(stream_exc).__name__}: {cause}",
                     incomplete=_is_unflushed_tool(state.open_block) and parses == "no",
+                    guidance=guidance,
                 )
 
             # Terminal — emit the state-appropriate final error type. On

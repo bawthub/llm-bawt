@@ -301,6 +301,8 @@ def test_probe_lease_fences_cancellation_cleanup_and_concurrent_resend(harness, 
             assert b"error" in await pending
             assert len(adapter.samples) == 2
         else:
+            # TASK-2330: the probe is held open, so skip the in-flight wait.
+            monkeypatch.setattr(routes, "_IN_FLIGHT_WAIT_S", 0.0)
             assert b"already running" in await send()
             assert len(adapter.samples) == 2
             release.set()

@@ -140,6 +140,9 @@ def test_route_rejects_in_flight_duplicate_without_second_upstream_call(monkeypa
         registry = RetryBudgetRegistry()
         adapter = Adapter()
         monkeypatch.setattr(routes, "lookup", lambda _: adapter)
+        # TASK-2330: a resend waits for the in-flight call; A is held open
+        # here, so skip the wait and check the eventual refusal.
+        monkeypatch.setattr(routes, "_IN_FLIGHT_WAIT_S", 0.0)
         app = NS(state=NS(proxy_retry_budgets=registry, proxy_cancellations=None,
                            proxy_status_callback=None))
 
