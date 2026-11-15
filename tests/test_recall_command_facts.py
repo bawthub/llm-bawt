@@ -13,7 +13,7 @@ import pytest
 
 from llm_bawt.recall.command_facts import command_facts, safe_path, safe_repo
 from llm_bawt.recall.contracts import RecallScope
-from llm_bawt.recall.postgres import PUBLIC_HISTORY_AUTHORITY, ToolArgSource, tool_arg_facts
+from llm_bawt.recall.postgres import PATH_TIMEOUT_MS, PUBLIC_HISTORY_AUTHORITY, ToolArgSource, tool_arg_facts
 
 SCOPE = RecallScope("caller", "operator", "session-a", frozenset({"excluded"}),
                     frozenset({"caller", "peer", "excluded"}))
@@ -161,9 +161,14 @@ class Database:
     def __init__(self, rows):
         self.rows = rows
         self.reads = []
+        self.timeouts = []
+        self.path_error = None
 
-    def read(self, sql, params):
+    def read(self, sql, params, timeout_ms=2000):
         self.reads.append((sql, params))
+        self.timeouts.append(timeout_ms)
+        if "path_pattern" in params and self.path_error:
+            raise self.path_error
         # The file-path query (TASK-1567) is covered on PostgreSQL; here it finds nothing.
         return [] if "path_pattern" in params else self.rows
 
@@ -199,6 +204,16 @@ def test_path_pattern_drops_question_and_file_tool_words():
 
     assert path_term_pattern("which files did caid edit for chatdebug") == "(caid|chatdebug)"
     assert path_term_pattern("which files were edited") is None
+
+
+@pytest.mark.asyncio
+async def test_a_path_query_timeout_keeps_clone_facts():
+    """A too-broad path pattern loses only path facts, not the source."""
+    database = Database([call("2", "cd /tmp && git clone https://github.com/example/widget w")])
+    database.path_error = RuntimeError("canceling statement due to statement timeout")
+    evidence = await ToolArgSource(database).search("where was the widget cloned", SCOPE, ())
+    assert [item.id for item in evidence] == ["2"]
+    assert database.timeouts == [2000, PATH_TIMEOUT_MS] and PATH_TIMEOUT_MS < 2000
 
 
 @pytest.mark.asyncio

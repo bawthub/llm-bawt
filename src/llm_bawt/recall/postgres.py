@@ -4,6 +4,7 @@ from __future__ import annotations
 from abc import abstractmethod
 from datetime import datetime, timezone
 import json
+import logging
 import re
 import time
 
@@ -16,6 +17,8 @@ from llm_bawt.bot_tags import SNAPSHOT_SQL, TagPolicyUnavailable, TagSnapshot
 from llm_bawt.memory.ownership import MemoryAuthority
 
 from .budgets import DATABASE_WORKER, compact_json
+
+logger = logging.getLogger(__name__)
 from .contracts import (
     COVERAGE_BUCKETS, FOLLOW_ON_WINDOW_SECONDS, MAX_FOLLOW_ONS_PER_HIT, MAX_RECORD_CHARS, MAX_SOURCE_RECORDS,
     RECENCY_HALF_WEIGHT_DAYS, Evidence, RecallError, RecallScope, SourceProvider, WindowedEvidence,
@@ -120,7 +123,7 @@ class RecallDatabase:
     def __init__(self, engine):
         self.engine = engine
 
-    def read(self, statement: str, params: dict) -> list[dict]:
+    def read(self, statement: str, params: dict, timeout_ms: int = 2000) -> list[dict]:
         if self.engine is None:
             raise RecallError("source_unavailable")
         # PostgreSQL enforces read-only mode; no provisioning, access counters,
@@ -128,7 +131,7 @@ class RecallDatabase:
         with self.engine.connect() as connection:
             with connection.begin():
                 connection.execute(text("SET TRANSACTION READ ONLY"))
-                connection.execute(text("SET LOCAL statement_timeout = '2000ms'"))
+                connection.execute(text(f"SET LOCAL statement_timeout = '{int(timeout_ms)}ms'"))
                 connection.execute(text("SET LOCAL lock_timeout = '500ms'"))
                 return [dict(row) for row in connection.execute(text(statement), params).mappings()]
 
@@ -553,6 +556,9 @@ def tool_call_fact(row: dict) -> str | None:
     return file_path_fact(row.get("tool_name"), row.get("path"))
 
 
+# Budget for the optional path query, below the source's 2 s statement timeout.
+PATH_TIMEOUT_MS = 800
+
 PATH_NOISE_TERMS = frozenset({
     "which", "what", "where", "when", "who", "how", "did", "does", "was", "were",
     "the", "and", "for", "from", "with", "into", "that", "this", "any", "all",
@@ -635,6 +641,20 @@ class ToolArgSource(PostgresSource):
         LIMIT :candidate_limit
     """
 
+    async def _path_rows(self, params: dict, pattern: str) -> list[dict]:
+        """Path candidates, or none when the pattern is too broad to finish.
+
+        A broad pattern loses only the path facts under its own shorter
+        timeout; clone facts from the same source are still returned.
+        """
+        try:
+            return await DATABASE_WORKER.run(self.database.read, self.path_statement,
+                                             {**params, "path_pattern": pattern},
+                                             PATH_TIMEOUT_MS)
+        except Exception as error:
+            logger.warning("tool_args path candidates skipped class=%s", type(error).__name__)
+            return []
+
     def extra_params(self, scope: RecallScope, query: str) -> dict:
         allowed = sorted(scope.allowed_bot_ids - scope.excluded_bot_ids)
         return {"bots": allowed, "parts": [partition_id(bot) for bot in allowed],
@@ -648,13 +668,11 @@ class ToolArgSource(PostgresSource):
         pattern = path_term_pattern(query)
         try:
             rows = await DATABASE_WORKER.run(self.database.read, self.statement, params)
-            path_rows = (await DATABASE_WORKER.run(self.database.read, self.path_statement,
-                                                   {**params, "path_pattern": pattern})
-                         if pattern else [])
         except RecallError:
             raise
         except Exception as error:
             raise RecallError("source_unavailable") from error
+        path_rows = await self._path_rows(params, pattern) if pattern else []
         candidates = [(row, tool_call_fact(row)) for row in [*rows, *path_rows]]
         ranked = []
         for row, facts in candidates:
