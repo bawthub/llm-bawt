@@ -133,9 +133,6 @@ class ArrUnavailable(RuntimeError):
         self.code = code
 
 
-_ENV_FALLBACK_WARNED: set[str] = set()
-
-
 def resolve_credentials(service: str, url_var: str, key_var: str, *, config=None) -> tuple[str, str]:
     """``(url, api_key)`` for one service, from its encrypted connection first.
 
@@ -143,30 +140,21 @@ def resolve_credentials(service: str, url_var: str, key_var: str, *, config=None
     credentials form) wins. Only when no record exists are the legacy env vars
     read, with a one-time deprecation warning naming the vars, never a value.
     """
-    from llm_bawt.service.connection_secrets import (
-        ConnectionUnavailable,
-        integration_spec,
-        read_connection,
-    )
+    from llm_bawt.service.connection_secrets import ConnectionUnavailable, resolve_integration
 
     if config is None:
         from llm_bawt.utils.config import Config
 
         config = Config()
+    legacy = {"url": os.getenv(url_var), "api_key": os.getenv(key_var)}
     try:
-        found = read_connection(config, "integration", service, integration_spec(service))
+        found = resolve_integration(config, service, legacy, legacy_names=(url_var, key_var))
     except ConnectionUnavailable as e:
         raise ArrUnavailable(service, e.code) from None
-    if found is not None:
-        return found.meta["url"], found.secret["api_key"]
-    url, key = _read_env_pair(service, url_var, key_var)
-    if service not in _ENV_FALLBACK_WARNED:
-        _ENV_FALLBACK_WARNED.add(service)
-        logger.warning(
-            "%s credentials read from deprecated env vars %s/%s; save them under "
-            "Integrations instead", service, url_var, key_var,
-        )
-    return url, key
+    if found is None:
+        _read_env_pair(service, url_var, key_var)  # raises ArrNotConfigured naming the missing vars
+        raise ArrNotConfigured(service, [url_var, key_var])  # set but blank
+    return found.meta["url"], found.secret["api_key"]
 
 
 class _Held:

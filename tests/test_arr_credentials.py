@@ -67,7 +67,8 @@ def store(monkeypatch):
                           "ON runtime_settings (scope_type, scope_id, key)"))
     made = _store(engine)
     monkeypatch.setattr(connection_secrets, "_store", lambda config, kind: made)
-    monkeypatch.setattr(arr_base, "_ENV_FALLBACK_WARNED", set())
+    monkeypatch.setattr(connection_secrets, "_legacy_warned", set())
+    monkeypatch.setattr(connection_secrets, "has_connection_store", lambda config: True)
     for url_var, key_var, _getter in SERVICES.values():
         monkeypatch.delenv(url_var, raising=False)
         monkeypatch.delenv(key_var, raising=False)
@@ -101,13 +102,25 @@ def test_stored_connection_wins_over_env(store, monkeypatch, service):
 def test_no_record_falls_back_to_env_with_one_warning_naming_vars_only(store, monkeypatch, caplog, service):
     _env(monkeypatch, service)
     url_var, key_var, _getter = SERVICES[service]
-    with caplog.at_level(logging.WARNING, logger=arr_base.logger.name):
+    with caplog.at_level(logging.WARNING, logger=connection_secrets.logger.name):
         assert _resolve(service) == (f"http://{service}-env.example", ENV_KEY)
         _resolve(service)
     warnings = [r.getMessage() for r in caplog.records]
     assert len(warnings) == 1
     assert url_var in warnings[0] and key_var in warnings[0]
     assert ENV_KEY not in caplog.text
+
+
+def test_without_a_database_env_is_used_and_the_store_is_never_read(store, monkeypatch):
+    """TASK-1600: a CLI-only install (no DB credentials) uses env, not store_unavailable."""
+    _env(monkeypatch, "sonarr")
+    monkeypatch.setattr(connection_secrets, "has_connection_store", lambda config: False)
+
+    def untouched(config, kind):
+        raise AssertionError("store read without a database")
+
+    monkeypatch.setattr(connection_secrets, "_store", untouched)
+    assert _resolve("sonarr") == ("http://sonarr-env.example", ENV_KEY)
 
 
 def test_no_record_and_no_env_is_not_configured(store):

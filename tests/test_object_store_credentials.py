@@ -69,7 +69,8 @@ def store(monkeypatch):
     made = object.__new__(IntegrationStore)
     made._store = runtime
     monkeypatch.setattr(connection_secrets, "_store", lambda config, kind: made)
-    monkeypatch.setattr(creds, "_env_fallback_warned", False)
+    monkeypatch.setattr(connection_secrets, "_legacy_warned", set())
+    monkeypatch.setattr(connection_secrets, "has_connection_store", lambda config: True)
     monkeypatch.setattr(creds, "_default_source", None)
     return made
 
@@ -123,8 +124,20 @@ def test_record_wins_over_env(forms, env):
     assert resolve_s3_config(None) == STORED
 
 
+def test_without_a_database_env_is_used_and_the_store_is_never_read(store, env, monkeypatch):
+    """TASK-1600: a CLI-only install (no DB credentials) uses env, not store_unavailable."""
+    monkeypatch.setattr(connection_secrets, "has_connection_store", lambda config: False)
+
+    def untouched(config, kind):
+        raise AssertionError("store read without a database")
+
+    monkeypatch.setattr(connection_secrets, "_store", untouched)
+    assert resolve_s3_config(None) == S3Config(
+        "http://s3-env.example", "env-region", "env-bucket", "env-access", ENV_SECRET)
+
+
 def test_no_record_falls_back_to_env_with_one_warning_naming_vars_only(store, env, caplog):
-    with caplog.at_level(logging.WARNING, logger=creds.logger.name):
+    with caplog.at_level(logging.WARNING, logger=connection_secrets.logger.name):
         found = resolve_s3_config(None)
         resolve_s3_config(None)
     assert found == S3Config("http://s3-env.example", "env-region", "env-bucket", "env-access", ENV_SECRET)

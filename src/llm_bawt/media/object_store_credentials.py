@@ -24,7 +24,7 @@ import time
 from collections.abc import Callable
 
 from llm_bawt.media.object_store import BlobBackendUnavailable, S3Config, s3_config_from_env
-from llm_bawt.service.connection_secrets import ConnectionUnavailable, integration_spec, read_connection
+from llm_bawt.service.connection_secrets import ConnectionUnavailable, resolve_integration
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +38,6 @@ _ENV_NAMES = (
     "LLM_BAWT_S3_ACCESS_KEY",
     "LLM_BAWT_S3_SECRET_KEY",
 )
-_env_fallback_warned = False
 
 
 class ObjectStoreUnavailable(BlobBackendUnavailable):
@@ -55,27 +54,24 @@ class ObjectStoreUnavailable(BlobBackendUnavailable):
 
 def resolve_s3_config(config) -> S3Config | None:
     """The S3 config to use now, or ``None`` when none is set anywhere."""
-    global _env_fallback_warned
+    legacy = s3_config_from_env()
+    legacy_fields = {} if legacy is None else {
+        "endpoint": legacy.endpoint, "region": legacy.region, "bucket": legacy.bucket,
+        "access_key_id": legacy.access_key, "secret_access_key": legacy.secret_key,
+    }
     try:
-        found = read_connection(config, "integration", INTEGRATION_ID, integration_spec(INTEGRATION_ID))
+        found = resolve_integration(config, INTEGRATION_ID, legacy_fields, legacy_names=_ENV_NAMES)
     except ConnectionUnavailable as error:
         raise ObjectStoreUnavailable(error.code) from None
-    if found is not None:
-        return S3Config(
-            endpoint=found.meta["endpoint"].strip(),
-            region=found.meta["region"].strip(),
-            bucket=found.meta["bucket"].strip(),
-            access_key=found.secret["access_key_id"].strip(),
-            secret_key=found.secret["secret_access_key"].strip(),
-        )
-    cfg = s3_config_from_env()
-    if cfg is not None and not _env_fallback_warned:
-        _env_fallback_warned = True
-        logger.warning(
-            "Object store credentials read from deprecated settings %s; save them under Integrations instead",
-            "/".join(_ENV_NAMES),
-        )
-    return cfg
+    if found is None:
+        return None
+    return S3Config(
+        endpoint=found.meta["endpoint"].strip(),
+        region=found.meta["region"].strip(),
+        bucket=found.meta["bucket"].strip(),
+        access_key=found.secret["access_key_id"].strip(),
+        secret_key=found.secret["secret_access_key"].strip(),
+    )
 
 
 class StoredS3Config:
