@@ -405,6 +405,10 @@ While an old reconciler image still runs beside a new app, whichever process
 enqueues first wins; the idempotency key keeps it to one delivery, but a
 receipt enqueued by the old reconciler is never announced and shows no QUEUED
 event (the dispatcher's recovery sweep still delivers it).
+In the reverse mix, a new reconciler beside an old app sends no direct quiesce
+receipts until the app is upgraded and restarted. Terminal jobs with a recorded
+callback keep a null `receipt_callback_delivery_id`; the new app's receipt loop
+then picks them up and delivers them, so the pending receipts are not lost.
 
 **Open deadline.** A job that has not opened its hold within
 `quiesce_timeout_seconds` of `submitted_at` fails `quiesce_timeout` with no
