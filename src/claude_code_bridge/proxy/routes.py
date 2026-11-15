@@ -194,6 +194,11 @@ async def _proxy_iter(
             # connection alive, then admit normally; never sample twice.
             waited = 0.0
             while lease is None:
+                # Check before every acquisition: a stop can tombstone the
+                # request while this resend waits, then release the original
+                # lease. Nothing awaits between this check and acquire().
+                if cancellations is not None and cancellations.is_cancelled(context.request_id):
+                    raise asyncio.CancelledError
                 try:
                     lease = budgets.acquire(
                         context.request_id, fingerprint,
@@ -207,8 +212,6 @@ async def _proxy_iter(
                             f"own retry is in progress); this resend waited {waited:.0f}s "
                             "and was not sampled"
                         ) from None
-                    if cancellations is not None and cancellations.is_cancelled(context.request_id):
-                        raise asyncio.CancelledError from None
                     if _PING_INTERVAL > 0 and waited % _PING_INTERVAL < _IN_FLIGHT_POLL_S:
                         yield _PING_FRAME
                     await asyncio.sleep(_IN_FLIGHT_POLL_S)

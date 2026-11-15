@@ -19,7 +19,7 @@ from claude_code_bridge.proxy.chatgpt_transport import (
     DEFAULT_ARGUMENT_STREAM_TIMEOUT,
     ChatGPTEventTimeout,
 )
-from claude_code_bridge.proxy.request_context import ProxyRequestContext
+from claude_code_bridge.proxy.request_context import ProxyCancellationRegistry, ProxyRequestContext
 from claude_code_bridge.proxy.retry import (
     FailureBucket,
     RetryBudgetRegistry,
@@ -157,13 +157,36 @@ class HeldAdapter:
             yield frame
 
 
-async def _drain(adapter, budgets, body, sink):
+async def _drain(adapter, budgets, body, sink, cancellations=None):
     context = ProxyRequestContext(request_id="turn", provider="openai_chatgpt")
     async for chunk in routes._proxy_iter(
         adapter, body, "fixture", provider="openai_chatgpt", context=context,
         budgets=budgets, fingerprint=budgets.fingerprint(body, "openai_chatgpt", "fixture"),
+        cancellations=cancellations,
     ):
         sink.append(chunk)
+
+
+def test_cancelled_waiter_never_samples_after_original_releases():
+    async def run():
+        adapter, budgets, body = HeldAdapter(), RetryBudgetRegistry(), {"messages": []}
+        cancellations = ProxyCancellationRegistry()
+        first, second = [], []
+        original = asyncio.create_task(_drain(adapter, budgets, body, first))
+        while adapter.calls == 0:
+            await asyncio.sleep(0.1)
+        resend = asyncio.create_task(_drain(adapter, budgets, body, second, cancellations))
+        while not second:
+            await asyncio.sleep(0.1)
+        # Bridge stop tombstones the request, then the original lease releases.
+        cancellations.cancel("turn")
+        adapter.release.set()
+        await original
+        with pytest.raises(asyncio.CancelledError):
+            await resend
+        assert adapter.calls == 1, "a cancelled resend must not start a new sample"
+        assert b"message_start" not in b"".join(second)
+    virtual_clock.run_timing(run())
 
 
 def test_identical_resend_waits_for_running_attempt_instead_of_failing():
