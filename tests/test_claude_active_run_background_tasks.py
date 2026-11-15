@@ -159,3 +159,50 @@ async def test_escalation_during_idle_background_wait_owns_next_result():
             consumer.cancel()
             await asyncio.gather(consumer, return_exceptions=True)
         run.mark_completed()
+
+
+def _progress(task_id: str) -> dict:
+    return {"type": "system", "subtype": "task_progress", "task_id": task_id,
+            "description": "d", "usage": {}, "uuid": f"p-{task_id}", "session_id": "s"}
+
+
+@pytest.mark.anyio
+async def test_endless_progress_hits_the_hard_background_bound():
+    """Progress resets the watchdog's idle timer, so the hold needs its own cap."""
+    from claude_code_bridge.active_run import BackgroundWaitTimeout
+
+    client = _FakeClient()
+    for frame in [_started("a"), _result("launched"), _progress("a"), _progress("a")]:
+        client._query.frames.put_nowait(frame)
+    run = _run(client, background_tasks=True)
+    run.background_wait_max_s = 0.0
+    with pytest.raises(BackgroundWaitTimeout, match="still running after 0s: a"):
+        await asyncio.wait_for(_consume_until_result(run), 2)
+
+
+@pytest.mark.anyio
+async def test_result_after_a_steer_over_background_ends_the_run():
+    """A user correction or ops quiesce steered during the wait must not stall
+    behind subagents that are still running."""
+    client = _FakeClient()
+    run = _run(client, background_tasks=True)
+    client._query.frames.put_nowait(_started("a"))
+    client._query.frames.put_nowait(_result("launched"))
+
+    async def steer_then_answer():
+        while run._background_result is None:
+            await asyncio.sleep(0)
+        run._note_steer_over_background(run._background_pending())
+        client._query.frames.put_nowait(_result("stopping now"))
+
+    task = asyncio.create_task(steer_then_answer())
+    got = _results(await asyncio.wait_for(_consume_until_result(run), 2))
+    await task
+    assert got == ["stopping now"]
+
+
+@pytest.mark.anyio
+async def test_steer_without_background_work_changes_nothing():
+    run = _run(_FakeClient(), background_tasks=True)
+    run._note_steer_over_background(run._background_pending())
+    assert run._steered_over_background is False

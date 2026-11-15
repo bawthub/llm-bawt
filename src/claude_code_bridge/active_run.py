@@ -85,6 +85,14 @@ _REJECTED = LIFECYCLE_REJECTED
 _STARTED = LIFECYCLE_STARTED
 # Mirrors claude_agent_sdk.types.TERMINAL_TASK_STATUSES.
 _TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "stopped", "killed"})
+# TASK-595: the longest a run may wait for background subagents after its
+# first result. Progress frames keep the watchdog's idle timer alive, so this
+# is the hard bound; a silent subagent hits the watchdog's idle timeout first.
+DEFAULT_BACKGROUND_WAIT_MAX_S = 900.0
+
+
+class BackgroundWaitTimeout(RuntimeError):
+    """Background subagents outlived the run's hard wait bound (TASK-595)."""
 
 # ``proof`` values on a published lifecycle (see the module docstring); the
 # two proven-not-run proofs are shared with the app (steer_contract).
@@ -236,6 +244,12 @@ class ClaudeActiveRun:
     _active_tasks: set[str] = field(default_factory=set)
     _background_wait: bool = False
     _background_result: Any = None
+    background_wait_max_s: float = DEFAULT_BACKGROUND_WAIT_MAX_S
+    _background_since: float | None = None
+    # A steer accepted while subagents run means someone wants this turn to
+    # end with a reply (a user correction, an ops quiesce): later results stop
+    # waiting for background work (TASK-595).
+    _steered_over_background: bool = False
     _completed: asyncio.Event = field(default_factory=asyncio.Event)
     _steer_timeout_s: float = field(default=8.0, repr=False)
     # command_uuid -> last lifecycle state for ``next`` injections.
@@ -317,6 +331,7 @@ class ClaudeActiveRun:
             item = interrupt_item or ""
             if not framed.strip() or (priority == "next" and not item.strip()):
                 raise RuntimeError(STEER_UNFRAMED)
+        over_background = self._background_pending()
         if priority == "next":
             if origin == "user" and (not message_id or _command_uuid(message_id) != message_id):
                 raise ValueError("User next steer requires a UUID message_id")
@@ -324,8 +339,9 @@ class ClaudeActiveRun:
                 framed, item, message_id, origin=origin, steer_rpc_id=steer_rpc_id,
                 images=tuple(images or ()),
             )
-            return
-        await self._steer_now(framed, images=tuple(images or ()))
+        else:
+            await self._steer_now(framed, images=tuple(images or ()))
+        self._note_steer_over_background(over_background)
 
     async def _steer_next(
         self,
@@ -467,6 +483,7 @@ class ClaudeActiveRun:
                 raise RuntimeError(prior)
             if self._completed.is_set():
                 raise RuntimeError("no_active_run")
+            over_background = self._background_pending()
             held = self._held.get(message_id)
             # TASK-1748: a system steer is a quiesce control row; bot steers
             # never interrupt a running tool (TASK-934).
@@ -587,6 +604,7 @@ class ClaudeActiveRun:
                     "escalation replayed: request=%s commands=%s",
                     self.request_id, self._describe(swept),
                 )
+                self._note_steer_over_background(over_background)
                 return "escalated"
             except BaseException as exc:
                 # If no replacement was accepted, do not wait indefinitely for
@@ -880,12 +898,22 @@ class ClaudeActiveRun:
         if origin_kind is None:
             if not self._active_tasks:
                 return "pass"
+            if self._steered_over_background:
+                # Someone steered during the wait: their reply ends the turn.
+                logger.info(
+                    "Steered result ends background wait: request=%s tasks=%s",
+                    self.request_id, sorted(self._active_tasks),
+                )
+                self._background_wait = False
+                return "own"
         elif origin_kind != "task-notification" or not self._background_wait:
             # A notification result before this run waited on anything is
             # stale work from an earlier run; keep ignoring it.
             return "pass"
         if self._active_tasks:
             self._background_wait = True
+            if self._background_since is None:
+                self._background_since = asyncio.get_running_loop().time()
             logger.info(
                 "Holding result for background tasks: request=%s tasks=%s",
                 self.request_id, sorted(self._active_tasks),
@@ -893,6 +921,25 @@ class ClaudeActiveRun:
             return "hold"
         self._background_wait = False
         return "own"
+
+    def _background_pending(self) -> bool:
+        return self.background_tasks and bool(self._active_tasks or self._background_result is not None)
+
+    def _note_steer_over_background(self, over_background: bool) -> None:
+        if over_background or self._background_pending():
+            self._steered_over_background = True
+
+    def _check_background_deadline(self) -> None:
+        """Fail the run once background work outlives the hard bound."""
+        if self._background_result is None or self._background_since is None:
+            return
+        waited = asyncio.get_running_loop().time() - self._background_since
+        if waited > self.background_wait_max_s:
+            self._take_background_result()
+            raise BackgroundWaitTimeout(
+                f"Background subagents still running after {self.background_wait_max_s:.0f}s: "
+                f"{', '.join(sorted(self._active_tasks)) or 'unknown'}"
+            )
 
     def _note_task_message(self, msg: Any) -> None:
         subtype = getattr(msg, "subtype", None)
@@ -962,6 +1009,7 @@ class ClaudeActiveRun:
         if handle is None:
             self.lifecycle_supported = False
             async for msg in self.client.receive_messages():
+                self._check_background_deadline()
                 if isinstance(msg, TaskNotificationMessage):
                     self._injected_notification_active = True
                 self._note_task_message(msg)
@@ -1005,6 +1053,7 @@ class ClaudeActiveRun:
             # a taken lifecycle frame having been recorded already.
             self._frames_taken += 1
             self._frame_progress.set()
+            self._check_background_deadline()
             if isinstance(data, dict) and data.get("type") == "system":
                 if data.get("subtype") == "init":
                     capabilities = data.get("capabilities")
