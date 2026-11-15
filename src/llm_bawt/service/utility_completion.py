@@ -1,6 +1,7 @@
 """Stateless utility completions shared by HTTP routes and in-process callers."""
 from __future__ import annotations
 
+import base64
 import time
 
 from fastapi import HTTPException
@@ -11,6 +12,9 @@ from .logging import get_service_logger
 from .schemas import RawCompletionRequest, RawCompletionResponse
 
 log = get_service_logger(__name__)
+
+MAX_UTILITY_IMAGES = 32
+MAX_UTILITY_IMAGE_BYTES = 20 * 1024 * 1024
 
 
 class BudgetUnavailable(Exception):
@@ -143,6 +147,7 @@ def _complete_utility(
 
     # Read after the call: a fallback client names its backup only once it served.
     box["served"] = lambda: served_model(client, model_alias)
+    images = ([request.image_url] if request.image_url else []) + request.image_urls
     try:
         start = time.perf_counter()
         from ..models.message import Message
@@ -151,11 +156,24 @@ def _complete_utility(
         if request.system:
             messages.append(Message(role="system", content=request.system))
         image_parts = None
-        if request.image_url:
-            from ..media.prompt_expansion import validate_reference_image
-            image_parts = [{"type": "image_url", "image_url": {
-                "url": validate_reference_image(request.image_url), "detail": "low",
-            }}]
+        if images:
+            from ..media.prompt_expansion import PromptExpansionError, validate_reference_image
+
+            if len(images) > MAX_UTILITY_IMAGES:
+                raise PromptExpansionError(f"At most {MAX_UTILITY_IMAGES} reference images are allowed")
+            image_parts = []
+            total_bytes = 0
+            for index, image in enumerate(images, start=1):
+                try:
+                    image = validate_reference_image(image)
+                except PromptExpansionError as error:
+                    raise PromptExpansionError(f"Reference image {index}: {error}") from error
+                total_bytes += len(base64.b64decode(image.partition(",")[2], validate=True))
+                if total_bytes > MAX_UTILITY_IMAGE_BYTES:
+                    raise PromptExpansionError(
+                        f"Reference images exceed the total decoded limit of {MAX_UTILITY_IMAGE_BYTES} bytes"
+                    )
+                image_parts.append({"type": "image_url", "image_url": {"url": image, "detail": "low"}})
         messages.append(Message(role="user", content=request.prompt, content_parts=image_parts))
         if timeout_seconds is None:
             response = client.query(
@@ -188,7 +206,7 @@ def _complete_utility(
                 raise HTTPException(status_code=502, detail=EMPTY_COMPLETION_DETAIL) from None
             status = 422 if isinstance(error, NotImplementedError) else 502
             raise HTTPException(status_code=status, detail="Recall completion unavailable") from None
-        if request.image_url:
+        if images:
             from ..media.prompt_expansion import PromptExpansionError
             if isinstance(error, PromptExpansionError):
                 raise HTTPException(status_code=400, detail=str(error)) from error

@@ -529,6 +529,9 @@ class RawCompletionRequest(BaseModel):
     prompt: str
     system: str | None = None
     image_url: str | None = None  # Validated data URI from the media prompt-expansion route
+    # Both fields are combined in order; utility completion validates every URI
+    # and rejects more than 32 images or 20 MiB decoded total before querying.
+    image_urls: list[str] = Field(default_factory=list)
     model: str | None = None  # Inherits global maintenance_model when omitted
     max_tokens: int = 500
     temperature: float = 0.7
