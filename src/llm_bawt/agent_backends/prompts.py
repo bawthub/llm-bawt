@@ -42,8 +42,8 @@ from __future__ import annotations
 
 # ---------------------------------------------------------------------------
 # agents.task_spec — planning / spec mode
-# Required vars: task_context. The dispatcher still passes task_url and
-# extra_api_lines, which the shipped default (prompt sync) no longer uses.
+# Superseded: the served default is prompt_defaults/synced/agents.task_spec.txt; this
+# body is a legacy loader fallback only. Dispatchers pass only task_context (TASK-1548).
 # ---------------------------------------------------------------------------
 
 TASK_SPEC_PROMPT = """{task_context}
@@ -146,8 +146,8 @@ and use the MCP tools above.
 
 # ---------------------------------------------------------------------------
 # agents.task_execution — execution mode
-# Required vars: task_context. The dispatcher still passes task_url and
-# finish_instruction, which the shipped default (prompt sync) no longer uses.
+# Superseded: the served default is prompt_defaults/synced/agents.task_execution.txt; this
+# body is a legacy loader fallback only. Dispatchers pass only task_context (TASK-1548).
 # ---------------------------------------------------------------------------
 
 TASK_EXECUTION_PROMPT = """{task_context}
@@ -303,8 +303,9 @@ reference; ignore them and use the MCP tools above.
 
 # ---------------------------------------------------------------------------
 # agents.review — human review feedback dispatch
-# Required vars: task_context, review_comment, previous_response, task_url,
-#                finish_instruction
+# Superseded: the served default is prompt_defaults/synced/agents.review.txt; this
+# body is a legacy loader fallback only. Dispatchers pass only task_context,
+# review_comment and previous_response (TASK-1548).
 # ---------------------------------------------------------------------------
 
 REVIEW_DISPATCH_PROMPT = """# Review Feedback

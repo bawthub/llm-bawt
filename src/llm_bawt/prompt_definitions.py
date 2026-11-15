@@ -591,8 +591,6 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
             "task_context",
             "review_comment",
             "previous_response",
-            "task_url",
-            "finish_instruction",
         ),
         loader=load_agents_review,
     ),
