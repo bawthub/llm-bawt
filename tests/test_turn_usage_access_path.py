@@ -78,21 +78,21 @@ def test_encode_freezes_owner_billing_without_auth_inference(key, auth, billing_
     assert "access_path" not in USAGE
 
 
-@pytest.mark.parametrize("snapshot", [
-    {"key": "openai-oauth", "vendor": "openai", "protocol": "responses"},  # Legacy, never backfilled.
-    {"key": "openai-oauth", "billing_mode": "metered"},  # Frozen metadata wins over today's owner.
-    {"key": "openai-oauth", "billing_mode": "unknown"},
-    {},
-    None,
+@pytest.mark.parametrize(("snapshot", "cost_kind"), [
+    ({"key": "openai-oauth", "vendor": "openai", "protocol": "responses"}, "none"),  # Legacy subscription.
+    ({"key": "openai-oauth", "billing_mode": "metered"}, "unknown"),  # Frozen metadata wins.
+    ({"key": "openai-oauth", "billing_mode": "unknown"}, "unknown"),
+    ({}, "unknown"),
+    (None, "unknown"),
 ])
-def test_encode_keeps_a_caller_supplied_snapshot(snapshot) -> None:
+def test_encode_keeps_a_caller_supplied_snapshot(snapshot, cost_kind) -> None:
     frozen = {**USAGE, "access_path": snapshot}
     with patch(
         "llm_bawt.service.turn_usage.access_path_snapshot",
         side_effect=AssertionError("replaced caller snapshot"),
     ):
         encoded = json.loads(encode_token_usage(frozen, model_ref="qwen-local@local-vllm", catalog=_catalog()))
-    assert encoded == {**frozen, "cost_kind": "unknown", "total_cost_usd": None}
+    assert encoded == {**frozen, "cost_kind": cost_kind, "total_cost_usd": None}
     assert "cost_kind" not in frozen
 
 

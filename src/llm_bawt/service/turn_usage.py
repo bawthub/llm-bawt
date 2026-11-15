@@ -5,6 +5,7 @@ import json
 import logging
 import math
 import time
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -19,15 +20,32 @@ def classify_turn_cost(usage: dict[str, Any]) -> dict[str, Any]:
     result = dict(usage)
     access = usage.get("access_path")
     access = access if isinstance(access, dict) else {}
+    billing_mode = access.get("billing_mode")
+    if "billing_mode" not in access:
+        # Older frozen snapshots name the serving path without its billing
+        # capability. Consult only that path's static owner, never auth or the
+        # bot's current model. Explicit frozen values remain authoritative.
+        from .providers.registry import access_path_billing_mode
+
+        billing_mode = access_path_billing_mode(access.get("key"))
     raw = usage.get("total_cost_usd")
-    cost = raw if isinstance(raw, (int, float)) and not isinstance(raw, bool) else None
-    if cost is not None and (not math.isfinite(cost) or cost < 0):
-        cost = None
+    cost = None
+    if isinstance(raw, (int, float, Decimal, str)) and not isinstance(raw, bool):
+        try:
+            amount = Decimal(str(raw))
+            if amount.is_finite() and amount >= 0:
+                candidate = float(amount)
+                # Persist a JSON number: both the live parser and recorded
+                # frontend cost require numbers, not Decimal's string fallback.
+                if math.isfinite(candidate) and (candidate > 0 or amount == 0):
+                    cost = candidate
+        except (InvalidOperation, ValueError, OverflowError):
+            pass
     if access.get("vendor") == "local" or access.get("engine_kind") in ("llama-cpp", "vllm", "ollama"):
         kind, cost = "none", 0.0
-    elif access.get("billing_mode") == "subscription":
+    elif billing_mode == "subscription":
         kind = "notional" if cost is not None else "none"
-    elif access.get("billing_mode") == "metered":
+    elif billing_mode == "metered":
         explicit = usage.get("cost_kind")
         if explicit in ("notional", "none", "unknown"):
             kind = explicit
