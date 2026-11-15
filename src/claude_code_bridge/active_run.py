@@ -1077,8 +1077,27 @@ class ClaudeActiveRun:
             self._refuse_new_command()
 
             self.steering_attempted = True
-            self._expected_interrupt_results += 1
-            self._pending_now_interrupts += 1
+            # TASK-595: a parent result held for idle background tasks has
+            # already ended its query, so the interrupt produces no second
+            # result for it. The replacement owns the next result; drop the
+            # obsolete fallback rather than arm a boundary nothing will fill.
+            # An active notification turn is still a live query and keeps the
+            # normal interrupt accounting.
+            idle_wait = (
+                self._background_result is not None
+                and not self._injected_notification_active
+            )
+            boundary_armed = not idle_wait
+            if boundary_armed:
+                self._expected_interrupt_results += 1
+                self._pending_now_interrupts += 1
+            else:
+                self._take_background_result()
+                self._background_wait = False
+                logger.info(
+                    "Now-steer replaces idle background wait: request=%s tasks=%s",
+                    self.request_id, sorted(self._active_tasks),
+                )
             interrupted = False
             loop = asyncio.get_running_loop()
             deadline = loop.time() + self._steer_timeout_s
@@ -1113,10 +1132,11 @@ class ClaudeActiveRun:
                 # interrupted result as though a continuation were coming. Once
                 # interrupt succeeded the old task is already dead, so tear down
                 # the client rather than leaving _handle_send parked forever.
-                self._expected_interrupt_results = max(
-                    0, self._expected_interrupt_results - 1
-                )
-                self._pending_now_interrupts = max(0, self._pending_now_interrupts - 1)
+                if boundary_armed:
+                    self._expected_interrupt_results = max(
+                        0, self._expected_interrupt_results - 1
+                    )
+                    self._pending_now_interrupts = max(0, self._pending_now_interrupts - 1)
                 if interrupted:
                     try:
                         await self._tear_down()
