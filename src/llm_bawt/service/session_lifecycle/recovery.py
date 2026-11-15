@@ -93,44 +93,53 @@ class NewSessionRecovery:
         params = {"id": delivery_id, "token": claim_token or "",
                   "status": status, "reason": reason[:4000]}
         row = conn.execute(text("""
-            UPDATE inter_bot_deliveries SET status='FAILED',
+            SELECT * FROM inter_bot_deliveries
+            WHERE id=:id AND status=:status AND claim_token=:token
+              AND transport_accepted_at IS NOT NULL FOR UPDATE
+        """), params).mappings().one_or_none()
+        if row is None:
+            return None
+        from ...inter_bot_delivery import InterBotDeliveryStore
+        from ...inter_bot_delivery_recovery import DeliveryLeaseRecovery
+
+        # Hold the delivery fence, then serialize with Stop's audit writer.
+        # Choose once before writing: a transient FAILED would also fire the
+        # batch-head settlement trigger and need its own misleading event.
+        turn = conn.execute(text("""
+            SELECT terminal_protocol_state FROM turn_logs
+            WHERE id=:turn FOR NO KEY UPDATE
+        """), {"turn": row["turn_id"]}).mappings().one_or_none()
+        user_stopped = (row["delivery_mode"] == "turn"
+                        and InterBotDeliveryStore._explicit_stop_requested(conn, row["turn_id"]))
+        settlement = "status='FAILED', last_error=:reason"
+        reason_code = "reset_ambiguous"
+        if user_stopped:
+            settlement, reason_code = InterBotDeliveryStore._stopped_turn_settlement(conn, row["turn_id"])
+        # Evidence is metadata-only, not a second terminal transition. Keep it
+        # separate because the shared started-Stop settlement also merges metadata.
+        conn.execute(text("""
+            UPDATE inter_bot_deliveries SET metadata_json=jsonb_set(
+                jsonb_set(metadata_json, '{new_session_ambiguous}', 'true'::jsonb),
+                '{new_session_ambiguous_reason}', to_jsonb(CAST(:reason AS text)))
+            WHERE id=:id
+        """), params)
+        row = conn.execute(text(f"""
+            UPDATE inter_bot_deliveries SET {settlement},
                 claim_token=NULL, claim_owner=NULL, lease_expires_at=NULL,
-                next_retry_at=NULL, last_error=:reason,
-                metadata_json=jsonb_set(
-                    jsonb_set(metadata_json, '{new_session_ambiguous}', 'true'::jsonb),
-                    '{new_session_ambiguous_reason}', to_jsonb(CAST(:reason AS text))),
-                updated_at=now()
+                next_retry_at=NULL, updated_at=now()
             WHERE id=:id AND status=:status AND claim_token=:token
               AND transport_accepted_at IS NOT NULL RETURNING *
-        """), params).mappings().one_or_none()
-        reason_code = "reset_ambiguous"
-        if row is not None:
-            from ...inter_bot_delivery import InterBotDeliveryStore
-            from ...inter_bot_delivery_recovery import DeliveryLeaseRecovery
-
-            # Serialize with Stop's audit writer before choosing a terminal.
-            # The delivery claim is already fenced by the UPDATE above.
-            turn = conn.execute(text("""
-                SELECT terminal_protocol_state FROM turn_logs
-                WHERE id=:turn FOR NO KEY UPDATE
-            """), {"turn": row["turn_id"]}).mappings().one_or_none()
-            if (row["delivery_mode"] == "turn"
-                    and InterBotDeliveryStore._explicit_stop_requested(conn, row["turn_id"])):
-                settlement, reason_code = InterBotDeliveryStore._stopped_turn_settlement(conn, row["turn_id"])
-                row = conn.execute(text(f"""
-                    UPDATE inter_bot_deliveries SET {settlement}
-                    WHERE id=:id RETURNING *
-                """), {"id": row["id"]}).mappings().one()
-                # Active protocol turns belong to their immutable terminal
-                # owner. Only legacy turns and unstarted reservations settle here.
-                if turn and turn["terminal_protocol_state"] in (None, "reserved"):
-                    DeliveryLeaseRecovery._settle_stopped_turn(conn, row["turn_id"])
-            else:
-                conn.execute(text("""
-                    UPDATE turn_logs SET status='error', end_reason='error',
-                        error_text=:reason, ended_at=COALESCE(ended_at, now())
-                    WHERE id=:turn AND ended_at IS NULL
-                      AND terminal_protocol_state IS NULL
-                """), {"turn": row["turn_id"], "reason": reason[:4000]})
+        """), params).mappings().one()
         DeliveryTransitionEvents.stage(conn, row, reason_code=reason_code)
-        return DeliveryRecord.from_mapping(row) if row else None
+        if user_stopped:
+            # Active protocol turns belong to their immutable terminal owner.
+            if turn and turn["terminal_protocol_state"] in (None, "reserved"):
+                DeliveryLeaseRecovery._settle_stopped_turn(conn, row["turn_id"])
+        else:
+            conn.execute(text("""
+                UPDATE turn_logs SET status='error', end_reason='error',
+                    error_text=:reason, ended_at=COALESCE(ended_at, now())
+                WHERE id=:turn AND ended_at IS NULL
+                  AND terminal_protocol_state IS NULL
+            """), {"turn": row["turn_id"], "reason": reason[:4000]})
+        return DeliveryRecord.from_mapping(row)

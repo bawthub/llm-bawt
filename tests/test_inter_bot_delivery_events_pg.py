@@ -6,6 +6,7 @@ one ``system_events`` row per (delivery, revision), after every domain write.
 
 from __future__ import annotations
 
+import json
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -25,7 +26,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("private_app_pg")
 
 
 @pytest.fixture
-def ledger(gated, monkeypatch):
+def ledger(gated, monkeypatch):  # noqa: F811  (imported pytest fixture)
     from llm_bawt.inter_bot_delivery import InterBotDeliveryStore
     from llm_bawt.utils.config import config
 
@@ -139,6 +140,47 @@ def test_a_started_stop_receipt_is_a_warning_not_a_success(ledger):
     assert stopped["payload"] == {"phase": "DELIVERED", "reason_code": "user_stop_after_start",
                                   "stopped_after_start": True}
     assert "stopped after it ran" in stopped["summary"]
+
+
+@pytest.mark.parametrize("case", ["unstarted", "started", "no_stop"])
+def test_ambiguous_reset_writes_and_stages_only_its_final_status(ledger, case):
+    from llm_bawt.service.session_lifecycle.recovery import NewSessionRecovery
+
+    record, _ = _send(ledger, ledger.bot(), ledger.bot())
+    claim = ledger.deliveries.claim_next(record.target_bot_id, claim_owner="fixture", steer_capable=False)
+    assert claim is not None and claim.id == record.id
+    engine = ledger.deliveries.engine
+    with engine.begin() as conn:
+        conn.execute(sa_text("""
+            UPDATE inter_bot_deliveries SET session_policy='reset_retain_history',
+                transport_accepted_at=now() WHERE id=:id
+        """), {"id": record.id})
+        conn.execute(sa_text("""
+            UPDATE turn_logs SET terminal_protocol_state=NULL, status='cancelling',
+                request_json=:audit, agent_request_id=:request WHERE id=:turn
+        """), {"turn": record.turn_id,
+               "audit": json.dumps({} if case == "no_stop" else {"abort_request": {"source": "chat_stop"}}),
+               "request": "fixture-started" if case == "started" else None})
+        before_revision = _row(conn, record.id)["revision"]
+    before_events = _events(ledger, record.id)
+    with engine.begin() as conn:
+        result = NewSessionRecovery.mark_ambiguous(
+            conn, delivery_id=record.id, claim_token=claim.claim_token,
+            reason="accepted reset ambiguous; never replay",
+        )
+    expected = {"unstarted": "CANCELLED", "started": "DELIVERED", "no_stop": "FAILED"}[case]
+    assert result.status == expected
+    # One metadata-only evidence merge and one terminal UPDATE, never an
+    # intermediate FAILED transition (which would also fire batch settlement).
+    assert result.revision == before_revision + 2
+    events = _events(ledger, record.id)
+    assert events[:-1] == before_events
+    assert len(events) == len(before_events) + 1
+    assert events[-1]["payload"]["phase"] == expected
+    assert events[-1]["payload"]["reason_code"] == {
+        "unstarted": "user_stop", "started": "user_stop_after_start", "no_stop": "reset_ambiguous",
+    }[case]
+    assert result.metadata["new_session_ambiguous"] is True
 
 
 def test_a_replayed_enqueue_appends_nothing_new(ledger):
