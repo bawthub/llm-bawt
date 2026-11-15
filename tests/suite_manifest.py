@@ -11,6 +11,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_isolated_recall_pg.py::",
     "test_recall_ledger_pg.py::",
     "test_recall_tool_args_pg.py::",
+    "test_recall_db_retry.py::test_real_statement_timeout_is_retried_on_postgres",
     "test_memory_consolidation_replacement_pg.py::",
     "test_summary_rebuild_safety_pg.py::",
     "test_bot_access_pg.py::",
