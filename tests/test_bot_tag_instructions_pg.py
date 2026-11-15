@@ -255,6 +255,102 @@ def test_a_key_shared_before_the_index_blocks_saves_and_startup_survives(tags, c
     assert ("role.fixture_role", "Mine.", "bot_tag", 1) in tags.prompts()
 
 
+def _legacy_shared_key(tags):
+    """Two tags sharing a key, as before the rule, so startup skips the unique index."""
+    from llm_bawt.bot_tags import catalog
+
+    with tags.rig.engine.begin() as conn:
+        conn.execute(text(f"DROP INDEX {catalog.PROMPT_KEY_INDEX}"))
+        conn.execute(text(
+            "INSERT INTO bot_tag_catalog (slug, name, kind, prompt_key, system) VALUES"
+            " ('fixture_old_a', 'Old A', 'role', 'role.fixture_old', FALSE),"
+            " ('fixture_old_b', 'Old B', 'role', 'role.fixture_old', FALSE)"))
+    with tags.rig.engine.begin() as conn:
+        catalog.ensure_schema(conn)
+        assert not catalog.owned(conn, catalog.PROMPT_KEY_INDEX, "i")
+
+
+def _holders(tags, key):
+    with tags.rig.engine.connect() as conn:
+        return list(conn.execute(text(
+            "SELECT slug FROM bot_tag_catalog WHERE prompt_key = :k ORDER BY slug"),
+            {"k": key}).scalars())
+
+
+def _waiting_on_advisory_lock(tags) -> bool:
+    with tags.rig.engine.connect() as conn:
+        return bool(conn.execute(text(
+            "SELECT EXISTS (SELECT 1 FROM pg_locks"
+            " WHERE locktype = 'advisory' AND NOT granted)")).scalar_one())
+
+
+@pytest.mark.parametrize("second", ["create", "patch"])
+def test_without_the_index_concurrent_claims_of_one_free_key_admit_one(tags, monkeypatch,
+                                                                         second):
+    """TASK-1468: the first claimant pauses after its free-key check and before
+    its write; the second claimant must wait for it, then get a 409."""
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    _legacy_shared_key(tags)
+    tags.client.post("/v1/bot-tags", json={"slug": "fixture_other", "name": "Other"})
+    store = BotTagStore(tags.rig.engine)
+    checked, release = threading.Event(), threading.Event()
+    require = BotTagStore._require_free_prompt_key
+
+    def pausing_require(conn, key, slug):
+        require(conn, key, slug)
+        if threading.current_thread().name.startswith("first"):
+            checked.set()
+            assert release.wait(30)
+
+    monkeypatch.setattr(BotTagStore, "_require_free_prompt_key", staticmethod(pausing_require))
+    key = "role.fixture_new"
+
+    def claim_second():
+        if second == "create":
+            return store.create_role("fixture_b", "B", prompt_key=key)
+        return store.update_role("fixture_other", {"prompt_key": key})
+
+    with ThreadPoolExecutor(1, thread_name_prefix="first") as first_pool, \
+         ThreadPoolExecutor(1, thread_name_prefix="second") as second_pool:
+        first = first_pool.submit(store.create_role, "fixture_a", "A", prompt_key=key)
+        assert checked.wait(30)
+        later = second_pool.submit(claim_second)
+        deadline = time.monotonic() + 10
+        while not later.done() and not _waiting_on_advisory_lock(tags):
+            assert time.monotonic() < deadline, "second claimant neither blocked nor finished"
+            time.sleep(0.02)
+        release.set()
+        assert first.result(30).prompt_key == key
+        with pytest.raises(TagConflict, match="belongs to bot tag 'fixture_a'"):
+            later.result(30)
+
+    assert _holders(tags, key) == ["fixture_a"]
+    assert _holders(tags, "role.fixture_old") == ["fixture_old_a", "fixture_old_b"]
+
+
+def test_the_index_is_built_once_the_operator_repairs_the_shared_key(tags):
+    from sqlalchemy.exc import IntegrityError
+
+    from llm_bawt.bot_tags import catalog
+
+    _legacy_shared_key(tags)
+    with tags.rig.engine.begin() as conn:
+        conn.execute(text(
+            "UPDATE bot_tag_catalog SET prompt_key = NULL WHERE slug = 'fixture_old_b'"))
+    with tags.rig.engine.begin() as conn:
+        catalog.ensure_schema(conn)
+        assert catalog.owned(conn, catalog.PROMPT_KEY_INDEX, "i")
+
+    with pytest.raises(IntegrityError, match=catalog.PROMPT_KEY_INDEX):
+        with tags.rig.engine.begin() as conn:
+            conn.execute(text(
+                "UPDATE bot_tag_catalog SET prompt_key = 'role.fixture_old'"
+                " WHERE slug = 'fixture_old_b'"))
+
+
 # --- the tag-context facts --------------------------------------------------------
 
 

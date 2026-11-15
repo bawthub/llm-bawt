@@ -417,9 +417,20 @@ class BotTagStore:
 
     @staticmethod
     def _require_free_prompt_key(conn, key: str | None, slug: str) -> None:
-        """Refuse a ``prompt_key`` that another tag already points at."""
+        """Refuse a ``prompt_key`` that another tag already points at.
+
+        Claims the key until the caller's transaction ends. While legacy
+        duplicates keep the unique index from being built, nothing else stops
+        two writers both seeing the key free and both committing it. The
+        check runs after the lock, so it sees any holder that committed first.
+        Callers take it after their role row lock and before writing, and
+        take at most one key lock per transaction, so key locks can't cycle.
+        """
         if key is None:
             return
+        conn.execute(text(
+            "SELECT pg_advisory_xact_lock(hashtext('bot-tag-prompt-key'), hashtext(:key))"
+        ), {"key": key})
         holder = conn.execute(text("""
             SELECT slug FROM bot_tag_catalog
             WHERE prompt_key = :key AND slug <> :slug ORDER BY slug LIMIT 1
