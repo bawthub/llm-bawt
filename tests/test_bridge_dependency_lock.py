@@ -44,7 +44,6 @@ KNOWN_DRIFT = {
     "pyjwt": ("2.15.0", "2.11.0"),  # transitive: mcp; not loaded by bridge code
     "python-multipart": ("0.0.32", "0.0.22"),  # transitive: mcp
     "rpds-py": ("2026.6.3", "0.30.0"),  # transitive: jsonschema/referencing (mcp)
-    "sqlalchemy": ("2.1.1", "2.0.48"),  # llm-bawt requirement; not loaded by bridge code
     "sse-starlette": ("3.4.11", "3.3.2"),  # transitive: mcp
     "typing-inspection": ("0.4.4", "0.4.2"),  # transitive: pydantic/fastapi/mcp
     "websockets": ("17.1", "16.0"),  # DIRECT: imported by bridge code
@@ -141,6 +140,7 @@ def test_aligned_packages_cannot_drift_again():
         "jiter": "0.17.0",
         "redis": "8.1.0",
         "hiredis": "3.4.2",
+        "sqlalchemy": "2.1.1",
     }.items():
         assert name not in KNOWN_DRIFT
         pins = f"claude-agent-sdk==0.2.160\n{name}=={version}\n"
