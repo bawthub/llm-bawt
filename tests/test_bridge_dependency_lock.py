@@ -34,7 +34,6 @@ KNOWN_DRIFT = {
     "attrs": ("26.1.0", "25.4.0"),  # transitive: jsonschema/referencing (mcp)
     "certifi": ("2026.7.22", "2026.2.25"),  # transitive: httpx/httpcore TLS roots
     "fastapi": ("0.141.1", "0.135.1"),  # DIRECT: imported by bridge code
-    "openai": ("3.19.2", "2.24.0"),  # DIRECT: 3.x failed app acceptance; deferred to TASK-2339
     "packaging": ("26.3", "26.0"),  # transitive: openai-codex; not loaded by bridge code
     "pillow": ("12.3.0", "12.1.1"),  # llm-bawt requirement; not loaded by bridge code
     "psycopg2-binary": ("2.9.13", "2.9.11"),  # llm-bawt requirement; not loaded by bridge code
@@ -150,11 +149,10 @@ def test_aligned_packages_cannot_drift_again():
                    for p in drift_problems(pins, lock.replace(version, "0.0.0")))
 
 
-def test_deferred_openai_major_has_an_exact_exception():
+def test_openai_major_is_aligned_with_no_exception():
+    assert "openai" not in KNOWN_DRIFT
     pins = "claude-agent-sdk==0.2.160\nopenai==3.19.2\n"
-    lock = _lock(**{"claude-agent-sdk": "0.2.160", "openai": "2.24.0"})
+    lock = _lock(**{"claude-agent-sdk": "0.2.160", "openai": "3.19.2"})
     assert not any(p.startswith("openai:") for p in drift_problems(pins, lock))
-    assert any(p.startswith("openai:") for p in drift_problems(
-        pins, lock.replace("2.24.0", "2.25.0")))
-    assert any(p.startswith("openai:") and "drop it" in p for p in drift_problems(
-        pins, lock.replace("2.24.0", "3.19.2")))
+    assert any(p.startswith("openai:") and "not in KNOWN_DRIFT" in p
+               for p in drift_problems(pins, lock.replace("3.19.2", "2.24.0")))
