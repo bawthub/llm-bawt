@@ -186,6 +186,30 @@ def test_clearing_an_isolation_override_rechecks_the_shared_default(workspace, c
         "UV_PROJECT_ENVIRONMENT": str(workspace[1] / ".venv")}) is not None
 
 
+@pytest.mark.parametrize("prefix", [
+    "timeout 120",
+    "/usr/bin/timeout 5m",
+    "timeout --signal TERM --kill-after 5s 120",
+    "timeout -s KILL -k 5s 120",
+    "timeout --signal=TERM --kill-after=5s 120",
+    "timeout --foreground -- 120",
+    "env timeout 120 bash -c",
+])
+def test_timeout_wrappers_cannot_start_shared_uv(workspace, prefix):
+    assert decide(workspace, f"{prefix} 'uv run pytest tests/test_x.py'"
+                  if prefix.endswith("-c") else f"{prefix} uv run pytest tests/test_x.py") is not None
+    assert decide(workspace, f"{prefix} 'uv run pytest tests/test_x.py'"
+                  if prefix.endswith("-c") else f"{prefix} uv run pytest tests/test_x.py",
+                  isolated=True) is None
+
+
+def test_pushd_popd_and_subshell_directory_stack(workspace):
+    assert decide(workspace, "pushd {shared}; uv sync", isolated=True) is not None
+    assert decide(workspace, "pushd {shared}; popd; uv sync", isolated=True) is None
+    assert decide(workspace, "pushd {task}; popd; uv sync") is not None
+    assert decide(workspace, "(pushd {shared}); uv sync", isolated=True) is None
+
+
 def test_does_not_apply_the_bridge_rule_on_the_host(workspace):
     assert decide(workspace, "uv sync", extra={"BAWT_AGENT_BRIDGE": "0"}) is None
     assert decide(workspace, "uv sync", extra={"BAWT_AGENT_BRIDGE": "0",

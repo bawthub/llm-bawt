@@ -154,13 +154,14 @@ def _unsafe(command: str, cwd: Path, env: Mapping[str, str], shared: Path,
         return False  # Bash rejects malformed quoting before it can run uv.
     state = dict(env)
     scopes = []
+    directories = []
     for segment in segments:
         if segment == ["("]:
-            scopes.append((cwd, dict(state)))
+            scopes.append((cwd, dict(state), list(directories)))
             continue
         if segment == [")"]:
             if scopes:
-                cwd, state = scopes.pop()
+                cwd, state, directories = scopes.pop()
             continue
         words, local = list(segment), dict(state)
         while words and (words[0] in _RESERVED_PREFIXES or _ASSIGNMENT.match(words[0])):
@@ -181,7 +182,7 @@ def _unsafe(command: str, cwd: Path, env: Mapping[str, str], shared: Path,
             for word in words[1:]:
                 state.pop(word, None)
             continue
-        while words and words[0].rsplit("/", 1)[-1] in _COMMAND_PREFIXES:
+        while words and words[0].rsplit("/", 1)[-1] in _COMMAND_PREFIXES | {"timeout"}:
             wrapper = words.pop(0).rsplit("/", 1)[-1]
             while words and (_ASSIGNMENT.match(words[0]) or words[0].startswith("-")):
                 word = words.pop(0)
@@ -194,11 +195,24 @@ def _unsafe(command: str, cwd: Path, env: Mapping[str, str], shared: Path,
                     value = words.pop(0)
                     if wrapper == "env" and word in {"-u", "--unset"}:
                         local.pop(value, None)
+                elif wrapper == "timeout" and words and word in {
+                        "-s", "--signal", "-k", "--kill-after"}:
+                    words.pop(0)
+            if wrapper == "timeout" and words:
+                words.pop(0)  # duration is positional, before the wrapped program
         if not words:
             continue
         program = words[0].rsplit("/", 1)[-1]
         if program == "cd":
             cwd = _path(words[-1] if len(words) > 1 else "~", cwd, local)
+        elif program == "pushd":
+            if len(words) > 1:
+                directories.append(cwd)
+                cwd = _path(words[-1], cwd, local)
+            elif directories:
+                cwd, directories[-1] = directories[-1], cwd
+        elif program == "popd" and directories:
+            cwd = directories.pop()
         elif program in {"source", "."} and len(words) > 1:
             activation = _path(words[1], cwd, local)
             if activation.name == "activate" and activation.parent.name == "bin":
