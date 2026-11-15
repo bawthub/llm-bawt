@@ -31,7 +31,6 @@ MUST_MATCH = frozenset({"claude-agent-sdk"})
 KNOWN_DRIFT = {
     "annotated-doc": ("0.0.5", "0.0.4"),  # transitive: fastapi
     "annotated-types": ("0.8.0", "0.7.0"),  # transitive: pydantic
-    "anyio": ("4.15.1", "4.12.1"),  # DIRECT: imported by bridge code
     "attrs": ("26.1.0", "25.4.0"),  # transitive: jsonschema/referencing (mcp)
     "certifi": ("2026.7.22", "2026.2.25"),  # transitive: httpx/httpcore TLS roots
     "cffi": ("2.1.1", "2.0.0"),  # transitive: cryptography
@@ -52,8 +51,6 @@ KNOWN_DRIFT = {
     "sqlalchemy": ("2.1.1", "2.0.48"),  # llm-bawt requirement; not loaded by bridge code
     "sse-starlette": ("3.4.11", "3.3.2"),  # transitive: mcp
     "typing-inspection": ("0.4.4", "0.4.2"),  # transitive: pydantic/fastapi/mcp
-    "typing-extensions": ("4.16.0", "4.15.0"),  # transitive: many
-    "uvicorn": ("0.54.0", "0.41.0"),  # DIRECT: imported by bridge code
     "websockets": ("17.1", "16.0"),  # DIRECT: imported by bridge code
 }
 
@@ -118,21 +115,36 @@ def _lock(**packages: str) -> str:
 
 
 def test_detector_catches_each_kind_of_drift():
-    lock = _lock(**{"claude-agent-sdk": "0.2.160", "anyio": "4.12.1", "redis": "8.1.0"})
-    pins = "claude-agent-sdk==0.2.160\nanyio==4.15.1\nredis==8.1.0\n"
+    lock = _lock(**{"claude-agent-sdk": "0.2.160", "fastapi": "0.135.1", "redis": "8.1.0"})
+    pins = "claude-agent-sdk==0.2.160\nfastapi==0.141.1\nredis==8.1.0\n"
     known = drift_problems(pins, lock)
-    assert all("anyio" not in p for p in known)  # recorded drift is accepted
+    assert all("fastapi" not in p for p in known)  # recorded drift is accepted
     assert any("annotated-doc" in p and "no longer" in p for p in known)
 
     assert any(p.startswith("claude-agent-sdk:") for p in drift_problems(
         pins.replace("0.2.160", "0.2.172"), lock))
     assert any(p.startswith("redis:") and "KNOWN_DRIFT" in p for p in drift_problems(
         pins.replace("redis==8.1.0", "redis==8.2.0"), lock))
-    assert any(p.startswith("anyio:") for p in drift_problems(
-        pins.replace("anyio==4.15.1", "anyio==4.16.0"), lock))
+    assert any(p.startswith("fastapi:") for p in drift_problems(
+        pins.replace("fastapi==0.141.1", "fastapi==0.142.0"), lock))
     # A recorded package that leaves the lock is stale too.
-    assert any(p.startswith("anyio:") and "uv.lock" in p for p in drift_problems(
+    assert any(p.startswith("fastapi:") and "uv.lock" in p for p in drift_problems(
         pins, _lock(**{"claude-agent-sdk": "0.2.160", "redis": "8.1.0"})))
     # Drift that disappears must be removed from the table.
     assert any(p.startswith("redis:") and "drop it" in p for p in drift_problems(
         pins.replace("redis==8.1.0", "redis==7.2.1"), lock.replace("8.1.0", "7.2.1")))
+
+
+def test_aligned_minor_packages_cannot_drift_again():
+    for name, version in {
+        "anyio": "4.15.1",
+        "uvicorn": "0.54.0",
+        "typing-extensions": "4.16.0",
+        "httptools": "0.9.0",
+    }.items():
+        assert name not in KNOWN_DRIFT
+        pins = f"claude-agent-sdk==0.2.160\n{name}=={version}\n"
+        lock = _lock(**{"claude-agent-sdk": "0.2.160", name: version})
+        assert not any(p.startswith(f"{name}:") for p in drift_problems(pins, lock))
+        assert any(p.startswith(f"{name}:") and "not in KNOWN_DRIFT" in p
+                   for p in drift_problems(pins, lock.replace(version, "0.0.0")))
