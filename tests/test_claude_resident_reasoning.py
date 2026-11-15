@@ -44,11 +44,22 @@ def test_missing_details_on_any_main_request_falls_back_to_estimate():
     assert p.thinking_by_message() == {"msg_a": 100}
 
 
-def _assistant(msg_id, *, thinking=True, sidechain=False):
+def _assistant(msg_id, *, thinking=True, sidechain=False, uuid=None, parent=None):
     content = ([{"type": "thinking", "thinking": "", "signature": "sig"}] if thinking else []) + [
         {"type": "text", "text": "hi"}
     ]
-    return {"type": "assistant", "isSidechain": sidechain, "message": {"id": msg_id, "content": content}}
+    row = {"type": "assistant", "isSidechain": sidechain, "message": {"id": msg_id, "content": content}}
+    if uuid is not None:
+        row.update(uuid=uuid, parentUuid=parent)
+    return row
+
+
+def _user(uuid, parent=None):
+    return {"type": "user", "uuid": uuid, "parentUuid": parent, "message": {"role": "user", "content": "go"}}
+
+
+def _boundary(**metadata):
+    return {"type": "system", "subtype": "compact_boundary", "uuid": "b", "compactMetadata": metadata}
 
 
 @pytest.fixture
@@ -74,6 +85,79 @@ def test_resident_reasoning_sums_ledger_after_last_compaction(transcript):
     reasoning_ledger.record_thinking("sess", {"msg_old": 500, "msg_1": 260})
     reasoning_ledger.record_thinking("sess", {"msg_3": 40, "msg_sub": 7})
     assert reasoning_ledger.resident_reasoning("sess") == (300, True)
+
+
+def test_compaction_keeps_thinking_rows_listed_in_preserved_messages(transcript):
+    transcript(
+        _user("u1"),
+        _assistant("msg_dropped", uuid="a1", parent="u1"),
+        _user("u2", "a1"),
+        _assistant("msg_kept", uuid="a2", parent="u2"),
+        _assistant("msg_kept", uuid="a3", parent="a2"),  # second block row, same message
+        _boundary(preservedMessages={"uuids": ["u2", "a2", "a3"]}),
+        _assistant("msg_new", uuid="a4", parent="b"),
+    )
+    reasoning_ledger.record_thinking("sess", {"msg_dropped": 900, "msg_kept": 70, "msg_new": 5})
+    assert reasoning_ledger.resident_reasoning("sess") == (75, True)
+
+
+def test_compaction_keeps_legacy_preserved_segment_walked_by_parent(transcript):
+    transcript(
+        _assistant("msg_dropped", uuid="a1"),
+        _user("u2", "a1"),
+        _assistant("msg_kept", uuid="a2", parent="u2"),
+        _assistant("msg_tail", uuid="a3", parent="a2"),
+        _boundary(preservedSegment={"headUuid": "u2", "tailUuid": "a3", "anchorUuid": "x"}),
+    )
+    reasoning_ledger.record_thinking("sess", {"msg_dropped": 900, "msg_kept": 70, "msg_tail": 3})
+    assert reasoning_ledger.resident_reasoning("sess") == (73, True)
+
+
+def test_preserved_text_row_keeps_its_messages_thinking_row(transcript):
+    transcript(
+        _assistant("msg_kept", uuid="a1"),  # thinking block row
+        _assistant("msg_kept", thinking=False, uuid="a2", parent="a1"),  # text block row
+        _boundary(preservedMessages={"uuids": ["a2"]}),
+    )
+    reasoning_ledger.record_thinking("sess", {"msg_kept": 70})
+    assert reasoning_ledger.resident_reasoning("sess") == (70, True)
+
+
+def test_row_parented_across_the_boundary_keeps_its_parent(transcript):
+    transcript(
+        _assistant("msg_parent", uuid="a1"),
+        _assistant("msg_gone", uuid="a0"),
+        _boundary(),
+        _user("u2", "a1"),
+    )
+    reasoning_ledger.record_thinking("sess", {"msg_parent": 40, "msg_gone": 900})
+    assert reasoning_ledger.resident_reasoning("sess") == (40, True)
+
+
+def test_compaction_without_preservation_drops_everything_before_it(transcript):
+    transcript(
+        _assistant("msg_old", uuid="a1"),
+        _boundary(trigger="auto", preTokens=150000),
+        _assistant("msg_new", uuid="a2", parent="b"),
+    )
+    reasoning_ledger.record_thinking("sess", {"msg_old": 900, "msg_new": 8})
+    assert reasoning_ledger.resident_reasoning("sess") == (8, True)
+
+
+@pytest.mark.parametrize("metadata", [
+    {"preservedMessages": {"uuids": "a1"}},
+    {"preservedSegment": {"headUuid": "a1"}},
+    {"preservedSegment": {"headUuid": "a1", "tailUuid": "missing"}},
+    {"preservedSegment": {"headUuid": "not-an-ancestor", "tailUuid": "a1"}},
+])
+def test_unresolvable_preservation_marks_reasoning_incomplete(transcript, metadata):
+    transcript(
+        _assistant("msg_old", uuid="a1"),
+        _boundary(**metadata),
+        _assistant("msg_new", uuid="a2", parent="b"),
+    )
+    reasoning_ledger.record_thinking("sess", {"msg_old": 900, "msg_new": 8})
+    assert reasoning_ledger.resident_reasoning("sess") == (8, False)
 
 
 def test_resident_reasoning_flags_untracked_thinking_as_incomplete(transcript):
