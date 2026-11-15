@@ -86,7 +86,7 @@ def _server_client(monkeypatch, value):
         return io.BytesIO(json.dumps(wire).encode())
 
     monkeypatch.setattr("urllib.request.urlopen", urlopen)
-    return MemoryClient(SimpleNamespace(), bot_id="public_fixture", user_id="nick",
+    return MemoryClient(SimpleNamespace(), bot_id="public_fixture", user_id="operator",
                         server_url="http://mcp.invalid"), calls
 
 
@@ -125,7 +125,7 @@ def test_moved_transport_still_raises_tool_errors(monkeypatch):
 
 
 def test_moved_methods_keep_embedded_backend_provisioning():
-    client = MemoryClient(SimpleNamespace(), bot_id="public_fixture", user_id="nick")
+    client = MemoryClient(SimpleNamespace(), bot_id="public_fixture", user_id="operator")
     backend = Mock()
     backend.ignore_recent_messages.return_value = 2
     backend.stats.return_value = {"ok": True}
@@ -137,7 +137,7 @@ def test_moved_methods_keep_embedded_backend_provisioning():
     storage.get_backend.assert_called_with("public_fixture")
     assert client.ignore_recent_messages(2) == 2
     storage.get_backend.assert_called_with("public_fixture", provision_schema=True)
-    backend.ignore_recent_messages.assert_called_with(count=2, user_id="nick")
+    backend.ignore_recent_messages.assert_called_with(count=2, user_id="operator")
 
 
 def test_count_forget_requires_a_user_bound_client():

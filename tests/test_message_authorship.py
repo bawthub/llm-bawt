@@ -13,9 +13,9 @@ from llm_bawt.service.inter_bot_claims import validate_inter_bot_claim
 
 
 def test_author_reference_normalizes_identity() -> None:
-    assert AuthorReference.user(" Nick ").to_dict() == {
+    assert AuthorReference.user(" Operator ").to_dict() == {
         "entity_type": "user",
-        "entity_id": "nick",
+        "entity_id": "operator",
         "status": "canonical",
     }
     assert AuthorReference.bot("SNARK").entity_id == "snark"
@@ -40,7 +40,7 @@ class StubLegacyResolver(LegacyAuthorResolver):
 
     def _session_users(self, session_ids: list[str]) -> dict[str, str]:
         assert session_ids == ["thread-human", "thread-assistant"]
-        return {"thread-human": "nick", "thread-assistant": "nick"}
+        return {"thread-human": "operator", "thread-assistant": "operator"}
 
 
 def test_legacy_resolution_never_parses_content_or_defaults_unknown_to_viewer() -> None:
@@ -80,13 +80,13 @@ def test_legacy_resolution_never_parses_content_or_defaults_unknown_to_viewer() 
 
     assert result["canonical"] == AuthorReference.bot("loopy")
     assert result["delivery"] == AuthorReference("bot", "snark", "legacy")
-    assert result["human"] == AuthorReference("user", "nick", "legacy")
+    assert result["human"] == AuthorReference("user", "operator", "legacy")
     assert result["assistant"] == AuthorReference("bot", "loopy", "legacy")
     assert result["unknown"] == AuthorReference.unknown()
 
 
 def test_validated_inter_bot_claim_returns_durable_author() -> None:
-    record = SimpleNamespace(author=AuthorReference.user("Nick"))
+    record = SimpleNamespace(author=AuthorReference.user("Operator"))
 
     class Store:
         def validate_claim(self, **kwargs):
@@ -112,7 +112,7 @@ def test_validated_inter_bot_claim_returns_durable_author() -> None:
         inter_bot_seed_session_id=None,
     )
 
-    assert validate_inter_bot_claim(service, request) == AuthorReference.user("nick")
+    assert validate_inter_bot_claim(service, request) == AuthorReference.user("operator")
 
 
 def test_untrusted_request_without_claim_cannot_supply_correlation_authority() -> None:

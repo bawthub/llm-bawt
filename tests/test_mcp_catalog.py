@@ -125,7 +125,7 @@ async def test_catalog_token_budgets():
     encoder = tiktoken.get_encoding("o200k_base")
     tools = await mcp.list_tools()
     descriptions = [len(encoder.encode(tool.description or "")) for tool in tools]
-    # TASK-2121: Nick required his "finished" definition verbatim in
+    # TASK-2121: the user required their "finished" definition verbatim in
     # ops_quiesce_ack's description, so that one tool has its own cap.
     exempt = {"ops_quiesce_ack": 303}
     for tool, size in zip(tools, descriptions):
@@ -140,8 +140,8 @@ async def test_catalog_token_budgets():
     # contract stated in-band so agents don't need the reference): 3,680 (+135).
     # TASK-1323: messages_find (cards, facets, handle paging, status set in-band
     # so agents don't need the reference to page or narrow): 3,734 (+54).
-    # TASK-1368: Nick's BLOCKED rule in-band on tasks_create, pointer on
-    # tasks_update (misused BLOCKED pages Nick): 3,797 (+63).
+    # TASK-1368: the user's BLOCKED rule in-band on tasks_create, pointer on
+    # tasks_update (misused BLOCKED pages the user): 3,797 (+63).
     # TASK-1374: visually confirmable REVIEW vs coordinator-verified closure:
     # 3,819 (+22).
     # TASK-1380: tasks_list names the user's focus list and where to change it:
@@ -193,7 +193,7 @@ async def test_catalog_token_budgets():
     # TASK-1151: ops_list_operations slug= detail (compact list rows) (+3).
     # TASK-2118: self_house (a bot moves itself into a free house or out of its
     # own; the occupied/no-pin rules in-band): 4,606 (+44).
-    # TASK-2121: ops_quiesce_ack carries Nick's verbatim "finished"/"stopping"
+    # TASK-2121: ops_quiesce_ack carries the user's verbatim "finished"/"stopping"
     # definition (he required it in the description): 4,878 (+272).
     # TASK-2115: WAITING joins the status enum on tasks_list (+1).
     # TASK-1343: steps_set says an empty list needs clear=true (+2).
@@ -309,7 +309,7 @@ async def test_catalog_token_budgets():
     # TASK-2116: bots_list_available location filter (+46), measured 17,452.
     # TASK-2118: self_house (action enum, optional house): 17,568 (+116). One
     # self-only tool replaces a coordinator PATCHing the bot's house field.
-    # TASK-2121: ops_quiesce_ack "finished" status with Nick's verbatim
+    # TASK-2121: ops_quiesce_ack "finished" status with the user's verbatim
     # definition in its description: 17,898 (+330). Claude bots load the
     # schema only when a quiesce asks them to ack.
     # TASK-2115: waiting_on/waiting_reason on create/update and tasks_board
@@ -461,7 +461,7 @@ async def test_task_and_step_status_guidance_uses_canonical_values():
 
 @pytest.mark.anyio
 async def test_blocked_definition_reaches_task_write_tools():
-    # TASK-1368: Nick's BLOCKED definition rides every task-writing surface.
+    # TASK-1368: the user's BLOCKED definition rides every task-writing surface.
     from llm_bawt.mcp_server.task_step_types import BLOCKED_DEFINITION
     from llm_bawt.mcp_server.task_tools import create_task, update_task
 

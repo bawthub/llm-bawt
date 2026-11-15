@@ -53,7 +53,7 @@ def _req(**over):
     base = dict(
         request_id="tuid-1",
         bot_id="snark",
-        user_id="nick",
+        user_id="operator",
         turn_id="turn-1",
         backend="claude-code",
         tool_name="make rebuild-prod",

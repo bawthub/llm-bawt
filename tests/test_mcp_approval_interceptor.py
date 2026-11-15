@@ -29,7 +29,7 @@ def _turn_values():
         "turn_id": "turn-" + "a" * 32,
         "trigger_message_id": str(uuid4()),
         "bot_id": "snark",
-        "user_id": "nick",
+        "user_id": "operator",
     }
 
 
@@ -111,7 +111,7 @@ def _stamped_args(capability):
         tool_input=clean,
         tool_use_id="toolu_123",
         agent_request_id="req_123",
-        session_key="snark:nick",
+        session_key="snark:operator",
         backend="claude-code",
     )
     return {**clean, MCP_CALL_CONTEXT_KEY: stamp}
@@ -136,7 +136,7 @@ def _call_codex(mcp, capability, args, *, request_id="rpc-42", envelope=None):
     envelope = envelope or mint_mcp_request_context(
         capability=capability,
         agent_request_id="req_codex",
-        session_key="codex:nick",
+        session_key="codex:operator",
         backend="codex",
     )
     capability_binding = task_association.set_current_task_turn_capability(capability)
@@ -235,7 +235,7 @@ def test_ops_run_schema_violation_files_no_card(capability, clean):
     stamp = mint_mcp_call_context(
         capability=capability, tool_name="ops_run", tool_input=clean,
         tool_use_id="toolu_bad", agent_request_id="req_bad",
-        session_key="snark:nick", backend="claude-code")
+        session_key="snark:operator", backend="claude-code")
     result = _call(mcp, capability, {**clean, MCP_CALL_CONTEXT_KEY: stamp})
     assert result.structured_content["status"] == "args_invalid" and result.structured_content["is_error"] is True
     assert store.rows == [] and order == [] and executed == [] and prepared == []
@@ -275,7 +275,7 @@ def test_routing_approval_displays_exact_target_image_and_delta(capability):
     stamp = mint_mcp_call_context(
         capability=capability, tool_name="ops_run", tool_input=clean,
         tool_use_id="toolu_routing", agent_request_id="req_routing",
-        session_key="snark:nick", backend="claude-code",
+        session_key="snark:operator", backend="claude-code",
     )
     result = _call(mcp, capability, {**clean, MCP_CALL_CONTEXT_KEY: stamp})
     assert result.structured_content["status"] == "approval_required" and not executed
@@ -297,7 +297,7 @@ def test_config_approval_displays_names_mounts_and_enum_values_only(capability):
     stamp = mint_mcp_call_context(
         capability=capability, tool_name="ops_run", tool_input=clean,
         tool_use_id="toolu_config", agent_request_id="req_config",
-        session_key="snark:nick", backend="claude-code",
+        session_key="snark:operator", backend="claude-code",
     )
     result = _call(mcp, capability, {**clean, MCP_CALL_CONTEXT_KEY: stamp})
     assert result.structured_content["status"] == "approval_required" and not executed
@@ -335,9 +335,9 @@ def test_codex_require_persists_routable_context_once_per_protocol_call(capabili
     _, persisted = store.rows[0]
     assert persisted["backend"] == "codex"
     assert persisted["bot_id"] == "snark"
-    assert persisted["user_id"] == "nick"
+    assert persisted["user_id"] == "operator"
     assert persisted["trigger_message_id"]
-    assert persisted["session_key"] == "codex:nick"
+    assert persisted["session_key"] == "codex:operator"
     assert persisted["tool_use_id"].startswith("mcp-")
     assert persisted["continuation_capable"] is True
     assert executed == []
@@ -354,7 +354,7 @@ def test_contextual_call_missing_or_forged_header_executes_nothing(capability):
     forged = mint_mcp_request_context(
         capability="wrong",
         agent_request_id="req_codex",
-        session_key="codex:nick",
+        session_key="codex:operator",
         backend="codex",
     )
     result = _call_codex(
@@ -373,7 +373,7 @@ def test_codex_context_missing_capability_or_invalid_turn_executes_nothing(capab
     envelope = mint_mcp_request_context(
         capability=capability,
         agent_request_id="req_codex",
-        session_key="codex:nick",
+        session_key="codex:operator",
         backend="codex",
     )
     order, executed = [], []

@@ -70,10 +70,10 @@ def _mcp_req(**over):
         tool_use_id="toolu_01ABC",
         mcp_server="bawthub",
         bot_id="snark",
-        user_id="nick",
+        user_id="operator",
         turn_id="turn-1",
         trigger_message_id="message-1",
-        session_key="snark:nick",
+        session_key="snark:operator",
         backend="claude-code",
         tool_name="ops_run",
         tool_arguments={"operation": "llm-bawt.restart-app", "args": {}},
@@ -170,22 +170,22 @@ def test_seed_defaults_preserves_operator_edited_ops_rule():
     store.seed_defaults()
     edited = store.update(
         "seed-ops-run-require-approval",
-        {"enabled": False, "approval_prompt": "Nick changed this"},
-        actor="nick",
+        {"enabled": False, "approval_prompt": "Operator changed this"},
+        actor="operator",
     )
     assert edited is not None
     assert store.seed_defaults() == 0
     preserved = store.get("seed-ops-run-require-approval")
     assert preserved is not None
     assert preserved.enabled is False
-    assert preserved.approval_prompt == "Nick changed this"
+    assert preserved.approval_prompt == "Operator changed this"
     assert preserved.version == 2
-    assert preserved.updated_by == "nick"
+    assert preserved.updated_by == "operator"
 
 
 def test_seed_defaults_adds_missing_ops_rule_to_existing_policy_table():
     store = _store()
-    store.create({"tool_name": "Bash", "matcher_type": "always"}, actor="nick")
+    store.create({"tool_name": "Bash", "matcher_type": "always"}, actor="operator")
     assert store.seed_defaults() == 14
     assert store.get("seed-ops-run-require-approval") is not None
     assert store.get("seed-ops-run-bawthub-reconcile-prod-routing") is not None
@@ -541,7 +541,7 @@ def test_existing_record_request_still_defaults_to_kind_harness():
     row = store.record_request(
         request_id="tuid-legacy",
         bot_id="snark",
-        user_id="nick",
+        user_id="operator",
         turn_id="turn-1",
         backend="claude-code",
         tool_name="Bash",
@@ -602,7 +602,7 @@ def test_different_args_or_caller_are_not_duplicates():
     assert other_args.status == REQ_PENDING
     other_bot = store.record_mcp_request(**_mcp_req(
         request_id="req-mcp-3", tool_use_id="toolu_03", turn_id="turn-3",
-        bot_id="caid", session_key="caid:nick"))
+        bot_id="caid", session_key="caid:operator"))
     assert other_bot.status == REQ_PENDING
 
 

@@ -39,8 +39,8 @@ def _ready_row(store, *, tool_name="ops_run", result=None):
     caller_context = {
         "session_id": "session-1", "turn_id": "turn-1",
         "trigger_message_id": "message-1", "bot_id": "snark",
-        "user_id": "nick", "issued_at": 1,
-        "agent_request_id": "agent-request-1", "session_key": "snark:nick",
+        "user_id": "operator", "issued_at": 1,
+        "agent_request_id": "agent-request-1", "session_key": "snark:operator",
         "backend": "claude-code", "tool_use_id": "toolu-1",
     }
     row = store.record_mcp_request(
@@ -48,10 +48,10 @@ def _ready_row(store, *, tool_name="ops_run", result=None):
         tool_use_id="toolu-1",
         mcp_server="bawthub",
         bot_id="snark",
-        user_id="nick",
+        user_id="operator",
         turn_id="turn-1",
         trigger_message_id="message-1",
-        session_key="snark:nick",
+        session_key="snark:operator",
         backend="claude-code",
         tool_name=tool_name,
         tool_arguments=args,
@@ -450,7 +450,7 @@ class ResetService(FakeService):
 
     def get_memory_client(self, bot_id, user_id):
         from types import SimpleNamespace
-        assert (bot_id, user_id) == ("snark", "nick")
+        assert (bot_id, user_id) == ("snark", "operator")
         return SimpleNamespace(get_session=lambda id: {
             "id": id, "bot_id": bot_id, "user_id": user_id, **self.sessions[id],
         })

@@ -43,8 +43,8 @@ class Engine:
         self.profile_rows = [
             {
                 "entity_type": "USER",
-                "entity_id": "nick",
-                "display_name": "Nick",
+                "entity_id": "operator",
+                "display_name": "Operator",
                 "color": "emerald",
                 "avatar": "🐕",
                 "avatar_render": None,
@@ -76,18 +76,18 @@ def test_resolver_batches_profiles_and_bots_once() -> None:
     engine = Engine()
     resolver = EntityPresentationResolver(engine)
     authors = [
-        AuthorReference.user("nick"),
-        AuthorReference.user("nick"),
+        AuthorReference.user("operator"),
+        AuthorReference.user("operator"),
         AuthorReference.bot("snark"),
     ]
 
     result = resolver.resolve_many(authors)
 
     assert len(engine.calls) == 2
-    assert result[("user", "nick")].to_dict() == {
+    assert result[("user", "operator")].to_dict() == {
         "entity_type": "user",
-        "entity_id": "nick",
-        "display_name": "Nick",
+        "entity_id": "operator",
+        "display_name": "Operator",
         "color": "emerald",
         "avatar": "🐕",
         "avatar_render": None,

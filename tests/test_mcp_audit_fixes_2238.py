@@ -85,7 +85,7 @@ def test_extracted_name_candidate_leaves_display_name(monkeypatch: pytest.Monkey
             "profile_attribute": {"category": "fact", "key": "name"}}
     config = SimpleNamespace(MEMORY_PROFILE_ATTRIBUTE_ENABLED=True)
 
-    assert extraction.extract_profile_attributes_from_fact(fact, "nick", config) is True  # type: ignore[arg-type]
+    assert extraction.extract_profile_attributes_from_fact(fact, "operator", config) is True  # type: ignore[arg-type]
     assert manager.display_names == []
 
 

@@ -37,7 +37,7 @@ def _client(monkeypatch, value, *, structured=True):
         return io.BytesIO(json.dumps(wire).encode())
 
     monkeypatch.setattr("urllib.request.urlopen", urlopen)
-    client = MemoryClient(SimpleNamespace(), bot_id="caid", user_id="nick",
+    client = MemoryClient(SimpleNamespace(), bot_id="caid", user_id="operator",
                           server_url="http://mcp.invalid")
     return client, calls
 
@@ -60,7 +60,7 @@ def test_first_delivery_new_uses_absent_successor_without_relaxing_ownership(mon
     binding = {"thread_session_id": "outgoing-session"}
 
     resolved, delivery_id = prepare_delivery_new_binding(
-        service, llm_bawt, request, bot_id="caid", user_id="nick",
+        service, llm_bawt, request, bot_id="caid", user_id="operator",
         user_prompt="/new", thread_binding=binding, backend_name="claude-code",
     )
     assert resolved is binding
@@ -71,7 +71,7 @@ def test_first_delivery_new_uses_absent_successor_without_relaxing_ownership(mon
 
 def test_existing_successor_still_rejects_wrong_delivery(monkeypatch):
     client, _ = _client(monkeypatch, {
-        "id": "present", "bot_id": "caid", "user_id": "nick", "status": "archived",
+        "id": "present", "bot_id": "caid", "user_id": "operator", "status": "archived",
         "session_metadata": {"rotation_delivery_id": "another-delivery"},
     })
     llm_bawt = SimpleNamespace(history_manager=SimpleNamespace(
@@ -81,7 +81,7 @@ def test_existing_successor_still_rejects_wrong_delivery(monkeypatch):
             SimpleNamespace(), llm_bawt,
             SimpleNamespace(inter_bot_delivery_id="delivery-first-new",
                             inter_bot_session_policy=None),
-            bot_id="caid", user_id="nick", user_prompt="/new",
+            bot_id="caid", user_id="operator", user_prompt="/new",
             thread_binding={"thread_session_id": "outgoing"},
             backend_name="claude-code",
         )

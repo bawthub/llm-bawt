@@ -310,7 +310,7 @@ def test_pre_tool_use_hook_stamps_bawthub_mcp_without_bridge_gating():
     capability = "opaque-turn-capability"
     hook = b._make_pre_tool_use_hook(
         request_id="req-1",
-        session_key="snark:nick",
+        session_key="snark:operator",
         seq_holder=[0],
         task_turn_capability=capability,
     )
@@ -341,7 +341,7 @@ def test_pre_tool_use_hook_stamps_bawthub_mcp_without_bridge_gating():
     )
     assert verified.tool_use_id == "toolu-1"
     assert verified.agent_request_id == "req-1"
-    assert verified.session_key == "snark:nick"
+    assert verified.session_key == "snark:operator"
 
 
 def test_pre_tool_use_hook_fails_open_on_unexpected_error():

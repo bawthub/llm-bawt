@@ -22,7 +22,7 @@ def _stamp(**over):
         "tool_input": {"operation": "llm-bawt.restart-app", "args": {}},
         "tool_use_id": "toolu_123",
         "agent_request_id": "req_abc",
-        "session_key": "snark:nick",
+        "session_key": "snark:operator",
         "backend": "claude-code",
     }
     values.update(over)
@@ -39,7 +39,7 @@ def test_round_trip_binds_exact_tool_and_args():
     )
     assert opened.tool_use_id == "toolu_123"
     assert opened.agent_request_id == "req_abc"
-    assert opened.session_key == "snark:nick"
+    assert opened.session_key == "snark:operator"
     assert opened.invocation_hash == canonical_invocation_hash(
         "ops_run", values["tool_input"]
     )
@@ -96,7 +96,7 @@ def test_codex_request_context_derives_stable_exact_call_identity():
     raw = mint_mcp_request_context(
         capability=capability,
         agent_request_id="req_codex",
-        session_key="codex:nick",
+        session_key="codex:operator",
         backend="codex",
     )
     values = dict(
@@ -121,13 +121,13 @@ def test_codex_request_context_rejects_forgery_and_sentinel_identity():
         mint_mcp_request_context(
             capability="cap",
             agent_request_id="unknown",
-            session_key="codex:nick",
+            session_key="codex:operator",
             backend="codex",
         )
     raw = mint_mcp_request_context(
         capability="cap",
         agent_request_id="req",
-        session_key="codex:nick",
+        session_key="codex:operator",
         backend="codex",
     )
     with pytest.raises(McpCallContextError, match="signature is invalid"):

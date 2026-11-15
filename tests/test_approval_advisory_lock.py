@@ -15,9 +15,9 @@ def test_mcp_approval_advisory_lock_uses_postgres_safe_distinct_keys():
             seen.append((str(statement), params["key"]))
 
     session = Session()
-    _lock_mcp_invocation(session, "loopy", "nick", "abc")
-    _lock_mcp_invocation(session, "loopy", "nick", "def")
+    _lock_mcp_invocation(session, "loopy", "operator", "abc")
+    _lock_mcp_invocation(session, "loopy", "operator", "def")
     assert all("pg_advisory_xact_lock" in statement for statement, _ in seen)
     assert all("\x00" not in key for _, key in seen)
     assert seen[0][1] != seen[1][1]
-    assert seen[0][1].split("\x1f") == ["mcp-approval", "loopy", "nick", "abc"]
+    assert seen[0][1].split("\x1f") == ["mcp-approval", "loopy", "operator", "abc"]

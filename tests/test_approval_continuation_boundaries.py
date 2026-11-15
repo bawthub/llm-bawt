@@ -59,7 +59,7 @@ def test_streaming_client_preserves_grant_bound_request_without_leaking():
 
 def client():
     result = MemoryClient(SimpleNamespace(), server_url="http://unused.test",
-                          bot_id="loopy", user_id="nick")
+                          bot_id="loopy", user_id="operator")
     result._ensure_initialized = lambda: None
     return result
 

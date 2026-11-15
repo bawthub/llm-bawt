@@ -44,7 +44,7 @@ def test_approval_event_preserves_exact_arguments():
             events.append(event)
     arguments = {'command': "printf '%s' /home/bridge/dev", 'timeout': 10000,
                  'nested': {'path': '/home/bridge/a'}}
-    Bridge()._publish_event('request', 'snark:nick', 1,
+    Bridge()._publish_event('request', 'snark:operator', 1,
                             kind=AgentEventKind.APPROVAL_REQUIRED,
                             tool_name='Bash', tool_arguments=arguments)
     assert events[0].tool_arguments == arguments

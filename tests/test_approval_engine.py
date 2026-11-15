@@ -323,7 +323,7 @@ def test_strip_drops_a_cat_heredoc_body_but_keeps_the_frame():
 
 
 def test_strip_keeps_an_executed_heredoc_body():
-    for sink in ("bash", "sh -s", "python3", "ssh nick@host bash", "/bin/bash"):
+    for sink in ("bash", "sh -s", "python3", "ssh operator@host bash", "/bin/bash"):
         cmd = _heredoc(sink, "docker compose down")
         assert "docker compose down" in strip_inert_heredoc_bodies(cmd), sink
 
@@ -368,7 +368,7 @@ def test_writing_a_fixture_that_mentions_git_switch_no_longer_gates():
 
 
 def test_a_real_docker_restart_still_gates():
-    call = {"command": "ssh nick@172.18.0.1 'cd ~/dev/llm-bawt && docker compose restart app'"}
+    call = {"command": "ssh operator@172.18.0.1 'cd ~/dev/llm-bawt && docker compose restart app'"}
     decision = evaluate(_live_bash_rules(), "claude-code", "Bash", call)
     assert decision.action is PolicyAction.REQUIRE_APPROVAL
     assert decision.policy is not None and decision.policy.id == "docker"

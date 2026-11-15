@@ -30,7 +30,7 @@ def test_mcp_resolution_replaces_placeholder_on_original_tool_row():
     calls.save_start(
         turn_id="turn-1",
         bot_id="loopy",
-        user_id="nick",
+        user_id="operator",
         call_id="call-record-1",
         tool_name="mcp__bawthub__ops_run",
         arguments={"operation": "llm-bawt.restart-bridge"},
@@ -43,7 +43,7 @@ def test_mcp_resolution_replaces_placeholder_on_original_tool_row():
         tool_use_id="call-original",
         tool_name="mcp__bawthub__ops_run",
         bot_id="loopy",
-        user_id="nick",
+        user_id="operator",
         payload=ToolResultPayload.from_value({"status": "approval_required"}),
         ended_at=100.2,
         is_error=False,

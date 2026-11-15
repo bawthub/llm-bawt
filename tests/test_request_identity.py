@@ -71,7 +71,7 @@ def make_row(params):
     }
 
 
-def submit(conn, *, user=None, key=None, author="nick", target="snark",
+def submit(conn, *, user=None, key=None, author="operator", target="snark",
            producer="bot", message="hello", assistant=None, metadata=None, payload=None, policy="continue"):
     values = {"sender": "loopy", "author_type": "user", "author_id": author,
               "target": target, "message": message.strip(), "idem": key,
@@ -268,7 +268,7 @@ def test_retry_identity_leaf_does_not_wait_for_cancel_target():
 
 def test_ordinary_legacy_assistant_omission_explicit_and_mutated_execution_payload():
     user, assistant = str(uuid.uuid4()), str(uuid.uuid4())
-    incoming = {"bot_id": "snark", "user": "nick", "user_message_id": user,
+    incoming = {"bot_id": "snark", "user": "operator", "user_message_id": user,
                 "assistant_message_id": assistant, "prefer_steer": False}
     conn = FakeConnection()
     first, _ = submit(conn, user=user, key="ordinary:" + user, producer="ordinary",
