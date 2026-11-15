@@ -331,17 +331,24 @@ class ClaudeActiveRun:
             item = interrupt_item or ""
             if not framed.strip() or (priority == "next" and not item.strip()):
                 raise RuntimeError(STEER_UNFRAMED)
-        over_background = self._background_pending()
-        if priority == "next":
-            if origin == "user" and (not message_id or _command_uuid(message_id) != message_id):
-                raise ValueError("User next steer requires a UUID message_id")
-            await self._steer_next(
-                framed, item, message_id, origin=origin, steer_rpc_id=steer_rpc_id,
-                images=tuple(images or ()),
-            )
-        else:
-            await self._steer_now(framed, images=tuple(images or ()))
-        self._note_steer_over_background(over_background)
+        if priority == "next" and origin == "user" and (
+            not message_id or _command_uuid(message_id) != message_id
+        ):
+            raise ValueError("User next steer requires a UUID message_id")
+        # Published before the write: the consumer can take the reply while
+        # this await is still cleaning up. Undone if the steer fails.
+        prior = self._mark_steer_over_background()
+        try:
+            if priority == "next":
+                await self._steer_next(
+                    framed, item, message_id, origin=origin, steer_rpc_id=steer_rpc_id,
+                    images=tuple(images or ()),
+                )
+            else:
+                await self._steer_now(framed, images=tuple(images or ()))
+        except BaseException:
+            self._steered_over_background = prior
+            raise
 
     async def _steer_next(
         self,
@@ -483,7 +490,6 @@ class ClaudeActiveRun:
                 raise RuntimeError(prior)
             if self._completed.is_set():
                 raise RuntimeError("no_active_run")
-            over_background = self._background_pending()
             held = self._held.get(message_id)
             # TASK-1748: a system steer is a quiesce control row; bot steers
             # never interrupt a running tool (TASK-934).
@@ -518,7 +524,9 @@ class ClaudeActiveRun:
             # mean the CLI processed the request without delivering its receipt.
             self._escalations[message_id] = "escalation_uncertain"
             self.steering_attempted = True
-            # TASK-595: same idle-background rule as a now-steer.
+            # TASK-595: same idle-background rule as a now-steer; the override
+            # is published before any write and undone on failure.
+            prior_override = self._mark_steer_over_background()
             idle_saved = self._release_idle_wait() if self._idle_background_wait() else None
             boundary_armed = idle_saved is None
             if boundary_armed:
@@ -604,9 +612,9 @@ class ClaudeActiveRun:
                     "escalation replayed: request=%s commands=%s",
                     self.request_id, self._describe(swept),
                 )
-                self._note_steer_over_background(over_background)
                 return "escalated"
             except BaseException as exc:
+                self._steered_over_background = prior_override
                 # If no replacement was accepted, do not wait indefinitely for
                 # one after consuming the aborted turn's ResultMessage.
                 if boundary_armed:
@@ -925,9 +933,13 @@ class ClaudeActiveRun:
     def _background_pending(self) -> bool:
         return self.background_tasks and bool(self._active_tasks or self._background_result is not None)
 
-    def _note_steer_over_background(self, over_background: bool) -> None:
-        if over_background or self._background_pending():
+    def _mark_steer_over_background(self) -> bool:
+        """Let the next result end the run if background work is pending.
+        Returns the previous value so a failed steer can restore it."""
+        prior = self._steered_over_background
+        if self._background_pending():
             self._steered_over_background = True
+        return prior
 
     def _check_background_deadline(self) -> None:
         """Fail the run once background work outlives the hard bound."""

@@ -192,7 +192,7 @@ async def test_result_after_a_steer_over_background_ends_the_run():
     async def steer_then_answer():
         while run._background_result is None:
             await asyncio.sleep(0)
-        run._note_steer_over_background(run._background_pending())
+        run._mark_steer_over_background()
         client._query.frames.put_nowait(_result("stopping now"))
 
     task = asyncio.create_task(steer_then_answer())
@@ -204,5 +204,5 @@ async def test_result_after_a_steer_over_background_ends_the_run():
 @pytest.mark.anyio
 async def test_steer_without_background_work_changes_nothing():
     run = _run(_FakeClient(), background_tasks=True)
-    run._note_steer_over_background(run._background_pending())
+    run._mark_steer_over_background()
     assert run._steered_over_background is False
