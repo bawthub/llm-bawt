@@ -238,6 +238,12 @@ class OpsOperation(SQLModel, table=True):
         default=False,
         sa_column=Column(Boolean, nullable=False, server_default="false"),
     )
+    # TASK-1183: a bell notification when a job of this operation starts and
+    # when it finishes. Off by default; jobs read it from their frozen snapshot.
+    notify_bell: bool = Field(
+        default=False,
+        sa_column=Column(Boolean, nullable=False, server_default="false"),
+    )
     quiesce_timeout_seconds: int = Field(
         default=600,
         sa_column=Column(Integer, nullable=False, server_default="600"),
@@ -287,6 +293,7 @@ class OpsOperation(SQLModel, table=True):
             "quiesce_timeout_seconds": int(self.quiesce_timeout_seconds or 0),
             "quiesce_scope_json": self.quiesce_scope_json,
             "execution_mode": self.execution_mode,
+            "notify_bell": bool(self.notify_bell),
         }
 
     def to_agent_summary(self) -> dict[str, Any]:

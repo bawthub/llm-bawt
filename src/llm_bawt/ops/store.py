@@ -22,6 +22,7 @@ from sqlmodel import Session, SQLModel, select
 from ..system_events import SystemEventEmitter
 from ..utils.config import Config, has_database_credentials
 from ..utils.schema import SchemaBootstrapGuard
+from .bell import OpsBellOutbox
 from .events import append_job_transition, append_job_transition_by_id
 from .container_remove import ACTION as REMOVE_ACTION, validate_remove_schema  # TASK-1439 T2c
 from .executor import validate_spec
@@ -74,7 +75,7 @@ _OP_WRITABLE = {"slug", "title", "description", "enabled", "executor_kind", "tar
                 "args_defaults_json", "timeout_seconds", "start_delay_seconds", "max_output_bytes",
                 "max_concurrent", "risk_level", "category", "approval_prompt_prefix",
                 "quiesce_enabled", "quiesce_timeout_seconds", "quiesce_scope_json",
-                "execution_mode", "execution_tag"}
+                "execution_mode", "execution_tag", "notify_bell"}
 _ACTIVE_CLAIMED = (JOB_DISPATCHING, JOB_ACCEPTED, JOB_RUNNING)
 # Non-terminal states a terminal write may leave (QUIESCING: TASK-1233).
 _OPEN_STATES = (JOB_QUEUED, JOB_QUIESCING, *_ACTIVE_CLAIMED)
@@ -245,7 +246,8 @@ class OpsStore:
         if self.engine is None:
             return
         def bootstrap(conn):
-            SQLModel.metadata.create_all(bind=conn, tables=[OpsOperation.__table__, OpsJob.__table__, OpsOperationRevision.__table__])
+            SQLModel.metadata.create_all(bind=conn, tables=[OpsOperation.__table__, OpsJob.__table__, OpsOperationRevision.__table__,
+                                                            OpsBellOutbox.__table__])
             self._migrate_add_columns(conn)
             # Pre-existing rows have only their current revision available.
             # Never invent historical revisions that were not recorded.
@@ -265,7 +267,8 @@ class OpsStore:
             ("ops_jobs", (("invocation_snapshot_json", "TEXT"), ("request_payload_json", "TEXT"),
                           ("caller_actor", "VARCHAR(128)"), *_JOB_QUIESCE_COLUMNS,
                           *_JOB_WORKER_SLOT_COLUMNS, ("sequence_json", "TEXT"))),
-            ("ops_operations", (*_OP_QUIESCE_COLUMNS, ("execution_tag", "VARCHAR(64)"))),
+            ("ops_operations", (*_OP_QUIESCE_COLUMNS, ("execution_tag", "VARCHAR(64)"),
+                                ("notify_bell", "BOOLEAN NOT NULL DEFAULT false"))),
         ):
             existing = {c["name"] for c in inspect(conn).get_columns(table)}
             for name, kind in columns:
@@ -346,6 +349,8 @@ class OpsStore:
             raise ValueError("slug must be 1..128 letters, digits, dots, underscores or hyphens")
         if type(op.enabled) is not bool:
             raise ValueError("enabled must be boolean")
+        if type(op.notify_bell) is not bool:
+            raise ValueError("notify_bell must be boolean")
         from ..bot_tags.vocabulary import TAG_SLUG
         if op.execution_tag is not None and (
                 not isinstance(op.execution_tag, str) or not TAG_SLUG.fullmatch(op.execution_tag)):

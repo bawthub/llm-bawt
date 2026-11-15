@@ -74,6 +74,8 @@ class OperationUpsert(BaseModel):
     execution_mode: str | None = None
     # Inert gate-only grant configuration; no gate admission route is enabled.
     execution_tag: str | None = Field(default=None, strict=True, max_length=64)
+    # TASK-1183: bell notifications for this operation's job start and finish.
+    notify_bell: bool | None = Field(default=None, strict=True)
 
     actor: str | None = Field(default=None, max_length=128)
 

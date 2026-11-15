@@ -41,10 +41,13 @@ MAINTENANCE_JOBS = "maintenance_jobs"
 #: A user-authored fan-out row moved. Its lifecycle frame goes to the sender
 #: bot's stream (``unknown`` for the dashboard), which no browser reads.
 DELIVERIES = "deliveries"
+#: TASK-1183: an entry reached the BawtHub bell (marked by the ops bell pump
+#: after BawtHub stored it).
+NOTIFICATIONS = "notifications"
 
 #: Every topic a browser may receive. Closed: the client ignores anything else.
 TOPICS = frozenset({OPS_JOBS, OPS_RELEASES, GPU, QUEUE_HOLD, APPROVAL_POLICIES, MEDIA, SCHEDULES,
-                    MAINTENANCE_JOBS, DELIVERIES})
+                    MAINTENANCE_JOBS, DELIVERIES, NOTIFICATIONS})
 
 #: Bursts of commits inside this window produce one fingerprint pass.
 MIN_INTERVAL_SECONDS = 1.0
@@ -225,6 +228,6 @@ async def run_state_watcher(service: Any, engine: Any) -> None:
     await watcher.run()
 
 
-__all__ = ["APPROVAL_POLICIES", "EVENT_TYPE", "GPU", "MAINTENANCE_JOBS", "MEDIA", "OPS_JOBS", "OPS_RELEASES",
+__all__ = ["APPROVAL_POLICIES", "EVENT_TYPE", "GPU", "MAINTENANCE_JOBS", "MEDIA", "NOTIFICATIONS", "OPS_JOBS", "OPS_RELEASES",
            "QUEUE_HOLD", "SCHEDULES", "StateWatcher", "TOPICS", "mark", "nudge", "publish_state_changed",
            "read_fingerprints", "run_state_watcher", "state_changed_event", "watcher_of"]

@@ -5,10 +5,14 @@ from __future__ import annotations
 from sqlmodel import Session
 
 from ..system_events import SystemEventEmitter
+from . import bell
 from .models import JOB_SUCCEEDED, JOB_TERMINAL_STATES, OpsJob
 
 
 def append_job_transition(emitter: SystemEventEmitter | None, conn, job: OpsJob) -> None:
+    # TASK-1183: opted-in operations' bell entries. Independent of the event
+    # ledger, so staged even when it is unavailable; never raises.
+    bell.stage(conn, job)
     if emitter is None:
         return
     requester = job.caller_bot_id or job.caller_user_id or job.caller_actor or "system"
@@ -27,8 +31,6 @@ def append_job_transition(emitter: SystemEventEmitter | None, conn, job: OpsJob)
 
 
 def append_job_transition_by_id(emitter: SystemEventEmitter | None, conn, job_id: str) -> None:
-    if emitter is None:
-        return
     with Session(bind=conn) as session:
         job = session.get(OpsJob, job_id)
         if job is not None:

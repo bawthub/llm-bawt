@@ -339,6 +339,11 @@ async def lifespan(app):
     from .state_events import MAINTENANCE_JOBS, mark as mark_state, nudge as nudge_state, run_state_watcher
     service._state_watcher_task = asyncio.create_task(
         run_state_watcher(service, model_engine), name="state-watcher")
+    # TASK-1183: opted-in operations' start/finish entries into the BawtHub bell.
+    from .dependencies import get_ops_store
+    from .ops_bell_pump import run_ops_bell_pump
+    service._ops_bell_task = asyncio.create_task(
+        run_ops_bell_pump(service, lambda: get_ops_store(config)), name="ops-bell-pump")
     # TASK-2120: house up/down/recreating from lease keyspace events.
     from ..house_watcher import HouseWatcher
     service._house_watcher = HouseWatcher(service.config)
@@ -475,6 +480,7 @@ BACKGROUND_TASK_ATTRIBUTES = (
     "_gate_change_task",
     "_commit_wake_task",
     "_state_watcher_task",
+    "_ops_bell_task",
     "_house_watcher_task",
     "_claude_refresh_task",
     "_codex_refresh_task",
