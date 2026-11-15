@@ -193,6 +193,28 @@ def test_api_admission_skips_without_rotation_or_delayed_work(rig, real_lifecycl
         """), {"bot": rig.bot, "key": intent.idempotency_key}).scalar_one() == 0
 
 
+
+def test_null_session_pointer_has_its_own_reset_reason(rig, real_lifecycle):
+    """TASK-1342: a missing pointer is not reported as a session/owner change."""
+    from llm_bawt.service.session_lifecycle.lifecycle import NO_ACCEPTED_SESSION
+
+    intent = intent_for(rig)
+    record, reason = real_lifecycle._admit(intent)
+    assert record is not None and reason is None
+    with rig.engine.begin() as conn:
+        conn.execute(text("UPDATE bot_profiles SET last_session_id=NULL WHERE slug=:bot"),
+                     {"bot": rig.bot})
+    assert real_lifecycle.store.claim_next(rig.bot, claim_owner="race", steer_capable=False) is None
+    skipped = real_lifecycle.store.get(record.id)
+    assert skipped.status == "FAILED"
+    assert skipped.metadata["new_session_skip_reason"] == NO_ACCEPTED_SESSION
+
+    retry = replace(intent_for(rig), idempotency_key="null-pointer-admission")
+    assert real_lifecycle._admit(retry) == (None, NO_ACCEPTED_SESSION)
+    with rig.engine.connect() as conn:
+        assert conn.execute(text("SELECT last_session_id FROM bot_profiles WHERE slug=:bot"),
+                            {"bot": rig.bot}).scalar_one() is None
+
 def _seeded_ack(rig, real_lifecycle, monkeypatch, *, backend, bound, ack):
     bot = SimpleNamespace(slug=rig.bot, agent_backend=backend, harness=backend)
     monkeypatch.setattr("llm_bawt.service.session_lifecycle.lifecycle.BotManager",

@@ -26,6 +26,10 @@ from ..turn_admission import classify_target, lock_target
 from .intent import Admission, Continuity, NewSessionIntent, NewSessionResult, Origin, Outcome, Stage
 
 
+# A registered bot whose accepted-session pointer is null has nothing to
+# reset. Reported on its own so it is not mistaken for a session/owner race.
+NO_ACCEPTED_SESSION = "bot has no accepted session"
+
 class NewSessionLifecycle:
     """Submit once, then observe exactly that durable delivery until bounded time."""
 
@@ -254,7 +258,9 @@ class NewSessionLifecycle:
             from ...bot_session_state import BotSessionState
 
             pointer = BotSessionState.resolve(conn, bot_id=intent.bot_id)
-            if (pointer is None or pointer["id"] != intent.expected_session_id
+            if pointer is None:
+                reason = NO_ACCEPTED_SESSION
+            elif (pointer["id"] != intent.expected_session_id
                     or pointer["user_id"] != intent.user_id
                     or pointer["status"] != "active" or pointer["ended_at"] is not None):
                 reason = "accepted session or owner changed"
@@ -445,7 +451,9 @@ class NewSessionLifecycle:
                     raise ValueError("idempotency key belongs to another reset intent")
                 return record, None
             pointer = BotSessionState.resolve(conn, bot_id=intent.bot_id)
-            if (pointer is None or pointer["user_id"] != intent.user_id
+            if pointer is None:
+                return None, NO_ACCEPTED_SESSION
+            if (pointer["user_id"] != intent.user_id
                     or pointer["status"] != "active" or pointer["ended_at"] is not None):
                 return None, "accepted session or owner changed"
             if intent.expected_session_id and intent.expected_session_id != pointer["id"]:
