@@ -44,7 +44,8 @@ def test_pristine_full_store_catalog(full_store_db, tmp_path):
     # + TASK-1538's utility_usage (TurnLogStore bootstraps it).
     # + TASK-2169's worker_lifecycle_records (WorkerLifecycleStore bootstraps it).
     # + TASK-2275's memory_ownership_activations (memory backend bootstraps it).
-    assert len(relations) == 66, sorted(relations)
+    # + TASK-1183's ops_bell_outbox (OpsStore bootstraps it).
+    assert len(relations) == 67, sorted(relations)
     assert "memory_ownership_activations" in {key.split(".")[-1] for key in relations}
     assert {"system_events", "system_gates", "gate_members", "gate_escalations", "bot_tag_catalog", "bot_profile_tags",
             "api_balance_ledger", "api_balances", "llm_response_records", "worker_lifecycle_records", "utility_usage",

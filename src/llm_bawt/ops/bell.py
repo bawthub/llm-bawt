@@ -84,7 +84,7 @@ _TABLE = OpsBellOutbox.__table__
 def wants_bell(job: OpsJob) -> bool:
     """Whether the job's frozen operation opted in. Unreadable or missing is off."""
     try:
-        snapshot = json.loads(job.invocation_snapshot_json or "{}")
+        snapshot = json.loads(getattr(job, "invocation_snapshot_json", None) or "{}")
         operation = snapshot.get("operation") if isinstance(snapshot, dict) else None
         return isinstance(operation, dict) and operation.get("notify_bell") is True
     except (TypeError, ValueError):
@@ -117,8 +117,11 @@ def stage(conn, job: OpsJob | None) -> int:
     """
     if job is None:
         return 0
+    # Opt-in first: an opted-out job is decided from its snapshot alone.
+    if not wants_bell(job):
+        return 0
     phases = phases_for(job)
-    if not phases or not wants_bell(job):
+    if not phases:
         return 0
     added = 0
     for phase in phases:
