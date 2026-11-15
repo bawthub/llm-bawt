@@ -48,23 +48,7 @@ def _registered_tools() -> dict[str, _Signature]:
 
 
 def _registered_tool_names() -> set[str]:
-    names = set()
-    for path in MCP_DIR.glob("*.py"):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            for decorator in node.decorator_list:
-                if not isinstance(decorator, ast.Call) or not isinstance(decorator.func, ast.Attribute):
-                    continue
-                if not (isinstance(decorator.func.value, ast.Name)
-                        and decorator.func.value.id == "mcp" and decorator.func.attr == "tool"):
-                    continue
-                for keyword in decorator.keywords:
-                    if keyword.arg == "name" and isinstance(keyword.value, ast.Constant):
-                        assert isinstance(keyword.value.value, str), (path, node.lineno)
-                        names.add(keyword.value.value)
-    return names
+    return set(_registered_tools())
 
 
 def _client_calls() -> list[tuple[str, int, str]]:
@@ -102,9 +86,13 @@ def test_every_memory_client_tool_call_is_registered():
             "messages_preview_since_minutes"} <= {name for _, _, name in calls}
 
 
-def _local_dict(name: str, scope: ast.AST) -> tuple[list[ast.expr | None], set[str]] | None:
-    """Keys of ``name = {...}`` in the calling function plus ``name["k"] = ...`` additions."""
+def _local_dict(name: str, scope: ast.AST) -> tuple[list[ast.expr | None], set[str], set[str]] | None:
+    """Keys of ``name = {...}`` in the calling function, all ``name["k"] = ...`` additions,
+    and the definite ones: additions that are top-level statements of the function body
+    (nested under ``if``/loops they may not run, so they never satisfy a required parameter)."""
     keys, conditional, found = [], set(), False
+    top_level = set(map(id, getattr(scope, "body", [])))
+    definite: set[str] = set()
     for node in ast.walk(scope):
         if isinstance(node, ast.Assign) and len(node.targets) == 1:
             target = node.targets[0]
@@ -117,7 +105,9 @@ def _local_dict(name: str, scope: ast.AST) -> tuple[list[ast.expr | None], set[s
                 if not (isinstance(target.slice, ast.Constant) and isinstance(target.slice.value, str)):
                     return None
                 conditional.add(target.slice.value)
-    return (keys, conditional) if found else None
+                if id(node) in top_level:
+                    definite.add(target.slice.value)
+    return (keys, conditional, definite) if found else None
 
 
 def _argument_problems(name: str, call: ast.Call, signature: _Signature,
@@ -127,10 +117,11 @@ def _argument_problems(name: str, call: ast.Call, signature: _Signature,
         return [] if not signature.required else [f"missing required {sorted(signature.required)}"]
     params = call.args[1]
     added: set[str] = set()
+    definite: set[str] = set()
     if isinstance(params, ast.Dict):
         dict_keys = list(params.keys)
     elif isinstance(params, ast.Name) and scope is not None and (local := _local_dict(params.id, scope)):
-        dict_keys, added = local
+        dict_keys, added, definite = local
     else:
         return ["arguments must be a dict literal so their names can be checked"]
     keys, spread = set(), False
@@ -146,7 +137,7 @@ def _argument_problems(name: str, call: ast.Call, signature: _Signature,
     problems = []
     if not signature.var_keyword and (unknown := keys - signature.params):
         problems.append(f"unknown {sorted(unknown)}")
-    if not spread and (missing := signature.required - keys):
+    if not spread and (missing := signature.required - keys - definite):
         problems.append(f"missing required {sorted(missing)}")
     return problems
 
@@ -179,5 +170,10 @@ def test_argument_guard_rejects_renamed_and_missing_parameters():
     assert _argument_problems("t", local_call, signature, fn) == []
     fn = ast.parse('def f():\n    a = {"bot_id": b}\n    a["max"] = s\n    c._call_server("t", a)').body[0]
     assert _argument_problems("t", fn.body[-1].value, signature, fn) == ["unknown ['max']"]
+    fn = ast.parse('def f():\n    a = {}\n    a["bot_id"] = b\n    c._call_server("t", a)').body[0]
+    assert _argument_problems("t", fn.body[-1].value, signature, fn) == []
+    fn = ast.parse('def f():\n    a = {}\n    if x:\n        a["bot_id"] = b\n    c._call_server("t", a)').body[0]
+    assert _argument_problems("t", fn.body[-1].value, signature, fn) == ["missing required ['bot_id']"]
+    assert _registered_tool_names() == set(_registered_tools())
     bare = ast.parse("@mcp.tool()\ndef bare_tool(x): ...").body[0]
     assert _tool_name(bare) == "bare_tool"
