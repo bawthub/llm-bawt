@@ -74,7 +74,8 @@ class DeliveryLeaseRecovery:
         TASK-1286 #2: a user-stopped ordinary turn whose claim no live
         dispatcher owns (claim_owner != live_owner, so no in-process _dispatch
         settles it) is cancelled now. Other foreign claims, accepted resets
-        included (their ambiguity check precedes Stop), wait out the lease.
+        included, wait out the lease. Reset ambiguity recovery honors a recorded
+        Stop too, while preserving the evidence that forbids reset replay.
         """
         if store.engine is None:
             return []

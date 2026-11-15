@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -338,6 +339,122 @@ def test_accepted_reset_dispatch_timeout_never_replays(rig, real_lifecycle, mode
     assert row.status == "FAILED" and "ambiguous" in row.last_error.lower()
     assert row.next_retry_at is None
     assert real_lifecycle.store.claim_next(rig.bot, claim_owner="retry", steer_capable=False) is None
+
+
+@pytest.mark.parametrize("mode", ["structured", "policy"])
+@pytest.mark.parametrize("source", ["chat_stop", "bot_list_stop"])
+@pytest.mark.parametrize("recovery", ["direct", "lease"])
+@pytest.mark.parametrize("started", [False, True])
+def test_recorded_stop_wins_accepted_reset_recovery(rig, real_lifecycle, mode, source, recovery, started):
+    from llm_bawt.service.session_lifecycle.recovery import NewSessionRecovery
+
+    claim = accepted_reset(rig, real_lifecycle, mode)
+    # Model a legacy open turn: Stop committed, then the app died before settle.
+    audit = {"abort_request": {"source": source, "requested_at": "2026-01-01T00:00:00+00:00"}}
+    with rig.engine.begin() as conn:
+        conn.execute(text("""
+            UPDATE turn_logs SET status='cancelling', terminal_protocol_state=NULL,
+                request_json=:audit, agent_request_id=:request WHERE id=:turn
+        """), {"turn": claim.turn_id, "audit": json.dumps(audit),
+               "request": f"request-{claim.id}" if started else None})
+        if recovery == "direct":
+            row = NewSessionRecovery.mark_ambiguous(
+                conn, delivery_id=claim.id, claim_token=claim.claim_token,
+                reason="accepted reset outcome is ambiguous; never replay provider reset",
+            )
+        else:
+            conn.execute(text("""
+                UPDATE inter_bot_deliveries SET lease_expires_at=now()-interval '1 minute'
+                WHERE id=:id
+            """), {"id": claim.id})
+    if recovery == "lease":
+        row = next(row for row in real_lifecycle.store.recover_expired() if row.id == claim.id)
+    assert row.status == ("DELIVERED" if started else "CANCELLED")
+    assert row.last_error == ("Stopped by user after it ran" if started else "Stopped by user")
+    assert row.metadata["new_session_ambiguous"] is True
+    assert "never replay" in row.metadata["new_session_ambiguous_reason"]
+    assert row.claim_token is None
+    assert row.next_retry_at is None
+    with rig.engine.connect() as conn:
+        assert tuple(conn.execute(text("""
+            SELECT claim_owner, lease_expires_at FROM inter_bot_deliveries WHERE id=:id
+        """), {"id": claim.id}).one()) == (None, None)
+        turn = conn.execute(text("""
+            SELECT status, end_reason, ended_at, error_text, request_json
+            FROM turn_logs WHERE id=:turn
+        """), {"turn": claim.turn_id}).mappings().one()
+    assert (turn["status"], turn["end_reason"]) == ("aborted", "aborted")
+    assert turn["ended_at"] is not None and turn["error_text"] is None
+    payload = json.loads(turn["request_json"])
+    assert payload["abort_request"] == audit["abort_request"]
+    assert payload["user_stop"]["by"] == "recover_expired"
+    # Neither the claim nor its terminal can be replayed or rewritten.
+    with rig.engine.begin() as conn:
+        assert NewSessionRecovery.mark_ambiguous(
+            conn, delivery_id=claim.id, claim_token=claim.claim_token, reason="late failure",
+        ) is None
+    assert real_lifecycle.store.recover_expired() == []
+    assert real_lifecycle.store.claim_next(rig.bot, claim_owner="retry", steer_capable=False) is None
+    with rig.engine.connect() as conn:
+        assert conn.execute(text("""
+            SELECT ended_at FROM turn_logs WHERE id=:turn
+        """), {"turn": claim.turn_id}).scalar_one() == turn["ended_at"]
+
+
+@pytest.mark.parametrize("mode", ["structured", "policy"])
+@pytest.mark.parametrize("state", ["ended", "reserved", "open"])
+def test_stopped_reset_recovery_respects_claim_and_terminal_ownership(rig, real_lifecycle, mode, state):
+    from llm_bawt.service.session_lifecycle.recovery import NewSessionRecovery
+    from llm_bawt.service.turn_logs import TurnLog
+    from llm_bawt.service.turn_terminal_protocol import protocol_insert_fields, protocol_reservation_fields
+
+    claim = accepted_reset(rig, real_lifecycle, mode)
+    with rig.engine.begin() as conn:
+        values = {
+            "request_json": json.dumps({"abort_request": {"source": "chat_stop"}}),
+            "status": "reserved" if state == "reserved" else "streaming",
+        }
+        if state == "reserved":
+            values.update(protocol_reservation_fields(assistant_message_id=str(uuid.uuid4())))
+        elif state == "open":
+            values.update(protocol_insert_fields(
+                connection=conn, assistant_message_id=str(uuid.uuid4()), history_session_id=claim.new_session_id,
+            ))
+            values["agent_request_id"] = f"request-{claim.id}"
+        conn.execute(TurnLog.__table__.update().where(TurnLog.id == claim.turn_id).values(**values))
+        if state == "ended":
+            conn.execute(text("""
+                UPDATE turn_logs SET terminal_protocol_state=NULL, status='ok', end_reason='completed',
+                    ended_at=now(), response_text='already finished' WHERE id=:turn
+            """), {"turn": claim.turn_id})
+        before = dict(conn.execute(text(
+            "SELECT * FROM turn_logs WHERE id=:turn"
+        ), {"turn": claim.turn_id}).mappings().one())
+        delivery_before = dict(conn.execute(text(
+            "SELECT * FROM inter_bot_deliveries WHERE id=:id"
+        ), {"id": claim.id}).mappings().one())
+        assert NewSessionRecovery.mark_ambiguous(
+            conn, delivery_id=claim.id, claim_token="stale-claim", reason="ambiguous",
+        ) is None
+        assert dict(conn.execute(text(
+            "SELECT * FROM inter_bot_deliveries WHERE id=:id"
+        ), {"id": claim.id}).mappings().one()) == delivery_before
+        assert dict(conn.execute(text(
+            "SELECT * FROM turn_logs WHERE id=:turn"
+        ), {"turn": claim.turn_id}).mappings().one()) == before
+        result = NewSessionRecovery.mark_ambiguous(
+            conn, delivery_id=claim.id, claim_token=claim.claim_token, reason="ambiguous",
+        )
+        after = dict(conn.execute(text(
+            "SELECT * FROM turn_logs WHERE id=:turn"
+        ), {"turn": claim.turn_id}).mappings().one())
+    assert result.status == ("CANCELLED" if state == "reserved" else "DELIVERED")
+    assert result.metadata["new_session_ambiguous"] is True
+    if state == "reserved":
+        assert (after["status"], after["end_reason"]) == ("aborted", "aborted")
+        assert after["ended_at"] is not None and after["terminal_snapshot_json"] is not None
+    else:
+        assert after == before  # no competing terminal or protocol-owner writes
 
 
 def test_unacknowledged_publish_preserves_pending_event(pending_receipt):

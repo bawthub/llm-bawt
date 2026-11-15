@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
-import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -1545,17 +1544,20 @@ def test_orphan_recovery_waits_for_the_turn_to_end_and_for_a_user_stop(delivery_
 
 
 def test_orphan_recovery_leaves_an_accepted_reset_to_lease_recovery(delivery_store):
-    """Codex r1 blocker: the accepted-reset ambiguity branch precedes the Stop
-    check, so an early sweep must not reach it; the lease path owns that row."""
+    """Accepted resets still wait for lease expiry; a recorded Stop then wins
+    without discarding the ambiguous reset's no-replay evidence."""
     store, sender, target = delivery_store
     reset, _ = _orphaned_claim(store, sender, target, policy=SessionPolicy.RESET_WITHOUT_HISTORY)
     assert store.mark_transport_accepted(reset.id, store.get(reset.id).claim_token or "")
     assert not [row for row in store.recover_expired(live_owner="dispatcher-new") if row.id == reset.id]
     assert store.get(reset.id).status == "DISPATCHING"
 
-    _expire_lease(store, reset.id)  # unchanged lease-expiry behavior for an accepted reset
+    _expire_lease(store, reset.id)
     recovered = [row for row in store.recover_expired(live_owner="dispatcher-new") if row.id == reset.id]
-    assert recovered and recovered[0].status == "FAILED" and "ambiguous" in (recovered[0].last_error or "")
+    assert recovered and recovered[0].status == "CANCELLED"
+    assert recovered[0].metadata["new_session_ambiguous"] is True
+    assert "ambiguous" in recovered[0].metadata["new_session_ambiguous_reason"]
+    _assert_turn_user_stopped(store, reset.turn_id)
 
 
 def test_stop_on_a_delivery_reservation_revokes_the_claim_and_drains(delivery_store):

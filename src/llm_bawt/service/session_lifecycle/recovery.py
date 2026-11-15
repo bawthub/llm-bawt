@@ -92,17 +92,41 @@ class NewSessionRecovery:
             UPDATE inter_bot_deliveries SET status='FAILED',
                 claim_token=NULL, claim_owner=NULL, lease_expires_at=NULL,
                 next_retry_at=NULL, last_error=:reason,
-                metadata_json=jsonb_set(metadata_json, '{new_session_ambiguous}',
-                                        'true'::jsonb), updated_at=now()
+                metadata_json=jsonb_set(
+                    jsonb_set(metadata_json, '{new_session_ambiguous}', 'true'::jsonb),
+                    '{new_session_ambiguous_reason}', to_jsonb(CAST(:reason AS text))),
+                updated_at=now()
             WHERE id=:id AND status=:status AND claim_token=:token
               AND transport_accepted_at IS NOT NULL RETURNING *
         """), params).mappings().one_or_none()
-        DeliveryTransitionEvents.stage(conn, row, reason_code="reset_ambiguous")
+        reason_code = "reset_ambiguous"
         if row is not None:
-            conn.execute(text("""
-                UPDATE turn_logs SET status='error', end_reason='error',
-                    error_text=:reason, ended_at=COALESCE(ended_at, now())
-                WHERE id=:turn AND ended_at IS NULL
-              AND terminal_protocol_state IS NULL
-            """), {"turn": row["turn_id"], "reason": reason[:4000]})
+            from ...inter_bot_delivery import InterBotDeliveryStore
+            from ...inter_bot_delivery_recovery import DeliveryLeaseRecovery
+
+            # Serialize with Stop's audit writer before choosing a terminal.
+            # The delivery claim is already fenced by the UPDATE above.
+            turn = conn.execute(text("""
+                SELECT terminal_protocol_state FROM turn_logs
+                WHERE id=:turn FOR NO KEY UPDATE
+            """), {"turn": row["turn_id"]}).mappings().one_or_none()
+            if (row["delivery_mode"] == "turn"
+                    and InterBotDeliveryStore._explicit_stop_requested(conn, row["turn_id"])):
+                settlement, reason_code = InterBotDeliveryStore._stopped_turn_settlement(conn, row["turn_id"])
+                row = conn.execute(text(f"""
+                    UPDATE inter_bot_deliveries SET {settlement}
+                    WHERE id=:id RETURNING *
+                """), {"id": row["id"]}).mappings().one()
+                # Active protocol turns belong to their immutable terminal
+                # owner. Only legacy turns and unstarted reservations settle here.
+                if turn and turn["terminal_protocol_state"] in (None, "reserved"):
+                    DeliveryLeaseRecovery._settle_stopped_turn(conn, row["turn_id"])
+            else:
+                conn.execute(text("""
+                    UPDATE turn_logs SET status='error', end_reason='error',
+                        error_text=:reason, ended_at=COALESCE(ended_at, now())
+                    WHERE id=:turn AND ended_at IS NULL
+                      AND terminal_protocol_state IS NULL
+                """), {"turn": row["turn_id"], "reason": reason[:4000]})
+        DeliveryTransitionEvents.stage(conn, row, reason_code=reason_code)
         return DeliveryRecord.from_mapping(row) if row else None
