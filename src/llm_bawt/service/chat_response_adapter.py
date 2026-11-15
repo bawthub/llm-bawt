@@ -94,7 +94,9 @@ def _stream_error(detail: str, status: int = 502) -> str:
     return _data({"error": {"message": detail, "type": "server_error", "code": status}})
 
 
-async def _wait_stream_reply(service: Any, request: ChatCompletionRequest, receipt: dict) -> AsyncIterator[str]:
+async def _wait_stream_reply(
+    service: Any, request: ChatCompletionRequest, receipt: dict, *, extensions: str = "none",
+) -> AsyncIterator[str]:
     task = asyncio.create_task(observe_receipt(service, request, receipt))
     try:
         while not task.done():
@@ -109,11 +111,17 @@ async def _wait_stream_reply(service: Any, request: ChatCompletionRequest, recei
         status, detail = _reply_error(reply)
         yield _stream_error(detail, status)
         return
-    for frame in _reply_frames(request, reply.get("response_text") or ""):
+    for frame in _reply_frames(
+        request, reply.get("response_text") or "", extensions=extensions,
+        animation=reply.get("animation") if not _stopped(reply) else None,
+    ):
         yield frame
 
 
-def _reply_frames(request: ChatCompletionRequest, text: str):
+def _reply_frames(
+    request: ChatCompletionRequest, text: str, *, extensions: str = "none",
+    animation: str | None = None,
+):
     response_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     created, model = int(time.time()), _model(request)
     yield _data({
@@ -121,6 +129,9 @@ def _reply_frames(request: ChatCompletionRequest, text: str):
         "model": model, "choices": [{"index": 0, "finish_reason": None,
                                "delta": {"role": "assistant", "content": text}}],
     })
+    if animation:
+        payload = {"object": "service.animation", "animation": animation}
+        yield from _openai_frames(_data(payload), payload, extensions)
     yield _data({
         "id": response_id, "object": "chat.completion.chunk", "created": created,
         "model": model, "choices": [{"index": 0, "finish_reason": "stop", "delta": {}}],
@@ -245,7 +256,7 @@ async def completion_stream(
                 if request.voice_input:
                     # Route on the durable outcome, not just the advisory busy
                     # snapshot: another admission can start before this claim.
-                    text = None
+                    reply = None
                     busy = payload.get("busy") is True
                     if not busy or payload.get("steer_capable") is True:
                         deadline = voice_deadline if busy else (
@@ -259,21 +270,25 @@ async def completion_stream(
                                 done, _ = await asyncio.wait({observer}, timeout=15.0)
                                 if not done:
                                     yield ": waiting for voice reply\n\n"
-                            text = await observer
+                            reply = await observer
                         finally:
                             if not observer.done():
                                 observer.cancel()
                                 await asyncio.gather(observer, return_exceptions=True)
-                    if text is None:
+                    if reply is None:
                         warning = {"object": "service.warning", "warnings": ["voice_step_unavailable"]}
                         for frame in _openai_frames(_data(warning), warning, extensions):
                             yield frame
                         yield "data: [DONE]\n\n"
                     else:
-                        for frame in _reply_frames(request, text):
+                        for frame in _reply_frames(
+                            request, reply.text, extensions=extensions, animation=reply.animation,
+                        ):
                             yield frame
                 else:
-                    async for reply_event in _wait_stream_reply(service, request, payload):
+                    async for reply_event in _wait_stream_reply(
+                        service, request, payload, extensions=extensions,
+                    ):
                         yield reply_event
                 return  # Discard the internal receipt's [DONE].
             if payload.get("object") == "service.warning":

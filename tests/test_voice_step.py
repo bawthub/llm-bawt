@@ -289,7 +289,7 @@ def test_observer_uses_exact_durable_identity_and_closes_at_first_root_boundary(
             None, _delta("old", 0), _started(), _delta("answer"), _tool(18),
             _delta("must not read whole turn", 18), _complete(42),
         ])
-        assert await _observe(service, reader) == "answer"
+        assert await _observe(service, reader) == voice_step.VoiceReply("answer")
         resolver.assert_called_once_with(
             service._inter_bot_dispatcher.store, service._turn_log_store, "delivery-1",
             bot_id="test-bot", user_id="test-user", user_message_id="message-1",
@@ -327,7 +327,7 @@ def test_observer_retains_pre_settlement_lifecycle_until_binding_is_verified(mon
             assert not task.done()
             assert not reader.entered.is_set()
             release.set()
-            assert await task == "fresh"
+            assert await task == voice_step.VoiceReply("fresh")
             assert resolver.call_count == 2
             assert reader.closed.is_set()
             _assert_shared_resources_untouched(service)
@@ -480,7 +480,7 @@ def test_adapter_waits_for_cursor_claim_to_finish_before_admitting(monkeypatch):
 
         reader.claim.side_effect = claim
         service = _stream_service(dict(RECEIPT), reader)
-        observer = AsyncMock(return_value="fresh step")
+        observer = AsyncMock(return_value=voice_step.VoiceReply("fresh step"))
         whole_turn = AsyncMock(side_effect=AssertionError("busy voice used whole turn"))
         monkeypatch.setattr(voice_step, "observe_voice_step", observer)
         monkeypatch.setattr(adapter, "observe_receipt", whole_turn)
@@ -570,7 +570,7 @@ def test_adapter_idle_voice_uses_durable_voice_observer_and_typed_keeps_whole_tu
         receipt = {**RECEIPT, "busy": busy}
         reader = _Reader()
         service = _stream_service(receipt, reader)
-        step_observer = AsyncMock(return_value="ordinary reply")
+        step_observer = AsyncMock(return_value=voice_step.VoiceReply("ordinary reply"))
         whole_turn = AsyncMock(return_value={"status": "DELIVERED", "response_text": "ordinary reply"})
         monkeypatch.setattr(voice_step, "observe_voice_step", step_observer)
         monkeypatch.setattr(adapter, "observe_receipt", whole_turn)
@@ -627,7 +627,9 @@ def test_adapter_uses_unique_voice_cursor_without_stealing_ui_or_other_call(monk
         service = _stream_service(dict(RECEIPT))
         readers = [_Reader(), _Reader()]
         service._redis_subscriber.ui_stream.side_effect = readers
-        monkeypatch.setattr(voice_step, "observe_voice_step", AsyncMock(return_value="fresh"))
+        monkeypatch.setattr(
+            voice_step, "observe_voice_step", AsyncMock(return_value=voice_step.VoiceReply("fresh")),
+        )
         # Each call also allocates a response ID, so cursor IDs use draws 0 and 2.
         monkeypatch.setattr(adapter.uuid, "uuid4", Mock(side_effect=[
             SimpleNamespace(hex=f"{value:032x}") for value in range(4)
@@ -649,11 +651,15 @@ def test_adapter_uses_unique_voice_cursor_without_stealing_ui_or_other_call(monk
 
 
 @pytest.mark.parametrize("busy", [False, True])
-def test_adapter_idle_snapshot_can_durably_become_steer_without_speaking_old_turn(monkeypatch, resolver, busy):
+@pytest.mark.parametrize("mode", ["none", "comment", "data"])
+def test_adapter_idle_snapshot_can_durably_become_steer_without_speaking_old_turn(
+    monkeypatch, resolver, busy, mode,
+):
     async def scenario():
         old = "old target's whole response must never be spoken"
         resolver.return_value = {
             "status": "DELIVERED", "voice_binding": dict(BINDING), "response_text": old,
+            "animation": "old-target-animation",
         }
         reader = _Reader([
             _delta(old, 0), _started(), _delta("fresh step"), _tool(22),
@@ -662,9 +668,10 @@ def test_adapter_idle_snapshot_can_durably_become_steer_without_speaking_old_tur
         service = _stream_service({**RECEIPT, "busy": busy}, reader)
         whole_turn = AsyncMock(side_effect=AssertionError("voice used snapshot whole turn"))
         monkeypatch.setattr(adapter, "observe_receipt", whole_turn)
-        frames = await _collect(service, extensions="comment")
+        frames = await _collect(service, extensions=mode)
         assert _chunks(frames)[0]["choices"][0]["delta"]["content"] == "fresh step"
         assert old not in "".join(frames)
+        assert "service.animation" not in "".join(frames)
         assert frames[-1] == DONE
         assert reader.claimed and reader.closed.is_set()
         assert len(service.admissions) == 1
@@ -726,7 +733,9 @@ def test_idle_voice_verified_direct_reply_does_not_require_reader(resolver):
         resolver.return_value = {
             "status": "DELIVERED", "voice_direct_reply": True, "response_text": "own full reply",
         }
-        assert await _observe(service, None, receipt={**RECEIPT, "busy": False}) == "own full reply"
+        assert await _observe(service, None, receipt={**RECEIPT, "busy": False}) == voice_step.VoiceReply(
+            "own full reply",
+        )
         assert resolver.call_args.kwargs["include_voice_binding"] is True
         _assert_shared_resources_untouched(service)
 
@@ -746,7 +755,7 @@ def test_adapter_deadline_is_60_seconds_for_busy_and_300_for_own_idle_reply(monk
 
         monkeypatch.setattr(adapter.asyncio, "get_running_loop", lambda: SimpleNamespace(time=lambda: base_time))
         monkeypatch.setattr(adapter.asyncio, "timeout_at", no_real_timer)
-        observer = AsyncMock(return_value="own reply")
+        observer = AsyncMock(return_value=voice_step.VoiceReply("own reply"))
         monkeypatch.setattr(voice_step, "observe_voice_step", observer)
         service = _stream_service({**RECEIPT, "busy": busy}, _Reader())
         assert (await _collect(service))[-1] == DONE

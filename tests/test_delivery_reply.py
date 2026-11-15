@@ -143,6 +143,31 @@ def test_exact_finished_turn_returns_its_reply():
     assert lookup(delivery("DELIVERED"), turn())["response_text"] == "Actual reply"
 
 
+@pytest.mark.parametrize("direct", [False, True])
+@pytest.mark.parametrize("changes,expected", [
+    ({}, "wave"), ({"animation": None}, None),
+    ({"ended_at": None}, None), ({"status": "error"}, None),
+    ({"error_text": "failure"}, None), ({"status": "aborted"}, None),
+    ({"status": "cancelled"}, None),
+])
+def test_only_verified_success_carries_animation(direct, changes, expected):
+    saved = turn(**{"animation": "wave", **changes})
+    result = (resolve_direct_turn_reply(
+        Turns(saved), "turn-test", bot_id="bot", user_id="owner", user_message_id="message",
+    ) if direct else lookup(delivery("DELIVERED"), saved))
+    assert result.get("animation") == expected
+
+
+@pytest.mark.parametrize("field", ["bot_id", "user_id", "trigger_message_id"])
+def test_foreign_turn_never_exposes_animation(field):
+    saved = turn(animation="wave", **{field: "other"})
+    assert "animation" not in lookup(delivery("DELIVERED"), saved)
+    with pytest.raises(DeliveryReplyMismatch):
+        resolve_direct_turn_reply(
+            Turns(saved), "turn-test", bot_id="bot", user_id="owner", user_message_id="message",
+        )
+
+
 @pytest.mark.parametrize("changes,status", [
     ({}, "DELIVERED"), ({"ended_at": None}, "IN_FLIGHT"),
     ({"status": "error"}, "FAILED"),

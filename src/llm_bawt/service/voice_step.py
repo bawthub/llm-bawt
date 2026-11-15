@@ -12,6 +12,12 @@ VOICE_STEP_TIMEOUT_SECONDS = 60.0
 MAX_STEP_UNITS = 65536
 
 
+@dataclass(frozen=True)
+class VoiceReply:
+    text: str
+    animation: str | None = None
+
+
 @dataclass
 class VoiceStep:
     """Fail-closed UTF-16 frontier for a single ordered consumption barrier."""
@@ -78,7 +84,7 @@ class VoiceStep:
 
 
 async def observe_voice_step(service: Any, request: Any, receipt: dict, reader: Any,
-                             *, deadline: float) -> str | None:
+                             *, deadline: float) -> VoiceReply | None:
     """Wait for durable identity, then consume the cursor claimed BEFORE admission.
 
     Lifecycle may precede delivery settlement; Redis retains those events while
@@ -114,7 +120,8 @@ async def observe_voice_step(service: Any, request: Any, receipt: dict, reader: 
                     # by durable delivery, not the advisory busy snapshot: an
                     # idle admission may become a steer before claim (or vice
                     # versa). Never return a steered target's whole response.
-                    return resolved.get("response_text") or None
+                    text = resolved.get("response_text")
+                    return VoiceReply(text, resolved.get("animation")) if text else None
                 if resolved.get("status") not in {"QUEUED", "STEERING", "DISPATCHING", "IN_FLIGHT"}:
                     return None
                 await asyncio.sleep(min(0.25, max(0, deadline - loop.time())))
@@ -124,7 +131,10 @@ async def observe_voice_step(service: Any, request: Any, receipt: dict, reader: 
                     if event is not None:
                         done, text = step.accept(event)
                         if done:
-                            return text
+                            # A step can end at a tool boundary while its target
+                            # turn continues. That turn's animation is not a
+                            # classification of this injected speech segment.
+                            return VoiceReply(text) if text else None
     except Exception:
         # Database/reader failures are observation failures, not failed work.
         # CancelledError still propagates; never swallow call cancellation.

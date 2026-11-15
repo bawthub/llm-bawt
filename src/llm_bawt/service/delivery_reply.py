@@ -176,6 +176,8 @@ def _receipt(
         receipt.update(status="FAILED", error="Turn ended without a verified answer")
         return receipt
     receipt["response_text"] = turn.response_text or ""
+    if animation := getattr(turn, "animation", None):
+        receipt["animation"] = animation
     return receipt
 
 
@@ -197,7 +199,10 @@ def resolve_direct_turn_reply(
                 "response_text": turn.response_text or ""}
     if turn.status not in {"ok", "completed"} or turn.error_text:
         return {"turn_id": turn_id, "status": "FAILED"}
-    return {"turn_id": turn_id, "status": "DELIVERED", "response_text": turn.response_text or ""}
+    reply = {"turn_id": turn_id, "status": "DELIVERED", "response_text": turn.response_text or ""}
+    if animation := getattr(turn, "animation", None):
+        reply["animation"] = animation
+    return reply
 
 
 async def _wait_exact_reply(
