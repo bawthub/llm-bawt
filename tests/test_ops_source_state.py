@@ -607,3 +607,14 @@ def test_a_compose_only_plan_binds_the_compose_file_and_the_whole_tree(repo, tmp
     git(repo, "checkout", "--", "docker-compose.yml")
     (repo / "src" / "pkg" / "module.py").write_text("VALUE = 2\n")  # any tracked change, as for the app
     assert refused(repo, tmp_path, **only).code == "source_dirty"
+
+
+def test_the_source_check_reports_every_policy_refusal_at_once(repo, tmp_path):
+    # TASK-1639: dirty source and stray egg-info used to surface one per cycle.
+    (repo / "src" / "pkg" / "module.py").write_text("VALUE = 2\n")
+    stray = repo / "src" / "llm_bawt.egg-info" / "PKG-INFO"
+    stray.parent.mkdir(parents=True)
+    stray.write_text("x\n")
+    caught = refused(repo, tmp_path)
+    assert [r.code for r in caught.refusals] == ["source_dirty", "source_untracked"]
+    assert caught.code == "source_dirty"

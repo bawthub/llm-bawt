@@ -211,6 +211,34 @@ class SourceStateError(ComposeError):
         super().__init__(code, shown, detail=detail)
 
 
+#: Joins the refusals in one :class:`SourceStateRefusals` message.
+REFUSAL_SEPARATOR = " | "
+
+
+class SourceStateRefusals(SourceStateError):
+    """Every refusal one check found, in check order (TASK-1639).
+
+    A bind used to stop at the first guard, so a cutover window paid a full
+    commit cycle per refusal. ``code``/``names`` stay the first refusal's, so
+    callers keyed on a code see what they always saw; the text lists all."""
+
+    def __init__(self, refusals):
+        self.refusals = list(refusals)
+        first = self.refusals[0]
+        self.code, self.names = first.code, first.names
+        ValueError.__init__(self, f"{len(self.refusals)} refusals: "
+                            + REFUSAL_SEPARATOR.join(str(r) for r in self.refusals))
+
+
+def raise_refusals(refusals) -> None:
+    """Raise nothing, the one refusal, or all of them together."""
+    flat = [r for item in refusals for r in getattr(item, "refusals", [item])]
+    if len(flat) == 1:
+        raise flat[0]
+    if flat:
+        raise SourceStateRefusals(flat)
+
+
 def _clean_path(value) -> bool:
     return (isinstance(value, str) and bool(SAFE_PATH.fullmatch(value)) and value != "/"
             and posixpath.normpath(value) == value and ".." not in value.split("/"))
@@ -276,68 +304,91 @@ def source_plan(spec: dict, source: dict, container: dict, image: dict, desired:
     """``{"paths": [repo-relative source paths], "compose_files": [names], "bytecode_ok": bool}``.
 
     Raises :class:`SourceStateError` for a mount or environment the source
-    check cannot vouch for. Values are never reported, only names."""
+    check cannot vouch for, listing every such refusal at once (TASK-1639).
+    The sealed source check never runs on a refused plan. Values are never
+    reported, only names."""
+    found = []
     sources, data = spec["source_mounts"], spec["data_mounts"]
     destinations = _mount_destinations(container, image, desired)
     shadowed = [d for d in destinations if d not in sources
                 and any(_within(posixpath.normpath(d or "/"), s) for s in sources)]
     if shadowed:
-        raise SourceStateError("source_mount_shadowed", shadowed)
-    unclassified = [d for d in destinations if d not in sources and d not in data]
+        found.append(SourceStateError("source_mount_shadowed", shadowed))
+    unclassified = [d for d in destinations if d not in sources and d not in data and d not in shadowed]
     if unclassified:
-        raise SourceStateError("source_mount_unclassified", unclassified)
+        found.append(SourceStateError("source_mount_unclassified", unclassified))
     missing = [s for s in sources if s not in desired["mounts"]]
     if missing:
-        raise SourceStateError("source_mount_missing", missing)
+        found.append(SourceStateError("source_mount_missing", missing))
     project = source["project_dir"]
     paths = []
     for destination in sources:
+        if destination in missing:
+            continue
         mount = desired["mounts"][destination]
         host = mount.get("source")
         if (mount.get("type") != "bind" or not _clean_path(host) or host == project
                 or not _within(host, project)):
-            raise SourceStateError("source_mount_invalid", [destination], detail="not a bind inside the project")
+            found.append(SourceStateError("source_mount_invalid", [destination],
+                                          detail="not a bind inside the project"))
+            continue
         rel = posixpath.relpath(host, project)
         if ".git" in rel.split("/"):
-            raise SourceStateError("source_mount_invalid", [destination], detail="inside the git directory")
+            found.append(SourceStateError("source_mount_invalid", [destination], detail="inside the git directory"))
+            continue
         paths.append(rel)
     env = {**dict(e.partition("=")[::2] for e in (image.get("Config") or {}).get("Env") or []),
            **desired["env"]}
     # destination -> is a read-only data mount after the recreate
     mounts = {d: d in data and (desired["mounts"].get(d) or {}).get("read_only") is True
               for d in destinations if d}
-    opaque = _classify_env(env, mounts, set(spec["env_names"]))
+    opaque, prefix_ok = _env_refusals(env, mounts, set(spec["env_names"]), found)
     compose_files = [posixpath.relpath(f, project) for f in source["compose_files"]]
-    return {"paths": sorted(paths), "compose_files": compose_files,
-            "bytecode_ok": env.get(PYCACHE_PREFIX) is not None,
+    plan = {"paths": sorted(paths), "compose_files": compose_files,
+            "bytecode_ok": env.get(PYCACHE_PREFIX) is not None and prefix_ok,
             "classification": {"source_mounts": sorted(sources),
                                "data_mounts": sorted(d for d in mounts if d in data),
                                "opaque_env": opaque}}
+    raise_refusals(found)
+    return plan
 
 
 def _classify_env(env: dict, mounts: dict, opaque_names: set) -> list:
     """The opaque names present, sorted; raises for anything unclassified or
-    unsafe (see :data:`PRODUCT_ENV`). Names are reported, never values."""
+    unsafe, listing every refusal (see :func:`_env_refusals`)."""
+    found = []
+    opaque, _prefix_ok = _env_refusals(env, mounts, opaque_names, found)
+    raise_refusals(found)
+    return opaque
+
+
+def _env_refusals(env: dict, mounts: dict, opaque_names: set, found: list) -> tuple[list, bool]:
+    """``(the opaque names present, sorted; whether the bytecode prefix is
+    safe)``. Appends a refusal to ``found`` for each class of unclassified or
+    unsafe name (see :data:`PRODUCT_ENV`). Names are reported, never values."""
     unsafe = sorted(name for name, value in env.items() if not ENV_NAME.fullmatch(name)
                     or not isinstance(value, str) or value.lstrip().startswith(_FUNCTION_VALUE))
     if unsafe:
-        raise SourceStateError("source_env_unsafe", unsafe, detail="not a plain variable")
+        found.append(SourceStateError("source_env_unsafe", unsafe, detail="not a plain variable"))
     # Python reads bytecode at the prefix INSTEAD of __pycache__, so a prefix
     # on (or holding) a mount loads a forged .pyc even when no __pycache__
     # exists under source (TASK-1474 r1 B1): a set prefix must be safe. Unset,
     # Python uses __pycache__ next to the source, which the checker refuses.
     prefix = env.get(PYCACHE_PREFIX)
-    if prefix is not None and not _outside(prefix, mounts):
-        raise SourceStateError("source_bytecode_unsafe", [PYCACHE_PREFIX],
-                               detail="not an absolute path outside every mount")
-    bad = sorted(name for name, value in env.items() if name in PRODUCT_ENV and not PRODUCT_ENV[name](value, mounts))
+    prefix_ok = PYCACHE_PREFIX not in unsafe and (prefix is None or _outside(prefix, mounts))
+    if not prefix_ok and PYCACHE_PREFIX not in unsafe:
+        found.append(SourceStateError("source_bytecode_unsafe", [PYCACHE_PREFIX],
+                                      detail="not an absolute path outside every mount"))
+    # A validator only ever sees a plain string value: unsafe names are refused above.
+    bad = sorted(name for name, value in env.items()
+                 if name in PRODUCT_ENV and name not in unsafe and not PRODUCT_ENV[name](value, mounts))
     if bad:
-        raise SourceStateError("source_env_unsafe", bad, detail="value not allowed for this runtime variable")
+        found.append(SourceStateError("source_env_unsafe", bad, detail="value not allowed for this runtime variable"))
     unclassified = sorted(name for name in env if name not in PRODUCT_ENV and name not in opaque_names)
     if unclassified:
-        raise SourceStateError("source_env_unclassified", unclassified,
-                               detail="list app-data names in the operation's env_names")
-    return sorted(name for name in env if name in opaque_names)
+        found.append(SourceStateError("source_env_unclassified", unclassified,
+                                      detail="list app-data names in the operation's env_names"))
+    return sorted(name for name in env if name in opaque_names), prefix_ok
 
 
 def _records(out: bytes) -> list[str]:
@@ -424,16 +475,17 @@ class _Steps:
         # names no paths; git reads an empty pathspec as the whole repository,
         # so the per-path steps scope to the Compose files instead.
         scoped = paths or compose
+        found = []  # TASK-1639: every policy refusal, raised together below
         flagged = [r[2:] for r in _records(self.git("ls-files", "-z", "-v", "--", *scoped)) if not r.startswith("H ")]
         if flagged:
-            raise SourceStateError("source_index_flags", flagged)
+            found.append(SourceStateError("source_index_flags", flagged))
         self.git("read-tree", head, fresh=True)
         dirty = (_records(self.git("diff", "--no-ext-diff", "--no-textconv", "--name-only", "-z",
                                   head, "--", *scoped, fresh=True))
                  if self.revision else
                  _records(self.git("status", "--porcelain=v2", "-z", "--untracked-files=no", fresh=True)))
         if dirty and not self.allow_dirty:
-            raise SourceStateError("source_dirty", dirty if self.revision else _status_names(dirty))
+            found.append(SourceStateError("source_dirty", dirty if self.revision else _status_names(dirty)))
         others = [] if not paths else _records(self.git(
             "ls-files", "-z", "--others",
             *([] if self.allow_dirty else ["--directory", "--no-empty-directory"]),
@@ -451,21 +503,22 @@ class _Steps:
                     cache.append(directory)
         stray = [p for p in others if p not in cache]
         if stray and not self.allow_dirty:
-            raise SourceStateError("source_untracked", stray)
+            found.append(SourceStateError("source_untracked", stray))
         if cache and not self.plan["bytecode_ok"]:
             # Python would load a forged .pyc whose header matches its source.
-            raise SourceStateError("source_bytecode_unsafe", cache, detail=f"{PYCACHE_PREFIX} not outside every mount")
+            found.append(SourceStateError("source_bytecode_unsafe", cache, detail=f"{PYCACHE_PREFIX} not outside every mount"))
         blobs = self._tree(head, paths) if paths else {}
         tracked = self._tree(head, compose, recursive=False) if compose else {}
         bad_compose = [c for c in compose if c not in tracked or tracked[c][0] != "100644"]
         if bad_compose:
-            raise SourceStateError("source_compose_untracked", bad_compose)
+            found.append(SourceStateError("source_compose_untracked", bad_compose))
         empty = [p for p in paths if not any(_within(f, p) for f in blobs)]
         if empty:
-            raise SourceStateError("source_mount_invalid", empty, detail="no tracked files")
+            found.append(SourceStateError("source_mount_invalid", empty, detail="no tracked files"))
         odd = [f for f, (mode, _sha) in blobs.items() if mode not in _REGULAR]
         if odd:
-            raise SourceStateError("source_unsupported_entry", odd)
+            found.append(SourceStateError("source_unsupported_entry", odd))
+        raise_refusals(found)
         expected = {**blobs, **tracked}
         if self.allow_dirty:
             return self._capture(head, observed_head, expected, stray, scoped)

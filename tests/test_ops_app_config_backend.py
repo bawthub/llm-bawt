@@ -21,7 +21,7 @@ from llm_bawt.ops.compose_render import ComposeError, ComposeRenderer
 from llm_bawt.ops.executor import ConfigCheckError, validate_spec
 from llm_bawt.ops.image_deploy import DeployFailed
 from tests.ops_install_rows import SEEDS
-from llm_bawt.ops.source_state import SourceStateError, reserved_env_name, source_plan
+from llm_bawt.ops.source_state import SourceStateError, SourceStateRefusals, reserved_env_name, source_plan
 from tests.test_ops_app_config_reconcile import (
     APP_NAME, EXECUTION, OPERATION, SPEC as APP_SPEC, TAG as APP_TAG, AppDocker, StubChecker, _executor,
     app_compose, source,  # noqa: F401 (autouse: the sealed git source check, stubbed)
@@ -433,6 +433,33 @@ def test_an_unclassified_compose_env_name_fails_closed():
     with pytest.raises(SourceStateError) as caught:
         _plan(IMAGE_ENV, {**ENV, "BAWTHUB_TTS_RESTART_CMD": "x"})
     assert caught.value.code == "source_env_unclassified"
+
+
+def test_every_env_refusal_is_reported_at_once():
+    # TASK-1639: the 10-28 cutover paid a commit cycle per refusal.
+    with pytest.raises(SourceStateRefusals) as caught:
+        _plan(["PATH=/usr/bin", "UV_LOCKED=0"], {**ENV, "BAWTHUB_TTS_RESTART_CMD": "x"})
+    codes = [r.code for r in caught.value.refusals]
+    assert codes == ["source_env_unsafe", "source_env_unclassified"]
+    assert caught.value.code == "source_env_unsafe"  # callers keyed on a code see the first
+    assert "UV_LOCKED" in str(caught.value) and "BAWTHUB_TTS_RESTART_CMD" in str(caught.value)
+
+
+def test_a_plan_refusal_reports_mounts_and_env_together_without_the_source_check():
+    checker = StubChecker()
+    compose = backend_compose(environment={**ENV, "BAWTHUB_TTS_RESTART_CMD": "x"})
+    compose["services"]["backend"]["volumes"].append(
+        {"type": "bind", "source": "/srv/extra", "target": "/extra", "bind": {"create_host_path": True}})
+    with pytest.raises(SourceStateRefusals) as caught:
+        bind(BackendDocker(compose=compose), checker=checker)
+    assert [r.code for r in caught.value.refusals] == ["source_mount_unclassified", "source_env_unclassified"]
+    assert not checker.calls  # a refused plan never reaches the sealed git check
+
+
+def test_a_single_refusal_keeps_its_own_error():
+    with pytest.raises(SourceStateError) as caught:
+        _plan(IMAGE_ENV, {**ENV, "BAWTHUB_TTS_RESTART_CMD": "x"})
+    assert type(caught.value) is SourceStateError
 
 
 # ── backend end to end ──────────────────────────────────────────────────────
