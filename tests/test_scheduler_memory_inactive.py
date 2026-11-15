@@ -17,7 +17,8 @@ from llm_bawt.bot_identities import WILDCARD_BOT_ID
 from llm_bawt.bot_tags.facade import TagSnapshot
 from llm_bawt.service.scheduler import JobScheduler, JobType, ScheduledJob
 
-MEMORY_JOBS = [JobType.MEMORY_EXTRACTION, JobType.MEMORY_CONSOLIDATION, JobType.MEMORY_DECAY]
+MEMORY_JOBS = [JobType.MEMORY_EXTRACTION, JobType.MEMORY_CONSOLIDATION, JobType.MEMORY_DECAY,
+               JobType.HISTORY_SUMMARIZATION]  # TASK-2333
 
 ROWS = [
     {"slug": "nova", "include_in_global_search": True, "tags": []},
@@ -73,8 +74,3 @@ def test_inactive_bots_are_skipped_and_private_active_bots_still_run(job_type):
 @pytest.mark.parametrize("job_type", MEMORY_JOBS)
 def test_unavailable_tag_snapshot_processes_nothing(job_type):
     assert _run(job_type, TagSnapshot.unavailable()) == []
-
-
-def test_history_summarization_is_out_of_scope_and_unchanged():
-    expanded = _run(JobType.HISTORY_SUMMARIZATION, TagSnapshot.from_rows(ROWS))
-    assert expanded == ["nova", "hush", "sleepy", "ghost"]

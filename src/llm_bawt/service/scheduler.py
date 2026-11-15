@@ -46,8 +46,9 @@ class JobType(str, Enum):
     IDLE_CONTEXT_RESET = "idle_context_reset"
 
 
-# Wildcard jobs that skip bots tagged inactive (TASK-1440).
+# Wildcard jobs that skip bots tagged inactive (TASK-1440, TASK-2333).
 _INACTIVE_EXCLUDED_JOBS = frozenset({
+    JobType.HISTORY_SUMMARIZATION,
     JobType.MEMORY_EXTRACTION,
     JobType.MEMORY_CONSOLIDATION,
     JobType.MEMORY_DECAY,
@@ -305,7 +306,7 @@ class JobScheduler:
 
             all_bots = await asyncio.to_thread(list_bot_slugs)
             if job.job_type in _INACTIVE_EXCLUDED_JOBS and all_bots:
-                # Memory maintenance skips bots tagged inactive (TASK-1440).
+                # Memory/history maintenance skips bots tagged inactive.
                 # Private bots keep theirs. An unreadable snapshot answers
                 # "inactive" for every bot, so nothing runs.
                 tags = await asyncio.to_thread(BotTags(self.engine).snapshot)

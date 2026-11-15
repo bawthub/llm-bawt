@@ -177,7 +177,17 @@ def test_scheduler_wildcard_expansion_loads_bots_off_the_loop():
             def list_bots(self):
                 return [SimpleNamespace(slug="nova"), SimpleNamespace(slug="rook")]
 
-        with patch("llm_bawt.bots.BotManager", SlowBotManager):
+        class NoTags:  # every wildcard job now reads tags (TASK-2333)
+            def __init__(self, engine=None):
+                pass
+
+            def snapshot(self, conn=None):
+                from llm_bawt.bot_tags.facade import TagSnapshot
+                return TagSnapshot.from_rows([
+                    {"slug": s, "include_in_global_search": True, "tags": []} for s in ("nova", "rook")])
+
+        with patch("llm_bawt.bots.BotManager", SlowBotManager), \
+                patch("llm_bawt.service.scheduler.BotTags", NoTags):
             await probe.run(scheduler._execute_job(job))
         return probe
 
