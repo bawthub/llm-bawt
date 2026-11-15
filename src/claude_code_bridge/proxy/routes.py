@@ -43,6 +43,7 @@ from .request_context import (
     valid_skill_names,
 )
 from .openrouter_routing import parse_openrouter_provider
+from .skill_catalog import SKILL_SCOPE_HEADER, callable_skill_names, parse_skill_scope
 from .strict_tools import STRICT_TOOLS_HEADER, parse_strict_tools
 from .apply_patch import APPLY_PATCH_HEADER, parse_mode as parse_apply_patch_mode
 from .transport_policy import normalize_responses_transport
@@ -606,7 +607,13 @@ async def messages(request: Request) -> JSONResponse | StreamingResponse:
         ),
         strict_tools=parse_strict_tools(request_headers.get(STRICT_TOOLS_HEADER)),
         apply_patch=parse_apply_patch_mode(request_headers.get(APPLY_PATCH_HEADER)),
-        skill_names=valid_skill_names(request_headers.get(SKILL_NAMES_HEADER)),
+        # TASK-1550: an ambient run adds the skills the request advertises
+        # (bundled/plugin); a managed catalog stays exactly as sent.
+        skill_names=callable_skill_names(
+            body,
+            valid_skill_names(request_headers.get(SKILL_NAMES_HEADER)),
+            ambient=parse_skill_scope(request_headers.get(SKILL_SCOPE_HEADER)),
+        ),
         status_callback=getattr(
             getattr(getattr(request, "app", None), "state", None),
             "proxy_status_callback",

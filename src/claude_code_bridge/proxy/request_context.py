@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .openrouter_routing import serialize_openrouter_provider
+from .skill_catalog import AMBIENT_SCOPE, SKILL_SCOPE_HEADER
 from .strict_tools import STRICT_TOOLS_HEADER
 from .apply_patch import APPLY_PATCH_HEADER
 
@@ -105,6 +106,8 @@ class ProxyRequestContext:
     # Latest CLI working directory, for relative patch paths (set per request).
     patch_cwd: str | None = None
     skill_names: tuple[str, ...] = ()
+    # TASK-1550: no managed selection; the proxy may add advertised skills.
+    skill_scope_ambient: bool = False
     started_at: float = 0.0
     account_hash: str = "default"
     active_provider: int = 0
@@ -187,4 +190,6 @@ def custom_header_env(context: ProxyRequestContext) -> str:
         names = [name for name in context.skill_names if _SKILL_NAME_RE.fullmatch(name)]
         if names:
             lines.append(f"{SKILL_NAMES_HEADER}: {','.join(names[:256])}")
+    if context.skill_scope_ambient:
+        lines.append(f"{SKILL_SCOPE_HEADER}: {AMBIENT_SCOPE}")
     return "\n".join(lines)

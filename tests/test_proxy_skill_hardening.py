@@ -217,3 +217,135 @@ def test_cancelled_request_is_rejected_before_adapter_call(monkeypatch) -> None:
         asyncio.run(messages(Request()))
     assert exc.value.status_code == 499
     assert calls == 0
+
+
+# TASK-1550: ambient runs also allow the skills the request advertises.
+BUNDLED_LISTING = (
+    "<system-reminder>\nThe following skills are available for use with the "
+    "Skill tool:\n\n- agent-system: Task tools.\n- dataviz: Charts, mandatory "
+    "for plots.\n- plugin:review: A plugin skill.\n</system-reminder>"
+)
+
+
+def _advertising_body(*, schema_enum: list[str] | None = None) -> dict:
+    schema = json.loads(json.dumps(SKILL_SCHEMA))
+    if schema_enum is not None:
+        schema["input_schema"]["properties"]["skill"]["enum"] = schema_enum
+    return {
+        "model": "openai_chatgpt/gpt-6-astra",
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": BUNDLED_LISTING},
+            {"type": "text", "text": "chart it"},
+        ]}],
+        "tools": [schema],
+        "stream": True,
+    }
+
+
+def test_ambient_catalog_adds_listed_bundled_and_plugin_skills() -> None:
+    from claude_code_bridge.proxy.skill_catalog import callable_skill_names
+
+    assert callable_skill_names(_advertising_body(), SKILLS, ambient=True) == (
+        *SKILLS, "dataviz", "plugin:review",
+    )
+
+
+def test_ambient_catalog_keeps_existing_sdk_enum() -> None:
+    from claude_code_bridge.proxy.skill_catalog import callable_skill_names
+
+    body = _advertising_body(schema_enum=["sdk-only"])
+    body["messages"] = [{"role": "user", "content": "no listing"}]
+    assert callable_skill_names(body, SKILLS, ambient=True) == (*SKILLS, "sdk-only")
+
+
+def test_managed_catalog_is_never_widened() -> None:
+    from claude_code_bridge.proxy.skill_catalog import callable_skill_names
+
+    body = _advertising_body(schema_enum=["sdk-only"])
+    assert callable_skill_names(body, ("bawthub",), ambient=False) == ("bawthub",)
+
+
+def test_tool_result_text_does_not_advertise_skills() -> None:
+    from claude_code_bridge.proxy.skill_catalog import callable_skill_names
+
+    body = {"messages": [{"role": "user", "content": [{
+        "type": "tool_result", "tool_use_id": "t", "content": BUNDLED_LISTING,
+    }]}], "tools": [SKILL_SCHEMA]}
+    assert callable_skill_names(body, SKILLS, ambient=True) == SKILLS
+
+
+def test_scope_header_round_trips_only_for_ambient_runs() -> None:
+    from claude_code_bridge.proxy.request_context import ProxyRequestContext, custom_header_env
+
+    ambient = custom_header_env(ProxyRequestContext(
+        request_id="r", provider="p", skill_names=SKILLS, skill_scope_ambient=True))
+    managed = custom_header_env(ProxyRequestContext(
+        request_id="r", provider="p", skill_names=SKILLS))
+    assert "X-LLM-Bawt-Skill-Scope: ambient" in ambient
+    assert "Skill-Scope" not in managed
+
+
+def _route_skill_names(monkeypatch, headers: dict, body: dict) -> tuple[str, ...]:
+    """Run the real route up to the adapter and return its resolved catalog."""
+    from claude_code_bridge.proxy import routes
+
+    seen: list[tuple[str, ...]] = []
+
+    class Stop(Exception):
+        pass
+
+    def record(**kwargs):
+        context = routes_context(**kwargs)
+        seen.append(context.skill_names)
+        raise Stop
+
+    routes_context = routes.ProxyRequestContext
+    monkeypatch.setattr(routes, "ProxyRequestContext", record)
+    monkeypatch.setattr(routes, "lookup", lambda _provider: object())
+
+    class Request:
+        app = SimpleNamespace(state=SimpleNamespace(
+            proxy_status_callback=None, proxy_cancellations=None))
+
+        def __init__(self):
+            self.headers = headers
+
+        async def json(self):
+            return body
+
+    with pytest.raises(Stop):
+        asyncio.run(messages(Request()))
+    return seen[0]
+
+
+@pytest.mark.parametrize(
+    ("scope", "expected"),
+    [
+        ("ambient", (*SKILLS, "dataviz", "plugin:review")),
+        (None, SKILLS),
+    ],
+)
+def test_route_resolves_callable_skills_by_scope(monkeypatch, scope, expected) -> None:
+    headers = {"X-LLM-Bawt-Skill-Names": ",".join(SKILLS)}
+    if scope:
+        headers["X-LLM-Bawt-Skill-Scope"] = scope
+    assert _route_skill_names(monkeypatch, headers, _advertising_body()) == expected
+
+
+@pytest.mark.parametrize("surface", ["responses", "chat_completions"])
+def test_ambient_bundled_skill_reaches_both_translated_enums(surface) -> None:
+    from claude_code_bridge.proxy.skill_catalog import callable_skill_names
+
+    body = _advertising_body(schema_enum=["sdk-only"])
+    names = callable_skill_names(body, SKILLS, ambient=True)
+    if surface == "responses":
+        tool = anthropic_to_responses(body, "gpt-6-astra", allowed_skill_names=names)["tools"][0]
+        params = tool["parameters"]
+    else:
+        tool = anthropic_to_chat_completions(body, "k3", allowed_skill_names=names)["tools"][0]
+        params = tool["function"]["parameters"]
+    enum = params["properties"]["skill"]["enum"]
+    assert {"dataviz", "plugin:review", "sdk-only", *SKILLS} == set(enum)
+    assert sanitize_tool_arguments(
+        {"skill": "dataviz;"}, "Skill", allowed_skill_names=names
+    ) == {"skill": "dataviz"}

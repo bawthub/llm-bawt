@@ -208,6 +208,7 @@ class ClaudeStreamMixin:
             # The durable DB thread is the canonical conversation boundary.
             # Normal app dispatch always supplies it; the request id is a
             # non-prompt fallback for legacy/direct bridge commands.
+            managed_skills = ManagedSelection.from_field(skill_selection)
             conversation_id = durable_conversation_identity(
                 bot_id=bot_id,
                 session_key=session_key,
@@ -223,8 +224,8 @@ class ClaudeStreamMixin:
                     openrouter_provider=openrouter_provider,
                     strict_tools=strict_tools,
                     apply_patch=apply_patch,
-                    skill_names=claude_skill_names(
-                        ManagedSelection.from_field(skill_selection)),
+                    skill_names=claude_skill_names(managed_skills),
+                    skill_scope_ambient=managed_skills is None,
                 )
             )
             # TASK-546: Override every internal/subagent model selector with a
