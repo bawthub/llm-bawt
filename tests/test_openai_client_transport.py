@@ -145,3 +145,64 @@ def test_api_error_text_keeps_status_and_body_reason(content, expected):
     assert text.startswith("Error code: 502")
     assert expected in text
     assert text.count(expected) == 1
+
+
+class _RejectingHandler(_Handler):
+    """Refuses the first token-parameter name (or temperature) it sees with a
+    non-OpenAI-shaped 400 body, as gateways do, then accepts the retry."""
+
+    mode = "token"
+    plain = False
+    refused_key: str | None = None
+
+    def do_POST(self):  # noqa: N802 - http.server API
+        raw = self.rfile.read(int(self.headers["content-length"]))
+        body = json.loads(raw)
+        cls = type(self)
+        cls.requests.append({"path": self.path, "body": body, "auth": None})
+        if cls.mode == "token":
+            key = next((k for k in ("max_completion_tokens", "max_tokens") if k in body), None)
+            if cls.refused_key is None:
+                cls.refused_key = key
+            reject = key is not None and key == cls.refused_key
+            reason = f"unsupported parameter {key}"
+        else:
+            reject = "temperature" in body
+            reason = "temperature is unsupported for this model"
+        if reject:
+            out = reason.encode() if cls.plain else json.dumps({"detail": reason}).encode()
+            self.send_response(400)
+            self.send_header("content-type", "text/plain" if cls.plain else "application/json")
+        else:
+            out = json.dumps(COMPLETION).encode()
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(out)))
+        self.end_headers()
+        self.wfile.write(out)
+
+
+@pytest.mark.parametrize("plain", [False, True])
+@pytest.mark.parametrize("mode", ["token", "temperature"])
+def test_parameter_fallback_reads_non_openai_error_bodies(mode, plain):
+    _RejectingHandler.requests = []
+    _RejectingHandler.mode, _RejectingHandler.plain, _RejectingHandler.refused_key = mode, plain, None
+    srv = HTTPServer(("127.0.0.1", 0), _RejectingHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        client = _client(f"http://127.0.0.1:{srv.server_port}/v1")
+        client.client = client.client.with_options(max_retries=0)
+        payload = {"model": "fake", "messages": [{"role": "user", "content": "hi"}],
+                   "stream": False, "temperature": 0.2}
+        completion = client._chat_create_with_fallback(payload)
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    assert completion.choices[0].message.content == "TRANSPORT_OK"
+    sent = [r["body"] for r in _RejectingHandler.requests]
+    assert len(sent) == 2
+    if mode == "temperature":
+        assert "temperature" in sent[0] and "temperature" not in sent[1]
+    else:
+        first = _RejectingHandler.refused_key
+        assert first in sent[0] and first not in sent[1]

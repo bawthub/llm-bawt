@@ -186,7 +186,7 @@ class OpenAIClient(LLMClient):
                 break
             except OpenAIError as e:
                 self._log_openai_error(e, try_payload)
-                msg = str(e).lower()
+                msg = _api_error_text(e).lower()  # TASK-2339: openai 3 drops non-OpenAI bodies from str()
                 if ("unsupported parameter" in msg and any(k in msg for k in ("max_tokens", "max_completion_tokens", "max_output_tokens"))) or (
                     "invalid_request_error" in msg and "token" in msg
                 ):
@@ -201,7 +201,7 @@ class OpenAIClient(LLMClient):
                         try:
                             return self.client.chat.completions.create(**try_payload_no_temp)
                         except OpenAIError as e2:
-                            m2 = str(e2).lower()
+                            m2 = _api_error_text(e2).lower()
                             if ("unsupported parameter" in m2 and any(k in m2 for k in ("max_tokens", "max_completion_tokens", "max_output_tokens"))):
                                 last_err = e2
                                 continue
