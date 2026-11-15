@@ -37,8 +37,8 @@ def _item(item_id: str, tool: str = "browser_take_screenshot") -> dict:
 
 def _complete(bridge: CodexBridge, item: dict, buffers: dict) -> None:
     buffers.setdefault(item["id"], {"tool_name": item["tool"], "type": "mcp"})
-    asyncio.run(bridge._persist_mcp_images(item, "caid:nick", buffers))
-    bridge._emit_tool_end(item, "req", "caid:nick", 0, buffers, [])
+    asyncio.run(bridge._persist_mcp_images(item, "bot:user", buffers))
+    bridge._emit_tool_end(item, "req", "bot:user", 0, buffers, [])
 
 
 def _tool_ends(bridge: CodexBridge) -> list:
@@ -52,8 +52,8 @@ def test_screenshot_uploads_and_attaches_to_tool_end_and_turn():
     _complete(bridge, _item("b", "mcp__bawthub__generate_image"), buffers)
 
     assert bridge.uploads == [
-        ("data:image/png;base64,", "nick", "a"),
-        ("data:image/png;base64,", "nick", "b"),
+        ("data:image/png;base64,", "user", "a"),
+        ("data:image/png;base64,", "user", "b"),
     ]
     assert [e.attachments for e in _tool_ends(bridge)] == [
         [{"asset_id": "ma_1", "kind": "image"}],
