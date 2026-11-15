@@ -277,27 +277,24 @@ def _holders(tags, key):
             {"k": key}).scalars())
 
 
-def _waiting_on_a_lock(tags) -> bool:
-    with tags.rig.engine.connect() as conn:
-        return bool(conn.execute(text(
-            "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE NOT granted)")).scalar_one())
-
-
 def _race(tags, monkeypatch, first_claim, second_claim,
           pause_after="_require_free_prompt_key"):
     """Run ``first_claim`` until just after its ``pause_after`` store step,
-    start ``second_claim``, wait until it blocks (or finishes), then let both
-    finish. Returns both futures, already finished."""
+    start ``second_claim``, require it to wait on a lock the first holds, then
+    let both finish. Returns both futures, already finished."""
     import threading
-    import time
-    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import ThreadPoolExecutor, wait
+
+    from tests.pg_lock_wait import wait_blocked_by
 
     checked, release = threading.Event(), threading.Event()
+    holder = {}
     step = getattr(BotTagStore, pause_after)
 
-    def pausing_step(*args):
-        result = step(*args)
+    def pausing_step(conn, *args):
+        result = step(conn, *args)
         if threading.current_thread().name.startswith("first"):
+            holder["pid"] = conn.execute(text("SELECT pg_backend_pid()")).scalar_one()
             checked.set()
             assert release.wait(30)
         return result
@@ -306,15 +303,14 @@ def _race(tags, monkeypatch, first_claim, second_claim,
     with ThreadPoolExecutor(1, thread_name_prefix="first") as first_pool, \
          ThreadPoolExecutor(1, thread_name_prefix="second") as second_pool:
         first = first_pool.submit(first_claim)
-        assert checked.wait(30)
-        later = second_pool.submit(second_claim)
-        deadline = time.monotonic() + 10
-        while not later.done() and not _waiting_on_a_lock(tags):
-            assert time.monotonic() < deadline, "second claimant neither blocked nor finished"
-            time.sleep(0.02)
-        release.set()
-        for future in (first, later):
-            future.exception(30)
+        try:
+            assert checked.wait(30)
+            later = second_pool.submit(second_claim)
+            wait_blocked_by(tags.rig.engine, holder["pid"], later)
+        finally:
+            release.set()
+        _, pending = wait([first, later], timeout=30)
+        assert not pending
     return first, later
 
 
