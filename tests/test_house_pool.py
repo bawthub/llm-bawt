@@ -269,8 +269,10 @@ def test_tenant_bridge_image_ships_the_preview_launcher():
 def test_image_keeps_tests_separate_from_harness_environment():
     dockerfile = (ROOT / "Dockerfile.house").read_text()
     assert "FROM ${AGENT_BRIDGE_IMAGE}" in dockerfile
-    assert "uv venv /opt/house-tests" in dockerfile
-    assert '--python /opt/house-tests/bin/python -e "/app[dev,service,mcp,search]"' in dockerfile
+    assert "COPY pyproject.toml setup.cfg uv.lock README.md LICENSE /app/" in dockerfile
+    assert "UV_PROJECT_ENVIRONMENT=/opt/house-tests uv sync --frozen --no-dev" in dockerfile
+    assert "--extra dev --extra service --extra mcp --extra search" in dockerfile
+    assert "uv pip install" not in dockerfile
     assert "gpt-" not in dockerfile
     assert "USER bridge" in dockerfile
 
@@ -278,5 +280,7 @@ def test_image_keeps_tests_separate_from_harness_environment():
 def test_house_build_context_includes_required_package_readme():
     ignored = (ROOT / ".dockerignore").read_text().splitlines()
     assert ignored.index("!README.md") > ignored.index("*.md")
-    for path in ("pyproject.toml", "README.md", "LICENSE", "docker/house-preview"):
+    for path in (
+        "pyproject.toml", "setup.cfg", "uv.lock", "README.md", "LICENSE", "docker/house-preview",
+    ):
         assert (ROOT / path).is_file()

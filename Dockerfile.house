@@ -7,9 +7,9 @@ USER root
 # Do not change the lean harness environment or its pinned SDKs. pytest and the
 # app's dev/service/mcp/search extras live in a separate environment for focused
 # tests; it is not a full-unit or full-gate environment (see docs/HEAVY_QUEUE.md).
-COPY pyproject.toml setup.cfg README.md LICENSE /app/
-RUN uv venv /opt/house-tests \
-    && uv pip install --python /opt/house-tests/bin/python -e "/app[dev,service,mcp,search]" \
+COPY pyproject.toml setup.cfg uv.lock README.md LICENSE /app/
+RUN UV_PROJECT_ENVIRONMENT=/opt/house-tests uv sync --frozen --no-dev \
+        --extra dev --extra service --extra mcp --extra search \
     && ln -s /opt/house-tests/bin/pytest /usr/local/bin/pytest \
     && chown -R bridge:bridge /opt/house-tests
 COPY docker/house-preview /usr/local/bin/house-preview
