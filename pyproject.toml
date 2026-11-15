@@ -69,6 +69,9 @@ dev = [
     # boto3 path without a live Garage. moto 5+ uses the unified
     # ``@mock_aws`` decorator.
     "moto[s3]>=5.0.0",
+    # In-memory Redis with a real Lua engine (lupa) for TASK-1584: the UI
+    # cursor scripts run their actual Lua text in every gate lane, no server.
+    "fakeredis[lua]>=2.26.0",
 ]
 memory = [
     "sentence-transformers>=2.2.0",
