@@ -131,3 +131,22 @@ def test_thread_switched_still_starts_a_daemon_without_running_transport(monkeyp
         daemon=True, name="thread-switched-pub-test-bot",
     )
     constructor.return_value.start.assert_called_once_with()
+
+
+def test_delegated_ops_fixture_records_public_subscriber_events_without_a_database(monkeypatch):
+    """Catch fixture interface drift before the private-PG integration gate."""
+    from tests import test_ops_approvals_pg as delegated
+    monkeypatch.setattr(delegated, "ToolApprovalPolicyStore", lambda *a, **kw: object())
+    api = SimpleNamespace(
+        rig=SimpleNamespace(engine=object()),
+        client=SimpleNamespace(app=SimpleNamespace(include_router=Mock())),
+        as_person=Mock(return_value=SimpleNamespace(status_code=200)),
+    )
+    ops = delegated.ops.__wrapped__(api, monkeypatch)
+    asyncio.run(approval_events.publish_approval_resolved(
+        delegated.approval_routes._subscriber(), delegated.REQUESTER, delegated.USER,
+        "fixture-approval", "fixture-turn", "approved", has_result=False))
+    [(stream, event)] = ops.events
+    assert stream == f"events:{delegated.REQUESTER}:{delegated.USER}"
+    assert event["request_id"] == "fixture-approval"
+    assert "result" not in event

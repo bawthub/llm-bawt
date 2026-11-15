@@ -78,8 +78,10 @@ def ops(grant_api, monkeypatch):  # noqa: F811
     monkeypatch.setattr(routes, "open_task_turn_context", open_turn)
     monkeypatch.setattr(routes, "_store", lambda: store)
     monkeypatch.setattr(approval_routes, "_store", lambda: store)
-    monkeypatch.setattr(approval_routes, "_subscriber",
-                        lambda: SimpleNamespace(_redis=SimpleNamespace(xadd=xadd)))
+    from agent_bridge.subscriber import RedisSubscriber
+    subscriber = RedisSubscriber.__new__(RedisSubscriber)
+    subscriber._redis = SimpleNamespace(xadd=xadd)
+    monkeypatch.setattr(approval_routes, "_subscriber", lambda: subscriber)
     monkeypatch.setattr(approval_routes, "get_turn_log_store", lambda: SimpleNamespace(engine=object()))
     monkeypatch.setattr(approval_routes, "ToolCallStore", Cards)
     grant_api.client.app.include_router(routes.router)
