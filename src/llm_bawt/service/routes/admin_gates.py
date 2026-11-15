@@ -128,9 +128,17 @@ def get_dispatch_wake():
 
 
 def get_freeze_changed():
-    """Tells open UIs a freeze was placed or thawed (state_changed ``freeze``, TASK-1184)."""
-    service = get_service()
-    return lambda: state_events.mark(service, state_events.FREEZE)
+    """Tells open UIs a freeze was placed or thawed (state_changed ``freeze``, TASK-1184).
+
+    Resolves the service only when called, and does nothing without one, so the
+    gates routes still work where no background service is running."""
+    def changed() -> None:
+        try:
+            service = get_service()
+        except RuntimeError:
+            return
+        state_events.mark(service, state_events.FREEZE)
+    return changed
 
 
 @router.get("")
