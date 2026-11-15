@@ -184,7 +184,7 @@ class _Store:
         return copy.deepcopy(row)
 
     def payload(self, _id):
-        return {"messages": [{"content": "hello"}], "user": "nick"}
+        return {"messages": [{"content": "hello"}], "user": "operator"}
 
     def get(self, _id):
         return copy.deepcopy(self.row)
@@ -228,7 +228,7 @@ def _dispatcher(monkeypatch, bridge: _Bridge, *, turns: dict | None = None):
     turns = turns if turns is not None else {TARGET: SimpleNamespace(ended_at=None, status="streaming")}
     dispatcher = InterBotDeliveryDispatcher.__new__(InterBotDeliveryDispatcher)
     dispatcher.service = SimpleNamespace(
-        config=SimpleNamespace(DEFAULT_USER="nick"),
+        config=SimpleNamespace(DEFAULT_USER="operator"),
         _turn_log_store=SimpleNamespace(get_turn=lambda turn_id: turns.get(turn_id)),
     )
     dispatcher.store = _Store()
@@ -380,8 +380,8 @@ def _chat_steer(monkeypatch, steer_request_id):
     monkeypatch.setattr(bots, "BotManager", lambda _config: SimpleNamespace(
         get_bot=lambda _bot_id: SimpleNamespace(agent_backend="claude-code")))
     turn = SimpleNamespace(
-        id="turn-live", bot_id="byte", user_id="nick", status="streaming", ended_at=None,
-        agent_session_key="byte:nick", agent_request_id="req-live", user_prompt="work",
+        id="turn-live", bot_id="byte", user_id="operator", status="streaming", ended_at=None,
+        agent_session_key="byte:operator", agent_request_id="req-live", user_prompt="work",
         trigger_message_id="trigger-live",
     )
     with owned_steer_store(turn) as store:
@@ -390,7 +390,7 @@ def _chat_steer(monkeypatch, steer_request_id):
             asyncio.run(steer_active_turn(
                 service,
                 ChatSteerRequest(turn_id=turn.id, message="hi", message_id="m-1",
-                                 bot_id="byte", user_id="nick"),
+                                 bot_id="byte", user_id="operator"),
                 steer_request_id=steer_request_id,
             ))
     assert caught.value.detail == "no_active_run"

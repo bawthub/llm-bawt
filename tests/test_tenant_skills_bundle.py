@@ -10,6 +10,8 @@ import json
 import re
 from pathlib import Path
 
+from scripts.general_use_contract import load_policy
+
 ROOT = Path(__file__).resolve().parents[1]
 BUNDLE = ROOT / "tenant-skills"
 SKILLS_PATH = "/opt/bawthub/skills"
@@ -19,12 +21,12 @@ REQUIRED = {"agent-system", "bawthub", "llm-bawt", "git-commits", "frontend-desi
 PRIVATE = {"local-infrastructure", "taurus-ops", "unifi-network", "unraid-ops",
            "local-services", "infra-backups", "network-pentest", "bitwarden-cli",
            "bridge-container-network", "tenant-provisioning"}
-# Mirrors the exporter's lint: one private installation's names and addresses.
+# Generic infrastructure checks supplement the external deployment policy.
 PRIVATE_TEXT = re.compile(
-    r"ferreri\.us|zenoran|\b10\.0\.\d{1,3}\.\d{1,3}\b|\b172\.18\.0\.1\b"
+    r"\b10\.0\.\d{1,3}\.\d{1,3}\b|\b172\.18\.0\.1\b"
     r"|\b192\.168\.\d{1,3}\.\d{1,3}\b|(?i:\btaurus\b)|echo-release|@echo\b|\becho:\d"
     r"|\b(?:on|from|to|in|of|via|at) echo\b|\becho (?:host|DB|disk)\b"
-    r"|/home/(?:nick|bawthub)\b"
+    r"|/home/(?!bridge\b|<)[a-z_][a-z0-9_-]*"
 )
 
 
@@ -49,11 +51,14 @@ def test_bundle_ships_product_skills_and_no_private_ones():
 
 
 def test_bundle_has_no_private_references():
+    policy = load_policy(ROOT)
+    private_values = (*policy["operator_identities"], *policy["personal_domains"])
+    patterns = [re.compile(rf"\b{re.escape(value)}\b", re.IGNORECASE) for value in private_values]
     hits = []
     for path in sorted(BUNDLE.rglob("*")):
         if path.is_file():
             for number, line in enumerate(path.read_text().splitlines(), 1):
-                if PRIVATE_TEXT.search(line):
+                if PRIVATE_TEXT.search(line) or any(pattern.search(line) for pattern in patterns):
                     hits.append(f"{path.relative_to(ROOT)}:{number}")
     assert hits == []
 

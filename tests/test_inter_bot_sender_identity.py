@@ -299,7 +299,7 @@ def delivery_route(monkeypatch):
     store.get.return_value = record
     store.payload.return_value = {}
     dispatcher = SimpleNamespace(store=store, _emit=AsyncMock(), wake=Mock())
-    service = SimpleNamespace(config=SimpleNamespace(DEFAULT_USER="nick"),
+    service = SimpleNamespace(config=SimpleNamespace(DEFAULT_USER="operator"),
                               _inter_bot_dispatcher=dispatcher)
     bot = SimpleNamespace(agent_backend="claude-code", harness="claude-code")
     known = {"al", "snark", "outside"}
@@ -343,8 +343,8 @@ def test_route_accepts_the_outside_agent_bot_as_sender(delivery_route) -> None:
 
 
 def test_route_keeps_user_authored_workspace_delivery(delivery_route) -> None:
-    """BawtHub's repos workspace posts author=nick with sender unknown."""
-    _create(sender_bot_id="unknown", author_entity_type="user", author_entity_id="nick")
+    """BawtHub's repos workspace posts author=operator with sender unknown."""
+    _create(sender_bot_id="unknown", author_entity_type="user", author_entity_id="operator")
     kwargs = delivery_route.enqueue.call_args.kwargs
     assert kwargs["sender_bot_id"] == "unknown"
     assert kwargs["author"].entity_type == "user"

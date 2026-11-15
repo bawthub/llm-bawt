@@ -23,7 +23,7 @@ from tests import virtual_clock
 SIGHTED = RunSighting("req-1", "claude-code", "boot-a", pid1=True)
 
 
-def _member(*, sighting=SIGHTED, backend="claude-code", request_id="req-1", accepted=None, session_key="snark:nick"):
+def _member(*, sighting=SIGHTED, backend="claude-code", request_id="req-1", accepted=None, session_key="snark:operator"):
     return SweepMember(7, 3, "turn-1", True, backend, session_key, request_id, sighting, accepted=accepted)
 
 
@@ -101,7 +101,7 @@ def test_a_known_survivor_is_not_rewritten_every_pass():
     member = _member(sighting=None)
     assert _verdict(member, _reply(boot_id="boot-a"), _terminal(False)) == (
         "terminal_survivor", ("c", False, "boot-a"))
-    blocked = SweepMember(7, 3, "turn-1", True, "claude-code", "snark:nick", "req-1", None, "exit_unconfirmed")
+    blocked = SweepMember(7, 3, "turn-1", True, "claude-code", "snark:operator", "req-1", None, "exit_unconfirmed")
     assert _verdict(blocked, _reply(boot_id="boot-a"), _terminal(False)) == ("terminal_survivor", None)
     assert _verdict(blocked, _reply(boot_id="boot-a"), _terminal(True)) == ("terminal_exited", ("c", True, "boot-a"))
 

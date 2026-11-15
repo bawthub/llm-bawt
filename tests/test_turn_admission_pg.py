@@ -48,7 +48,7 @@ def _open(store, bot, status="streaming", turn_id=None):
         conn.execute(sa_text("""
             INSERT INTO turn_logs (id, created_at, path, stream, bot_id, user_id,
                                    status, user_prompt, response_text, ended_at)
-            VALUES (:id, now(), '/test', true, :bot, 'nick', :status, '', '', NULL)
+            VALUES (:id, now(), '/test', true, :bot, 'operator', :status, '', '', NULL)
         """), {"id": turn_id, "bot": bot, "status": status})
     return turn_id
 
@@ -67,7 +67,7 @@ def _save(
     return store.save_turn(
         turn_id=turn_id or f"turn-{uuid.uuid4().hex}", request_id="r",
         path="/v1/chat/completions", stream=True, model="m", bot_id=bot,
-        user_id="nick", status="streaming", latency_ms=None, user_prompt="hi",
+        user_id="operator", status="streaming", latency_ms=None, user_prompt="hi",
         request_payload=payload, response_text="", tool_calls=None,
         admission_claim=claim, connection=connection,
         terminal_protocol=protocol, assistant_message_id=assistant_id,
@@ -76,7 +76,7 @@ def _save(
 
 def _reserve(store, bot, turn_id, *, owner="owner-a", fence=None):
     return store.reserve_idle_turn(
-        turn_id=turn_id, bot_id=bot, user_id="nick", user_prompt="continuation",
+        turn_id=turn_id, bot_id=bot, user_id="operator", user_prompt="continuation",
         request_json={"admission": "idle_only"}, trigger_message_id=str(uuid.uuid4()),
         owner=owner, fence=fence,
     )
@@ -155,7 +155,7 @@ def test_durable_retry_reservation_never_rearms_a_protocol_attempt(pg_turns, com
     before = turns.get_turn(turn_id).model_dump()
     with turns.engine.begin() as conn:
         assert not write_reservation(
-            conn, turn_id=turn_id, bot_id=bot, user_id="nick", user_prompt="retry",
+            conn, turn_id=turn_id, bot_id=bot, user_id="operator", user_prompt="retry",
             request_json={"inter_bot_delivery_id": "delivery"},
             trigger_message_id=str(uuid.uuid4()),
         )
@@ -173,14 +173,14 @@ def test_ordinary_agent_starts_enqueue_atomically_and_claim_fifo(pg_turns):
 
     def send(message, *, message_id=None, assistant_id=None):
         request = ChatCompletionRequest(
-            bot_id=bot, user="nick", model="test-model", stream=True,
+            bot_id=bot, user="operator", model="test-model", stream=True,
             messages=[ChatMessage(role="user", content=message)],
             user_message_id=message_id or str(uuid.uuid4()),
             assistant_message_id=assistant_id or str(uuid.uuid4()),
             augment_memory=False, extract_memory=False,
         )
         result = queue.decide(
-            request=request, bot_id=bot, user_id="nick", user_prompt=message,
+            request=request, bot_id=bot, user_id="operator", user_prompt=message,
         )
         return request, result
 
@@ -534,14 +534,14 @@ def test_idle_http_ack_survives_dispatcher_crash_before_bridge_send(pg_turns):
     turns, bot = pg_turns
     deliveries = InterBotDeliveryStore(pg_turns[0].config)
     request = ChatCompletionRequest(
-        bot_id=bot, user="nick", model="test-model", stream=True,
+        bot_id=bot, user="operator", model="test-model", stream=True,
         messages=[ChatMessage(role="user", content="recover my exact reply")],
         user_message_id=str(uuid.uuid4()), assistant_message_id=str(uuid.uuid4()),
     )
     message_id = request.user_message_id
     try:
         decision = OrdinaryTurnQueue(turns, deliveries).decide(
-            request=request, bot_id=bot, user_id="nick", user_prompt="recover my exact reply",
+            request=request, bot_id=bot, user_id="operator", user_prompt="recover my exact reply",
         )
         assert decision.receipt()["object"] == "chat.completion.queued"
         assert turns.get_turn(decision.turn_id) is None
@@ -594,7 +594,7 @@ def test_terminal_takeover_blocks_bridge_binding_under_row_lock(pg_turns):
 
     def bind():
         try:
-            owner.bind_bridge(backend="claude-code", session_key=f"{bot}:nick", request_id="req-A")
+            owner.bind_bridge(backend="claude-code", session_key=f"{bot}:operator", request_id="req-A")
         except Exception as exc:
             errors.append(exc)
 
@@ -631,7 +631,7 @@ def test_ordinary_agent_new_enqueues_without_http_execution(pg_turns, monkeypatc
     )
     message_id, assistant_id = str(uuid.uuid4()), str(uuid.uuid4())
     request = ChatCompletionRequest(
-        bot_id=bot, user="nick", model="test-model", stream=stream,
+        bot_id=bot, user="operator", model="test-model", stream=stream,
         messages=[ChatMessage(
             role="user", content="/new" if stream else [{"type": "text", "text": "/new"}],
         )],
@@ -759,7 +759,7 @@ def test_delivery_claim_waits_instead_of_steering_ambiguous_or_reserved_targets(
         record, _ = deliveries.enqueue(
             sender_bot_id=sender, target_bot_id=bot, message="callback",
             payload={"messages": [{"role": "user", "content": "callback"}],
-                     "bot_id": bot, "user": "nick", "stream": True},
+                     "bot_id": bot, "user": "operator", "stream": True},
         )
         first = _open(store, bot)
         second = _open(store, bot)
@@ -793,7 +793,7 @@ def test_delivery_consumption_fence_rejects_reclaimed_claim_on_postgres(pg_turns
     record, _ = deliveries.enqueue(
         sender_bot_id=sender, target_bot_id=bot, message="callback",
         payload={"messages": [{"role": "user", "content": "callback"}],
-                 "bot_id": bot, "user": "nick", "stream": True},
+                 "bot_id": bot, "user": "operator", "stream": True},
     )
     try:
         first = deliveries.claim_next(bot, claim_owner="worker-1", steer_capable=False)
@@ -841,7 +841,7 @@ def test_delivery_enqueue_can_share_the_admission_transaction(pg_turns):
                 record, duplicate = deliveries.enqueue(
                     sender_bot_id=sender, target_bot_id=bot, message="wait",
                     payload={"messages": [{"role": "user", "content": "wait"}],
-                             "bot_id": bot, "user": "nick", "stream": True},
+                             "bot_id": bot, "user": "operator", "stream": True},
                     assistant_message_id=assistant_id, connection=conn,
                 )
                 assert not duplicate
@@ -870,7 +870,7 @@ def test_delivery_claim_fence_locks_out_concurrent_requeue(pg_turns):
     record, _ = deliveries.enqueue(
         sender_bot_id=sender, target_bot_id=bot, message="callback",
         payload={"messages": [{"role": "user", "content": "callback"}],
-                 "bot_id": bot, "user": "nick", "stream": True},
+                 "bot_id": bot, "user": "operator", "stream": True},
     )
     worker = None
     try:
@@ -944,7 +944,7 @@ def test_delivery_retry_still_rearms_its_ended_turn(pg_turns):
                quota_snapshot_json='{}', task_ref='TASK-1', task_attribution_source='explicit'
                WHERE id=:id"""), {"id": turn_id})
         assert write_reservation(
-            conn, turn_id=turn_id, bot_id=bot, user_id="nick", user_prompt="retry",
+            conn, turn_id=turn_id, bot_id=bot, user_id="operator", user_prompt="retry",
             request_json={}, trigger_message_id=None,
         )
     turn = store.get_turn(turn_id)
@@ -1049,7 +1049,7 @@ def _claimed_delivery(store, bot, sender, *, metadata=None):
     record, _ = deliveries.enqueue(
         sender_bot_id=sender, target_bot_id=bot, message="callback",
         payload={"messages": [{"role": "user", "content": "callback"}],
-                 "bot_id": bot, "user": "nick", "stream": True},
+                 "bot_id": bot, "user": "operator", "stream": True},
         metadata=metadata,
     )
     claimed = deliveries.claim_next(bot, claim_owner="worker", steer_capable=False)
@@ -1178,7 +1178,7 @@ def test_reservation_delete_lock_excludes_concurrent_tool_start(pg_turns):
     def start():
         try:
             outcome.append(ToolCallStore(turns.engine).save_start(
-                turn_id=turn_id, bot_id=bot, user_id="nick", call_id="reserved-tool",
+                turn_id=turn_id, bot_id=bot, user_id="operator", call_id="reserved-tool",
                 tool_name="tasks_reviews_add",
             ))
         except Exception as exc:

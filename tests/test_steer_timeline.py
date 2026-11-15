@@ -25,7 +25,7 @@ def timeline():
             interrupt_source_message_id TEXT, interrupt_content_offset INTEGER
         )"""))
     service = SimpleNamespace(_turn_log_store=SimpleNamespace(engine=engine))
-    result = SteerTimeline(service, bot_id="target", user_id="nick", turn_id="turn-live", message_id="message-steer")
+    result = SteerTimeline(service, bot_id="target", user_id="operator", turn_id="turn-live", message_id="message-steer")
     yield result
     engine.dispose()
 
@@ -41,7 +41,7 @@ def persist(timeline, offset=12):
 def test_infers_live_offset_without_waiting_for_turn_end(timeline):
     subscriber = SimpleNamespace(turn_text_offset=AsyncMock(return_value=8))
     assert asyncio.run(timeline.content_offset(subscriber, None)) == 8
-    subscriber.turn_text_offset.assert_awaited_once_with("target", "nick", "turn-live")
+    subscriber.turn_text_offset.assert_awaited_once_with("target", "operator", "turn-live")
 
 
 def test_browser_offset_is_preserved_without_stream_lookup(timeline):
@@ -69,7 +69,7 @@ def test_hyphenated_timeline_retry_publication_and_fallback_anchor(timeline, mon
     monkeypatch.setattr(EntityPresentationResolver, "resolve_many_safe", lambda *_: {("bot", "sender"): {}})
     asyncio.run(timeline.publish(subscriber))
     args = subscriber.publish_tool_event.await_args.args
-    assert args[:2] == ("fixture-agent", "nick")
+    assert args[:2] == ("fixture-agent", "operator")
     assert args[2]["bot_id"] == "fixture-agent"
     service = SimpleNamespace(get_memory_client=lambda _: None,
                               _turn_log_store=SimpleNamespace(engine=timeline.engine))
@@ -92,8 +92,8 @@ def test_publishes_canonical_message_to_recipient_not_sender(timeline, monkeypat
     monkeypatch.setattr(EntityPresentationResolver, "resolve_many_safe", lambda self, refs: {("bot", "sender"): author})
     subscriber = SimpleNamespace(publish_tool_event=AsyncMock(return_value="stream-id"))
     asyncio.run(timeline.publish(subscriber))
-    subscriber.publish_tool_event.assert_awaited_once_with("target", "nick", {
-        "_type": "steer_message", "bot_id": "target", "user_id": "nick",
+    subscriber.publish_tool_event.assert_awaited_once_with("target", "operator", {
+        "_type": "steer_message", "bot_id": "target", "user_id": "operator",
         "turn_id": "turn-live", "message_id": "message-steer", "session_id": "session-target",
         "content": "Message from bot sender: ready", "author": author,
         "interrupt_source_message_id": "trigger", "interrupt_content_offset": 12, "ts": 123.0,
@@ -114,7 +114,7 @@ def test_publish_failure_does_not_undo_persisted_message(timeline, monkeypatch):
         (AuthorReference.bot("sender"), "steer_delivery_test", ("bot", "sender")),
         # Public /v1/chat/steer passes no author: the composer message is the
         # turn owner's. NULL authorship hid live user corrections from recall.
-        (None, None, ("user", "nick")),
+        (None, None, ("user", "operator")),
     ],
 )
 def test_active_steer_persists_anchor_then_publishes_without_ending_turn(
@@ -125,7 +125,7 @@ def test_active_steer_persists_anchor_then_publishes_without_ending_turn(
     from llm_bawt.service.routes import chat
 
     calls = []
-    turn = SimpleNamespace(id="turn-live", bot_id="target", user_id="nick", ended_at=None,
+    turn = SimpleNamespace(id="turn-live", bot_id="target", user_id="operator", ended_at=None,
                            status="streaming", agent_session_key="session-key", agent_request_id="req",
                            trigger_message_id="trigger")
     memory = SimpleNamespace(get_message_by_id=lambda id: {"session_id": "session-target"},
@@ -151,7 +151,7 @@ def test_active_steer_persists_anchor_then_publishes_without_ending_turn(
     monkeypatch.setattr("llm_bawt.service.steer_timeline.SteerTimeline", Timeline)
     monkeypatch.setattr(chat, "_persist_interrupt_anchor", lambda *args, **kwargs: calls.append(("anchor", kwargs)) or True)
     result = asyncio.run(chat.steer_active_turn(service, chat.ChatSteerRequest(
-        turn_id="turn-live", bot_id="target", user_id="nick", message_id="message-steer", message="ready",
+        turn_id="turn-live", bot_id="target", user_id="operator", message_id="message-steer", message="ready",
     ), steer_request_id=steer_request_id, author=author))
     assert result.persisted is True
     assert [call[0] for call in calls] == ["persist", "anchor", "publish"]
@@ -168,7 +168,7 @@ def test_delivery_steer_sends_wire_suffix_but_persists_clean_text(monkeypatch, s
     from llm_bawt.service.routes import chat
 
     persisted = []
-    turn = SimpleNamespace(id="turn-live", bot_id="target", user_id="nick", ended_at=None,
+    turn = SimpleNamespace(id="turn-live", bot_id="target", user_id="operator", ended_at=None,
                            status="streaming", agent_session_key="session-key", agent_request_id="req",
                            trigger_message_id="trigger")
     memory = SimpleNamespace(get_message_by_id=lambda id: {"session_id": "session-target"},
@@ -192,7 +192,7 @@ def test_delivery_steer_sends_wire_suffix_but_persists_clean_text(monkeypatch, s
 
     monkeypatch.setattr("llm_bawt.service.steer_timeline.SteerTimeline", Timeline)
     asyncio.run(chat.steer_active_turn(service, chat.ChatSteerRequest(
-        turn_id="turn-live", bot_id="target", user_id="nick", message_id="message-steer",
+        turn_id="turn-live", bot_id="target", user_id="operator", message_id="message-steer",
         message="Message from bot 'sender': verdict?",
     ), steer_request_id="steer_delivery_test", author=AuthorReference.bot("sender"),
         wire_suffix="[Reply channel: async delivery.]"))
@@ -215,7 +215,7 @@ def test_run_finishing_is_a_definite_409_without_composer_retries(monkeypatch, s
     from llm_bawt.bots import BotManager
     from llm_bawt.service.routes import chat
 
-    turn = SimpleNamespace(id="turn-live", bot_id="target", user_id="nick", ended_at=None,
+    turn = SimpleNamespace(id="turn-live", bot_id="target", user_id="operator", ended_at=None,
                            status="streaming", agent_session_key="session-key", agent_request_id="req",
                            trigger_message_id="trigger")
     service = SimpleNamespace(config=object(), _turn_log_store=steer_store_factory(turn),
@@ -227,7 +227,7 @@ def test_run_finishing_is_a_definite_409_without_composer_retries(monkeypatch, s
 
     with pytest.raises(HTTPException) as raised:
         asyncio.run(chat.steer_active_turn(service, chat.ChatSteerRequest(
-            turn_id="turn-live", bot_id="target", user_id="nick", message_id="message-steer", message="late",
+            turn_id="turn-live", bot_id="target", user_id="operator", message_id="message-steer", message="late",
         ), steer_request_id=steer_request_id))
 
     assert (raised.value.status_code, raised.value.detail) == (409, "run_finishing")

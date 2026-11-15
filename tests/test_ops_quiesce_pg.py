@@ -88,7 +88,7 @@ def rig(private_app_pg):
             conn.execute(text("""
                 INSERT INTO turn_logs (id, created_at, path, stream, bot_id, user_id, status,
                                        user_prompt, response_text, ended_at, agent_request_id)
-                VALUES (:id, now(), '/test', true, :bot, 'nick', 'streaming', '', '', NULL, :req)
+                VALUES (:id, now(), '/test', true, :bot, 'operator', 'streaming', '', '', NULL, :req)
             """), {"id": turn_id, "bot": bot, "req": f"req-{turn_id}"})
         return turn_id
 
@@ -666,7 +666,7 @@ def _as_caller(rig, monkeypatch, *, bot=None, turn_id=None, session="sess-caller
 
     monkeypatch.setattr(ops_tools, "_get_ops_service", lambda: rig.service)
     monkeypatch.setattr(ops_tools, "_caller_provenance", lambda: {
-        "caller_bot_id": bot or rig.bot, "caller_user_id": "nick", "caller_turn_id": turn_id,
+        "caller_bot_id": bot or rig.bot, "caller_user_id": "operator", "caller_turn_id": turn_id,
         "caller_session_id": session})
     return ops_tools
 
@@ -691,7 +691,7 @@ def test_the_callers_own_turn_holds_until_it_exits_and_it_is_told_to_end_it(rig,
     job_id = receipt["job_id"]
     assert receipt["state"] == JOB_QUIESCING and rig.row(job_id)["caller_turn_id"] == turn_id
     assert json.loads(rig.row(job_id)["receipt_callback_json"]) == {
-        "bot_id": rig.bot, "user_id": "nick", "session_id": "sess-caller"}
+        "bot_id": rig.bot, "user_id": "operator", "session_id": "sess-caller"}
     told = receipt["caller_instruction"]
     assert (told["action"], told["held_bot"], told["result_delivery"]) == ("end_turn", rig.bot, "new_turn")
     assert "do not poll in this turn" in told["message"] and "poll_later" not in json.dumps(told)
@@ -729,7 +729,7 @@ def test_the_callers_own_turn_holds_until_it_exits_and_it_is_told_to_end_it(rig,
     [delivery] = _receipt_deliveries(rig)
     assert (delivery["sender_bot_id"], delivery["message_kind"]) == ("system", "OPS_RECEIPT")
     payload = delivery["payload_json"]
-    assert (payload["session_id"], payload["user"], payload["bot_id"]) == (None, "nick", rig.bot)
+    assert (payload["session_id"], payload["user"], payload["bot_id"]) == (None, "operator", rig.bot)
     assert payload["prefer_steer"] is False and payload["extract_memory"] is False
     assert delivery["metadata_json"]["ops_job_id"] == job_id
     sent = json.loads(delivery["message"].split("\n", 1)[1])

@@ -404,7 +404,7 @@ def test_cards_the_caller_cannot_see_are_not_found(ops):
 @pytest.mark.parametrize("body", [
     {"decision": "approve", "reason": ""},
     {"decision": "cancel", "reason": "x"},
-    {"decision": "approve", "reason": "x", "resolved_by": "nick"},
+    {"decision": "approve", "reason": "x", "resolved_by": "operator"},
     {"decision": "approve", "reason": "x" * 1001},
 ])
 def test_a_bad_body_changes_nothing(ops, body):

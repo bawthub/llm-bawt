@@ -20,12 +20,12 @@ def rig(monkeypatch):
         conn.exec_driver_sql("CREATE TABLE sessions (id TEXT,bot_id TEXT,user_id TEXT,status TEXT)")
         conn.exec_driver_sql("CREATE TABLE messages (id TEXT,bot_id TEXT,session_id TEXT)")
         conn.exec_driver_sql("CREATE TABLE turn_logs (id TEXT,bot_id TEXT,user_id TEXT,trigger_message_id TEXT)")
-        conn.exec_driver_sql("INSERT INTO sessions VALUES ('durable-A','target','nick','archived')")
+        conn.exec_driver_sql("INSERT INTO sessions VALUES ('durable-A','target','operator','archived')")
         conn.exec_driver_sql("INSERT INTO messages VALUES ('trigger','target','durable-A')")
-        conn.exec_driver_sql("INSERT INTO turn_logs VALUES ('turn','target','nick','trigger')")
-    turn = SimpleNamespace(id="turn", bot_id="target", user_id="nick", trigger_message_id="trigger",
+        conn.exec_driver_sql("INSERT INTO turn_logs VALUES ('turn','target','operator','trigger')")
+    turn = SimpleNamespace(id="turn", bot_id="target", user_id="operator", trigger_message_id="trigger",
                            status="streaming", ended_at=None, user_prompt="working",
-                           agent_session_key="target:nick", agent_request_id="req-A",
+                           agent_session_key="target:operator", agent_request_id="req-A",
                            agent_backend="claude-code", agent_steer_caps="next")
     memory = SimpleNamespace(add_message=Mock())
     service = SimpleNamespace(config=object(), get_memory_client=lambda *_: memory,
@@ -46,7 +46,7 @@ def rig(monkeypatch):
 
 
 def request(**kw):
-    return chat.ChatSteerRequest(**(dict(turn_id="turn", bot_id="target", user_id="nick",
+    return chat.ChatSteerRequest(**(dict(turn_id="turn", bot_id="target", user_id="operator",
                                        message_id="message", message="correct", session_id="durable-A") | kw))
 
 
@@ -58,7 +58,7 @@ def run(rig, **kw):
 def test_same_session_and_omitted_intent_return_canonical_durable_session(rig, explicit):
     result = run(rig, session_id="durable-A" if explicit else None)
     assert result.ok and result.persisted and result.session_id == "durable-A"
-    assert rig.sub.send_steer.await_args.kwargs["session_key"] == "target:nick"
+    assert rig.sub.send_steer.await_args.kwargs["session_key"] == "target:operator"
     assert rig.sub.send_steer.await_args.kwargs["target_request_id"] == "req-A"
     assert rig.memory.add_message.call_args.args[2] == "durable-A"
 
@@ -74,12 +74,12 @@ def test_hyphenated_bot_uses_storage_partition_without_relaxing_session_owner(ri
     from llm_bawt.service.steer_session import voice_steer_target_ready
     with rig.engine.begin() as conn:
         assert voice_steer_target_ready(conn, vars(rig.turn), bot_id="fixture-agent",
-                                        user_id="nick", session_id="durable-A")
+                                        user_id="operator", session_id="durable-A")
         assert not voice_steer_target_ready(conn, vars(rig.turn), bot_id="fixture-agent",
-                                            user_id="nick", session_id="other")
+                                            user_id="operator", session_id="other")
         conn.exec_driver_sql("UPDATE messages SET bot_id='foreign'")
         assert not voice_steer_target_ready(conn, vars(rig.turn), bot_id="fixture-agent",
-                                            user_id="nick", session_id="durable-A")
+                                            user_id="operator", session_id="durable-A")
     with pytest.raises(HTTPException) as caught:
         run(rig, bot_id="fixture-agent")
     assert caught.value.detail == "session_unavailable"
@@ -123,7 +123,7 @@ def test_async_preparation_race_cannot_retarget_or_dispatch(rig, monkeypatch, ch
             rig.turn.user_id = "someone-else"
         else:
             with rig.engine.begin() as conn:
-                conn.exec_driver_sql("INSERT INTO sessions VALUES ('durable-B','target','nick','active')")
+                conn.exec_driver_sql("INSERT INTO sessions VALUES ('durable-B','target','operator','active')")
                 conn.exec_driver_sql("UPDATE messages SET session_id='durable-B'")
         return {}
     monkeypatch.setattr(chat, "_steer_framing", framing)
@@ -239,10 +239,10 @@ def test_active_list_keeps_bot_wide_busy_rows_with_nullable_owned_session(rig, m
     from llm_bawt.service.routes import turn_logs
     from llm_bawt.service.turn_logs import TurnLog
 
-    rows = [TurnLog(id=tid, bot_id="target", user_id="nick", path="/test", stream=True,
+    rows = [TurnLog(id=tid, bot_id="target", user_id="operator", path="/test", stream=True,
                     created_at=datetime.now(timezone.utc), status="streaming", user_prompt="working",
                     response_text="", trigger_message_id="trigger" if tid == "turn" else "unknown",
-                    agent_session_key="target:nick") for tid in ("turn", "unknown-turn")]
+                    agent_session_key="target:operator") for tid in ("turn", "unknown-turn")]
     listing = Mock(return_value=(rows, 2))
     store = SimpleNamespace(engine=rig.engine, list_turns=listing,
                             changed_files_summaries_for_turns=lambda _: {})

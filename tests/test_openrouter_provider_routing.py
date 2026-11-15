@@ -169,7 +169,7 @@ def _published_command(**kwargs) -> dict:
     fake.eval = eval_script
     subscriber._pub_redis = fake
     asyncio.run(subscriber.send_command(
-        session_key="snark:nick", message="hi", request_id="req-or", **kwargs,
+        session_key="snark:operator", message="hi", request_id="req-or", **kwargs,
     ))
     return commands[0]
 
@@ -184,7 +184,7 @@ def test_openrouter_provider_is_serialized_into_bridge_command():
 
 _FIELDS = {
     "request_id": "req-1",
-    "session_key": "snark:nick",
+    "session_key": "snark:operator",
     "bot_id": "snark",
     "message": "hello",
     "model": "openrouter/deepseek/deepseek-v4.1-flash",
@@ -237,7 +237,7 @@ def test_command_to_header_to_proxy_context_round_trip(monkeypatch):
         subagent_model=None,
         force_refresh=False,
         bot_id="snark",
-        session_key="snark:nick",
+        session_key="snark:operator",
         thread_session_id="thread-1",
         request_id="request-1",
         openrouter_provider=req.openrouter_provider,

@@ -40,10 +40,10 @@ def _mcp_req(**over):
         "tool_use_id": "toolu_01ABC",
         "mcp_server": "bawthub",
         "bot_id": "snark",
-        "user_id": "nick",
+        "user_id": "operator",
         "turn_id": "turn-1",
         "trigger_message_id": "message-1",
-        "session_key": "snark:nick",
+        "session_key": "snark:operator",
         "backend": "claude-code",
         "tool_name": "ops_run",
         "tool_arguments": {"operation": "llm-bawt.restart-app", "args": {}},
@@ -127,7 +127,7 @@ def _run(store, row, *, outcome="approve", message=""):
         row,
         outcome=outcome,
         message=message,
-        resolved_by="nick",
+        resolved_by="operator",
     ))
 
 
@@ -201,7 +201,7 @@ def test_resolve_route_reconciles_original_tool_record_and_fanout(monkeypatch):
     with TestClient(app) as client:
         response = client.post(
             f"/v1/chat/approvals/{row.id}/resolve",
-            json={"user_id": "nick", "decision": "approve", "resolved_by": "nick"},
+            json={"user_id": "operator", "decision": "approve", "resolved_by": "operator"},
         )
 
     assert response.status_code == 200
@@ -216,7 +216,7 @@ def test_resolve_route_reconciles_original_tool_record_and_fanout(monkeypatch):
     fanned = dict(fanout[0][1])
     # TASK-1609: the event carries the persisted resolver, not the body.
     resolver = fanned.pop("resolver")
-    assert (resolver.id, resolver.resolved_by, resolver.resolved_via) == (row.id, "nick", "user")
+    assert (resolver.id, resolver.resolved_by, resolver.resolved_via) == (row.id, "operator", "user")
     assert fanned == {
         "tool_use_id": "toolu_01ABC",
         "result": payload["result"],
@@ -290,7 +290,7 @@ def test_resolve_route_for_ops_run_marks_card_and_fanout_without_result(monkeypa
     app.include_router(routes.router)
     with TestClient(app) as client:
         response = client.post(f"/v1/chat/approvals/{row.id}/resolve",
-                               json={"user_id": "nick", "decision": "approve", "resolved_by": "nick"})
+                               json={"user_id": "operator", "decision": "approve", "resolved_by": "operator"})
 
     assert response.status_code == 200
     payload = response.json()
@@ -299,7 +299,7 @@ def test_resolve_route_for_ops_run_marks_card_and_fanout_without_result(monkeypa
     assert marked == [{"tool_use_id": "toolu_01ABC", "approval_request_id": row.id,
                        "approval_status": REQ_APPROVED}]
     [(stream, event)] = events
-    assert stream == "events:snark:nick"
+    assert stream == "events:snark:operator"
     assert event["status"] == REQ_APPROVED and event["execution_state"] == EXEC_PENDING
     assert "result" not in event and "is_error" not in event
 

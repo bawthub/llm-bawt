@@ -41,7 +41,7 @@ def store(tmp_path):
     store.ttl_hours = None
     with Session(engine) as session:
         for i, name in enumerate(("A", "B")):
-            session.add(TurnLog(id=name, bot_id="test", user_id="nick", status="streaming",
+            session.add(TurnLog(id=name, bot_id="test", user_id="operator", status="streaming",
                                created_at=datetime.now(timezone.utc) + timedelta(seconds=i)))
         session.add(ToolCallRecord(turn_id="A", tool_name="Bash", call_id="tool-A"))
         session.commit()
@@ -69,7 +69,7 @@ def test_claude_does_not_answer_another_bridges_abort(backend):
     bridge._session_queue = Mock()
     redis = SimpleNamespace(xack=AsyncMock())
     asyncio.run(bridge._handle_rpc({"backend": backend, "request_id": "rpc", "method": "chat.abort",
-                                  "params": {"sessionKey": "test:nick", "requestId": "req-A"}}, "msg", redis))
+                                  "params": {"sessionKey": "test:operator", "requestId": "req-A"}}, "msg", redis))
     bridge._publisher.publish_rpc_result.assert_not_called()
     bridge._session_queue.cancel_request.assert_not_called()
     redis.xack.assert_awaited_once()
@@ -79,14 +79,14 @@ def test_claude_does_not_answer_another_bridges_abort(backend):
     {"ok": True},
     {"ok": True, "cancelled": False},
     # claude-code's old ``aborted`` was the session key.
-    {"ok": True, "aborted": "test:nick", "detail": "no_active_task"},
+    {"ok": True, "aborted": "test:operator", "detail": "no_active_task"},
 ])
 def test_pre_contract_reply_is_malformed_but_still_stops(store, monkeypatch, reply):
     """TASK-1232 #21: a reply without the v1 shape is no longer mapped. It
     still stops the turn (the P4 guarantee), but is recorded as an
     unconfirmed ``error``, never as cancelled or not_found."""
     owner = execution(store)
-    owner.bind_bridge(backend="local", session_key="test:nick", request_id="req-A")
+    owner.bind_bridge(backend="local", session_key="test:operator", request_id="req-A")
     owner.dispatched()
     rpc = AsyncMock(return_value=reply)
     monkeypatch.setattr(agent_bridge, "get_agent_subscriber", lambda: SimpleNamespace(send_rpc=rpc))
@@ -111,7 +111,7 @@ def test_stop_before_dispatch_prevents_command(store, monkeypatch):
     backend = agent_bridge.AgentBridgeBackend()
     from llm_bawt.service.turn_execution import TurnExecutionCancelled
     with pytest.raises(TurnExecutionCancelled):
-        list(backend.stream_raw("hello", {"session_key": "test:nick", "request_id": "req-A", "turn_execution": owner}))
+        list(backend.stream_raw("hello", {"session_key": "test:operator", "request_id": "req-A", "turn_execution": owner}))
     assert store.get_turn("A").agent_request_id is None
 
 
@@ -125,7 +125,7 @@ def test_terminal_turn_cannot_publish_bridge_command(store, monkeypatch, termina
     monkeypatch.setattr(agent_bridge, "get_agent_subscriber", lambda: subscriber)
     with pytest.raises(TurnExecutionCancelled, match="no longer permits"):
         list(agent_bridge.AgentBridgeBackend().stream_raw("hello", {
-            "session_key": "test:nick", "request_id": "req-A", "turn_execution": owner,
+            "session_key": "test:operator", "request_id": "req-A", "turn_execution": owner,
         }))
     assert store.get_turn("A").agent_request_id is None
     subscriber.send_command.assert_not_called()
@@ -141,7 +141,7 @@ def test_unconsumed_reservation_cannot_bind_bridge_command(store):
         session.commit()
     owner = execution(store)
     with pytest.raises(TurnExecutionCancelled, match="no longer permits"):
-        owner.bind_bridge(backend="claude-code", session_key="test:nick", request_id="req-A")
+        owner.bind_bridge(backend="claude-code", session_key="test:operator", request_id="req-A")
     assert store.get_turn("A").agent_request_id is None
 
 
@@ -157,7 +157,7 @@ def test_cross_process_stop_cannot_publish_bridge_command(store, monkeypatch):
     monkeypatch.setattr(agent_bridge, "get_agent_subscriber", lambda: subscriber)
     with pytest.raises(TurnExecutionCancelled, match="no longer permits"):
         list(agent_bridge.AgentBridgeBackend().stream_raw("hello", {
-            "session_key": "test:nick", "request_id": "req-A", "turn_execution": owner,
+            "session_key": "test:operator", "request_id": "req-A", "turn_execution": owner,
         }))
     assert store.get_turn("A").agent_request_id is None
     subscriber.send_command.assert_not_called()
@@ -195,7 +195,7 @@ def test_pre_output_abort_and_overlapping_streams_keep_own_identity(store, monke
             while not release[name].is_set():
                 await asyncio.sleep(.001)
             yield AgentEvent(kind=AgentEventKind.ASSISTANT_DELTA, run_id=request_id,
-                             session_key="test:nick", seq=1, text=name,
+                             session_key="test:operator", seq=1, text=name,
                              event_id=f"evt-{name}", origin="test")
 
     monkeypatch.setattr("agent_bridge.subscriber.RedisSubscriber", Subscriber)
@@ -204,7 +204,7 @@ def test_pre_output_abort_and_overlapping_streams_keep_own_identity(store, monke
     backend = agent_bridge.AgentBridgeBackend()
     client = AgentBackendClient.__new__(AgentBackendClient)
     client._backend = backend
-    client._bot_config = {"session_key": "test:nick"}
+    client._bot_config = {"session_key": "test:operator"}
     def run(name):
         try:
             output[name].extend(client.stream_raw([Message(role="user", content=name)],
@@ -273,7 +273,7 @@ def test_abort_during_command_publication_is_sent_after_chat_send(store, monkeyp
 
     monkeypatch.setattr("agent_bridge.subscriber.RedisSubscriber", Subscriber)
     list(agent_bridge.AgentBridgeBackend().stream_raw("hello", {
-        "session_key": "test:nick", "request_id": "req-A", "turn_execution": owner,
+        "session_key": "test:operator", "request_id": "req-A", "turn_execution": owner,
     }))
     assert order == ["send", "abort"]
 
@@ -521,7 +521,7 @@ def test_reaper_bounds_unacknowledged_cancel_without_live_owner(store, monkeypat
 
 def test_reaper_settles_unknown_tools(store):
     assert store.reap_other_open_turns(bot_id="test", current_turn_id="B") == [
-        {"id": "A", "user_id": "nick", "balance_update": None}]
+        {"id": "A", "user_id": "operator", "balance_update": None}]
     with Session(store.engine) as session:
         row = session.get(ToolCallRecord, 1)
         assert row.ended_at is not None and row.result_text is None and row.result_complete is False
@@ -561,7 +561,7 @@ def test_terminal_approval_failure_keeps_diagnostic_enrichment(store):
 
 def test_redis_failure_does_not_turn_successful_stop_into_500(store, monkeypatch):
     owner = execution(store)
-    owner.bind_bridge(backend="codex", session_key="test:nick", request_id="req-A")
+    owner.bind_bridge(backend="codex", session_key="test:operator", request_id="req-A")
     owner.dispatched()
     monkeypatch.setattr(agent_bridge, "get_agent_subscriber", lambda: SimpleNamespace(send_rpc=AsyncMock(return_value={"aborted": True})))
     svc = service(store)
@@ -583,7 +583,7 @@ def test_model_and_task_failure_logs_do_not_parse_user_markup():
 
 
 # ---------------------------------------------------------------------------
-# TASK-1232 P4: "stop should stop, no questions" (Nick). A user Stop settles the
+# TASK-1232 P4: "stop should stop, no questions" (the user). A user Stop settles the
 # turn on every bridge outcome through the shared settle, records the bridge's
 # answer in a ``user_stop`` audit, and releases admission. Abort-class rows end
 # aborted/aborted (A1); the cause lives in the audit, never in end_reason.
@@ -604,7 +604,7 @@ def _orphan_bound_to_bridge(store, monkeypatch, *, request_id: str | None = "req
     """App restarted: the row names a bridge run, but no in-process owner exists."""
     with Session(store.engine) as session:
         row = session.get(TurnLog, "A")
-        row.agent_session_key, row.agent_request_id = "test:nick", request_id
+        row.agent_session_key, row.agent_request_id = "test:operator", request_id
         session.add(row)
         session.commit()
     from llm_bawt import bots

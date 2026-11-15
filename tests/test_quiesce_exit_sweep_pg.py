@@ -125,8 +125,8 @@ def sweep(rig):
         rig.sql("""
             INSERT INTO turn_logs (id, created_at, path, stream, bot_id, user_id, status, user_prompt,
                                    response_text, agent_request_id, agent_backend, agent_session_key)
-            VALUES (:id, now(), '/test', true, :bot, 'nick', 'streaming', '', '', :req, :backend, :session)
-        """, id=turn_id, bot=rig.bot, req=f"req-{turn_id}", backend=backend, session=f"{rig.bot}:nick")
+            VALUES (:id, now(), '/test', true, :bot, 'operator', 'streaming', '', '', :req, :backend, :session)
+        """, id=turn_id, bot=rig.bot, req=f"req-{turn_id}", backend=backend, session=f"{rig.bot}:operator")
         return turn_id, f"req-{turn_id}"
 
     def held(*turns):
@@ -502,7 +502,7 @@ def test_an_abort_ahead_of_the_send_refuses_it_and_c_drains(sweep):
     assert sweep.drain(gate_id)[turn_id] == (False, "no_execution_exit")
 
     async def deliver():
-        await (await sweep.bridge.deliver(f"{sweep.bot}:nick", req))
+        await (await sweep.bridge.deliver(f"{sweep.bot}:operator", req))
 
     asyncio.run(deliver())
     assert sweep.bridge.terminals[req].teardown == TeardownReport(disconnect="refused", exited=True)

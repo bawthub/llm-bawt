@@ -31,8 +31,8 @@ def store():
 def add(store, *, live=True, question_id="t1"):
     deadline = datetime.now(timezone.utc) + timedelta(seconds=30) if live else None
     store.upsert_awaiting(
-        tool_use_id=question_id, bot_id="loopy", user_id="nick", turn_id="turn",
-        session_key="loopy:nick", arguments={"questions": []},
+        tool_use_id=question_id, bot_id="loopy", user_id="operator", turn_id="turn",
+        session_key="loopy:operator", arguments={"questions": []},
         origin_harness="claude-code", live_deadline=deadline,
     )
     return deadline
@@ -52,7 +52,7 @@ class FakeBridge(ClaudeApprovalMixin, ClaudeCommandMixin):
         self.events.append(kwargs)
         deadline = kwargs.get("extra_raw", {}).get("live_deadline") if kwargs.get("extra_raw") else None
         self.store.upsert_awaiting(
-            tool_use_id=kwargs["tool_use_id"], bot_id="loopy", user_id="nick",
+            tool_use_id=kwargs["tool_use_id"], bot_id="loopy", user_id="operator",
             turn_id="turn", session_key=session_key, arguments=kwargs["tool_arguments"],
             origin_harness="claude-code",
             live_deadline=datetime.fromisoformat(deadline) if deadline else None,
@@ -102,11 +102,11 @@ def test_question_answered_preserves_exact_payload(store, app, monkeypatch):
     monkeypatch.setattr(chat.time, "time", lambda: 123.5)
     add(store, live=False)
     result = asyncio.run(chat.answer_question("t1", chat.QuestionAnswerRequest(
-        bot_id="loopy", user_id="nick", result="café 雪")))
+        bot_id="loopy", user_id="operator", result="café 雪")))
     assert result.ok
     assert app._redis.events == [(
-        ("events:loopy:nick", {"payload":
-            '{"_type": "question_answered", "bot_id": "loopy", "user_id": "nick", '
+        ("events:loopy:operator", {"payload":
+            '{"_type": "question_answered", "bot_id": "loopy", "user_id": "operator", '
             '"question_id": "t1", "turn_id": "turn", "answer": "café 雪", "ts": 123.5}'}),
         {"maxlen": 5000, "approximate": True},
     )]
@@ -117,7 +117,7 @@ def test_question_publish_failure_does_not_fail_the_answer(store, app, monkeypat
     add(store, live=False)
     app._redis.xadd = AsyncMock(side_effect=ConnectionError("offline"))
     response = asyncio.run(chat.answer_question("t1", chat.QuestionAnswerRequest(
-        bot_id="loopy", user_id="nick", result="Yes")))
+        bot_id="loopy", user_id="operator", result="Yes")))
     assert response.ok
     assert store.get("t1").status == "answered"
 
@@ -173,12 +173,12 @@ def test_setting_resolves_each_turn_and_zero_survives_payload(monkeypatch):
 
     publisher = CommandPublisherMixin()
     publisher._pub_redis = Redis()
-    asyncio.run(publisher.send_command("loopy:nick", "hello", "req", question_answer_wait_seconds=0))
+    asyncio.run(publisher.send_command("loopy:operator", "hello", "req", question_answer_wait_seconds=0))
 
 
 def test_wait_zero_is_original_deferral(store):
     bridge = FakeBridge(store)
-    cb = bridge._make_can_use_tool(request_id="r", session_key="loopy:nick", seq_holder=[0], question_answer_wait_seconds=0)
+    cb = bridge._make_can_use_tool(request_id="r", session_key="loopy:operator", seq_holder=[0], question_answer_wait_seconds=0)
     result = asyncio.run(cb("AskUserQuestion", {"questions": []}, SimpleNamespace(tool_use_id="t1")))
     assert result.message == "deferred"
     assert bridge.events[0]["kind"] == AgentEventKind.AWAIT_TOOL_RESULT
@@ -201,12 +201,12 @@ def test_live_answer_allows_tool_with_native_answers(store, app):
     bridge = app.bridge = FakeBridge(store)
 
     async def scenario():
-        cb = bridge._make_can_use_tool(request_id="r", session_key="loopy:nick", seq_holder=[0], question_answer_wait_seconds=5)
+        cb = bridge._make_can_use_tool(request_id="r", session_key="loopy:operator", seq_holder=[0], question_answer_wait_seconds=5)
         pending = asyncio.create_task(cb("AskUserQuestion", SHIP_INPUT, SimpleNamespace(tool_use_id="t1")))
         await asyncio.sleep(0)
         response = await chat.answer_question("t1", chat.QuestionAnswerRequest(
             bot_id="loopy",
-            user_id="nick",
+            user_id="operator",
             responses=[
                 chat.QuestionResponseItem(question_id="Ship", selected=["Yes"]),
                 chat.QuestionResponseItem(question_id="Envs", selected=["dev", "prod"], other="staging"),
@@ -225,8 +225,8 @@ def test_live_answer_allows_tool_with_native_answers(store, app):
 
 def test_tool_answers_mapping_fallbacks(store):
     store.upsert_awaiting(
-        tool_use_id="m1", bot_id="loopy", user_id="nick", turn_id="turn",
-        session_key="loopy:nick", arguments=SHIP_INPUT, origin_harness="claude-code",
+        tool_use_id="m1", bot_id="loopy", user_id="operator", turn_id="turn",
+        session_key="loopy:operator", arguments=SHIP_INPUT, origin_harness="claude-code",
     )
     # Positional fallback when question_id matches neither header nor text.
     assert store.claim_deferred_answer("m1", "x", [
@@ -235,8 +235,8 @@ def test_tool_answers_mapping_fallbacks(store):
     assert store.tool_answers(store.get("m1")) == {"Ship it?": "No"}
     # Pre-formatted answer with no structure maps onto the first question.
     store.upsert_awaiting(
-        tool_use_id="m2", bot_id="loopy", user_id="nick", turn_id="turn",
-        session_key="loopy:nick", arguments=SHIP_INPUT, origin_harness="claude-code",
+        tool_use_id="m2", bot_id="loopy", user_id="operator", turn_id="turn",
+        session_key="loopy:operator", arguments=SHIP_INPUT, origin_harness="claude-code",
     )
     assert store.claim_deferred_answer("m2", "just ship dev", None)
     assert store.tool_answers(store.get("m2")) == {"Ship it?": "just ship dev"}
@@ -246,18 +246,18 @@ def test_live_answer_is_same_tool_result(store, app):
     bridge = app.bridge = FakeBridge(store)
 
     async def scenario():
-        cb = bridge._make_can_use_tool(request_id="r", session_key="loopy:nick", seq_holder=[0], question_answer_wait_seconds=5)
+        cb = bridge._make_can_use_tool(request_id="r", session_key="loopy:operator", seq_holder=[0], question_answer_wait_seconds=5)
         pending = asyncio.create_task(cb("AskUserQuestion", {"questions": []}, SimpleNamespace(tool_use_id="t1")))
         await asyncio.sleep(0)
         assert store.get("t1").status == "awaiting_live"
         assert bridge.events[0]["extra_raw"]["live_deadline"]
-        response = await chat.answer_question("t1", chat.QuestionAnswerRequest(bot_id="loopy", user_id="nick", result="Yes"))
+        response = await chat.answer_question("t1", chat.QuestionAnswerRequest(bot_id="loopy", user_id="operator", result="Yes"))
         assert response.live is True
         assert response.continuation_prompt == ""
         assert (await pending).message == "Yes"
-        assert app.sent == [("loopy:nick", "t1", "Yes")]
+        assert app.sent == [("loopy:operator", "t1", "Yes")]
         assert store.get("t1").status == "answered"
-        duplicate = await chat.answer_question("t1", chat.QuestionAnswerRequest(bot_id="loopy", user_id="nick", result="Yes"))
+        duplicate = await chat.answer_question("t1", chat.QuestionAnswerRequest(bot_id="loopy", user_id="operator", result="Yes"))
         assert duplicate.already_answered and not duplicate.continuation_prompt
         assert len(app.sent) == 1
         assert not bridge._pending_question_futures
@@ -281,14 +281,14 @@ def test_timeout_claim_wins_answer_race(store, app, monkeypatch):
     monkeypatch.setattr("claude_code_bridge.approval_ops.httpx.AsyncClient", Client)
 
     async def scenario():
-        cb = bridge._make_can_use_tool(request_id="r", session_key="loopy:nick", seq_holder=[0], question_answer_wait_seconds=0.01)
+        cb = bridge._make_can_use_tool(request_id="r", session_key="loopy:operator", seq_holder=[0], question_answer_wait_seconds=0.01)
         result = await cb("AskUserQuestion", {"questions": []}, SimpleNamespace(tool_use_id="t1"))
         assert result.message == "deferred"
         assert store.get("t1").status == "awaiting"
-        response = await chat.answer_question("t1", chat.QuestionAnswerRequest(bot_id="loopy", user_id="nick", result="Too late"))
+        response = await chat.answer_question("t1", chat.QuestionAnswerRequest(bot_id="loopy", user_id="operator", result="Too late"))
         assert response.live is False
         assert response.continuation_prompt == "Too late"
-        duplicate = await chat.answer_question("t1", chat.QuestionAnswerRequest(bot_id="loopy", user_id="nick", result="Too late"))
+        duplicate = await chat.answer_question("t1", chat.QuestionAnswerRequest(bot_id="loopy", user_id="operator", result="Too late"))
         assert duplicate.already_answered and not duplicate.continuation_prompt
         assert not app.sent
 
@@ -321,7 +321,7 @@ def test_timeout_arbitration_failure_defers_without_raising(store, monkeypatch, 
     monkeypatch.setattr("claude_code_bridge.approval_ops.httpx.AsyncClient", Client)
 
     async def scenario():
-        cb = bridge._make_can_use_tool(request_id="r", session_key="loopy:nick", seq_holder=[0], question_answer_wait_seconds=0.01)
+        cb = bridge._make_can_use_tool(request_id="r", session_key="loopy:operator", seq_holder=[0], question_answer_wait_seconds=0.01)
         result = await cb("AskUserQuestion", {"questions": []}, SimpleNamespace(tool_use_id="t1"))
         assert result.message == "deferred"
         assert not bridge._pending_question_futures
@@ -343,7 +343,7 @@ def test_timeout_failure_preserves_answer_already_in_future(store, monkeypatch):
     monkeypatch.setattr("claude_code_bridge.approval_ops.httpx.AsyncClient", Client)
 
     async def scenario():
-        cb = bridge._make_can_use_tool(request_id="r", session_key="loopy:nick", seq_holder=[0], question_answer_wait_seconds=0.01)
+        cb = bridge._make_can_use_tool(request_id="r", session_key="loopy:operator", seq_holder=[0], question_answer_wait_seconds=0.01)
         result = await cb("AskUserQuestion", {"questions": []}, SimpleNamespace(tool_use_id="t1"))
         assert result.message == "answer already delivered"
         assert not bridge._pending_question_futures
@@ -367,7 +367,7 @@ def test_unexpected_timeout_status_does_not_hang(store, monkeypatch):
     monkeypatch.setattr("claude_code_bridge.approval_ops.httpx.AsyncClient", Client)
 
     async def scenario():
-        cb = bridge._make_can_use_tool(request_id="r", session_key="loopy:nick", seq_holder=[0], question_answer_wait_seconds=0.01)
+        cb = bridge._make_can_use_tool(request_id="r", session_key="loopy:operator", seq_holder=[0], question_answer_wait_seconds=0.01)
         result = await asyncio.wait_for(
             cb("AskUserQuestion", {"questions": []}, SimpleNamespace(tool_use_id="t1")),
             timeout=1,
@@ -411,7 +411,7 @@ def test_answer_claim_wins_bridge_timeout_without_redis_delivery(store, monkeypa
             "claude_code_bridge.approval_ops.asyncio",
             SimpleNamespace(**{**vars(asyncio), "wait_for": timeout_after_claim}),
         )
-        cb = bridge._make_can_use_tool(request_id="r", session_key="loopy:nick", seq_holder=[0], question_answer_wait_seconds=30)
+        cb = bridge._make_can_use_tool(request_id="r", session_key="loopy:operator", seq_holder=[0], question_answer_wait_seconds=30)
         pending = asyncio.create_task(cb("AskUserQuestion", SHIP_INPUT, SimpleNamespace(tool_use_id="t1")))
         # Failure-only bound: a bridge that never reaches its live wait fails, not hangs.
         await asyncio.wait_for(waiting.wait(), 10)
@@ -444,13 +444,13 @@ def test_answer_claim_wins_timeout_race(store):
 
 def test_timeout_endpoint_and_hydration_include_deadline(store, app):
     deadline = add(store)
-    hydrated = asyncio.run(chat.list_pending_questions(bot_id="loopy", user_id="nick"))
+    hydrated = asyncio.run(chat.list_pending_questions(bot_id="loopy", user_id="operator"))
     assert hydrated.data[0].status == "awaiting_live"
     assert hydrated.data[0].live_deadline == deadline.isoformat()
-    first = asyncio.run(chat.timeout_question("t1", chat.QuestionTimeoutRequest(session_key="loopy:nick")))
+    first = asyncio.run(chat.timeout_question("t1", chat.QuestionTimeoutRequest(session_key="loopy:operator")))
     assert first["expired"] is True
     assert store.get("t1").status == "awaiting"
-    second = asyncio.run(chat.timeout_question("t1", chat.QuestionTimeoutRequest(session_key="loopy:nick")))
+    second = asyncio.run(chat.timeout_question("t1", chat.QuestionTimeoutRequest(session_key="loopy:operator")))
     assert second["expired"] is True
     assert not second["answers"] and not second["message"]
 
@@ -464,7 +464,7 @@ def test_expired_deadline_cannot_claim_live(store, app):
         session.add(row)
         session.commit()
     assert not store.claim_live_answer("t1", "late", None)
-    answer = asyncio.run(chat.answer_question("t1", chat.QuestionAnswerRequest(bot_id="loopy", user_id="nick", result="late")))
+    answer = asyncio.run(chat.answer_question("t1", chat.QuestionAnswerRequest(bot_id="loopy", user_id="operator", result="late")))
     assert not answer.live
     assert answer.continuation_prompt == "late"
     assert not app.sent
@@ -474,7 +474,7 @@ def test_abort_cancels_future_and_preserves_deferred_answer(store, app):
     bridge = FakeBridge(store)
 
     async def scenario():
-        cb = bridge._make_can_use_tool(request_id="r", session_key="loopy:nick", seq_holder=[0], question_answer_wait_seconds=5)
+        cb = bridge._make_can_use_tool(request_id="r", session_key="loopy:operator", seq_holder=[0], question_answer_wait_seconds=5)
         pending = asyncio.create_task(cb("AskUserQuestion", {"questions": []}, SimpleNamespace(tool_use_id="t1")))
         await asyncio.sleep(0)
         assert store.expire_live_for_turn("turn") == 1
@@ -482,7 +482,7 @@ def test_abort_cancels_future_and_preserves_deferred_answer(store, app):
         with pytest.raises(asyncio.CancelledError):
             await pending
         assert not bridge._pending_question_futures
-        answer = await chat.answer_question("t1", chat.QuestionAnswerRequest(bot_id="loopy", user_id="nick", result="Later"))
+        answer = await chat.answer_question("t1", chat.QuestionAnswerRequest(bot_id="loopy", user_id="operator", result="Later"))
         assert not answer.live
         assert answer.continuation_prompt == "Later"
 
@@ -497,11 +497,11 @@ def test_dismiss_delivery_failure_is_recovered_by_timeout(store, app):
 
     app.send_tool_result = broken_delivery
     response = asyncio.run(chat.answer_question(
-        "t1", chat.QuestionAnswerRequest(bot_id="loopy", user_id="nick", dismiss=True),
+        "t1", chat.QuestionAnswerRequest(bot_id="loopy", user_id="operator", dismiss=True),
     ))
     assert response.live
     timeout = asyncio.run(chat.timeout_question(
-        "t1", chat.QuestionTimeoutRequest(session_key="loopy:nick"),
+        "t1", chat.QuestionTimeoutRequest(session_key="loopy:operator"),
     ))
     assert timeout["dismissed"]
     assert timeout["message"] == "[Question dismissed by user.]"
@@ -512,10 +512,10 @@ def test_live_dismiss_resolves_future(store, app):
     bridge = app.bridge = FakeBridge(store)
 
     async def scenario():
-        cb = bridge._make_can_use_tool(request_id="r", session_key="loopy:nick", seq_holder=[0], question_answer_wait_seconds=5)
+        cb = bridge._make_can_use_tool(request_id="r", session_key="loopy:operator", seq_holder=[0], question_answer_wait_seconds=5)
         pending = asyncio.create_task(cb("AskUserQuestion", {"questions": []}, SimpleNamespace(tool_use_id="t1")))
         await asyncio.sleep(0)
-        response = await chat.answer_question("t1", chat.QuestionAnswerRequest(bot_id="loopy", user_id="nick", dismiss=True))
+        response = await chat.answer_question("t1", chat.QuestionAnswerRequest(bot_id="loopy", user_id="operator", dismiss=True))
         assert response.live
         assert (await pending).message == "[Question dismissed by user.]"
         assert store.get("t1").status == "skipped"

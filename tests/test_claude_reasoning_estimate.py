@@ -9,7 +9,7 @@ from claude_code_bridge.send_usage import LiveUsagePublisher
 
 
 def _publisher() -> LiveUsagePublisher:
-    return LiveUsagePublisher(None, "req", "caid:nick", "m", "m", 200_000)
+    return LiveUsagePublisher(None, "req", "caid:operator", "m", "m", 200_000)
 
 
 def _delta(kind: str, key: str, text: str) -> dict:

@@ -53,7 +53,7 @@ def _ops_run(store, *, approved=True) -> str:
         invocation_hash=uuid.uuid4().hex * 2,
     ))
     if approved:
-        store.resolve_request(request_id, status=REQ_APPROVED, resolved_by="nick", continuation_owner="server")
+        store.resolve_request(request_id, status=REQ_APPROVED, resolved_by="operator", continuation_owner="server")
     return request_id
 
 
@@ -200,7 +200,7 @@ def test_an_undecided_card_is_cancelled_not_denied_and_stays_cancelled(stores):
     row = _assert_purged(stores, request_id)
     assert row.resolved_by == "snark" and row.resolution_message.startswith(PURGED_BY_OPERATOR)
     # First decision wins: a late approve can't revive it.
-    stores.resolve_request(request_id, status=REQ_APPROVED, resolved_by="nick", continuation_owner="server")
+    stores.resolve_request(request_id, status=REQ_APPROVED, resolved_by="operator", continuation_owner="server")
     assert _row(stores, request_id).status == REQ_CANCELLED
     assert stores.claim_mcp_execution(request_id) is None
 
@@ -235,7 +235,7 @@ def test_a_purged_cards_stored_resolution_and_tool_card_carry_the_cancelled_resu
             conn.execute(sa_text("""
                 INSERT INTO turn_logs (id, created_at, path, stream, bot_id, user_id, status, user_prompt,
                                        response_text, ended_at)
-                VALUES (:id, now(), '/test', true, :bot, 'nick', 'ok', '', '', now())
+                VALUES (:id, now(), '/test', true, :bot, 'operator', 'ok', '', '', now())
             """), {"id": row.turn_id, "bot": row.bot_id})
         cards.save_start(turn_id=row.turn_id, bot_id=row.bot_id, user_id=row.user_id, call_id=row.tool_use_id,
                          tool_name="ops_run", tool_use_id=row.tool_use_id)

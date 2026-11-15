@@ -137,7 +137,7 @@ def _jpeg_with_gps_exif() -> bytes:
         b"\x3B\x01"  # Tag = Artist (0x013B)
         b"\x02\x00"  # type = ASCII
         b"\x05\x00\x00\x00"  # count = 5 bytes
-        b"NICK\x00"  # inline value (fits in 4? extended)
+        b"USER\x00"  # inline value (fits in 4? extended)
         b"\x00\x00\x00\x00"  # next IFD = 0
     )
     buf = io.BytesIO()

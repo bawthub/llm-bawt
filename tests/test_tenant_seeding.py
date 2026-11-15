@@ -37,9 +37,14 @@ def test_standard_paths_include_openai_platform_responses_route():
 
 def test_first_agent_prompt_seed_is_generic():
     """No owner name, no personal traits — it's a tenant starter, not Operator's bot."""
+    from pathlib import Path
+
+    from scripts.general_use_contract import load_policy
+
     lowered = FIRST_AGENT_PROMPT_SEED.lower()
-    for forbidden in ("nick", "nova", "mira", "personal ai assistant"):
-        assert forbidden not in lowered
+    names = load_policy(Path(__file__).resolve().parents[1])["operator_identities"]
+    for forbidden in (*names, "nova", "mira", "personal ai assistant"):
+        assert forbidden.lower() not in lowered
     assert FIRST_AGENT_PROMPT_SEED.strip()
 
 

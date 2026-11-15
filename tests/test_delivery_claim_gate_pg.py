@@ -38,7 +38,7 @@ def _enqueue(ctx, bot, message="callback"):
     record, _ = deliveries.enqueue(
         sender_bot_id=sender, target_bot_id=bot, message=message,
         payload={"messages": [{"role": "user", "content": message}],
-                 "bot_id": bot, "user": "nick", "stream": True},
+                 "bot_id": bot, "user": "operator", "stream": True},
     )
     return deliveries, record
 
@@ -113,7 +113,7 @@ class _Durable:
         try:
             self.ctx.store.save_turn(
                 turn_id=record.turn_id, request_id="r", path="/v1/chat/completions",
-                stream=True, model="m", bot_id=record.target_bot_id, user_id="nick",
+                stream=True, model="m", bot_id=record.target_bot_id, user_id="operator",
                 status="streaming", latency_ms=None, user_prompt=record.message,
                 request_payload={"messages": []}, response_text="", tool_calls=None,
                 admission_claim=claim,
@@ -192,7 +192,7 @@ def test_explicit_stop_still_settles_under_a_gate(gated):
         conn.execute(sa_text("""
             INSERT INTO turn_logs (id, created_at, path, stream, bot_id, user_id, status,
                                    user_prompt, response_text, ended_at, request_json)
-            VALUES (:id, now(), '/test', true, :bot, 'nick', 'aborted', '', '', now(),
+            VALUES (:id, now(), '/test', true, :bot, 'operator', 'aborted', '', '', now(),
                     '{"abort_request": {"source": "chat_stop"}}')
         """), {"id": record.turn_id, "bot": bot})
     _activate(store, _spec(gated.owner(), GateScope.for_bots(bot)))
@@ -303,7 +303,7 @@ def test_busy_target_at_save_turn_is_refunded_and_delayed(gated):
         conn.execute(sa_text("""
             INSERT INTO turn_logs (id, created_at, path, stream, bot_id, user_id, status,
                                    user_prompt, response_text, ended_at)
-            VALUES (:id, now(), '/test', true, :bot, 'nick', 'reserved', '', '', NULL)
+            VALUES (:id, now(), '/test', true, :bot, 'operator', 'reserved', '', '', NULL)
         """), {"id": f"turn-other-{uuid.uuid4().hex}", "bot": bot})
     durable.dispatch(claimed)
 

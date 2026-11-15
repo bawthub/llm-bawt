@@ -117,7 +117,7 @@ def _open(store, bot, status="streaming", *, request_id=None):
         conn.execute(sa_text("""
             INSERT INTO turn_logs (id, created_at, path, stream, bot_id, user_id, status,
                                    user_prompt, response_text, ended_at, agent_request_id)
-            VALUES (:id, now(), '/test', true, :bot, 'nick', :status, '', '', NULL, :req)
+            VALUES (:id, now(), '/test', true, :bot, 'operator', :status, '', '', NULL, :req)
         """), {"id": turn_id, "bot": bot, "status": status, "req": request_id})
     return turn_id
 
@@ -129,7 +129,7 @@ def _save(store, bot, *, turn_id=None, admission=None, claim=None):
     turn_id = turn_id or f"turn-{uuid.uuid4().hex}"
     store.save_turn(
         turn_id=turn_id, request_id="r", path="/v1/chat/completions", stream=True, model="m",
-        bot_id=bot, user_id="nick", status="streaming", latency_ms=None, user_prompt="hi",
+        bot_id=bot, user_id="operator", status="streaming", latency_ms=None, user_prompt="hi",
         request_payload=payload, response_text="", tool_calls=None, admission_claim=claim,
     )
     return turn_id
@@ -164,7 +164,7 @@ def _claimed_delivery(ctx, bot, **enqueue):
     record, _ = deliveries.enqueue(
         sender_bot_id=sender, target_bot_id=bot, message="callback",
         payload={"messages": [{"role": "user", "content": "callback"}],
-                 "bot_id": bot, "user": "nick", "stream": True},
+                 "bot_id": bot, "user": "operator", "stream": True},
         **enqueue,
     )
     claimed = deliveries.claim_next(bot, claim_owner="worker", steer_capable=False)
@@ -187,7 +187,7 @@ def _approval_reservation(store, approvals, bot, request_id):
     row = _mcp_claim(approvals, request_id=request_id)
     fence = approvals.continuation_claim_fence(row.id, row.continuation_claim_token)
     turn_id = f"turn-approval-{uuid.uuid4().hex}"
-    store.reserve_idle_turn(turn_id=turn_id, bot_id=bot, user_id="nick", user_prompt="c",
+    store.reserve_idle_turn(turn_id=turn_id, bot_id=bot, user_id="operator", user_prompt="c",
                             request_json={"admission": "idle_only"},
                             trigger_message_id=str(uuid.uuid4()),
                             owner=row.continuation_claim_token, fence=fence)
@@ -314,7 +314,7 @@ def test_b2_activation_first_refuses_the_producer(gated):
     assert isinstance(refused.value, TargetBusy)  # durable producers defer it
     assert store.get_turn(turn_id) is None
     with pytest.raises(SystemGateRefused):
-        store.reserve_idle_turn(turn_id=turn_id, bot_id=bot, user_id="nick", user_prompt="x",
+        store.reserve_idle_turn(turn_id=turn_id, bot_id=bot, user_id="operator", user_prompt="x",
                                 request_json={}, trigger_message_id=str(uuid.uuid4()), owner="o")
     assert store.get_turn(turn_id) is None
 
@@ -548,7 +548,7 @@ def test_b4_held_approval_refunds_and_reclaims_after_thaw(gated):
         approvals_row = approvals.claim_continuation(row.id, lease_seconds=0)
         assert approvals_row.continuation_claim_token not in (None, row.continuation_claim_token)
         store.reserve_idle_turn(
-            turn_id=turn_id, bot_id=bot, user_id="nick", user_prompt="c",
+            turn_id=turn_id, bot_id=bot, user_id="operator", user_prompt="c",
             request_json={"admission": "idle_only"}, trigger_message_id=str(uuid.uuid4()),
             owner=approvals_row.continuation_claim_token,
             fence=approvals.continuation_claim_fence(row.id, approvals_row.continuation_claim_token),
@@ -731,7 +731,7 @@ def test_claim_admission_without_gate_rows_is_unaffected(gated):
     """The ordinary reservation path with an owner claim still works under no gate."""
     store, bot = gated.store, gated.bot()
     turn_id = f"turn-{uuid.uuid4().hex}"
-    store.reserve_idle_turn(turn_id=turn_id, bot_id=bot, user_id="nick", user_prompt="x",
+    store.reserve_idle_turn(turn_id=turn_id, bot_id=bot, user_id="operator", user_prompt="x",
                             request_json={"admission": "idle_only"},
                             trigger_message_id=str(uuid.uuid4()), owner="owner-a")
     _save(store, bot, turn_id=turn_id, admission="idle_only",

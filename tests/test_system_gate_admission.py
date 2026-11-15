@@ -272,12 +272,12 @@ def test_held_steer_requeues_same_target_without_spending_an_attempt(monkeypatch
     requeued, failed = [], []
     dispatcher = InterBotDeliveryDispatcher.__new__(InterBotDeliveryDispatcher)
     dispatcher.store = SimpleNamespace(
-        payload=lambda _id: {"messages": [{"content": "hi"}], "user": "nick"},
+        payload=lambda _id: {"messages": [{"content": "hi"}], "user": "operator"},
         get=lambda _id: record,
         requeue=lambda *args, **kw: requeued.append((args, kw)) or SimpleNamespace(status="QUEUED"),
         fail_claim=lambda *args: failed.append(args),
     )
-    dispatcher.service = SimpleNamespace(config=SimpleNamespace(DEFAULT_USER="nick"))
+    dispatcher.service = SimpleNamespace(config=SimpleNamespace(DEFAULT_USER="operator"))
 
     async def heartbeat(*_args):
         await asyncio.sleep(3600)
@@ -317,7 +317,7 @@ def capability(monkeypatch):
     def mint(bot_id="byte"):
         return codec.mint_task_turn_context(
             session_id=str(uuid.uuid4()), turn_id="turn-" + "a" * 32,
-            trigger_message_id=str(uuid.uuid4()), bot_id=bot_id, user_id="nick",
+            trigger_message_id=str(uuid.uuid4()), bot_id=bot_id, user_id="operator",
         )
 
     return mint
@@ -384,7 +384,7 @@ def test_the_public_route_reads_the_capability_header(
 
     bot = SimpleNamespace(slug=sender, agent_backend="claude-code", harness="claude-code")
     monkeypatch.setattr(send, "BotManager", lambda _cfg: SimpleNamespace(get_bot=lambda _slug: bot))
-    monkeypatch.setattr(route, "get_service", lambda: SimpleNamespace(config=SimpleNamespace(DEFAULT_USER="nick")))
+    monkeypatch.setattr(route, "get_service", lambda: SimpleNamespace(config=SimpleNamespace(DEFAULT_USER="operator")))
     store = SimpleNamespace(enqueue=enqueue, get=lambda _id: record, payload=lambda _id: {})
     monkeypatch.setattr(route, "_dispatcher", lambda: SimpleNamespace(store=store, _emit=emit, wake=lambda _t: None))
     app = FastAPI()
@@ -459,7 +459,7 @@ def test_message_route_reports_a_gate_refusal_with_its_status(monkeypatch):
 
     monkeypatch.setattr(route, "_router", lambda: Router())
     body = SimpleNamespace(request=lambda: None, message="hi", idempotency_key=None,
-                           project_id=None, task_id=None, user_id="nick")
+                           project_id=None, task_id=None, user_id="operator")
     with pytest.raises(HTTPException) as raised:
         route.route(body, SimpleNamespace(headers={}))
     assert raised.value.status_code == 503

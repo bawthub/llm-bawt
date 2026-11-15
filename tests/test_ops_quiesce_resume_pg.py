@@ -85,7 +85,7 @@ def test_a_succeeded_job_resumes_each_held_bot_once_with_its_note(rig, resume): 
     assert (facts["job_id"], facts["state"], facts["ack_status"]) == (job_id, JOB_SUCCEEDED, "stopping")
     assert facts["ack_note"] == "mid TASK-9: step 3 of 5"
     payload = delivery["payload_json"]
-    assert (payload["bot_id"], payload["user"], payload["prefer_steer"]) == (rig.bot, "nick", False)
+    assert (payload["bot_id"], payload["user"], payload["prefer_steer"]) == (rig.bot, "operator", False)
 
     # No duplicate on retry: the done marker stops the scan, and a crash before
     # it re-reads the same idempotent delivery.
@@ -154,7 +154,7 @@ def test_a_failed_job_routes_to_the_coordinator_not_the_held_bot(rig, resume):  
 def test_the_caller_that_gets_the_receipt_is_not_also_resumed(rig, resume):  # noqa: F811
     turn_id, job_id = _held_and_stopping(rig)
     rig.sql("UPDATE ops_jobs SET receipt_callback_json=:j WHERE id=:id", id=job_id,
-            j=json.dumps({"bot_id": rig.bot, "user_id": "nick", "session_id": "s"}))
+            j=json.dumps({"bot_id": rig.bot, "user_id": "operator", "session_id": "s"}))
     rig.end(turn_id)
     _dispatch(rig, job_id)
     _finish(rig, job_id)
