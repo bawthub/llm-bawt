@@ -92,8 +92,8 @@ def _preserved_uuids(metadata: object, parents: dict[str, str | None]) -> set[st
     preserved = metadata.get("preservedMessages")
     if preserved is not None:
         uuids = preserved.get("uuids") if isinstance(preserved, dict) else None
-        if not isinstance(uuids, list) or not all(isinstance(u, str) for u in uuids):
-            return None
+        if not isinstance(uuids, list) or not all(isinstance(u, str) and u in parents for u in uuids):
+            return None  # the CLI aborts its resume on a missing preserved uuid
         return set(uuids)
     segment = metadata.get("preservedSegment")
     if segment is None:

@@ -162,6 +162,8 @@ def test_compaction_without_preservation_drops_everything_before_it(transcript):
 
 @pytest.mark.parametrize("metadata", [
     {"preservedMessages": {"uuids": "a1"}},
+    {"preservedMessages": {"uuids": ["missing"]}},
+    {"preservedMessages": {"uuids": ["a1", "missing"]}},
     {"preservedSegment": {"headUuid": "a1"}},
     {"preservedSegment": {"headUuid": "a1", "tailUuid": "missing"}},
     {"preservedSegment": {"headUuid": "not-an-ancestor", "tailUuid": "a1"}},
