@@ -29,6 +29,7 @@ from pydantic import (
 from starlette.concurrency import run_in_threadpool
 from starlette.responses import JSONResponse
 
+from llm_bawt.service import state_events
 from llm_bawt.service.dependencies import get_service
 from llm_bawt.utils.db import get_shared_engine
 
@@ -126,6 +127,12 @@ def get_dispatch_wake():
     return dispatcher.wake if dispatcher is not None else (lambda: None)
 
 
+def get_freeze_changed():
+    """Tells open UIs a freeze was placed or thawed (state_changed ``freeze``, TASK-1184)."""
+    service = get_service()
+    return lambda: state_events.mark(service, state_events.FREEZE)
+
+
 @router.get("")
 async def get_gates(engine=Depends(get_gate_engine)):
     freezes = await run_in_threadpool(live_freezes, engine)
@@ -136,7 +143,8 @@ async def get_gates(engine=Depends(get_gate_engine)):
 
 
 @router.post("")
-async def post_freeze(request: Request, engine=Depends(get_gate_engine)):
+async def post_freeze(request: Request, engine=Depends(get_gate_engine),
+                      changed=Depends(get_freeze_changed)):
     body = await _read(request, FreezeRequest)
     try:
         frozen = await run_in_threadpool(
@@ -148,12 +156,13 @@ async def post_freeze(request: Request, engine=Depends(get_gate_engine)):
     except FreezeConflict as conflict:
         return JSONResponse({"detail": "already_frozen", "freeze": conflict.existing.to_api()},
                             status_code=409, headers=NO_STORE)
+    changed()
     return JSONResponse({"freeze": frozen.to_api()}, status_code=201, headers=NO_STORE)
 
 
 @router.post("/{gate_id}/thaw")
 async def post_thaw(gate_id: int, request: Request, engine=Depends(get_gate_engine),
-                    wake=Depends(get_dispatch_wake)):
+                    wake=Depends(get_dispatch_wake), changed=Depends(get_freeze_changed)):
     body = await _read(request, ThawRequest)
     try:
         result = await run_in_threadpool(
@@ -166,6 +175,7 @@ async def post_thaw(gate_id: int, request: Request, engine=Depends(get_gate_engi
         raise HTTPException(404, "not_found", headers=NO_STORE)
     if result.released:
         wake()
+    changed()  # the freeze list moved even when another freeze still holds
     return JSONResponse({
         "freeze": result.freeze.to_api(), "released": result.released, "override": result.override,
     }, headers=NO_STORE)

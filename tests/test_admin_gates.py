@@ -32,6 +32,7 @@ def client(monkeypatch):
     app.include_router(route.router)
     app.dependency_overrides[route.get_gate_engine] = lambda: engine
     app.dependency_overrides[route.get_dispatch_wake] = lambda: (lambda: None)
+    app.dependency_overrides[route.get_freeze_changed] = lambda: (lambda: None)
     return TestClient(app)
 
 
@@ -159,6 +160,28 @@ def test_off_postgres_status_is_empty_and_writes_are_503(client):
 @pytest.mark.parametrize("body", [{}, {"actor": "a b"}, {"actor": "a", "force": True}])
 def test_invalid_thaw_is_422(client, body):
     assert client.post(f"{URL}/1/thaw", headers=AUTH, json=body).status_code == 422
+
+
+def test_freeze_and_thaw_publish_the_freeze_topic_only_on_success(client, monkeypatch):
+    """TASK-1184: open UIs refresh the freeze banner from state_changed, not a poll."""
+    from types import SimpleNamespace
+
+    from llm_bawt.service import state_events
+
+    marks = []
+    client.app.dependency_overrides[route.get_freeze_changed] = lambda: (lambda: marks.append("freeze"))
+    frozen = SimpleNamespace(to_api=lambda: {"gate_id": 7})
+    monkeypatch.setattr(route, "freeze", lambda engine, **kwargs: frozen)
+    assert client.post(URL, headers=AUTH, json=FREEZE).status_code == 201
+    assert marks == ["freeze"]
+    held = SimpleNamespace(freeze=frozen, released=False, override=False)
+    monkeypatch.setattr(route, "thaw", lambda engine, gate_id, **kwargs: held)
+    assert client.post(f"{URL}/7/thaw", headers=AUTH, json=THAW).status_code == 200
+    assert marks == ["freeze", "freeze"], "a thaw moves the list even while another freeze holds"
+    monkeypatch.setattr(route, "thaw", lambda engine, gate_id, **kwargs: None)
+    assert client.post(f"{URL}/8/thaw", headers=AUTH, json=THAW).status_code == 404
+    assert marks == ["freeze", "freeze"]
+    assert state_events.state_changed_event(["freeze"]) == {"_type": "state_changed", "topics": ["freeze"]}
 
 
 def test_router_is_registered_with_the_app():
