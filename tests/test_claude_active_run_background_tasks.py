@@ -106,11 +106,9 @@ async def test_kill_switch_keeps_first_result_terminal():
     assert await _drive(frames, enabled=False) == ["launched"]
 
 
+@pytest.mark.anyio
 async def test_now_steer_during_idle_background_wait_owns_next_result():
     """Codex r1 B1: an idle held parent emits no interrupt result."""
-    from tests.test_claude_active_run_finishing import _consume_until_result
-    from tests.test_claude_active_run_next_steer import _FakeClient, _result, _results, _run
-
     client = _FakeClient()
     run = _run(client, background_tasks=True)
     consumer = asyncio.create_task(_consume_until_result(run))
