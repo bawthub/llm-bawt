@@ -103,8 +103,26 @@ class ContractTests(unittest.TestCase):
         self.tracked("tests/unrelated.py", "10.1.2.3\n")
         (self.repo / "src/untracked.py").write_text("10.1.2.3\n")
         hits, _, scanned = guard.scan(self.repo, policy())
-        self.assertEqual(scanned, 9)
+        self.assertEqual(scanned, 10)  # tests/unrelated.py is read for identity rules only
         self.assertEqual(sum(hits.values()), 9)
+
+    def test_tests_scan_only_identity_and_domain_rules(self):
+        self.tracked("tests/test_x.py",
+                     "alice example.org vexbot 10.1.2.3 /home/someone\n")
+        hits, _, _ = guard.scan(self.repo, policy(
+            operator_identities=["alice"], personal_domains=["example.org"],
+            bot_slugs=["vexbot"]))
+        self.assertEqual({hit.rule for hit in hits},
+                         {"operator_identities", "personal_domains"})
+        self.tracked("tests/test_ops_routing_reconcile.py", "vexbot 10.1.2.3\n")
+        hits, _, _ = guard.scan(self.repo, policy(bot_slugs=["vexbot"]))
+        self.assertEqual({hit.rule for hit in hits if hit.path.endswith("reconcile.py")},
+                         {"bot_slugs", "rfc1918"})
+
+    def test_baseline_accepts_test_paths(self):
+        hits = Counter({guard.Hit("tests/test_x.py", "operator_identities", "a" * 32): 1})
+        entries = self.baseline(hits)
+        self.assertIn(guard.Hit("tests/test_x.py", "operator_identities", "a" * 32), entries)
 
     def test_count_growth_new_file_and_reduction(self):
         hits = self.hits("10.1.2.3\n")

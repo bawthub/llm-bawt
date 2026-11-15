@@ -17,6 +17,10 @@ import sys
 PRIVATE_RULES = ("operator_identities", "personal_domains", "container_names", "bot_slugs")
 ROOTS = ("src/", "docs/", "skills/", "tenant-skills/", "prompts/", "seeds/")
 EXTRA_FILES = {"tests/test_ops_routing_reconcile.py"}
+# Test fixtures may use bot names, LAN addresses and paths as ordinary sample
+# data, but never the operator's identity or personal domains.
+TEST_ROOTS = ("tests/",)
+TEST_RULES = frozenset({"operator_identities", "personal_domains"})
 IPV4 = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])")
 HOME = re.compile(r"/home/[A-Za-z0-9_.-]+|/mnt/user(?:/[A-Za-z0-9_.-]+)*")
 CONTAINER = re.compile(r"^\s*container_name:\s*[\"']?([A-Za-z0-9][A-Za-z0-9_.-]*)[\"']?\s*(?:#.*)?$")
@@ -152,7 +156,8 @@ def scan(repo: Path, policy: dict) -> tuple[Counter, dict[Hit, int], int]:
     locations = {}
     scanned = 0
     for path in sorted(set(git(repo, "ls-files", "--cached", "-z").split("\0")) - {""}):
-        if not in_scope(path):
+        full_scope = in_scope(path)
+        if not full_scope and not path.startswith(TEST_ROOTS):
             continue
         full = repo / path
         try:
@@ -179,6 +184,8 @@ def scan(repo: Path, policy: dict) -> tuple[Counter, dict[Hit, int], int]:
             for rule, key, pattern in patterns:
                 found.extend((rule, key) for match in pattern.finditer(line))
             for rule, key in found:
+                if not full_scope and rule not in TEST_RULES:
+                    continue
                 hit = Hit(path, rule, key)
                 hits[hit] += 1
                 locations.setdefault(hit, number)
@@ -212,7 +219,8 @@ def read_baseline(path: Path) -> dict[Hit, dict]:
             raise ContractError("Every baseline rule needs a reason and removal task")
     entries = {}
     for path, groups in data["files"].items():
-        if (not isinstance(path, str) or not in_scope(path) or path.startswith("/")
+        if (not isinstance(path, str) or path.startswith("/")
+                or not (in_scope(path) or path.startswith(TEST_ROOTS))
                 or ".." in PurePosixPath(path).parts
                 or not isinstance(groups, dict) or not groups):
             raise ContractError("Invalid baseline path or empty rule group")
