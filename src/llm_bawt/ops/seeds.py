@@ -404,6 +404,8 @@ _CONFIG_SEEDS: list[dict[str, Any]] = [{
                      "/var/lib/llm-bawt-ops", "/var/run/docker.sock", "/home/bridge/dev/agent-skills",
                      "/run/bawthub-service-token", "/run/llm-bawt-bridge-tokens", "/run/llm-bawt-house-pool.json",
                      "/run/llm-bawt-crawl4ai-token",
+                     # TASK-2386: the reconciler's secrets, which the app exports.
+                     "/run/llm-bawt-ops-secrets",
                      # Read-only pin list the weekly harness check reads (TASK-1975); never executed.
                      "/app/docker/agent-bridge-constraints.txt"],
         # Every environment name the container carries beyond the product's
@@ -589,7 +591,7 @@ _CONFIG_SEEDS: list[dict[str, Any]] = [{
          ["/app/.logs", "/home/bridge/dev", "/home/bridge/.claude", "/home/bridge/.claude.json",
           "/home/bridge/.ssh", "/etc/ssh/ssh_config", "/opt/agent-skills/bin", "/run/llm-bawt-bridge-tokens"],
          ["ANTHROPIC_API_KEY", "BAWT_WT_DEV_ROOT", "BRIDGE_BROKER_TOKEN_FILE", "BRIDGE_GIT_CREDENTIAL_TOKEN_FILE",
-          "CLAUDE_CODE_BAWTHUB_MCP_URL", "CLAUDE_CODE_BRIDGE_LOG_LEVEL", "CLAUDE_CODE_CRAWL4AI_MCP_URL",
+          "BRIDGE_VAULT_TOKEN_FILE", "CLAUDE_CODE_BAWTHUB_MCP_URL", "CLAUDE_CODE_BRIDGE_LOG_LEVEL", "CLAUDE_CODE_CRAWL4AI_MCP_URL",
           "CLAUDE_CODE_CWD", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_PERMISSION_MODE",
           "CLAUDE_CODE_PLAYWRIGHT_MCP_URL", "CLAUDE_CODE_SKILLS_PATH",
           "CRAWL4AI_API_TOKEN_FILE", "ENABLE_TOOL_SEARCH", "LLM_BAWT_API_URL", "LLM_BAWT_REDIS_URL",

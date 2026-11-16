@@ -58,7 +58,7 @@ CODES: frozenset[str] = frozenset({
 })
 
 #: The probe that proves each env_import destination works from its stored
-#: record. Keys equal ``{spec.destination for spec in llm_bawt.env_import.SPECS}``
+#: record. Keys equal ``{spec.destination for spec in llm_bawt.env_import.SPECS if spec.planned}``
 #: (pinned by a test; this file can't import SPECS).
 DESTINATION_PROBES: dict[str, str] = {
     "zai": "zai_completion",

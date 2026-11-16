@@ -30,8 +30,8 @@ class PlanError(ValueError):
 
 
 def credential_names() -> dict:
-    """``{destination: sorted env names}``: env_import's closed list."""
-    return {spec.destination: sorted(set(spec.env_names)) for spec in SPECS}
+    """``{destination: sorted env names}``: env_import's closed planned list."""
+    return {spec.destination: sorted(set(spec.env_names)) for spec in SPECS if spec.planned}
 
 
 def bind_plan(spec: dict, accept_loss, *, executor, get_operation, executor_kind: str,

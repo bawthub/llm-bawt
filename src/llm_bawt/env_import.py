@@ -68,14 +68,17 @@ class Spec:
     destination: str
     kind: str  # PROVIDER | INTEGRATION
     fields: tuple[tuple[str, tuple[str, ...]], ...]  # (record field, env aliases)
+    #: Covered by the service-plan reconcile (one destination probe each). The
+    #: TASK-2386 adoptions are proven by their own consumers instead.
+    planned: bool = True
 
     @property
     def env_names(self) -> tuple[str, ...]:
         return tuple(name for _, aliases in self.fields for name in aliases)
 
 
-def _api_key(destination: str, *names: str) -> Spec:
-    return Spec(destination, PROVIDER, (("api_key", names),))
+def _api_key(destination: str, *names: str, planned: bool = True) -> Spec:
+    return Spec(destination, PROVIDER, (("api_key", names),), planned=planned)
 
 
 def _url_and_key(service: str) -> Spec:
@@ -100,8 +103,8 @@ SPECS: tuple[Spec, ...] = (
     _url_and_key("radarr"),
     _url_and_key("sabnzbd"),
     # TASK-2386: the last secrets left in .env with a store home.
-    _api_key("anthropic-api", "LLM_BAWT_ANTHROPIC_API_KEY"),
-    _api_key("vaultwarden", "BW_PASSWORD"),
+    _api_key("anthropic-api", "LLM_BAWT_ANTHROPIC_API_KEY", planned=False),
+    _api_key("vaultwarden", "BW_PASSWORD", planned=False),
 )
 
 # Outcomes. ``removable`` is decided separately (see :class:`Outcome`).
