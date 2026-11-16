@@ -24,6 +24,7 @@ from llm_bawt.service.bridge_gate import (
     EXPORT_UID_ENV,
     GATES,
     GIT_CREDENTIAL,
+    VAULT,
     BridgeGates,
     Outcome,
     State,
@@ -32,6 +33,7 @@ from llm_bawt.service.bridge_gate import (
 
 DERIVED = {gate.label: f"derived-{gate.slug}-" + "d" * 40 for gate in GATES}
 LEGACY = {BROKER: "legacy-broker-fixture", GIT_CREDENTIAL: "legacy-git-fixture"}
+SETTABLE = tuple(g for g in GATES if not g.always_enforced)
 
 
 class Clock:
@@ -61,7 +63,7 @@ def make(environ=None, settings=None, *, derive=None, clock=None):
 
 
 def legacy_env(*gates):
-    return {gate.legacy_env: LEGACY[gate] for gate in gates}
+    return {gate.legacy_env: LEGACY[gate] for gate in gates if gate.legacy_env}
 
 
 def refused(gates, gate, header) -> bool:
@@ -74,7 +76,7 @@ def refused(gates, gate, header) -> bool:
 
 
 # --- classification ------------------------------------------------------
-@pytest.mark.parametrize("gate", GATES, ids=lambda g: g.slug)
+@pytest.mark.parametrize("gate", SETTABLE, ids=lambda g: g.slug)
 def test_classifies_all_four_outcomes_per_gate(gate):
     gates = make(legacy_env(*GATES))
     assert gates.classify(gate, DERIVED[gate.label]) is Outcome.DERIVED
@@ -307,9 +309,10 @@ def _settings(engine) -> dict:
 
 def test_fresh_marker_seeds_enforcement_then_missing_is_refused(engine):
     env = {DEFAULT_ENFORCED_ENV: "1"}
-    assert sorted(seed_enforced_defaults(engine, env)) == sorted(g.setting_key for g in GATES)
+    assert sorted(seed_enforced_defaults(engine, env)) == sorted(g.setting_key for g in SETTABLE)
     stored = _settings(engine)
-    assert all(stored[("global", "*", g.setting_key)] is True for g in GATES)
+    assert all(stored[("global", "*", g.setting_key)] is True for g in SETTABLE)
+    assert ("global", "*", VAULT.setting_key) not in stored  # no row to delete or flip
     # The row is now the truth even if the marker is lost.
     gates = make({}, Settings({k[2]: v for k, v in stored.items()}))
     assert refused(gates, BROKER, None)
@@ -367,6 +370,68 @@ def test_present_empty_header_is_refused_on_an_open_gate(monkeypatch):
 
 
 _GATE_NAMES = {"x-bridge-token", "bridge_claude_token_secret", "bridge_git_credential_token"}
+
+
+# --- vault: enforced in code (TASK-2386) -----------------------------------
+@pytest.mark.parametrize("settings", [
+    Settings(),  # setting absent
+    Settings({VAULT.setting_key: False}),
+    Settings({VAULT.setting_key: "false"}),
+    Settings(fail=True),  # settings store unreadable
+], ids=["absent", "false", "non-bool", "unreadable"])
+def test_vault_refuses_missing_and_bad_whatever_the_settings(settings):
+    gates = make({DEFAULT_ENFORCED_ENV: "0"}, settings)
+    assert gates.enforced(VAULT)
+    assert refused(gates, VAULT, None)
+    assert refused(gates, VAULT, "wrong")
+    assert not refused(gates, VAULT, DERIVED[VAULT.label])
+
+
+def test_vault_refuses_after_its_setting_row_is_deleted():
+    settings = Settings({VAULT.setting_key: True})
+    gates = make(settings=settings, clock=Clock())
+    assert refused(gates, VAULT, None)
+    settings.values.clear()
+    gates._cached_at = None  # force a re-read
+    assert refused(gates, VAULT, None)
+
+
+def test_vault_accepts_no_legacy_or_other_gate_token():
+    gates = make(legacy_env(*SETTABLE))
+    for header in [*LEGACY.values(), DERIVED[BROKER.label], DERIVED[GIT_CREDENTIAL.label], ""]:
+        assert refused(gates, VAULT, header)
+
+
+def test_vault_fails_closed_when_the_root_cannot_derive():
+    def broken(_label):
+        raise RuntimeError("no root")
+
+    gates = make(derive=broken)
+    assert refused(gates, VAULT, None)
+    assert refused(gates, VAULT, DERIVED[VAULT.label])
+
+
+def test_vault_health_row_is_enforced():
+    row = _row(make(), VAULT)
+    assert row["enforced"] is True and row["status"] == "ok"
+
+
+def test_vault_route_401_over_http_with_setting_absent_false_deleted(monkeypatch):
+    settings = Settings()
+    monkeypatch.setattr(bridge_gate, "_GATES", BridgeGates(
+        settings, environ={}, derive=DERIVED.__getitem__, clock=Clock(), settings_ttl=0))
+    app = FastAPI()
+
+    @app.get("/vault")
+    def vault(request: bridge_gate.Request):
+        bridge_gate.check(request, VAULT)
+        return {"ok": True}
+
+    client = TestClient(app)
+    for values in ({}, {VAULT.setting_key: False}, {}):
+        settings.values = dict(values)
+        assert client.get("/vault").status_code == 401
+    assert client.get("/vault", headers={bridge_gate.HEADER: DERIVED[VAULT.label]}).status_code == 200
 
 
 def _gate_name_literals(tree: ast.AST) -> list[int]:

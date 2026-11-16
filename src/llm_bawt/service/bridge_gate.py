@@ -7,6 +7,11 @@ token:
 * ``broker``: every provider token/bundle broker route.
 * ``git_credential``: the GitHub git-credential route the bridge's
   ``credential.helper`` calls.
+* ``vault``: the Vaultwarden fetch route ``bw-secret`` calls (TASK-2386).
+  It is **always enforced in code**: no runtime setting, environment marker
+  or legacy secret can open it, and a request is refused when the root can't
+  derive its token. Revoking its token means bumping the label version, which
+  changes the derived value and rewrites every export.
 
 Each gate's token is **derived** from the one bootstrap root
 (``crypto.derive_key(<label>)``, hex), never stored. The app writes it to a
@@ -60,8 +65,10 @@ RECENT_SECONDS = 3600.0
 class Gate:
     slug: str
     label: str  # derive_key label; versioned so a later scheme can't collide
-    legacy_env: str
+    legacy_env: str  # "" = no legacy secret is ever accepted
     export_env: str
+    # True: enforcement is fixed in code; the runtime setting is never read.
+    always_enforced: bool = False
 
     @property
     def setting_key(self) -> str:
@@ -72,7 +79,11 @@ BROKER = Gate("broker", "bridge-broker-token/v1",
               "BRIDGE_CLAUDE_TOKEN_SECRET", "BRIDGE_BROKER_TOKEN_EXPORT_FILE")
 GIT_CREDENTIAL = Gate("git_credential", "bridge-git-credential-token/v1",
                       "BRIDGE_GIT_CREDENTIAL_TOKEN", "BRIDGE_GIT_CREDENTIAL_TOKEN_EXPORT_FILE")
-GATES: tuple[Gate, ...] = (BROKER, GIT_CREDENTIAL)
+# TASK-2386: no legacy secret, no setting. The settings API is not a security
+# boundary (TASK-2369), so a vault route must not depend on a settings row.
+VAULT = Gate("vault", "bridge-vault-token/v1", "", "BRIDGE_VAULT_TOKEN_EXPORT_FILE",
+             always_enforced=True)
+GATES: tuple[Gate, ...] = (BROKER, GIT_CREDENTIAL, VAULT)
 
 
 class Outcome(enum.Enum):
@@ -151,6 +162,8 @@ class BridgeGates:
         return token
 
     def _legacy(self, gate: Gate) -> str | None:
+        if not gate.legacy_env:
+            return None
         return (self._environ.get(gate.legacy_env) or "").strip() or None
 
     def outbound_headers(self, gate: Gate) -> dict[str, str]:
@@ -183,6 +196,8 @@ class BridgeGates:
         return flag or self._legacy(gate) is not None
 
     def enforced(self, gate: Gate) -> bool:
+        if gate.always_enforced:
+            return True
         value = (self._global_settings() or {}).get(gate.setting_key)
         if isinstance(value, bool):
             return value
@@ -314,6 +329,8 @@ def seed_enforced_defaults(engine, environ: Mapping[str, str] | None = None) -> 
 
     inserted: list[str] = []
     for gate in GATES:
+        if gate.always_enforced:
+            continue
         with Session(engine) as session:
             exists = session.exec(select(RuntimeSetting.id).where(
                 RuntimeSetting.scope_type == "global",
