@@ -99,6 +99,9 @@ SPECS: tuple[Spec, ...] = (
     _url_and_key("sonarr"),
     _url_and_key("radarr"),
     _url_and_key("sabnzbd"),
+    # TASK-2386: the last secrets left in .env with a store home.
+    _api_key("anthropic-api", "LLM_BAWT_ANTHROPIC_API_KEY"),
+    _api_key("vaultwarden", "BW_PASSWORD"),
 )
 
 # Outcomes. ``removable`` is decided separately (see :class:`Outcome`).

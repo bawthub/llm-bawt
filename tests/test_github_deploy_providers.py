@@ -99,5 +99,8 @@ def test_descriptor_exposes_setup_help_without_secret(monkeypatch):
 
 def test_only_release_deploy_providers_are_operator_only():
     operator_only = {pid for pid, cls in _ADAPTER_CLASSES.items() if cls.operator_only}
-    assert operator_only == {cls.id for cls in (GitHubReleaseAdapter, GitHubReleaseDispatchAdapter, GhcrPullAdapter)}
+    from llm_bawt.service.providers.vaultwarden import VaultwardenAdapter  # TASK-2386
+
+    assert operator_only == {cls.id for cls in (GitHubReleaseAdapter, GitHubReleaseDispatchAdapter, GhcrPullAdapter,
+                                                VaultwardenAdapter)}
     assert _adapter(GhcrPullAdapter).descriptor()["operator_only"] is True

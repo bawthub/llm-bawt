@@ -37,6 +37,7 @@ from .xai import XaiAdapter
 from .xai_management import XaiManagementAdapter
 from .bridge_keys import KimiCodingKeyAdapter, MoonshotKeyAdapter, ZaiKeyAdapter
 from .search_keys import SEARCH_KEY_ADAPTERS
+from .vaultwarden import VaultwardenAdapter
 from .x import XAdapter
 
 logger = logging.getLogger(__name__)
@@ -74,6 +75,8 @@ _ADAPTER_CLASSES: dict[str, type[ProviderAdapter]] = {
     GitHubReleaseAdapter.id: GitHubReleaseAdapter,
     GitHubReleaseDispatchAdapter.id: GitHubReleaseDispatchAdapter,
     GhcrPullAdapter.id: GhcrPullAdapter,
+    # TASK-2386: the agent vault's master password, read only through the vault gate.
+    VaultwardenAdapter.id: VaultwardenAdapter,
 }
 
 

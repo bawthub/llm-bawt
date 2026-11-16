@@ -273,6 +273,25 @@ def test_export_disabled_without_path_and_removes_stale_file_without_root(tmp_pa
     assert not stale.exists()
 
 
+def test_vault_host_copy_is_owned_by_the_config_dir_owner(tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(os, "chown", lambda path, uid, gid: seen.append(uid))
+    host = tmp_path / "config" / "vault-token"
+    host.parent.mkdir()
+    result = make({bridge_gate.VAULT_HOST_EXPORT_ENV: str(host)}).export_tokens()
+    assert result["vault_host"] == "written"
+    assert host.read_text().strip() == DERIVED[VAULT.label]
+    assert stat.S_IMODE(host.stat().st_mode) == 0o600
+    assert seen == [host.parent.stat().st_uid]
+
+    def broken(_label):
+        raise RuntimeError("no root")
+
+    assert make({bridge_gate.VAULT_HOST_EXPORT_ENV: str(host)}, derive=broken).export_tokens()[
+        "vault_host"] == "removed"
+    assert not host.exists()
+
+
 def test_export_failure_never_raises(tmp_path):
     result = make({BROKER.export_env: str(tmp_path / "x"), EXPORT_UID_ENV: "nope"}).export_tokens()
     assert result["broker"] == "failed"
@@ -350,6 +369,28 @@ def test_routes_go_through_the_gate(monkeypatch):
     for token in (LEGACY[GIT_CREDENTIAL], DERIVED[GIT_CREDENTIAL.label]):
         assert client.get(url, headers={"X-Bridge-Token": token}).status_code == 404
     assert client.get("/v1/providers/openrouter/token", headers={"X-Bridge-Token": "wrong"}).status_code == 401
+
+
+def test_vault_password_route_opens_only_for_the_vault_token(monkeypatch):
+    from llm_bawt.service.routes import providers
+
+    password = "v" * 9  # synthetic
+    adapter = type("A", (), {"api_key": lambda self: password})()
+    monkeypatch.setattr(bridge_gate, "_GATES", make(legacy_env(*SETTABLE), Settings({VAULT.setting_key: False})))
+    monkeypatch.setattr(providers, "get_service", lambda: type("S", (), {"config": None})())
+    monkeypatch.setattr(providers, "get_adapter", lambda _config, _id: adapter if _id == "vaultwarden" else None)
+    app = FastAPI()
+    app.include_router(providers.router)
+    client = TestClient(app)
+    url = "/v1/providers/vaultwarden/password"
+    for header in (None, "wrong", DERIVED[BROKER.label], DERIVED[GIT_CREDENTIAL.label], *LEGACY.values()):
+        response = client.get(url, headers={"X-Bridge-Token": header} if header else {})
+        assert response.status_code == 401 and password not in response.text
+    ok = client.get(url, headers={"X-Bridge-Token": DERIVED[VAULT.label]})
+    assert ok.status_code == 200 and ok.json() == {"password": password}
+    assert ok.headers["cache-control"] == "no-store"
+    adapter.api_key = lambda: None
+    assert client.get(url, headers={"X-Bridge-Token": DERIVED[VAULT.label]}).status_code == 503
 
 
 def test_present_empty_header_is_refused_on_an_open_gate(monkeypatch):

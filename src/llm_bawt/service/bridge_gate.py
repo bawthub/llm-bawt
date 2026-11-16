@@ -84,6 +84,9 @@ GIT_CREDENTIAL = Gate("git_credential", "bridge-git-credential-token/v1",
 VAULT = Gate("vault", "bridge-vault-token/v1", "", "BRIDGE_VAULT_TOKEN_EXPORT_FILE",
              always_enforced=True)
 GATES: tuple[Gate, ...] = (BROKER, GIT_CREDENTIAL, VAULT)
+#: A second vault token copy for the host user's ``bw-secret``: a path in the
+#: host config directory the app mounts. The file is owned by that directory's owner.
+VAULT_HOST_EXPORT_ENV = "BRIDGE_VAULT_TOKEN_HOST_EXPORT_FILE"
 
 
 class Outcome(enum.Enum):
@@ -308,7 +311,28 @@ class BridgeGates:
                 logger.error("Could not export the %s bridge token to %s (%s: %s)",
                              gate.slug, raw, type(error).__name__, error)
                 results[gate.slug] = "failed"
+        host = (self._environ.get(VAULT_HOST_EXPORT_ENV) or "").strip()
+        if host:
+            results["vault_host"] = self._export_vault_host_copy(Path(host))
         return results
+
+    def _export_vault_host_copy(self, path: Path) -> str:
+        """The host user's copy of the vault token (``bw-secret`` on the host).
+
+        The file lands in the host config directory the app mounts, owned by
+        whoever owns that directory, 0600. No token removes it."""
+        from llm_bawt.bawthub_auth.token_export import _write_atomically
+
+        try:
+            token = self.derived_token(VAULT)
+            if token is None:
+                path.unlink(missing_ok=True)
+                return "removed"
+            _write_atomically(path, token, path.parent.stat().st_uid)
+            return "written"
+        except OSError as error:
+            logger.error("Could not export the vault host token (%s)", type(error).__name__)
+            return "failed"
 
 
 def seed_enforced_defaults(engine, environ: Mapping[str, str] | None = None) -> list[str]:

@@ -353,6 +353,25 @@ async def openrouter_api_key(request: Request):
     return {"access_token": key, "expires_at": None, "state": "ok"}
 
 
+# --- Agent vault password (TASK-2386) ---------------------------------------
+@router.get("/v1/providers/vaultwarden/password")
+async def vaultwarden_password(request: Request, response: Response):
+    """Internal: hand ``bw-secret`` the agent vault's master password.
+
+    Only the ``vault`` bridge gate opens this route. That gate is always
+    enforced, has no legacy secret, and refuses when its token can't be
+    derived. Its token is exported to the bridges and to one host file.
+    """
+    bridge_gate.check(request, bridge_gate.VAULT)
+    response.headers["Cache-Control"] = "no-store"
+
+    adapter = _adapter_or_404("vaultwarden")
+    password = await run_in_threadpool(adapter.api_key)
+    if not password:
+        raise HTTPException(status_code=503, detail="no vault credential installed")
+    return {"password": password}
+
+
 @router.delete("/v1/providers/{provider_id}", dependencies=_SERVICE)
 async def disconnect(provider_id: str):
     adapter = _adapter_or_404(provider_id)

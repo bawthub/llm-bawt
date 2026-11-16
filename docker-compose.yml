@@ -88,6 +88,11 @@ services:
       - BRIDGE_TOKEN_EXPORT_UID=${BRIDGE_TOKEN_EXPORT_UID:-${BRIDGE_UID:-1000}}
       - BRIDGE_BROKER_TOKEN_EXPORT_FILE=/run/llm-bawt-bridge-tokens/broker
       - BRIDGE_GIT_CREDENTIAL_TOKEN_EXPORT_FILE=/run/llm-bawt-bridge-tokens/git-credential
+      # TASK-2386: the vault gate's token, for bw-secret. The bridges read it
+      # from the volume; the host user's copy lands in the mounted host config
+      # directory (owned by that directory's owner, 0600).
+      - BRIDGE_VAULT_TOKEN_EXPORT_FILE=/run/llm-bawt-bridge-tokens/vault
+      - BRIDGE_VAULT_TOKEN_HOST_EXPORT_FILE=/root/.config/llm-bawt/vault-token
       # The Crawl4AI bearer, derived the same way (crawl4ai_token_export.py):
       # one copy for the bridges, one for the crawl4ai container (uid 999,
       # `appuser` in the crawl4ai image), which reads it at boot. The app's own
@@ -318,6 +323,7 @@ services:
       # TASK-1604: derived bearers the app exported (bridge-tokens volume).
       - BRIDGE_BROKER_TOKEN_FILE=/run/llm-bawt-bridge-tokens/broker
       - BRIDGE_GIT_CREDENTIAL_TOKEN_FILE=/run/llm-bawt-bridge-tokens/git-credential
+      - BRIDGE_VAULT_TOKEN_FILE=/run/llm-bawt-bridge-tokens/vault
       - CRAWL4AI_API_TOKEN_FILE=/run/llm-bawt-bridge-tokens/crawl4ai
       # TASK-2072: bawt-wt defaults to the host-identical root (mounted below),
       # so new worktrees' gitdir links also resolve on the host.

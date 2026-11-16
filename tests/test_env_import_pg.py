@@ -37,7 +37,10 @@ SONARR = "sonarr-fixture-value-iiii9999"
 RADARR = "radarr-fixture-value-jjjj0000"
 SAB = "sab-fixture-value-kkkk1111"
 UNMAPPED = "openai-fixture-value-llll2222"
-SECRETS = (ZAI, KIMI, BRAVE, NEWS, CLAW, CLAW_OTHER, S3_ACCESS, S3_SECRET, SONARR, RADARR, SAB, UNMAPPED)
+ANTHROPIC = "anthropic-fixture-value-mmmm3333"
+VAULT = "vault-fixture-value-nnnn4444"
+SECRETS = (ZAI, KIMI, BRAVE, NEWS, CLAW, CLAW_OTHER, S3_ACCESS, S3_SECRET, SONARR, RADARR, SAB, UNMAPPED,
+           ANTHROPIC, VAULT)
 
 FULL_ENV = {
     "ZAI_API_KEY": ZAI,
@@ -55,6 +58,8 @@ FULL_ENV = {
     "LLM_BAWT_RADARR_API_KEY": RADARR,
     "LLM_BAWT_SABNZBD_URL": "https://sabnzbd.example",
     "LLM_BAWT_SABNZBD_API_KEY": SAB,
+    "LLM_BAWT_ANTHROPIC_API_KEY": ANTHROPIC,
+    "BW_PASSWORD": VAULT,
     # Set but not adoptable: never read. OpenClaw is being removed (TASK-1439), not adopted.
     "OPENAI_API_KEY": UNMAPPED,
     "OPENCLAW_GATEWAY_TOKEN": CLAW,
@@ -94,7 +99,8 @@ def test_mapping_is_closed():
     assert {(spec.destination, spec.kind) for spec in SPECS} == {
         ("zai", "provider"), ("kimi-coding", "provider"), ("brave", "provider"), ("newsapi", "provider"),
         ("object-store", "integration"), ("sonarr", "integration"),
-        ("radarr", "integration"), ("sabnzbd", "integration")}
+        ("radarr", "integration"), ("sabnzbd", "integration"),
+        ("anthropic-api", "provider"), ("vaultwarden", "provider")}
 
 
 def test_every_destination_imports_verified_and_is_removable(env):
@@ -105,6 +111,7 @@ def test_every_destination_imports_verified_and_is_removable(env):
     zai = providers.load("zai")
     assert (zai.status, zai.auth_method, zai.secret) == (STATUS_CONNECTED, AUTH_API_KEY, {"api_key": ZAI})
     assert providers.load("kimi-coding").secret == {"api_key": KIMI}
+    assert providers.load("vaultwarden").secret == {"api_key": VAULT}
     store = integrations.load("object-store")
     assert store.meta == {"endpoint": "https://s3.example", "region": "us-east-1", "bucket": "media"}
     assert store.secret == {"access_key_id": S3_ACCESS, "secret_access_key": S3_SECRET}
@@ -241,7 +248,7 @@ def test_main_only_limits_the_run(env, monkeypatch, capsys):
     assert integrations.load("openclaw") is None
     assert row_count(engine) == 2
     with pytest.raises(SystemExit):
-        env_import.main(["--only", "anthropic-api"])  # not adoptable
+        env_import.main(["--only", "openai-api"])  # not adoptable
 
 
 def test_main_reports_names_and_codes_never_values(env, monkeypatch, capsys, caplog):
