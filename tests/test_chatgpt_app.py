@@ -501,6 +501,11 @@ def test_real_browser_routes_broker_gate_and_secret_free_failures(adapter, upstr
             "session_id": session, "callback_url": callback(pending),
         })
         assert failure.status_code == 502 and "secret-access-refresh-callback" not in failure.text
+        # Disconnecting is an operator write: refused without BawtHub's bearer (TASK-2370);
+        # 503 when this environment has no token configured, 401 when it does.
+        assert client.delete("/v1/providers/chatgpt-app").status_code in (401, 503)
+        from llm_bawt.service.routes.service_auth import require_service_token
+        app.dependency_overrides[require_service_token] = lambda: None
         assert client.delete("/v1/providers/chatgpt-app").json()["disconnected"]
 
 

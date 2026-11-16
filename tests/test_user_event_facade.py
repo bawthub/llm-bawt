@@ -139,7 +139,7 @@ def test_delegated_ops_fixture_records_public_subscriber_events_without_a_databa
     monkeypatch.setattr(delegated, "ToolApprovalPolicyStore", lambda *a, **kw: object())
     api = SimpleNamespace(
         rig=SimpleNamespace(engine=object()),
-        client=SimpleNamespace(app=SimpleNamespace(include_router=Mock())),
+        client=SimpleNamespace(app=SimpleNamespace(include_router=Mock(), dependency_overrides={})),
         as_person=Mock(return_value=SimpleNamespace(status_code=200)),
     )
     ops = delegated.ops.__wrapped__(api, monkeypatch)
