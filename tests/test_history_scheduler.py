@@ -176,8 +176,10 @@ def test_history_enrichment_only_queries_the_selected_page(fixture, monkeypatch)
         result = client.get("/v1/history?bot_id=bot&user_id=alice&limit=1").json()
     assert len(result["messages"]) == 1
     assert result["messages"][0]["scheduler"]["schedule_id"] == "job-two"
-    assert "m-one" not in calls[0][1]
-    assert "m-two" in calls[0][1]
+    enrichment = [params for sql, params in calls if "FROM prompt_occurrences o" in sql]
+    assert len(enrichment) == 1
+    assert "m-one" not in enrichment[0]
+    assert "m-two" in enrichment[0]
 
 
 def test_session_route_owner_check_precedes_enrichment(fixture, monkeypatch):

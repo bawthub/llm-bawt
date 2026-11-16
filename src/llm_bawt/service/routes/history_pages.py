@@ -655,6 +655,17 @@ def get_history(
     effective_bot_id = bot_id or service._default_bot
 
     try:
+        from .history_page_query import load_history_page
+
+        page = load_history_page(
+            service, effective_bot_id, limit, before, after, session_id, user_id,
+        )
+        if page is not None:
+            page_messages, has_older, has_newer = page
+            return _build_history_response(
+                service, effective_bot_id, [], page_messages, candidate_count=None,
+                has_older=has_older, has_newer=has_newer, origin_user_id=user_id,
+            )
         visible_messages = _load_sorted_visible_messages(
             service, effective_bot_id, session_id=session_id, user_id=user_id
         )
