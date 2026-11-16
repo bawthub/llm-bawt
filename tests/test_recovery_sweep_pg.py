@@ -826,19 +826,23 @@ def test_a_full_pass_skipped_as_busy_is_run_in_full_by_the_next_follow_up():
     assert sweep.calls[-1]["steps"] == ["orphan_turns"]
 
 
-def _run_then_requeue(store, sender, target, text):
+def _run_then_requeue(store, sender, target, text, *, previous_batch=False):
     """TASK-2142 incident: the claim reserves, the bridge consumes the row and
     runs, then an app restart lets the lease lapse and recover_expired requeues."""
     from llm_bawt.service.tool_call_store import ToolCallRecord
     ToolCallRecord.__table__.create(store.engine, checkfirst=True)  # settling a turn closes its tool rows
     delivery, _ = _enqueue(store, sender, target, text)
     assert store.claim_next(target, claim_owner="dead-app", steer_capable=False, lease_seconds=60)
+    payload = {"messages": [], "user_stop": None}
+    if previous_batch:
+        payload.update(inter_bot_delivery_id=delivery.id,
+                       inter_bot_delivery_ids=[delivery.id, "prior-follower"])
     with store.engine.begin() as conn:
         conn.execute(sa_text("""
-            UPDATE turn_logs SET status='streaming', request_json='{"messages": [], "user_stop": null}',
+            UPDATE turn_logs SET status='streaming', request_json=:payload,
                 agent_session_key=:key, agent_request_id='req-ran'
             WHERE id=:id
-        """), {"id": delivery.turn_id, "key": f"{target}:operator"})
+        """), {"id": delivery.turn_id, "key": f"{target}:operator", "payload": json.dumps(payload)})
         conn.execute(sa_text("UPDATE inter_bot_deliveries SET lease_expires_at=now() - interval '1 second'"
                              " WHERE id=:id"), {"id": delivery.id})
     assert [row.status for row in store.recover_expired() if row.id == delivery.id] == ["QUEUED"]
@@ -856,15 +860,17 @@ def test_a_rearmed_row_that_already_ran_is_relinked_to_its_delivery(delivery_sto
     assert step["done"] == [] and step["ambiguous"] == []   # still QUEUED: keeps its place
 
 
-def test_a_started_attempt_whose_lease_expired_stays_in_attempt_history(delivery_store):  # noqa: F811
+@pytest.mark.parametrize("previous_batch", [False, True], ids=["single", "prior-batch"])
+def test_a_started_attempt_whose_lease_expired_stays_in_attempt_history(delivery_store, previous_batch):  # noqa: F811
     """TASK-1256: the re-arm resets the row to ``reserved``, so the next claim
     records nothing; the started attempt must already be in ``attempts``."""
     store, sender, target = delivery_store
-    delivery = _run_then_requeue(store, sender, target, "ran, lease expired")
+    delivery = _run_then_requeue(store, sender, target, "ran, lease expired", previous_batch=previous_batch)
     turn = TurnLogStore(store.config).get_turn(delivery.turn_id)
     payload = json.loads(turn.request_json)
     assert turn.status == "reserved" and turn.ended_at is None   # still the queue-ordering fence
     assert payload["inter_bot_delivery_id"] == delivery.id
+    assert "inter_bot_delivery_ids" not in payload  # prior followers are not this attempt's membership
     [attempt] = payload["attempts"]
     assert (attempt["n"], attempt["status"], attempt["end_reason"]) == (1, "aborted", "aborted")
     assert attempt["started"] and attempt["ended"] and attempt["ended"] >= attempt["started"]
@@ -874,6 +880,8 @@ def test_a_started_attempt_whose_lease_expired_stays_in_attempt_history(delivery
     assert claimed and claimed.id == delivery.id
     after = json.loads(TurnLogStore(store.config).get_turn(delivery.turn_id).request_json)
     assert after["attempts"] == [attempt]   # survives the re-claim, not double-counted
+    assert after["inter_bot_delivery_id"] == delivery.id
+    assert "inter_bot_delivery_ids" not in after
 
 
 def _withdraw(store, delivery, *, linked=True):

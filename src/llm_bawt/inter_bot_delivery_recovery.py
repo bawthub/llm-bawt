@@ -233,11 +233,14 @@ class DeliveryLeaseRecovery:
             " FROM turn_logs WHERE id=:id" + lock
         ), {"id": turn_id}).mappings().first()
         payload = turn_payload(prior["request_json"] if prior else None)
+        if prior is not None and prior["status"] != "reserved":
+            for key in ATTEMPT_KEYS:
+                payload.pop(key, None)
+        # Stamp the recovered reservation's owner after dropping old attempt
+        # metadata; prior batch followers must not survive into the new claim.
         payload["inter_bot_delivery_id"] = str(delivery_id)
         if prior is None or prior["status"] == "reserved":
             return json.dumps(payload, ensure_ascii=False, default=str)
-        for key in ATTEMPT_KEYS:
-            payload.pop(key, None)
         started = {
             **dict(prior), "status": "aborted", "end_reason": "aborted",
             "ended_at": datetime.now(timezone.utc),
