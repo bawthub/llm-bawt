@@ -69,6 +69,19 @@ async def test_original_mint_settle_and_late_duplicate_are_idempotent(transport)
 
 
 @pytest.mark.anyio
+async def test_original_handler_acks_entry_trimmed_during_run_without_receipt(transport):
+    entry_id, fields = await pending(transport)
+    handler = owner(transport)
+    context = handler.capture(fields, entry_id)
+    await transport.xdel(STREAM, entry_id)
+    assert not await handler.settle(context)
+    assert (await transport.xpending(STREAM, GROUP))["pending"] == 1
+    await handler.acknowledge(context)
+    assert (await transport.xpending(STREAM, GROUP))["pending"] == 0
+    assert await transport.get(context.key) is None
+
+
+@pytest.mark.anyio
 async def test_restart_and_concurrent_settlers_use_original_boot_and_epoch(transport):
     entry_id, fields = await pending(transport, house_epoch="old-epoch")
     context = owner(transport).capture(fields, entry_id)

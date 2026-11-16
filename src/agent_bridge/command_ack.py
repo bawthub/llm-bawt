@@ -34,6 +34,9 @@ def receipt_key(stream: str, group: str, entry_id: str) -> str:
     return "agent:command_ack:" + hashlib.sha256(identity.encode()).hexdigest()
 
 
+SOURCE_MISSING = -3
+
+
 @dataclass(frozen=True)
 class CommandAckContext:
     stream: str
@@ -85,6 +88,12 @@ class CommandAckOwner:
         if self._load(context.entry_id, context.evidence) != context:
             raise ValueError("Unsupported original command acknowledgment context")
         minted = await self._eval(MINT_ACK, context)
+        if minted == SOURCE_MISSING:
+            # A trimmed entry can never be redelivered, so the original handler
+            # keeps its pre-existing direct XACK authority. Recovery never does.
+            async with asyncio.timeout(self.timeout):
+                await self.redis.xack(self.stream, self.group, context.entry_id)
+            return
         # Even an already-disposed entry may have an exact receipt to retire.
         if minted not in {1, 2} or not await self.settle(context):
             raise RuntimeError("Original command acknowledgment evidence conflicted")

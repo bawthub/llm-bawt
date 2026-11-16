@@ -12,7 +12,8 @@ if receipt.version ~= 1 or receipt.state ~= 'ACK_READY'
     return -1
 end
 local entries = redis.call('XRANGE', stream, id, id, 'COUNT', 1)
-if #entries ~= 1 then return -1 end
+-- -3: source gone (trimmed/deleted); only the original handler may still ACK.
+if #entries ~= 1 then return -3 end
 local raw, fields, keys = entries[1][2], {}, {}
 for i = 1, #raw, 2 do
     if fields[raw[i]] ~= nil then return -1 end
