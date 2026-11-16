@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 
 from sqlalchemy import text
@@ -213,3 +214,23 @@ class InboxSettlement:
             })}).mappings().one()
             DeliveryTransitionEvents.stage(conn, updated, reason_code="inbox_acknowledged")
             return DeliveryRecord.from_mapping(updated)
+
+    def persist_history(
+        self, delivery_id: str, claim_token: str, evidence: InboxWriteProof,
+        write: Callable[[], bool],
+    ) -> bool:
+        """Serialize all history mutation with rejection, takeover and generation.
+
+        This synchronous boundary must run entirely in the writer's worker
+        thread. Releasing a lock in a cancelled coroutine while add_message or
+        the anchor thread still runs would let it overwrite a successor.
+        """
+        if self.store.engine is None or not claim_token:
+            return False
+        with self.store.engine.begin() as conn:
+            row = SteerLifecycleFence(self.store)._locked_row(conn, delivery_id)
+            if (row is None or row["status"] != "STEERING" or row["claim_token"] != claim_token
+                    or not evidence.matches(row) or inbox_marker(row).get("phase") != "accepted"
+                    or row["transport_accepted_at"] is None or not self._destination_owned(conn, evidence)):
+                return False
+            return write()

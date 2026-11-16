@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from ..message_authorship import AuthorReference
@@ -23,6 +24,27 @@ class SteerDestination:
     session_id: str
 
 
+def persist_input_history(
+    service, *, destination: SteerDestination, message_id: str, message: str,
+    author: AuthorReference, persist_anchor, content_offset: int | None,
+    attachment_refs: list[dict] | None,
+) -> bool:
+    """Blocking message + anchor mutation, optionally inside a caller's fence."""
+    memory_client = service.get_memory_client(destination.bot_id, destination.user_id)
+    if memory_client is None:
+        raise RuntimeError("Memory client unavailable")
+    memory_client.add_message(
+        "user", message, destination.session_id, None, message_id,
+        attachment_refs, None, author.entity_type, author.entity_id,
+    )
+    if content_offset is not None and not persist_anchor(
+        service, bot_id=destination.bot_id, message_id=message_id,
+        source_message_id=destination.source_message_id, content_offset=content_offset,
+    ):
+        raise RuntimeError("Persisted steer message was not found for anchor update")
+    return True
+
+
 async def persist_accepted_input(
     service, *,
     destination: SteerDestination,
@@ -34,6 +56,7 @@ async def persist_accepted_input(
     content_offset: int | None = None,
     attachment_refs: list[dict] | None = None,
     resolve_offset: bool = True,
+    history_fence: Callable[[Callable[[], bool]], bool] | None = None,
 ) -> bool:
     """Save/repair history for the fixed message ID, then publish best effort.
 
@@ -46,9 +69,6 @@ async def persist_accepted_input(
     persisted = False
     target = destination
     try:
-        memory_client = service.get_memory_client(target.bot_id, target.user_id)
-        if memory_client is None:
-            raise RuntimeError("Memory client unavailable")
         from .steer_timeline import SteerTimeline
 
         timeline = SteerTimeline(
@@ -56,21 +76,19 @@ async def persist_accepted_input(
             turn_id=target.turn_id, message_id=message_id,
         )
         offset = await timeline.content_offset(subscriber, content_offset) if resolve_offset else content_offset
-        await asyncio.to_thread(
-            memory_client.add_message,
-            "user", message, target.session_id, None, message_id,
-            attachment_refs, None, author.entity_type, author.entity_id,
-        )
-        if offset is not None:
-            anchored = await asyncio.to_thread(
-                persist_anchor, service, bot_id=target.bot_id,
-                message_id=message_id, source_message_id=target.source_message_id,
-                content_offset=offset,
+
+        def write():
+            return persist_input_history(
+                service, destination=target, message_id=message_id, message=message,
+                author=author, persist_anchor=persist_anchor, content_offset=offset,
+                attachment_refs=attachment_refs,
             )
-            if not anchored:
-                raise RuntimeError("Persisted steer message was not found for anchor update")
-        persisted = True
-        await timeline.publish(subscriber)
+
+        # The blocking fence and both mutations run in the SAME worker. Cancelling
+        # this coroutine cannot release a DB lock while its writer still runs.
+        persisted = await asyncio.to_thread(history_fence, write) if history_fence else await asyncio.to_thread(write)
+        if persisted:
+            await timeline.publish(subscriber)
     except Exception:
         log.exception(
             "chat.steer accepted but persistence failed: turn=%s message=%s",

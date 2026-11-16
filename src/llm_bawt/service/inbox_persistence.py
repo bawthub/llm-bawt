@@ -22,6 +22,9 @@ async def repair_inbox_history(service, store, *, delivery_id: str, claim_token:
         message_id=record.user_message_id, message=repair.message, author=record.author,
         subscriber=subscriber, persist_anchor=persist_anchor,
         content_offset=repair.content_offset, resolve_offset=False,
+        history_fence=lambda write: settlement.persist_history(
+            delivery_id, claim_token, repair.evidence, write,
+        ),
     )
     if not persisted:
         return None

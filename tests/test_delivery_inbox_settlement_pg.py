@@ -1,14 +1,18 @@
 """Real private-PG acceptance/repair/ack with a deterministic, provider-free SDK."""
 import asyncio
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
 
 from claude_code_bridge.inbox_input import accept_inbox_input
 from llm_bawt.inter_bot_delivery import InterBotDeliveryStore
+from llm_bawt.inter_bot_delivery_steer_fence import SteerLifecycleFence
 from llm_bawt.inter_bot_inbox_claim import INBOX, prepare_inbox_write
 from llm_bawt.inter_bot_inbox_settlement import InboxSettlement, InboxWriteProof
 from llm_bawt.service.inbox_persistence import repair_inbox_history
@@ -212,23 +216,108 @@ def test_ack_never_substitutes_foreign_history_for_acceptance(rig, running, chan
     assert settlement.acknowledge(row.id, row.claim_token, evidence) is None
 
 
-def test_takeover_during_history_write_fences_old_ack_without_reinput(rig, running):
+def test_history_mutation_serializes_generation_rejection_and_takeover(rig, running):
     store, row, evidence, settlement = operation(rig, running)
     settlement.note_lifecycle(row.id, evidence, "queued")
     memory, service, subscriber = history(rig)
-    successor = []
 
-    def take_over():
-        memory.on_saved = None
-        claims.expire(store, row)
-        successor.append(settlement.claim_repair(rig.bot, claim_owner="replacement"))
+    def assert_write_fenced():
+        with rig.engine.begin() as conn:
+            assert not conn.execute(text(
+                "SELECT pg_try_advisory_xact_lock(hashtext(:bot))"
+            ), {"bot": rig.bot}).scalar_one()
+        with pytest.raises(OperationalError, match="could not obtain lock"):
+            with rig.engine.begin() as conn:
+                conn.execute(text(
+                    "SELECT id FROM inter_bot_deliveries WHERE id=:id FOR UPDATE NOWAIT"
+                ), {"id": row.id})
 
-    memory.on_saved = take_over
-    assert repair(store, row, service, subscriber) is None
-    assert successor[0] and successor[0].claim_token != row.claim_token
-    assert settlement.acknowledge(row.id, row.claim_token, evidence) is None
-    assert repair(store, successor[0], service, subscriber).status == "DELIVERED"
-    assert memory.calls[0] == memory.calls[1]
+    memory.on_saved = assert_write_fenced
+
+    def anchor(*args, **kwargs):
+        assert_write_fenced()
+        return _persist_interrupt_anchor(*args, **kwargs)
+
+    assert repair(store, row, service, subscriber, persist_anchor=anchor).status == "DELIVERED"
+
+
+def test_stale_repair_context_cannot_mutate_history_after_rejection(rig, running):
+    store, row, evidence, settlement = operation(rig, running)
+    settlement.note_lifecycle(row.id, evidence, "queued")
+    context = settlement.history_repair(row.id, row.claim_token)
+    assert context is not None
+    assert settlement.note_lifecycle(row.id, evidence, "refused", proof="cli_terminal").status == "QUEUED"
+    writes = []
+    assert not settlement.persist_history(row.id, row.claim_token, context.evidence, lambda: writes.append(True))
+    assert writes == []
+
+
+def test_rejection_waits_for_history_worker_even_after_caller_cancellation(rig, running, monkeypatch):
+    store, row, evidence, settlement = operation(rig, running)
+    settlement.note_lifecycle(row.id, evidence, "queued", content_offset=7)
+    memory, service, subscriber = history(rig)
+    writing, release, rejecting = threading.Event(), threading.Event(), threading.Event()
+    original_locked_row = SteerLifecycleFence._locked_row
+    rejection_thread = []
+
+    def locked_row(self, conn, delivery_id):
+        if threading.get_ident() in rejection_thread:
+            rejecting.set()
+        return original_locked_row(self, conn, delivery_id)
+
+    monkeypatch.setattr(SteerLifecycleFence, "_locked_row", locked_row)
+
+    def pause_after_message():
+        writing.set()
+        assert release.wait(10), "fixture did not release history worker"
+
+    memory.on_saved = pause_after_message
+
+    def reject():
+        rejection_thread.append(threading.get_ident())
+        return settlement.note_lifecycle(row.id, evidence, "refused", proof="cli_terminal")
+
+    async def cancel_repair():
+        task = asyncio.create_task(repair_inbox_history(
+            service, store, delivery_id=row.id, claim_token=row.claim_token,
+            subscriber=subscriber, persist_anchor=_persist_interrupt_anchor,
+        ))
+        await asyncio.to_thread(writing.wait)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            rejection = pool.submit(reject)
+            try:
+                assert await asyncio.to_thread(rejecting.wait, 10)
+                # The rejection has entered its lock-taking boundary. A cancelled
+                # async caller cannot unlock the still-running message/anchor worker.
+                with rig.engine.begin() as conn:
+                    assert not conn.execute(text(
+                        "SELECT pg_try_advisory_xact_lock(hashtext(:bot))"
+                    ), {"bot": rig.bot}).scalar_one()
+                assert not rejection.done()
+            finally:
+                release.set()
+            assert (await asyncio.wrap_future(rejection)).status == "QUEUED"
+
+    try:
+        asyncio.run(cancel_repair())
+    finally:
+        release.set()
+    assert store.get(row.id).metadata[INBOX] is None
+    assert not settlement.persist_history(row.id, row.claim_token, evidence, lambda: pytest.fail("stale write"))
+    # Rejection can now advance and a successor can persist a different anchor;
+    # no cancelled old worker remains to overwrite it after the fence released.
+    with rig.engine.begin() as conn:
+        conn.execute(text("""
+            UPDATE messages SET interrupt_source_message_id=:id, interrupt_content_offset=21
+            WHERE bot_id=:bot AND id=:message
+        """), {"id": rig.message_id, "bot": rig.bot, "message": row.user_message_id})
+    with rig.engine.connect() as conn:
+        assert conn.execute(text("""
+            SELECT interrupt_content_offset FROM messages WHERE bot_id=:bot AND id=:id
+        """), {"bot": rig.bot, "id": row.user_message_id}).scalar_one() == 21
 
 
 def test_repair_refuses_a_deleted_or_retargeted_owned_destination(rig, running):
