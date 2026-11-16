@@ -39,6 +39,36 @@ STARTED = "started"
 UNCERTAIN = "uncertain"
 
 
+def _apply_inbox(dispatcher, payload, target_turn_id) -> str:
+    from ..inter_bot_inbox_claim import InboxRunBinding
+    from ..inter_bot_inbox_settlement import InboxSettlement, InboxWriteProof
+
+    try:
+        envelope = payload["inbox_write"]
+        raw = envelope["evidence"]
+        evidence = InboxWriteProof(InboxRunBinding(**raw["binding"]), raw["generation"],
+                                   raw["command_uuid"], raw["write_token"])
+        if (type(evidence.generation) is not int or evidence.binding.turn_id != target_turn_id
+                or evidence.command_uuid != payload.get("message_id")
+                or evidence.binding.request_id != payload.get("run_request_id")
+                or SteerGeneration.parse_request_id(payload.get("steer_rpc_id")) != (
+                    envelope["delivery_id"], evidence.generation,
+                )):
+            return IGNORED
+    except (KeyError, TypeError, ValueError):
+        return IGNORED
+    record = InboxSettlement(dispatcher.store).note_lifecycle(
+        envelope["delivery_id"], evidence, payload.get("state"), proof=payload.get("proof"),
+    )
+    if record is None:
+        return IGNORED
+    if record.status == "QUEUED":
+        dispatcher.announce_admitted(record)
+        return REOPENED
+    dispatcher.announce_lifecycle(record)
+    return STARTED if payload.get("state") in LIFECYCLE_STARTED else str(payload.get("state"))
+
+
 def apply_bot_steer_lifecycle(
     dispatcher: Any, payload: Mapping[str, Any], *, target_turn_id: str | None,
 ) -> str:
@@ -50,6 +80,8 @@ def apply_bot_steer_lifecycle(
     """
     if payload.get("origin") != "bot":
         return IGNORED
+    if "inbox_write" in payload:
+        return _apply_inbox(dispatcher, payload, target_turn_id)
     parsed = SteerGeneration.parse_request_id(payload.get("steer_rpc_id"))
     if parsed is None or not target_turn_id:
         logger.warning(

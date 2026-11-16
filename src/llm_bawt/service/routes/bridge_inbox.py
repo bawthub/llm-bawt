@@ -76,7 +76,8 @@ def _claimed(record):
 @router.post("/claim")
 def claim(body: RunClaim):
     """The actual run owner asks; the durable authority revalidates that run."""
-    store = _dispatcher().store
+    dispatcher = _dispatcher()
+    store = dispatcher.store
     target = body.bot_id.strip().lower()
     with store.engine.connect() as conn:
         binding = InboxRunBinding.read(
@@ -91,6 +92,7 @@ def claim(body: RunClaim):
     )
     result = _claimed(record)
     if result is not None:
+        dispatcher.announce_lifecycle(record)
         from ...inter_bot_reply_channel import delivery_reply_channel_note
 
         # These are the existing app-rendered trust/reply boundaries. The body

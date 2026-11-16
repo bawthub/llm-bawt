@@ -51,6 +51,7 @@ class CommandPublisherMixin:
         model: str | None = None,
         backend: str | None = None,
         bot_id: str | None = None,
+        user_id: str | None = None,
         trigger_message_id: str | None = None,
         effort: str | None = None,
         max_turns: int | None = None,
@@ -73,6 +74,7 @@ class CommandPublisherMixin:
         thread_session_id: str | None = None,
         thread_resume_id: str | None = None,
         explicit_thread: bool = False,
+        inbox_next: bool = False,
         task_turn_capability: str | None = None,
         access_path: str | None = None,
         access_path_provider: str | None = None,
@@ -98,6 +100,8 @@ class CommandPublisherMixin:
             "message": message,
             "request_id": request_id,
         }
+        if inbox_next:
+            fields["inbox_next"] = "1"
         if skill_selection is not None:  # TASK-1309: validated before it is published
             from .skill_selection import SELECTION_FIELD, ManagedSelection
 
@@ -124,6 +128,8 @@ class CommandPublisherMixin:
             fields["backend"] = backend
         if bot_id:
             fields["bot_id"] = bot_id
+        if user_id:
+            fields["user_id"] = user_id
         if trigger_message_id:
             fields["trigger_message_id"] = trigger_message_id
         if effort:

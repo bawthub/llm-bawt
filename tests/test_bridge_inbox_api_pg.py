@@ -1,4 +1,5 @@
 """Internal HTTP inbox contract against private PostgreSQL, never a live SDK."""
+import asyncio
 from dataclasses import asdict
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -24,7 +25,7 @@ def http(rig, running, monkeypatch):
     dispatcher = SimpleNamespace(
         store=store, announce_admitted=Mock(), announce_lifecycle=Mock(),
     )
-    _, service, subscriber = settlement.history(rig)
+    memory, service, subscriber = settlement.history(rig)
     gate = Mock()
     monkeypatch.setattr(api, "_dispatcher", lambda: dispatcher)
     monkeypatch.setattr(api, "get_service", lambda: service)
@@ -45,7 +46,7 @@ def http(rig, running, monkeypatch):
     )
     with TestClient(app) as client:
         yield SimpleNamespace(client=client, store=store, binding=binding, dispatcher=dispatcher,
-                              gate=gate, framing=framing, body=body)
+                              gate=gate, framing=framing, body=body, memory=memory)
 
 
 def post(http, path, body):
@@ -58,6 +59,7 @@ def test_claim_prepare_positive_receipt_then_persistence_only_ack(rig, http):
     row = claims.send(rig, http.store)
     claimed = post(http, "/claim", http.body)["claim"]
     assert claimed["delivery_id"] == row.id
+    assert http.dispatcher.announce_lifecycle.call_args.args[0].status == "STEERING"
     assert claimed["evidence"]["binding"] == asdict(http.binding)
     assert claimed["claim_token"] == claimed["evidence"]["write_token"]
     assert claimed["framed_message"] == "NEXT[callback]"
@@ -151,3 +153,40 @@ def test_transport_success_is_not_an_accepted_lifecycle_state(rig, http):
     assert response.status_code == 422
     assert http.store.get(row.id).metadata[INBOX]["phase"] == "claimed"
     assert InboxSettlement(http.store).claim_repair(rig.bot, claim_owner="replacement") is None
+
+
+def test_actual_consumer_accepts_once_then_replacement_repairs_through_http(rig, http):
+    from agent_bridge.session_queue import SessionQueue
+    from claude_code_bridge.inbox_consumer import BotInbox, InboxConsumer, InboxRun
+    from tests.test_claude_inbox_input import InputClient
+
+    row = claims.send(rig, http.store)
+    client = InputClient()
+    client.run.request_id = http.binding.request_id
+    queue = SessionQueue()
+    queue.set_active_client(http.binding.session_key, client.run)
+    context = InboxRun(rig.bot, rig.user, http.binding.backend, http.binding.session_key,
+                       client.run, rig.message_id, rig.session_id)
+
+    async def rpc(path, body):
+        return await asyncio.to_thread(post, http, path, body)
+
+    async def scenario():
+        consumer = InboxConsumer(rpc, queue, owner="original")
+        consumer.bots[rig.bot] = BotInbox(runs=[context])
+        client.run.on_command_lifecycle = lambda payload: consumer.observe(context, payload)
+        http.memory.fail = True
+        assert await consumer.drain(rig.bot)
+        assert len(client.frames) == 1 and http.store.get(row.id).status == "STEERING"
+        # Simulate process loss: all bridge-local operation state disappears.
+        claims.expire(http.store, row)
+        client.run.mark_completed()
+        queue.pop_active_client(http.binding.session_key)
+        replacement = InboxConsumer(rpc, queue, owner="replacement")
+        replacement.bots[rig.bot] = BotInbox()
+        assert not await replacement.drain(rig.bot)
+        assert http.store.get(row.id).status == "DELIVERED"
+        assert len(client.frames) == 1
+        assert http.memory.calls[0] == http.memory.calls[1]
+
+    asyncio.run(scenario())

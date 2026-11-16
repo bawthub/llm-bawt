@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Callable
 
@@ -24,6 +25,7 @@ from .approval_ops import ClaudeApprovalMixin
 from .event_ops import ClaudeEventMixin
 from ._bridge_helpers import _get_fresh_oauth_token as _get_fresh_oauth_token  # facade re-export for __main__
 from .command_ops import ClaudeCommandMixin
+from .inbox_consumer import InboxAPI, InboxConsumer
 from .run_terminal import RunTerminalLatch
 from .send_handler import ClaudeSendMixin
 
@@ -81,6 +83,9 @@ class ClaudeCodeBridge(
         # Shared session queue — serializes sends per session and tracks
         # active tasks for abort support.
         self._session_queue = SessionQueue()
+        self._inbox_consumer = InboxConsumer(
+            InboxAPI(app_api_url), self._session_queue, owner=f"bridge-{uuid.uuid4().hex}",
+        ) if app_api_url else None
         # request_id → frontend user-message UUID, populated in _handle_send
         # and read by _publish_event so every emitted AgentEvent (tool_*,
         # assistant_*, etc.) carries the originating message id.  Cleared on
@@ -327,6 +332,9 @@ class ClaudeCodeBridge(
         # otherwise register after cancel_all and outlive the publisher.
         await self._cancel_and_wait(self._command_task)
         await self._cancel_sends_for_shutdown()
+        inbox_consumer = getattr(self, "_inbox_consumer", None)
+        if inbox_consumer is not None:
+            await inbox_consumer.stop()
         for task in (self._cleanup_task, self._approval_reload_task):
             await self._cancel_and_wait(task)
         self._publisher.close()

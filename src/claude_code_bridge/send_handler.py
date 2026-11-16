@@ -27,6 +27,7 @@ from ._bridge_helpers import (
     AgentSpawnIndex,
 )
 from .active_run import STEER_INTERRUPTED_TOOL_RESULT, ClaudeActiveRun
+from .inbox_consumer import InboxRun
 from .native_auth import resolve_native_route
 from .send_errors import (
     AuthRetryPolicy,
@@ -524,6 +525,7 @@ class ClaudeSendMixin(
 
                     sdk_client = None
                     active_run = None
+                    inbox_context = None
                     teardown = None
                     msg_stream = None
                     try:
@@ -536,6 +538,13 @@ class ClaudeSendMixin(
                             seq += 1
                             self._publish_event(request_id, session_key, seq, kind=kind, extra_raw=raw)
 
+                        inbox_consumer = getattr(self, "_inbox_consumer", None)
+
+                        def _command_lifecycle(payload: dict) -> None:
+                            if inbox_context is not None and inbox_consumer is not None:
+                                payload = inbox_consumer.observe(inbox_context, payload)
+                            _publish_run_signal(AgentEventKind.STEER_LIFECYCLE, payload)
+
                         active_run = ClaudeActiveRun(
                             client=sdk_client,
                             request_id=request_id,
@@ -544,9 +553,7 @@ class ClaudeSendMixin(
                             background_tasks=background_tasks_enabled(),
                             # TASK-1300: every origin, with the proof the app
                             # needs to re-queue or fence a bot delivery.
-                            on_command_lifecycle=lambda payload: _publish_run_signal(
-                                AgentEventKind.STEER_LIFECYCLE, payload,
-                            ),
+                            on_command_lifecycle=_command_lifecycle,
                         )
                         msg_stream = active_run.messages()
 
@@ -571,6 +578,14 @@ class ClaudeSendMixin(
                         # A single response consumer remains here in _handle_send.
                         if session_key:
                             self._session_queue.set_active_client(session_key, active_run)
+                        if (getattr(req, "inbox_next", False) and inbox_consumer is not None
+                                and session_key and req.trigger_message_id and thread_session_id
+                                and getattr(req, "user_id", None)):
+                            inbox_context = InboxRun(
+                                bot_slug, req.user_id, self._backend_name,
+                                session_key, active_run, req.trigger_message_id, thread_session_id,
+                            )
+                            inbox_consumer.attach(inbox_context)
                         while True:
                             # Cooperative abort check — runs before every SDK
                             # `__anext__`, so an abort signalled by chat.abort is
@@ -1026,6 +1041,8 @@ class ClaudeSendMixin(
                         turn_done.set()
                         if active_run is not None:
                             active_run.mark_completed()
+                        if inbox_context is not None:
+                            inbox_consumer.detach(inbox_context)
                         # Always deregister this iteration's client so steers
                         # stop targeting a finished run. Pop only if the
                         # registry still points at our client; a successor

@@ -2,7 +2,7 @@
 import asyncio
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
+from dataclasses import asdict, replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -16,6 +16,8 @@ from llm_bawt.inter_bot_delivery_steer_fence import SteerLifecycleFence
 from llm_bawt.inter_bot_inbox_claim import INBOX, prepare_inbox_write
 from llm_bawt.inter_bot_inbox_settlement import InboxSettlement, InboxWriteProof
 from llm_bawt.service.inbox_persistence import repair_inbox_history
+from llm_bawt.service.inter_bot_dispatcher_steer import SteerGeneration
+from llm_bawt.service.inter_bot_steer_lifecycle import apply_bot_steer_lifecycle
 from llm_bawt.service.routes.chat import _persist_interrupt_anchor
 from llm_bawt.utils.bot_partition import sanitize_table_name
 from tests import test_delivery_inbox_claim_pg as claims
@@ -218,7 +220,7 @@ def test_ack_never_substitutes_foreign_history_for_acceptance(rig, running, chan
 
 def test_history_mutation_serializes_generation_rejection_and_takeover(rig, running):
     store, row, evidence, settlement = operation(rig, running)
-    settlement.note_lifecycle(row.id, evidence, "queued")
+    settlement.note_lifecycle(row.id, evidence, "queued", content_offset=7)
     memory, service, subscriber = history(rig)
 
     def assert_write_fenced():
@@ -352,3 +354,38 @@ def test_cancelled_repair_does_not_ack_even_if_history_thread_completed(rig, run
     assert store.get(row.id).status == "STEERING"
     subscriber.publish_tool_event.side_effect = None
     assert repair(store, row, service, subscriber).status == "DELIVERED"
+
+
+@pytest.mark.parametrize("foreign", [None, "command", "request", "target_turn", "rpc"])
+def test_existing_lifecycle_stream_accepts_only_exact_private_inbox_proof(rig, running, foreign):
+    store, row, evidence, settlement = operation(rig, running)
+    dispatcher = SimpleNamespace(store=store, announce_admitted=lambda _: None, announce_lifecycle=lambda _: None)
+    payload = dict(
+        origin="bot", message_id=evidence.command_uuid, state="started",
+        run_request_id=evidence.binding.request_id, steer_rpc_id=SteerGeneration.of(row).request_id,
+        inbox_write=dict(delivery_id=row.id, evidence=asdict(evidence)),
+    )
+    turn_id = evidence.binding.turn_id
+    if foreign == "target_turn":
+        turn_id = "foreign"
+    elif foreign:
+        payload[{"command": "message_id", "request": "run_request_id", "rpc": "steer_rpc_id"}[foreign]] = "foreign"
+    result = apply_bot_steer_lifecycle(dispatcher, payload, target_turn_id=turn_id)
+    assert result == ("started" if foreign is None else "ignored")
+    assert (settlement.history_repair(row.id, row.claim_token) is not None) == (foreign is None)
+
+
+def test_inbox_stream_projects_durable_history_id_not_command_uuid(rig, running, monkeypatch):
+    from llm_bawt.agent_backends.agent_bridge import _settle_bot_steer
+
+    store, row, evidence, _ = operation(rig, running)
+    dispatcher = SimpleNamespace(store=store, announce_admitted=lambda _: None, announce_lifecycle=lambda _: None)
+    monkeypatch.setattr("llm_bawt.service.dependencies.get_service",
+                        lambda: SimpleNamespace(_inter_bot_dispatcher=dispatcher))
+    payload = dict(
+        origin="bot", message_id=evidence.command_uuid, state="queued",
+        run_request_id=evidence.binding.request_id, steer_rpc_id=SteerGeneration.of(row).request_id,
+        inbox_write=dict(delivery_id=row.id, evidence=asdict(evidence)),
+    )
+    history_id = asyncio.run(_settle_bot_steer(payload, SimpleNamespace(turn_id=evidence.binding.turn_id)))
+    assert history_id == row.user_message_id and history_id != evidence.command_uuid

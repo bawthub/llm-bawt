@@ -96,6 +96,9 @@ class SendRequest:
     # The proxy provider the app derived from that access path (None for a
     # native or non-proxy path); a proxy turn must match the model's prefix.
     access_path_provider: str | None = None
+    # Explicit app-pinned capability; absent/legacy commands never attach a drain.
+    inbox_next: bool = False
+    user_id: str | None = None
 
     @classmethod
     def from_fields(cls, fields: dict) -> "SendRequest":
@@ -301,4 +304,6 @@ class SendRequest:
                 if fields.get("access_path") is not None else None
             ),
             access_path_provider=str(fields.get("access_path_provider") or "").strip() or None,
+            inbox_next=fields.get("inbox_next") == "1",
+            user_id=str(fields.get("user_id") or "").strip() or None,
         )

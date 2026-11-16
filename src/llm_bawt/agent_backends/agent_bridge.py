@@ -57,7 +57,7 @@ def _turn_log_engine():
         return None
 
 
-async def _settle_bot_steer(payload: dict[str, Any], execution: Any) -> None:
+async def _settle_bot_steer(payload: dict[str, Any], execution: Any) -> str | None:
     """Apply a bot steer's lifecycle to its delivery row (TASK-1300).
 
     The run's turn is the steer's target turn. Never raises: a failure here
@@ -73,10 +73,13 @@ async def _settle_bot_steer(payload: dict[str, Any], execution: Any) -> None:
         if dispatcher is None:
             logger.warning("bot steer lifecycle %s: no delivery dispatcher", payload.get("steer_rpc_id"))
             return
-        await asyncio.to_thread(
+        outcome = await asyncio.to_thread(
             apply_bot_steer_lifecycle, dispatcher, payload,
             target_turn_id=getattr(execution, "turn_id", None),
         )
+        if "inbox_write" in payload and outcome != "ignored":
+            record = await asyncio.to_thread(dispatcher.store.get, payload["inbox_write"]["delivery_id"])
+            return record.user_message_id if record is not None else None
     except Exception:
         logger.exception("Could not settle bot steer lifecycle %s", payload.get("steer_rpc_id"))
 
@@ -213,13 +216,14 @@ class AgentBridgeBackend(AgentBackend):
         request_id = configured_request_id or f"req_{uuid.uuid4().hex}"
         self._active_request_id = request_id  # diagnostics only; never abort authority
         execution = config.get("turn_execution")
+        pinned_steer_caps = self.steer_capabilities(config)
         if execution is not None:
             from ..steer_capabilities import encode_caps
 
             # TASK-1243: the run's steer capabilities are pinned with its binding.
             execution.bind_bridge(
                 backend=self.name, session_key=session_key, request_id=request_id,
-                steer_caps=encode_caps(self.steer_capabilities(config)),
+                steer_caps=encode_caps(pinned_steer_caps),
             )
         # Fall back to config so callers that thread it through agent_backend_config
         # (rather than as a kwarg) still propagate.
@@ -309,7 +313,9 @@ class AgentBridgeBackend(AgentBackend):
                             system_prompt_delivery=config.get("system_prompt_delivery"),
                             model=config.get("model"),
                             backend=self.name,
+                            inbox_next="inbox_next" in pinned_steer_caps,
                             bot_id=str(config.get("bot_id") or "").strip() or None,
+                            user_id=str(config.get("user_id") or "").strip() or None,
                             trigger_message_id=trigger_message_id,
                             effort=(
                                 str(config.get("effort")).strip().lower()
@@ -455,7 +461,14 @@ class AgentBridgeBackend(AgentBackend):
                                 bot_id, user_id = config.get("bot_id"), config.get("user_id")
                                 if meta.get("origin") == "bot":
                                     # TASK-1300: settle the steered delivery row.
-                                    await _settle_bot_steer(meta, execution)
+                                    history_message_id = await _settle_bot_steer(meta, execution)
+                                    if "inbox_write" in meta:
+                                        # SDK command UUID is not the durable history
+                                        # UUID. Publish only a validated row's ID,
+                                        # never the private write-proof envelope.
+                                        if history_message_id is None:
+                                            continue
+                                        message_id = history_message_id
                                 if message_id and state and bot_id and user_id:
                                     # Keep the consumption barrier in the SAME queue
                                     # as text/tools. A separate Redis publish can
