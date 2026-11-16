@@ -14,6 +14,7 @@ from sqlalchemy.engine import Connection
 from .inter_bot_delivery_claim import QUEUED
 from .inter_bot_delivery_ledger import DeliveryTransitionEvents
 from .inter_bot_delivery_record import DeliveryRecord
+from .inter_bot_inbox_claim import INBOX, inbox_marker
 from .inter_bot_delivery_steer_fence import pending_rejection, rejection_error, rejection_merge
 
 # TASK-1258: set on a turn delivery that lease recovery FAILED after its turn
@@ -99,6 +100,27 @@ class DeliveryLeaseRecovery:
             from .inter_bot_delivery import EXPIRED_ACCEPTED_ERROR, settle_expired_accepted
 
             for row in rows:
+                marker = inbox_marker(row)
+                if marker is not None:
+                    if marker.get("phase") != "claimed":
+                        # A replacement bridge has no in-memory dedup. Expiry
+                        # is never proof that a possible SDK write did not run.
+                        continue
+                    # No write permission was issued. Clear the obsolete run
+                    # binding; a fresh claim rechecks all admission contracts.
+                    updated = conn.execute(sa_text("""
+                        UPDATE inter_bot_deliveries SET status='QUEUED',
+                            delivery_mode=NULL, target_turn_id=NULL,
+                            claim_token=NULL, claim_owner=NULL, lease_expires_at=NULL,
+                            available_at=now(), next_retry_at=now(),
+                            attempt_count=GREATEST(attempt_count - 1, 0),
+                            metadata_json=metadata_json || CAST(:merge AS jsonb),
+                            last_error='inbox claim expired before write authorization',
+                            updated_at=now() WHERE id=:id RETURNING *
+                    """), {"id": row["id"], "merge": json.dumps({INBOX: None})}).mappings().one()
+                    DeliveryTransitionEvents.stage(conn, updated, reason_code="inbox_claim_expired")
+                    recovered.append(DeliveryRecord.from_mapping(updated))
+                    continue
                 is_turn = row.get("delivery_mode") != "steer"
                 expired = False
                 accepted = row.get("transport_accepted_at") is not None

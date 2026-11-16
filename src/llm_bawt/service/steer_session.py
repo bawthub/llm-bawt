@@ -34,6 +34,15 @@ def owned_turn_sessions(engine, turns) -> dict[str, str]:
                 and row["storage_bot"] == sanitize_table_name(row["bot_id"])}
 
 
+def owned_turn_destination(conn, *, turn_id: str, bot_id: str, user_id: str) -> tuple[str, str] | None:
+    """The owned trigger/session pair, read inside the caller's admission transaction."""
+    for row in conn.execute(_OWNED, {"ids": [turn_id]}).mappings():
+        if (row["bot_id"] == bot_id and row["user_id"] == user_id
+                and row["storage_bot"] == sanitize_table_name(bot_id)):
+            return str(row["trigger_message_id"]), str(row["session_id"])
+    return None
+
+
 def voice_steer_target_ready(conn, active, *, bot_id: str, user_id: str, session_id: str | None) -> bool:
     """Conservative voice admission readout and claim fence, under the target lock.
 

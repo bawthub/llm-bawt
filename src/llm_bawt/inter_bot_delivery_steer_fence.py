@@ -154,6 +154,9 @@ class SteerLifecycleFence:
     def _matches(row: Mapping[str, Any] | None, generation: int, target_turn_id: str) -> bool:
         return bool(
             row is not None
+            # Inbox lifecycle evidence also needs the original write token and
+            # full binding. Legacy generation/turn-only events cannot settle it.
+            and not isinstance(_metadata(row).get("_inbox"), dict)
             and row.get("delivery_mode") == "steer"
             and target_turn_id
             and row.get("target_turn_id") == target_turn_id

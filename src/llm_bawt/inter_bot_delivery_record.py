@@ -206,7 +206,7 @@ class DeliveryRecord:
             "task_id": self.task_id,
             "message_kind": self.message_kind,
             "metadata": {k: v for k, v in self.metadata.items()
-                         if k != "_request_identity_producer"},
+                         if k not in {"_request_identity_producer", "_inbox"}},
             "created_at": iso(self.created_at),
             "updated_at": iso(self.updated_at),
             "available_at": iso(self.available_at),

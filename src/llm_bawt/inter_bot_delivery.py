@@ -39,6 +39,7 @@ from .inter_bot_delivery_ledger import DeliveryTransitionEvents
 from .inter_bot_delivery_record import DeliveryRecord
 from .inter_bot_delivery_steer_fence import pending_rejection, rejection_error, rejection_merge
 from .inter_bot_delivery_user import resolve_delivery_user
+from .inter_bot_inbox_claim import INBOX, InboxRunBinding, inbox_marker
 from .utils.config import Config
 from .utils.db import get_shared_engine
 from .utils.schema import SchemaBootstrapGuard
@@ -282,7 +283,10 @@ class InterBotDeliveryStore:
             # a queued delivery could appear between the reset's queue check
             # and its durable thread rotation.
             lock_target(conn, target)
-            stamped = MaintenanceBarrier(conn, target).stamp_enqueue(metadata)
+            # Inbox ownership is server execution state, never caller metadata
+            # (including on a new retry child).
+            submitted_metadata = {key: value for key, value in (metadata or {}).items() if key != INBOX}
+            stamped = MaintenanceBarrier(conn, target).stamp_enqueue(submitted_metadata)
             record, duplicate = RequestIdentityResolver(conn).admit(
                 values=values, payload=payload, metadata=json.loads(stamped),
                 producer=producer, explicit_user=user_message_id,
@@ -462,12 +466,13 @@ class InterBotDeliveryStore:
     def claim_next(
         self, target_bot_id: str, *, claim_owner: str, steer_capable: bool | frozenset[str],
         lease_seconds: int = 300,
+        inbox_run: InboxRunBinding | None = None,
     ) -> DeliveryRecord | None:
         from .inter_bot_delivery_claim import DeliveryClaim
 
         return DeliveryClaim.claim_next(
             self, target_bot_id, claim_owner=claim_owner,
-            steer_capable=steer_capable, lease_seconds=lease_seconds,
+            steer_capable=steer_capable, lease_seconds=lease_seconds, inbox_run=inbox_run,
         )
 
     def mark_transport_accepted(self, delivery_id: str, claim_token: str) -> bool:
@@ -486,6 +491,10 @@ class InterBotDeliveryStore:
                 "SELECT * FROM inter_bot_deliveries WHERE id=:id FOR UPDATE"
             ), {"id": delivery_id}).mappings().first()
             if not row or row["claim_token"] != claim_token or row["status"] not in {"STEERING", "DISPATCHING"}:
+                return False
+            if inbox_marker(row) is not None:
+                # Inbox acceptance requires the original write/run proof,
+                # not the legacy transport-only receipt.
                 return False
             if (row.get("metadata_json") or {}).get("message_route") and row["transport_accepted_at"] is None:
                 from .route_dispatch_gate import check_route_claim
@@ -543,6 +552,9 @@ class InterBotDeliveryStore:
                 FOR UPDATE
             """), values).mappings().first()
             if claim is None:
+                return None
+            if inbox_marker(claim) is not None:
+                # Dedicated inbox ack must prove acceptance AND persistence.
                 return None
             if claim["status"] == "STEERING" and pending_rejection(claim) is not None:
                 return self.requeue_claim(conn, delivery_id, claim_token, "", delay_seconds=1)
@@ -620,6 +632,15 @@ class InterBotDeliveryStore:
             WHERE id=:id AND status='STEERING' AND claim_token=:claim_token FOR UPDATE
         """), values).mappings().first()
         proof = pending_rejection(steering) if steering is not None else None
+        marker = inbox_marker(steering) if steering is not None else None
+        if marker is not None:
+            if marker.get("phase") != "claimed":
+                # WRITING may have crossed SDK admission. No generic requeue,
+                # even on timeout, Stop, teardown or a local not_written.
+                return None
+            clear_delivery_mode, reject_steer_target, refund_attempt = True, False, True
+            metadata_merge = {**dict(metadata_merge or {}), INBOX: None}
+            values["metadata_merge"] = json.dumps(metadata_merge)
         if proof is not None:
             # TASK-1300: this claim's own command is proven not to have run, so
             # whatever the caller saw, the row leaves its target at k+1 rather
@@ -754,6 +775,7 @@ class InterBotDeliveryStore:
                     lease_expires_at=NULL, claim_token=NULL, claim_owner=NULL, next_retry_at=NULL,
                     last_error=:error, updated_at=now()
                 WHERE id=:id AND status IN ('STEERING','DISPATCHING') AND claim_token=:claim_token
+                  AND jsonb_typeof(metadata_json->'_inbox') IS DISTINCT FROM 'object'
                 RETURNING *
             """), {
                 "id": delivery_id,

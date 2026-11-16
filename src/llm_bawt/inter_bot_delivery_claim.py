@@ -1,6 +1,7 @@
 """Target-locked FIFO claim and reset precondition for durable deliveries."""
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import datetime, timezone
 
@@ -10,6 +11,7 @@ from .agent_context import SessionPolicy
 from .inter_bot_delivery_ledger import DeliveryTransitionEvents
 from .inter_bot_delivery_record import DeliveryRecord
 from .inter_bot_delivery_user import resolve_delivery_user
+from .inter_bot_inbox_claim import INBOX, InboxRunBinding, claimed_metadata, eligible, inbox_marker
 from .inter_bot_steer_only import (
     NO_ACTIVE_RUN, UNSUPPORTED_BACKEND, is_steer_only, settle_not_needed,
 )
@@ -31,6 +33,7 @@ class DeliveryClaim:
         claim_owner: str,
         steer_capable: bool | frozenset[str],
         lease_seconds: int = 300,
+        inbox_run: InboxRunBinding | None = None,
     ) -> DeliveryRecord | None:
         """Atomically choose STEERING for an active steerable run or safe dispatch.
 
@@ -42,6 +45,8 @@ class DeliveryClaim:
         if store.engine is None:
             return None
         target = target_bot_id.strip().lower()
+        if inbox_run is not None and inbox_run.bot_id != target:
+            return None
         claim_token = f"claim-{uuid.uuid4().hex}"
         from .service.turn_admission import lock_target
         from .service.turn_gates import GateActor, gate_blocks, live_gate_for_owner
@@ -56,7 +61,7 @@ class DeliveryClaim:
 
             # TASK-1431: a control row steers its pinned run past a held head.
             # It reserves nothing; a head settled here comes back terminal.
-            control = ControlClaim.claim(
+            control = None if inbox_run is not None else ControlClaim.claim(
                 conn, target, claim_owner=claim_owner, lease_seconds=lease_seconds,
             )
             if control is not None:
@@ -64,10 +69,10 @@ class DeliveryClaim:
             # A user-Stop hold lets the user's own chat run ahead of the held
             # backlog; every other gate still applies to it (TASK-1327).
             head, exempt_owner = None, None
-            if live_gate_for_owner(conn, hold_owner(target), fresh=True) is not None:
+            if inbox_run is None and live_gate_for_owner(conn, hold_owner(target), fresh=True) is not None:
                 head = load_user_bypass(conn, target, store.config)
                 exempt_owner = hold_owner(target) if head else None
-            if head is None:
+            if head is None and inbox_run is None:
                 # TASK-1749: the user's Send now row passes the gates it names.
                 head = load_user_bypass(conn, target, store.config, send_now=True)
             if head is None:
@@ -81,6 +86,7 @@ class DeliveryClaim:
                     not head
                     or head["status"] != QUEUED
                     or head["available_at"] > datetime.now(timezone.utc)
+                    or inbox_marker(head) is not None
                 ):
                     return None
                 if store._explicit_stop_requested(conn, head["turn_id"]):
@@ -154,6 +160,11 @@ class DeliveryClaim:
                     backend=active.get("agent_backend"), caps=active.get("agent_steer_caps"),
                     provisional=provisional,
                 )
+                # Bridge admission is running-only, never the provisional
+                # committed reservation compatibility path above.
+                owned_inbox_run = InboxRunBinding.read(conn, target=target, active=state.executing)
+                if inbox_run is not None and owned_inbox_run != inbox_run:
+                    return None
                 can_steer = NEXT in run_caps
                 if payload.get("voice_input"):
                     from .service.steer_session import voice_steer_target_ready
@@ -207,6 +218,16 @@ class DeliveryClaim:
                     and active
                     and active["id"] == head["target_turn_id"]
                 )
+                inbox_head = bool(
+                    owned_inbox_run is not None
+                    and eligible(head, user_id=delivery_user_id, config=store.config)
+                )
+                if inbox_run is not None and not inbox_head and (prefer_steer or jumped):
+                    return None
+                if inbox_head and inbox_run is None:
+                    # The bound run opted in. Only its actual active-client
+                    # owner may claim; the app still owns idle and special rows.
+                    return None
                 if existing_steer:
                     # A steer RPC may have reached the bridge even if the app timed
                     # out before seeing its result. Always retry the SAME deterministic
@@ -311,6 +332,7 @@ class DeliveryClaim:
                         lease_expires_at=now() + (:lease * interval '1 second'),
                         claim_token=:claim_token, claim_owner=:claim_owner,
                         target_turn_id=:target_turn_id, delivery_mode=:delivery_mode,
+                        metadata_json=metadata_json || CAST(:inbox_merge AS jsonb),
                         next_retry_at=NULL, last_error=NULL, updated_at=now()
                     WHERE id=:id AND status='QUEUED'
                     RETURNING *
@@ -322,6 +344,9 @@ class DeliveryClaim:
                     "claim_owner": claim_owner,
                     "target_turn_id": target_turn_id,
                     "delivery_mode": delivery_mode,
+                    "inbox_merge": json.dumps(
+                        {INBOX: claimed_metadata(inbox_run, head)} if inbox_run else {},
+                    ),
                 }).mappings().first()
                 DeliveryTransitionEvents.stage(conn, row)
                 break

@@ -24,6 +24,10 @@ Capabilities:
     Images can ride a steer (TASK-774). Without it a steer that carries
     images is refused with ``steer_images_unsupported`` and the caller sends
     it as the next turn. Rows bound before TASK-774 lack it.
+``inbox_next``
+    The run explicitly negotiates bridge-owned durable input admission.
+    Independent of ordinary ``next``; legacy and current backend defaults do
+    not advertise it. It is reserved until the end-to-end consumer is ready.
 
 The stored form is the sorted, comma-joined names. ``NULL`` is a row bound
 before TASK-1243 recorded capabilities: only the claude-code bridge could
@@ -41,6 +45,10 @@ ESCALATE = "escalate"
 CANCEL_QUEUED = "cancel_queued"
 IMAGES = "images"
 ALL_STEER_CAPS = frozenset({NEXT, NOW, ESCALATE, CANCEL_QUEUED, IMAGES})
+# TASK-1252: explicitly negotiated, never inferred from NEXT or the legacy
+# "all steer" configuration. Do not advertise until the inbox consumer exists.
+INBOX_NEXT = "inbox_next"
+KNOWN_STEER_CAPS = ALL_STEER_CAPS | {INBOX_NEXT}
 # What a pre-TASK-1243 (NULL) claude-code row could do: never images.
 LEGACY_STEER_CAPS = frozenset({NEXT, NOW, ESCALATE, CANCEL_QUEUED})
 NO_STEER_CAPS: frozenset[str] = frozenset()
@@ -52,13 +60,13 @@ LEGACY_STEERABLE_BACKEND = "claude-code"
 
 def encode_caps(caps: Iterable[str]) -> str:
     """The stored form: known names, sorted and comma-joined ('' for none)."""
-    return ",".join(sorted(set(caps) & ALL_STEER_CAPS))
+    return ",".join(sorted(set(caps) & KNOWN_STEER_CAPS))
 
 
 def decode_caps(raw: str | None) -> frozenset[str]:
     """Known capability names in a stored value; unknown names are dropped."""
     names = (part.strip() for part in (raw or "").split(","))
-    return frozenset(name for name in names if name in ALL_STEER_CAPS)
+    return frozenset(name for name in names if name in KNOWN_STEER_CAPS)
 
 
 def run_steer_caps(
@@ -118,6 +126,7 @@ __all__ = [
     "CANCEL_QUEUED",
     "ESCALATE",
     "IMAGES",
+    "INBOX_NEXT",
     "LEGACY_STEER_CAPS",
     "LEGACY_STEERABLE_BACKEND",
     "NEXT",
