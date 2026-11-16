@@ -164,6 +164,44 @@ def test_new_address_with_one_secret_left_blank_is_refused(manager, store):
     assert store.load("object-store").secret["access_key_id"] == "fixture-access-id"
 
 
+@pytest.mark.parametrize("start, edit", [
+    # A region is part of the hostname (https://{region}.tts.speech.microsoft.com).
+    ({"region": "eastus", "key": SECRET}, {"region": "westus", "key": ""}),
+    # Clearing the endpoint sends the key to the region's server instead.
+    ({"region": "eastus", "endpoint": "https://speech.example", "key": SECRET}, {"endpoint": ""}),
+    ({"endpoint": "https://speech.example", "key": SECRET}, {"region": "westus", "endpoint": ""}),
+])
+def test_any_change_to_the_effective_address_needs_the_key_again(manager, store, start, edit):
+    manager.configure("azure-speech", start)
+    before = store.load("azure-speech")
+    with pytest.raises(IntegrationError, match="secret_reentry_required"):
+        manager.configure("azure-speech", edit)
+    after = store.load("azure-speech")
+    assert (after.meta, after.secret) == (before.meta, before.secret)
+    manager.configure("azure-speech", {**edit, "key": "fresh-key"})
+    assert store.load("azure-speech").secret == {"key": "fresh-key"}
+
+
+def test_object_store_region_change_needs_the_keys_again(manager, store):
+    manager.configure("object-store", VALID["object-store"])
+    with pytest.raises(IntegrationError, match="secret_reentry_required"):
+        manager.configure("object-store", {"region": "eu-west-1"})
+
+
+def test_unchanged_address_keeps_secrets_on_other_edits(manager, store):
+    manager.configure("azure-speech", VALID["azure-speech"])
+    manager.configure("azure-speech", {"region": "eastus", "endpoint": "", "key": ""})
+    assert store.load("azure-speech").secret == {"key": SECRET}
+
+
+@pytest.mark.parametrize("region", ["receiver.example/", "receiver.example", "east us", "-eastus", "x" * 64, "a/b"])
+def test_region_must_be_one_hostname_label(manager, store, region):
+    manager.configure("azure-speech", VALID["azure-speech"])
+    with pytest.raises(IntegrationError, match="invalid_region"):
+        manager.configure("azure-speech", {"region": region, "key": "fresh-key"})
+    assert store.load("azure-speech").meta == {"region": "eastus"}
+
+
 def test_new_secret_replaces_the_stored_one(manager, store):
     manager.configure("unraid", VALID["unraid"])
     manager.configure("unraid", {"api_key": "rotated-key"})

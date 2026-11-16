@@ -14,6 +14,8 @@ a URL doesn't mean retyping the key.
 
 from __future__ import annotations
 
+import re
+
 from dataclasses import dataclass
 from typing import Literal
 from urllib.parse import urlsplit
@@ -36,10 +38,18 @@ class CredentialField:
     kind: FieldKind
     required: bool = True
     placeholder: str = ""
+    # A text value that becomes part of the server's hostname, such as a cloud
+    # region: it must be a single DNS label and counts as part of the address.
+    host_label: bool = False
 
     @property
     def secret(self) -> bool:
         return self.kind == "secret"
+
+    @property
+    def addresses(self) -> bool:
+        """Whether this field decides which server receives the secrets."""
+        return self.kind == "url" or self.host_label
 
 
 @dataclass(frozen=True)
@@ -92,7 +102,7 @@ CREDENTIAL_INTEGRATIONS: dict[str, CredentialIntegration] = {
             description="S3-compatible bucket for uploads and media.",
             fields=(
                 CredentialField("endpoint", "Endpoint URL", "url", placeholder="https://s3.example"),
-                CredentialField("region", "Region", "text", placeholder="us-east-1"),
+                CredentialField("region", "Region", "text", placeholder="us-east-1", host_label=True),
                 CredentialField("bucket", "Bucket", "text"),
                 CredentialField("access_key_id", "Access key ID", "secret"),
                 CredentialField("secret_access_key", "Secret access key", "secret"),
@@ -105,7 +115,7 @@ CREDENTIAL_INTEGRATIONS: dict[str, CredentialIntegration] = {
             label="Azure Speech",
             description="Text-to-speech voices from Azure AI Speech.",
             fields=(
-                CredentialField("region", "Region", "text", required=False, placeholder="eastus"),
+                CredentialField("region", "Region", "text", required=False, placeholder="eastus", host_label=True),
                 CredentialField("endpoint", "Endpoint URL", "url", required=False),
                 CredentialField("key", "Key", "secret"),
             ),
@@ -175,6 +185,9 @@ def _clean(value: object) -> str:
     if len(value) > MAX_VALUE_LENGTH:
         raise IntegrationError("field_too_long")
     return value
+
+
+_HOST_LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?")
 
 
 def _valid_url(value: str) -> bool:
@@ -258,6 +271,8 @@ class CredentialIntegrations:
         for name, value in cleaned.items():
             if value and definition.field(name).kind == "url" and not _valid_url(value):
                 raise IntegrationError("invalid_url")
+            if value and definition.field(name).host_label and not _HOST_LABEL.fullmatch(value):
+                raise IntegrationError("invalid_region")
         return cleaned
 
     @staticmethod
@@ -265,14 +280,6 @@ class CredentialIntegrations:
                 previous: ConnectionRecord | None, values: dict[str, str]) -> ConnectionRecord:
         meta = dict(previous.meta) if previous else {}
         secret = dict(previous.secret) if previous else {}
-        # A new address never inherits stored secrets (TASK-2370): otherwise a
-        # blank-secret save could point the saved token at another server.
-        # Clearing an address is not a new one; it fails as a missing field.
-        readdressed = previous is not None and any(
-            definition.field(name).kind == "url" and value and value != meta.get(name, "")
-            for name, value in values.items())
-        if readdressed:
-            secret = {}
         for name, value in values.items():
             if definition.field(name).secret:
                 if value:  # blank keeps the stored secret
@@ -284,14 +291,19 @@ class CredentialIntegrations:
         known_meta = {f.name for f in definition.fields if not f.secret}
         meta = {k: v for k, v in meta.items() if k in known_meta}
         secret = {k: v for k, v in secret.items() if k in definition.secret_names}
-        missing = [f.name for f in definition.fields if f.required
-                   and not (secret if f.secret else meta).get(f.name)]
-        if missing:
-            if readdressed and any(definition.field(name).secret for name in missing):
-                raise IntegrationError("secret_reentry_required")
+        # A new address never inherits stored secrets (TASK-2370): otherwise a
+        # blank-secret save could point the saved token at another server. The
+        # address is every field that decides the server, compared after the
+        # merge, so a changed region or a cleared endpoint counts too.
+        readdressed = previous is not None and any(
+            meta.get(f.name, "") != previous.meta.get(f.name, "") for f in definition.fields if f.addresses)
+        if readdressed:  # keep only the secrets entered in this save
+            secret = {k: v for k, v in secret.items() if values.get(k)}
+        if any(f.required and not f.secret and not meta.get(f.name) for f in definition.fields) or (
+                definition.requires_one_of and not any(meta.get(n) for n in definition.requires_one_of)):
             raise IntegrationError("missing_required_field")
-        if definition.requires_one_of and not any(meta.get(n) for n in definition.requires_one_of):
-            raise IntegrationError("missing_required_field")
+        if any(f.required and f.secret and not secret.get(f.name) for f in definition.fields):
+            raise IntegrationError("secret_reentry_required" if readdressed else "missing_required_field")
         return ConnectionRecord(
             provider=integration_id, status=STATUS_CONNECTED, auth_method=AUTH_METHOD,
             meta=meta, secret=secret,
