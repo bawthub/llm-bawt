@@ -250,8 +250,10 @@ class ClaudeActiveRun:
     # end with a reply (a user correction, an ops quiesce): later results stop
     # waiting for background work (TASK-595).
     _steered_over_background: bool = False
-    # Inbox ack waits release the input lock; rollback must not undo a newer steer.
-    _background_steer_epoch: int = 0
+    # Track surviving attempts, not saved booleans: inbox receipt waits release
+    # the input lock, so overlapping failures may roll back in either order.
+    _background_steer_intents: set[object] = field(default_factory=set)
+    _background_steer_baseline: bool | None = None
     _completed: asyncio.Event = field(default_factory=asyncio.Event)
     _steer_timeout_s: float = field(default=8.0, repr=False)
     # command_uuid -> last lifecycle state for ``next`` injections.
@@ -349,7 +351,7 @@ class ClaudeActiveRun:
             else:
                 await self._steer_now(framed, images=tuple(images or ()))
         except BaseException:
-            self._steered_over_background = prior
+            self._rollback_steer_over_background(prior)
             raise
 
     async def _steer_next(
@@ -626,7 +628,7 @@ class ClaudeActiveRun:
                 )
                 return "escalated"
             except BaseException as exc:
-                self._steered_over_background = prior_override
+                self._rollback_steer_over_background(prior_override)
                 # If no replacement was accepted, do not wait indefinitely for
                 # one after consuming the aborted turn's ResultMessage.
                 if boundary_armed:
@@ -945,14 +947,23 @@ class ClaudeActiveRun:
     def _background_pending(self) -> bool:
         return self.background_tasks and bool(self._active_tasks or self._background_result is not None)
 
-    def _mark_steer_over_background(self) -> bool:
+    def _mark_steer_over_background(self) -> object:
         """Let the next result end the run if background work is pending.
-        Returns the previous value so a failed steer can restore it."""
-        self._background_steer_epoch += 1
-        prior = self._steered_over_background
+        Return this attempt's intent so failure removes only its own override."""
+        if self._background_steer_baseline is None:
+            self._background_steer_baseline = self._steered_over_background
+        intent = object()
         if self._background_pending():
+            self._background_steer_intents.add(intent)
             self._steered_over_background = True
-        return prior
+        return intent
+
+    def _rollback_steer_over_background(self, intent: object) -> None:
+        """Remove a failed attempt without resurrecting another failed attempt."""
+        self._background_steer_intents.discard(intent)
+        self._steered_over_background = bool(
+            self._background_steer_baseline or self._background_steer_intents
+        )
 
     def _check_background_deadline(self) -> None:
         """Fail the run once background work outlives the hard bound."""

@@ -6,6 +6,7 @@ interrupt ordering without real bot traffic or timing-sensitive sleeps.
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -150,6 +151,51 @@ async def test_rejection_after_started_never_proves_nonexecution():
     receipt = await accept_inbox_input(client.run, **args)
     assert receipt.outcome == "accepted" and receipt.proof is None
     assert len(client.frames) == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("now_fails_first", [True, False])
+async def test_refused_inbox_and_failed_now_restore_background_hold(now_fails_first):
+    """Independent review regression, including reverse rollback ordering."""
+    client, _, _, args = rig(states=())
+    run = client.run
+    run.background_tasks = True
+    run._active_tasks.add("still-running-child")
+    written, interrupting, release_interrupt = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    client.on_input = written.set
+
+    async def failed_interrupt():
+        interrupting.set()
+        await release_interrupt.wait()
+        raise RuntimeError("interrupt refused before write")
+
+    client.interrupt.side_effect = failed_interrupt
+    inbox = asyncio.create_task(accept_inbox_input(run, **args))
+    now = None
+    try:
+        await written.wait()
+        now = asyncio.create_task(run.steer("redirect", priority="now", origin="system"))
+        await interrupting.wait()
+        if now_fails_first:
+            release_interrupt.set()
+            with pytest.raises(RuntimeError, match="interrupt refused before write"):
+                await now
+        run.note_lifecycle(BOT, "refused")
+        assert (await inbox).outcome == "rejected"
+        if not now_fails_first:
+            # A still-pending now-steer retains its own override.
+            assert run._steered_over_background
+            release_interrupt.set()
+            with pytest.raises(RuntimeError, match="interrupt refused before write"):
+                await now
+        assert len(client.frames) == 1 and not run._started_ever
+        assert not run._steered_over_background
+        assert run._background_hold(SimpleNamespace(), None) == "hold"
+    finally:
+        inbox.cancel()
+        if now is not None:
+            now.cancel()
+        await asyncio.gather(inbox, *([now] if now is not None else []), return_exceptions=True)
 
 
 @pytest.mark.anyio

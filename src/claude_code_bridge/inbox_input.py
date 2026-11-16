@@ -39,6 +39,8 @@ class InboxInputReceipt:
 
 
 def _receipt(run: ClaudeActiveRun, command_uuid: str, *, detail: str | None = None) -> InboxInputReceipt:
+    outcome: Literal["accepted", "rejected", "uncertain"]
+    proof: str | None
     state = run._settled.get(command_uuid) or run._commands.get(command_uuid)
     if command_uuid in run._started_ever or command_uuid in run._replayed:
         outcome, proof = "accepted", None
@@ -95,12 +97,11 @@ async def accept_inbox_input(
         return bool(held and held.origin == "bot" and held.steer_rpc_id == steer_rpc_id
                     and held.item == interrupt_item)
 
-    override: tuple[int, bool] | None = None
+    override: object | None = None
 
     def finish(receipt: InboxInputReceipt) -> InboxInputReceipt:
-        if (override is not None and receipt.outcome in {"rejected", "not_written"}
-                and run._background_steer_epoch == override[0]):
-            run._steered_over_background = override[1]
+        if override is not None and receipt.outcome in {"rejected", "not_written"}:
+            run._rollback_steer_over_background(override)
         return receipt
 
     # A duplicate must never turn an old uncertainty/rejection into a fresh write.
@@ -138,8 +139,7 @@ async def accept_inbox_input(
                 run._refuse_new_command()
             except RuntimeError as exc:
                 return not_written(str(exc))
-            prior = run._mark_steer_over_background()
-            override = (run._background_steer_epoch, prior)
+            override = run._mark_steer_over_background()
             try:
                 await run._write_next_locked(
                     framed_message, interrupt_item, command_uuid,
