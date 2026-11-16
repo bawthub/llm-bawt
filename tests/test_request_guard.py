@@ -72,7 +72,8 @@ def test_server_callers_without_origin_can_write_any_body():
     assert client.post("/v1/thing").status_code == 200
 
 
-@pytest.mark.parametrize("origin", ["https://evil.example", "null", "http://api.example.test.evil", "file://"])
+@pytest.mark.parametrize("origin", ["https://evil.example", "null", "http://api.example.test.evil", "file://",
+                                    "https://["])
 def test_cross_site_browser_write_is_refused(origin):
     response = _client().post("/v1/thing", content='{"url":"http://attacker:11434"}',
                               headers={"origin": origin, "content-type": "text/plain"})
@@ -124,6 +125,8 @@ def test_report_mode_logs_once_and_refuses_nothing(caplog):
     lines = [r.getMessage() for r in caplog.records if "would refuse" in r.getMessage()]
     assert len(lines) == 2
     assert "host_not_allowed" in lines[0] and "cross_site_origin" in lines[1]
+    # A malformed Origin passes through in report mode instead of raising.
+    assert client.post("/v1/thing", headers={"origin": "https://["}).status_code == 200
 
 
 def test_off_mode_and_wildcard_host():

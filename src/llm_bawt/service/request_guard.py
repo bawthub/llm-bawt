@@ -99,7 +99,10 @@ class GuardPolicy:
         origin = origin.strip().lower().rstrip("/")
         if origin in self.origins:
             return True
-        parts = urlsplit(origin)
+        try:
+            parts = urlsplit(origin)
+        except ValueError:
+            return False  # malformed (e.g. "https://["): untrusted, never a 500
         if parts.scheme not in ("http", "https") or not parts.hostname:
             return False  # includes the opaque "null" origin
         return not self.any_host and self.host_allowed(parts.hostname)
