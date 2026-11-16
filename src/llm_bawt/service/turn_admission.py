@@ -936,6 +936,7 @@ def turn_request_extensions(request: Any) -> dict[str, Any]:
     admission = TurnAdmission.for_request(request)
     values = {
         "inter_bot_delivery_id": getattr(request, "inter_bot_delivery_id", None),
+        "inter_bot_delivery_ids": getattr(request, "_internal_inter_bot_delivery_ids", None),
         "inter_bot_turn_id": getattr(request, "inter_bot_turn_id", None),
         "inter_bot_bridge_request_id": getattr(request, "inter_bot_bridge_request_id", None),
         "inter_bot_timeout_seconds": getattr(request, "inter_bot_timeout_seconds", None),

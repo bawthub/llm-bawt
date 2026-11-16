@@ -102,6 +102,8 @@ class ChatCompletionRequest(BaseModel):
     # chat path rather than creating a second execution mechanism.
     inter_bot_delivery_id: str | None = Field(default=None, description="Durable inter-bot delivery id (server-generated and claim-validated).")
     _internal_inter_bot_sender_id: str | None = PrivateAttr(default=None)
+    # Dispatcher-stamped audit membership, never accepted from public JSON.
+    _internal_inter_bot_delivery_ids: list[str] | None = PrivateAttr(default=None)
     # Python-only authority: never accepted from public request JSON.
     _internal_approval_claim: tuple[str, str] | None = PrivateAttr(default=None)
     # Exact row returned by HTTP selected-thread admission, not a caller's id.

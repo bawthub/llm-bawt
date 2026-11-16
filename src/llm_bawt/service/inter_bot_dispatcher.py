@@ -688,13 +688,16 @@ class InterBotDeliveryDispatcher:
             name=f"inter-bot-heartbeat:{record.id}",
         )
         finalize_awaited = False
-        batch_prompt = (getattr(record, "metadata", None) or {}).get("batch_prompt")
+        batch_metadata = getattr(record, "metadata", None) or {}
+        batch_prompt = batch_metadata.get("batch_prompt")
+        batch_delivery_ids = None
         if isinstance(batch_prompt, str) and payload.get("messages"):
             # TASK-1252 S1: this head's turn carries its inbox batch; the
             # stored payload stays the head's own message for any replay.
             messages = list(payload["messages"])
             messages[-1] = {**messages[-1], "content": batch_prompt}
             payload = {**payload, "messages": messages}
+            batch_delivery_ids = [record.id, *batch_metadata.get("batch_member_ids", [])]
         try:
             payload = {
                 **payload,
@@ -702,6 +705,7 @@ class InterBotDeliveryDispatcher:
                 "stream": True,
             }
             request = ChatCompletionRequest.model_validate(payload)
+            request._internal_inter_bot_delivery_ids = batch_delivery_ids
             if not self.store.mark_transport_accepted(record.id, claim_token):
                 return
             async for _chunk in self.service.chat_completion_stream(request):
