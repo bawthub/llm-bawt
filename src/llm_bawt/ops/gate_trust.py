@@ -100,9 +100,22 @@ def _configured_environment(conn, plan, *, lock=False):
     return value
 
 
+def _provenance_key() -> bytes:
+    """Derived from the master key in the app; the reconciler, which holds no
+    master key (TASK-2386), reads the copy the app exported."""
+    from . import secret_exports
+
+    if secret_exports.read_dir() is not None:
+        exported = secret_exports.read(secret_exports.GATE_PROVENANCE_KEY)
+        if not exported:
+            raise GateTrustError("gate_provenance_key_unavailable")
+        return bytes.fromhex(exported)
+    return crypto.derive_key(_KEY_LABEL)
+
+
 def _mac(body):
     try:
-        key = crypto.derive_key(_KEY_LABEL)
+        key = _provenance_key()
     except Exception:
         raise GateTrustError("gate_provenance_key_unavailable") from None
     return hmac.new(key, canonical_json(body).encode(), hashlib.sha256).hexdigest()

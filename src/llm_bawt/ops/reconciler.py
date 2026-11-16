@@ -184,6 +184,13 @@ def main():
     from ..shared.logfmt import configure_logging
 
     configure_logging("ops")  # standard one-line format (TASK-2225)
+    from . import secret_exports
+    from ..service.providers import crypto
+
+    if secret_exports.read_dir() is not None:
+        # TASK-2386: this process reads the app's exports and holds no master
+        # key; it must never mint one of its own.
+        crypto.refuse_generation_when(lambda: True)
     # Bound a connect to an unreachable database (no RST) so the storage
     # producer keeps publishing "down" instead of going silent for ~2 minutes
     # and tripping the wedge watchdog through an outage (TASK-1991).

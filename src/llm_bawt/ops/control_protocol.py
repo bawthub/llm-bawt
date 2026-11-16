@@ -44,7 +44,17 @@ MAX_BODY_BYTES = 64 * 1024
 
 def control_token() -> str:
     """The control bearer, derived from the master key. Raises when the key is
-    unusable (absent, or only in this process), so both sides fail closed."""
+    unusable (absent, or only in this process), so both sides fail closed.
+
+    The reconciler holds no master key (TASK-2386): it reads the copy the app
+    exported, and a missing copy fails closed the same way."""
+    from . import secret_exports
+
+    if secret_exports.read_dir() is not None:
+        token = secret_exports.read(secret_exports.CONTROL_TOKEN)
+        if not token:
+            raise RuntimeError("ops control token not exported")
+        return token
     from ..service.providers import crypto
 
     return crypto.derive_key(TOKEN_LABEL).hex()

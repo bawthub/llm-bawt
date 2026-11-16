@@ -231,6 +231,9 @@ class CredentialStore:
         from ..health_changes import publish
 
         publish(f"credential write: {record.provider}")
+        from ...ops.secret_exports import credential_changed
+
+        credential_changed(record.provider)
         if record.status == STATUS_CONNECTED and not record.connected_at:
             record.connected_at = record.updated_at
         payload: dict[str, Any] = {
@@ -381,6 +384,9 @@ class CredentialStore:
             from ..health_changes import publish
 
             publish(f"credential delete: {provider}")
+            from ...ops.secret_exports import credential_changed
+
+            credential_changed(provider)
         return removed
 
 

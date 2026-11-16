@@ -317,7 +317,11 @@ class HttpGitHubWorkflowGateway(GitHubWorkflowGateway):
 
 
 def _stored_dispatch_token() -> str:
+    from . import secret_exports
+
     try:
+        if secret_exports.read_dir() is not None:  # the reconciler: the app's export (TASK-2386)
+            return secret_exports.read(secret_exports.GITHUB_RELEASE_DISPATCH) or ""
         return GitHubReleaseDispatchAdapter(Config()).api_key() or ""
     except Exception as exc:  # noqa: BLE001 - credential-store errors are surfaced safely
         raise GitHubWorkflowError(

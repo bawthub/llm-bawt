@@ -93,7 +93,11 @@ class ReleaseVerifier(ABC):
 
 
 def _stored_release_token() -> str:
+    from . import secret_exports
+
     try:
+        if secret_exports.read_dir() is not None:  # the reconciler: the app's export (TASK-2386)
+            return secret_exports.read(secret_exports.GITHUB_RELEASE) or ""
         return GitHubReleaseAdapter(Config()).api_key() or ""
     except Exception as exc:  # noqa: BLE001 - DB/key trouble must surface as "unverified"
         raise ReleaseVerificationError(f"release verification token unavailable: {type(exc).__name__}") from exc

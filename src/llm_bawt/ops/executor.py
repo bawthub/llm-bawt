@@ -352,7 +352,12 @@ def validate_spec(command_script: str) -> dict:
 
 
 def _stored_pull_auth() -> dict | None:
-    """ghcr.io pull credential from the encrypted CredentialStore (TASK-997)."""
+    """ghcr.io pull credential from the encrypted CredentialStore (TASK-997),
+    or, in the reconciler (no master key, TASK-2386), the app's export."""
+    from . import secret_exports
+
+    if secret_exports.read_dir() is not None:
+        return secret_exports.read_pull_auth()
     return GhcrPullAdapter(Config()).pull_auth()
 
 

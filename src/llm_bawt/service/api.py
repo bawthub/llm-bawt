@@ -74,6 +74,12 @@ async def lifespan(app):
 
     export_service_token()
 
+    # TASK-2386: the ops reconciler holds no master key; hand it the values it
+    # derives or decrypts. Never raises; a missing value keeps its last copy.
+    from ..ops.secret_exports import export_all as export_ops_secrets
+
+    export_ops_secrets()
+
     # TASK-1477: export the derived bridge-gate tokens for the bridges, and
     # record enforcement for a tenant bootstrap marked fresh. Before any route
     # serves, so an enforced gate has no open window.

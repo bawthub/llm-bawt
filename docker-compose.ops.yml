@@ -8,8 +8,13 @@ services:
       LLM_BAWT_OPS_RECEIPT_ROOT: /var/lib/llm-bawt-ops
       # TASK-997 release-deploy credentials are NOT env: they are the DB-stored
       # github-release / ghcr-pull provider connections (CredentialStore).
+      # TASK-2386: the reconciler holds no master key. The app writes the
+      # values it needs (control bearer, gate provenance key, the GitHub
+      # release/pull credentials) here, 0600, and re-exports after a reconnect.
+      LLM_BAWT_OPS_SECRETS_EXPORT_DIR: /run/llm-bawt-ops-secrets
     volumes:
       - ops-receipts:/var/lib/llm-bawt-ops
+      - ops-secrets:/run/llm-bawt-ops-secrets
 
   ops-reconciler:
     # Must be the verified existing CPU app image, not a guessed image tag.
@@ -56,13 +61,13 @@ services:
       # on the host because the runner's bind mounts resolve on the daemon.
       LLM_BAWT_OPS_GATE_REPOSITORY: /srv/llm-bawt-repo
       LLM_BAWT_OPS_GATE_SCRATCH: ${LLM_BAWT_OPS_GATE_SCRATCH:-}
+      # TASK-2386: read the app's exports instead of the master key.
+      LLM_BAWT_OPS_SECRETS_DIR: /run/llm-bawt-ops-secrets
     volumes:
       - ./src:/app/src:ro
       - .:/srv/llm-bawt-repo:ro
       - ${LLM_BAWT_OPS_GATE_SCRATCH:-/tmp/llm-bawt-ops-gate-disabled}:${LLM_BAWT_OPS_GATE_SCRATCH:-/tmp/llm-bawt-ops-gate-disabled}
-      # Read only the app's existing encryption key, not its full config directory.
-      # Release reconciliation must decrypt the same DB-stored provider credentials.
-      - ${HOME}/.config/llm-bawt/secret.key:/root/.config/llm-bawt/secret.key:ro
+      - ops-secrets:/run/llm-bawt-ops-secrets:ro
       - /var/run/docker.sock:/var/run/docker.sock
       - ops-receipts:/var/lib/llm-bawt-ops
     restart: unless-stopped
@@ -70,3 +75,6 @@ services:
 volumes:
   ops-receipts:
     name: ${LLM_BAWT_OPS_RECEIPT_VOLUME:?Set dedicated named volume name}
+  # TASK-2386: app read-write, reconciler read-only; nothing else mounts it.
+  ops-secrets:
+    name: llm-bawt-ops-secrets
