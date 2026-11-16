@@ -32,6 +32,10 @@ class LogConfig:
         "asyncio",
         "uvicorn",
         "uvicorn.error",
+        # TASK-2386: botocore DEBUG prints signed request headers.
+        "botocore",
+        "boto3",
+        "s3transfer",
     )
     
     # These loggers are suppressed even more aggressively (ERROR only)

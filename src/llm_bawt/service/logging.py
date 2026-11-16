@@ -257,6 +257,9 @@ def setup_service_logging(verbose: bool = False, debug: bool = False) -> None:
         "mcp.server.streamable_http",
         "watchfiles",                 # File watcher logs — writes to debug log create feedback loop
         "watchfiles.main",
+        "botocore",                   # DEBUG prints signed request headers (TASK-2386)
+        "boto3",
+        "s3transfer",
     ]
     
     # In verbose mode, suppress HTTP access logs completely (we log our own summaries)

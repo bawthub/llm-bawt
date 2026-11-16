@@ -266,6 +266,8 @@ NOISY_LIBRARIES: tuple[str, ...] = (
     "httpx", "httpcore", "urllib3", "asyncio", "openai", "anthropic", "huggingface_hub",
     "sentence_transformers", "transformers", "filelock", "multipart", "watchfiles",
     "sse_starlette", "mcp.server.lowlevel.server", "mcp.server.streamable_http_manager",
+    # TASK-2386: botocore DEBUG prints signed request headers (an access key ID).
+    "botocore", "boto3", "s3transfer",
 )
 
 

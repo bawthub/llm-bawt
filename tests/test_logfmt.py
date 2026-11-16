@@ -109,6 +109,23 @@ def test_debug_stays_out_of_stdout_but_reaches_debug_file(tmp_path):
         root.setLevel(saved[1])
 
 
+def test_aws_sdk_debug_never_reaches_the_debug_file(tmp_path):
+    """TASK-2386: botocore DEBUG prints signed request headers."""
+    root = logging.getLogger()
+    saved = (root.handlers[:], root.level)
+    path = tmp_path / "d.log"
+    try:
+        logfmt.configure_logging("mcp", stream=io.StringIO(), debug_file=str(path))
+        for name in ("botocore", "botocore.endpoint", "boto3", "s3transfer"):
+            logging.getLogger(name).debug("sdk-debug-line")
+        for h in root.handlers:
+            h.flush()
+        assert "sdk-debug-line" not in path.read_text()
+    finally:
+        root.handlers[:] = saved[0]
+        root.setLevel(saved[1])
+
+
 def test_json_mode(monkeypatch, capture):
     import json
 
