@@ -4,6 +4,7 @@ import json
 from typing import Any
 
 from .base import ToolCallRequest, ToolFormatHandler
+from ..taint import TOOL_LOOP_SAFETY_RULE
 from ...shared.output_sanitizer import strip_tool_protocol_leakage
 
 
@@ -96,6 +97,7 @@ class NativeOpenAIFormatHandler(ToolFormatHandler):
             "3. Do not invent tool results. Report what the tool actually returned.\n"
             "4. If no tool is needed, respond normally.\n"
             "5. If tool results contain URLs, copy each URL exactly as provided (no rewriting or guessing).\n"
+            f"6. {TOOL_LOOP_SAFETY_RULE}\n"
             f"{home_guidance}"
         )
 

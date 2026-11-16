@@ -116,6 +116,7 @@ def stream_with_tools(
     adapter: "ModelAdapter | None" = None,
     history_manager: "HistoryManager | None" = None,
     tool_call_details: list[dict] | None = None,
+    trigger_message_id: str | None = None,
 ) -> Iterator[str]:
     """Stream LLM response with tool calling support.
 
@@ -186,6 +187,7 @@ def stream_with_tools(
         user_id=user_id,
         bot_id=bot_id,
         history_manager=history_manager,
+        trigger_message_id=trigger_message_id,
     )
     current_messages = messages.copy()
     has_executed_tools = False  # Track if we've executed tools

@@ -22,7 +22,14 @@ from difflib import SequenceMatcher
 from datetime import datetime, timedelta
 from typing import Callable, TYPE_CHECKING
 
-from .parser import ToolCall, format_tool_result
+from .parser import ToolCall, format_tool_result, tool_result_is_error
+from .taint import (
+    EXTERNAL_CONTENT_TAG,
+    EXTERNAL_CONTENT_TOOLS,
+    confirmation_required_message,
+    label_untrusted,
+    needs_confirmation_reason,
+)
 from .definitions import normalize_legacy_tool_call
 
 if TYPE_CHECKING:
@@ -116,6 +123,7 @@ class ToolExecutor:
         user_id: str = "",  # Required - must be passed explicitly
         bot_id: str = "",
         history_manager: "HistoryManager | None" = None,
+        trigger_message_id: str | None = None,
     ):
         """Initialize the executor.
 
@@ -147,6 +155,9 @@ class ToolExecutor:
         self.bot_id = bot_id.lower().strip()  # Normalize to match ProfileManager
         self._history_manager = history_manager
         self._call_count = 0
+        # Per-turn external-content taint (see tools/taint.py).
+        self.trigger_message_id = trigger_message_id
+        self.external_content_seen = False
         # Get max tool calls from config (0 = unlimited)
         self._max_tool_calls = getattr(config, 'MAX_TOOL_CALLS_PER_TURN', self.DEFAULT_MAX_TOOL_CALLS) if config else self.DEFAULT_MAX_TOOL_CALLS
 
@@ -186,8 +197,9 @@ class ToolExecutor:
         }
 
     def reset_call_count(self):
-        """Reset the per-turn call counter."""
+        """Reset per-turn state: the call counter and external-content taint."""
         self._call_count = 0
+        self.external_content_seen = False
 
     def can_execute_more(self) -> bool:
         """Check if more tool calls are allowed this turn."""
@@ -231,8 +243,22 @@ class ToolExecutor:
 
         result: str
         try:
-            # Check if this is an HA native tool call
-            if self.ha_native_client and self.ha_native_client.is_ha_tool(normalized_call.name):
+            is_ha_native = bool(
+                self.ha_native_client and self.ha_native_client.is_ha_tool(normalized_call.name)
+            )
+            if self.external_content_seen:
+                reason = needs_confirmation_reason(
+                    normalized_call.name, normalized_call.arguments, ha_native=is_ha_native,
+                )
+                if reason:
+                    logger.warning(
+                        "Held %s after external content this turn: %s", normalized_call.name, reason,
+                    )
+                    return format_tool_result(
+                        normalized_call.name, None, error=confirmation_required_message(reason),
+                    )
+
+            if is_ha_native:
                 return self._execute_ha_native_tool(normalized_call)
 
             handler = self._handlers.get(normalized_call.name)
@@ -247,6 +273,10 @@ class ToolExecutor:
         except Exception as e:
             logger.exception(f"Tool execution failed: {normalized_call.name}")
             result = format_tool_result(normalized_call.name, None, error=str(e))
+
+        if normalized_call.name in EXTERNAL_CONTENT_TOOLS and not tool_result_is_error(result):
+            self.external_content_seen = True
+            result = label_untrusted(result)
 
         # Log the result in verbose mode
         if slog:
@@ -344,12 +374,17 @@ class ToolExecutor:
         # Ensure tags is a list
         if isinstance(tags, str):
             tags = [tags]
+        tags = list(tags)
+        # Provenance: the triggering turn, and whether it read external content.
+        if self.external_content_seen and EXTERNAL_CONTENT_TAG not in tags:
+            tags.append(EXTERNAL_CONTENT_TAG)
 
         try:
             result = self.memory_client.store_memory(
                 content=content,
                 importance=importance,
                 tags=tags,
+                source_message_ids=[self.trigger_message_id] if self.trigger_message_id else None,
             )
 
             return format_tool_result(
@@ -1081,7 +1116,7 @@ class ToolExecutor:
                 key=key,
                 value=value,
                 confidence=1.0,
-                source="self",
+                **self._trait_provenance(),
             )
 
             return format_tool_result(
@@ -1092,6 +1127,13 @@ class ToolExecutor:
         except Exception as e:
             logger.exception(f"Self set failed: {e}")
             return format_tool_result(tool_call.name, None, error="Failed to save trait. Please try again.")
+
+    def _trait_provenance(self) -> dict:
+        """Source fields for a bot-written trait: triggering turn and taint."""
+        return {
+            "source": f"self:{EXTERNAL_CONTENT_TAG}" if self.external_content_seen else "self",
+            "source_message_id": self.trigger_message_id,
+        }
 
     def _self_delete(self, tool_call: ToolCall) -> str:
         """Delete bot personality traits (evolve past old patterns)."""
@@ -1216,7 +1258,7 @@ class ToolExecutor:
                 key=key,
                 value=value,
                 confidence=1.0,
-                source="self",
+                **self._trait_provenance(),
             )
 
             return format_tool_result(

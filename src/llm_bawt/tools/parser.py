@@ -5,6 +5,8 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from .taint import escape_tool_body
+
 
 @dataclass
 class ToolCall:
@@ -70,7 +72,7 @@ def format_tool_result(tool_name: str, result: Any, error: str | None = None) ->
     if error:
         return (
             f"<tool_result name=\"{tool_name}\" status=\"error\">\n"
-            f"{error}\n"
+            f"{escape_tool_body(str(error))}\n"
             f"</tool_result>\n"
             f"[IMPORTANT: The tool failed. Report this error to the user accurately.]"
         )
@@ -80,7 +82,9 @@ def format_tool_result(tool_name: str, result: Any, error: str | None = None) ->
         result_str = json.dumps(result, indent=2, default=str)
     else:
         result_str = str(result)
-    
+    # Content must not be able to close its own envelope.
+    result_str = escape_tool_body(result_str)
+
     return (
         f"<tool_result name=\"{tool_name}\" status=\"success\">\n"
         f"{result_str}\n"

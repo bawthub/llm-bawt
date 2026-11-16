@@ -62,6 +62,7 @@ class NativeToolStream:
             config=llm_bawt.config,
             user_id=llm_bawt.user_id,
             bot_id=llm_bawt.bot_id,
+            trigger_message_id=trigger_message_id,
         )
 
         def native_stream_with_tool_loop():
