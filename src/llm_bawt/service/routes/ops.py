@@ -26,6 +26,8 @@ from .service_auth import NO_STORE, read_body, require_service_token
 
 log = logging.getLogger(__name__)
 router = APIRouter()
+# BawtHub-server only (TASK-2370): the bridges and the LAN never hold this bearer.
+_SERVICE = [Depends(require_service_token)]
 
 
 def _store():
@@ -133,7 +135,7 @@ def list_revisions(slug: str, limit: int = Query(50, ge=1, le=200), offset: int 
     return {"revisions": [row.to_api() for row in rows], "total": total, "limit": limit, "offset": offset}
 
 
-@router.post("/v1/ops/operations", tags=["Ops"], status_code=201)
+@router.post("/v1/ops/operations", tags=["Ops"], status_code=201, dependencies=_SERVICE)
 def create_operation(body: OperationUpsert):
     store = _store()
     try:
@@ -143,7 +145,7 @@ def create_operation(body: OperationUpsert):
     return row.to_api(include_script=True)
 
 
-@router.patch("/v1/ops/operations/{slug}", tags=["Ops"])
+@router.patch("/v1/ops/operations/{slug}", tags=["Ops"], dependencies=_SERVICE)
 def update_operation(slug: str, body: OperationUpsert):
     store = _store()
     try:
@@ -155,7 +157,7 @@ def update_operation(slug: str, body: OperationUpsert):
     return row.to_api(include_script=True)
 
 
-@router.post("/v1/ops/operations/{slug}/soft-delete", tags=["Ops"])
+@router.post("/v1/ops/operations/{slug}/soft-delete", tags=["Ops"], dependencies=_SERVICE)
 def soft_delete_operation(slug: str, actor: str | None = Query(None, max_length=128)):
     store = _store()
     try:
@@ -167,7 +169,7 @@ def soft_delete_operation(slug: str, actor: str | None = Query(None, max_length=
     return {"ok": True, "slug": slug}
 
 
-@router.post("/v1/ops/operations/{slug}/enable", tags=["Ops"])
+@router.post("/v1/ops/operations/{slug}/enable", tags=["Ops"], dependencies=_SERVICE)
 def enable_operation(slug: str, body: EnableRequest | None = None):
     body = body or EnableRequest()
     store = _store()
@@ -188,7 +190,7 @@ def catalog_drift():
     return report(_store())
 
 
-@router.post("/v1/ops/seed-defaults", tags=["Ops"])
+@router.post("/v1/ops/seed-defaults", tags=["Ops"], dependencies=_SERVICE)
 def seed_defaults():
     """Insert every canonical seed row that isn't already present.
 
@@ -298,7 +300,7 @@ class CancelRequest(BaseModel):
     reason: str | None = Field(default=None, max_length=500)
 
 
-@router.post("/v1/ops/jobs/{job_id}/cancel", tags=["Ops"])
+@router.post("/v1/ops/jobs/{job_id}/cancel", tags=["Ops"], dependencies=_SERVICE)
 def cancel_job(job_id: str, body: CancelRequest):
     """Cancel a quiesce job that has not dispatched (TASK-1233 (f)).
 
@@ -358,7 +360,7 @@ DISPATCH_ERROR_STATUS = {
 }
 
 
-@router.post("/v1/ops/jobs", tags=["Ops"], status_code=202)
+@router.post("/v1/ops/jobs", tags=["Ops"], status_code=202, dependencies=_SERVICE)
 def dispatch_job(body: DispatchRequest):
     """Directly dispatch a job via HTTP.
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy import text
 
@@ -25,8 +25,11 @@ from ...model_catalog import AccessPath, ProtocolCompatibility
 from ..dependencies import get_model_catalog_engine, get_service
 from ..http_errors import internal_error
 from ..providers.registry import access_path_billing_mode, access_path_connections, route_eligibility
+from .service_auth import require_service_token
 
 router = APIRouter(prefix="/v1/models/catalog", tags=["Models"])
+# BawtHub-server only (TASK-2370): the bridges and the LAN never hold this bearer.
+_SERVICE = [Depends(require_service_token)]
 
 
 class ModelWrite(BaseModel):
@@ -252,7 +255,7 @@ def list_catalog_models(access_path: str | None = None):
         return {"models": _dict_rows(conn.execute(text(sql), {"access_path": access_path}))}
 
 
-@router.put("/models/{model_key}")
+@router.put("/models/{model_key}", dependencies=_SERVICE)
 def put_catalog_model(model_key: str, request: ModelWrite):
     sql = """
         INSERT INTO models
@@ -290,7 +293,7 @@ def put_catalog_model(model_key: str, request: ModelWrite):
     return row
 
 
-@router.delete("/models/{model_key}")
+@router.delete("/models/{model_key}", dependencies=_SERVICE)
 def delete_catalog_model(model_key: str):
     try:
         with _engine().begin() as conn:
@@ -348,7 +351,7 @@ def list_access_paths(
     return {"access_paths": rows}
 
 
-@router.put("/access-paths/{access_key}")
+@router.put("/access-paths/{access_key}", dependencies=_SERVICE)
 def put_access_path(access_key: str, request: AccessPathWrite):
     sql = """
         INSERT INTO access_paths
@@ -383,7 +386,7 @@ def put_access_path(access_key: str, request: AccessPathWrite):
     return row
 
 
-@router.delete("/access-paths/{access_key}")
+@router.delete("/access-paths/{access_key}", dependencies=_SERVICE)
 def delete_access_path(access_key: str):
     try:
         with _engine().begin() as conn:
@@ -453,7 +456,7 @@ def _endpoint_row_path(row: dict[str, Any]) -> AccessPath:
     )
 
 
-@router.put("/endpoints/{model_key}/{access_key}")
+@router.put("/endpoints/{model_key}/{access_key}", dependencies=_SERVICE)
 def put_endpoint(model_key: str, access_key: str, request: EndpointWrite):
     """Upsert exactly one (model, access-path) endpoint with CAS protection."""
     with _engine().begin() as conn:
@@ -550,7 +553,7 @@ def _merge_endpoint_patch(existing: dict[str, Any], patch: EndpointPatch) -> End
         raise HTTPException(status_code=422, detail=exc.errors(include_url=False, include_context=False)) from exc
 
 
-@router.patch("/endpoints/{model_key}/{access_key}")
+@router.patch("/endpoints/{model_key}/{access_key}", dependencies=_SERVICE)
 def patch_endpoint(model_key: str, access_key: str, request: EndpointPatch):
     """Partially update one existing endpoint; unsupplied fields are kept."""
     with _engine().begin() as conn:
@@ -590,7 +593,7 @@ def patch_endpoint(model_key: str, access_key: str, request: EndpointPatch):
     return dict(row)
 
 
-@router.delete("/endpoints/{endpoint_id}")
+@router.delete("/endpoints/{endpoint_id}", dependencies=_SERVICE)
 def delete_endpoint(endpoint_id: int):
     with _engine().begin() as conn:
         bot = conn.execute(

@@ -484,10 +484,8 @@ Step types: `PLAN`, `READ_FILE`, `EDIT_FILE`, `CREATE_FILE`,
 - Compatible access paths:  `GET {origin}/v1/models/catalog/access-paths?harness=<key>`
 - Models by access path:     `GET {origin}/v1/models/catalog/models?access_path=<key>`
 - Filtered endpoints:       `GET {origin}/v1/models/catalog/endpoints?harness=<key>&access_path=<key>`
-- Model/access CRUD:        `PUT|DELETE {origin}/v1/models/catalog/models/<key>`
-                             and `.../access-paths/<key>`
-- Endpoint upsert:          `PUT {origin}/v1/models/catalog/endpoints/<model>/<access>`
-  (`endpoint_id` is an optional compare-and-set guard on updates)
+- Catalog writes (models, access paths, endpoints) need the service bearer:
+  a person makes them in BawtHub's model settings; bots read only.
 
 The alias-keyed `/v1/models/definitions/*` API is compatibility-only and
 refuses updates that would retarget an existing model to another access path.

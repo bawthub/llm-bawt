@@ -240,7 +240,9 @@ def test_manual_run_records_no_doomed_gpu_handoff_run(rig, slug):
 
 
 def test_legacy_http_cannot_assert_new_operator_authority(client, rig):
-    response = client.post("/v1/ops/jobs", json=_body())
+    # Legacy dispatch needs the bearer (TASK-2370) and still can't assert operator authority with it.
+    assert client.post("/v1/ops/jobs", json=_body()).status_code == 401
+    response = client.post("/v1/ops/jobs", headers={"Authorization": "Bearer synthetic-service-token"}, json=_body())
     assert response.status_code == 422 and rig.github.dispatches == []
 
 

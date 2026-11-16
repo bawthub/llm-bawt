@@ -31,6 +31,7 @@ from tests.test_ops_image_deploy import (
     CONFIG_HASH, JOB_ID, RENDERER, RENDERER_ID, FakeDocker, FakeVerifier, _frame, _service, _Stream,
     compose_project,
 )
+from llm_bawt.service.routes.service_auth import require_service_token
 
 SEED = next(s for s in SEEDS if s["slug"] == "llm-bawt.reconcile-app-config")
 SEED_SPEC = json.loads(SEED["command_script"])
@@ -1056,6 +1057,7 @@ def test_the_run_button_gets_a_clear_409(monkeypatch):
     monkeypatch.setattr(routes, "_store", lambda: store)
     monkeypatch.setattr(routes, "_service", lambda: service)
     app = FastAPI()
+    app.dependency_overrides[require_service_token] = lambda: None  # BawtHub's bearer (TASK-2370)
     app.include_router(routes.router)
     with TestClient(app) as client:
         response = client.post("/v1/ops/jobs", json={"operation": SEED["slug"], "actor": "operator"})

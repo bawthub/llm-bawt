@@ -25,6 +25,7 @@ from llm_bawt.ops.worker import QUIESCE_FENCE_LABEL, atomic_json, fence_expired,
 from llm_bawt.service.turn_gates import GateScope
 from tests.test_ops_executor import JOB, FakeAPI, FakeContainer, setup
 from tests.test_ops_service import _make, _op_data, _store
+from llm_bawt.service.routes.service_auth import require_service_token
 
 BRIDGE_MAP = {"claude-code-bridge": "claude-code", "codex-bridge": "codex"}
 BRIDGE_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["bridge"],
@@ -142,6 +143,7 @@ def test_patch_route_edits_quiesce_settings_as_a_revision(monkeypatch):
     store.create_operation(_op_data(executor_kind="docker"))
     monkeypatch.setattr(routes, "_store", lambda: store)
     app = FastAPI()
+    app.dependency_overrides[require_service_token] = lambda: None  # BawtHub's bearer (TASK-2370)
     app.include_router(routes.router)
     url = "/v1/ops/operations/test.restart-thing"
     scope = '{"backends": ["claude-code"]}'

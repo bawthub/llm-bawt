@@ -27,6 +27,7 @@ from llm_bawt.bot_tags import BehaviorTag
 from llm_bawt.service.routes import approval_policies as approval_routes
 from llm_bawt.service.routes import ops_approvals as routes
 from llm_bawt.service.routes import turn_logs as turn_log_routes
+from llm_bawt.service.routes.service_auth import require_service_token
 from llm_bawt.task_turn_context import TASK_TURN_CONTEXT_HEADER, TaskTurnContextError
 from tests.bot_tag_fixtures import tag
 from tests.test_approval_mcp_state import _mcp_req
@@ -86,6 +87,8 @@ def ops(grant_api, monkeypatch):  # noqa: F811
     monkeypatch.setattr(approval_routes, "ToolCallStore", Cards)
     grant_api.client.app.include_router(routes.router)
     grant_api.client.app.include_router(approval_routes.router)
+    # The person route needs BawtHub's bearer (TASK-2370); these tests are about who resolves.
+    grant_api.client.app.dependency_overrides[require_service_token] = lambda: None
     assert grant_api.as_person(HOLDER).status_code == 200
 
     def card(*, bot=REQUESTER, user=USER, tool="ops_run", snapshot=SNAPSHOT, **over):

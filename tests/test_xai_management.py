@@ -24,6 +24,7 @@ from llm_bawt.service.routes import providers as provider_routes
 from llm_bawt.service.routes import usage as usage_routes
 from llm_bawt.service.usage.adapters.xai import XaiUsageAdapter
 from llm_bawt.service.usage.balance import BalanceRow, balance_update_for_turn
+from llm_bawt.service.routes.service_auth import require_service_token
 
 KEY = "fixture-management-key-NOT-A-REAL-CREDENTIAL"
 TEAM = "fixture-team"
@@ -188,6 +189,7 @@ def test_connection_http_route_and_inference_broker_separation(offline, monkeypa
     monkeypatch.setattr(provider_routes, "get_service", lambda: SimpleNamespace(config=None))
     monkeypatch.delenv("BRIDGE_CLAUDE_TOKEN_SECRET", raising=False)
     app = FastAPI()
+    app.dependency_overrides[require_service_token] = lambda: None  # BawtHub's bearer (TASK-2370)
     app.include_router(provider_routes.router)
     client = TestClient(app)
     connected = client.post(f"/v1/providers/{CONNECTION_ID}/connect/api-key", json={"api_key": KEY})
@@ -387,6 +389,7 @@ def test_usage_http_reports_native_zero_and_refuses_manual_writes(offline, monke
     monkeypatch.setattr(usage_routes, "set_balance", lambda *_: pytest.fail("Native credit must not accept an anchor"))
     monkeypatch.setattr(usage_routes, "clear_balance", lambda *_: pytest.fail("Native credit must not clear an anchor"))
     app = FastAPI()
+    app.dependency_overrides[require_service_token] = lambda: None  # BawtHub's bearer (TASK-2370)
     app.include_router(usage_routes.router)
     client = TestClient(app)
     response = client.get("/v1/usage?provider=xai")

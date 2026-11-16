@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import re
 
-from fastapi import APIRouter, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
@@ -30,10 +30,13 @@ from ..providers.base import AUTH_API_KEY, AUTH_CLI_OAUTH, AUTH_DEVICE_OAUTH
 from ..providers.ollama import AUTH_ENDPOINT
 from ..providers.github import GitHubAdapter, GitHubConfigError, GitHubNotConnectedError, parse_repository
 from ..providers.registry import all_adapters, get_adapter
+from .service_auth import require_service_token
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+# BawtHub-server only (TASK-2370): the bridges and the LAN never hold this bearer.
+_SERVICE = [Depends(require_service_token)]
 
 
 class PollRequest(BaseModel):
@@ -245,7 +248,7 @@ async def browser_login_cancel(provider_id: str, body: BrowserLoginRequest):
 
 
 # --- API-key connect (openrouter, any future AUTH_API_KEY adapter) ----------
-@router.post("/v1/providers/{provider_id}/connect/api-key")
+@router.post("/v1/providers/{provider_id}/connect/api-key", dependencies=_SERVICE)
 async def connect_api_key(provider_id: str, request: Request, response: Response):
     """Validate and persist an API key for a key-auth provider.
 
@@ -287,7 +290,7 @@ class EndpointRequest(BaseModel):
     api_key: SecretStr | None = None
 
 
-@router.post("/v1/providers/{provider_id}/connect/endpoint")
+@router.post("/v1/providers/{provider_id}/connect/endpoint", dependencies=_SERVICE)
 async def connect_endpoint(provider_id: str, request: Request, response: Response):
     """Probe and save a self-hosted server URL (plus an optional key).
 
@@ -350,7 +353,7 @@ async def openrouter_api_key(request: Request):
     return {"access_token": key, "expires_at": None, "state": "ok"}
 
 
-@router.delete("/v1/providers/{provider_id}")
+@router.delete("/v1/providers/{provider_id}", dependencies=_SERVICE)
 async def disconnect(provider_id: str):
     adapter = _adapter_or_404(provider_id)
     result = await run_in_threadpool(adapter.disconnect)
@@ -442,7 +445,7 @@ async def chatgpt_auth_bundle(request: Request):
 
 
 # --- GitHub-specific --------------------------------------------------------
-@router.put("/v1/providers/github/app-config")
+@router.put("/v1/providers/github/app-config", dependencies=_SERVICE)
 async def github_configure_app(request: Request, response: Response):
     """Install app-side runtime configuration from the operator's vault.
 
@@ -488,7 +491,7 @@ async def github_installations():
     return {"installations": await run_in_threadpool(adapter.list_installations)}
 
 
-@router.post("/v1/providers/github/repos")
+@router.post("/v1/providers/github/repos", dependencies=_SERVICE)
 async def github_select_repos(body: SelectReposRequest):
     service = get_service()
     adapter = get_adapter(service.config, "github")

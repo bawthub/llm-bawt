@@ -21,6 +21,7 @@ from llm_bawt.integrations.nextcloud.setup_bindings import NextcloudBindings
 from llm_bawt.runtime_settings import RuntimeSetting, RuntimeSettingsStore
 from llm_bawt.service.providers import crypto
 from llm_bawt.service.routes import nextcloud_setup as routes
+from llm_bawt.service.routes.service_auth import require_service_token
 
 INSTANCE = "https://cloud.example.test"
 APP_PASSWORD = "synthetic-app-password"
@@ -367,6 +368,7 @@ def test_shared_list_uses_nextcloud_descriptor_not_google_fields(setup, monkeypa
     monkeypatch.setattr(integrations, "IntegrationConnections", lambda _: IntegrationConnections(None, store=setup.store))
     monkeypatch.setattr(integrations, "CredentialIntegrations", lambda _: CredentialIntegrations(None, store=setup.store))
     app = FastAPI()
+    app.dependency_overrides[require_service_token] = lambda: None  # BawtHub's bearer (TASK-2370)
     app.include_router(integrations.router)
     descriptors = TestClient(app).get("/v1/integrations").json()["integrations"]
     assert {item["id"] for item in descriptors} == {"google-keep", "nextcloud-talk", *CREDENTIAL_INTEGRATIONS}
@@ -383,6 +385,7 @@ def test_cookie_route_contract_and_no_google_handler_fallthrough(setup, monkeypa
     monkeypatch.setattr(routes, "manager", lambda: setup)
     from llm_bawt.service.routes import integrations
     app = FastAPI()
+    app.dependency_overrides[require_service_token] = lambda: None  # BawtHub's bearer (TASK-2370)
     app.include_router(routes.router)
     app.include_router(integrations.router)
     client = TestClient(app, base_url="https://ui.example.test")

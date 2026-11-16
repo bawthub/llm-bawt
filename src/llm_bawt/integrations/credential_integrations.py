@@ -265,6 +265,14 @@ class CredentialIntegrations:
                 previous: ConnectionRecord | None, values: dict[str, str]) -> ConnectionRecord:
         meta = dict(previous.meta) if previous else {}
         secret = dict(previous.secret) if previous else {}
+        # A new address never inherits stored secrets (TASK-2370): otherwise a
+        # blank-secret save could point the saved token at another server.
+        # Clearing an address is not a new one; it fails as a missing field.
+        readdressed = previous is not None and any(
+            definition.field(name).kind == "url" and value and value != meta.get(name, "")
+            for name, value in values.items())
+        if readdressed:
+            secret = {}
         for name, value in values.items():
             if definition.field(name).secret:
                 if value:  # blank keeps the stored secret
@@ -279,6 +287,8 @@ class CredentialIntegrations:
         missing = [f.name for f in definition.fields if f.required
                    and not (secret if f.secret else meta).get(f.name)]
         if missing:
+            if readdressed and any(definition.field(name).secret for name in missing):
+                raise IntegrationError("secret_reentry_required")
             raise IntegrationError("missing_required_field")
         if definition.requires_one_of and not any(meta.get(n) for n in definition.requires_one_of):
             raise IntegrationError("missing_required_field")

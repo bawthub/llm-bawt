@@ -19,6 +19,7 @@ from llm_bawt.ops.service import OpsDispatchError, OpsService
 from llm_bawt.ops.store import OpsStore
 from llm_bawt.ops.validation import ArgValidationError, validate_args, validate_catalog
 from tests.sqlite_support import fast_sqlite_engine
+from llm_bawt.service.routes.service_auth import require_service_token
 
 
 class FakeExecutor(Executor):
@@ -293,6 +294,7 @@ def test_http_pagination_attribution_and_conflict(system, monkeypatch):
     monkeypatch.setattr(routes, "_store", lambda: store)
     monkeypatch.setattr(routes, "_service", lambda: service)
     app = FastAPI()
+    app.dependency_overrides[require_service_token] = lambda: None  # BawtHub's bearer (TASK-2370)
     app.include_router(routes.router)
     with TestClient(app) as client:
         result = client.post("/v1/ops/jobs", json={"operation": op.slug, "actor": "operator", "caller_user_id": "fixture-user", "idempotency_key": "http"})
@@ -328,6 +330,7 @@ def test_http_live_jobs_retains_short_outcome_beyond_idle_poll(system, monkeypat
     store.mark_terminal(recent.id, state=JOB_SUCCEEDED, finished_at=now - timedelta(seconds=35))
     store.mark_terminal(expired.id, state=JOB_FAILED, finished_at=now - timedelta(seconds=75))
     app = FastAPI()
+    app.dependency_overrides[require_service_token] = lambda: None  # BawtHub's bearer (TASK-2370)
     app.include_router(routes.router)
     with TestClient(app) as client:
         response = client.get("/v1/ops/jobs/live")
@@ -555,6 +558,7 @@ def _approve_via_route(approvals, request_id, monkeypatch, decision="approve"):
     monkeypatch.setattr(routes, "_subscriber", lambda: None)
     monkeypatch.setattr(routes, "get_turn_log_store", lambda: SimpleNamespace(set_approval_status=lambda **kwargs: None))
     app = FastAPI()
+    app.dependency_overrides[require_service_token] = lambda: None  # BawtHub's bearer (TASK-2370)
     app.include_router(routes.router)
     with TestClient(app) as client:
         response = client.post(f"/v1/chat/approvals/{request_id}/resolve", json={

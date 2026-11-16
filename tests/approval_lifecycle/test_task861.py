@@ -21,6 +21,7 @@ from llm_bawt.mcp_server.approval_interceptor import ApprovalAwareFastMCP
 from llm_bawt.service import approval_continuations as continuations
 from llm_bawt.service.routes import approval_policies as routes
 from tests.test_mcp_approval_continuations import FakeTurnStore
+from llm_bawt.service.routes.service_auth import require_service_token
 
 
 @pytest.fixture
@@ -38,6 +39,7 @@ def client(store, monkeypatch):
     monkeypatch.setattr(routes, "_subscriber", lambda: None)
     monkeypatch.setattr(routes, "get_turn_log_store", lambda: SimpleNamespace(set_approval_status=lambda **kw: None))
     app = FastAPI()
+    app.dependency_overrides[require_service_token] = lambda: None  # BawtHub's bearer (TASK-2370)
     app.include_router(routes.router)
     with TestClient(app) as value:
         yield value

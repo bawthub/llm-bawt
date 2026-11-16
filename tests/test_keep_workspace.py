@@ -15,6 +15,7 @@ from llm_bawt.integrations.connections import IntegrationError, KEEP_SCOPE
 from llm_bawt.integrations.keep_workspace import TOKEN_URL, WorkspaceAuthError, validate_service_account
 from llm_bawt.service.routes import integrations as routes
 from tests.test_integration_connections import manager as integration_manager
+from llm_bawt.service.routes.service_auth import require_service_token
 
 manager = pytest.fixture(name="manager")(integration_manager.__wrapped__)  # noqa: F401 -- shared isolated encrypted store fixture
 
@@ -242,6 +243,7 @@ def test_preview_requires_verified_workspace_connection(manager, key):
 def test_workspace_routes(manager, key, monkeypatch):
     monkeypatch.setattr(routes, "manager", lambda _: manager)
     app = FastAPI()
+    app.dependency_overrides[require_service_token] = lambda: None  # BawtHub's bearer (TASK-2370)
     app.include_router(routes.router)
     client = TestClient(app)
     response = client.put("/v1/integrations/google-keep/workspace", json={

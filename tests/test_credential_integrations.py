@@ -28,6 +28,7 @@ from llm_bawt.service.connection_secrets import BAWTHUB_READABLE, FieldSpec, rea
 from llm_bawt.service.providers import crypto
 from llm_bawt.service.providers.base import STATUS_CONNECTED, ConnectionRecord
 from llm_bawt.service.routes import integrations as routes
+from llm_bawt.service.routes.service_auth import require_service_token
 
 SECRET = "fixture-secret-do-not-echo"
 VALID = {
@@ -128,10 +129,39 @@ def test_descriptor_before_save_reports_nothing_set(manager):
 
 def test_blank_secret_keeps_the_stored_one(manager, store):
     manager.configure("unraid", VALID["unraid"])
-    manager.configure("unraid", {"url": "https://unraid2.example", "api_key": "  "})
+    manager.configure("unraid", {"url": "https://unraid.example", "api_key": "  "})
     result = read_connection(None, "integration", "unraid", BAWTHUB_READABLE[("integration", "unraid")], store=store)
-    assert result.meta == {"url": "https://unraid2.example"}
+    assert result.meta == {"url": "https://unraid.example"}
     assert result.secret == {"api_key": SECRET}
+
+
+@pytest.mark.parametrize("integration_id, url_field", [
+    ("unraid", "url"), ("home-assistant", "url"), ("object-store", "endpoint")])
+def test_new_address_never_inherits_the_stored_secret(manager, store, integration_id, url_field):
+    # TASK-2370: a blank secret with a changed URL would send the stored token
+    # to the new server, so the save is refused and nothing changes.
+    manager.configure(integration_id, VALID[integration_id])
+    before = store.load(integration_id)
+    blanks = {f.name: "" for f in CREDENTIAL_INTEGRATIONS[integration_id].fields if f.secret}
+    with pytest.raises(IntegrationError, match="secret_reentry_required"):
+        manager.configure(integration_id, {url_field: "https://attacker.example", **blanks})
+    after = store.load(integration_id)
+    assert (after.meta, after.secret) == (before.meta, before.secret)
+
+
+def test_new_address_with_every_secret_reentered_saves(manager, store):
+    manager.configure("unraid", VALID["unraid"])
+    manager.configure("unraid", {"url": "https://unraid2.example", "api_key": "fresh-key"})
+    result = store.load("unraid")
+    assert result.meta == {"url": "https://unraid2.example"} and result.secret == {"api_key": "fresh-key"}
+
+
+def test_new_address_with_one_secret_left_blank_is_refused(manager, store):
+    manager.configure("object-store", VALID["object-store"])
+    with pytest.raises(IntegrationError, match="secret_reentry_required"):
+        manager.configure("object-store", {"endpoint": "https://s3b.example", "access_key_id": "id2",
+                                           "secret_access_key": ""})
+    assert store.load("object-store").secret["access_key_id"] == "fixture-access-id"
 
 
 def test_new_secret_replaces_the_stored_one(manager, store):
@@ -145,7 +175,7 @@ def test_new_secret_replaces_the_stored_one(manager, store):
 def test_reconfigure_keeps_original_connected_at(manager, store):
     manager.configure("unraid", VALID["unraid"])
     first = _raw_row(store, "unraid")["connected_at"]
-    manager.configure("unraid", {"url": "https://other.example"})
+    manager.configure("unraid", {"url": "https://other.example", "api_key": SECRET})
     assert _raw_row(store, "unraid")["connected_at"] == first
 
 
@@ -259,10 +289,10 @@ def test_blank_secret_save_racing_a_rotation_keeps_the_new_key(manager, store, m
     manager.configure("unraid", {"url": "https://unraid.example", "api_key": "K0"})
     other = CredentialIntegrations(None, store=store)
     _interleave(monkeypatch, store, lambda: other.configure("unraid", {"api_key": "K1"}))
-    manager.configure("unraid", {"url": "https://unraid2.example", "api_key": ""})
+    manager.configure("unraid", {"url": "https://unraid.example", "api_key": ""})
     result = store.load("unraid")
     assert result.secret == {"api_key": "K1"}
-    assert result.meta == {"url": "https://unraid2.example"}
+    assert result.meta == {"url": "https://unraid.example"}
 
 
 def test_first_save_racing_another_first_save_retries_onto_its_row(manager, store, monkeypatch):
@@ -281,7 +311,7 @@ def test_save_racing_a_foreign_writer_does_not_overwrite_it(manager, store, monk
     manager.configure("unraid", VALID["unraid"])
     _interleave(monkeypatch, store, lambda: _plant_foreign(store))
     with pytest.raises(IntegrationError, match="managed_elsewhere"):
-        manager.configure("unraid", {"url": "https://unraid2.example"})
+        manager.configure("unraid", {"url": "https://unraid2.example", "api_key": SECRET})
     assert store.load("unraid").auth_method == "imported"
 
 
@@ -297,7 +327,7 @@ def test_save_that_keeps_losing_the_race_reports_conflict(manager, store, monkey
     manager.configure("unraid", VALID["unraid"])
     monkeypatch.setattr(store, "replace", lambda *_args: False)
     with pytest.raises(IntegrationError, match="conflict"):
-        manager.configure("unraid", {"url": "https://unraid2.example"})
+        manager.configure("unraid", {"url": "https://unraid2.example", "api_key": SECRET})
     assert store.load("unraid").meta == {"url": "https://unraid.example"}
 
 
@@ -309,6 +339,7 @@ def client(manager, monkeypatch):
     monkeypatch.setattr(routes, "CredentialIntegrations", lambda _config: manager)
     app = FastAPI()
     app.include_router(routes.router)
+    app.dependency_overrides[require_service_token] = lambda: None
     return TestClient(app)
 
 
@@ -365,6 +396,7 @@ def test_put_and_delete_refuse_a_foreign_row(client, store):
 def test_put_credentials_unknown_integration_is_404():
     app = FastAPI()
     app.include_router(routes.router)
+    app.dependency_overrides[require_service_token] = lambda: None
     response = TestClient(app).put("/v1/integrations/google-keep/credentials", json={"values": {}})
     assert response.status_code == 404
 

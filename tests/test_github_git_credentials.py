@@ -22,6 +22,7 @@ from fastapi import FastAPI
 from llm_bawt.service.providers import crypto, github
 from llm_bawt.service.providers.base import ConnectionRecord, CredentialStore
 from llm_bawt.service.routes import providers
+from llm_bawt.service.routes.service_auth import require_service_token
 
 
 class MemoryStore:
@@ -287,6 +288,7 @@ async def client(adapter, monkeypatch):
     )
     monkeypatch.setattr(providers.bridge_gate, "_GATES", gates)
     app = FastAPI()
+    app.dependency_overrides[require_service_token] = lambda: None  # BawtHub's bearer (TASK-2370)
     app.include_router(providers.router)
     headers = {providers.bridge_gate.HEADER: gates.derived_token(providers.bridge_gate.GIT_CREDENTIAL)}
     async with httpx.AsyncClient(

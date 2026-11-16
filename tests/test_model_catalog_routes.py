@@ -12,6 +12,7 @@ from llm_bawt.service.routes.model_catalog import (
     _normalized_harness,
     list_harnesses,
 )
+from llm_bawt.service.routes.service_auth import require_service_token
 
 
 def test_model_write_requires_positive_context_window():
@@ -344,6 +345,7 @@ def test_patch_endpoint_invalid_serving_config_returns_422_over_http():
     engine = MagicMock()
     engine.begin.return_value.__enter__.return_value = conn
     app = FastAPI()
+    app.dependency_overrides[require_service_token] = lambda: None  # BawtHub's bearer (TASK-2370)
     app.include_router(mc.router)
     with patch.object(mc, "_engine", return_value=engine), patch.object(mc, "_refresh_catalog"):
         response = TestClient(app).patch(

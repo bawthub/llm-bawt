@@ -17,6 +17,7 @@ from llm_bawt.approval_policies import (
 )
 from llm_bawt.service.routes import approval_policies as routes
 from tests.test_mcp_approval_resolve import _mcp_req
+from llm_bawt.service.routes.service_auth import require_service_token
 
 OWNER = "fixture-owner"
 OTHER = "fixture-other-user"
@@ -40,6 +41,7 @@ def scope(monkeypatch):
     monkeypatch.setattr(routes, "ToolCallStore", lambda engine: SimpleNamespace(
         resolve_approval_result=lambda **kwargs: None, mark_approval_status=lambda **kwargs: None))
     app = FastAPI()
+    app.dependency_overrides[require_service_token] = lambda: None  # BawtHub's bearer (TASK-2370)
     app.include_router(routes.router)
     with TestClient(app) as client:
         yield SimpleNamespace(store=store, client=client, events=events)

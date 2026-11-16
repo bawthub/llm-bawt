@@ -1,5 +1,5 @@
 """Connection configuration for external integrations; secrets stay server-side."""
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
@@ -7,8 +7,11 @@ from pydantic import BaseModel, Field
 from llm_bawt.integrations.connections import IntegrationConnections, IntegrationError, REGISTRY
 from llm_bawt.integrations.credential_integrations import CREDENTIAL_INTEGRATIONS, CredentialIntegrations
 from ..dependencies import get_service
+from .service_auth import require_service_token
 
 router = APIRouter(prefix="/v1/integrations")
+# BawtHub-server only (TASK-2370): the bridges and the LAN never hold this bearer.
+_SERVICE = [Depends(require_service_token)]
 COOKIE = "__Secure-bawthub-integration"
 COOKIE_PATH = "/api/chat/proxy/v1/integrations"
 
@@ -41,7 +44,7 @@ async def read_keep_list(integration_id: str, note_id: str):
     return await call(manager(integration_id).read_keep_list, integration_id, f"notes/{note_id}")
 
 
-@router.put("/{integration_id}/workspace")
+@router.put("/{integration_id}/workspace", dependencies=_SERVICE)
 async def configure_workspace(integration_id: str, body: WorkspaceConfig):
     return await call(manager(integration_id).configure_workspace, integration_id,
                       body.service_account_json, body.subject)
@@ -101,7 +104,7 @@ async def credential_values(request: Request) -> dict[str, str]:
     return values
 
 
-@router.put("/{integration_id}/credentials")
+@router.put("/{integration_id}/credentials", dependencies=_SERVICE)
 async def configure_credentials(integration_id: str, request: Request):
     service = credential_manager(integration_id)
     values = await credential_values(request)
@@ -109,7 +112,7 @@ async def configure_credentials(integration_id: str, request: Request):
     return JSONResponse(result, headers={"Cache-Control": "no-store"})
 
 
-@router.put("/{integration_id}/client")
+@router.put("/{integration_id}/client", dependencies=_SERVICE)
 async def configure_client(integration_id: str, body: ClientConfig):
     return await call(manager(integration_id).configure, integration_id,
                       body.client_id.strip(), body.client_secret, body.redirect_uri.strip())
@@ -141,7 +144,7 @@ async def callback(integration_id: str, request: Request, state: str = "", code:
     return response
 
 
-@router.delete("/{integration_id}")
+@router.delete("/{integration_id}", dependencies=_SERVICE)
 async def disconnect(integration_id: str):
     if integration_id in CREDENTIAL_INTEGRATIONS:
         return {"disconnected": await call(credential_manager(integration_id).disconnect, integration_id)}

@@ -12,7 +12,7 @@ import json
 import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from mcp.types import CallToolResult
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import SQLAlchemyError
@@ -32,6 +32,7 @@ from ..approval_continuations import (
     build_continuation_prompt,
     build_respond_prompt,
 )
+from .service_auth import require_service_token
 from ..dependencies import (
     get_service,
     get_tool_approval_policy_store,
@@ -61,6 +62,8 @@ log = logging.getLogger(__name__)
 # Response/display only: never persisted as the request's result.
 OPS_ADMISSION_PENDING_MESSAGE = "Approved; waiting for the ops reconciler to start it."
 router = APIRouter()
+# Writes, the live request list and resolution are BawtHub-server only (TASK-2370).
+_SERVICE = [Depends(require_service_token)]
 
 
 def _store():
@@ -136,7 +139,8 @@ def get_bundle(etag: str | None = None):
     return bundle.to_dict()
 
 
-@router.post("/v1/tool-approval-policies", tags=["Approval Policies"], status_code=201)
+@router.post("/v1/tool-approval-policies", tags=["Approval Policies"], status_code=201,
+             dependencies=_SERVICE)
 def create_policy(body: PolicyUpsert):
     store = _store()
     try:
@@ -146,7 +150,7 @@ def create_policy(body: PolicyUpsert):
     return row.to_api()
 
 
-@router.post("/v1/tool-approval-policies/seed-defaults", tags=["Approval Policies"])
+@router.post("/v1/tool-approval-policies/seed-defaults", tags=["Approval Policies"], dependencies=_SERVICE)
 def seed_defaults():
     store = _store()
     seeded = store.seed_defaults()
@@ -229,7 +233,7 @@ def get_policy(policy_id: str):
     return row.to_api()
 
 
-@router.patch("/v1/tool-approval-policies/{policy_id}", tags=["Approval Policies"])
+@router.patch("/v1/tool-approval-policies/{policy_id}", tags=["Approval Policies"], dependencies=_SERVICE)
 def update_policy(policy_id: str, body: PolicyUpsert):
     store = _store()
     try:
@@ -241,7 +245,7 @@ def update_policy(policy_id: str, body: PolicyUpsert):
     return row.to_api()
 
 
-@router.delete("/v1/tool-approval-policies/{policy_id}", tags=["Approval Policies"])
+@router.delete("/v1/tool-approval-policies/{policy_id}", tags=["Approval Policies"], dependencies=_SERVICE)
 def delete_policy(policy_id: str):
     store = _store()
     if not store.delete(policy_id):
@@ -249,7 +253,7 @@ def delete_policy(policy_id: str):
     return {"success": True, "id": policy_id}
 
 
-@router.post("/v1/admin/reload-tool-approval-policies", tags=["Admin"])
+@router.post("/v1/admin/reload-tool-approval-policies", tags=["Admin"], dependencies=_SERVICE)
 async def reload_policies():
     """Publish cache invalidation; delivery is not a bridge installation ACK.
 
@@ -511,7 +515,7 @@ async def resolve_mcp_card(store, row, *, outcome: str, message: str, resolved_b
     return result, final
 
 
-@router.get("/v1/tool-approval-requests", tags=["Approval Policies"])
+@router.get("/v1/tool-approval-requests", tags=["Approval Policies"], dependencies=_SERVICE)
 def list_requests(status: str | None = None, bot_id: str | None = None, limit: int = 50, offset: int = 0,
                   user_id: str | None = None):
     store = _store()
@@ -529,7 +533,7 @@ def request_result(request_id: str, user_id: str | None = None):
     return _stored_mcp_resolution(row)
 
 
-@router.post("/v1/chat/approvals/{request_id}/resolve", tags=["Approval Policies"])
+@router.post("/v1/chat/approvals/{request_id}/resolve", tags=["Approval Policies"], dependencies=_SERVICE)
 async def resolve_approval(request_id: str, body: ResolveRequest):
     """Approve, deny, cancel, or respond to a pending gated tool call.
 

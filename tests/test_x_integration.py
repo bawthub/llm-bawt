@@ -15,6 +15,7 @@ from llm_bawt.service.providers.base import CredentialStore
 from llm_bawt.service.providers.registry import get_adapter
 from llm_bawt.service.providers.x import XAdapter
 from llm_bawt.service.routes import providers as routes
+from llm_bawt.service.routes.service_auth import require_service_token
 
 
 @pytest.fixture
@@ -53,6 +54,7 @@ def test_connect_route_encrypts_and_disconnect_removes_token(monkeypatch, store)
     config = SimpleNamespace()
     monkeypatch.setattr(routes, "get_service", lambda: SimpleNamespace(config=config))
     app = FastAPI()
+    app.dependency_overrides[require_service_token] = lambda: None  # BawtHub's bearer (TASK-2370)
     app.include_router(routes.router)
     client = TestClient(app)
     secret = "secret-bearer-token"

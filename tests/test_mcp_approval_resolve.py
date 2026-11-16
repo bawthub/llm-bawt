@@ -21,6 +21,7 @@ from llm_bawt.approval_policies import (
     ToolApprovalRequest,
 )
 from llm_bawt.service.routes import approval_policies as routes
+from llm_bawt.service.routes.service_auth import require_service_token
 
 
 def _store():
@@ -197,6 +198,7 @@ def test_resolve_route_reconciles_original_tool_record_and_fanout(monkeypatch):
     monkeypatch.setattr(routes, "_store", lambda: store)
 
     app = FastAPI()
+    app.dependency_overrides[require_service_token] = lambda: None  # BawtHub's bearer (TASK-2370)
     app.include_router(routes.router)
     with TestClient(app) as client:
         response = client.post(
@@ -287,6 +289,7 @@ def test_resolve_route_for_ops_run_marks_card_and_fanout_without_result(monkeypa
     monkeypatch.setattr(routes, "_subscriber", lambda: subscriber)
     monkeypatch.setattr(routes, "_store", lambda: store)
     app = FastAPI()
+    app.dependency_overrides[require_service_token] = lambda: None  # BawtHub's bearer (TASK-2370)
     app.include_router(routes.router)
     with TestClient(app) as client:
         response = client.post(f"/v1/chat/approvals/{row.id}/resolve",
