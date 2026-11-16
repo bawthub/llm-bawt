@@ -72,7 +72,11 @@ AUDIT_KEYS = (
     "abort_request", "ordinary_request_digest", "user_stop", "recovery", "manual_settle", "attempts",
     "system_prompt_pin",
 )
-ATTEMPT_KEYS = ("abort_cause", EXECUTION_EXIT_KEY)
+# Delivery membership belongs to this admitted attempt: keep it during message
+# enrichment/finalization, but use the newly claimed membership on a re-arm.
+ATTEMPT_KEYS = (
+    "abort_cause", EXECUTION_EXIT_KEY, "inter_bot_delivery_id", "inter_bot_delivery_ids",
+)
 # TASK-1234 Fix 2: how many earlier attempts ``attempts`` keeps (newest last).
 ATTEMPT_HISTORY_LIMIT = 10
 

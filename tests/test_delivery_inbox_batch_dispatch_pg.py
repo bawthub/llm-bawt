@@ -10,7 +10,7 @@ from llm_bawt.inter_bot_delivery_retry import fail_claim_with_restart_retry
 from llm_bawt.service.inter_bot_claims import turn_admission_claim, validate_inter_bot_claim
 from llm_bawt.service.inter_bot_dispatcher import InterBotDeliveryDispatcher
 from llm_bawt.service.schemas import ChatCompletionRequest
-from llm_bawt.service.turn_admission import turn_start_extensions
+from llm_bawt.service.turn_admission import turn_start_extensions, write_reservation
 from llm_bawt.service.turn_lifecycle import TurnLifecycleMixin
 from tests.test_delivery_inbox_batch_pg import _claim, _opt_in, _send
 from tests.test_delivery_inbox_batch_review_pg import _shutdown
@@ -61,20 +61,30 @@ def test_restart_child_keeps_interruption_note_at_actual_dispatch(gated, monkeyp
 
 
 @pytest.mark.parametrize("batch", [False, True], ids=["single", "batch"])
-def test_dispatch_preserves_batch_audit_ids_in_started_turn(gated, batch):  # noqa: F811
-    """Consume the real reservation through the shared start-row writer."""
+def test_dispatch_preserves_batch_audit_ids_through_completion(gated, batch):  # noqa: F811
+    """Use real start, enrichment and terminal writers, without a provider."""
     bot = gated.bot()
     _opt_in(gated, bot)
-    deliveries, head = _send(gated, bot, "head-A")
+    deliveries, head = _send(
+        gated, bot, "head-A",
+        inter_bot_delivery_ids=["forged-head", "forged-follower"],
+        _internal_inter_bot_delivery_ids=["forged-head", "forged-follower"],
+    )
     members = [_send(gated, bot, message)[1] for message in ("B", "C")] if batch else []
     claimed = _claim(deliveries, bot)
     stored_payload = deliveries.payload(head.id)
     captured = []
 
+    class AuditService(TurnLifecycleMixin):
+        pass
+
     class Captured(BaseException):
         pass
 
-    service = SimpleNamespace(_turn_log_store=gated.store, _default_bot=bot)
+    service = AuditService()
+    service._turn_log_store = gated.store
+    service._default_bot = bot
+    service.config = SimpleNamespace(DEBUG_TURN_LOG=False)
 
     async def capture(request):
         validate_inter_bot_claim(service, request)
@@ -98,6 +108,8 @@ def test_dispatch_preserves_batch_audit_ids_in_started_turn(gated, batch):  # no
     dispatcher = InterBotDeliveryDispatcher.__new__(InterBotDeliveryDispatcher)
     dispatcher.store = deliveries
     dispatcher.service = service
+    dispatcher._loop = None
+    dispatcher._wake_event = asyncio.Event()
     service.chat_completion_stream = capture
     service._inter_bot_dispatcher = dispatcher
     with pytest.raises(Captured):
@@ -112,8 +124,71 @@ def test_dispatch_preserves_batch_audit_ids_in_started_turn(gated, batch):  # no
         assert captured[0].messages[-1].content == claimed.metadata["batch_prompt"]
     else:
         assert "inter_bot_delivery_ids" not in audit
+
+    enriched = [
+        {"role": "system", "content": "prepared context"},
+        {"role": "user", "content": captured[0].messages[-1].content},
+    ]
+    service._update_turn_log(turn_id=head.turn_id, prepared_messages=enriched)
+    enriched_audit = json.loads(gated.store.get_turn(head.turn_id).request_json)
+    assert enriched_audit["messages"] == enriched
+    assert enriched_audit["inter_bot_delivery_id"] == head.id
+    assert enriched_audit.get("inter_bot_delivery_ids") == audit.get("inter_bot_delivery_ids")
+
+    # Even a later payload with forged correlation cannot overwrite membership
+    # already stamped by the trusted dispatcher for this attempt.
+    gated.store.update_turn(
+        turn_id=head.turn_id,
+        request_payload={
+            "messages": enriched, "inter_bot_delivery_id": "forged-head",
+            **({"inter_bot_delivery_ids": ["forged-head"]} if batch else {}),
+        },
+    )
+    overwritten = json.loads(gated.store.get_turn(head.turn_id).request_json)
+    assert overwritten["inter_bot_delivery_id"] == head.id
+    assert overwritten.get("inter_bot_delivery_ids") == audit.get("inter_bot_delivery_ids")
+
+    finalized = []
+    service._finalize_turn(
+        llm_bawt=SimpleNamespace(finalize_response=lambda *args, **kwargs: finalized.append(args)),
+        turn_id=head.turn_id, response_text="done", tool_context="", tool_call_details=[],
+        prepared_messages=enriched, user_prompt=captured[0].messages[-1].content,
+        model="test", bot_id=bot, user_id="nick", elapsed_ms=1,
+        stream=False, end_reason="stop",
+    )
+    row = gated.store.get_turn(head.turn_id)
+    completed_audit = json.loads(row.request_json)
+    assert finalized and row.status == "ok" and row.ended_at is not None
+    assert row.response_text == "done" and row.end_reason == "stop"
+    assert completed_audit["messages"] == enriched
+    assert completed_audit["inter_bot_delivery_id"] == head.id
+    assert completed_audit.get("inter_bot_delivery_ids") == audit.get("inter_bot_delivery_ids")
     assert deliveries.payload(head.id) == stored_payload
-    assert "inter_bot_claim_token" not in audit
+    assert "inter_bot_claim_token" not in completed_audit
+
+
+@pytest.mark.parametrize("replacement", [None, ["head", "new-member"]], ids=["single", "rebatched"])
+def test_delivery_audit_membership_is_attempt_scoped(gated, replacement):  # noqa: F811
+    bot = gated.bot()
+    turn_id = f"audit-rearm-{gated.tag}"
+    with gated.store.engine.begin() as conn:
+        assert write_reservation(
+            conn, turn_id=turn_id, bot_id=bot, user_id="nick", user_prompt="old batch",
+            request_json={"inter_bot_delivery_id": "old-head", "inter_bot_delivery_ids": ["old-head", "old-member"]},
+            trigger_message_id=None,
+        )
+    gated.store.update_turn(turn_id=turn_id, status="error", end_reason="error")
+    payload = {"messages": [], "inter_bot_delivery_id": "head"}
+    if replacement:
+        payload["inter_bot_delivery_ids"] = replacement
+    with gated.store.engine.begin() as conn:
+        assert write_reservation(
+            conn, turn_id=turn_id, bot_id=bot, user_id="nick", user_prompt="retry",
+            request_json=payload, trigger_message_id=None,
+        )
+    audit = json.loads(gated.store.get_turn(turn_id).request_json)
+    assert audit["inter_bot_delivery_id"] == "head"
+    assert audit.get("inter_bot_delivery_ids") == replacement
 
 
 def test_public_payload_cannot_supply_batch_audit_ids():
