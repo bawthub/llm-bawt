@@ -7,6 +7,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from llm_bawt.mcp_server import storage as storage_module
 from llm_bawt.mcp_server.storage import MemoryStorage
 from llm_bawt.memory.postgresql import MESSAGES_PARENT, partition_name
 from llm_bawt.service.routes import history_pages
@@ -32,6 +33,9 @@ def test_scheduled_command_and_receipt_survive_fresh_http_history_reads(pending_
     storage._backends[rig.bot] = SimpleNamespace(
         engine=rig.engine, _messages_table_name=partition_name(MESSAGES_PARENT, rig.bot),
     )
+    # The bounded page path also hydrates through the process-wide storage.
+    # Keep it on this module's private DB, not a previous module's cached engine.
+    monkeypatch.setattr(storage_module, "_storage", storage)
     client = SimpleNamespace(get_messages=lambda **kwargs: storage._get_messages_raw(rig.bot, **kwargs))
     service = SimpleNamespace(
         config=rig.config, _default_bot=rig.bot,
@@ -66,3 +70,4 @@ def test_scheduled_command_and_receipt_survive_fresh_http_history_reads(pending_
     assert confirmation["reply_to_message_id"] == state.claim.user_message_id
     assert confirmation["author"]["entity_type"] == "bot"
     assert confirmation["author"]["entity_id"] == rig.bot
+    assert confirmation["author"]["display_name"] == "Disposable idle context target"
