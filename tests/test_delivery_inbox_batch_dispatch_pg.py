@@ -92,7 +92,7 @@ def test_dispatch_preserves_batch_audit_ids_through_completion(gated, batch):  #
         TurnLifecycleMixin._persist_turn_log(
             service, turn_id=head.turn_id, request_id="batch-audit-probe",
             path="/v1/chat/completions", stream=True, model=None,
-            bot_id=bot, user_id=request.user or "nick", status="streaming",
+            bot_id=bot, user_id=request.user or "test-user", status="streaming",
             latency_ms=None, user_prompt=request.messages[-1].content,
             prepared_messages=request.messages, response_text="",
             trigger_message_id=request.user_message_id,
@@ -153,7 +153,7 @@ def test_dispatch_preserves_batch_audit_ids_through_completion(gated, batch):  #
         llm_bawt=SimpleNamespace(finalize_response=lambda *args, **kwargs: finalized.append(args)),
         turn_id=head.turn_id, response_text="done", tool_context="", tool_call_details=[],
         prepared_messages=enriched, user_prompt=captured[0].messages[-1].content,
-        model="test", bot_id=bot, user_id="nick", elapsed_ms=1,
+        model="test", bot_id=bot, user_id="test-user", elapsed_ms=1,
         stream=False, end_reason="stop",
     )
     row = gated.store.get_turn(head.turn_id)
@@ -173,7 +173,7 @@ def test_delivery_audit_membership_is_attempt_scoped(gated, replacement):  # noq
     turn_id = f"audit-rearm-{gated.tag}"
     with gated.store.engine.begin() as conn:
         assert write_reservation(
-            conn, turn_id=turn_id, bot_id=bot, user_id="nick", user_prompt="old batch",
+            conn, turn_id=turn_id, bot_id=bot, user_id="test-user", user_prompt="old batch",
             request_json={"inter_bot_delivery_id": "old-head", "inter_bot_delivery_ids": ["old-head", "old-member"]},
             trigger_message_id=None,
         )
@@ -183,7 +183,7 @@ def test_delivery_audit_membership_is_attempt_scoped(gated, replacement):  # noq
         payload["inter_bot_delivery_ids"] = replacement
     with gated.store.engine.begin() as conn:
         assert write_reservation(
-            conn, turn_id=turn_id, bot_id=bot, user_id="nick", user_prompt="retry",
+            conn, turn_id=turn_id, bot_id=bot, user_id="test-user", user_prompt="retry",
             request_json=payload, trigger_message_id=None,
         )
     audit = json.loads(gated.store.get_turn(turn_id).request_json)
