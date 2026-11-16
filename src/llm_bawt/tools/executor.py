@@ -246,17 +246,11 @@ class ToolExecutor:
             is_ha_native = bool(
                 self.ha_native_client and self.ha_native_client.is_ha_tool(normalized_call.name)
             )
-            if self.external_content_seen:
-                reason = needs_confirmation_reason(
-                    normalized_call.name, normalized_call.arguments, ha_native=is_ha_native,
-                )
-                if reason:
-                    logger.warning(
-                        "Held %s after external content this turn: %s", normalized_call.name, reason,
-                    )
-                    return format_tool_result(
-                        normalized_call.name, None, error=confirmation_required_message(reason),
-                    )
+            held = self._held_after_external_content(
+                normalized_call.name, normalized_call.arguments, ha_native=is_ha_native,
+            )
+            if held:
+                return held
 
             if is_ha_native:
                 return self._execute_ha_native_tool(normalized_call)
@@ -283,6 +277,18 @@ class ToolExecutor:
             slog.tool_result(normalized_call.name, result)
 
         return result
+
+    def _held_after_external_content(
+        self, tool_name: str, arguments: dict, *, ha_native: bool = False,
+    ) -> str | None:
+        """Error result if this is a physical-security action in a tainted turn."""
+        if not self.external_content_seen:
+            return None
+        reason = needs_confirmation_reason(tool_name, arguments, ha_native=ha_native)
+        if not reason:
+            return None
+        logger.warning("Held %s after external content this turn: %s", tool_name, reason)
+        return format_tool_result(tool_name, None, error=confirmation_required_message(reason))
 
     # =========================================================================
     # Consolidated Tool Handlers
@@ -1606,6 +1612,12 @@ class ToolExecutor:
                 if self._home_needs_resolution(text):
                     resolved = self._home_resolve_entity(entity)
                     if resolved:
+                        # Re-gate on the real target: a harmless alias can resolve to a lock/cover.
+                        held = self._held_after_external_content(
+                            "home", {"action": "set", "entity": resolved, "state": state},
+                        )
+                        if held:
+                            return held
                         attempted_resolution = True
                         text = self.home_client.set(entity=resolved, state=state, brightness=brightness)
 

@@ -133,6 +133,9 @@ class ToolLoop:
         """
         
         self.executor.reset_call_count()
+        # Provenance for bot-written memories/traits: the turn's user message.
+        last_user = next((m for m in reversed(messages) if getattr(m, "role", None) == "user"), None)
+        self.executor.trigger_message_id = getattr(last_user, "db_id", None)
         self.tool_context = []  # Reset tool context
         self.tool_call_details = []  # Reset per-call details
         current_messages = messages.copy()

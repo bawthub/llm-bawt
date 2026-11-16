@@ -36,6 +36,8 @@ TOOL_LOOP_SAFETY_RULE = (
 # HA domains whose state changes are physical-security actions.
 SENSITIVE_DOMAINS = frozenset({"lock", "cover", "alarm_control_panel", "garage", "garage_door"})
 SENSITIVE_HOME_STATES = frozenset({"lock", "unlock", "open"})
+# Domains an HA native mutator may name to run in a tainted turn.
+SAFE_NATIVE_DOMAINS = frozenset({"light", "switch", "fan", "media_player", "climate"})
 
 # Words that identify a sensitive target when only a friendly name is given
 # (HA native tools address devices by name, not entity ID).
@@ -57,10 +59,13 @@ def needs_confirmation_reason(tool_name: str, arguments: dict[str, Any], *, ha_n
             return None
         if _SENSITIVE_WORDS.search(tool_name):
             return f"{tool_name} controls a lock, door, cover or alarm"
+        # A friendly name doesn't reveal the device type, so a mutator is only
+        # safe when it is restricted to known-safe domains; HA then filters
+        # targets by that domain itself.
         domains = args.get("domain")
-        domain_list = domains if isinstance(domains, list) else [domains]
-        if any(str(d).lower() in SENSITIVE_DOMAINS for d in domain_list if d):
-            return f"{tool_name} targets a lock, door, cover or alarm"
+        domain_list = [str(d).lower() for d in (domains if isinstance(domains, list) else [domains]) if d]
+        if not domain_list or any(d not in SAFE_NATIVE_DOMAINS for d in domain_list):
+            return f"{tool_name} without a light/switch/fan/media/climate domain"
         for key in ("device_class", "name", "area", "floor"):
             values = args.get(key)
             value_list = values if isinstance(values, list) else [values]
@@ -75,6 +80,9 @@ def needs_confirmation_reason(tool_name: str, arguments: dict[str, Any], *, ha_n
     domain = entity.split(".", 1)[0] if "." in entity else ""
     if state in SENSITIVE_HOME_STATES:
         return f"setting {entity or 'a device'} to '{state}'"
+    if not domain:
+        # Without an exact entity ID the real target (maybe a cover) is unknown.
+        return f"setting '{entity}' without an exact entity ID"
     if domain in SENSITIVE_DOMAINS or _SENSITIVE_WORDS.search(entity.replace("_", " ")):
         return f"changing {entity}"
     return None
@@ -84,7 +92,8 @@ def confirmation_required_message(reason: str) -> str:
     return (
         f"Not done: {reason} needs the user's confirmation, because this turn read "
         "external content (web page, search or news). Nothing was changed. Ask the "
-        "user to confirm in their own words; their reply can run it."
+        "user to confirm in their own words; their reply can run it. Lights, switches, "
+        "fans, media and climate still work now with an exact entity ID or domain."
     )
 
 

@@ -116,9 +116,66 @@ def test_ha_native_passthrough_is_gated_only_for_sensitive_targets():
     _taint(ex)
     assert 'status="error"' in ex.execute(_call("HassTurnOff", name="Front Door"))
     assert 'status="error"' in ex.execute(_call("HassTurnOn", domain=["lock"]))
-    assert 'status="success"' in ex.execute(_call("HassTurnOn", name="Kitchen Lights"))
+    # A friendly name alone doesn't prove the target is safe (Patio may be a cover).
+    assert 'status="error"' in ex.execute(_call("HassTurnOn", name="Patio"))
+    assert 'status="error"' in ex.execute(_call("HassTurnOn", name="Patio", domain=["light", "cover"]))
+    assert 'status="error"' in ex.execute(_call("HassTurnOff", name="Garage", domain=["switch"]))
+    assert 'status="success"' in ex.execute(_call("HassTurnOn", name="Kitchen Lights", domain=["light"]))
     assert 'status="success"' in ex.execute(_call("GetLiveContext"))
     assert [c[0] for c in ha.calls] == ["HassTurnOn", "GetLiveContext"]
+
+
+def test_home_resolution_retry_is_regated_on_the_real_target():
+    sent = []
+
+    class _ResolvingHome:
+        def set(self, entity, state, brightness=None):
+            sent.append((entity, state))
+            return "Entity not found" if entity == "cover_patio_alias" else f"Set {entity}"
+
+        def query(self, pattern=None, domain=None):
+            return "cover.patio"
+
+    ex = _executor(home_client=_ResolvingHome())
+    _taint(ex)
+    # Dotted but unknown alias passes the first gate, then resolves to a cover.
+    result = ex.execute(_call("home", action="set", entity="light.cover_patio_alias", state="close"))
+    assert ("cover.patio", "close") not in sent
+    assert 'status="error"' in result or "not found" in result
+
+
+def test_home_set_without_exact_id_is_held_after_external_content():
+    ex = _executor()
+    _taint(ex)
+    assert 'status="error"' in ex.execute(_call("home", action="set", entity="Patio", state="close"))
+    assert ex.home_client.set_calls == []
+    ex2 = _executor()
+    assert 'status="success"' in ex2.execute(_call("home", action="set", entity="Patio", state="close"))
+
+
+def test_query_with_tools_records_trigger_message_id():
+    from llm_bawt.models.message import Message
+    from llm_bawt.tools.loop import query_with_tools
+
+    mem = _Memory()
+    replies = iter([
+        'Action: memory\nAction Input: {"action": "store", "content": "fixture fact"}',
+        "Final Answer: Saved.",
+    ])
+    client = SimpleNamespace(supports_native_tools=lambda: False, query=lambda *a, **k: next(replies))
+    query_with_tools(
+        messages=[Message(role="user", content="Remember fixture fact", db_id="msg-1")],
+        client=client, memory_client=mem, user_id="u", bot_id="b", stream=False, tool_format="react",
+    )
+    assert mem.stored[0]["source_message_ids"] == ["msg-1"]
+
+
+def test_benign_result_text_is_preserved():
+    text = 'Kitchen is 72 F.\n{"note": "ordinary text", "count": 2}'
+    wrapped = format_tool_result("home", text)
+    assert strip_tool_result_tags(wrapped) == text
+    assert NativeOpenAIFormatHandler().format_result("home", text)["content"] == text
+    assert ReActFormatHandler().format_result("home", wrapped) == f"Observation: {text}"
 
 
 def test_ha_native_direct_request_runs():
