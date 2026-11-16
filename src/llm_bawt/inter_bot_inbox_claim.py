@@ -83,12 +83,18 @@ def claimed_metadata(binding: InboxRunBinding, row) -> dict[str, Any]:
 
 def prepare_inbox_write(
     store, delivery_id: str, claim_token: str, binding: InboxRunBinding,
+    *, content_offset: int | None = None, freeze_offset: bool = False,
 ) -> bool:
     """True exactly once per claim, before any possible input; network awaits are outside.
 
     A retry after a lost response sees WRITING and returns False. The original
     write token and run binding stay durable for later lifecycle proof.
+    The internal API supplies a turn-scoped offset sampled before this fence;
+    freeze_offset retains even an explicitly unknown value, never a retry's
+    later position. Direct store callers may retain first-receipt anchoring.
     """
+    if content_offset is not None and (type(content_offset) is not int or content_offset < 0):
+        raise ValueError("content_offset must be a nonnegative integer")
     if store.engine is None or not claim_token:
         return False
     from .service.turn_admission import classify_target, lock_target
@@ -126,6 +132,8 @@ def prepare_inbox_write(
         if InboxRunBinding.read(conn, target=binding.bot_id, active=state.executing) != binding:
             return False
         marker = {**marker, "phase": "writing", "write_token": claim_token}
+        if freeze_offset:
+            marker["content_offset"] = content_offset
         conn.execute(text("""
             UPDATE inter_bot_deliveries SET
                 metadata_json=metadata_json || CAST(:merge AS jsonb), updated_at=now()

@@ -2,11 +2,12 @@
 import asyncio
 from dataclasses import asdict
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 
 from llm_bawt.inter_bot_inbox_claim import INBOX
 from llm_bawt.inter_bot_inbox_settlement import InboxSettlement
@@ -26,6 +27,7 @@ def http(rig, running, monkeypatch):
         store=store, announce_admitted=Mock(), announce_lifecycle=Mock(),
     )
     memory, service, subscriber = settlement.history(rig)
+    subscriber.turn_text_offset = AsyncMock(return_value=None)
     gate = Mock()
     monkeypatch.setattr(api, "_dispatcher", lambda: dispatcher)
     monkeypatch.setattr(api, "get_service", lambda: service)
@@ -46,7 +48,7 @@ def http(rig, running, monkeypatch):
     )
     with TestClient(app) as client:
         yield SimpleNamespace(client=client, store=store, binding=binding, dispatcher=dispatcher,
-                              gate=gate, framing=framing, body=body, memory=memory)
+                              gate=gate, framing=framing, body=body, memory=memory, subscriber=subscriber)
 
 
 def post(http, path, body):
@@ -161,6 +163,7 @@ def test_actual_consumer_accepts_once_then_replacement_repairs_through_http(rig,
     from tests.test_claude_inbox_input import InputClient
 
     row = claims.send(rig, http.store)
+    http.subscriber.turn_text_offset.return_value = 13
     client = InputClient()
     client.run.request_id = http.binding.request_id
     queue = SessionQueue()
@@ -178,7 +181,10 @@ def test_actual_consumer_accepts_once_then_replacement_repairs_through_http(rig,
         http.memory.fail = True
         assert await consumer.drain(rig.bot)
         assert len(client.frames) == 1 and http.store.get(row.id).status == "STEERING"
+        http.subscriber.turn_text_offset.assert_awaited_once_with(rig.bot, rig.user, rig.turn_id)
+        assert http.store.get(row.id).metadata[INBOX]["content_offset"] == 13
         # Simulate process loss: all bridge-local operation state disappears.
+        http.subscriber.turn_text_offset.return_value = 999
         claims.expire(http.store, row)
         client.run.mark_completed()
         queue.pop_active_client(http.binding.session_key)
@@ -188,5 +194,63 @@ def test_actual_consumer_accepts_once_then_replacement_repairs_through_http(rig,
         assert http.store.get(row.id).status == "DELIVERED"
         assert len(client.frames) == 1
         assert http.memory.calls[0] == http.memory.calls[1]
+        http.subscriber.turn_text_offset.assert_awaited_once()
+        with rig.engine.connect() as conn:
+            anchor = conn.execute(text("""
+                SELECT interrupt_source_message_id, interrupt_content_offset
+                FROM messages WHERE bot_id=:bot AND id=:id
+            """), {"bot": rig.bot, "id": row.user_message_id}).one()
+        assert tuple(anchor) == (rig.message_id, 13)
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("offset", [None, 0, 23])
+def test_prepare_freezes_offset_including_unknown_across_later_receipts(rig, http, offset):
+    row = claims.send(rig, http.store)
+    claimed = post(http, "/claim", http.body)["claim"]
+    operation = dict(delivery_id=row.id, claim_token=claimed["claim_token"], binding=asdict(http.binding))
+    http.subscriber.turn_text_offset.return_value = offset
+    assert post(http, "/prepare", operation)["authorized"]
+    http.subscriber.turn_text_offset.return_value = 999
+    assert not post(http, "/prepare", operation)["authorized"]
+    assert post(http, "/lifecycle", dict(
+        delivery_id=row.id, evidence=claimed["evidence"], state="queued", content_offset=999,
+    ))["recorded"]
+    assert http.store.get(row.id).metadata[INBOX]["content_offset"] == offset
+    repair = InboxSettlement(http.store).history_repair(row.id, claimed["claim_token"])
+    assert repair.content_offset == offset
+
+
+def test_prepare_revalidates_run_after_awaiting_offset(rig, http):
+    row = claims.send(rig, http.store)
+    claimed = post(http, "/claim", http.body)["claim"]
+
+    async def sample(bot, user, turn):
+        assert (bot, user, turn) == (rig.bot, rig.user, rig.turn_id)
+        with rig.engine.begin() as conn:
+            conn.execute(text("""
+                UPDATE turn_logs SET agent_request_id='successor' WHERE id=:id
+            """), {"id": rig.turn_id})
+        return 13
+
+    http.subscriber.turn_text_offset.side_effect = sample
+    assert not post(http, "/prepare", dict(
+        delivery_id=row.id, claim_token=claimed["claim_token"], binding=asdict(http.binding),
+    ))["authorized"]
+    marker = http.store.get(row.id).metadata[INBOX]
+    assert marker["phase"] == "claimed" and "content_offset" not in marker
+
+
+def test_unavailable_position_freezes_unknown_instead_of_later_receipt(rig, http):
+    row = claims.send(rig, http.store)
+    claimed = post(http, "/claim", http.body)["claim"]
+    http.subscriber.turn_text_offset.side_effect = RuntimeError("fixture subscriber unavailable")
+    assert post(http, "/prepare", dict(
+        delivery_id=row.id, claim_token=claimed["claim_token"], binding=asdict(http.binding),
+    ))["authorized"]
+    assert post(http, "/lifecycle", dict(
+        delivery_id=row.id, evidence=claimed["evidence"], state="started", content_offset=999,
+    ))["recorded"]
+    marker = http.store.get(row.id).metadata[INBOX]
+    assert "content_offset" in marker and marker["content_offset"] is None

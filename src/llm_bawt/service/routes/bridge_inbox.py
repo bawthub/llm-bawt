@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import asdict
 from typing import Literal
 
@@ -25,6 +26,7 @@ def _bridge(request: Request):
 
 
 router = APIRouter(prefix="/v1/internal/inbox", dependencies=[Depends(_bridge)])
+log = logging.getLogger(__name__)
 
 
 class InboxRequest(BaseModel):
@@ -108,9 +110,25 @@ def claim(body: RunClaim):
 
 
 @router.post("/prepare")
-def prepare(body: WriteOperation):
-    return {"authorized": prepare_inbox_write(
+async def prepare(body: WriteOperation):
+    from ...agent_backends.agent_bridge import get_agent_subscriber
+
+    # Sample only this original run's UTF-16 position, before possible input.
+    # The durable preparation revalidates the full binding after this await.
+    # An unavailable position is frozen as unknown, never sampled by repair.
+    offset = None
+    subscriber = get_agent_subscriber()
+    if subscriber is not None:
+        try:
+            offset = await subscriber.turn_text_offset(
+                body.binding.bot_id, body.binding.user_id, body.binding.turn_id,
+            )
+        except Exception:
+            log.warning("No inbox timeline position for turn=%s", body.binding.turn_id)
+    return {"authorized": await asyncio.to_thread(
+        prepare_inbox_write,
         _dispatcher().store, body.delivery_id, body.claim_token, body.binding,
+        content_offset=offset, freeze_offset=True,
     )}
 
 
