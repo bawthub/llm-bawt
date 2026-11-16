@@ -172,7 +172,10 @@ dev-run: ## [uv] Run llm from .venv (e.g. make dev-run ARGS="--status")
 # DOCKER (works identically on Linux / macOS / Windows)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-.PHONY: run up docker-dev down restart restart-app rebuild logs docker-status docker-shell docker-exec
+.PHONY: run up docker-dev down restart restart-app rebuild logs docker-status docker-shell docker-exec secret-guard
+
+secret-guard: ## Refuse secret values in .env/compose files (names only; TASK-2386)
+	@python3 -I src/llm_bawt/secret_guard.py .
 
 run: ## Stop app + bridges, rebuild dev, tail logs
 	$(DEV_COMPOSE) down --remove-orphans --timeout 5 app claude-code-bridge
