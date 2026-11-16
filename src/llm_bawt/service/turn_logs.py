@@ -700,6 +700,34 @@ class TurnLogStore:
             for row in rows
         }
 
+    def turn_response(self, turn_id: str, *, bot_id: str, user_id: str) -> dict | None:
+        """Read only the persisted response for one exactly scoped turn."""
+        if any(not isinstance(value, str) or not value.strip() for value in (turn_id, bot_id, user_id)):
+            raise ValueError("Turn ID, bot ID and user ID must be nonblank strings")
+        if self.engine is None:
+            raise RuntimeError("Turn logs DB unavailable")
+        with Session(self.engine) as session:
+            row = session.exec(
+                select(
+                    TurnLog.id, TurnLog.bot_id, TurnLog.user_id,
+                    TurnLog.response_text, TurnLog.status, TurnLog.ended_at,
+                ).where(
+                    TurnLog.id == turn_id,
+                    TurnLog.bot_id == bot_id.strip().lower(),
+                    TurnLog.user_id == user_id.strip().lower(),
+                )
+            ).first()
+        if row is None:
+            return None
+        return {
+            "id": row.id,
+            "bot_id": row.bot_id,
+            "user_id": row.user_id,
+            "response": row.response_text,
+            "status": row.status,
+            "ended_at": row.ended_at,
+        }
+
     def turn_id_for_agent_request(self, request_id: str) -> str | None:
         """The turn bound to a bridge request id (TASK-502 egress capture)."""
         if self.engine is None or not request_id:

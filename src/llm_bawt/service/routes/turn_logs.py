@@ -2,8 +2,12 @@
 
 import json
 import logging
+from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
+from fastapi.routing import APIRoute
 from pydantic import BaseModel, Field, field_validator
 from fastapi.responses import Response
 from sqlalchemy import func
@@ -694,6 +698,61 @@ def get_turn_identities(body: TurnIdentitiesRequest):
         raise HTTPException(status_code=503, detail="Turn logs DB unavailable")
     identities = store.turn_identities(body.turn_ids)
     return {"by_turn": {turn_id: identities.get(turn_id) for turn_id in body.turn_ids}}
+
+
+class TurnResponse(BaseModel):
+    id: str
+    bot_id: str
+    user_id: str
+    response: str | None
+    status: str
+    ended_at: datetime | None
+
+
+class _TurnResponseRoute(APIRoute):
+    """Keep this projection and its handled errors out of HTTP caches."""
+
+    def get_route_handler(self):
+        handler = super().get_route_handler()
+
+        async def no_store(request: Request):
+            try:
+                response = await handler(request)
+            except HTTPException as exc:
+                response = await http_exception_handler(request, exc)
+            except RequestValidationError as exc:
+                response = await request_validation_exception_handler(request, exc)
+            response.headers["Cache-Control"] = "no-store"
+            return response
+
+        return no_store
+
+
+def get_turn_response(
+    turn_id: str,
+    bot_id: str = Query(..., min_length=1, description="Owning bot ID"),
+    user_id: str = Query(..., min_length=1, description="Owning user ID"),
+):
+    """Get the raw persisted response without expanding a debug turn."""
+    if any(not value.strip() for value in (turn_id, bot_id, user_id)):
+        raise HTTPException(status_code=422, detail="Turn ID, bot ID and user ID must be nonblank")
+    store = get_turn_log_store()
+    if store.engine is None:
+        raise HTTPException(status_code=503, detail="Turn logs DB unavailable")
+    row = store.turn_response(turn_id, bot_id=bot_id, user_id=user_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Turn log not found")
+    return row
+
+
+router.add_api_route(
+    "/v1/turn-logs/{turn_id}/response",
+    get_turn_response,
+    methods=["GET"],
+    response_model=TurnResponse,
+    route_class_override=_TurnResponseRoute,
+    tags=["Debug"],
+)
 
 
 @router.get("/v1/turn-logs/{turn_id}", response_model=TurnLogDetail, tags=["Debug"])
