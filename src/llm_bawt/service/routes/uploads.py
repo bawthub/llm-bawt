@@ -46,11 +46,10 @@ Limits
   misuse.
 - Every other MIME (TASK-847) is stored verbatim as a ``file`` asset, capped
   by ``LLM_BAWT_MAX_FILE_UPLOAD_BYTES`` (default 100 MB). There is no MIME
-  allowlist any more; the LAN boundary is the trust boundary (see
-  ``reference/security-model.md``). A handful of browser-active types
-  (``text/html``, ``image/svg+xml``, …) are always served as
-  ``Content-Disposition: attachment`` so they never execute in the
-  BawtHub origin.
+  upload allowlist: arbitrary files may still be stored. Only explicit inert
+  response types are served inline; every other type downloads. Responses
+  carry nosniff and a sandbox (except PDFs, whose native viewer needs it
+  omitted), so stored active content cannot execute in the BawtHub origin.
 """
 
 from __future__ import annotations
@@ -109,18 +108,41 @@ ACCEPTED_MIME_TYPES = IMAGE_MIME_TYPES
 #: Fallback MIME when nothing better is known (images always report WebP).
 RESPONSE_MIME = "image/webp"
 
-#: MIME types that browsers will *execute* if served inline from our origin.
-#: Always forced to ``Content-Disposition: attachment``.
-FORCE_ATTACHMENT_MIMES = frozenset(
+#: Explicit inert inline types. No text/* or image/* wildcard: XML, XHTML,
+#: XSLT, SVG, JavaScript and unknown types must download (TASK-2375).
+INLINE_MIME_TYPES = frozenset(
     {
-        OCTET_STREAM,
-        "text/html",
-        "application/xhtml+xml",
-        "image/svg+xml",
-        "application/javascript",
-        "text/javascript",
+        *IMAGE_MIME_TYPES, "image/avif", "image/bmp", "image/x-icon",
+        "audio/mpeg", "audio/mp4", "audio/aac", "audio/ogg", "audio/webm",
+        "audio/wav", "audio/x-wav", "audio/flac", "audio/x-flac",
+        "video/mp4", "video/webm", "video/ogg", "video/quicktime",
+        "application/pdf", "text/plain", "text/csv", "text/markdown", "application/json",
     }
 )
+
+
+def _response_mime(raw: str | None) -> str:
+    """Normalize stored types; preserve only a simple charset parameter for text.
+
+    Never reflect arbitrary stored parameters into a browser response. PDF is
+    exactly application/pdf, to keep the sandbox exception unambiguous.
+    """
+    mime = normalize_mime(raw)
+    if not re.fullmatch(r"[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+", mime):
+        return OCTET_STREAM
+    if mime in {"text/plain", "text/csv", "text/markdown", "application/json"}:
+        charset = re.search(r';\s*charset\s*=\s*"?([a-zA-Z0-9._-]+)"?(?=\s*(?:;|$))', raw or "", re.I)
+        if charset:
+            return f"{mime}; charset={charset.group(1)}"
+    return mime
+
+
+def _safety_headers(mime: str) -> dict[str, str]:
+    # Chromium's native PDF viewer cannot render a sandboxed document.
+    headers = {"X-Content-Type-Options": "nosniff"}
+    if mime != "application/pdf":
+        headers["Content-Security-Policy"] = "sandbox"
+    return headers
 
 #: Longest filename we will store / echo in Content-Disposition.
 MAX_FILENAME_CHARS = 200
@@ -434,9 +456,8 @@ def _serve_variant(
     the DB-only ``stat`` call is enough to compute the ETag.
 
     TASK-847: every response carries ``Content-Disposition`` built from the
-    stored filename. ``download=True`` (``?download=1``) or a MIME in
-    :data:`FORCE_ATTACHMENT_MIMES` switches it from ``inline`` to
-    ``attachment``.
+    stored filename. ``download=True`` (``?download=1``) or a MIME outside
+    :data:`INLINE_MIME_TYPES` switches it from ``inline`` to ``attachment``.
     """
     store = _store()
 
@@ -449,9 +470,16 @@ def _serve_variant(
     mutable = bool(asset is not None and asset.storage_key)
     cache_control = "no-store" if mutable else CACHE_CONTROL
     if not mutable and etag and _etag_matches(if_none_match, etag):
+        mime = _response_mime(asset.mime_type if variant == "original" else RESPONSE_MIME)
+        disposition = "attachment" if download or normalize_mime(mime) not in INLINE_MIME_TYPES else "inline"
         return Response(
             status_code=304,
-            headers={"ETag": etag, "Cache-Control": CACHE_CONTROL},
+            headers={
+                "ETag": etag, "Cache-Control": CACHE_CONTROL, **_safety_headers(mime),
+                "Content-Disposition": _content_disposition(
+                    disposition, _display_filename(asset, mime, variant)
+                ),
+            },
         )
 
     try:
@@ -475,10 +503,11 @@ def _serve_variant(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    mime = mime or RESPONSE_MIME
-    disposition = "attachment" if (download or mime in FORCE_ATTACHMENT_MIMES) else "inline"
+    mime = _response_mime(mime)
+    disposition = "attachment" if download or normalize_mime(mime) not in INLINE_MIME_TYPES else "inline"
     headers = {
         "Cache-Control": cache_control,
+        **_safety_headers(mime),
         "Content-Disposition": _content_disposition(
             disposition, _display_filename(asset, mime, variant)
         ),

@@ -120,6 +120,68 @@ def _png_bytes(width: int = 640, height: int = 480, color=(200, 50, 100)) -> byt
     return buf.getvalue()
 
 
+@pytest.mark.parametrize("mime", [
+    "text/xml", "application/xml", "application/xslt+xml", "application/xhtml+xml",
+    "text/html", "text/javascript", "application/javascript", "image/svg+xml",
+    "text/x-unknown", "application/x-unknown",
+])
+def test_active_and_unknown_uploads_download_with_nosniff_and_sandbox(
+    client: TestClient, mime: str,
+) -> None:
+    payload = f"<fixture>{mime}</fixture>".encode()
+    uploaded = client.post(
+        "/v1/uploads", headers={"X-Entity-Id": "fixture-user"},
+        files={"file": ("fixture", payload, mime)},
+    )
+    assert uploaded.status_code == 200
+    url = f"/v1/uploads/{uploaded.json()['asset_id']}"
+    response = client.get(url)
+    assert response.content == payload
+    assert response.headers["content-disposition"].startswith("attachment;")
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["content-security-policy"] == "sandbox"
+    cached = client.get(url, headers={"If-None-Match": response.headers["etag"]})
+    assert cached.status_code == 304
+    assert cached.headers["content-disposition"].startswith("attachment;")
+    assert cached.headers["x-content-type-options"] == "nosniff"
+    assert cached.headers["content-security-policy"] == "sandbox"
+
+
+@pytest.mark.parametrize("mime", [
+    "text/plain", "text/csv", "text/markdown", "application/json",
+    "application/pdf", "audio/mpeg", "video/mp4",
+])
+def test_approved_inert_inline_types_keep_rendering(client: TestClient, mime: str) -> None:
+    payload = f"fixture {mime}".encode()
+    uploaded = client.post(
+        "/v1/uploads", headers={"X-Entity-Id": "fixture-user"},
+        files={"file": ("fixture", payload, mime)},
+    )
+    assert uploaded.status_code == 200
+    response = client.get(f"/v1/uploads/{uploaded.json()['asset_id']}")
+    assert response.content == payload
+    assert response.headers["content-disposition"].startswith("inline;")
+    assert response.headers["x-content-type-options"] == "nosniff"
+    if mime == "application/pdf":
+        assert response.headers["content-type"] == mime
+        assert "content-security-policy" not in response.headers
+    else:
+        assert response.headers["content-security-policy"] == "sandbox"
+
+
+@pytest.mark.parametrize(("raw", "expected"), [
+    ("Text/Plain; charset=iso-8859-1; unexpected=private", "text/plain; charset=iso-8859-1"),
+    ('APPLICATION/JSON; charset="utf-8"; anything=x', "application/json; charset=utf-8"),
+    ("application/pdf; unexpected=text/html", "application/pdf"),
+    ("text/xml; charset=utf-8", "text/xml"),
+    ("", "application/octet-stream"),
+    (None, "application/octet-stream"),
+    ("not-a-mime", "application/octet-stream"),
+])
+def test_response_mime_normalizes_stored_types_and_only_preserves_text_charset(raw, expected) -> None:
+    assert uploads_routes._response_mime(raw) == expected
+
+
 def _png_data_url(width: int = 640, height: int = 480) -> str:
     raw = _png_bytes(width, height)
     return "data:image/png;base64," + base64.b64encode(raw).decode("ascii")
