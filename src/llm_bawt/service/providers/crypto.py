@@ -48,6 +48,32 @@ class EphemeralKeyError(RuntimeError):
     """The master key exists only in this process: it was generated and not saved."""
 
 
+class MissingRootKeyError(RuntimeError):
+    """No master key is available and generating one would orphan existing records."""
+
+
+# TASK-2386: a process that holds encrypted records registers a check here
+# (the app does at startup). When it returns True, or can't tell, a missing key
+# is an error instead of a freshly generated root: a new root would silently
+# orphan every stored credential and change every derived token.
+_generation_guard = None
+
+
+def refuse_generation_when(check) -> None:
+    """Register ``check() -> bool``: True means records exist, never generate."""
+    global _generation_guard
+    _generation_guard = check
+
+
+def _generation_refused() -> bool:
+    if _generation_guard is None:
+        return False
+    try:
+        return bool(_generation_guard())
+    except Exception:  # noqa: BLE001 - can't tell: fail closed
+        return True
+
+
 def _load_or_create_key(*, require_persisted: bool = False) -> bytes:
     """Resolve the Fernet key from env, else a persisted file, else generate.
 
@@ -61,12 +87,22 @@ def _load_or_create_key(*, require_persisted: bool = False) -> bytes:
 
     env = os.getenv(_ENV_KEY)
     if env:
-        return env.strip().encode()
+        key = env.strip().encode()
+        try:
+            Fernet(key)
+        except (ValueError, TypeError):
+            # Never fall back to the file or a new key: the operator set one.
+            raise ValueError(f"{_ENV_KEY} is set but is not a valid Fernet key") from None
+        return key
 
     path = _key_file()
     if path.exists():
         return path.read_text().strip().encode()
 
+    if _generation_refused():
+        raise MissingRootKeyError(
+            f"no master key ({_ENV_KEY} unset, no key file) and encrypted records exist; "
+            "refusing to generate a new one")
     key = Fernet.generate_key()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
