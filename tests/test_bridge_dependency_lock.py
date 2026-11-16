@@ -32,15 +32,11 @@ KNOWN_DRIFT = {
     "annotated-doc": ("0.0.5", "0.0.4"),  # transitive: fastapi
     "annotated-types": ("0.8.0", "0.7.0"),  # transitive: pydantic
     "attrs": ("26.1.0", "25.4.0"),  # transitive: jsonschema/referencing (mcp)
-    "certifi": ("2026.7.22", "2026.2.25"),  # transitive: httpx/httpcore TLS roots
     "fastapi": ("0.141.1", "0.135.1"),  # DIRECT: imported by bridge code
     "packaging": ("26.3", "26.0"),  # transitive: openai-codex; not loaded by bridge code
-    "pillow": ("12.3.0", "12.1.1"),  # llm-bawt requirement; not loaded by bridge code
     "psycopg2-binary": ("2.9.13", "2.9.11"),  # llm-bawt requirement; not loaded by bridge code
     "pydantic": ("2.13.5", "2.12.5"),  # transitive: fastapi/mcp/openai
     "pydantic-core": ("2.46.5", "2.41.5"),  # transitive: pydantic
-    "pyjwt": ("2.15.0", "2.11.0"),  # transitive: mcp; not loaded by bridge code
-    "python-multipart": ("0.0.32", "0.0.22"),  # transitive: mcp
     "rpds-py": ("2026.6.3", "0.30.0"),  # transitive: jsonschema/referencing (mcp)
     "sse-starlette": ("3.4.11", "3.3.2"),  # transitive: mcp
     "typing-inspection": ("0.4.4", "0.4.2"),  # transitive: pydantic/fastapi/mcp
