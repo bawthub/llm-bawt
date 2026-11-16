@@ -107,6 +107,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_delivery_inbox_batch_review_pg.py::",
     "test_delivery_inbox_claim_pg.py::",
     "test_delivery_inbox_settlement_pg.py::",
+    "test_bridge_inbox_api_pg.py::",
     "test_delivery_audit_pg.py::",
     "test_ops_quiesce_pg.py::",
     "test_ops_gate_receipt_pg.py::",

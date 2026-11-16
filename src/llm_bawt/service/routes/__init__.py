@@ -45,6 +45,7 @@ from .turn_logs import router as turn_logs_router
 from .recall_evidence import router as recall_evidence_router
 from .workspace_provenance import router as workspace_provenance_router
 from .inter_bot_deliveries import router as inter_bot_deliveries_router
+from .bridge_inbox import router as bridge_inbox_router
 from .queue_hold import router as queue_hold_router
 from .agent_context import router as agent_context_router
 from .usage import router as usage_router
@@ -75,6 +76,7 @@ all_routers = [
     recall_evidence_router,
     workspace_provenance_router,
     inter_bot_deliveries_router,
+    bridge_inbox_router,
     queue_hold_router,
     agent_context_router,
     usage_router,
