@@ -64,6 +64,20 @@ def test_reconciler_reads_what_the_app_derives(app_key, tmp_path, monkeypatch):
     assert not (tmp_path / "home" / ".config" / "llm-bawt" / "secret.key").exists()
 
 
+def test_real_sources_read_the_stored_credentials(app_key, tmp_path, monkeypatch):
+    """The default sources, not injected lambdas: imports, Config and adapters resolve."""
+    from llm_bawt.service.providers import github_deploy
+
+    monkeypatch.setattr(github_deploy.GhcrPullAdapter, "pull_auth", lambda self: dict(PULL))
+    monkeypatch.setattr(github_deploy.GitHubReleaseAdapter, "api_key", lambda self: "r" * 11)
+    monkeypatch.setattr(github_deploy.GitHubReleaseDispatchAdapter, "api_key", lambda self: "d" * 12)
+    out = tmp_path / "ops-secrets"
+    assert export_all(out) == dict.fromkeys(FILES, "written")
+    monkeypatch.setenv(secret_exports.READ_DIR_ENV, str(out))
+    assert read_pull_auth() == PULL
+    assert read(GITHUB_RELEASE) == "r" * 11 and read(GITHUB_RELEASE_DISPATCH) == "d" * 12
+
+
 def test_missing_exports_fail_closed(tmp_path, monkeypatch):
     monkeypatch.setenv(secret_exports.READ_DIR_ENV, str(tmp_path))
     with pytest.raises(RuntimeError, match="not exported"):

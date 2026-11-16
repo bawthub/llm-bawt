@@ -96,7 +96,7 @@ def _derived(label: str) -> str:
 
 
 def _credential(adapter_cls):
-    from ..config import Config
+    from ..utils.config import Config
 
     try:
         return adapter_cls(Config()).api_key()
@@ -105,7 +105,7 @@ def _credential(adapter_cls):
 
 
 def _pull_auth():
-    from ..config import Config
+    from ..utils.config import Config
     from ..service.providers.github_deploy import GhcrPullAdapter
 
     try:
@@ -155,7 +155,8 @@ def export_all(directory: Path | None = None, sources=None) -> dict[str, str]:
             except Unreadable:
                 results[name] = "kept"
                 continue
-            except Exception:  # noqa: BLE001 - e.g. no master key: keep the last good copy
+            except Exception as exc:  # noqa: BLE001 - e.g. no master key: keep the last good copy
+                log.warning("ops secret export %s source failed (%s)", name, type(exc).__name__)
                 results[name] = "kept"
                 continue
             try:
