@@ -4,7 +4,7 @@ import json
 import logging
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from fastapi.responses import Response
 from sqlalchemy import func
 from sqlmodel import Session, select
@@ -24,7 +24,7 @@ from ..tool_call_events import extract_trigger_message, message_id_matches, pars
 from ..llm_response_store import LlmResponseStore, serialize_responses
 from ..worker_lifecycle_store import WorkerLifecycleStore
 from ..tool_call_store import ToolCallRecord, ToolCallStore
-from ..turn_logs import TurnLogStore
+from ..turn_logs import MAX_TURN_IDENTITY_BATCH, MAX_TURN_IDENTITY_ID_LENGTH, TurnLogStore
 
 log = logging.getLogger(__name__)
 
@@ -659,6 +659,41 @@ def record_turn_egress(capture: EgressCaptureIn):
         turn_id=turn_id, capture=capture.model_dump(),
     )
     return {"turn_id": turn_id, "created": created}
+
+
+class TurnIdentitiesRequest(BaseModel):
+    turn_ids: list[str] = Field(max_length=MAX_TURN_IDENTITY_BATCH)
+
+    @field_validator("turn_ids")
+    @classmethod
+    def bounded_nonblank_ids(cls, value: list[str]) -> list[str]:
+        if any(not turn_id.strip() or len(turn_id) > MAX_TURN_IDENTITY_ID_LENGTH for turn_id in value):
+            raise ValueError("Turn IDs must be nonblank bounded strings")
+        return value
+
+
+class TurnIdentity(BaseModel):
+    id: str
+    bot_id: str | None
+    user_id: str | None
+
+
+class TurnIdentitiesResponse(BaseModel):
+    by_turn: dict[str, TurnIdentity | None]
+
+
+@router.post(
+    "/v1/turn-logs/identities",
+    response_model=TurnIdentitiesResponse,
+    tags=["Debug"],
+)
+def get_turn_identities(body: TurnIdentitiesRequest):
+    """Batch exact turn ownership only; absent or legacy owners stay explicit."""
+    store = get_turn_log_store()
+    if store.engine is None:
+        raise HTTPException(status_code=503, detail="Turn logs DB unavailable")
+    identities = store.turn_identities(body.turn_ids)
+    return {"by_turn": {turn_id: identities.get(turn_id) for turn_id in body.turn_ids}}
 
 
 @router.get("/v1/turn-logs/{turn_id}", response_model=TurnLogDetail, tags=["Debug"])

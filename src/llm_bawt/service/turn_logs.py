@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections.abc import Sequence
 from contextlib import nullcontext
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
@@ -43,6 +44,9 @@ from .turn_gates import GateActor, ensure_gate_schema, gate_blocks, pin_member_r
 from .turn_termination import reconcile_finished_tool_safely
 
 logger = logging.getLogger(__name__)
+
+MAX_TURN_IDENTITY_BATCH = 500
+MAX_TURN_IDENTITY_ID_LENGTH = 1024
 
 if TYPE_CHECKING:
     from .turn_terminal_protocol import FollowerLease
@@ -669,6 +673,32 @@ class TurnLogStore:
         self._cleanup_expired_if_due()
         with Session(self.engine) as session:
             return session.exec(select(TurnLog).where(TurnLog.id == turn_id)).first()
+
+    def turn_identities(self, turn_ids: Sequence[str]) -> dict[str, dict[str, str | None]]:
+        """Resolve exact ownership without loading debug payloads or related rows."""
+        if len(turn_ids) > MAX_TURN_IDENTITY_BATCH:
+            raise ValueError(f"At most {MAX_TURN_IDENTITY_BATCH} turn IDs are supported")
+        if any(
+            not isinstance(turn_id, str)
+            or not turn_id.strip()
+            or len(turn_id) > MAX_TURN_IDENTITY_ID_LENGTH
+            for turn_id in turn_ids
+        ):
+            raise ValueError("Turn IDs must be nonblank bounded strings")
+        ids = list(dict.fromkeys(turn_ids))
+        if not ids:
+            return {}
+        if self.engine is None:
+            raise RuntimeError("Turn logs DB unavailable")
+        with Session(self.engine) as session:
+            rows = session.exec(
+                select(TurnLog.id, TurnLog.bot_id, TurnLog.user_id)
+                .where(TurnLog.id.in_(ids))
+            ).all()
+        return {
+            row.id: {"id": row.id, "bot_id": row.bot_id, "user_id": row.user_id}
+            for row in rows
+        }
 
     def turn_id_for_agent_request(self, request_id: str) -> str | None:
         """The turn bound to a bridge request id (TASK-502 egress capture)."""
