@@ -145,6 +145,7 @@ def test_app_timeout_cancels_only_supported_request_and_preserves_error(monkeypa
     local.subscribe_run = timeout
     monkeypatch.setattr(transport, "RedisSubscriber", lambda url: local)
     owner = SimpleNamespace(name=backend, _resolve_session_key=lambda config: "snark:operator",
+                            steer_capabilities=lambda config: frozenset(),
                             _thread_local=threading.local())
     with pytest.raises(TimeoutError, match="original inactivity error"):
         list(scope["stream_raw"](owner, "test", {"request_id": "doomed"}))
