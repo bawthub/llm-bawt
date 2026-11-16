@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from llm_bawt.bawthub_auth import voice_backend_auth
 from llm_bawt.integrations.ha_credentials import HomeAssistantUnavailable, resolve_ha_credentials
 from llm_bawt.runtime_settings import RuntimeSettingsStore
 
@@ -95,7 +96,8 @@ class HomeAudioClient:
 
     async def render(self, text: str, voice: str) -> bytes:
         response = await self.http.post(self.settings.tts_url.rstrip("/") + "/v1/tts/render",
-                                        json={"text": text, "voice": voice}, timeout=190)
+                                        json={"text": text, "voice": voice}, timeout=190,
+                                        auth=voice_backend_auth())
         response.raise_for_status()
         raw = response.content
         if len(raw) > 60_000_000:

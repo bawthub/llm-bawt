@@ -11,13 +11,16 @@ from .service_token import (
     EXPORT_FILE_ENV,
     TOKEN_ENV,
     TOKEN_FILE_ENV,
+    VOICE_PROXY_TOKEN_HEADER,
     BawtHubServiceAuth,
+    VoiceBackendAuth,
     ExportResult,
     ServiceTokenSource,
     TokenCheck,
     derive_service_token,
     service_auth,
     service_token_source,
+    voice_backend_auth,
 )
 from .token_export import EXPORT_GID_ENV, EXPORT_UID_ENV, export_service_token
 
@@ -28,7 +31,9 @@ __all__ = [
     "EXPORT_UID_ENV",
     "TOKEN_ENV",
     "TOKEN_FILE_ENV",
+    "VOICE_PROXY_TOKEN_HEADER",
     "BawtHubServiceAuth",
+    "VoiceBackendAuth",
     "ExportResult",
     "ServiceTokenSource",
     "TokenCheck",
@@ -36,4 +41,5 @@ __all__ = [
     "export_service_token",
     "service_auth",
     "service_token_source",
+    "voice_backend_auth",
 ]

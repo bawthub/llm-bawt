@@ -221,8 +221,35 @@ class BawtHubServiceAuth(httpx.Auth):
         yield request
 
 
+VOICE_PROXY_TOKEN_HEADER = "x-bawthub-voice-proxy-token"
+
+
+class VoiceBackendAuth(httpx.Auth):
+    """httpx auth for direct calls to BawtHub's voice backend (TASK-2235).
+
+    The backend can require the service token in its proxy header
+    (``BAWTHUB_VOICE_REQUIRE_PROXY_TOKEN_FILE``), the same credential the
+    BawtHub frontend proxy sends. With no usable token nothing is added.
+    """
+
+    def __init__(self, source: ServiceTokenSource):
+        self._source = source
+
+    def auth_flow(self, request: httpx.Request) -> Generator[httpx.Request, httpx.Response, None]:
+        token = self._source.read()
+        if token:
+            request.headers[VOICE_PROXY_TOKEN_HEADER] = token
+        yield request
+
+
 _SOURCE = ServiceTokenSource()
 _AUTH = BawtHubServiceAuth(_SOURCE)
+_VOICE_AUTH = VoiceBackendAuth(_SOURCE)
+
+
+def voice_backend_auth() -> VoiceBackendAuth:
+    """httpx ``auth=`` for every llm-bawt call to the voice backend."""
+    return _VOICE_AUTH
 
 
 def service_token_source() -> ServiceTokenSource:

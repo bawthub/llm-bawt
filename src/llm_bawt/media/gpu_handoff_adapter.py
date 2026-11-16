@@ -14,6 +14,7 @@ import httpx
 
 from agent_bridge.approval import PolicyAction, evaluate
 
+from llm_bawt.bawthub_auth import voice_backend_auth
 from llm_bawt.integrations.home_audio import HomeAudioSettings
 
 from .gpu_handoff import START_OPERATIONS, STOP_OPERATIONS, HandoffAdapter
@@ -138,7 +139,8 @@ class LocalHandoffAdapter(HandoffAdapter):
         return parse_service_observation(service_id, response.status_code, response)
 
     async def observe(self):
-        response = await self.http.get((await self.voice_url()) + "/v1/internal/voice/sessions", timeout=3)
+        response = await self.http.get((await self.voice_url()) + "/v1/internal/voice/sessions", timeout=3,
+                                       auth=voice_backend_auth())
         response.raise_for_status()
         gpu, model, services = await asyncio.gather(self.video.gpu_telemetry(), self.video.model_status(),
                                                    self._services())
@@ -172,13 +174,14 @@ class LocalHandoffAdapter(HandoffAdapter):
             # one-use user confirmation. Preparing/checking never dispatches.
 
     async def park(self):
-        response = await self.http.post((await self.voice_url()) + "/v1/internal/voice/park", timeout=3)
+        response = await self.http.post((await self.voice_url()) + "/v1/internal/voice/park", timeout=3,
+                                        auth=voice_backend_auth())
         response.raise_for_status()
         return response.json()["lease_id"]
 
     async def unpark(self, lease_id):
         response = await self.http.post((await self.voice_url()) + "/v1/internal/voice/unpark",
-                                        json={"lease_id": lease_id}, timeout=3)
+                                        json={"lease_id": lease_id}, timeout=3, auth=voice_backend_auth())
         response.raise_for_status()
 
     async def reset_video(self):

@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 
 import httpx
 
+from llm_bawt.bawthub_auth import voice_backend_auth
 from llm_bawt.integrations.home_audio import HomeAudioSettings
 
 MORPH_OPS = (
@@ -33,7 +34,7 @@ class GpuPreflight:
             return None, "Voice backend runtime settings unavailable"
         try:
             result = await self.http.get(settings.tts_url.rstrip("/") + "/v1/internal/voice/sessions",
-                                         timeout=3)
+                                         timeout=3, auth=voice_backend_auth())
             result.raise_for_status()
             data = result.json()
             if (not isinstance(data, dict) or type(data.get("active_count")) is not int

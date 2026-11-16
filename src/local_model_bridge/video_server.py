@@ -18,6 +18,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
+from llm_bawt.bawthub_auth import voice_backend_auth
 from llm_bawt.media.gpu_handoff_store import GpuHandoffStore, HandoffConflict
 from llm_bawt.media.gpu_profile import video_profile
 from llm_bawt.utils.config import Config
@@ -51,7 +52,8 @@ async def verify_voice_park(ledger: GpuHandoffStore) -> None:
         raise HandoffConflict("Video ownership has no recorded voice lease")
     settings = await asyncio.to_thread(HomeAudioSettings.load, Config())
     async with httpx.AsyncClient() as client:
-        response = await client.get(settings.tts_url.rstrip("/") + "/v1/internal/voice/sessions", timeout=3)
+        response = await client.get(settings.tts_url.rstrip("/") + "/v1/internal/voice/sessions", timeout=3,
+                                    auth=voice_backend_auth())
         response.raise_for_status()
         voice = response.json()
     if (voice.get("parked") is not True or voice.get("park_id") != lease
