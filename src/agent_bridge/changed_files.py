@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .sensitive_paths import is_sensitive_path, path_stat_signature
+
 logger = logging.getLogger(__name__)
 
 MAX_BYTES_PER_SIDE = 1_048_576
@@ -40,6 +42,8 @@ class _FileSnapshot:
     binary: bool
     truncated: bool
     digest: str | None
+    signature: tuple[int, ...] | None = None
+    redacted: bool = False
 
 
 @dataclass(frozen=True)
@@ -53,6 +57,7 @@ class _PendingCapture:
     in_repo: bool
     repo_root: Path | None
     before: _FileSnapshot
+    metadata_only: bool = False
 
 
 class ToolChangedFileCapture:
@@ -63,7 +68,7 @@ class ToolChangedFileCapture:
         self._max_bytes_per_side = max_bytes_per_side
         self._pending: dict[tuple[str, str], _PendingCapture] = {}
         self._pending_without_id: dict[tuple[str, str], list[_PendingCapture]] = {}
-        self._baselines: dict[tuple[str, Path], _FileSnapshot] = {}
+        self._baselines: dict[tuple[str, Path, bool], _FileSnapshot] = {}
 
     @staticmethod
     def _key(request_id: str, tool_use_id: str | None) -> tuple[str, str] | None:
@@ -97,6 +102,10 @@ class ToolChangedFileCapture:
             # The app-side TOOL_END path sees this same value before the richer
             # bridge companion arrives, so both upserts converge on one row.
             repo_path = raw_path.replace("\\", "/")
+            declared = Path(raw_path).expanduser()
+            if not declared.is_absolute():
+                declared = self._cwd / declared
+            metadata_only = self._is_sensitive(declared) or self._is_sensitive(absolute_path)
             pending = _PendingCapture(
                 tool_name=canonical_tool_name(tool_name),
                 arguments=dict(args),
@@ -107,8 +116,10 @@ class ToolChangedFileCapture:
                 in_repo=repo_root is not None,
                 repo_root=repo_root,
                 before=self._baselines.setdefault(
-                    (request_id, absolute_path), self._read_snapshot(absolute_path)
+                    (request_id, absolute_path, metadata_only),
+                    self._read_snapshot(absolute_path, metadata_only=metadata_only),
                 ),
+                metadata_only=metadata_only,
             )
             if key is not None:
                 self._pending[key] = pending
@@ -139,23 +150,30 @@ class ToolChangedFileCapture:
         if pending is None:
             return None
         try:
-            after = self._read_snapshot(pending.absolute_path)
+            before = pending.before
+            after = self._read_snapshot(pending.absolute_path, metadata_only=pending.metadata_only)
+            if before.redacted or after.redacted:
+                if before.redacted and after.redacted and before.signature == after.signature:
+                    return None
+                # A newly sensitive target must not expose an earlier baseline.
+                before = _FileSnapshot(before.exists, None, False, True, None, redacted=True)
+                after = _FileSnapshot(after.exists, None, False, True, None, redacted=True)
             if (
-                pending.before.exists == after.exists
-                and pending.before.binary == after.binary
-                and pending.before.digest == after.digest
-                and not pending.before.truncated
+                before.exists == after.exists
+                and before.binary == after.binary
+                and before.digest == after.digest
+                and not before.truncated
                 and not after.truncated
             ):
                 return None
-            additions, deletions = self._line_counts(pending.before, after)
-            if not pending.before.exists and after.exists:
+            additions, deletions = self._line_counts(before, after)
+            if not before.exists and after.exists:
                 change_kind = "added"
-            elif pending.before.exists and not after.exists:
+            elif before.exists and not after.exists:
                 change_kind = "deleted"
             else:
                 change_kind = "modified"
-            binary = pending.before.binary or after.binary
+            binary = before.binary or after.binary
             captured = {
                 "repo_key": pending.repo_key,
                 "repo_label": pending.repo_label,
@@ -165,9 +183,9 @@ class ToolChangedFileCapture:
                 "additions": additions,
                 "deletions": deletions,
                 "binary": binary,
-                "truncated": pending.before.truncated or after.truncated,
-                "content_type": None if binary else "text/plain; charset=utf-8",
-                "before_b64": self._encode(pending.before.data) if pending.before.exists else None,
+                "truncated": before.truncated or after.truncated,
+                "content_type": None if binary or before.redacted or after.redacted else "text/plain; charset=utf-8",
+                "before_b64": self._encode(before.data) if before.exists else None,
                 "after_b64": self._encode(after.data) if after.exists else None,
                 # TASK-1275 S2: raw evidence for app-side workspace identity.
                 # The app resolves repo/workspace identity at persist time;
@@ -191,7 +209,7 @@ class ToolChangedFileCapture:
 
     def captured_paths(self, request_id: str) -> list[Path]:
         """Absolute paths this request's file tools declared (TASK-1218)."""
-        return [path for key, path in self._baselines if key == request_id]
+        return [path for key, path, _ in self._baselines if key == request_id]
 
     def discard_request(self, request_id: str) -> None:
         stale = [key for key in self._pending if key[0] == request_id]
@@ -240,7 +258,27 @@ class ToolChangedFileCapture:
                 return candidate
         return None
 
-    def _read_snapshot(self, path: Path) -> _FileSnapshot:
+    def _is_sensitive(self, path: Path) -> bool:
+        root = self._find_repo_root(path)
+        relative = str(path.relative_to(root)) if root is not None else str(path)
+        if not is_sensitive_path(relative):
+            return False
+        tracked = False
+        if root is not None:
+            try:
+                result = subprocess.run(
+                    ("git", "-C", str(root), "--literal-pathspecs", "ls-files", "--error-unmatch", "--", relative),
+                    capture_output=True, timeout=2, check=False,
+                )
+                tracked = result.returncode == 0
+            except (OSError, subprocess.SubprocessError):
+                pass  # Fail closed if the tracked-source exception cannot be proved.
+        return is_sensitive_path(relative, tracked=tracked)
+
+    def _read_snapshot(self, path: Path, *, metadata_only: bool = False) -> _FileSnapshot:
+        if metadata_only or self._is_sensitive(path) or self._is_sensitive(path.resolve(strict=False)):
+            signature = path_stat_signature(path)
+            return _FileSnapshot(signature is not None, None, False, True, None, signature, True)
         try:
             if not path.is_file():
                 return _FileSnapshot(False, None, False, False, None)

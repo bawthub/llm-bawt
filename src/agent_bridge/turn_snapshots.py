@@ -51,6 +51,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from .readonly_commands import is_read_only_tool_call
+from .sensitive_paths import is_sensitive_path, path_stat_signature
 
 logger = logging.getLogger(__name__)
 
@@ -212,6 +213,7 @@ class Snapshot:
     head: str | None
     branch: str | None
     taken_at: float
+    sensitive_paths: dict[str, tuple[int, ...] | None] = field(default_factory=dict)
 
 
 @dataclass
@@ -224,6 +226,8 @@ class TreeState:
     marker: Path | None = None
     # Missing snapshot content is not evidence that a file was absent.
     excluded_paths: set[str] = field(default_factory=set)
+    tracked_paths: set[str] = field(default_factory=set)
+    sensitive_paths: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -433,8 +437,16 @@ class TurnSnapshotObserver:
         turn.trees[key] = state
         self._register(state, turn)
         tree = _git_text(root, "rev-parse", f"{created}^{{tree}}")
-        state.start = Snapshot(commit=created, tree=tree, head=created, branch=None, taken_at=turn.started_at)
-        self._update_ref(state, turn.turn_id, "start", created)
+        tree = self._write_tree(state, [], base_tree=tree)
+        commit = _git_text(
+            root, "commit-tree", tree, "-p", created, "-m", "bawt turn creation baseline",
+            env=_SNAPSHOT_IDENTITY,
+        )
+        state.start = Snapshot(
+            commit=commit, tree=tree, head=created, branch=None, taken_at=turn.started_at,
+            sensitive_paths={p: path_stat_signature(root / p) for p in state.sensitive_paths},
+        )
+        self._update_ref(state, turn.turn_id, "start", commit)
 
     @staticmethod
     def _creation_commit(root: Path, since: float) -> str | None:
@@ -469,18 +481,43 @@ class TurnSnapshotObserver:
         path_count = len(paths) + len(excluded)
         if path_count > MAX_STATUS_PATHS:
             raise SnapshotTooLarge(f"{path_count} changed paths exceeds {MAX_STATUS_PATHS}")
+        tracked = {
+            p.decode("utf-8", "surrogateescape")
+            for p in _git(root, "ls-files", "-z").split(b"\0") if p
+        }
+        state.tracked_paths.update(tracked)
+        candidates = set(paths) | excluded | tracked
+        # Include ignored sensitive files for stat-only attribution. Restrict
+        # this names-only query so unrelated ignored build output stays out.
+        ignored = _git(
+            root, "ls-files", "--others", "--ignored", "--exclude-standard", "-z", "--",
+            ":(icase,glob)**/.env", ":(icase,glob)**/.env.*",
+            ":(icase,glob)**/.env/**", ":(icase,glob)**/.env.*/**",
+            ":(icase,glob)**/*.key", ":(icase,glob)**/*.key/**",
+            ":(icase,glob)**/*secret*", ":(icase,glob)**/*secret*/**",
+        )
+        candidates.update(p.decode("utf-8", "surrogateescape") for p in ignored.split(b"\0") if p)
+        if len(candidates - tracked) > MAX_STATUS_PATHS:
+            raise SnapshotTooLarge("too many untracked candidate paths")
+        state.sensitive_paths.update(
+            p for p in candidates if is_sensitive_path(p, tracked=p in state.tracked_paths)
+        )
+        sensitive = {p: path_stat_signature(root / p) for p in state.sensitive_paths}
+        paths = [p for p in paths if p not in state.sensitive_paths]
+        excluded.difference_update(state.sensitive_paths)
         state.excluded_paths.update(excluded)
-        if not paths and head is not None:
-            tree = _git_text(root, "rev-parse", f"{head}^{{tree}}")
-        else:
-            tree = self._write_tree(state, paths)
+        # Even a clean index/HEAD may already contain a sensitive path.
+        tree = self._write_tree(state, paths)
         parents = ("-p", head) if head else ()
         commit = _git_text(
             root, "commit-tree", tree, *parents, "-m", f"bawt turn snapshot {phase} {turn_id}",
             env=_SNAPSHOT_IDENTITY,
         )
         self._update_ref(state, turn_id, phase, commit)
-        return Snapshot(commit=commit, tree=tree, head=head, branch=branch, taken_at=self._clock())
+        return Snapshot(
+            commit=commit, tree=tree, head=head, branch=branch, taken_at=self._clock(),
+            sensitive_paths=sensitive,
+        )
 
     @staticmethod
     def _changed_paths(root: Path, status: bytes, *, excluded: set[str]) -> list[str]:
@@ -501,14 +538,35 @@ class TurnSnapshotObserver:
             paths.append(rel)
         return paths
 
-    def _write_tree(self, state: TreeState, paths: list[str]) -> str:
+    def _write_tree(self, state: TreeState, paths: list[str], *, base_tree: str | None = None) -> str:
         root = state.root
         real_index = state.git_dir / "index"
         with tempfile.TemporaryDirectory(prefix="bawt-turn-index-") as tmp:
             temp_index = Path(tmp) / "index"
-            if real_index.exists():
+            if base_tree is None and real_index.exists():
                 temp_index.write_bytes(real_index.read_bytes())
             env = {"GIT_INDEX_FILE": str(temp_index), "GIT_LITERAL_PATHSPECS": "1"}
+            if base_tree is not None:
+                _git(root, "read-tree", base_tree, env=env)
+            indexed = {
+                p.decode("utf-8", "surrogateescape")
+                for p in _git(root, "ls-files", "-z", env=env).split(b"\0") if p
+            }
+            state.tracked_paths.update(indexed)
+            state.sensitive_paths.update(
+                p for p in indexed if is_sensitive_path(p, tracked=True)
+            )
+            denied = indexed & state.sensitive_paths
+            if denied:
+                _git(
+                    root, "update-index", "--force-remove", "-z", "--stdin", env=env,
+                    input_bytes=b"\0".join(p.encode("utf-8", "surrogateescape") for p in denied) + b"\0",
+                )
+            paths = [
+                p for p in paths
+                if p not in state.sensitive_paths
+                and not is_sensitive_path(p, tracked=p in state.tracked_paths)
+            ]
             if paths:
                 spec = b"\0".join(p.encode("utf-8", "surrogateescape") for p in paths)
                 _git(
@@ -557,7 +615,11 @@ class TurnSnapshotObserver:
             return "ineligible_shared_tree_busy", []
         if not self._head_movement_is_own(state, state.start, end, turn.bot_id):
             return "ineligible_head_moved", []
-        if end.tree == state.start.tree:
+        sensitive_changes = [
+            p for p in sorted(state.start.sensitive_paths.keys() | end.sensitive_paths.keys())
+            if state.start.sensitive_paths.get(p) != end.sensitive_paths.get(p)
+        ]
+        if end.tree == state.start.tree and not sensitive_changes:
             return ("excluded_only" if state.excluded_paths else "unchanged"), []
         raw = _git(state.root, "diff-tree", "-r", "-z", "--no-renames", "--raw", state.start.tree, end.tree)
         entries = self._parse_raw_diff(raw)
@@ -574,6 +636,18 @@ class TurnSnapshotObserver:
             if old_mode.startswith("160") or new_mode.startswith("160"):
                 continue  # submodule pointer, not file content
             files.append(self._file_payload(turn, state, end, rel, status, old_blob, new_blob))
+            turn.files_emitted += 1
+        for rel in sensitive_changes:
+            if len(files) >= MAX_FILES_PER_TREE or turn.files_emitted >= MAX_FILES_PER_TURN:
+                break
+            identity = file_identity(state.root / rel)
+            if identity is not None and identity in covered:
+                continue
+            status = (
+                "A" if state.start.sensitive_paths.get(rel) is None
+                else "D" if end.sensitive_paths.get(rel) is None else "M"
+            )
+            files.append(self._sensitive_payload(state, end, rel, status))
             turn.files_emitted += 1
         if state.excluded_paths:
             return ("observed_partial" if files else "excluded_only"), files
@@ -645,6 +719,10 @@ class TurnSnapshotObserver:
         self, turn: TurnObservation, state: TreeState, end: Snapshot,
         rel: str, status: str, old_blob: str, new_blob: str,
     ) -> dict[str, Any]:
+        # This is deliberately before even blob-size lookups: callers may
+        # supply legacy trees or bypass normal tree construction.
+        if rel in state.sensitive_paths or is_sensitive_path(rel, tracked=rel in state.tracked_paths):
+            return self._sensitive_payload(state, end, rel, status)
         null = "0" * len(old_blob)
         sizes = [
             self._blob_size(state.root, blob) for blob in (old_blob, new_blob) if blob != null
@@ -702,6 +780,20 @@ class TurnSnapshotObserver:
         if end.branch:
             payload["git_branch"] = end.branch
         return payload
+
+    @staticmethod
+    def _sensitive_payload(state: TreeState, end: Snapshot, rel: str, status: str) -> dict[str, Any]:
+        absolute = str(state.root / rel)
+        return {
+            "repo_key": "workspace", "repo_label": state.root.name, "path": absolute,
+            "absolute_path": absolute, "in_repo": True,
+            "change_kind": {"A": "added", "D": "deleted"}.get(status, "modified"),
+            "additions": None, "deletions": None, "binary": False, "truncated": True,
+            "content_type": None, "before_b64": None, "after_b64": None,
+            "git_before_blob": None, "git_after_blob": None, "provenance": PROVENANCE,
+            **({"git_head_sha": end.head} if end.head else {}),
+            **({"git_branch": end.branch} if end.branch else {}),
+        }
 
     @staticmethod
     def _blob_size(root: Path, blob: str) -> int:

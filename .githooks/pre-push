@@ -1,0 +1,12 @@
+#!/bin/sh
+# Turn snapshot refs are local retention pins, never publication targets.
+while read -r local_ref local_oid remote_ref remote_oid
+do
+    case "$local_ref:$remote_ref" in
+        refs/bawt/*:*|*:refs/bawt/*)
+            printf '%s\n' 'Push refused: refs/bawt/* must remain local.' >&2
+            exit 1
+            ;;
+    esac
+done
+exit 0

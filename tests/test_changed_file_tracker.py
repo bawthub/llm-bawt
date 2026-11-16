@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 from pathlib import Path
 
+import pytest
+
 from agent_bridge.changed_files import ToolChangedFileCapture, is_file_modifying_tool
 
 
@@ -123,3 +125,94 @@ def test_capture_records_git_head_and_branch(tmp_path: Path):
     assert payload["git_branch"] == "trunk"
     assert payload["provenance"] == "tool"
     assert payload["absolute_path"] == str(target)
+
+
+@pytest.mark.parametrize("name", [".env", ".env.bak", ".env.local", "private.key", "secret-data.json", "secret_store.py"])
+def test_sensitive_tool_capture_never_opens_content(tmp_path: Path, monkeypatch, name: str):
+    target = tmp_path / name
+    target.write_text("fixture-before\n")
+    original_open = Path.open
+
+    def guarded_open(path, mode="r", *args, **kwargs):
+        if path == target and "r" in mode:
+            raise AssertionError("sensitive content opened")
+        return original_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", guarded_open)
+    capture = ToolChangedFileCapture(cwd=tmp_path)
+    capture.start(request_id="r", tool_use_id="t", tool_name="Edit", arguments={"file_path": str(target)})
+    target.write_text("fixture-after-longer\n")
+    result = capture.finish(request_id="r", tool_use_id="t")
+    assert result is not None
+    row = result[2]
+    assert row["change_kind"] == "modified"
+    assert row["before_b64"] is row["after_b64"] is None
+    assert row["additions"] is row["deletions"] is None
+    assert row["truncated"] is True
+    assert row["content_type"] is None
+
+
+@pytest.mark.parametrize("sensitive_alias", [True, False])
+def test_sensitive_symlink_alias_or_target_is_metadata_only(tmp_path: Path, sensitive_alias: bool):
+    target = tmp_path / ("ordinary.txt" if sensitive_alias else ".env")
+    target.write_text("fixture-before\n")
+    alias = tmp_path / (".env" if sensitive_alias else "ordinary.txt")
+    alias.symlink_to(target)
+    capture = ToolChangedFileCapture(cwd=tmp_path)
+    capture.start(request_id="r", tool_use_id="t", tool_name="Write", arguments={"file_path": str(alias)})
+    target.write_text("fixture-after-longer\n")
+    result = capture.finish(request_id="r", tool_use_id="t")
+    assert result is not None
+    assert result[2]["before_b64"] is result[2]["after_b64"] is None
+
+
+def test_sensitive_noop_and_repeated_capture_retain_stat_baseline(tmp_path: Path):
+    target = tmp_path / ".env"
+    target.write_text("fixture\n")
+    capture = ToolChangedFileCapture(cwd=tmp_path)
+    capture.start(request_id="r", tool_use_id="noop", tool_name="Edit", arguments={"file_path": str(target)})
+    assert capture.finish(request_id="r", tool_use_id="noop") is None
+    capture.start(request_id="r", tool_use_id="delete", tool_name="Edit", arguments={"file_path": str(target)})
+    target.unlink()
+    assert capture.finish(request_id="r", tool_use_id="delete")[2]["change_kind"] == "deleted"
+    assert capture.captured_paths("r") == [target]
+    capture.discard_request("r")
+    assert capture.captured_paths("r") == []
+
+
+@pytest.mark.parametrize("name", [".env.example", ".env.template", ".env.docker", "secret_store.py", "connection_secrets.py", "tests/test_secrets.py"])
+def test_tracked_tool_source_and_templates_keep_normal_content(tmp_path: Path, name: str):
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    run = lambda *args: subprocess.run(
+        ("git", "-C", str(repo), *args), capture_output=True, check=True,
+    )
+    run("init", "-q")
+    target = repo / name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("before\n")
+    run("add", "--", name)
+    capture = ToolChangedFileCapture(cwd=repo)
+    capture.start(request_id="r", tool_use_id="t", tool_name="Edit", arguments={"file_path": str(target)})
+    target.write_text("after\n")
+    result = capture.finish(request_id="r", tool_use_id="t")
+    assert result is not None
+    assert _decode(result[2]["before_b64"]) == b"before\n"
+    assert _decode(result[2]["after_b64"]) == b"after\n"
+
+
+def test_sensitive_alias_cannot_reuse_content_baseline(tmp_path: Path):
+    target = tmp_path / "ordinary.txt"
+    target.write_text("before\n")
+    alias = tmp_path / ".env"
+    alias.symlink_to(target)
+    capture = ToolChangedFileCapture(cwd=tmp_path)
+    capture.start(request_id="r", tool_use_id="normal", tool_name="Edit", arguments={"file_path": str(target)})
+    target.write_text("after\n")
+    assert capture.finish(request_id="r", tool_use_id="normal")[2]["before_b64"] is not None
+    capture.start(request_id="r", tool_use_id="alias", tool_name="Edit", arguments={"file_path": str(alias)})
+    target.write_text("after-longer\n")
+    row = capture.finish(request_id="r", tool_use_id="alias")[2]
+    assert row["before_b64"] is row["after_b64"] is None

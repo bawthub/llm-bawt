@@ -313,3 +313,97 @@ def test_marker_from_previous_bridge_process_is_dead(repo: Path) -> None:
     (repo / "a.txt").write_text("z\n")
     files, _ = obs.finish("r1")
     assert len(files) == 1 and not (registry / "crashed.json").exists()
+
+
+@pytest.mark.parametrize("name", [".env", ".env.bak", ".env.local", "private.key", "secret-data.json", "nested/.env.bak"])
+@pytest.mark.parametrize("placement", ["untracked", "staged", "tracked", "ignored"])
+def test_sensitive_paths_have_metadata_but_no_snapshot_content(repo: Path, name: str, placement: str) -> None:
+    target = repo / name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("fixture-before\n")
+    if placement == "ignored":
+        with (repo / ".gitignore").open("a") as handle:
+            handle.write(f"{name}\n")
+    elif placement in {"staged", "tracked"}:
+        git(repo, "add", "--", name)
+        if placement == "tracked":
+            git(repo, "commit", "-qm", "fixture")
+    index = (repo / ".git" / "index").read_bytes()
+    obs = TurnSnapshotObserver()
+    bash(obs, "r-sensitive", "update configuration", repo)
+    target.write_text("fixture-after-longer\n")
+    files, receipts = obs.finish("r-sensitive")
+    (row,) = files
+    assert row["path"] == str(target)
+    assert row["change_kind"] == "modified"
+    assert row["before_b64"] is row["after_b64"] is None
+    assert row["git_before_blob"] is row["git_after_blob"] is None
+    assert row["additions"] is row["deletions"] is None
+    assert row["truncated"] is True
+    assert receipts[0]["status"] == "observed"
+    assert (repo / ".git" / "index").read_bytes() == index
+    refs = git(repo, "for-each-ref", "--format=%(refname)", REF_PREFIX).splitlines()
+    assert len(refs) == 2
+    for ref in refs:
+        assert name not in git(repo, "ls-tree", "-r", "--name-only", ref).splitlines()
+    # Untracked/ignored data must never even become a Git object.
+    if placement in {"untracked", "ignored"}:
+        for fixture in ("fixture-before\n", "fixture-after-longer\n"):
+            oid = subprocess.run(
+                ("git", "-C", str(repo), "hash-object", "--stdin"),
+                input=fixture, text=True, capture_output=True, check=True,
+            ).stdout.strip()
+            assert subprocess.run(
+                ("git", "-C", str(repo), "cat-file", "-e", oid),
+                capture_output=True,
+            ).returncode != 0
+
+
+@pytest.mark.parametrize("name", [".env.example", ".env.template", ".env.docker", "secret_store.py", "connection_secrets.py", "test_secrets.py"])
+def test_tracked_source_and_templates_keep_normal_diffs(repo: Path, name: str) -> None:
+    target = repo / name
+    target.write_text("before\n")
+    git(repo, "add", "--", name)
+    git(repo, "commit", "-qm", "fixture")
+    obs = TurnSnapshotObserver()
+    bash(obs, "r-normal", "update source", repo)
+    target.write_text("after\n")
+    files, _ = obs.finish("r-normal")
+    (row,) = files
+    assert base64.b64decode(row["before_b64"]) == b"before\n"
+    assert base64.b64decode(row["after_b64"]) == b"after\n"
+
+
+def test_sensitive_payload_guard_precedes_every_blob_read(repo: Path, monkeypatch) -> None:
+    obs = TurnSnapshotObserver()
+    bash(obs, "r-guard", "update configuration", repo)
+    turn = obs._turns["r-guard"]
+    state = next(iter(turn.trees.values()))
+
+    def forbidden(*args):
+        raise AssertionError("sensitive blob lookup")
+
+    monkeypatch.setattr(obs, "_blob_size", forbidden)
+    monkeypatch.setattr(obs, "_read_blob", forbidden)
+    row = obs._file_payload(turn, state, state.start, ".env.bak", "M", "a" * 40, "b" * 40)
+    assert row["before_b64"] is row["after_b64"] is None
+    assert row["git_before_blob"] is row["git_after_blob"] is None
+    obs.discard("r-guard")
+
+
+def test_sensitive_add_delete_and_covered_capture(repo: Path) -> None:
+    obs = TurnSnapshotObserver()
+    bash(obs, "r-add", "update configuration", repo)
+    target = repo / ".env"
+    target.write_text("fixture\n")
+    files, _ = obs.finish("r-add")
+    assert files[0]["change_kind"] == "added"
+    bash(obs, "r-delete", "update configuration", repo)
+    target.unlink()
+    files, _ = obs.finish("r-delete")
+    assert files[0]["change_kind"] == "deleted"
+    target.write_text("fixture\n")
+    bash(obs, "r-covered", "update configuration", repo)
+    target.write_text("fixture-next\n")
+    files, _ = obs.finish("r-covered", covered=[file_identity(target)])
+    assert files == []
