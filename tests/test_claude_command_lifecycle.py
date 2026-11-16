@@ -251,6 +251,7 @@ def test_listeners_reconnect_with_original_redis_url(monkeypatch, url):
         redis = FakeRedis()
         bridge = bridge_harness()
         bridge._publisher.redis_url = url
+        bridge._inbox_consumer = Mock()
         seen = {}
 
         def from_url(u, **kwargs):
@@ -273,4 +274,5 @@ def test_listeners_reconnect_with_original_redis_url(monkeypatch, url):
         assert seen["url"] == url
         assert seen["kwargs"]["socket_timeout"] is None
         bridge._approval_reload_listener.assert_awaited_with(url)
+        bridge._inbox_consumer.start.assert_called_once_with(url)
     asyncio.run(asyncio.wait_for(run(), 5))

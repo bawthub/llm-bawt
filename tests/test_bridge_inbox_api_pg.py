@@ -101,6 +101,7 @@ def test_foreign_run_identity_never_claims_or_reserves_idle_work(rig, http, fiel
     ("/claim", "claim"), ("/prepare", "prepare"), ("/repair/claim", "repair_claim"),
     ("/repair", "operation"), ("/lifecycle", "receipt"),
     ("/release", "release"),
+    ("/inventory", "inventory"),
 ])
 def test_every_internal_operation_uses_bridge_gate(rig, http, path, body):
     row = claims.send(rig, http.store)
@@ -114,6 +115,7 @@ def test_every_internal_operation_uses_bridge_gate(rig, http, path, body):
         "receipt": dict(delivery_id=row.id, evidence=claimed["evidence"], state="queued"),
         "release": operation | dict(evidence=claimed["evidence"],
                                     invocation_id="e08a77dc-101c-4ac5-b724-a37571b17fb2"),
+        "inventory": dict(backend="claude-code"),
     }
     http.gate.side_effect = HTTPException(401, "fixture denied")
     assert http.client.post(PREFIX + path, json=bodies[body]).status_code == 401
@@ -175,9 +177,13 @@ def test_actual_consumer_accepts_once_then_replacement_repairs_through_http(rig,
     queue.set_active_client(http.binding.session_key, client.run)
     context = InboxRun(rig.bot, rig.user, http.binding.backend, http.binding.session_key,
                        client.run, rig.message_id, rig.session_id)
+    repaired = asyncio.Event()
 
     async def rpc(path, body):
-        return await asyncio.to_thread(post, http, path, body)
+        result = await asyncio.to_thread(post, http, path, body)
+        if path == "/repair" and result.get("acknowledged"):
+            repaired.set()
+        return result
 
     async def scenario():
         consumer = InboxConsumer(rpc, queue, owner="original")
@@ -194,8 +200,12 @@ def test_actual_consumer_accepts_once_then_replacement_repairs_through_http(rig,
         client.run.mark_completed()
         queue.pop_active_client(http.binding.session_key)
         replacement = InboxConsumer(rpc, queue, owner="replacement")
-        replacement.bots[rig.bot] = BotInbox()
-        assert not await replacement.drain(rig.bot)
+        try:
+            await replacement.resync()
+            assert not replacement.bots[rig.bot].runs
+            await asyncio.wait_for(repaired.wait(), timeout=5)
+        finally:
+            await replacement.stop()
         assert http.store.get(row.id).status == "DELIVERED"
         assert len(client.frames) == 1
         assert http.memory.calls[0] == http.memory.calls[1]
@@ -208,6 +218,43 @@ def test_actual_consumer_accepts_once_then_replacement_repairs_through_http(rig,
         assert tuple(anchor) == (rig.message_id, 13)
 
     asyncio.run(scenario())
+
+
+def test_inventory_includes_live_lease_finished_run_and_stable_distinct_pages(rig, http):
+    row, operation = release_operation(rig, http)
+    assert post(http, "/lifecycle", dict(
+        delivery_id=row.id, evidence=operation["evidence"], state="queued",
+    ))["recorded"]
+    metadata = http.store.get(row.id).metadata
+    for target, backend in [("fixture-a", "claude-code"), ("fixture-z", "claude-code"),
+                            ("fixture-a", "claude-code"), ("fixture-other", "other")]:
+        extra = claims.send(rig, http.store)
+        marker = deepcopy(metadata)
+        marker[INBOX]["binding"].update(bot_id=target, backend=backend)
+        with rig.engine.begin() as conn:
+            conn.execute(text("""
+                UPDATE inter_bot_deliveries SET target_bot_id=:bot, status='STEERING',
+                    delivery_mode='steer', metadata_json=CAST(:metadata AS jsonb),
+                    transport_accepted_at=now(), lease_expires_at=now()+interval '5 minutes'
+                WHERE id=:id
+            """), {"bot": target, "id": extra.id, "metadata": json.dumps(marker)})
+    with rig.engine.begin() as conn:
+        conn.execute(text("UPDATE turn_logs SET ended_at=now(), status='completed' WHERE id=:id"),
+                     {"id": rig.turn_id})
+    targets = sorted([rig.bot, "fixture-a", "fixture-z"])
+    assert post(http, "/inventory", {"backend": "claude-code"})["bot_ids"] == targets
+    first = post(http, "/inventory", {"backend": "claude-code", "limit": 1})
+    assert first == {"bot_ids": targets[:1], "after": targets[0]}
+    # Actors may repair/remove page one's rows while inventory is still paging.
+    with rig.engine.begin() as conn:
+        conn.execute(text("""
+            UPDATE inter_bot_deliveries SET status='DELIVERED' WHERE target_bot_id=:bot
+        """), {"bot": targets[0]})
+    following = post(http, "/inventory", {
+        "backend": "claude-code", "limit": 1, "after": first["after"],
+    })
+    assert following == {"bot_ids": targets[1:2], "after": targets[1]}
+    assert post(http, "/inventory", {"backend": "missing"}) == {"bot_ids": [], "after": None}
 
 
 @pytest.mark.parametrize("offset", [None, 0, 23])

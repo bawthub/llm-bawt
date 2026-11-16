@@ -29,6 +29,7 @@ from .steer_contract import (
 from .ui_stream import LEGACY_UI_GROUP_PREFIX, UiStreamReader, unified_stream_keys
 from .publisher import (
     HISTORY_STREAM,
+    INBOX_WAKE_CHANNEL,
     RUN_STREAM_PREFIX,
     UNIFIED_EVENTS_PREFIX,
     UNIFIED_STREAM_MAXLEN,
@@ -347,6 +348,12 @@ class RedisSubscriber(CommandPublisherMixin):
                     if fields.get(DONE_FIELD) == "1":
                         return True
         return False
+
+    async def publish_inbox_wake(self, bot_id: str, backend: str) -> int:
+        """Backend-wide scheduling hint, never a command or write permission."""
+        return await self._pub_redis.publish(
+            INBOX_WAKE_CHANNEL, json.dumps({"bot_id": bot_id, "backend": backend}),
+        )
 
     async def publish_approval_reload(self) -> int:
         """Broadcast a policy-bundle reload to every bridge (TASK-291, TASK-293).

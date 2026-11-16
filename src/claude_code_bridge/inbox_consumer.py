@@ -1,11 +1,13 @@
 """One bridge drain owner per bot; active clients, not session send locks.
 
-The app still owns idle turns. This consumer is only attached for a run whose
-app-pinned inbox capability was explicitly carried in its send command.
+The app still owns idle turns. Input requires an attached run whose app-pinned
+inbox capability was explicitly carried in its send command. Durable accepted
+repair inventory may also start runless actors, which never authorize input.
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import uuid
 from collections import deque
@@ -13,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from agent_bridge.bridge_token import headers
+from agent_bridge.publisher import INBOX_WAKE_CHANNEL
 
 from .inbox_input import accept_inbox_input
 
@@ -71,10 +74,102 @@ class BotInbox:
 
 
 class InboxConsumer:
-    def __init__(self, api, queue, *, owner: str, fallback_seconds: float = 30):
+    def __init__(self, api, queue, *, owner: str, fallback_seconds: float = 30, backend: str = "claude-code"):
         self.api, self.queue, self.owner = api, queue, owner
         self.fallback_seconds = fallback_seconds
+        self.backend = backend
         self.bots: dict[str, BotInbox] = {}
+        self._listener_task: asyncio.Task | None = None
+        self._resync_task: asyncio.Task | None = None
+        self._resync_event = asyncio.Event()
+
+    def wake(self, bot_id: str, *, discover: bool = False) -> None:
+        """Only durable repair inventory may create an actor without a run."""
+        if not discover and bot_id not in self.bots:
+            return
+        inbox = self.bots.setdefault(bot_id, BotInbox())
+        inbox.wake.set()
+        if inbox.task is None or inbox.task.done():
+            inbox.task = asyncio.create_task(self._run(bot_id), name=f"inbox:{bot_id}")
+
+    async def resync(self) -> None:
+        for bot_id in list(self.bots):
+            self.wake(bot_id)
+        after = ""
+        while True:
+            page = await self.api("/inventory", {"backend": self.backend, "after": after, "limit": 100})
+            for bot_id in page["bot_ids"]:
+                self.wake(bot_id, discover=True)
+            following = page.get("after")
+            if following is None:
+                return
+            # The database's collation, not Python's string ordering, owns
+            # keyset progression. Reject a stuck cursor without reordering it.
+            if not isinstance(following, str) or following == after:
+                raise ValueError("Inbox inventory cursor did not advance")
+            after = following
+
+    def start(self, redis_url: str) -> None:
+        if self._resync_task is None or self._resync_task.done():
+            self._resync_task = asyncio.create_task(self._resync_loop(), name="inbox:inventory")
+        if self._listener_task is None or self._listener_task.done():
+            self._listener_task = asyncio.create_task(self._listen(redis_url), name="inbox:wakes")
+
+    async def _resync_loop(self) -> None:
+        delay = 2
+        while True:
+            await self._resync_event.wait()
+            self._resync_event.clear()
+            try:
+                await self.resync()
+                delay = 2
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Unknown accepted targets have no actor fallback yet. Retry
+                # until inventory completes, without blocking Redis reception.
+                log.warning("Inbox inventory failed; retrying", exc_info=True)
+                await asyncio.sleep(delay)
+                delay = min(30, delay * 2)
+                self._resync_event.set()
+
+    async def _listen(self, redis_url: str) -> None:
+        import redis.asyncio as aioredis
+
+        while True:
+            client = pubsub = None
+            try:
+                client = aioredis.from_url(
+                    redis_url, decode_responses=True, socket_timeout=None,
+                    socket_connect_timeout=5, health_check_interval=30,
+                )
+                pubsub = client.pubsub()
+                await pubsub.subscribe(INBOX_WAKE_CHANNEL)
+                async for message in pubsub.listen():
+                    if message.get("type") == "subscribe":
+                        # Includes redis-py's automatic resubscribe after a gap.
+                        # Read inventory only after the subscription is live.
+                        self._resync_event.set()
+                    elif message.get("type") == "message":
+                        try:
+                            hint = json.loads(message.get("data", ""))
+                        except (TypeError, ValueError):
+                            continue
+                        if (isinstance(hint, dict) and hint.get("backend") == self.backend
+                                and isinstance(hint.get("bot_id"), str)):
+                            self.wake(hint["bot_id"])
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.warning("Inbox wake listener failed; reconnecting", exc_info=True)
+            finally:
+                for connection in (pubsub, client):
+                    if connection is not None:
+                        try:
+                            await connection.aclose()
+                        except Exception:
+                            pass
+            await asyncio.sleep(5)
 
     def owns(self, context: InboxRun) -> bool:
         run, key = context.run, context.session_key
@@ -90,9 +185,7 @@ class InboxConsumer:
         inbox = self.bots.setdefault(context.bot_id, BotInbox())
         if context not in inbox.runs:
             inbox.runs.append(context)
-        inbox.wake.set()
-        if inbox.task is None or inbox.task.done():
-            inbox.task = asyncio.create_task(self._run(context.bot_id), name=f"inbox:{context.bot_id}")
+        self.wake(context.bot_id)
 
     def detach(self, context: InboxRun) -> None:
         inbox = self.bots.get(context.bot_id)
@@ -227,6 +320,10 @@ class InboxConsumer:
                 pass
 
     async def stop(self) -> None:
+        listeners = [task for task in (self._listener_task, self._resync_task) if task is not None]
+        for task in listeners:
+            task.cancel()
+        await asyncio.gather(*listeners, return_exceptions=True)
         tasks = [inbox.task for inbox in self.bots.values() if inbox.task is not None]
         for task in tasks:
             task.cancel()

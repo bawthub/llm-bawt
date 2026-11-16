@@ -105,6 +105,10 @@ class ClaudeCommandMixin:
                 self._approval_reload_listener(reload_url)
             )
 
+        inbox_consumer = getattr(self, "_inbox_consumer", None)
+        if inbox_consumer is not None:
+            inbox_consumer.start(redis_url)
+
         while True:
             try:
                 results = await reader.read(count=1, block=5000)

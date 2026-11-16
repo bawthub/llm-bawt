@@ -12,7 +12,7 @@ import httpx
 from ..inter_bot_delivery import DeliveryRecord, InterBotDeliveryStore
 from ..inter_bot_delivery_retry import fail_claim_with_restart_retry
 from ..inter_bot_delivery_user import resolve_delivery_user
-from ..steer_capabilities import bot_steer_caps
+from ..steer_capabilities import INBOX_NEXT, bot_steer_caps
 from .dispatcher_leadership import (
     PROBE_TIMEOUT_SECONDS,
     SESSION_GONE_ERRORS,
@@ -465,13 +465,26 @@ class InterBotDeliveryDispatcher:
         from ..bots import BotManager
 
         bot = BotManager(self.service.config).get_bot(target_bot_id)
+        caps = bot_steer_caps(bot)
+        if INBOX_NEXT in caps:
+            # Existing commit/gate/release wakes reach this async path even
+            # when the durable app claim yields a head to the bridge owner.
+            # The broadcast is only a hint; houses retain actual run ownership.
+            subscriber = getattr(self.service, "_redis_subscriber", None)
+            try:
+                if subscriber is not None:
+                    await asyncio.wait_for(
+                        subscriber.publish_inbox_wake(target_bot_id, bot.agent_backend), timeout=2,
+                    )
+            except Exception:
+                logger.warning("Inbox wake publication failed for %s", target_bot_id, exc_info=True)
         from .maintenance_queue import MaintenanceQueue
         await MaintenanceQueue(self.service, dispatcher=self).publish_ready(target_bot_id)
         # Admission and rollout settings read the DB; keep them off the API loop.
         record = await asyncio.to_thread(
             self.store.claim_next, target_bot_id,
             claim_owner=self.claim_owner,
-            steer_capable=bot_steer_caps(bot),
+            steer_capable=caps,
         )
         if record is None:
             return False

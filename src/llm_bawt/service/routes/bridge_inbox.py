@@ -39,6 +39,12 @@ class RepairClaim(InboxRequest):
     claim_owner: str = Field(min_length=1, max_length=256)
 
 
+class Inventory(InboxRequest):
+    backend: str = Field(min_length=1, max_length=128)
+    after: str = Field(default="", max_length=128)
+    limit: int = Field(default=100, ge=1, le=500, strict=True)
+
+
 class RunClaim(RepairClaim):
     user_id: str = Field(min_length=1)
     backend: str = Field(min_length=1)
@@ -81,6 +87,14 @@ def _claimed(record):
             marker["command_uuid"], marker.get("write_token", record.claim_token),
         )),
     }
+
+
+@router.post("/inventory")
+def inventory(body: Inventory):
+    targets = InboxSettlement(_dispatcher().store).repair_targets(
+        backend=body.backend, after=body.after, limit=body.limit,
+    )
+    return {"bot_ids": targets, "after": targets[-1] if len(targets) == body.limit else None}
 
 
 @router.post("/claim")

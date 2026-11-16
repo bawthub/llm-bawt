@@ -85,6 +85,7 @@ class ClaudeCodeBridge(
         self._session_queue = SessionQueue()
         self._inbox_consumer = InboxConsumer(
             InboxAPI(app_api_url), self._session_queue, owner=f"bridge-{uuid.uuid4().hex}",
+            backend=backend_name,
         ) if app_api_url else None
         # request_id → frontend user-message UUID, populated in _handle_send
         # and read by _publish_event so every emitted AgentEvent (tool_*,

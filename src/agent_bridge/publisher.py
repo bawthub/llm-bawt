@@ -47,6 +47,7 @@ HISTORY_STREAM = "agent:history"
 # ``agent_bridge.houses`` and keep the mansion name below.
 MANSION_COMMANDS_STREAM = "agent:commands"
 COMMANDS_STREAM = _bridge_commands_stream(MANSION_COMMANDS_STREAM)
+INBOX_WAKE_CHANNEL = "agent:inbox:wake"
 RUN_STREAM_PREFIX = "agent:run:"
 # Unified event stream for all bots: events:{bot_id}:{user_id}
 UNIFIED_EVENTS_PREFIX = "events:"

@@ -322,3 +322,45 @@ async def test_fallback_turn_does_not_hold_target_drain_open(monkeypatch):
     await asyncio.sleep(0.01)
     assert not dispatcher._dispatch_tasks
     assert dispatcher._wake_event.is_set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("advertised,broken", [(False, False), (True, False), (True, True)])
+async def test_inbox_hint_precedes_yielded_claim_and_failure_does_not_block_admission(
+    monkeypatch, advertised, broken,
+):
+    from unittest.mock import AsyncMock
+    import llm_bawt.bots as bots
+
+    monkeypatch.setattr(bots, "BotManager", lambda _config: SimpleNamespace(
+        get_bot=lambda _bot: SimpleNamespace(agent_backend="claude-code"),
+    ))
+    monkeypatch.setattr("llm_bawt.service.inter_bot_dispatcher.bot_steer_caps",
+                        lambda _bot: frozenset({"inbox_next", "next"} if advertised else {"next"}))
+    monkeypatch.setattr("llm_bawt.service.maintenance_queue.MaintenanceQueue.publish_ready", AsyncMock())
+    dispatcher = _make_dispatcher()
+    calls = []
+    timeouts = []
+    wait_for = asyncio.wait_for
+
+    def bounded(awaitable, *, timeout):
+        timeouts.append(timeout)
+        return wait_for(awaitable, timeout=timeout)
+
+    monkeypatch.setattr("llm_bawt.service.inter_bot_dispatcher.asyncio.wait_for", bounded)
+
+    async def hint(bot_id, backend):
+        assert (bot_id, backend) == ("fixture", "claude-code")
+        calls.append("hint")
+        if broken:
+            raise OSError("fixture Redis unavailable")
+
+    def claim(*args, **kwargs):
+        calls.append("claim")
+        return None
+
+    dispatcher.service._redis_subscriber.publish_inbox_wake = hint
+    dispatcher.store.claim_next = claim
+    assert not await dispatcher._drain_target("fixture")
+    assert calls == (["hint", "claim"] if advertised else ["claim"])
+    assert timeouts == ([2] if advertised else [])

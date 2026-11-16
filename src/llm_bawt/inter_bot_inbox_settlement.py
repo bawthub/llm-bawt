@@ -58,6 +58,24 @@ class InboxSettlement:
     def __init__(self, store):
         self.store = store
 
+    def repair_targets(self, *, backend: str, after: str = "", limit: int = 100) -> list[str]:
+        """Paged actor discovery, including accepted rows with live leases.
+
+        This grants no claim or SDK permission. Any same-backend bridge may
+        repair history; the existing per-target claim fence chooses one owner.
+        """
+        if self.store.engine is None:
+            return []
+        with self.store.engine.connect() as conn:
+            return list(conn.execute(text("""
+                SELECT DISTINCT target_bot_id FROM inter_bot_deliveries
+                WHERE status='STEERING' AND delivery_mode='steer'
+                  AND metadata_json->'_inbox'->>'phase'='accepted'
+                  AND metadata_json->'_inbox'->'binding'->>'backend'=:backend
+                  AND transport_accepted_at IS NOT NULL AND target_bot_id > :after
+                ORDER BY target_bot_id LIMIT :limit
+            """), {"backend": backend, "after": after, "limit": max(1, min(limit, 500))}).scalars())
+
     def release_not_written(
         self, delivery_id: str, claim_token: str, evidence: InboxWriteProof,
         invocation_id: str, *, stop_requested: bool = False,
