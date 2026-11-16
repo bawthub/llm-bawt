@@ -169,6 +169,17 @@ def test_non_bool_setting_falls_back_to_default():
     assert refused(gates, BROKER, None)
 
 
+def test_read_failure_keeps_established_enforcement_despite_opt_out():
+    clock, settings = Clock(), Settings({BROKER.setting_key: True})
+    gates = make(OPT_OUT, settings, clock=clock)
+    assert refused(gates, BROKER, None)
+    settings.fail = True
+    for _ in range(2):  # across repeated failed refreshes
+        clock.now += bridge_gate.SETTINGS_TTL_SECONDS + 1
+        assert refused(gates, BROKER, None)
+        assert gates.enforced(BROKER)
+
+
 def test_unreadable_settings_fail_closed():
     assert refused(make(settings=Settings(fail=True)), BROKER, None)
     assert not refused(make(OPT_OUT, Settings(fail=True)), BROKER, None)

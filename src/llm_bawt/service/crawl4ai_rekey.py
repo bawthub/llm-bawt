@@ -28,17 +28,49 @@ def advance(previous: int, new: int) -> dict[str, bool]:
     """Move the generation forward from exactly ``previous``; never reuse a counter."""
     previous = tokens.validate_generation(previous)
     new = tokens.validate_generation(new)
-    if new <= previous or tokens.current_generation() != previous:
+    if new <= previous:
         return {"ok": False, "generation_matches": False}
     from llm_bawt.runtime_settings import RuntimeSettingsStore  # noqa: PLC0415
     from llm_bawt.utils.config import Config  # noqa: PLC0415
 
-    store = RuntimeSettingsStore(Config())
-    if store.engine is None:
+    engine = RuntimeSettingsStore(Config()).engine
+    if engine is None or not _compare_and_set(engine, previous, new):
         return {"ok": False, "generation_matches": False}
-    store.set_value("global", "*", tokens.GENERATION_KEY, new)
     matches = tokens.current_generation() == new
     return {"ok": matches, "generation_matches": matches}
+
+
+def _compare_and_set(engine, previous: int, new: int) -> bool:
+    """Write ``new`` only if the stored generation is exactly ``previous``, atomically.
+
+    One transaction; on PostgreSQL a transaction-scoped advisory lock
+    serializes overlapping advances, including the absent-row (zero) case
+    that no row lock can cover.
+    """
+    from datetime import datetime, timezone  # noqa: PLC0415
+
+    from sqlalchemy import text  # noqa: PLC0415
+
+    where = "WHERE scope_type='global' AND scope_id='*' AND key=:key"
+    params = {"key": tokens.GENERATION_KEY}
+    with engine.begin() as conn:
+        if conn.dialect.name == "postgresql":
+            conn.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), params)
+        rows = conn.execute(text(f"SELECT value_json FROM runtime_settings {where} LIMIT 2"),
+                            params).fetchall()
+        if len(rows) > 1:
+            return False
+        current = tokens.validate_generation(json.loads(rows[0][0])) if rows else 0
+        if current != previous:
+            return False
+        values = {**params, "value": json.dumps(new), "now": datetime.now(timezone.utc)}
+        if rows:
+            conn.execute(text(f"UPDATE runtime_settings SET value_json=:value, updated_at=:now "
+                              f"{where}"), values)
+        else:
+            conn.execute(text("INSERT INTO runtime_settings (scope_type, scope_id, key, value_json, "
+                              "updated_at) VALUES ('global', '*', :key, :value, :now)"), values)
+    return True
 
 
 def export(expected: int) -> dict[str, bool]:

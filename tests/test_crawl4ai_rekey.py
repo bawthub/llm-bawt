@@ -114,31 +114,24 @@ def test_settings_api_refuses_generation_key(monkeypatch, scope):
     assert writes == []
 
 
-def test_advance_moves_forward_from_exact_current_only(monkeypatch):
-    state = {"generation": 2, "writes": []}
-    monkeypatch.setattr(tokens, "current_generation", lambda: state["generation"])
-
-    class Store:
-        engine = object()
-
-        def __init__(self, _config):
-            pass
-
-        def set_value(self, scope, sid, key, value):
-            state["writes"].append((scope, sid, key, value))
-            state["generation"] = value
-
+def test_advance_is_forward_only_compare_and_set(generation_db, monkeypatch):
     from llm_bawt import runtime_settings
-    from llm_bawt.utils import config
 
-    monkeypatch.setattr(runtime_settings, "RuntimeSettingsStore", Store)
-    monkeypatch.setattr(config, "Config", lambda: object())
-    assert rekey.advance(1, 3) == {"ok": False, "generation_matches": False}  # stale previous
-    assert rekey.advance(2, 2) == {"ok": False, "generation_matches": False}  # reuse
-    assert rekey.advance(2, 1) == {"ok": False, "generation_matches": False}  # rollback
-    assert state["writes"] == []
-    assert rekey.advance(2, 3) == {"ok": True, "generation_matches": True}
-    assert state["writes"] == [("global", "*", tokens.GENERATION_KEY, 3)]
+    with generation_db.begin() as conn:
+        conn.execute(text("ALTER TABLE runtime_settings ADD COLUMN updated_at TEXT"))
+    monkeypatch.setattr(runtime_settings, "RuntimeSettingsStore",
+                        lambda _config: SimpleNamespace(engine=generation_db))
+    closed = {"ok": False, "generation_matches": False}
+    assert rekey.advance(1, 2) == closed  # absent row is generation 0, not 1
+    assert rekey.advance(0, 2) == {"ok": True, "generation_matches": True}
+    assert rekey.advance(2, 2) == closed  # reuse
+    assert rekey.advance(2, 1) == closed  # rollback
+    assert rekey.advance(2, 4) == {"ok": True, "generation_matches": True}
+    # An overlapping advance that also saw 2 now fails instead of writing 3 over 4.
+    assert rekey.advance(2, 3) == closed
+    assert tokens.current_generation() == 4
+    with generation_db.connect() as conn:
+        assert conn.execute(text("SELECT COUNT(*) FROM runtime_settings")).scalar() == 1
 
 
 def test_invalid_generation_startup_export_withdraws_not_legacy(generation_db, tmp_path):

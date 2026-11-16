@@ -186,10 +186,15 @@ class BridgeGates:
             values: Mapping[str, Any] | None = self._settings()
             failing = False
         except Exception as error:  # noqa: BLE001 - fail closed
-            values, failing = None, True
+            # Keep the last successfully read policy: a read error must never
+            # undo enforcement already established by a row (TASK-2369). With
+            # no successful read yet, the default rule applies.
+            with self._lock:
+                values = self._cached
+            failing = True
             if not self._settings_failing:
-                logger.warning("Bridge gate settings unreadable (%s); enforcing",
-                               type(error).__name__)
+                logger.warning("Bridge gate settings unreadable (%s); keeping the last read "
+                               "policy or the default rule", type(error).__name__)
         with self._lock:
             self._cached, self._cached_at, self._settings_failing = values, now, failing
         return values
