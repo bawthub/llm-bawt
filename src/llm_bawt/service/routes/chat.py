@@ -404,51 +404,19 @@ async def steer_active_turn(
         status = 409 if detail in STEER_DEFINITE_409 else 502
         raise HTTPException(status_code=status, detail=detail)
 
-    persisted = False
-    try:
-        memory_client = service.get_memory_client(bot_id, user_id)
-        if memory_client is None:
-            raise RuntimeError("Memory client unavailable")
-        # Persist to the pre-dispatch validated destination, never a fresh
-        # post-RPC lookup that could move an accepted message to another thread.
-        from ..steer_timeline import SteerTimeline
+    from ..steer_persistence import SteerDestination, persist_accepted_input
 
-        timeline = SteerTimeline(
-            service, bot_id=bot_id, user_id=user_id,
-            turn_id=turn.id, message_id=request.message_id,
-        )
-        content_offset = await timeline.content_offset(subscriber, request.content_offset)
-        await asyncio.to_thread(
-            memory_client.add_message,
-            "user",
-            message,
-            session_id,
-            None,
-            request.message_id,
-            attachment_refs,
-            None,
-            author.entity_type,
-            author.entity_id,
-        )
-        if content_offset is not None:
-            anchored = await asyncio.to_thread(
-                _persist_interrupt_anchor,
-                service,
-                bot_id=bot_id,
-                message_id=request.message_id,
-                source_message_id=turn.trigger_message_id,
-                content_offset=content_offset,
-            )
-            if not anchored:
-                raise RuntimeError("Persisted steer message was not found for anchor update")
-        persisted = True
-        await timeline.publish(subscriber)
-    except Exception:
-        log.exception(
-            "chat.steer accepted but persistence failed: turn=%s message=%s",
-            turn.id,
-            request.message_id,
-        )
+    # Keep the pre-dispatch validated destination; never resolve it after RPC.
+    persisted = await persist_accepted_input(
+        service,
+        destination=SteerDestination(
+            bot_id=bot_id, user_id=user_id, turn_id=turn.id,
+            source_message_id=turn.trigger_message_id, session_id=session_id,
+        ),
+        message_id=request.message_id, message=message, author=author,
+        subscriber=subscriber, persist_anchor=_persist_interrupt_anchor,
+        content_offset=request.content_offset, attachment_refs=attachment_refs,
+    )
 
     return ChatSteerResponse(
         ok=True,
