@@ -16,13 +16,15 @@ from urllib.parse import quote
 
 if __package__:
     from .compose_config import apply_desired, canonical_hash, evaluate, selected_profile
-    from .compose_render import COMPOSE_FILE, MAX_COMPOSE_FILES, SAFE_PATH, validate_interpolation_env
+    from .compose_render import (COMPOSE_FILE, COMPOSE_SECRET_NAMES, MAX_COMPOSE_FILES, SAFE_PATH,
+                                 validate_compose_secrets, validate_interpolation_env)
     from .health_probe import validate_health_probe
     from .image_deploy import ImageDeployer, clone_create_body, demux_stdout, release_from_labels
     from .service_identity import SPEC_PATTERNS, ComposeServiceRef
 else:  # standalone immutable worker
     from compose_config import apply_desired, canonical_hash, evaluate, selected_profile
-    from compose_render import COMPOSE_FILE, MAX_COMPOSE_FILES, SAFE_PATH, validate_interpolation_env
+    from compose_render import (COMPOSE_FILE, COMPOSE_SECRET_NAMES, MAX_COMPOSE_FILES, SAFE_PATH,
+                                validate_compose_secrets, validate_interpolation_env)
     from health_probe import validate_health_probe
     from image_deploy import ImageDeployer, clone_create_body, demux_stdout, release_from_labels
     from service_identity import SPEC_PATTERNS, ComposeServiceRef
@@ -49,10 +51,10 @@ def validate_compose_config(value) -> dict:
     project directory comes from the target's own Compose labels (no host path
     in a catalog seed)."""
     required = {"compose_files", "renderer_image", "image_variable"}
-    optional = {"interpolation_env", "profile", "adopt_files"}
+    optional = {"interpolation_env", "profile", "adopt_files", "compose_secrets"}
     if not isinstance(value, dict) or not required <= set(value) <= required | optional:
         raise ValueError("compose_config requires exactly compose_files, renderer_image, image_variable"
-                         " (and optional interpolation_env, profile, adopt_files)")
+                         " (and optional interpolation_env, profile, adopt_files, compose_secrets)")
     files = value["compose_files"]
     if not _file_list(files):
         raise ValueError("compose_config.compose_files must be 1..4 distinct Compose file basenames")
@@ -65,6 +67,7 @@ def validate_compose_config(value) -> dict:
     if not isinstance(value["image_variable"], str) or not re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", value["image_variable"]):
         raise ValueError("compose_config.image_variable is invalid")
     validate_interpolation_env(value)
+    validate_compose_secrets(value)
     return value
 
 
@@ -105,6 +108,8 @@ def validate_target_fields(spec: dict, patterns: dict, *, health_max: int = 180)
                        and all(isinstance(x, str) and re.fullmatch(r"[A-Za-z0-9._-]{1,32}", x) for x in v)
                        for k, v in shown.items())):
         raise ValueError("display_values must map env names to closed enums of short tokens")
+    if set(shown) & COMPOSE_SECRET_NAMES:  # TASK-2386: an enum match would confirm a guess
+        raise ValueError("display_values must not name a compose secret")
     paths = spec["stat_paths"]
     if (not isinstance(paths, list) or len(paths) > 4
             or not all(isinstance(p, str) and SAFE_PATH.fullmatch(p) and ".." not in p.split("/") for p in paths)):

@@ -34,12 +34,14 @@ from urllib.parse import quote
 
 if __package__:
     from .compose_render import (COMPOSE_FILE, MAX_COMPOSE_FILES, RENDER_LABEL, ComposeError, ComposeRenderer,
-                                 OPS_JOB_LABEL, validate_interpolation_env, working_dir_valid)
+                                 OPS_JOB_LABEL, validate_compose_secrets, validate_interpolation_env,
+                                 working_dir_valid)
     from .config_reconcile import CONTAINER_NAME_PATTERN, validate_renderer_image
     from .service_identity import PROJECT_LABEL, PROJECT_PATTERN, SERVICE_LABEL
 else:  # standalone immutable worker
     from compose_render import (COMPOSE_FILE, MAX_COMPOSE_FILES, RENDER_LABEL, ComposeError, ComposeRenderer,
-                                OPS_JOB_LABEL, validate_interpolation_env, working_dir_valid)
+                                OPS_JOB_LABEL, validate_compose_secrets, validate_interpolation_env,
+                                working_dir_valid)
     from config_reconcile import CONTAINER_NAME_PATTERN, validate_renderer_image
     from service_identity import PROJECT_LABEL, PROJECT_PATTERN, SERVICE_LABEL
 
@@ -77,15 +79,17 @@ def validate_remove_spec(spec: dict) -> dict:
         raise ValueError("remove spec compose_project is invalid")
     config = spec["compose_config"]
     required = {"compose_files", "renderer_image"}
-    if not isinstance(config, dict) or not required <= set(config) <= required | {"interpolation_env"}:
+    if not isinstance(config, dict) or not required <= set(config) <= required | {"interpolation_env",
+                                                                                  "compose_secrets"}:
         raise ValueError("remove compose_config requires exactly compose_files and renderer_image"
-                         " (and optional interpolation_env)")
+                         " (and optional interpolation_env, compose_secrets)")
     files = config["compose_files"]
     if (not isinstance(files, list) or not 1 <= len(files) <= MAX_COMPOSE_FILES or len(set(files)) != len(files)
             or not all(isinstance(f, str) and COMPOSE_FILE.fullmatch(f) for f in files)):
         raise ValueError("remove compose_config.compose_files must be 1..4 distinct Compose file basenames")
     validate_renderer_image(config)
     validate_interpolation_env(config)
+    validate_compose_secrets(config)
     return spec
 
 

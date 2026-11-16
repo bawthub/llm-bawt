@@ -117,6 +117,79 @@ def validate_interpolation_env(config: dict) -> dict:
     return value
 
 
+# TASK-2386: bootstrap secrets (the root key and DB credentials) no longer live
+# in the project ``.env``. They rest in a root-owned volume, one Compose env
+# file per name, which only the sealed renderer mounts (read-only). The volume,
+# its mount point and the names are code constants, never catalog data, and a
+# target declares the subset it receives in ``compose_config.compose_secrets``.
+# Argv carries only paths; values exist inside the renderer and in the
+# in-memory rendered config, exactly as ``.env`` values always have.
+COMPOSE_SECRETS_VOLUME = "llm-bawt-compose-secrets"
+COMPOSE_SECRETS_DIR = "/run/compose-secrets"
+COMPOSE_SECRET_NAMES = frozenset({"LLM_BAWT_SECRET_KEY", "LLM_BAWT_POSTGRES_PASSWORD",
+                                  "POSTGRES_PASSWORD", "DATABASE_URL"})
+
+
+def validate_compose_secrets(config: dict) -> tuple[str, ...]:
+    """``compose_config.compose_secrets`` (optional): the bootstrap secret NAMES
+    this target receives, a non-empty subset of :data:`COMPOSE_SECRET_NAMES`."""
+    if "compose_secrets" not in config:
+        return ()
+    value = config["compose_secrets"]
+    if (not isinstance(value, list) or not value or len(set(value)) != len(value)
+            or not all(isinstance(n, str) and n in COMPOSE_SECRET_NAMES for n in value)):
+        raise ValueError("compose_config.compose_secrets must be distinct names from "
+                         + ", ".join(sorted(COMPOSE_SECRET_NAMES)))
+    if set(value) & (set(config.get("interpolation_env") or {}) | {config.get("image_variable")}):
+        raise ValueError("compose_config.compose_secrets overlaps another declared variable")
+    return tuple(sorted(value))
+
+
+def compose_secret_args(config: dict, project_dir: str) -> list[str]:
+    """Global ``docker compose`` options loading the declared secrets.
+
+    ``--env-file`` replaces Compose's implicit ``<project>/.env``, so that file
+    is named first and keeps supplying every non-secret value; each declared
+    name's own file comes after it and wins. Undeclared names are never loaded,
+    so a target can't receive another target's secret (input boundary)."""
+    names = validate_compose_secrets(config)
+    if not names:
+        return []
+    args = ["--env-file", posixpath.join(project_dir, ".env")]
+    for name in names:
+        args += ["--env-file", f"{COMPOSE_SECRETS_DIR}/{name}.env"]
+    return args
+
+
+def check_compose_secrets(config: dict, rendered: dict, service: str) -> None:
+    """Output boundary: every declared secret reaches the target non-empty and
+    only under its own name.
+
+    Compose silently drops a bare ``- NAME`` passthrough whose value is unset,
+    so presence is checked here, not left to the unset-variable warning. A
+    declared value found anywhere else in the target service (another env
+    name, a label, the command, ...) is refused: output classifiers see names,
+    so they could not catch one secret aliased under another name. Errors name
+    variables only, never a value."""
+    names = validate_compose_secrets(config)
+    if not names:
+        return
+    target = (rendered.get("services") or {}).get(service)
+    if not isinstance(target, dict):
+        raise ComposeError("renderer_output_invalid", detail="target service missing")
+    env = target.get("environment") or {}
+    if not isinstance(env, dict):
+        raise ComposeError("renderer_output_invalid", detail="target environment")
+    missing = [n for n in names if not isinstance(env.get(n), str) or not env[n]]
+    if missing:
+        raise ComposeError("compose_secret_missing", missing)
+    rest = {**target, "environment": {k: v for k, v in env.items() if k not in names}}
+    blob = json.dumps(rest, sort_keys=True)
+    aliased = [n for n in names if json.dumps(env[n])[1:-1] in blob]
+    if aliased:
+        raise ComposeError("compose_secret_aliased", aliased)
+
+
 def _within(path: str, root: str) -> bool:
     """``path`` is ``root`` or below it (both clean absolute paths)."""
     return path == root or path.startswith(root.rstrip("/") + "/")
@@ -251,7 +324,8 @@ def unescape_dollars(value):
 
 
 def renderer_argv(spec: dict, source: dict, *, hash_only: bool) -> list[str]:
-    argv = ["compose", "-p", spec["compose_project"]]
+    argv = ["compose", *compose_secret_args(spec["compose_config"], source["project_dir"]),
+            "-p", spec["compose_project"]]
     for path in source["compose_files"]:
         argv += ["-f", path]
     service = spec["compose_service"]
@@ -285,6 +359,7 @@ class ComposeRenderer:
         if not isinstance(config, dict):
             raise ComposeError("renderer_output_invalid")
         config = unescape_dollars(config)
+        check_compose_secrets(self.spec.get("compose_config") or {}, config, self.spec.get("compose_service"))
         line = self._run(source, image_ref, renderer_argv(self.spec, source, hash_only=True)).strip()
         match = re.fullmatch(re.escape(self.spec["compose_service"]) + r" ([0-9a-f]{64})", line)
         if not match:
@@ -294,8 +369,10 @@ class ComposeRenderer:
     def project(self, source: dict, project: str) -> dict:
         """The WHOLE rendered project, every profile included (TASK-1439 T2c):
         a container-removal check must see every service that could claim a
-        name, not only one service or the active profiles. No injected env."""
-        argv = ["compose", "-p", project]
+        name, not only one service or the active profiles. No injected env;
+        the declared secrets load only so their names resolve as they do for
+        the target itself."""
+        argv = ["compose", *compose_secret_args(self.spec["compose_config"], source["project_dir"]), "-p", project]
         for path in source["compose_files"]:
             argv += ["-f", path]
         raw = self._run(source, "", argv + ["--profile", "*", "config", "--format", "json"])
@@ -312,11 +389,13 @@ class ComposeRenderer:
                                  tag=self.tag, labels={RENDER_LABEL: "1"})
         # A Compose-built target (TASK-1474) has no image overlay to inject.
         env = renderer_env(self.spec["compose_config"], image_ref, source["project_dir"])
+        secrets = validate_compose_secrets(self.spec["compose_config"])
         try:
             # ``env -i``: Docker ``Env`` would only add to the image's own (HOME=/root).
             status, raw = sealed.run(entrypoint=["env", "-i", *env, "docker"], cmd=argv, env=[],
                                      directory=source["project_dir"], max_bytes=MAX_RENDER_BYTES,
-                                     empty_dirs=(RENDER_DOCKER_CONFIG,))
+                                     empty_dirs=(RENDER_DOCKER_CONFIG,),
+                                     ro_volumes=((COMPOSE_SECRETS_VOLUME, COMPOSE_SECRETS_DIR),) if secrets else ())
         except SealedRunError as exc:
             raise ComposeError(f"renderer_{exc.kind}") from None
         stdout, stderr = demux_streams(raw)

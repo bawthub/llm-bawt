@@ -54,13 +54,18 @@ def demux_streams(raw: bytes) -> tuple[bytes, bytes]:
 
 
 def sealed_body(image: str, *, entrypoint: list[str], cmd: list[str], env: list[str], directory: str,
-                labels: dict, role: str, tmpfs: bool = False, empty_dirs: tuple = ()) -> dict:
+                labels: dict, role: str, tmpfs: bool = False, empty_dirs: tuple = (),
+                ro_volumes: tuple = ()) -> dict:
     """Create body of the hardened container. ``labels`` adds the caller's own
     marker; ``role`` names it as the Compose service it pretends to be.
     ``empty_dirs`` are extra small ``noexec`` tmpfs mounts that start empty, so
-    nothing the image or the project ships can appear there (TASK-1476)."""
+    nothing the image or the project ships can appear there (TASK-1476).
+    ``ro_volumes`` are ``(volume name, container path)`` pairs mounted
+    read-only; callers pass code constants only (TASK-2386)."""
     host = {
-        "NetworkMode": "none", "Binds": [f"{directory}:{directory}:ro"], "ReadonlyRootfs": True,
+        "NetworkMode": "none",
+        "Binds": [f"{directory}:{directory}:ro", *(f"{name}:{path}:ro" for name, path in ro_volumes)],
+        "ReadonlyRootfs": True,
         "CapDrop": ["ALL"], "SecurityOpt": ["no-new-privileges:true"], "LogConfig": {"Type": "none", "Config": {}},
         "RestartPolicy": {"Name": "no"}, "AutoRemove": False, "Memory": 256 * 1024 * 1024, "PidsLimit": 64,
         "Privileged": False,
@@ -117,16 +122,18 @@ class SealedContainer:
         except Exception:  # noqa: BLE001 - the outcome stands; a leftover is labelled
             pass
 
-    def _body(self, *, entrypoint, cmd, env, directory, tmpfs, empty_dirs=()) -> dict:
+    def _body(self, *, entrypoint, cmd, env, directory, tmpfs, empty_dirs=(), ro_volumes=()) -> dict:
         return sealed_body(self.image, entrypoint=entrypoint, cmd=cmd, env=env, directory=directory,
-                           labels=self.labels, role=self.role, tmpfs=tmpfs, empty_dirs=empty_dirs)
+                           labels=self.labels, role=self.role, tmpfs=tmpfs, empty_dirs=empty_dirs,
+                           ro_volumes=ro_volumes)
 
     # ── one-shot: attach, start, wait ───────────────────────────────────
     def run(self, *, entrypoint: list[str], cmd: list[str], env: list[str], directory: str,
-            max_bytes: int, empty_dirs: tuple = ()) -> tuple[int | None, bytes]:
+            max_bytes: int, empty_dirs: tuple = (), ro_volumes: tuple = ()) -> tuple[int | None, bytes]:
         """``(exit status, raw multiplexed output)``; the output is never longer than ``max_bytes``."""
         container_id = self._create(self._body(entrypoint=entrypoint, cmd=cmd, env=env,
-                                               directory=directory, tmpfs=False, empty_dirs=empty_dirs))
+                                               directory=directory, tmpfs=False, empty_dirs=empty_dirs,
+                                               ro_volumes=ro_volumes))
         try:
             try:
                 stream = self.api.attach_stream(container_id)

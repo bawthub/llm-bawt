@@ -35,7 +35,8 @@ from urllib.parse import urlencode
 if __package__:
     from .compose_config import (BUILT_PROFILE, GPU_BUILT_PROFILE, ComposeError, built_image_tag, evaluate,
                                 gpu_preflight, gpu_verify, port_list)
-    from .compose_render import OPS_JOB_LABEL, SAFE_PATH, label_files_valid, validate_interpolation_env
+    from .compose_render import (OPS_JOB_LABEL, SAFE_PATH, label_files_valid, validate_compose_secrets,
+                                 validate_interpolation_env)
     from .config_reconcile import (CONTAINER_NAME_PATTERN, ConfigReconciler, check_compose_identity,
                                    current_config_hash, valid_hashes, validate_renderer_image,
                                    validate_target_fields)
@@ -46,7 +47,8 @@ if __package__:
 else:  # standalone immutable worker
     from compose_config import (BUILT_PROFILE, GPU_BUILT_PROFILE, ComposeError, built_image_tag, evaluate,
                                 gpu_preflight, gpu_verify, port_list)
-    from compose_render import OPS_JOB_LABEL, SAFE_PATH, label_files_valid, validate_interpolation_env
+    from compose_render import (OPS_JOB_LABEL, SAFE_PATH, label_files_valid, validate_compose_secrets,
+                                validate_interpolation_env)
     from config_reconcile import (CONTAINER_NAME_PATTERN, ConfigReconciler, check_compose_identity,
                                   current_config_hash, valid_hashes, validate_renderer_image,
                                   validate_target_fields)
@@ -95,10 +97,13 @@ def validate_label_compose_config(spec: dict) -> None:
     """No compose_files (the target's labels name them) and no image_variable;
     only the declared ``interpolation_env`` is interpolated (TASK-1476)."""
     config = spec["compose_config"]
-    if not isinstance(config, dict) or not {"renderer_image"} <= set(config) <= {"renderer_image", "interpolation_env"}:
-        raise ValueError("app compose_config requires exactly renderer_image (and optional interpolation_env)")
+    allowed = {"renderer_image", "interpolation_env", "compose_secrets"}
+    if not isinstance(config, dict) or not {"renderer_image"} <= set(config) <= allowed:
+        raise ValueError("app compose_config requires exactly renderer_image"
+                         " (and optional interpolation_env, compose_secrets)")
     validate_renderer_image(config)
     validate_interpolation_env(config)
+    validate_compose_secrets(config)
 
 
 def uses_process_profile(desired: dict) -> bool:
