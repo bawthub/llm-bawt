@@ -97,9 +97,9 @@ def test_generation_only_changes_crawl4ai_preserves_root_and_ciphertext(monkeypa
     assert any(call.get("require_persisted") for call in calls)
 
 
-@pytest.mark.parametrize("scope,value", [("bot", 1), ("global", True), ("global", -1),
-                                         ("global", "1"), ("global", 2**31)])
-def test_settings_api_validates_before_any_write(monkeypatch, scope, value):
+@pytest.mark.parametrize("scope", ["global", "bot"])
+def test_settings_api_refuses_generation_key(monkeypatch, scope):
+    """TASK-2369: the unauthenticated settings API cannot move or roll back the counter."""
     from llm_bawt.service.routes import settings
     from llm_bawt.service.schemas import RuntimeSettingUpsertRequest
 
@@ -109,35 +109,36 @@ def test_settings_api_validates_before_any_write(monkeypatch, scope, value):
         engine=object(), set_value=lambda *args: writes.append(args)))
     with pytest.raises(HTTPException) as error:
         settings.upsert_runtime_setting(RuntimeSettingUpsertRequest(
-            scope_type=scope, scope_id="fixture", key=tokens.GENERATION_KEY, value=value))
-    assert error.value.status_code == 400
+            scope_type=scope, scope_id="fixture", key=tokens.GENERATION_KEY, value=1))
+    assert error.value.status_code == 403
     assert writes == []
 
 
-def test_settings_valid_global_and_whole_batch_validation(monkeypatch):
-    from llm_bawt.service.routes import settings
-    from llm_bawt.service.schemas import (
-        RuntimeSettingBatchItem,
-        RuntimeSettingBatchUpsertRequest,
-        RuntimeSettingUpsertRequest,
-    )
+def test_advance_moves_forward_from_exact_current_only(monkeypatch):
+    state = {"generation": 2, "writes": []}
+    monkeypatch.setattr(tokens, "current_generation", lambda: state["generation"])
 
-    writes = []
-    monkeypatch.setattr(settings, "get_service", lambda: SimpleNamespace(config=None, _default_bot="fixture"))
-    monkeypatch.setattr(settings, "get_runtime_settings_store", lambda _: SimpleNamespace(
-        engine=object(), set_value=lambda *args: writes.append(args)))
-    monkeypatch.setattr(settings, "WorkingMemoryPolicy", lambda _: SimpleNamespace(validate_setting_write=lambda *a, **k: None))
-    monkeypatch.setattr(settings, "_invalidate_all_instance_cache", lambda _: None)
-    settings.upsert_runtime_setting(RuntimeSettingUpsertRequest(
-        scope_type="global", key=tokens.GENERATION_KEY, value=1))
-    assert writes == [("global", "*", tokens.GENERATION_KEY, 1)]
-    writes.clear()
-    with pytest.raises(HTTPException):
-        settings.batch_upsert_runtime_settings(RuntimeSettingBatchUpsertRequest(items=[
-            RuntimeSettingBatchItem(scope_type="global", key="ordinary", value=1),
-            RuntimeSettingBatchItem(scope_type="global", key=tokens.GENERATION_KEY, value="bad"),
-        ]))
-    assert writes == []
+    class Store:
+        engine = object()
+
+        def __init__(self, _config):
+            pass
+
+        def set_value(self, scope, sid, key, value):
+            state["writes"].append((scope, sid, key, value))
+            state["generation"] = value
+
+    from llm_bawt import runtime_settings
+    from llm_bawt.utils import config
+
+    monkeypatch.setattr(runtime_settings, "RuntimeSettingsStore", Store)
+    monkeypatch.setattr(config, "Config", lambda: object())
+    assert rekey.advance(1, 3) == {"ok": False, "generation_matches": False}  # stale previous
+    assert rekey.advance(2, 2) == {"ok": False, "generation_matches": False}  # reuse
+    assert rekey.advance(2, 1) == {"ok": False, "generation_matches": False}  # rollback
+    assert state["writes"] == []
+    assert rekey.advance(2, 3) == {"ok": True, "generation_matches": True}
+    assert state["writes"] == [("global", "*", tokens.GENERATION_KEY, 3)]
 
 
 def test_invalid_generation_startup_export_withdraws_not_legacy(generation_db, tmp_path):

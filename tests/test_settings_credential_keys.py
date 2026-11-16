@@ -154,3 +154,35 @@ def test_every_credential_store_key_is_reserved():
         key = object.__new__(store_cls)._key("example")
         assert providers_base.is_credential_setting_key(key), store_cls.__name__
         assert key.startswith(providers_base.CREDENTIAL_SETTING_PREFIXES), store_cls.__name__
+
+
+# --- TASK-2369: security controls -------------------------------------------
+PROTECTED_KEYS = [
+    "bridge_gate_enforced:broker",
+    "bridge_gate_enforced:git_credential",
+    "history_mutation_service_auth",
+    "workspace.bridge_url",
+    "google_home_probe",
+    "crawl4ai.token_generation",
+    " Bridge_Gate_Enforced:broker",
+    "HISTORY_MUTATION_SERVICE_AUTH",
+]
+
+
+@pytest.mark.parametrize("key", PROTECTED_KEYS)
+def test_security_keys_refused_on_put_delete_and_batch(store, key):
+    store.set_value("global", "*", "bridge_gate_enforced:broker", True)
+    for call in (
+        lambda: settings_routes.upsert_runtime_setting(
+            RuntimeSettingUpsertRequest(scope_type="global", key=key, value=False)),
+        lambda: settings_routes.delete_runtime_setting(scope_type="global", key=key, scope_id=None),
+        lambda: settings_routes.batch_upsert_runtime_settings(RuntimeSettingBatchUpsertRequest(items=[
+            RuntimeSettingBatchItem(scope_type="global", key="ordinary_setting", value=2),
+            RuntimeSettingBatchItem(scope_type="bot", scope_id="examplebot", key=key, value=False),
+        ])),
+    ):
+        with pytest.raises(HTTPException) as raised:
+            call()
+        assert raised.value.status_code == 403
+    assert _stored(store, "bridge_gate_enforced:broker") is True
+    assert _stored(store, "ordinary_setting") == 1

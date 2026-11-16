@@ -1,11 +1,12 @@
 """History summarization orchestration and summary-management routes."""
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 
 from ...memory.summarization_limits import resolve_summarization_limits
 from ..dependencies import get_service
 from ..logging import get_service_logger
 from ..http_errors import internal_error
+from .service_auth import require_mutation_service_token
 from ..schemas import (
     DeleteSummaryResponse,
     ListSummariesResponse,
@@ -17,6 +18,8 @@ from ..schemas import (
 
 management_router = APIRouter()
 delete_router = APIRouter()
+# Same switch as history/memory mutations (TASK-2369).
+_MUTATION = [Depends(require_mutation_service_token)]
 log = get_service_logger(__name__)
 
 
@@ -373,7 +376,8 @@ def preview_summarizable_sessions(
     except Exception as e:
         raise internal_error(e, "Failed to preview summarizable sessions") from e
 
-@management_router.post("/v1/history/summarize", response_model=SummarizeResponse, tags=["History"])
+@management_router.post("/v1/history/summarize", response_model=SummarizeResponse, tags=["History"],
+                        dependencies=_MUTATION)
 def summarize_history(
     bot_id: str = Query(None, description="Bot ID"),
     use_heuristic: bool = Query(False, description="Fall back to heuristic if LLM fails"),
@@ -425,7 +429,8 @@ def summarize_history(
         raise internal_error(e, "Failed to summarize history") from e
 
 
-@management_router.post("/v1/history/summarize/rebuild", response_model=SummarizeResponse, tags=["History"])
+@management_router.post("/v1/history/summarize/rebuild", response_model=SummarizeResponse, tags=["History"],
+                        dependencies=_MUTATION)
 def rebuild_history_summaries(
     bot_id: str = Query(None, description="Bot ID"),
     sessions: int = Query(5, ge=0, le=2000, description="How many recent eligible sessions to rebuild (0 = all eligible)"),
@@ -519,7 +524,8 @@ def list_summaries(
     except Exception as e:
         raise internal_error(e, "Failed to list summaries") from e
 
-@delete_router.delete("/v1/history/summary/{summary_id}", response_model=DeleteSummaryResponse, tags=["History"])
+@delete_router.delete("/v1/history/summary/{summary_id}", response_model=DeleteSummaryResponse, tags=["History"],
+                      dependencies=_MUTATION)
 def delete_summary(
     summary_id: str,
     bot_id: str = Query(None, description="Bot ID"),

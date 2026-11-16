@@ -192,6 +192,7 @@ def test_an_unavailable_store_is_unknown_not_connected(monkeypatch):
 
 
 def _broker_get(monkeypatch, provider_id: str):
+    monkeypatch.setenv("BRIDGE_GATE_DEFAULT_ENFORCED", "0")  # route test, gate opted out (TASK-2369)
     adapter = _adapter(_ADAPTER_CLASSES[provider_id])
     monkeypatch.delenv("BRIDGE_CLAUDE_TOKEN_SECRET", raising=False)
     monkeypatch.setattr(provider_routes, "_adapter_or_404", lambda _id: adapter)

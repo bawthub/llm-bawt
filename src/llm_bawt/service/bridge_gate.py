@@ -28,9 +28,9 @@ Every request is classified as ``derived``, ``legacy``, ``missing`` or
 
 Enforcement is the global runtime setting ``bridge_gate_enforced:<gate>``
 (bool), read through a short cache so flipping it needs no restart. With no
-setting row the default reproduces today's behaviour: enforced when the
-legacy env secret is set (or bootstrap marked a fresh tenant with
-``BRIDGE_GATE_DEFAULT_ENFORCED=1``), open otherwise. Counts of each class feed
+setting row the gate is enforced; a tenant whose bridges cannot send a token
+opts out explicitly with ``BRIDGE_GATE_DEFAULT_ENFORCED=0``. Unreadable
+settings use that same default (TASK-2369: fail closed). Counts of each class feed
 ``/v1/health/checks``; token values are never logged or reported.
 """
 
@@ -185,18 +185,19 @@ class BridgeGates:
         try:
             values: Mapping[str, Any] | None = self._settings()
             failing = False
-        except Exception as error:  # noqa: BLE001 - fall back to the default rule
+        except Exception as error:  # noqa: BLE001 - fail closed
             values, failing = None, True
             if not self._settings_failing:
-                logger.warning("Bridge gate settings unreadable (%s); using the default rule",
+                logger.warning("Bridge gate settings unreadable (%s); enforcing",
                                type(error).__name__)
         with self._lock:
             self._cached, self._cached_at, self._settings_failing = values, now, failing
         return values
 
     def default_enforced(self, gate: Gate) -> bool:
-        flag = (self._environ.get(DEFAULT_ENFORCED_ENV) or "").strip() == "1"
-        return flag or self._legacy(gate) is not None
+        """Enforced unless the tenant opts out; a legacy secret always enforces."""
+        opted_out = (self._environ.get(DEFAULT_ENFORCED_ENV) or "").strip() == "0"
+        return not opted_out or self._legacy(gate) is not None
 
     def enforced(self, gate: Gate) -> bool:
         if gate.always_enforced:
@@ -381,7 +382,7 @@ class _SettingsSource:
     """The runtime-settings store, attached by app startup (:func:`use_store`).
 
     Until then (or with no database) reads raise, and the gates fall back to
-    the default rule, which is never weaker than before TASK-1477.
+    the default rule: enforced unless the tenant explicitly opted out.
     """
 
     def __init__(self) -> None:

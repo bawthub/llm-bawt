@@ -183,6 +183,7 @@ def test_org_scope_rejected_without_a_balance_read_or_persist(offline, monkeypat
 
 
 def test_connection_http_route_and_inference_broker_separation(offline, monkeypatch):
+    monkeypatch.setenv("BRIDGE_GATE_DEFAULT_ENFORCED", "0")  # route test, gate opted out (TASK-2369)
     from tests.stored_provider_keys import stub_stored_keys
 
     mock_connect(monkeypatch)

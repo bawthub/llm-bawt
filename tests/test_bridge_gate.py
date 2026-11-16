@@ -62,6 +62,9 @@ def make(environ=None, settings=None, *, derive=None, clock=None):
                        derive=derive or DERIVED.__getitem__, clock=clock or Clock())
 
 
+OPT_OUT = {DEFAULT_ENFORCED_ENV: "0"}  # a network-only tenant's explicit open gate
+
+
 def legacy_env(*gates):
     return {gate.legacy_env: LEGACY[gate] for gate in gates if gate.legacy_env}
 
@@ -112,16 +115,23 @@ def test_underivable_root_means_no_derived_token_not_an_error():
 
 
 # --- default rule ---------------------------------------------------------
-def test_network_only_default_allows_missing_refuses_bad():
+def test_default_enforces_without_a_setting_row():
     gates = make()
+    assert refused(gates, BROKER, None)
+    assert refused(gates, GIT_CREDENTIAL, None)
+    assert not refused(gates, BROKER, DERIVED[BROKER.label])
+
+
+def test_network_only_opt_out_allows_missing_refuses_bad():
+    gates = make(OPT_OUT)
     assert not refused(gates, BROKER, None)
     assert not refused(gates, GIT_CREDENTIAL, None)
     assert refused(gates, BROKER, "wrong")
     assert not refused(gates, BROKER, DERIVED[BROKER.label])
 
 
-def test_legacy_default_enforces_like_today():
-    gates = make(legacy_env(BROKER))
+def test_legacy_secret_enforces_despite_opt_out():
+    gates = make({**legacy_env(BROKER), DEFAULT_ENFORCED_ENV: "0"})
     assert refused(gates, BROKER, None)
     assert not refused(gates, BROKER, LEGACY[BROKER])
     assert not refused(gates, BROKER, DERIVED[BROKER.label])
@@ -159,8 +169,9 @@ def test_non_bool_setting_falls_back_to_default():
     assert refused(gates, BROKER, None)
 
 
-def test_unreadable_settings_fall_back_to_default():
-    assert not refused(make(settings=Settings(fail=True)), BROKER, None)
+def test_unreadable_settings_fail_closed():
+    assert refused(make(settings=Settings(fail=True)), BROKER, None)
+    assert not refused(make(OPT_OUT, Settings(fail=True)), BROKER, None)
     assert refused(make(legacy_env(BROKER), Settings(fail=True)), BROKER, None)
 
 
@@ -185,7 +196,7 @@ def _row(gates, gate):
 
 def test_health_states():
     clock = Clock()
-    gates = make(clock=clock)
+    gates = make(OPT_OUT, clock=clock)
     assert gates.state(BROKER) is State.IDLE
     gates.check(BROKER, None)
     assert gates.state(BROKER) is State.OPEN_UNAUTHENTICATED
@@ -207,7 +218,7 @@ def test_mixed_traffic_does_not_recommend_enforcing():
     # TASK-1670: a few derived requests amid many token-less ones must not
     # recommend enforcement, which would 401 every token-less bridge.
     clock = Clock()
-    gates = make(clock=clock)
+    gates = make(OPT_OUT, clock=clock)
     for _ in range(3):
         gates.check(BROKER, None)
     gates.check(BROKER, DERIVED[BROKER.label])
@@ -413,10 +424,10 @@ def test_generic_token_broker_never_serves_the_vault_password(monkeypatch):
 
 
 def test_present_empty_header_is_refused_on_an_open_gate(monkeypatch):
-    """(N) default: an absent header passes, an empty one is BAD (401)."""
+    """Opted-out gate: an absent header passes, an empty one is BAD (401)."""
     from llm_bawt.service.routes import providers
 
-    gates = make({})
+    gates = make(OPT_OUT)
     monkeypatch.setattr(bridge_gate, "_GATES", gates)
     monkeypatch.setattr(providers, "get_service", lambda: type("S", (), {"config": None})())
     monkeypatch.setattr(providers, "get_adapter", lambda _config, _id: None)

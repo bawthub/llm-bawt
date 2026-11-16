@@ -13,7 +13,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
 from .. import bridge_gate
-from ..dependencies import get_runtime_settings_store, get_service
+from ..dependencies import get_service
 
 logger = logging.getLogger(__name__)
 
@@ -21,10 +21,9 @@ router = APIRouter()
 
 
 def _bridge_url() -> str:
-    config = get_service().config
-    store = get_runtime_settings_store(config)
-    settings = store.get_scope_settings("global", "*")
-    url = settings.get("workspace.bridge_url", getattr(config, "WORKSPACE_BRIDGE_URL", ""))
+    # Env/config only (TASK-2369): this URL receives the broker token, so a
+    # runtime setting would let a settings-API caller redirect it.
+    url = getattr(get_service().config, "WORKSPACE_BRIDGE_URL", "")
     if not isinstance(url, str) or not url.strip():
         raise WorkspaceError(503, "Workspace bridge is not configured.", "bridge_unavailable")
     url = url.strip().rstrip("/")

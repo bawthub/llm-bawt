@@ -99,6 +99,7 @@ def test_registry_exposes_all_raw_api_key_adapters(monkeypatch) -> None:
 
 
 def test_api_key_broker_returns_stored_key(monkeypatch) -> None:
+    monkeypatch.setenv("BRIDGE_GATE_DEFAULT_ENFORCED", "0")  # route test, gate opted out (TASK-2369)
     record = ConnectionRecord(
         provider="dummy-api",
         status="connected",
@@ -136,6 +137,7 @@ def test_admin_key_is_not_a_model_key_and_inference_probe_explains_slot(monkeypa
 
 
 def test_admin_key_cannot_be_read_from_inference_token_broker(monkeypatch) -> None:
+    monkeypatch.setenv("BRIDGE_GATE_DEFAULT_ENFORCED", "0")  # route test, gate opted out (TASK-2369)
     admin = object.__new__(AnthropicAdminAdapter)
     admin.store = FakeStore(ConnectionRecord(
         provider="anthropic-admin", status="connected", secret={"admin_key": "sk-ant-admin01-report"}))

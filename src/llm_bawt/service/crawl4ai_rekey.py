@@ -1,6 +1,9 @@
-"""Explicit Crawl4AI export/probe boundary; no settings writes or service actions.
+"""Explicit Crawl4AI advance/export/probe boundary; no service actions.
 
-Run only in the app process environment after an authorized generation update:
+Run only in the app process environment, as an authorized operation. The
+public settings API refuses the generation key (TASK-2369), so the counter
+moves only here, forward only:
+``python -m llm_bawt.service.crawl4ai_rekey advance <previous> <next>``
 ``python -m llm_bawt.service.crawl4ai_rekey export <expected-generation>``
 ``python -m llm_bawt.service.crawl4ai_rekey probe <previous> <expected>``
 Arguments are NONSECRET counters. Credentials stay in memory/existing exports;
@@ -19,6 +22,23 @@ from pathlib import Path
 import httpx
 
 from . import crawl4ai_token_export as tokens
+
+
+def advance(previous: int, new: int) -> dict[str, bool]:
+    """Move the generation forward from exactly ``previous``; never reuse a counter."""
+    previous = tokens.validate_generation(previous)
+    new = tokens.validate_generation(new)
+    if new <= previous or tokens.current_generation() != previous:
+        return {"ok": False, "generation_matches": False}
+    from llm_bawt.runtime_settings import RuntimeSettingsStore  # noqa: PLC0415
+    from llm_bawt.utils.config import Config  # noqa: PLC0415
+
+    store = RuntimeSettingsStore(Config())
+    if store.engine is None:
+        return {"ok": False, "generation_matches": False}
+    store.set_value("global", "*", tokens.GENERATION_KEY, new)
+    matches = tokens.current_generation() == new
+    return {"ok": matches, "generation_matches": matches}
 
 
 def export(expected: int) -> dict[str, bool]:
@@ -79,7 +99,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         with open(os.devnull, "w") as sink, contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
             try:
-                if len(args) == 2 and args[0] == "export":
+                if len(args) == 3 and args[0] == "advance":
+                    result = advance(int(args[1]), int(args[2]))
+                elif len(args) == 2 and args[0] == "export":
                     result = export(int(args[1]))
                 elif len(args) == 3 and args[0] == "probe":
                     result = probe(int(args[1]), int(args[2]))

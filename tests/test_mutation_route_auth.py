@@ -20,6 +20,13 @@ MUTATIONS = [
     ("POST", "/v1/memory/forget?bot_id=b"),
     ("POST", "/v1/memory/restore?bot_id=b"),
 ]
+# TASK-2369: summary mutations share the switch (refusal only; their handlers
+# need more service than this fixture stubs).
+SUMMARY_MUTATIONS = [
+    ("DELETE", "/v1/history/summary/abcdef12?bot_id=b"),
+    ("POST", "/v1/history/summarize?bot_id=b"),
+    ("POST", "/v1/history/summarize/rebuild?bot_id=b"),
+]
 
 
 class _Source:
@@ -52,7 +59,7 @@ def app(monkeypatch):
     dependencies.set_service(None)
 
 
-@pytest.mark.parametrize(("method", "path"), MUTATIONS)
+@pytest.mark.parametrize(("method", "path"), MUTATIONS + SUMMARY_MUTATIONS)
 def test_mutation_without_bearer_is_refused(app, method, path):
     http, svc, _ = app
     body = {"message_id": "abcdef12"} if path.startswith("/v1/memory/forget") else None

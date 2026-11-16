@@ -82,12 +82,38 @@ def _normalize_scope(scope_type: str, scope_id: str | None, default_bot: str) ->
 
 
 def _refuse_credential_key(key: str) -> None:
-    """Credential rows are written only through the provider/integration APIs (TASK-1520)."""
+    """Refuse credential and security-control keys on the public settings API.
+
+    Credential rows are written only through the provider/integration APIs
+    (TASK-1520). Security controls (TASK-2369) would let an unauthenticated
+    caller switch off the protection guarding this same API, so they change
+    only through the operator's database access or env.
+    """
     if is_credential_setting_key(key):
         raise HTTPException(
             status_code=403,
             detail="Credential settings are managed through the provider and integration APIs",
         )
+    if is_protected_setting_key(key):
+        raise HTTPException(
+            status_code=403,
+            detail="Security settings cannot be changed through the settings API",
+        )
+
+
+def is_protected_setting_key(key: str) -> bool:
+    """Security-control keys the settings API never writes or deletes (TASK-2369)."""
+    from ..bridge_gate import SETTING_PREFIX  # noqa: PLC0415
+    from ..crawl4ai_token_export import GENERATION_KEY  # noqa: PLC0415
+    from .service_auth import MUTATION_AUTH_SETTING  # noqa: PLC0415
+
+    key = key.strip().lower()
+    return key.startswith(SETTING_PREFIX) or key in {
+        MUTATION_AUTH_SETTING,
+        GENERATION_KEY,
+        "workspace.bridge_url",
+        "google_home_probe",
+    }
 
 
 def _refuse_setting_identity_length(scope_id: str, key: str) -> None:
@@ -114,15 +140,6 @@ def _validate_setting_writes(engine, writes: list[tuple[str, str, str, object]],
     for scope_type, scope_id, key, value in writes:
         _refuse_setting_identity_length(scope_id, key)
         _refuse_credential_key(key)
-        from ..crawl4ai_token_export import GENERATION_KEY, validate_generation  # noqa: PLC0415
-
-        if key == GENERATION_KEY:
-            if scope_type != "global":
-                raise HTTPException(status_code=400, detail="Crawl4AI generation is global-only")
-            try:
-                validate_generation(value)
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from None
     policy = WorkingMemoryPolicy(engine)
     for scope_type, scope_id, key, value in writes:
         if key in RETIRED_BALANCE_SETTINGS:

@@ -259,7 +259,7 @@ class Config(RuntimeTunables, BaseSettings):
     )
     WORKSPACE_BRIDGE_URL: str = Field(
         default="",
-        description="Internal workspace bridge HTTP base URL; global DB workspace.bridge_url takes precedence.",
+        description="Internal workspace bridge HTTP base URL (env only; it receives the broker token).",
     )
 
     # --- Ops health (TASK-1171) --- #

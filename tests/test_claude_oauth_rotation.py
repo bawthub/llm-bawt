@@ -68,6 +68,7 @@ def test_legacy_force_remains_supported(owner):
 
 
 def test_broker_route_forwards_validated_digest(owner, monkeypatch):
+    monkeypatch.setenv("BRIDGE_GATE_DEFAULT_ENFORCED", "0")  # route test, gate opted out (TASK-2369)
     monkeypatch.delenv("BRIDGE_CLAUDE_TOKEN_SECRET", raising=False)
     app = FastAPI()
     app.include_router(router)

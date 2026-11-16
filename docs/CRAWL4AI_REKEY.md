@@ -1,18 +1,20 @@
 # Scoped Crawl4AI bearer rekey
 
 This is a **source-only procedure**, not authorization or a live rotation receipt.
-Use the existing settings API, exporter and named-service operations. Do not
+Use the rekey command, exporter and named-service operations. Do not
 rotate the provider encryption root, provider OAuth, unrelated derived labels,
 bridge gate tokens, or manually edit shared bearer files. No new secret store,
 platform, hot-reload loop, generic executor or catalog action is needed.
 
 ## Mechanism and compatibility
 
-`crawl4ai.token_generation` is a **nonsecret global integer** in 0..2147483647,
-written through `PUT /v1/settings` (or its existing batch route). For example:
+`crawl4ai.token_generation` is a **nonsecret global integer** in 0..2147483647.
+The public settings API refuses to write or delete it, so an unauthenticated
+caller cannot roll it back. Advance it inside the app's environment, from the
+exact current counter to a larger one:
 
-```json
-{"scope_type":"global","key":"crawl4ai.token_generation","value":1}
+```
+python -m llm_bawt.service.crawl4ai_rekey advance <previous-generation> <next-generation>
 ```
 
 Read back this key alone through the existing filtered settings API. Record the

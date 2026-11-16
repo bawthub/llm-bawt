@@ -15,9 +15,6 @@ from llm_bawt.service.routes import workspace as routes
 def client(monkeypatch):
     config = SimpleNamespace(WORKSPACE_BRIDGE_URL="http://bridge.test:8681")
     monkeypatch.setattr(routes, "get_service", lambda: SimpleNamespace(config=config))
-    monkeypatch.setattr(routes, "get_runtime_settings_store", lambda _: SimpleNamespace(
-        get_scope_settings=lambda *_: {},
-    ))
     monkeypatch.setenv("BRIDGE_CLAUDE_TOKEN_SECRET", "fixture-only")
     app = FastAPI()
     app.include_router(routes.router)
@@ -125,18 +122,13 @@ def test_timeout_and_bad_success(client, monkeypatch):
     assert response.status_code == 503 and "secret" not in response.text
 
 
-def test_db_configuration_wins(client, monkeypatch):
-    monkeypatch.setattr(routes, "get_runtime_settings_store", lambda _: SimpleNamespace(
-        get_scope_settings=lambda *_: {"workspace.bridge_url": "http://codex.test:8682"},
-    ))
-    request = upstream(monkeypatch, httpx.Response(200, json={"entries": []}))
-    assert client.get("/v1/workspace").json() == {"entries": []}
-    assert request.call_args.args == ("GET", "http://codex.test:8682/workspace")
+def test_env_configuration_is_the_only_source(client):
+    # TASK-2369: a runtime-settings row can no longer redirect the broker token.
+    assert not hasattr(routes, "get_runtime_settings_store")
+    assert routes._bridge_url() == "http://bridge.test:8681"
 
 
 def test_bad_config_is_unavailable(client, monkeypatch):
-    monkeypatch.setattr(routes, "get_runtime_settings_store", lambda _: SimpleNamespace(
-        get_scope_settings=lambda *_: {"workspace.bridge_url": "http://user:secret@host"},
-    ))
+    monkeypatch.setattr(routes.get_service().config, "WORKSPACE_BRIDGE_URL", "http://user:secret@host")
     response = client.get("/v1/workspace")
     assert response.status_code == 503 and "secret" not in response.text
