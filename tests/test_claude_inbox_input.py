@@ -68,11 +68,20 @@ async def test_positive_receipt_requires_cli_evidence_and_prewrite_fence(state):
     receipt = await accept_inbox_input(client.run, **args)
     assert receipt.outcome == "accepted"
     assert receipt.state == state and receipt.proof is None
+    assert receipt.acceptance == ("queued" if state == "queued" else "started")
     assert (receipt.request_id, receipt.command_uuid) == ("run-1", BOT)
     [frame] = client.frames
     assert frame["uuid"] == BOT and frame["priority"] == "next"
     assert frame["message"]["content"] == args["framed_message"]
     client.interrupt.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_started_proof_survives_a_newer_teardown_state_in_receipt():
+    client, _, _, args = rig(states=("started", "refused"))
+    receipt = await accept_inbox_input(client.run, **args)
+    assert receipt.outcome == "accepted" and receipt.state == "refused"
+    assert receipt.acceptance == "started" and receipt.proof is None
 
 
 @pytest.mark.anyio

@@ -74,6 +74,7 @@ def rejection_merge(metadata: Mapping[str, Any], proof: str) -> dict[str, Any]:
     """The metadata merge that reopens generation ``k`` as proven not run."""
     generation = _generation(metadata)
     return {
+        **({"_inbox": None} if isinstance(metadata.get("_inbox"), dict) else {}),
         "steer_generation": generation + 1,
         STEER_REJECTED_PENDING: None,
         STEER_REJECTION: {"generation": generation, "proof": proof},
@@ -183,6 +184,27 @@ class SteerLifecycleFence:
                 attempt_count=GREATEST(attempt_count - 1, 0), last_error=:error,
                 metadata_json=metadata_json || CAST(:merge AS jsonb), updated_at=now()
             WHERE id=:id AND status='DELIVERED' AND delivery_mode='steer'
+            RETURNING *
+        """), {
+            "id": row["id"],
+            "error": rejection_error(proof, _generation(metadata)),
+            "merge": json.dumps(rejection_merge(metadata, proof)),
+        }).mappings().first()
+        DeliveryTransitionEvents.stage(conn, reopened, reason_code="steer_rejected")
+        return DeliveryRecord.from_mapping(reopened) if reopened else None
+
+    @staticmethod
+    def reopen_claimed(conn: Connection, row: Mapping[str, Any], proof: str) -> DeliveryRecord | None:
+        """Reopen a row whose caller validated non-execution under its row lock."""
+        metadata = _metadata(row)
+        reopened = conn.execute(sa_text("""
+            UPDATE inter_bot_deliveries SET status='QUEUED',
+                delivery_mode='steer_rejected', transport_accepted_at=NULL,
+                claim_token=NULL, claim_owner=NULL, lease_expires_at=NULL,
+                available_at=now(), next_retry_at=now(),
+                attempt_count=GREATEST(attempt_count - 1, 0), last_error=:error,
+                metadata_json=metadata_json || CAST(:merge AS jsonb), updated_at=now()
+            WHERE id=:id AND status='STEERING' AND delivery_mode='steer'
             RETURNING *
         """), {
             "id": row["id"],

@@ -36,23 +36,28 @@ class InboxInputReceipt:
     state: str | None = None
     proof: str | None = None
     detail: str | None = None
+    acceptance: Literal["queued", "started"] | None = None
 
 
 def _receipt(run: ClaudeActiveRun, command_uuid: str, *, detail: str | None = None) -> InboxInputReceipt:
     outcome: Literal["accepted", "rejected", "uncertain"]
     proof: str | None
     state = run._settled.get(command_uuid) or run._commands.get(command_uuid)
+    acceptance: Literal["queued", "started"] | None = None
     if command_uuid in run._started_ever or command_uuid in run._replayed:
         outcome, proof = "accepted", None
+        acceptance = "started"
     elif state in LIFECYCLE_REJECTED:
         outcome = "rejected"
         proof = PROOF_SWEEP_RECEIPT if command_uuid in run._settled else PROOF_CLI_TERMINAL
     elif state == "queued" or state in LIFECYCLE_STARTED:
         outcome, proof = "accepted", None
+        acceptance = "queued" if state == "queued" else "started"
     else:
         outcome, proof = "uncertain", None
     return InboxInputReceipt(
         outcome, run.request_id, command_uuid, state=state, proof=proof, detail=detail,
+        acceptance=acceptance,
     )
 
 

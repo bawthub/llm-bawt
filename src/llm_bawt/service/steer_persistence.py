@@ -33,12 +33,15 @@ async def persist_accepted_input(
     persist_anchor,
     content_offset: int | None = None,
     attachment_refs: list[dict] | None = None,
+    resolve_offset: bool = True,
 ) -> bool:
     """Save/repair history for the fixed message ID, then publish best effort.
 
     The caller owns acceptance and claim-token validation. Returning True says
     only that history and any required anchor were saved, never that this
     function obtained SDK acceptance or acknowledged a durable delivery.
+    Inbox repair supplies its durable offset (including an explicit unknown)
+    with resolve_offset=False; it never samples a later run's text position.
     """
     persisted = False
     target = destination
@@ -52,7 +55,7 @@ async def persist_accepted_input(
             service, bot_id=target.bot_id, user_id=target.user_id,
             turn_id=target.turn_id, message_id=message_id,
         )
-        offset = await timeline.content_offset(subscriber, content_offset)
+        offset = await timeline.content_offset(subscriber, content_offset) if resolve_offset else content_offset
         await asyncio.to_thread(
             memory_client.add_message,
             "user", message, target.session_id, None, message_id,
