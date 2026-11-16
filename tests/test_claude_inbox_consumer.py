@@ -20,6 +20,8 @@ class API:
         self.accepted = False
         self.lifecycle_error = None
         self.recovery = None
+        self.release_error = None
+        self.release_retry = False
 
     async def __call__(self, path, body):
         self.calls.append((path, deepcopy(body)))
@@ -42,6 +44,10 @@ class API:
         if path == "/repair/claim":
             recovery, self.recovery = self.recovery, None
             return {"claim": recovery}
+        if path == "/release":
+            if self.release_error:
+                raise self.release_error
+            return {"released": not self.release_retry, "retry": self.release_retry}
         raise AssertionError(path)
 
 
@@ -93,6 +99,12 @@ async def test_owner_handoff_never_inputs_into_a_stale_active_client(when):
     assert await r.consumer.drain("target")
     assert r.client.frames == []
     assert not any(path == "/lifecycle" for path, _ in r.api.calls)
+    releases = [body for path, body in r.api.calls if path == "/release"]
+    assert len(releases) == (when == "prepare")
+    if releases:
+        preparation = next(body for path, body in r.api.calls if path == "/prepare")
+        assert releases[0]["invocation_id"] == preparation["invocation_id"]
+        assert not releases[0]["stop_requested"]
 
 
 @pytest.mark.anyio
@@ -127,6 +139,7 @@ async def test_no_input_replay_after_lost_durable_prepare_response():
     assert not await r.consumer.drain("target")
     assert r.client.frames == []
     assert sum(path == "/prepare" for path, _ in r.api.calls) == 1
+    assert not any(path == "/release" for path, _ in r.api.calls)
 
 
 @pytest.mark.anyio
@@ -192,3 +205,30 @@ def test_legacy_send_does_not_enable_inbox_and_only_explicit_one_does():
     assert SendRequest.from_fields(fields | {"inbox_next": "1"}).inbox_next
     explicit = SendRequest.from_fields(fields | {"session_key": "opaque-key", "user_id": "operator"})
     assert explicit.user_id == "operator"
+
+
+@pytest.mark.anyio
+async def test_lost_release_response_retries_only_original_proof():
+    r = rig()
+    r.api.before_prepare = lambda: r.queue.set_active_client("target:operator", object())
+    r.api.release_error = TimeoutError("lost release response")
+    with pytest.raises(TimeoutError, match="lost release"):
+        await r.consumer.drain("target")
+    r.api.release_error = None
+    assert not await r.consumer.drain("target")
+    attempts = [body for path, body in r.api.calls if path == "/release"]
+    assert len(attempts) == 2 and attempts[0] == attempts[1]
+    assert not r.inbox.releases and not r.client.frames
+    assert sum(path == "/prepare" for path, _ in r.api.calls) == 1
+
+
+@pytest.mark.anyio
+async def test_local_stop_is_captured_at_proof_and_waits_for_durable_release():
+    r = rig()
+    r.api.before_prepare = lambda: r.queue.tombstone("target:operator", r.client.run.request_id)
+    r.api.release_retry = True
+    assert await r.consumer.drain("target")
+    assert r.inbox.releases[0]["stop_requested"]
+    r.api.release_retry = False
+    assert not await r.consumer.drain("target")
+    assert not r.inbox.releases and not r.client.frames

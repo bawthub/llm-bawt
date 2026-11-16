@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
@@ -63,6 +64,7 @@ class BotInbox:
     runs: list[InboxRun] = field(default_factory=list)
     operations: dict[str, dict] = field(default_factory=dict)
     receipts: deque[dict] = field(default_factory=deque)
+    releases: deque[dict] = field(default_factory=deque)
     repairs: dict[str, dict] = field(default_factory=dict)
     wake: asyncio.Event = field(default_factory=asyncio.Event)
     task: asyncio.Task | None = None
@@ -133,6 +135,11 @@ class InboxConsumer:
             elif result.get("recorded") and receipt["state"] in {"refused", "discarded", "cancelled", "uncertain"}:
                 inbox.repairs.pop(receipt["delivery_id"], None)
             inbox.receipts.popleft()
+        while inbox.releases:
+            result = await self.api("/release", inbox.releases[0])
+            if result.get("retry"):
+                break
+            inbox.releases.popleft()
         for delivery_id, operation in list(inbox.repairs.items()):
             result = await self.api("/repair", {
                 "delivery_id": delivery_id, "claim_token": operation["claim_token"],
@@ -163,12 +170,14 @@ class InboxConsumer:
         command = evidence["command_uuid"]
         if command in inbox.operations:
             return False  # A logical operation is invoked at most once by this owner.
+        operation = {**operation, "invocation_id": str(uuid.uuid4())}
         inbox.operations[command] = operation
 
         async def prepare():
             result = await self.api("/prepare", {
                 "delivery_id": operation["delivery_id"], "claim_token": operation["claim_token"],
                 "binding": evidence["binding"],
+                "invocation_id": operation["invocation_id"],
             })
             return result.get("authorized") is True
 
@@ -176,11 +185,19 @@ class InboxConsumer:
             context.run, command_uuid=command, steer_rpc_id=operation["steer_rpc_id"],
             framed_message=operation["framed_message"], interrupt_item=operation["interrupt_item"],
             owns_run=lambda: self.owns(context), prepare_write=prepare,
+            invocation_id=operation["invocation_id"],
+            stop_requested=lambda: (
+                self.queue.is_stopping(context.session_key, context.run.request_id)
+                or self.queue.is_tombstoned(context.session_key, context.run.request_id)
+            ),
         )
-        # not_written is NOT a generic release: denied preparation may mean an
-        # earlier WRITING operation exists. Until invocation-proof release is
-        # implemented, leave it to the conservative durable phase fence.
-        if receipt.outcome != "not_written":
+        if receipt.outcome == "not_written" and receipt.invocation_id is not None:
+            inbox.releases.append({
+                "delivery_id": operation["delivery_id"], "claim_token": operation["claim_token"],
+                "evidence": evidence, "invocation_id": receipt.invocation_id,
+                "stop_requested": receipt.stop_requested,
+            })
+        elif receipt.outcome != "not_written":
             state = receipt.acceptance if receipt.outcome == "accepted" else (
                 receipt.state if receipt.outcome == "rejected" else "uncertain"
             )

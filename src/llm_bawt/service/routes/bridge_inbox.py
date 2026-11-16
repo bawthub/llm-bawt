@@ -5,6 +5,7 @@ import asyncio
 import logging
 from dataclasses import asdict
 from typing import Literal
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, ConfigDict, Field
@@ -52,6 +53,13 @@ class Operation(InboxRequest):
 
 class WriteOperation(Operation):
     binding: InboxRunBinding
+    invocation_id: UUID | None = None
+
+
+class ReleaseOperation(Operation):
+    evidence: InboxWriteProof
+    invocation_id: UUID
+    stop_requested: bool = False
 
 
 class Lifecycle(InboxRequest):
@@ -129,7 +137,35 @@ async def prepare(body: WriteOperation):
         prepare_inbox_write,
         _dispatcher().store, body.delivery_id, body.claim_token, body.binding,
         content_offset=offset, freeze_offset=True,
+        invocation_id=str(body.invocation_id) if body.invocation_id is not None else None,
     )}
+
+
+@router.post("/release")
+async def release(body: ReleaseOperation):
+    dispatcher = _dispatcher()
+    record = await asyncio.to_thread(
+        InboxSettlement(dispatcher.store).release_not_written,
+        body.delivery_id, body.claim_token, body.evidence, str(body.invocation_id),
+        stop_requested=body.stop_requested,
+    )
+    if record is not None:
+        dispatcher.announce_admitted(record)
+        return {"released": True, "retry": False}
+    # A locally observed Stop can beat its app-side durable audit/hold. Keep
+    # that exact proof pending, not a new write. Stale/settled receipts are done.
+    prior = await asyncio.to_thread(dispatcher.store.get, body.delivery_id)
+    marker = prior.metadata.get(INBOX) if prior is not None else None
+    retry = bool(
+        body.stop_requested and isinstance(marker, dict) and marker.get("phase") == "writing"
+        and prior.claim_token == body.claim_token
+        and marker.get("write_invocation") == str(body.invocation_id)
+        and marker.get("binding") == asdict(body.evidence.binding)
+        and marker.get("command_uuid") == body.evidence.command_uuid
+        and marker.get("generation") == body.evidence.generation
+        and marker.get("write_token") == body.evidence.write_token
+    )
+    return {"released": False, "retry": retry}
 
 
 @router.post("/repair/claim")

@@ -84,6 +84,7 @@ def claimed_metadata(binding: InboxRunBinding, row) -> dict[str, Any]:
 def prepare_inbox_write(
     store, delivery_id: str, claim_token: str, binding: InboxRunBinding,
     *, content_offset: int | None = None, freeze_offset: bool = False,
+    invocation_id: str | None = None,
 ) -> bool:
     """True exactly once per claim, before any possible input; network awaits are outside.
 
@@ -132,6 +133,8 @@ def prepare_inbox_write(
         if InboxRunBinding.read(conn, target=binding.bot_id, active=state.executing) != binding:
             return False
         marker = {**marker, "phase": "writing", "write_token": claim_token}
+        if invocation_id is not None:
+            marker["write_invocation"] = invocation_id
         if freeze_offset:
             marker["content_offset"] = content_offset
         conn.execute(text("""

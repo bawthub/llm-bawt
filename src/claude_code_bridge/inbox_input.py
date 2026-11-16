@@ -37,6 +37,8 @@ class InboxInputReceipt:
     proof: str | None = None
     detail: str | None = None
     acceptance: Literal["queued", "started"] | None = None
+    invocation_id: str | None = None
+    stop_requested: bool = False
 
 
 def _receipt(run: ClaudeActiveRun, command_uuid: str, *, detail: str | None = None) -> InboxInputReceipt:
@@ -80,6 +82,8 @@ async def accept_inbox_input(
     interrupt_item: str,
     owns_run: Callable[[], bool],
     prepare_write: Callable[[], Awaitable[bool]],
+    invocation_id: str | None = None,
+    stop_requested: Callable[[], bool] = lambda: False,
 ) -> InboxInputReceipt:
     """Attempt one noninterrupting input, with no automatic replay on uncertainty.
 
@@ -93,9 +97,17 @@ async def accept_inbox_input(
         raise ValueError("Inbox input requires canonical UUID and operation identity")
     if not framed_message.strip() or not interrupt_item.strip():
         raise ValueError("Inbox input requires app-rendered framing")
+    if invocation_id is not None and str(uuid.UUID(invocation_id)) != invocation_id:
+        raise ValueError("Inbox input requires canonical invocation UUID")
+
+    prepared = False
 
     def not_written(detail: str) -> InboxInputReceipt:
-        return InboxInputReceipt("not_written", run.request_id, command_uuid, detail=detail)
+        return InboxInputReceipt(
+            "not_written", run.request_id, command_uuid, detail=detail,
+            invocation_id=invocation_id if prepared else None,
+            stop_requested=bool(prepared and stop_requested()),
+        )
 
     def identity_matches() -> bool:
         held = run._held.get(command_uuid)
@@ -130,6 +142,7 @@ async def accept_inbox_input(
     # No run input lock is held across the durable preparation RPC.
     if await prepare_write() is not True:
         return not_written("claim_write_not_authorized")
+    prepared = True
     async with run._steer_lock:
         # Another invocation may have completed while preparation awaited.
         if command_uuid in run._commands:

@@ -56,6 +56,7 @@ def rig(**kwargs):
             and not queue.is_stopping("session", client.run.request_id)
         ),
         "prepare_write": prepare,
+        "invocation_id": "e08a77dc-101c-4ac5-b724-a37571b17fb2",
     }
     return client, queue, prepare, args
 
@@ -67,6 +68,7 @@ async def test_positive_receipt_requires_cli_evidence_and_prewrite_fence(state):
     client.on_input = lambda: prepare.assert_awaited_once()
     receipt = await accept_inbox_input(client.run, **args)
     assert receipt.outcome == "accepted"
+    assert receipt.invocation_id is None
     assert receipt.state == state and receipt.proof is None
     assert receipt.acceptance == ("queued" if state == "queued" else "started")
     assert (receipt.request_id, receipt.command_uuid) == ("run-1", BOT)
@@ -102,6 +104,7 @@ async def test_no_eligible_owner_never_prepares_or_writes(ending):
         queue.tombstone("session", client.run.request_id)
     receipt = await accept_inbox_input(client.run, **args)
     assert receipt.outcome == "not_written"
+    assert receipt.invocation_id is None
     assert client.frames == [] and not client.run.steering_attempted
     prepare.assert_not_awaited()
 
@@ -124,6 +127,7 @@ async def test_ownership_and_stop_rechecked_after_durable_preparation(change):
     prepare.side_effect = prepare_write
     receipt = await accept_inbox_input(client.run, **args)
     assert receipt.outcome == "not_written"
+    assert receipt.invocation_id == args["invocation_id"]
     assert client.frames == [] and not client.run.has_unstarted_command()
     prepare.assert_awaited_once()
 
@@ -134,6 +138,7 @@ async def test_stale_claim_or_lost_preparation_never_authorizes_input():
     prepare.return_value = False
     receipt = await accept_inbox_input(client.run, **args)
     assert receipt.outcome == "not_written"
+    assert receipt.invocation_id is None
     assert receipt.detail == "claim_write_not_authorized"
     assert client.frames == []
     prepare.side_effect = TimeoutError("lost WRITING response")
@@ -400,6 +405,33 @@ async def test_completed_run_can_return_old_acceptance_without_new_write():
     assert (await accept_inbox_input(client.run, **args)).outcome == "accepted"
     assert len(client.frames) == 1
     prepare.assert_awaited_once()
+
+
+@pytest.mark.anyio
+async def test_cancelled_preparation_never_mints_release_permission():
+    client, _, prepare, args = rig()
+    preparing = asyncio.Event()
+
+    async def blocked():
+        preparing.set()
+        await asyncio.Event().wait()
+
+    prepare.side_effect = blocked
+    task = asyncio.create_task(accept_inbox_input(client.run, **args))
+    await preparing.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not client.frames and BOT not in client.run._commands
+
+
+@pytest.mark.anyio
+async def test_failure_before_registration_mints_only_its_authorized_invocation():
+    client, _, _, args = rig()
+    client.run._write_next_locked = AsyncMock(side_effect=RuntimeError("pre-registration refusal"))
+    receipt = await accept_inbox_input(client.run, **args)
+    assert receipt.outcome == "not_written" and receipt.invocation_id == args["invocation_id"]
+    assert BOT not in client.run._commands and not client.frames
 
 
 @pytest.mark.anyio

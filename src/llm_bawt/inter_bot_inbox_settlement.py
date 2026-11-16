@@ -10,6 +10,7 @@ import json
 import uuid
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
+from datetime import datetime
 
 from sqlalchemy import text
 
@@ -56,6 +57,57 @@ class InboxHistoryRepair:
 class InboxSettlement:
     def __init__(self, store):
         self.store = store
+
+    def release_not_written(
+        self, delivery_id: str, claim_token: str, evidence: InboxWriteProof,
+        invocation_id: str, *, stop_requested: bool = False,
+    ) -> DeliveryRecord | None:
+        """Only the positively authorized invocation proves untouched input.
+
+        Neither preparation denial/loss nor missing process-local command state
+        is proof. The input boundary supplies this receipt only after its True
+        grant and a terminal return before any possible SDK write.
+        """
+        if self.store.engine is None or not claim_token or not invocation_id:
+            return None
+        with self.store.engine.begin() as conn:
+            row = SteerLifecycleFence(self.store)._locked_row(conn, delivery_id)
+            marker = inbox_marker(row) if row else None
+            if (not marker or marker.get("phase") != "writing"
+                    or row["claim_token"] != claim_token or not evidence.matches(row)
+                    or marker.get("write_invocation") != invocation_id
+                    or marker.get("acceptance") or row["transport_accepted_at"] is not None):
+                return None
+            durable_stop = self.store._explicit_stop_requested(conn, evidence.binding.turn_id)
+            if stop_requested and not durable_stop:
+                return None
+            if durable_stop:
+                from .runtime_setting_resolution import resolve_global_runtime_setting
+                from .service.turn_gates import live_gate_for_owner
+                from .service.user_stop_hold import HOLD_SETTING, hold_owner
+
+                # Stop audit alone suffices only when queue holds are disabled.
+                # A resumed/expired hold must not strand an offline receipt.
+                ttl = int(resolve_global_runtime_setting(self.store.config, HOLD_SETTING) or 0)
+                if ttl > 0 and live_gate_for_owner(
+                    conn, hold_owner(evidence.binding.bot_id), fresh=True,
+                ) is None:
+                    raw = conn.execute(text(
+                        "SELECT request_json FROM turn_logs WHERE id=:id"
+                    ), {"id": evidence.binding.turn_id}).scalar_one()
+                    try:
+                        stamp = datetime.fromisoformat(json.loads(raw)["abort_request"]["requested_at"])
+                    except (KeyError, TypeError, ValueError):
+                        return None
+                    if stamp.tzinfo is None or not conn.execute(text("""
+                        SELECT EXISTS (
+                            SELECT 1 FROM system_gates WHERE owner_id=:owner
+                              AND created_at <= :stamp AND expires_at > :stamp
+                              AND (released_at IS NULL OR released_at >= :stamp)
+                        )
+                    """), {"owner": hold_owner(evidence.binding.bot_id), "stamp": stamp}).scalar_one():
+                        return None
+            return SteerLifecycleFence.reopen_claimed(conn, row, "inbox_not_written")
 
     def note_lifecycle(
         self, delivery_id: str, evidence: InboxWriteProof, state: str, *,
