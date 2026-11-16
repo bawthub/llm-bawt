@@ -1107,4 +1107,10 @@ class ClaudeSendMixin(
                 getattr(self, "_proxy_egress_seq", {}).pop(request_id, None)
                 self._turn_phase_trackers.pop(request_id, None)
                 self._trigger_message_ids.pop(request_id, None)
-                await async_redis.xack(COMMANDS_STREAM, "claude-code-bridge", msg_id)
+                ack_context = getattr(req, "command_ack_context", None)
+                if ack_context is not None:
+                    # Transport disposition only. The outer terminal is still
+                    # owed, and PG inbox acceptance has its separate authority.
+                    await self._command_ack_owner.acknowledge(ack_context)
+                else:
+                    await async_redis.xack(COMMANDS_STREAM, "claude-code-bridge", msg_id)

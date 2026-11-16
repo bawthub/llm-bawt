@@ -84,6 +84,9 @@ class ClaudeSendAdmissionMixin:
         self._run_terminals[request_id] = terminal
         cancelled = False
         try:
+            ack_owner = getattr(self, "_command_ack_owner", None)
+            if ack_owner is not None:
+                request.command_ack_context = ack_owner.capture(fields, msg_id)
             scope = PreflightScope()
             try:
                 preflight = await prepare_parsed_send(

@@ -67,6 +67,11 @@ class FakeRedis:
     async def xack(self, *args):
         self.consumed.set()
 
+    async def xpending(self, *args):
+        # A blocked ACK scan must not delay fresh reads or readiness. Listener
+        # shutdown owns cancellation before this same connection is closed.
+        await asyncio.Event().wait()
+
     async def aclose(self):
         self.calls["close"] += 1
         self.closed = True
@@ -135,6 +140,7 @@ def test_transient_failure_recovers_and_health_tracks_consumer(monkeypatch, stag
             await cleanup(bridge)
         assert redis.calls["close"] == 1
         assert not bridge.command_consumer_ready
+        assert bridge._command_ack_owner.task.done()
         assert (await response(bridge)).status_code == 503
     asyncio.run(asyncio.wait_for(run(), 5))
 

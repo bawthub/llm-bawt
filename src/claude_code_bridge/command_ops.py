@@ -5,7 +5,8 @@ import json
 import logging
 
 
-from agent_bridge.abort_contract import ABORT_TEARDOWN_BOUND_S, AbortState
+from agent_bridge.abort_contract import ABORT_TEARDOWN_BOUND_S, AbortState, process_boot_id
+from agent_bridge.command_ack import CommandAckOwner
 from agent_bridge.user_scope import session_user
 from agent_bridge.abort_rpc import answer_abort
 from agent_bridge.consumer_group import GroupReader
@@ -70,6 +71,9 @@ class ClaudeCommandMixin:
             await self._consume_commands(async_redis, redis_url)
         finally:
             self._command_ready = False
+            ack_owner = getattr(self, "_command_ack_owner", None)
+            if ack_owner is not None:
+                await ack_owner.stop()
             await async_redis.aclose()
 
     async def _consume_commands(self, async_redis, redis_url: str) -> None:
@@ -94,6 +98,11 @@ class ClaudeCommandMixin:
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 30)
         self._redis = async_redis
+        self._command_ack_owner = CommandAckOwner(
+            async_redis, stream=COMMANDS_STREAM, group="claude-code-bridge",
+            backend=self._backend_name, boot_id=process_boot_id(),
+        )
+        self._command_ack_owner.start()
         self._command_ready = True
         logger.info("Command listener started on %s (group=claude-code-bridge)", COMMANDS_STREAM)
 

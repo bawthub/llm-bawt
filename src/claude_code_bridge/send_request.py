@@ -12,6 +12,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 
+from agent_bridge.command_ack import CommandAckContext
 from agent_bridge.continuity import (
     RESET_SKILLS_FIELD,
     SEED_FRAMING_FIELD,
@@ -99,6 +100,8 @@ class SendRequest:
     # Explicit app-pinned capability; absent/legacy commands never attach a drain.
     inbox_next: bool = False
     user_id: str | None = None
+    # Listener-captured original transport entry; never parsed from command data.
+    command_ack_context: CommandAckContext | None = None
 
     @classmethod
     def from_fields(cls, fields: dict) -> "SendRequest":
