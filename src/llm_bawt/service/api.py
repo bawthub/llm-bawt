@@ -564,6 +564,10 @@ try:
     for router in all_routers:
         app.include_router(router)
 
+    from .request_guard import RequestGuardMiddleware
+
+    app.add_middleware(RequestGuardMiddleware)
+
 except ImportError:
     # FastAPI not installed - create stub
     app = None
