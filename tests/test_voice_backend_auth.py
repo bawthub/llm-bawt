@@ -12,6 +12,7 @@ import httpx
 import pytest
 
 from llm_bawt.bawthub_auth import VOICE_PROXY_TOKEN_HEADER, service_token_source, voice_backend_auth
+from llm_bawt.bawthub_auth.service_token import VOICE_ORIGINS_ENV, trusted_voice_origins
 from llm_bawt.integrations.home_audio import HomeAudioClient, HomeAudioSettings
 from llm_bawt.media.gpu_handoff_adapter import LocalHandoffAdapter
 from llm_bawt.media.gpu_preflight import GpuPreflight
@@ -24,6 +25,7 @@ SETTINGS = HomeAudioSettings(tts_url="http://voice.example/api", media_base_url=
 @pytest.fixture
 def token(monkeypatch):
     monkeypatch.setattr(service_token_source(), "read", lambda: TOKEN)
+    monkeypatch.setenv(VOICE_ORIGINS_ENV, "http://voice.example")
 
 
 @pytest.fixture
@@ -40,6 +42,67 @@ def test_adds_the_proxy_header_and_no_bearer(token):
     sent = _send(httpx.Request("GET", "http://voice.example/v1/internal/voice/sessions"))
     assert sent.headers[VOICE_PROXY_TOKEN_HEADER] == TOKEN
     assert "authorization" not in sent.headers
+
+
+@pytest.mark.parametrize("url", [
+    "http://receiver.example/v1/internal/voice/sessions",   # another host
+    "https://voice.example/v1/voices",                      # another scheme
+    "http://voice.example:8080/v1/voices",                  # another port
+    "http://voice.example.evil/v1/voices",
+])
+def test_untrusted_destination_gets_no_token(token, url):
+    assert VOICE_PROXY_TOKEN_HEADER not in _send(httpx.Request("GET", url)).headers
+
+
+def test_no_declared_origin_sends_nothing(monkeypatch):
+    monkeypatch.setattr(service_token_source(), "read", lambda: TOKEN)
+    monkeypatch.delenv(VOICE_ORIGINS_ENV, raising=False)
+    sent = _send(httpx.Request("GET", "http://voice.example/v1/voices"))
+    assert VOICE_PROXY_TOKEN_HEADER not in sent.headers
+
+
+def test_origin_parsing_normalizes_and_skips_junk():
+    origins = trusted_voice_origins({VOICE_ORIGINS_ENV: " http://Voice.Example/api , ftp://x, ,https://a.b:8443"})
+    assert origins == {("http", "voice.example", 80), ("https", "a.b", 8443)}
+
+
+def test_anonymous_destination_edit_cannot_capture_the_token(token, monkeypatch):
+    """Codex's TASK-2235 reproducer: an unauthenticated settings write moves
+    home_audio.tts_url; the next preflight must not carry the token there."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from llm_bawt.integrations import home_audio
+    from llm_bawt.service.routes import settings
+
+    values = {}
+    store = SimpleNamespace(
+        engine=object(),
+        set_value=lambda scope_type, scope_id, key, value: values.update({key: value}),
+        get_scope_settings=lambda scope_type, scope_id: values,
+    )
+    monkeypatch.setattr(settings, "get_service", lambda: SimpleNamespace(config=object(), _default_bot="fixture"))
+    monkeypatch.setattr(settings, "get_runtime_settings_store", lambda config: store)
+    monkeypatch.setattr(settings, "_invalidate_all_instance_cache", lambda service: None)
+    monkeypatch.setattr(home_audio, "RuntimeSettingsStore", lambda config: store)
+    app = FastAPI()
+    app.include_router(settings.router)
+    response = TestClient(app).put("/v1/settings", json={
+        "scope_type": "global", "key": "home_audio",
+        "value": {"tts_url": "http://receiver.example", "media_base_url": "http://media.example",
+                  "targets": ["media_player.test"]},
+    })
+    assert response.status_code == 200
+    seen = []
+
+    async def run():
+        async with httpx.AsyncClient(transport=_recording(seen, SESSIONS)) as http:
+            return await GpuPreflight(config=object(), http=http, ops=None).voice_status()
+
+    voice, error = asyncio.run(run())
+    assert error is None
+    assert seen[0].url.host == "receiver.example"
+    assert VOICE_PROXY_TOKEN_HEADER not in seen[0].headers
 
 
 def test_no_token_sends_no_header():

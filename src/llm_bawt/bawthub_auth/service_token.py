@@ -224,21 +224,60 @@ class BawtHubServiceAuth(httpx.Auth):
 VOICE_PROXY_TOKEN_HEADER = "x-bawthub-voice-proxy-token"
 
 
+VOICE_ORIGINS_ENV = "LLM_BAWT_VOICE_BACKEND_ORIGINS"
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def _origin(url: httpx.URL) -> tuple[str, str, int] | None:
+    scheme = url.scheme.lower()
+    if scheme not in _DEFAULT_PORTS or not url.host:
+        return None
+    return scheme, url.host.lower(), url.port or _DEFAULT_PORTS[scheme]
+
+
+def trusted_voice_origins(environ: Mapping[str, str] | None = None) -> frozenset[tuple[str, str, int]]:
+    """The deployment-declared voice backend origins (comma-separated URLs)."""
+    raw = ((os.environ if environ is None else environ).get(VOICE_ORIGINS_ENV) or "")
+    origins = set()
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            origin = _origin(httpx.URL(part))
+        except (httpx.InvalidURL, TypeError, ValueError):
+            origin = None
+        if origin:
+            origins.add(origin)
+    return frozenset(origins)
+
+
 class VoiceBackendAuth(httpx.Auth):
     """httpx auth for direct calls to BawtHub's voice backend (TASK-2235).
 
     The backend can require the service token in its proxy header
     (``BAWTHUB_VOICE_REQUIRE_PROXY_TOKEN_FILE``), the same credential the
-    BawtHub frontend proxy sends. With no usable token nothing is added.
+    BawtHub frontend proxy sends. Callers take their destination from a
+    runtime setting anyone on the network can edit, so the token goes only to
+    an origin the deployment declares in :data:`VOICE_ORIGINS_ENV` (read per
+    request); any other destination, or no usable token, gets no header.
     """
 
-    def __init__(self, source: ServiceTokenSource):
+    def __init__(self, source: ServiceTokenSource, environ: Mapping[str, str] | None = None):
         self._source = source
+        self._environ = environ
+        self._withheld: set[str] = set()
 
     def auth_flow(self, request: httpx.Request) -> Generator[httpx.Request, httpx.Response, None]:
-        token = self._source.read()
-        if token:
-            request.headers[VOICE_PROXY_TOKEN_HEADER] = token
+        origin = _origin(request.url)
+        if origin is not None and origin in trusted_voice_origins(self._environ):
+            token = self._source.read()
+            if token:
+                request.headers[VOICE_PROXY_TOKEN_HEADER] = token
+        elif request.url.host not in self._withheld and len(self._withheld) < 16:
+            self._withheld.add(request.url.host)
+            logger.warning("Voice backend %s is not in %s; sending no proxy token",
+                           request.url.host, VOICE_ORIGINS_ENV)
         yield request
 
 

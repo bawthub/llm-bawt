@@ -64,6 +64,9 @@ services:
       # TASK-2140: the user-facing origin for shared media links. No product
       # default; unset means same-origin relative links.
       - LLM_BAWT_PUBLIC_ORIGIN
+      # TASK-2235: origins (comma-separated) of BawtHub's voice backend that
+      # may receive the voice proxy token. No product default; unset sends none.
+      - LLM_BAWT_VOICE_BACKEND_ORIGINS
       - LLM_BAWT_WORKSPACE_BRIDGE_URL=${LLM_BAWT_WORKSPACE_BRIDGE_URL:-http://claude-code-bridge:8681}
       # TASK-701/793: trusted current-turn MCP tools write through BawtHub's
       # container-only association API, sending the BawtHub service bearer.
@@ -438,6 +441,8 @@ services:
       # at the compose service name `app`.
       - LLM_BAWT_SERVICE_HOST=app
       - REDIS_URL=redis://redis:6379/0
+      # TASK-2235: see the app; the video server's voice-park check sends it.
+      - LLM_BAWT_VOICE_BACKEND_ORIGINS
       # -- From .env (TASK-1476) --
       - POSTGRES_HOST
       - POSTGRES_PORT
