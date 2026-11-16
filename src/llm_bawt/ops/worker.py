@@ -34,6 +34,7 @@ if __package__:
     from .runtime_source import selected_runtime_spec, verify_runtime_source
     from . import sequence
     from . import wake_on_lan
+    from . import compose_secrets
     from .routing_reconcile import ACTION as ROUTING_ACTION, RoutingReconciler
     from .tagged_config_reconcile import ACTION as TAGGED_CONFIG_ACTION, TaggedConfigReconciler
 else:  # pragma: no cover - standalone worker image
@@ -50,6 +51,7 @@ else:  # pragma: no cover - standalone worker image
     from runtime_source import selected_runtime_spec, verify_runtime_source
     import sequence
     import wake_on_lan
+    import compose_secrets
     from routing_reconcile import ACTION as ROUTING_ACTION, RoutingReconciler
     from tagged_config_reconcile import ACTION as TAGGED_CONFIG_ACTION, TaggedConfigReconciler
 
@@ -293,6 +295,8 @@ def execute_action(api, snapshot, job_id, *, lock_root, receipt, before_submit=N
     action = snapshot["spec"]["action"]
     if action == wake_on_lan.ACTION:
         return wake_on_lan.run_worker(api, snapshot, job_id, receipt)
+    if action == compose_secrets.ACTION:
+        return compose_secrets.run_worker(api, snapshot, job_id, receipt)
     cls = action_handler(action)
     if cls is not None:
         handler = cls(api, snapshot, job_id, lock_root=lock_root)

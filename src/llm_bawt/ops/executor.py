@@ -54,6 +54,8 @@ from .tagged_config_reconcile import (ACTION as TAGGED_CONFIG_ACTION, TAGGED_GUA
 from .validation import canonical_json
 from . import sequence
 from . import wake_on_lan
+from . import compose_secrets
+from .compose_render import COMPOSE_SECRETS_RENDER_LABEL
 from .execution_mode import EXECUTION_ISOLATED, EXECUTION_PROCESS, EXECUTOR_MODES, snapshot_execution_mode
 from .process_launch import ProcessLauncher
 from .self_target import (SELF_IDENTITY_UNKNOWN, SELF_TARGET_UNVERIFIABLE, ContainerIdentity, SelfTargetError,
@@ -91,6 +93,11 @@ def spec_capability_labels(spec: dict) -> tuple[str, ...]:
     labels = []
     if spec.get("action") == wake_on_lan.ACTION:
         labels.append(wake_on_lan.WORKER_CAPABILITY_LABEL)
+    if spec.get("action") == compose_secrets.ACTION:
+        labels.append(compose_secrets.WORKER_CAPABILITY_LABEL)
+    if "compose_secrets" in (spec.get("compose_config") or {}):
+        # TASK-2386: an older worker would reject the field mid-job.
+        labels.append(COMPOSE_SECRETS_RENDER_LABEL)
     if spec.get("action") == sequence.ACTION:
         labels.append(sequence.WORKER_CAPABILITY_LABEL)
     if "runtime_source" in spec:
@@ -292,6 +299,8 @@ def validate_spec(command_script: str) -> dict:
         raise ValueError("command_script must be a Docker JSON spec") from exc
     if isinstance(spec, dict) and spec.get("action") == wake_on_lan.ACTION:
         return wake_on_lan.validate_spec(spec)
+    if isinstance(spec, dict) and spec.get("action") == compose_secrets.ACTION:
+        return compose_secrets.validate_spec(spec)
     if isinstance(spec, dict) and spec.get("action") == ROUTING_ACTION:
         return validate_routing_spec(spec)
     if isinstance(spec, dict) and spec.get("action") == CONFIG_ACTION:
@@ -693,6 +702,12 @@ class DockerExecutor(Executor):
             wake_on_lan.validate_spec(spec)
             if args:
                 raise ExecutorError("wake_on_lan accepts no caller arguments")
+            self.check_spec_capabilities(spec)
+            return
+        if spec.get("action") == compose_secrets.ACTION:
+            compose_secrets.validate_spec(spec)
+            if args:
+                raise ExecutorError("compose_secrets_write accepts no caller arguments")
             self.check_spec_capabilities(spec)
             return
         # TASK-1002: this executor only reaches its own Docker daemon. A target

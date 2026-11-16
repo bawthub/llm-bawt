@@ -124,6 +124,7 @@ def validate_interpolation_env(config: dict) -> dict:
 # target declares the subset it receives in ``compose_config.compose_secrets``.
 # Argv carries only paths; values exist inside the renderer and in the
 # in-memory rendered config, exactly as ``.env`` values always have.
+COMPOSE_SECRETS_RENDER_LABEL = "llm-bawt.ops.compose-secrets-render"  # worker capability
 COMPOSE_SECRETS_VOLUME = "llm-bawt-compose-secrets"
 COMPOSE_SECRETS_DIR = "/run/compose-secrets"
 COMPOSE_SECRET_NAMES = frozenset({"LLM_BAWT_SECRET_KEY", "LLM_BAWT_POSTGRES_PASSWORD",
