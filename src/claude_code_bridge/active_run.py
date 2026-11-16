@@ -250,6 +250,8 @@ class ClaudeActiveRun:
     # end with a reply (a user correction, an ops quiesce): later results stop
     # waiting for background work (TASK-595).
     _steered_over_background: bool = False
+    # Inbox ack waits release the input lock; rollback must not undo a newer steer.
+    _background_steer_epoch: int = 0
     _completed: asyncio.Event = field(default_factory=asyncio.Event)
     _steer_timeout_s: float = field(default=8.0, repr=False)
     # command_uuid -> last lifecycle state for ``next`` injections.
@@ -368,47 +370,10 @@ class ClaudeActiveRun:
             raise RuntimeError("next_unsupported")
         command_uuid = _command_uuid(message_id)
         async with self._steer_lock:
-            if self._completed.is_set():
-                raise RuntimeError("no_active_run")
-            if command_uuid in self._escalations:
-                raise RuntimeError("steer_already_escalated")
-            if command_uuid in self._cancellations:
-                raise RuntimeError("steer_already_cancelled")
-            state = self._commands.get(command_uuid)
-            if state is None or state in _REJECTED:
-                # Only a new CLI command is refused here: a replay of one
-                # already accepted keeps its answer, so it can never become a
-                # second, fresh-turn delivery.
-                self._refuse_new_command()
-                self._commands[command_uuid] = "sent"
-                event = self._command_events[command_uuid] = asyncio.Event()
-                # A re-send is a new CLI command: drop the old send's evidence.
-                self._held.pop(command_uuid, None)
-                self._held[command_uuid] = HeldCommand(
-                    uuid=command_uuid, origin=origin, item=item, steer_rpc_id=steer_rpc_id,
-                    images=images,
-                )
-                self._started_ever.discard(command_uuid)
-                self._replayed.discard(command_uuid)
-                self._settled.pop(command_uuid, None)
-                if origin == "user":
-                    self._user_commands.add(command_uuid)
-
-                async def _frames():
-                    yield {
-                        "type": "user",
-                        "message": {"role": "user", "content": _user_content(framed, images)},
-                        "parent_tool_use_id": None,
-                        "uuid": command_uuid,
-                        "priority": "next",
-                    }
-
-                self.steering_attempted = True
-                await asyncio.wait_for(
-                    self.client.query(_frames()), timeout=self._steer_timeout_s
-                )
-            else:
-                event = self._command_events[command_uuid]
+            event = await self._write_next_locked(
+                framed, item, command_uuid, origin=origin,
+                steer_rpc_id=steer_rpc_id, images=images,
+            )
             try:
                 await asyncio.wait_for(event.wait(), timeout=self._steer_timeout_s)
             except asyncio.TimeoutError:
@@ -425,6 +390,53 @@ class ClaudeActiveRun:
             final = self._commands.get(command_uuid)
             if final in _REJECTED:
                 raise RuntimeError(f"steer_{final}")
+
+    async def _write_next_locked(
+        self, framed: str, item: str, command_uuid: str, *,
+        origin: str, steer_rpc_id: str | None, images: tuple = (),
+    ) -> asyncio.Event:
+        """Write/register a next command; the caller must hold ``_steer_lock``.
+
+        This is transport admission, not a CLI acceptance receipt. The legacy
+        push path waits under its lock as before; the durable inbox waits for
+        lifecycle evidence outside it so an interrupt need not wait for an ack.
+        """
+        if self._completed.is_set():
+            raise RuntimeError("no_active_run")
+        if command_uuid in self._escalations:
+            raise RuntimeError("steer_already_escalated")
+        if command_uuid in self._cancellations:
+            raise RuntimeError("steer_already_cancelled")
+        state = self._commands.get(command_uuid)
+        if state is not None and state not in _REJECTED:
+            return self._command_events[command_uuid]
+        self._refuse_new_command()
+        self._commands[command_uuid] = "sent"
+        event = self._command_events[command_uuid] = asyncio.Event()
+        # A legacy re-send is a new CLI command: drop the old send's evidence.
+        self._held.pop(command_uuid, None)
+        self._held[command_uuid] = HeldCommand(
+            uuid=command_uuid, origin=origin, item=item, steer_rpc_id=steer_rpc_id,
+            images=images,
+        )
+        self._started_ever.discard(command_uuid)
+        self._replayed.discard(command_uuid)
+        self._settled.pop(command_uuid, None)
+        if origin == "user":
+            self._user_commands.add(command_uuid)
+
+        async def _frames():
+            yield {
+                "type": "user",
+                "message": {"role": "user", "content": _user_content(framed, images)},
+                "parent_tool_use_id": None,
+                "uuid": command_uuid,
+                "priority": "next",
+            }
+
+        self.steering_attempted = True
+        await asyncio.wait_for(self.client.query(_frames()), timeout=self._steer_timeout_s)
+        return event
 
     async def cancel_queued(self, message_id: str) -> str:
         """Withdraw one user message without interrupting the running tool.
@@ -936,6 +948,7 @@ class ClaudeActiveRun:
     def _mark_steer_over_background(self) -> bool:
         """Let the next result end the run if background work is pending.
         Returns the previous value so a failed steer can restore it."""
+        self._background_steer_epoch += 1
         prior = self._steered_over_background
         if self._background_pending():
             self._steered_over_background = True
