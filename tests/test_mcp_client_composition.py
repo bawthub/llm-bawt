@@ -168,3 +168,14 @@ def test_debug_logging_uses_the_client_logger(monkeypatch, caplog):
         client.stats()
     assert any(r.name == "llm_bawt.mcp_server.client" and "MCP response" in r.getMessage()
                for r in caplog.records)
+
+
+def test_debug_response_log_is_bounded_for_large_lists():
+    """TASK-2395: a full history read must not be serialized into the log."""
+    rows = [{"id": str(i), "role": "user", "content": "x" * 5000} for i in range(500)]
+    preview = client_transport._response_preview(rows)
+    assert preview.startswith("list[500] first=")
+    assert len(preview) < 2200
+    assert client_transport._response_preview([]) == "list[0]"
+    assert client_transport._response_preview(None) == "None"
+    assert client_transport._response_preview({"k": "v"}) == '{"k": "v"}'

@@ -13,6 +13,30 @@ from llm_bawt.bot_access.service import SERVICE_HEADER
 _CLIENT_LOGGER_NAME = "llm_bawt.mcp_server.client"
 logger = logging.getLogger(_CLIENT_LOGGER_NAME)
 
+_PREVIEW_CHARS = 2000
+
+
+def _response_preview(result: Any) -> str:
+    """A short, bounded rendering of an MCP result for debug logs."""
+    import json
+
+    if result is None:
+        return "None"
+    head = result
+    prefix = ""
+    if isinstance(result, list):
+        prefix = f"list[{len(result)}] first="
+        if not result:
+            return "list[0]"
+        head = result[0]
+    try:
+        text = json.dumps(head, default=str)
+    except Exception:
+        text = repr(head)
+    if len(text) > _PREVIEW_CHARS:
+        text = f"{text[:_PREVIEW_CHARS]}... ({len(text)} chars)"
+    return prefix + text
+
 
 class MemoryClientTransportMixin:
     """HTTP ``tools/call`` client plus its debug response logging."""
@@ -151,14 +175,10 @@ class MemoryClientTransportMixin:
             raise ConnectionError(f"Failed to connect to MCP server at {self.server_url}: {e}")
 
     def _log_response_debug(self, method: str, result: Any) -> None:
-        """Log full response data at DEBUG level without truncation."""
-        import json
+        """Log a bounded preview of the response at DEBUG level.
 
-        if result is None:
-            logger.debug("MCP response: None")
-            return
-
-        try:
-            logger.debug("MCP response: %s", json.dumps(result, default=str, indent=2))
-        except Exception:
-            logger.debug("MCP response: %s", result)
+        TASK-2395: never serialize the whole result. A full history read is
+        thousands of rows (megabytes); dumping and formatting it cost ~3 s per
+        call on the request path. Lists log their length and first item only.
+        """
+        logger.debug("MCP response: %s", _response_preview(result))
