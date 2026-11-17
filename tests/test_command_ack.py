@@ -2,6 +2,7 @@
 import asyncio
 import hashlib
 import json
+import time
 from dataclasses import replace
 from unittest.mock import AsyncMock
 
@@ -401,3 +402,35 @@ async def test_stop_on_actual_post_mint_boundary_repairs_without_sdk_replay(monk
     assert (await owner(transport).scan())["settled"] == 1
     sdk.connect.assert_awaited_once()
     harness._publisher.publish_run_done.assert_called_once()  # Recovery never republishes.
+
+
+@pytest.mark.anyio
+async def test_retained_inventory_classifies_without_ack_or_receipt(transport):
+    first, _ = await pending(transport)
+    await pending(transport)
+    # This owner booted after both deliveries, so neither can be its run.
+    await asyncio.sleep(0.02)
+    later = owner(transport, page_size=1, started_ms=int(time.time() * 1000))
+    assert (await later.scan())["retained"] == 1
+    assert later.last_inventory is None  # cycle not finished across pages
+    await later.scan()
+    while later._cycle_end is not None:
+        await later.scan()
+    inv = later.last_inventory
+    assert inv["legacy"] == 2 and inv["uncertain"] == 0
+    assert inv["oldest_legacy_id"] == first and inv["max_deliveries"] == 1
+    assert (await transport.xpending(STREAM, GROUP))["pending"] == 2
+    assert await transport.keys("agent:command_ack:*") == []
+
+
+@pytest.mark.anyio
+async def test_this_boot_deliveries_are_uncertain_and_empty_pel_resets(transport):
+    current = owner(transport, started_ms=0)
+    entry_id, _ = await pending(transport)
+    await current.scan()
+    assert current.last_inventory == {
+        "legacy": 0, "uncertain": 1, "oldest_legacy_id": None, "max_deliveries": 1,
+    }
+    await transport.xack(STREAM, GROUP, entry_id)
+    await current.scan()
+    assert current.last_inventory == current._empty_inventory()

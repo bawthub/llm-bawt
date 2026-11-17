@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import time
 from dataclasses import dataclass
 
 from .command_ack_scripts import MINT_ACK, SETTLE_ACK
@@ -53,6 +54,7 @@ class CommandAckOwner:
     def __init__(
         self, redis, *, stream: str, group: str, backend: str, boot_id: str,
         page_size: int = 64, interval: float = 5, timeout: float = 5,
+        started_ms: int | None = None, clock=time.time,
     ):
         self.redis, self.stream, self.group = redis, stream, group
         self.backend, self.boot_id = backend, boot_id
@@ -60,6 +62,12 @@ class CommandAckOwner:
         self.cursor = "-"
         self._cycle_end: str | None = None
         self.task: asyncio.Task | None = None
+        # Read-only retained-entry inventory. Classification never grants an
+        # ACK or a dispatch; it only says why an entry is still pending.
+        self.clock = clock
+        self.started_ms = int(clock() * 1000) if started_ms is None else started_ms
+        self._cycle_inventory = self._empty_inventory()
+        self.last_inventory: dict | None = None
 
     def capture(self, fields: dict[str, str], entry_id: str) -> CommandAckContext:
         """Synchronous snapshot, never an admission await or execution grant."""
@@ -133,6 +141,7 @@ class CommandAckOwner:
             self._cycle_end = summary["max"]
             if self._cycle_end is None:
                 self.cursor = "-"
+                self._publish_inventory()
                 return {"examined": 0, "settled": 0, "retained": 0}
         async with asyncio.timeout(self.timeout):
             entries = await self.redis.xpending_range(
@@ -149,10 +158,37 @@ class CommandAckOwner:
                 counts["settled"] += 1
             else:
                 counts["retained"] += 1
+                self._classify(entry)
         if len(entries) < self.page_size:
             self.cursor = "-"
             self._cycle_end = None
+            self._publish_inventory()
         return counts
+
+    @staticmethod
+    def _empty_inventory() -> dict:
+        return {"legacy": 0, "uncertain": 0, "oldest_legacy_id": None, "max_deliveries": 0}
+
+    def _classify(self, entry: dict) -> None:
+        """Legacy = last delivered before this process booted, so no handler
+        here can own it. Uncertain = delivered this boot with no receipt (a
+        live run or a stranded disposal). Neither is evidence of nonexecution."""
+        inv = self._cycle_inventory
+        delivered_ms = int(self.clock() * 1000) - int(entry.get("time_since_delivered") or 0)
+        if delivered_ms < self.started_ms:
+            inv["legacy"] += 1
+            if inv["oldest_legacy_id"] is None:
+                inv["oldest_legacy_id"] = entry["message_id"]
+        else:
+            inv["uncertain"] += 1
+        inv["max_deliveries"] = max(inv["max_deliveries"], int(entry.get("times_delivered") or 0))
+
+    def _publish_inventory(self) -> None:
+        inventory, self._cycle_inventory = self._cycle_inventory, self._empty_inventory()
+        if inventory != self.last_inventory:
+            level = logging.WARNING if inventory["legacy"] else logging.INFO
+            log.log(level, "Command PEL retained without receipt (no ACK/replay): %s", inventory)
+        self.last_inventory = inventory
 
     def start(self) -> None:
         if self.task is None or self.task.done():
