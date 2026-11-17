@@ -183,10 +183,18 @@ def test_delivery_inheritance_precedes_bridge_rpc_and_failure_blocks_it(rig, mon
         monkeypatch.setattr(store, "inherit", Mock(side_effect=RuntimeError("fixture outage")))
 
     async def bridge(**_kwargs):
+        target = ContentTurn("target", "operator", "turn", "trigger")
         assert store.admit(
-            ContentTurn("target", "operator", "turn", "trigger"),
+            target,
             tool_name="memory_store", write_kind="memory", invocation_hash="a" * 64,
         ).held
+        assert not store.admit(
+            target, tool_name="working_memory_update", write_kind="working_memory",
+            invocation_hash="b" * 64,
+        ).held
+        note, body = _kwargs["message"].split("\n\n", 1)
+        assert json.loads(note)["source"] == "fleet-delivery"
+        assert body == "correct"
         return {"ok": True}
 
     rig.sub.send_steer.side_effect = bridge

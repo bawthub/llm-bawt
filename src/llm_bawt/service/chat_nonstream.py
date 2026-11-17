@@ -210,10 +210,12 @@ class ChatNonStreamMixin:
         from ..content_provenance import ContentTurn
         from .content_lineage import inherit_admitted_request
 
-        await asyncio.to_thread(
+        content_note = await asyncio.to_thread(
             inherit_admitted_request, self, request,
             ContentTurn(bot_id, user_id, turn_log_id, trigger_message_id),
         )
+        if content_note:
+            user_prompt = f"{content_note}\n\n{user_prompt}"
         if is_agent_backend:
             from .turn_task_attribution import stamp_turn_task
             await stamp_turn_task(

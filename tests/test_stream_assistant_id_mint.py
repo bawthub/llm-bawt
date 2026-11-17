@@ -16,7 +16,8 @@ __all__ = ["_isolate"]
 
 
 @pytest.mark.parametrize("supplied", [None, "11111111-2222-3333-4444-555555555555"])
-def test_stream_turn_events_and_row_share_one_assistant_id(monkeypatch, supplied):
+@pytest.mark.parametrize("content_note", [None, '{"untrusted_content":true,"source":"fleet-delivery"}'])
+def test_stream_turn_events_and_row_share_one_assistant_id(monkeypatch, supplied, content_note):
     from llm_bawt.service import chat_streaming
     from llm_bawt.service.turn_stream_finalize import TurnStreamFinalizer
     from llm_bawt.service.turn_stream_worker import TurnStreamWorker
@@ -37,6 +38,10 @@ def test_stream_turn_events_and_row_share_one_assistant_id(monkeypatch, supplied
     monkeypatch.setattr(
         chat_streaming, "prepare_stream_request_attachments",
         AsyncMock(return_value=("hi", [], [], None)),
+    )
+    monkeypatch.setattr(
+        "llm_bawt.service.content_lineage.inherit_admitted_request",
+        lambda *_args: content_note,
     )
     monkeypatch.setattr(chat_streaming, "ToolEventCoordinator", Mock())
     published = AsyncMock()
@@ -62,6 +67,9 @@ def test_stream_turn_events_and_row_share_one_assistant_id(monkeypatch, supplied
 
     asyncio.run(run())
 
+    assert llm.prepare_messages_for_query.call_args.args[0] == (
+        f"{content_note}\n\nhi" if content_note else "hi"
+    )
     persisted = service._persist_turn_log.call_args.kwargs["assistant_message_id"]
     if supplied:
         assert persisted == supplied

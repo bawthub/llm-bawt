@@ -380,17 +380,25 @@ async def steer_active_turn(
                 revalidate_steer_target, service, request, turn, session_id,
                 allow_ended=bool(steer_request_id),
             )
+            outbound_message = wire_message
+            outbound_framing = framing
             if content_delivery_id is not None:
                 from ...content_provenance import ContentTurn
                 from ..content_lineage import inherit_delivery
 
-                await asyncio.to_thread(
+                content_note = await asyncio.to_thread(
                     inherit_delivery, service, content_delivery_id,
                     ContentTurn(turn.bot_id, turn.user_id, turn.id, turn.trigger_message_id),
                 )
+                if content_note:
+                    outbound_message = f"{content_note}\n\n{wire_message}"
+                    outbound_framing = await asyncio.to_thread(
+                        _steer_framing, outbound_message, origin=origin,
+                        priority=request.priority, bot_id=bot_id, user_id=user_id,
+                    )
             result = await subscriber.send_steer(
                 session_key=session_key,
-                message=wire_message,
+                message=outbound_message,
                 message_id=request.message_id,
                 backend=backend_name,
                 target_request_id=target.request_id if target is not None else turn.agent_request_id,
@@ -398,7 +406,7 @@ async def steer_active_turn(
                 priority=request.priority,
                 origin=origin,
                 **({"attachments": images} if images else {}),
-                **framing,
+                **outbound_framing,
             )
             if result.get("ok") or result.get("error") != "no_active_run":
                 break

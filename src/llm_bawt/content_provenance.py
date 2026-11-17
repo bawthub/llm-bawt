@@ -5,9 +5,9 @@ from dataclasses import dataclass
 from hashlib import sha256
 from uuid import uuid4
 
-from sqlalchemy import Boolean, Column, DateTime, MetaData, String, Table, func, text
+from sqlalchemy import Boolean, Column, DateTime, MetaData, String, Table, func, inspect, text
 
-from .utils.schema import SchemaBootstrapGuard
+from .utils.schema import SchemaBootstrapGuard, ensure_columns
 
 _metadata = MetaData()
 _turns = Table(
@@ -23,6 +23,7 @@ _edges = Table(
     "agent_content_lineage", _metadata,
     Column("target_id", String(64), primary_key=True),
     Column("source_id", String(64), primary_key=True),
+    Column("purpose", String(16), nullable=False, server_default="legacy"),
 )
 _writes = Table(
     "agent_content_write_decisions", _metadata,
@@ -45,6 +46,11 @@ _guard = SchemaBootstrapGuard()
 def _ensure_schema(conn) -> None:
     if conn.dialect.name != "postgresql":
         _metadata.create_all(conn)
+        if "purpose" not in {column["name"] for column in inspect(conn).get_columns(_edges.name)}:
+            conn.execute(text(
+                "ALTER TABLE agent_content_lineage "
+                "ADD COLUMN purpose VARCHAR(16) NOT NULL DEFAULT 'legacy'"
+            ))
         return
     from .bot_tags.catalog import owned, require_owned
 
@@ -52,6 +58,11 @@ def _ensure_schema(conn) -> None:
         if not owned(conn, table.name):
             table.create(conn)
         require_owned(conn, table.name)
+    # Old writers omit purpose and remain conservative. Do not rewrite old
+    # lineage or decisions: only newly verified fleet edges get the exemption.
+    ensure_columns(conn, _edges.name, {
+        "purpose": ("VARCHAR(16) NOT NULL DEFAULT 'legacy'", None),
+    })
 
 
 @dataclass(frozen=True)
@@ -87,7 +98,7 @@ class ContentProvenanceStore:
         if engine is None:
             raise RuntimeError("content provenance database unavailable")
         self.engine = engine
-        _guard.run(engine, "agent-content-provenance", _ensure_schema)
+        _guard.run(engine, "agent-content-provenance-v2", _ensure_schema)
 
     def _turn(self, conn, turn: ContentTurn) -> str:
         key = turn.key
@@ -114,26 +125,37 @@ class ContentProvenanceStore:
                 UPDATE agent_content_turns SET untrusted_seen=true WHERE id=:id
             """), {"id": key})
 
-    def inherit(self, source: ContentTurn, target: ContentTurn) -> None:
+    def inherit(
+        self, source: ContentTurn, target: ContentTurn, *, purpose: str = "continuation",
+    ) -> None:
         """Link only server-verified delivery/continuation lineage."""
+        if purpose not in {"fleet", "continuation"}:
+            raise ValueError("verified content lineage purpose required")
         with self.engine.begin() as conn:
             # Stable lock ordering also handles reciprocal bot deliveries.
             for turn in sorted((source, target), key=lambda t: t.key):
                 self._turn(conn, turn)
             conn.execute(text("""
-                INSERT INTO agent_content_lineage (source_id,target_id)
-                VALUES (:source,:target) ON CONFLICT DO NOTHING
-            """), {"source": source.key, "target": target.key})
+                INSERT INTO agent_content_lineage (source_id,target_id,purpose)
+                VALUES (:source,:target,:purpose)
+                ON CONFLICT (source_id,target_id) DO UPDATE SET purpose =
+                    CASE WHEN excluded.purpose = 'continuation' THEN 'continuation'
+                         ELSE agent_content_lineage.purpose END
+            """), {"source": source.key, "target": target.key, "purpose": purpose})
 
     @staticmethod
-    def _seen(conn, key: str) -> bool:
+    def _seen(conn, key: str, *, write_kind: str | None = None) -> bool:
         # UNION (not ALL) terminates cycles; only server-authored edges exist.
-        return bool(conn.execute(text("""
+        # Working-memory checkpoints do not inherit fleet coordination taint.
+        # Legacy/unknown edges and genuine continuations still fail closed.
+        edge_filter = "WHERE COALESCE(e.purpose, 'legacy') <> 'fleet'" if write_kind == "working_memory" else ""
+        return bool(conn.execute(text(f"""
             WITH RECURSIVE origins(id) AS (
                 SELECT CAST(:id AS TEXT)
                 UNION
                 SELECT CAST(e.source_id AS TEXT) FROM agent_content_lineage e
                 JOIN origins o ON e.target_id=o.id
+                {edge_filter}
             )
             SELECT EXISTS(
                 SELECT 1 FROM agent_content_turns t
@@ -166,7 +188,7 @@ class ContentProvenanceStore:
         receipt_id = str(uuid4())
         with self.engine.begin() as conn:
             key = self._turn(conn, turn)
-            exposed = self._seen(conn, key)
+            exposed = self._seen(conn, key, write_kind=write_kind)
             conn.execute(_writes.insert().values(
                 id=receipt_id, source_turn=turn.turn_id, bot_id=turn.bot_id,
                 user_id=turn.user_id, trigger_message_id=turn.trigger_message_id,

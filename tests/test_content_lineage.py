@@ -1,4 +1,5 @@
-"""Only durable verified delivery and approval ancestry propagates exposure."""
+"""Verified delivery labels and purpose-specific continuation admission."""
+import json
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -73,10 +74,17 @@ def test_delivery_and_retry_inherit_known_sender_before_recipient_admission(setu
     with engine.begin() as conn:
         conn.execute(rows.insert(), delivery(sender, retry=retry))
     store.expose(sender)
-    lineage.inherit_admitted_request(
+    note = lineage.inherit_admitted_request(
         service, SimpleNamespace(inter_bot_delivery_id="head"), target(),
     )
     assert_held(store, target())
+    assert not checkpoint_held(store, target())
+    envelope = json.loads(note)
+    assert envelope["untrusted_content"] is True
+    assert envelope["source"] == "fleet-delivery"
+    assert envelope["data"]["source_turns"] == [
+        {"bot_id": sender.bot_id, "turn_id": sender.turn_id},
+    ]
     assert not store.seen(target("fresh-human-turn"))
 
 
@@ -110,7 +118,8 @@ def test_unsigned_legacy_or_forged_origin_does_not_claim_verified_clean_sender(s
     row["metadata_json"]["_failure_origin"]["bot_id"] = "forged"
     with engine.begin() as conn:
         conn.execute(rows.insert(), row)
-    assert lineage.delivery_sources(service, "head", target()) == []
+    with pytest.raises(ValueError, match="sender mismatch"):
+        lineage.delivery_sources(service, "head", target())
 
 
 def test_approval_source_and_private_claim_carry_original_exposure(setup):
@@ -168,3 +177,53 @@ def test_busy_approval_result_uses_authoritative_owner_and_holds_recipient(setup
     else:
         lineage.inherit_delivery(service, "head", target())
         assert_held(store, target())
+        assert checkpoint_held(store, target())
+
+
+def checkpoint_held(store, turn):
+    return store.admit(
+        turn, tool_name="working_memory_update", write_kind="working_memory",
+        invocation_hash="b" * 64,
+    ).held
+
+
+def test_mixed_fleet_and_busy_approval_batch_keeps_each_purpose(setup):
+    engine, rows, store, service = setup
+    fleet = source()
+    own = ContentTurn("recipient", "owner", "own-approval", "own-trigger")
+    approval = SimpleNamespace(
+        bot_id=own.bot_id, user_id=own.user_id, turn_id=own.turn_id,
+        trigger_message_id=own.trigger_message_id,
+    )
+    busy = delivery(fleet, id="busy", batch="head")
+    busy.update(sender_bot_id="system", sender_turn_id=None, author_entity_id="system",
+                metadata_json={lineage.APPROVAL_ORIGIN_KEY: "approval",
+                               "approval_continuation_id": "approval"})
+    service._tool_approval_policy_store.get_request.return_value = approval
+    with engine.begin() as conn:
+        conn.execute(rows.insert(), [delivery(fleet), busy])
+    store.expose(fleet)
+    note = lineage.inherit_delivery(service, "head", target())
+    assert json.loads(note)["source"] == "fleet-delivery"
+    assert not checkpoint_held(store, target())
+    store.expose(own)  # Real continuation remains live, not a clean snapshot.
+    assert checkpoint_held(store, target())
+
+
+def test_delivery_user_mismatch_is_refused_before_linking(setup):
+    engine, rows, store, service = setup
+    row = delivery(ContentTurn("sender", "foreign-owner", "source-turn", "source-trigger"))
+    with engine.begin() as conn:
+        conn.execute(rows.insert(), row)
+    with pytest.raises(ValueError, match="user mismatch"):
+        lineage.inherit_delivery(service, "head", target())
+    assert not store.seen(target())
+
+
+def test_same_running_turn_direct_exposure_is_never_cleared_by_fleet_delivery(setup):
+    engine, rows, store, service = setup
+    with engine.begin() as conn:
+        conn.execute(rows.insert(), delivery(source()))
+    store.expose(target())
+    lineage.inherit_delivery(service, "head", target())
+    assert checkpoint_held(store, target())

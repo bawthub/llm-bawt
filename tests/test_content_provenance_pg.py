@@ -117,3 +117,47 @@ def test_missing_current_schema_cannot_fall_back_to_public(engine):
             ContentProvenanceStore(missing)
     finally:
         missing.dispose()
+
+
+@pytest.mark.parametrize("schema", ["legacy_tenant", 'legacy"quoted'])
+def test_existing_lineage_upgrade_preserves_old_rows_and_current_schema(engine, schema):
+    quoted = engine.dialect.identifier_preparer.quote_identifier(schema)
+    with engine.begin() as conn:
+        conn.exec_driver_sql(f"CREATE SCHEMA {quoted}")
+        conn.exec_driver_sql(
+            f"CREATE TABLE {quoted}.agent_content_lineage "
+            "(source_id VARCHAR(64),target_id VARCHAR(64),PRIMARY KEY(source_id,target_id))"
+        )
+    migrated = create_engine(engine.url)
+
+    def choose_schema(conn, *_args):
+        conn.exec_driver_sql(f"SET search_path TO {quoted}, public")
+
+    event.listen(migrated, "begin", choose_schema)
+    sender = ContentTurn("fixture-sender", "fixture-owner", schema, "trigger")
+    recipient = ContentTurn("fixture-recipient", "fixture-owner", schema, "trigger")
+    try:
+        with migrated.begin() as conn:
+            conn.execute(text(
+                "INSERT INTO agent_content_lineage(source_id,target_id) VALUES (:s,:t)"
+            ), {"s": sender.key, "t": recipient.key})
+        store = ContentProvenanceStore(migrated)
+        store.expose(sender)
+        assert store.admit(
+            recipient, tool_name="working_memory_update", write_kind="working_memory",
+            invocation_hash="b" * 64,
+        ).held
+        with migrated.connect() as conn:
+            assert conn.execute(text(
+                "SELECT purpose FROM agent_content_lineage WHERE source_id=:s"
+            ), {"s": sender.key}).scalar_one() == "legacy"
+        fresh = ContentTurn(recipient.bot_id, recipient.user_id, schema + "-fresh", "trigger")
+        store.inherit(sender, fresh, purpose="fleet")
+        assert store.seen(fresh)
+        assert not store.admit(
+            fresh, tool_name="working_memory_update", write_kind="working_memory",
+            invocation_hash="c" * 64,
+        ).held
+    finally:
+        event.remove(migrated, "begin", choose_schema)
+        migrated.dispose()

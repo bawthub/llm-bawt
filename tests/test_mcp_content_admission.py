@@ -161,6 +161,56 @@ async def test_approved_execution_cannot_bypass_later_exposure(setup):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("purpose", ["fleet", "continuation"])
+async def test_checkpoint_preflight_callable_and_approved_execution_agree(setup, purpose):
+    store, values, capability = setup
+    mcp = server(store)
+    calls = []
+
+    async def working_memory_update(objective: str) -> dict:
+        calls.append(objective)
+        return {"ok": True}
+
+    mcp.add_tool(working_memory_update)
+    mcp.mark_tools_registered()
+    target = content_turn(values)
+    origin = ContentTurn("sender", "owner", "source-turn", "source-trigger")
+    store.expose(origin)
+    store.inherit(origin, target, purpose=purpose)
+    args = {"objective": "checkpoint coordination"}
+    with identity(capability):
+        if purpose == "continuation":
+            with pytest.raises(Exception, match="untrusted_seen=true"):
+                await mcp.content_provenance.check("working_memory_update", args, preflight=True)
+            with pytest.raises(Exception, match="untrusted_seen=true"):
+                await mcp._tool_manager.call_tool("working_memory_update", args, None)
+        else:
+            await mcp.content_provenance.check("working_memory_update", args, preflight=True)
+            await mcp._tool_manager.call_tool("working_memory_update", args, None)
+    approved = ApprovedCallerContext(
+        bot_id=target.bot_id, user_id=target.user_id, turn_id=target.turn_id,
+    )
+    if purpose == "continuation":
+        with pytest.raises(Exception, match="untrusted_seen=true"):
+            await mcp.call_approved_tool(
+                "working_memory_update", args,
+                expected_invocation_hash=canonical_invocation_hash("working_memory_update", args),
+                caller_context=approved,
+            )
+        assert calls == []
+    else:
+        await mcp.call_approved_tool(
+            "working_memory_update", args,
+            expected_invocation_hash=canonical_invocation_hash("working_memory_update", args),
+            caller_context=approved,
+        )
+        assert calls == [args["objective"], args["objective"]]
+        store.expose(target)
+        with identity(capability), pytest.raises(Exception, match="untrusted_seen=true"):
+            await mcp.content_provenance.check("working_memory_update", args, preflight=True)
+
+
+@pytest.mark.asyncio
 async def test_exposure_survives_request_boundaries_and_failed_external_call(setup):
     store, values, capability = setup
     mcp = server(store)

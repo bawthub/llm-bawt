@@ -375,6 +375,15 @@ def test_native_nonstream_tools_use_service_turn_identity(
     try:
         response = asyncio.run(service.chat_completion(request))
         assert response.choices[0].message.content == "Done."
+        prepared_prompt = llm.prepare_messages_for_query.call_args.args[0]
+        if origin == "exposed-delivery":
+            import json
+
+            note, body = prepared_prompt.split("\n\n", 1)
+            assert json.loads(note)["source"] == "fleet-delivery"
+            assert body == "do the task"
+        else:
+            assert prepared_prompt == "do the task"
         llm.home_client.set.assert_called_once_with(entity="light.kitchen", state="on", brightness=None)
         llm.web_fetch_client.fetch.assert_called_once_with("https://example.test")
         if origin == "exposed-delivery":
