@@ -671,6 +671,7 @@ def collect_system_status(
     """
     from llm_bawt.bots import BotManager
     from llm_bawt.model_manager import is_service_mode_enabled
+    from llm_bawt.utils.bot_identity import optional_default_bot_id
 
     use_service = is_service_mode_enabled(config) and not local_only
 
@@ -683,21 +684,17 @@ def collect_system_status(
         # at least show something (with the service marked as unavailable).
 
     bot_manager = BotManager(config, local_only=local_only)
-    default_bot = bot_manager.get_default_bot()
+    # Status must still answer before a default bot exists (fresh install,
+    # or bots created before the first-bot default was recorded).
+    default_slug = optional_default_bot_id(config)
+    default_bot = bot_manager.get_bot(default_slug) if default_slug else None
 
     # Resolve effective bot
-    if bot_slug:
-        target_bot = bot_manager.get_bot(bot_slug) or default_bot
-    else:
-        target_bot = default_bot
+    target_bot = (bot_manager.get_bot(bot_slug) if bot_slug else None) or default_bot
 
     # Resolve effective model
-    if model_alias is None:
-        selection = bot_manager.select_model(None, bot_slug=target_bot.slug)
-    else:
-        selection = bot_manager.select_model(model_alias, bot_slug=target_bot.slug)
-
-    model_alias = selection.alias
+    selection = bot_manager.select_model(model_alias, bot_slug=target_bot.slug) if target_bot else None
+    model_alias = selection.alias if selection else None
 
     # Resolve user
     effective_user = user_id or config.DEFAULT_USER
@@ -718,7 +715,7 @@ def collect_system_status(
 
     # Bot summaries
     all_bots = [
-        BotSummary(slug=b.slug, name=b.name, is_default=(b.slug == default_bot.slug))
+        BotSummary(slug=b.slug, name=b.name, is_default=(default_bot is not None and b.slug == default_bot.slug))
         for b in bot_manager.list_bots()
     ]
 
@@ -733,10 +730,10 @@ def collect_system_status(
         mode="service" if use_service else "direct",
         service_url=service_url,
         environment="docker" if is_docker else "local",
-        bot_name=target_bot.name,
-        bot_slug=target_bot.slug,
+        bot_name=target_bot.name if target_bot else "",
+        bot_slug=target_bot.slug if target_bot else "",
         model_alias=model_alias,
-        model_source=selection.source,
+        model_source=selection.source if selection else None,
         user_id=effective_user,
         all_bots=all_bots,
         models_defined=len(defined_models),
@@ -749,13 +746,13 @@ def collect_system_status(
         bind_host=config.SERVICE_HOST,
     )
 
-    mcp_info = _collect_mcp_info(config, default_bot.slug)
+    mcp_info = _collect_mcp_info(config, default_bot.slug if default_bot else None)
 
     model_info = None
     if model_alias:
         model_info = _collect_model_info(config, model_alias)
 
-    memory_info = _collect_memory_info(config, default_bot.slug)
+    memory_info = _collect_memory_info(config, default_bot.slug if default_bot else None)
     dep_info = _collect_dependencies(config)
 
     return SystemStatus(
