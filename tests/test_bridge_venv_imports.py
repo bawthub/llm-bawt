@@ -95,6 +95,7 @@ def test_constraints_snapshot_present() -> None:
     assert CONSTRAINTS.is_file()
 
 
+@pytest.mark.real_process(reason="imports each entrypoint in a fresh Python interpreter")
 @pytest.mark.parametrize("module", ENTRYPOINTS)
 def test_bridge_entrypoint_imports_in_lean_venv(module: str) -> None:
     result = subprocess.run(
