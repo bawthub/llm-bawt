@@ -65,11 +65,42 @@ def refuse_generation_when(check) -> None:
     _generation_guard = check
 
 
-def _generation_refused() -> bool:
-    if _generation_guard is None:
+def records_in(engine) -> bool:
+    """Any ``enc:v1:`` value in ``runtime_settings`` (False when the table doesn't exist yet)."""
+    from sqlalchemy import inspect, text
+
+    with engine.connect() as conn:
+        if not inspect(conn).has_table("runtime_settings"):
+            return False
+        row = conn.execute(text(
+            "SELECT 1 FROM runtime_settings WHERE value_json LIKE :p LIMIT 1"), {"p": '%"enc:v1:%'}).first()
+    return row is not None
+
+
+def encrypted_records_exist() -> bool:
+    """The default generation guard, used by every entry point (app, importer,
+    CLI) unless one registers its own (Codex review).
+
+    Only a deployment with no database configured is a fresh install. A
+    configured database that can't be reached or queried raises, and the
+    caller treats that as "records may exist": a missing root plus a
+    temporarily unavailable database must never mint a replacement."""
+    from ...utils.config import Config, has_database_credentials
+
+    config = Config()
+    if not has_database_credentials(config):
         return False
+    from ...utils.db import get_shared_engine
+
+    engine = get_shared_engine(config)
+    if engine is None:
+        raise RuntimeError("database configured but no engine")
+    return records_in(engine)
+
+
+def _generation_refused() -> bool:
     try:
-        return bool(_generation_guard())
+        return bool((_generation_guard or encrypted_records_exist)())
     except Exception:  # noqa: BLE001 - can't tell: fail closed
         return True
 
@@ -86,7 +117,10 @@ def _load_or_create_key(*, require_persisted: bool = False) -> bytes:
     from cryptography.fernet import Fernet
 
     env = os.getenv(_ENV_KEY)
-    if env:
+    if env is not None:
+        # Set, even to nothing, means the operator chose it: never fall back.
+        if not env.strip():
+            raise ValueError(f"{_ENV_KEY} is set but empty")
         key = env.strip().encode()
         try:
             Fernet(key)

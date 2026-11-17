@@ -32,25 +32,6 @@ def _is_tcp_listening(host: str, port: int) -> bool:
         return False
 
 
-def _encrypted_records_exist(store):
-    """``check()`` for :func:`crypto.refuse_generation_when`: any stored
-    ``enc:v1:`` value. No database means nothing was stored; a failed query
-    raises, which the guard treats as "records may exist"."""
-
-    def check() -> bool:
-        engine = store.engine
-        if engine is None:
-            return False
-        from sqlalchemy import text
-
-        with engine.connect() as conn:
-            row = conn.execute(text(
-                "SELECT 1 FROM runtime_settings WHERE value_json LIKE :p LIMIT 1"), {"p": '%"enc:v1:%'}).first()
-        return row is not None
-
-    return check
-
-
 @asynccontextmanager
 async def lifespan(app):
     """FastAPI lifespan handler for startup/shutdown."""
@@ -61,12 +42,8 @@ async def lifespan(app):
     process_started_at = datetime.now(timezone.utc)
     config = Config()
 
-    # TASK-2386: before anything derives from the master key, refuse to mint
-    # a new one while encrypted records exist (a lost key must fail, not reset).
-    from ..runtime_settings import RuntimeSettingsStore
-    from .providers import crypto
-
-    crypto.refuse_generation_when(_encrypted_records_exist(RuntimeSettingsStore(config)))
+    # TASK-2386: the master key never resets while encrypted records exist;
+    # crypto's default guard enforces that for every entry point, this one too.
 
     # TASK-1472: publish the derived BawtHub service token to the shared file
     # BawtHub reads. Never raises; BawtHub fails closed until it is written.

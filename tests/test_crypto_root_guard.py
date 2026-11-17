@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 from cryptography.fernet import Fernet
 
-from llm_bawt.service.api import _encrypted_records_exist
 from llm_bawt.service.providers import crypto
 
 
@@ -69,21 +68,69 @@ def test_existing_file_is_used_even_when_generation_is_refused(isolated):
     assert crypto._load_or_create_key() == key
 
 
-class _Store:
-    def __init__(self, engine):
-        self.engine = engine
-
-
 def test_records_check_finds_an_encrypted_value(tmp_path):
+    from sqlalchemy import create_engine, text
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'db.sqlite'}")
+    assert crypto.records_in(engine) is False  # fresh database: no table yet
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE runtime_settings (value_json TEXT)"))
+        conn.execute(text("INSERT INTO runtime_settings VALUES ('true')"))
+    assert crypto.records_in(engine) is False
+    with engine.begin() as conn:
+        conn.execute(text("""INSERT INTO runtime_settings VALUES ('"enc:v1:abc"')"""))
+    assert crypto.records_in(engine) is True
+
+
+def test_empty_env_key_raises_and_never_falls_back(isolated, monkeypatch):
+    path = isolated / ".config" / "llm-bawt" / "secret.key"
+    path.parent.mkdir(parents=True)
+    path.write_text(Fernet.generate_key().decode())
+    monkeypatch.setenv("LLM_BAWT_SECRET_KEY", "  ")
+    with pytest.raises(ValueError, match="set but empty"):
+        crypto._load_or_create_key()
+
+
+# --- the default guard: every entry point, nothing registered (Codex) ------
+def _db(monkeypatch, *, configured: bool, engine=None, error: Exception | None = None):
+    from llm_bawt.utils import config as config_module
+    from llm_bawt.utils import db
+
+    monkeypatch.setattr(config_module, "has_database_credentials", lambda _cfg=None: configured)
+
+    def shared(_cfg, **_kw):
+        if error:
+            raise error
+        return engine
+
+    monkeypatch.setattr(db, "get_shared_engine", shared)
+
+
+def test_default_guard_lets_a_fresh_install_without_a_database_generate(isolated, monkeypatch):
+    _db(monkeypatch, configured=False)
+    Fernet(crypto._load_or_create_key())
+
+
+def test_default_guard_refuses_when_the_configured_database_is_down(isolated, monkeypatch):
+    _db(monkeypatch, configured=True, error=RuntimeError("db down"))
+    with pytest.raises(crypto.MissingRootKeyError):
+        crypto._load_or_create_key()
+    _db(monkeypatch, configured=True, engine=None)
+    with pytest.raises(crypto.MissingRootKeyError):
+        crypto._load_or_create_key()
+    assert not (isolated / ".config" / "llm-bawt" / "secret.key").exists()
+
+
+def test_default_guard_refuses_over_existing_ciphertext(isolated, monkeypatch, tmp_path):
+    """The standalone importer registers nothing; it still can't mint a new root."""
     from sqlalchemy import create_engine, text
 
     engine = create_engine(f"sqlite:///{tmp_path / 'db.sqlite'}")
     with engine.begin() as conn:
         conn.execute(text("CREATE TABLE runtime_settings (value_json TEXT)"))
-        conn.execute(text("INSERT INTO runtime_settings VALUES ('true')"))
-    check = _encrypted_records_exist(_Store(engine))
-    assert check() is False
-    with engine.begin() as conn:
         conn.execute(text("""INSERT INTO runtime_settings VALUES ('"enc:v1:abc"')"""))
-    assert check() is True
-    assert _encrypted_records_exist(_Store(None))() is False
+    _db(monkeypatch, configured=True, engine=engine)
+    from llm_bawt.service.providers.base import CredentialStore
+
+    assert CredentialStore.durable_key_problem() is not None
+    assert not (isolated / ".config" / "llm-bawt" / "secret.key").exists()
