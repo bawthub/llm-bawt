@@ -410,7 +410,7 @@ async def test_retained_inventory_classifies_without_ack_or_receipt(transport):
     await pending(transport)
     # This owner booted after both deliveries, so neither can be its run.
     await asyncio.sleep(0.02)
-    later = owner(transport, page_size=1, started_ms=int(time.time() * 1000))
+    later = owner(transport, page_size=1, started=time.monotonic())
     assert (await later.scan())["retained"] == 1
     assert later.last_inventory is None  # cycle not finished across pages
     await later.scan()
@@ -425,7 +425,7 @@ async def test_retained_inventory_classifies_without_ack_or_receipt(transport):
 
 @pytest.mark.anyio
 async def test_this_boot_deliveries_are_uncertain_and_empty_pel_resets(transport):
-    current = owner(transport, started_ms=0)
+    current = owner(transport, started=0.0)
     entry_id, _ = await pending(transport)
     await current.scan()
     assert current.last_inventory == {
@@ -434,3 +434,17 @@ async def test_this_boot_deliveries_are_uncertain_and_empty_pel_resets(transport
     await transport.xack(STREAM, GROUP, entry_id)
     await current.scan()
     assert current.last_inventory == current._empty_inventory()
+
+
+@pytest.mark.anyio
+async def test_failed_get_retries_entry_instead_of_publishing_empty_inventory(transport):
+    await pending(transport)
+    recovery = owner(transport, started=0.0)
+    real_get = transport.get
+    transport.get = AsyncMock(side_effect=ConnectionError("transient"))
+    with pytest.raises(ConnectionError):
+        await recovery.scan()
+    assert recovery.last_inventory is None
+    transport.get = real_get
+    await recovery.scan()
+    assert recovery.last_inventory["uncertain"] == 1

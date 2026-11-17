@@ -54,7 +54,7 @@ class CommandAckOwner:
     def __init__(
         self, redis, *, stream: str, group: str, backend: str, boot_id: str,
         page_size: int = 64, interval: float = 5, timeout: float = 5,
-        started_ms: int | None = None, clock=time.time,
+        started: float | None = None, clock=time.monotonic,
     ):
         self.redis, self.stream, self.group = redis, stream, group
         self.backend, self.boot_id = backend, boot_id
@@ -65,7 +65,7 @@ class CommandAckOwner:
         # Read-only retained-entry inventory. Classification never grants an
         # ACK or a dispatch; it only says why an entry is still pending.
         self.clock = clock
-        self.started_ms = int(clock() * 1000) if started_ms is None else started_ms
+        self.started = clock() if started is None else started
         self._cycle_inventory = self._empty_inventory()
         self.last_inventory: dict | None = None
 
@@ -150,7 +150,6 @@ class CommandAckOwner:
         counts = {"examined": len(entries), "settled": 0, "retained": 0}
         for entry in entries:
             entry_id = entry["message_id"]
-            self.cursor = f"({entry_id}"
             async with asyncio.timeout(self.timeout):
                 evidence = await self.redis.get(receipt_key(self.stream, self.group, entry_id))
             context = self._load(entry_id, evidence) if evidence else None
@@ -159,6 +158,9 @@ class CommandAckOwner:
             else:
                 counts["retained"] += 1
                 self._classify(entry)
+            # Advance only after this entry is settled or classified, so a
+            # transient GET/settle failure retries it instead of skipping it.
+            self.cursor = f"({entry_id}"
         if len(entries) < self.page_size:
             self.cursor = "-"
             self._cycle_end = None
@@ -170,12 +172,14 @@ class CommandAckOwner:
         return {"legacy": 0, "uncertain": 0, "oldest_legacy_id": None, "max_deliveries": 0}
 
     def _classify(self, entry: dict) -> None:
-        """Legacy = last delivered before this process booted, so no handler
-        here can own it. Uncertain = delivered this boot with no receipt (a
-        live run or a stranded disposal). Neither is evidence of nonexecution."""
+        """Best-effort estimate, not ownership: legacy = idle longer than this
+        process has been up (likely delivered to an earlier boot); uncertain =
+        delivered since (a live run or a stranded disposal). Uses monotonic
+        boot age, so local wall-clock steps can't flip it; Redis clock jumps
+        and query delay still can. Neither class is evidence of nonexecution."""
         inv = self._cycle_inventory
-        delivered_ms = int(self.clock() * 1000) - int(entry.get("time_since_delivered") or 0)
-        if delivered_ms < self.started_ms:
+        boot_age_ms = (self.clock() - self.started) * 1000
+        if int(entry.get("time_since_delivered") or 0) > boot_age_ms:
             inv["legacy"] += 1
             if inv["oldest_legacy_id"] is None:
                 inv["oldest_legacy_id"] = entry["message_id"]
