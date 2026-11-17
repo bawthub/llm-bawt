@@ -209,6 +209,20 @@ def test_metadata_only_secret_row_is_marked_sensitive(store):
     assert files["docs/secrets.md"]["sensitive"] is False
 
 
+def test_sensitive_declared_alias_wins_over_ordinary_resolved_path():
+    from llm_bawt.service.changed_files_store import TurnChangedFile, serialize_changed_file
+
+    # .env symlink resolving to config/settings.txt: capture withheld content
+    # because the declared name is sensitive; identity filled the target path.
+    row = TurnChangedFile(
+        turn_id="t", bot_id="b", user_id="u", repo_key="r", path="/repo/.env",
+        repo_relative_path="config/settings.txt", change_kind="modified", truncated=True,
+    )
+    assert serialize_changed_file(row)["sensitive"] is True
+    row.path, row.repo_relative_path = "/repo/config/settings.txt", ".env"
+    assert serialize_changed_file(row)["sensitive"] is True
+
+
 def test_upsert_is_idempotent(store):
     for after in ("v1", "v2"):
         store.save_turn_files(

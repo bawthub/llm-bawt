@@ -334,8 +334,11 @@ def serialize_changed_file(row: TurnChangedFile) -> dict[str, Any]:
         # Metadata-only secret row (e.g. an ignored .env a bot touched): the
         # snapshot recorded a stat change but withheld every byte. Commit
         # scopes must never name it.
-        "sensitive": not (has_before or has_after)
-        and is_sensitive_path(row.repo_relative_path or row.path),
+        # Check every spelling: a sensitive declared alias (.env symlink) can
+        # resolve to an ordinary repo-relative target.
+        "sensitive": not (has_before or has_after) and any(
+            is_sensitive_path(p) for p in (row.path, row.repo_relative_path) if p
+        ),
         "content_type": row.content_type,
         # None = unknown (legacy/fallback rows) — the UI treats only an explicit
         # False as "scratch file, not committable".
