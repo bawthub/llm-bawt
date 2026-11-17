@@ -37,7 +37,8 @@ if __package__:
     from . import import_preflight
     from .compose_config import (BUILT_PROFILE, GPU_BUILT_PROFILE, ComposeError, built_image_tag, evaluate,
                                 gpu_preflight, gpu_verify, port_list)
-    from .compose_render import (OPS_JOB_LABEL, SAFE_PATH, label_files_valid, validate_compose_secrets,
+    from .compose_render import (OPS_JOB_LABEL, SAFE_PATH, label_files_valid, overlay_files_valid, overlay_paths,
+                                 validate_adopt_paths, validate_compose_secrets,
                                  validate_interpolation_env)
     from .config_reconcile import (CONTAINER_NAME_PATTERN, ConfigReconciler, check_compose_identity,
                                    current_config_hash, valid_hashes, validate_renderer_image,
@@ -50,7 +51,8 @@ else:  # standalone immutable worker
     import import_preflight
     from compose_config import (BUILT_PROFILE, GPU_BUILT_PROFILE, ComposeError, built_image_tag, evaluate,
                                 gpu_preflight, gpu_verify, port_list)
-    from compose_render import (OPS_JOB_LABEL, SAFE_PATH, label_files_valid, validate_compose_secrets,
+    from compose_render import (OPS_JOB_LABEL, SAFE_PATH, label_files_valid, overlay_files_valid, overlay_paths,
+                                 validate_adopt_paths, validate_compose_secrets,
                                 validate_interpolation_env)
     from config_reconcile import (CONTAINER_NAME_PATTERN, ConfigReconciler, check_compose_identity,
                                   current_config_hash, valid_hashes, validate_renderer_image,
@@ -100,13 +102,16 @@ def validate_label_compose_config(spec: dict) -> None:
     """No compose_files (the target's labels name them) and no image_variable;
     only the declared ``interpolation_env`` is interpolated (TASK-1476)."""
     config = spec["compose_config"]
-    allowed = {"renderer_image", "interpolation_env", "compose_secrets"}
+    allowed = {"renderer_image", "interpolation_env", "compose_secrets",
+               "overlay_root", "overlay_files", "adopt_files"}  # TASK-2406
     if not isinstance(config, dict) or not {"renderer_image"} <= set(config) <= allowed:
-        raise ValueError("app compose_config requires exactly renderer_image"
-                         " (and optional interpolation_env, compose_secrets)")
+        raise ValueError("app compose_config requires exactly renderer_image (and optional interpolation_env,"
+                         " compose_secrets, overlay_root/overlay_files, adopt_files)")
     validate_renderer_image(config)
     validate_interpolation_env(config)
     validate_compose_secrets(config)
+    overlay_paths(config)
+    validate_adopt_paths(config)
 
 
 def uses_process_profile(desired: dict) -> bool:
@@ -312,7 +317,7 @@ def valid_app_binding(snapshot: dict) -> bool:
                 and type(binding["image_tag_moved"]) is bool
                 and set(source) == {"project_dir", "compose_files"}
                 and bool(SAFE_PATH.fullmatch(source["project_dir"]))
-                and label_files_valid(source["project_dir"], source["compose_files"])
+                and overlay_files_valid(spec["compose_config"], source["project_dir"], source["compose_files"])
                 and all(isinstance(x, str) for x in lists)
                 and set(binding["display"]) == set(spec["display_values"])
                 and valid_source_commit(spec, binding["source_commit"])
@@ -359,6 +364,17 @@ def trust_text(binding: dict, operation: dict, newly) -> str:
             f"{_names(classes['opaque_env'])}\n")
 
 
+def _overlay_text(spec: dict) -> str:
+    """TASK-2406: the external deployment files this run reads, paths only."""
+    compose, env = overlay_paths(spec["compose_config"])
+    if not compose:
+        return ""
+    adopt = spec["compose_config"].get("adopt_files")
+    return ("Deployment overlay (outside the checkout; not git-verified, bound by the fingerprints below): "
+            f"{', '.join(compose + env)}\n"
+            + (f"Adopts a container labelled: {', '.join(adopt)} (matched only, never read)\n" if adopt else ""))
+
+
 def approval_text(spec: dict, binding: dict, prefix: str | None, *, operation: dict, newly_trusted,
                   image_swap: dict | None = None) -> str:
     """Approval card body: names, ports, mounts and A1 enum values only."""
@@ -380,6 +396,7 @@ def approval_text(spec: dict, binding: dict, prefix: str | None, *, operation: d
             f"Source: github.com/{commit['repository']} {commit['branch']} @ {commit['head']} "
             "(published, clean)\n"
             f"Compose source: {', '.join(binding['source']['compose_files'])}\n"
+            + _overlay_text(spec) +
             f"Drift (names only): {drift}\n"
             f"Ports after: {', '.join(binding['ports']) or 'none'}\n"
             f"Requires running: {', '.join(binding['depends_on']) or 'nothing'} (never restarted)\n"

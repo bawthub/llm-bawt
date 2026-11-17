@@ -41,10 +41,10 @@ import re
 import stat
 
 if __package__:
-    from .compose_render import ComposeError, SAFE_PATH
+    from .compose_render import ComposeError, SAFE_PATH, overlay_paths
     from .sealed_container import SealedContainer, SealedRunError
 else:  # standalone immutable worker
-    from compose_render import ComposeError, SAFE_PATH
+    from compose_render import ComposeError, SAFE_PATH, overlay_paths
     from sealed_container import SealedContainer, SealedRunError
 
 SOURCE_FIELDS = ("source_repository", "source_branch", "source_mounts", "data_mounts", "env_names")
@@ -343,7 +343,16 @@ def source_plan(spec: dict, source: dict, container: dict, image: dict, desired:
     mounts = {d: d in data and (desired["mounts"].get(d) or {}).get("read_only") is True
               for d in destinations if d}
     opaque, prefix_ok = _env_refusals(env, mounts, set(spec["env_names"]), found)
-    compose_files = [posixpath.relpath(f, project) for f in source["compose_files"]]
+    # TASK-2406: a declared deployment overlay is outside the repository, so
+    # git cannot vouch for it. Only the in-project files are git-checked; the
+    # overlay's effect is bound by the approval's rendered/desired hashes.
+    overlay = set(overlay_paths((spec.get("compose_config") or {}))[0])
+    outside = [f for f in source["compose_files"] if f not in overlay and not _within(f, project)]
+    if outside:
+        found.append(SourceStateError("source_compose_outside", outside,
+                                      detail="not in the project and not the declared overlay"))
+    compose_files = [posixpath.relpath(f, project) for f in source["compose_files"]
+                     if f not in overlay and _within(f, project)]
     plan = {"paths": sorted(paths), "compose_files": compose_files,
             "bytecode_ok": env.get(PYCACHE_PREFIX) is not None and prefix_ok,
             "classification": {"source_mounts": sorted(sources),

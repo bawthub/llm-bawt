@@ -77,4 +77,8 @@ LABEL llm-bawt.ops.gpu-image-swap="1"
 # (compose_config.compose_secrets) and fills that volume (compose_secrets.py).
 LABEL llm-bawt.ops.compose-secrets-render="1"
 LABEL llm-bawt.ops.compose-secrets-write="1"
+# TASK-2406: ...renders a catalog-declared deployment overlay (single-file
+# read-only binds) and models a read-only root filesystem on the built kind.
+LABEL llm-bawt.ops.compose-overlay-render="1"
+LABEL llm-bawt.ops.read-only-profile="1"
 ENTRYPOINT ["python3", "-I", "/ops/worker.py"]

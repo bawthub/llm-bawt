@@ -22,7 +22,8 @@ from .app_config_reconcile import (ACTION as APP_CONFIG_ACTION, BUILT_PROFILE_LA
                                    IMAGE_SWAP_LABEL)
 from .compose_config import (GPU_PROFILE_LABEL, DEV_PROFILE, HARDENED_PROFILE, HARDENED_PROFILE_LABEL,
                              CGROUP_PARENT_PROFILE_LABEL, INIT_MEMORY_PROFILE_LABEL, PINNED_PROCESS_PROFILE,
-                             DNS_PROFILE_LABEL, evaluate, needs_cgroup_parent_worker, needs_dns_worker,
+                             DNS_PROFILE_LABEL, READ_ONLY_PROFILE_LABEL, evaluate, needs_cgroup_parent_worker,
+                             needs_dns_worker, needs_read_only_worker,
                              needs_init_memory_worker,
                              selected_profile)
 # TASK-1169 S4: the error/result types live in executor_types; re-exported here.
@@ -56,7 +57,7 @@ from . import sequence
 from . import wake_on_lan
 from . import compose_secrets
 from . import import_preflight
-from .compose_render import COMPOSE_SECRETS_RENDER_LABEL
+from .compose_render import COMPOSE_SECRETS_RENDER_LABEL, OVERLAY_RENDER_LABEL
 from .execution_mode import EXECUTION_ISOLATED, EXECUTION_PROCESS, EXECUTOR_MODES, snapshot_execution_mode
 from .process_launch import ProcessLauncher
 from .self_target import (SELF_IDENTITY_UNKNOWN, SELF_TARGET_UNVERIFIABLE, ContainerIdentity, SelfTargetError,
@@ -99,6 +100,9 @@ def spec_capability_labels(spec: dict) -> tuple[str, ...]:
     if "compose_secrets" in (spec.get("compose_config") or {}):
         # TASK-2386: an older worker would reject the field mid-job.
         labels.append(COMPOSE_SECRETS_RENDER_LABEL)
+    if "overlay_root" in (spec.get("compose_config") or {}):
+        # TASK-2406: an older worker would reject the field mid-job.
+        labels.append(OVERLAY_RENDER_LABEL)
     if spec.get("action") == sequence.ACTION:
         labels.append(sequence.WORKER_CAPABILITY_LABEL)
     if "runtime_source" in spec:
@@ -637,6 +641,9 @@ class DockerExecutor(Executor):
             if needs_dns_worker(desired, binding.get("drift") or ()):  # TASK-2171
                 self._check_config_worker(self.execution_settings(spec), spec["action"],
                                           extra=(DNS_PROFILE_LABEL,))
+            if needs_read_only_worker(desired, binding.get("drift") or ()):  # TASK-2406
+                self._check_config_worker(self.execution_settings(spec), spec["action"],
+                                          extra=(READ_ONLY_PROFILE_LABEL,))
             return binding, desired, container
         except ComposeError as exc:  # fixed code and names only
             raise ConfigCheckError(exc.code, f"config target cannot be bound: {exc}") from exc
@@ -677,6 +684,9 @@ class DockerExecutor(Executor):
         if needs_dns_worker(result["desired"], result["drift"]):  # TASK-2171
             self._check_config_worker(self.execution_settings(spec), spec["action"],
                                       extra=(DNS_PROFILE_LABEL,))
+        if needs_read_only_worker(result["desired"], result["drift"]):  # TASK-2406
+            self._check_config_worker(self.execution_settings(spec), spec["action"],
+                                      extra=(READ_ONLY_PROFILE_LABEL,))
         if result["drift"]:
             raise ConfigCheckError("config_drift", (
                 "config_drift: the running target differs from its Compose service ("

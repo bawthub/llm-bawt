@@ -136,7 +136,8 @@ PINNED_PROFILE = ServiceProfile("pinned", SERVICE_KEYS, built=False, models_proc
 BUILT_PROFILE = ServiceProfile("built", frozenset({
     "build", "command", "container_name", "depends_on", "entrypoint", "environment", "extra_hosts", "healthcheck",
     "image", "init", "labels", "networks", "ports", "pull_policy", "restart", "security_opt", "stdin_open", "tmpfs",
-    "tty", "volumes", "cgroup_parent", "dns", *MEMORY_KEYS}), built=True, models_process=True, pull_policies=BUILT_PULL_POLICIES)
+    "tty", "volumes", "cgroup_parent", "dns", "read_only", *MEMORY_KEYS}), built=True, models_process=True,
+    pull_policies=BUILT_PULL_POLICIES)
 # TASK-1844: a Compose-built GPU service (local-model-bridge), selected only by
 # ``gpu: true`` on its reconcile spec; every other profile still refuses these
 # keys. Native CDI only: ``runtime`` is the literal ``runc`` (never the legacy
@@ -193,6 +194,9 @@ CGROUP_PARENT_PROFILE_LABEL = "llm-bawt.ops.cgroup-parent-profile"
 # TASK-2171: worker image label proving it models ``dns`` (ordered upstream
 # resolvers for Docker's embedded DNS) on the built kind.
 DNS_PROFILE_LABEL = "llm-bawt.ops.dns-profile"
+# TASK-2406: worker image label proving it models ``read_only`` (a read-only
+# root filesystem, e.g. an agent house) on the built kind.
+READ_ONLY_PROFILE_LABEL = "llm-bawt.ops.read-only-profile"
 # resolv.conf honours at most three nameservers.
 _MAX_DNS = 3
 
@@ -207,6 +211,12 @@ def needs_dns_worker(desired: dict, drift_names=()) -> bool:
     """Would a worker built before TASK-2171 refuse this desired configuration
     or miss this drift (it never computes ``dns:~``)?"""
     return "dns" in desired or "dns:~" in drift_names
+
+
+def needs_read_only_worker(desired: dict, drift_names=()) -> bool:
+    """Would a worker built before TASK-2406 refuse this desired configuration
+    or miss this drift (it never computes ``read_only:~``)?"""
+    return "read_only" in desired or "read_only:~" in drift_names
 
 
 def _dns(value) -> list:
@@ -749,6 +759,9 @@ def translate(rendered: dict, spec: dict, image_ref: str, profile: ServiceProfil
         desired["memory"] = _memory(service)
     if HARDENING_KEYS <= profile.keys:
         desired["hardening"] = _hardening(service)
+    elif "read_only" in profile.keys and _flag(service.get("read_only"), "read_only"):
+        # TASK-2406: stored only when set, so other built services keep their hash.
+        desired["read_only"] = True
     if GPU_KEYS <= profile.keys:
         desired["gpu"] = _gpu(service)
     if built_tag is not None:
@@ -798,7 +811,7 @@ def running(container: dict) -> dict:
             "expose": sorted((config.get("ExposedPorts") or {}).keys()),
             "stop_timeout": config.get("StopTimeout"), "init": bool(host.get("Init")),
             "cgroup_parent": host.get("CgroupParent") or "",
-            "dns": list(host.get("Dns") or []),
+            "dns": list(host.get("Dns") or []), "read_only": bool(host.get("ReadonlyRootfs")),
             "memory": {"Memory": int(host.get("Memory") or 0), "MemorySwap": int(host.get("MemorySwap") or 0)},
             "hardening": _running_hardening(host), "gpu": _running_gpu(host)}
 
@@ -876,6 +889,9 @@ def drift(desired: dict, actual: dict) -> list[str]:
         # TASK-2171: ordered upstreams; undeclared ones are removed too.
         if desired.get("dns", []) != actual.get("dns", []):
             names.append("dns:~")
+        # TASK-2406: the root filesystem mode; a hardened profile owns it instead.
+        if "hardening" not in desired and desired.get("read_only", False) != actual.get("read_only", False):
+            names.append("read_only:~")
     # TASK-1649: only a profile that owns the memory cap compares it.
     if "memory" in desired and not _memory_matches(desired["memory"], actual["memory"]):
         names.append("memory:~")
@@ -1006,6 +1022,7 @@ def apply_desired(body: dict, old: dict, desired: dict, *, container_name: str, 
         host["Init"] = desired.get("init")  # undeclared: the daemon's default
         host["CgroupParent"] = desired.get("cgroup_parent", "")  # TASK-2076: "" = Docker's default
         host["Dns"] = list(desired.get("dns", [])) or None  # TASK-2171: None = Docker's default
+        host["ReadonlyRootfs"] = desired.get("read_only", False)  # TASK-2406; hardening below overrides
     if "memory" in desired:
         host["Memory"], host["MemorySwap"] = desired["memory"]["Memory"], desired["memory"]["MemorySwap"]
     if "hardening" in desired:

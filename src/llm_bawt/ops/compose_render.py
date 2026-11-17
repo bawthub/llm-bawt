@@ -200,6 +200,68 @@ def check_compose_secrets(config: dict, rendered: dict, service: str) -> None:
         raise ComposeError("compose_secret_aliased", aliased)
 
 
+# TASK-2406: a target whose label ends in Compose files OUTSIDE its project (an
+# agent house: ``<deployment>/houses/houses.compose.json`` plus the env file
+# that service reads). The catalog row declares one directory and the file
+# names in it; each file is bound into the renderer read-only as a SINGLE
+# file at its own path (never the directory), with missing-source creation
+# off. These are generated deployment files, not published source: the git
+# source guard keeps covering the in-project files, and the overlay's effect
+# is bound by the approval's rendered/desired fingerprints, which the worker
+# re-renders and compares before anything stops.
+OVERLAY_RENDER_LABEL = "llm-bawt.ops.compose-overlay-render"  # worker capability
+OVERLAY_COMPOSE_FILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,126}\.(?:ya?ml|json)")
+OVERLAY_ENV_FILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,126}\.env")
+MAX_OVERLAY_FILES = 3
+MAX_OVERLAY_COMPOSE_FILES = 2
+MAX_ADOPT_FILES = MAX_COMPOSE_FILES + MAX_OVERLAY_COMPOSE_FILES + 1
+
+
+def overlay_paths(config: dict) -> tuple[list[str], list[str]]:
+    """``(compose file paths in order, env file paths)`` the row declares, or
+    two empty lists. Raises ValueError for an invalid declaration.
+
+    ``overlay_root`` is a clean absolute directory that may not overlap any
+    path the renderer trusts, the secrets mount or its config dir; the project
+    overlap is checked against the bound project in :func:`overlay_mounts`."""
+    if "overlay_files" not in config and "overlay_root" not in config:
+        return [], []
+    root, names = config.get("overlay_root"), config.get("overlay_files")
+    if not working_dir_valid(root) or any(_overlaps(root, r) for r in (*RENDER_TRUSTED_ROOTS, COMPOSE_SECRETS_DIR)):
+        raise ValueError("compose_config.overlay_root must be a clean absolute path outside every trusted path")
+    if (not isinstance(names, list) or not 1 <= len(names) <= MAX_OVERLAY_FILES
+            or len(set(names)) != len(names) or not all(isinstance(n, str) for n in names)):
+        raise ValueError(f"compose_config.overlay_files must be 1-{MAX_OVERLAY_FILES} distinct file names")
+    compose = [n for n in names if OVERLAY_COMPOSE_FILE.fullmatch(n)]
+    env = [n for n in names if OVERLAY_ENV_FILE.fullmatch(n)]
+    if len(compose) + len(env) != len(names) or not 1 <= len(compose) <= MAX_OVERLAY_COMPOSE_FILES:
+        raise ValueError("compose_config.overlay_files must name 1-2 Compose files (.yml/.yaml/.json) "
+                         "and optional .env files")
+    return [posixpath.join(root, n) for n in compose], [posixpath.join(root, n) for n in env]
+
+
+def validate_adopt_paths(config: dict) -> list[str]:
+    """``compose_config.adopt_files`` for an overlay target: an exact earlier
+    label list, absolute paths, matched only and never bound or read."""
+    if "adopt_files" not in config:
+        return []
+    value = config["adopt_files"]
+    if (not isinstance(value, list) or not 1 <= len(value) <= MAX_ADOPT_FILES or len(set(value)) != len(value)
+            or not all(working_dir_valid(p) for p in value)):
+        raise ValueError("compose_config.adopt_files must be distinct clean absolute paths")
+    if "overlay_root" not in config:
+        raise ValueError("compose_config.adopt_files needs a declared overlay")
+    return value
+
+
+def overlay_mounts(config: dict, project_dir: str) -> tuple[str, ...]:
+    """Every declared overlay file, to bind read-only one by one."""
+    compose, env = overlay_paths(config)
+    if compose and _overlaps(config["overlay_root"], project_dir):
+        raise ValueError("compose_config.overlay_root must not overlap the Compose project")
+    return (*compose, *env)
+
+
 def _within(path: str, root: str) -> bool:
     """``path`` is ``root`` or below it (both clean absolute paths)."""
     return path == root or path.startswith(root.rstrip("/") + "/")
@@ -276,6 +338,13 @@ def compose_source(spec: dict, container: dict, project_dir: str | None = None) 
     names = spec["compose_config"].get("compose_files")
     if not working_dir_valid(working_dir):
         raise ComposeError("compose_source_invalid", detail="working directory label")
+    try:
+        overlay, _env = overlay_paths(spec["compose_config"])
+    except ValueError as exc:
+        raise ComposeError("compose_source_invalid", detail=str(exc)) from None
+    if overlay:
+        # The external tail is never rebased onto a sibling checkout.
+        return _overlay_source(spec["compose_config"], working_dir, project_dir or working_dir, files, overlay)
     if project_dir is not None and project_dir != working_dir:
         if not label_files_valid(working_dir, files):
             raise ComposeError("compose_source_invalid", detail="config files label")
@@ -300,6 +369,41 @@ def compose_source(spec: dict, container: dict, project_dir: str | None = None) 
             raise ComposeError("compose_source_invalid", detail="config files differ from the catalog spec")
         files = expected
     return {"project_dir": working_dir, "compose_files": files}
+
+
+def _overlay_source(config: dict, label_dir: str, project_dir: str, files: list, overlay: list) -> dict:
+    """TASK-2406: the label is in-project files (the install's own choice,
+    validated as before) followed by EXACTLY the declared overlay Compose
+    files; or, once, the exact earlier list in ``adopt_files``, whose leading
+    in-project files are kept. Rendered from the in-project files (rebased
+    onto ``project_dir``) plus the declared overlay, never anything else."""
+    adopt = validate_adopt_paths(config)
+    if files[len(files) - len(overlay):] == overlay:
+        head = files[:len(files) - len(overlay)]
+    elif adopt and files == adopt:
+        head = []
+        for f in files:
+            if posixpath.dirname(f) != label_dir:
+                break
+            head.append(f)
+    else:
+        raise ComposeError("compose_source_invalid", detail="config files differ from the catalog overlay")
+    if not label_files_valid(label_dir, head):
+        raise ComposeError("compose_source_invalid", detail="config files label")
+    head = [posixpath.join(project_dir, posixpath.basename(f)) for f in head]
+    return {"project_dir": project_dir, "compose_files": [*head, *overlay]}
+
+
+def overlay_files_valid(config: dict, project_dir: str, files: list) -> bool:
+    """A bound source's file list: in-project files, then the declared overlay."""
+    try:
+        overlay, _env = overlay_paths(config)
+    except ValueError:
+        return False
+    if not overlay:
+        return label_files_valid(project_dir, files)
+    return (files[len(files) - len(overlay):] == overlay
+            and label_files_valid(project_dir, files[:len(files) - len(overlay)]))
 
 
 def working_dir_valid(working_dir: str) -> bool:
@@ -401,11 +505,15 @@ class ComposeRenderer:
         env = renderer_env(self.spec["compose_config"], image_ref, source["project_dir"])
         secrets = validate_compose_secrets(self.spec["compose_config"])
         try:
+            overlay = overlay_mounts(self.spec["compose_config"], source["project_dir"])
+        except ValueError as exc:
+            raise ComposeError("compose_source_invalid", detail=str(exc)) from None
+        try:
             # ``env -i``: Docker ``Env`` would only add to the image's own (HOME=/root).
             status, raw = sealed.run(entrypoint=["env", "-i", *env, "docker"], cmd=argv, env=[],
                                      directory=source["project_dir"], max_bytes=MAX_RENDER_BYTES,
                                      empty_dirs=(RENDER_DOCKER_CONFIG,),
-                                     ro_volume_files=compose_secret_mounts(secrets))
+                                     ro_volume_files=compose_secret_mounts(secrets), ro_bind_files=overlay)
         except SealedRunError as exc:
             raise ComposeError(f"renderer_{exc.kind}") from None
         stdout, stderr = demux_streams(raw)

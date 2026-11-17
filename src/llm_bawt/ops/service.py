@@ -26,7 +26,8 @@ from .operation_revision import OperationChanged, changed_reason
 from .gpu_guard import (GPU_VOICE_SERVICES, STOP_ACTION, GpuGuardUnverifiable, gpu_voice_stop_target,
                         gpu_voice_target, handoff_only_service)
 from .gpu_reconcile import is_gpu_reconcile, nested_gpu_reconcile
-from .house_guard import HouseOccupancyUnverifiable, house_targets, occupancy_reader, override_requested
+from .house_guard import (HouseOccupancyUnverifiable, hold_id, house_targets, occupancy_reader, override_requested,
+                          recreate_houses, release_houses, reserve_houses)
 from .self_target import SelfTargetError
 from .image_deploy import DEPLOY_ACTION, IMAGE_ACTIONS
 from .release_spec import is_release_spec
@@ -895,9 +896,38 @@ class OpsService:
                 self.store.mark_terminal(job.id, state=JOB_FAILED,
                     error_text=f"house_occupied: {occupied}; no action submitted")
                 return
+            recreated = recreate_houses(snapshot.get("spec") or {}, snapshot.get("resolved_args") or {})
+            if recreated:
+                # TASK-2406: a recreate holds the house against new assignments
+                # from here through its terminal receipt (released there).
+                try:
+                    refused = reserve_houses(self.store.engine, lambda h: self._house_reasons(h, ExecutorError),
+                                             recreated, hold_id(job.id))
+                except ExecutorError as exc:
+                    self.store.note_queued_error(job.id, str(exc))
+                    return
+                if refused:
+                    self.store.mark_terminal(job.id, state=JOB_FAILED,
+                        error_text=f"house_occupied: {refused}; no action submitted")
+                    return
             if not self.store.claim_job(job.id, max_concurrent=snapshot["execution"].get("max_concurrent")):
+                if recreated:
+                    release_houses(self.store.engine, recreated, hold_id(job.id))
                 return
         self._submit(job, snapshot, executor)
+
+    def _release_recreated(self, job_id: str, snapshot: dict, state: str) -> None:
+        """TASK-2406: a known outcome (succeeded, or failed with nothing
+        changed / the previous container restored healthy) frees the house.
+        LOST or any other state keeps the reservation: the house may be down
+        or half-swapped, and the hold is the visible, actionable marker."""
+        houses = recreate_houses(snapshot.get("spec") or {}, snapshot.get("resolved_args") or {})
+        if not houses or state not in (JOB_SUCCEEDED, JOB_FAILED):
+            return
+        try:
+            release_houses(self.store.engine, houses, hold_id(job_id))
+        except Exception as exc:  # noqa: BLE001 - the receipt stands; the hold stays visible
+            logger.warning("ops job %s: house reservation not released: %s", job_id, type(exc).__name__)
 
     def _occupied_houses(self, houses, error) -> str | None:
         """Occupancy text over every house the target may denote, else None."""
@@ -1013,6 +1043,7 @@ class OpsService:
                                 output_tail=rec.output_tail, error_text=rec.error,
                                 started_at=_timestamp(rec.started_at), finished_at=_timestamp(rec.finished_at),
                                 sequence=rec.sequence)
+                            self._release_recreated(job.id, snapshot, rec.state)
                     except (ExecutorError, ValueError) as exc:
                         logger.warning("ops reconcile unavailable for %s: %s", job.id, exc)
                     self.store.touch_reconcile(job.id)

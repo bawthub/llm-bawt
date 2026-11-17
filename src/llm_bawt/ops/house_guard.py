@@ -26,8 +26,11 @@ from sqlalchemy import text
 
 from .worker import target_selector
 
-#: Container actions on a house. ``pull`` touches no container.
-GUARDED_ACTIONS = frozenset({"start", "restart", "stop"})
+#: Container actions on a house. ``pull`` touches no container. TASK-2406: a
+#: same-image config reconcile recreates the house, so it is guarded too, and
+#: additionally holds an assignment reservation (:func:`reserve_houses`).
+RECREATE_ACTIONS = frozenset({"reconcile_app_config"})
+GUARDED_ACTIONS = frozenset({"start", "restart", "stop"}) | RECREATE_ACTIONS
 OVERRIDE_ARG = "override_occupied"
 _HOUSE_ID = r"[a-z0-9][a-z0-9-]{0,30}"
 HOUSE_SERVICE_RE = re.compile(rf"house-({_HOUSE_ID})")
@@ -131,5 +134,58 @@ def occupancy_reader(config: Any, engine: Any) -> Callable[[str], list[str]]:
     return read
 
 
-__all__ = ["GUARDED_ACTIONS", "OVERRIDE_ARG", "HouseOccupancyUnverifiable", "house_targets",
+def hold_id(job_id: str) -> str:
+    """The reservation owner for one ops job (``house_retirements.reconcile_id``)."""
+    return f"ops-{job_id}"[:64]
+
+
+def recreate_houses(spec: dict, args: dict) -> tuple[str, ...]:
+    """Houses a job recreates, i.e. that need a reservation for its whole run."""
+    if not isinstance(spec, dict) or spec.get("action") not in RECREATE_ACTIONS:
+        return ()
+    return house_targets(spec, args)
+
+
+def reserve_houses(engine: Any, reasons: Callable[[str], list[str]], houses, owner: str) -> str | None:
+    """Reserve every house for ``owner`` under the assignment lock, after
+    re-reading occupancy under that lock. Returns refusal text (nothing
+    reserved) or None. A house already held by ``owner`` is kept (idempotent);
+    one held by anything else refuses. Unreadable occupancy raises."""
+    from ..house_retirement import RESERVATIONS, reservations
+    from ..house_tenancy import lock_house_assignments
+    from sqlalchemy import insert
+
+    with engine.begin() as conn:
+        lock_house_assignments(conn)
+        held = reservations(conn)
+        refusals = []
+        for house in houses:
+            if held.get(house) not in (None, owner):
+                refusals.append(f"house {house!r} is reserved by {held[house]}")
+                continue
+            why = reasons(house)
+            if why:
+                refusals.append(f"house {house!r} is occupied ({'; '.join(why)})")
+        if refusals:
+            return "; ".join(refusals)
+        for house in houses:
+            if house not in held:
+                conn.execute(insert(RESERVATIONS).values(house=house, reconcile_id=owner))
+    return None
+
+
+def release_houses(engine: Any, houses, owner: str) -> None:
+    """Drop ``owner``'s reservations; another owner's are never touched."""
+    from ..house_retirement import RESERVATIONS
+    from ..house_tenancy import lock_house_assignments
+    from sqlalchemy import delete
+
+    with engine.begin() as conn:
+        lock_house_assignments(conn)
+        for house in houses:
+            conn.execute(delete(RESERVATIONS).where(RESERVATIONS.c.house == house,
+                                                    RESERVATIONS.c.reconcile_id == owner))
+
+
+__all__ = ["GUARDED_ACTIONS", "RECREATE_ACTIONS", "hold_id", "recreate_houses", "release_houses", "reserve_houses", "OVERRIDE_ARG", "HouseOccupancyUnverifiable", "house_targets",
            "occupancy_reader", "override_requested", "read_occupancy"]

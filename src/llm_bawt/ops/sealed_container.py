@@ -55,7 +55,7 @@ def demux_streams(raw: bytes) -> tuple[bytes, bytes]:
 
 def sealed_body(image: str, *, entrypoint: list[str], cmd: list[str], env: list[str], directory: str,
                 labels: dict, role: str, tmpfs: bool = False, empty_dirs: tuple = (),
-                ro_volume_files: tuple = ()) -> dict:
+                ro_volume_files: tuple = (), ro_bind_files: tuple = ()) -> dict:
     """Create body of the hardened container. ``labels`` adds the caller's own
     marker; ``role`` names it as the Compose service it pretends to be.
     ``empty_dirs`` are extra small ``noexec`` tmpfs mounts that start empty, so
@@ -77,10 +77,17 @@ def sealed_body(image: str, *, entrypoint: list[str], cmd: list[str], env: list[
         mounts["/tmp"] = f"rw,noexec,nosuid,nodev,size={TMPFS_BYTES}"
     if mounts:
         host["Tmpfs"] = mounts
-    if ro_volume_files:
-        host["Mounts"] = [{"Type": "volume", "Source": volume, "Target": target, "ReadOnly": True,
-                           "VolumeOptions": {"Subpath": subpath}}
-                          for volume, subpath, target in ro_volume_files]
+    mounts_api = [{"Type": "volume", "Source": volume, "Target": target, "ReadOnly": True,
+                   "VolumeOptions": {"Subpath": subpath}}
+                  for volume, subpath, target in ro_volume_files]
+    # TASK-2406: single host files at their own path. The Mounts API (unlike
+    # legacy ``Binds``) refuses a missing source instead of creating a
+    # directory there, so absence fails the run and changes nothing on disk.
+    mounts_api += [{"Type": "bind", "Source": path, "Target": path, "ReadOnly": True,
+                    "BindOptions": {"Propagation": "rprivate", "NonRecursive": True}}
+                   for path in ro_bind_files]
+    if mounts_api:
+        host["Mounts"] = mounts_api
     return {
         "Image": image, "Entrypoint": entrypoint, "Cmd": cmd, "Env": env, "WorkingDir": directory,
         "AttachStdout": True, "AttachStderr": True, "AttachStdin": False, "OpenStdin": False, "Tty": False,
@@ -128,18 +135,20 @@ class SealedContainer:
         except Exception:  # noqa: BLE001 - the outcome stands; a leftover is labelled
             pass
 
-    def _body(self, *, entrypoint, cmd, env, directory, tmpfs, empty_dirs=(), ro_volume_files=()) -> dict:
+    def _body(self, *, entrypoint, cmd, env, directory, tmpfs, empty_dirs=(), ro_volume_files=(),
+              ro_bind_files=()) -> dict:
         return sealed_body(self.image, entrypoint=entrypoint, cmd=cmd, env=env, directory=directory,
                            labels=self.labels, role=self.role, tmpfs=tmpfs, empty_dirs=empty_dirs,
-                           ro_volume_files=ro_volume_files)
+                           ro_volume_files=ro_volume_files, ro_bind_files=ro_bind_files)
 
     # ── one-shot: attach, start, wait ───────────────────────────────────
     def run(self, *, entrypoint: list[str], cmd: list[str], env: list[str], directory: str,
-            max_bytes: int, empty_dirs: tuple = (), ro_volume_files: tuple = ()) -> tuple[int | None, bytes]:
+            max_bytes: int, empty_dirs: tuple = (), ro_volume_files: tuple = (),
+            ro_bind_files: tuple = ()) -> tuple[int | None, bytes]:
         """``(exit status, raw multiplexed output)``; the output is never longer than ``max_bytes``."""
         container_id = self._create(self._body(entrypoint=entrypoint, cmd=cmd, env=env,
                                                directory=directory, tmpfs=False, empty_dirs=empty_dirs,
-                                               ro_volume_files=ro_volume_files))
+                                               ro_volume_files=ro_volume_files, ro_bind_files=ro_bind_files))
         try:
             try:
                 stream = self.api.attach_stream(container_id)
