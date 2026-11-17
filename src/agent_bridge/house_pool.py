@@ -187,6 +187,9 @@ def render_compose(config: object, base_compose: Path) -> dict:
                 "BAWT_HOUSE_PREVIEW": "on",
                 "npm_config_store_dir": "/home/bridge/dev/.pnpm-store",
                 "BAWTHUB_SERVICE_TOKEN_FILE": "/run/bawthub-service-token/token",
+                # TASK-2400: the voice backend requires the frontend's proxy
+                # token on /api/v1 (TASK-2235); same file as the dev frontend.
+                "BAWTHUB_VOICE_PROXY_TOKEN_FILE": "/run/bawthub-service-token/token",
                 "BAWTHUB_LLM_URL": "http://app:8642",
                 # TASK-2184: the preview's Repos page reads the dev tree from
                 # /repos (read-only below) and shows host paths from here.
