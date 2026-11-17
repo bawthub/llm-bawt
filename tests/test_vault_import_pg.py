@@ -404,6 +404,10 @@ def test_import_refuses_a_root_key_that_was_not_persisted(env, monkeypatch, tmp_
     blocker.write_text("fixture")
     monkeypatch.delenv("LLM_BAWT_SECRET_KEY", raising=False)
     monkeypatch.setattr(fresh_crypto, "_key_file", lambda: blocker / "secret.key")
+    # A fresh install, so generation is allowed and the unpersistable key is
+    # what's refused (TASK-2386: the default guard would refuse even earlier,
+    # since this database holds encrypted rows).
+    fresh_crypto.refuse_generation_when(lambda: False)
     monkeypatch.setattr(base, "crypto", fresh_crypto)
     result = run(engine, store)
     assert (result["ANTHROPIC_API_KEY"].outcome, result["ANTHROPIC_API_KEY"].detail_code) == (
