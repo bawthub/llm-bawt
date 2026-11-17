@@ -59,7 +59,7 @@ RUN if [ "$WITH_CUDA" = "true" ]; then \
 # Install vLLM with CUDA (separate cached layer). Pinned to the uv.lock version
 # so this layer never fetches a newer vllm that the frozen sync then replaces.
 RUN if [ "$WITH_CUDA" = "true" ]; then \
-        uv pip install "vllm==0.29.0"; \
+        uv pip install "vllm==0.32.0"; \
     else \
         echo "Skipping vLLM install (requires CUDA)"; \
     fi
