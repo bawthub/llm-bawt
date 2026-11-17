@@ -87,8 +87,12 @@ async def admit_send(
     admission = queue.accept(session_key, request_id)
     if admission is Admission.TOMBSTONED:
         logger.info("Refusing stopped send: request_id=%s session=%s", request_id, session_key)
-        publisher.publish_run_done(request_id, teardown=queue.refusal_teardown(session_key, request_id))
-        await async_redis.xack(COMMANDS_STREAM, consumer_group, msg_id)
+        try:
+            publisher.publish_run_done(
+                request_id, teardown=queue.refusal_teardown(session_key, request_id))
+        finally:
+            # A failed publish must not strand the refused command in the PEL.
+            await async_redis.xack(COMMANDS_STREAM, consumer_group, msg_id)
         return
     if admission is Admission.DUPLICATE:
         logger.warning(

@@ -185,14 +185,52 @@ def test_claude_missing_model_exit_releases_registration():
     asyncio.run(asyncio.wait_for(run(), timeout=5))
 
 
-def test_claude_bad_structured_reset_releases_registration():
+def test_claude_bad_structured_reset_errors_xacks_and_releases():
     async def run():
         harness = _claude_harness()
-        with pytest.raises(ValueError, match="Invalid structured reset"):
-            await harness._handle_send(
-                _claude_fields("r1", bridge_reset_action="bogus", thread_session_id="t"),
-                "send-r1", harness.redis)
+        await harness._handle_send(
+            _claude_fields("r1", bridge_reset_action="bogus", thread_session_id="t"),
+            "send-r1", harness.redis)
+        errors = [e for e in harness.events if e.kind == AgentEventKind.ERROR]
+        assert len(errors) == 1 and "Invalid structured reset" in errors[0].text
+        assert _send_xacks(harness, "send-r1") == 1
+        harness._publisher.publish_run_done.assert_called_once()
         assert (SESSION, "r1") not in harness._session_queue._request_tasks
+        harness._run_send.assert_not_awaited()
+    asyncio.run(asyncio.wait_for(run(), timeout=5))
+
+
+def test_claude_failed_new_seed_errors_and_xacks_once():
+    async def run():
+        harness = _claude_harness()
+        harness._preprocess_new_command = AsyncMock(
+            side_effect=RuntimeError("new-session seed failed: boom"))
+        await harness._handle_send(_claude_fields("r1", message="/new"), "send-r1", harness.redis)
+        errors = [e for e in harness.events if e.kind == AgentEventKind.ERROR]
+        assert len(errors) == 1 and "seed failed" in errors[0].text
+        assert _send_xacks(harness, "send-r1") == 1
+        harness._publisher.publish_run_done.assert_called_once()
+        assert (SESSION, "r1") not in harness._session_queue._request_tasks
+    asyncio.run(asyncio.wait_for(run(), timeout=5))
+
+
+def test_claude_accept_runs_before_any_await():
+    """TASK-1255: an abort scheduled right after the send task must find the
+    send registered (CANCELLED terminal), not tombstone it first (REFUSED)."""
+    async def run():
+        harness = _claude_harness()
+        entered = asyncio.Event()
+
+        async def preprocess(message, **kw):
+            entered.set()
+            await asyncio.Event().wait()
+
+        harness._preprocess_new_command = AsyncMock(side_effect=preprocess)
+        send_task = asyncio.create_task(
+            harness._handle_send(_claude_fields("r1"), "send-r1", harness.redis))
+        abort_task = asyncio.create_task(harness.abort("r1"))
+        await asyncio.gather(send_task, abort_task, return_exceptions=True)
+        _assert_one_cancelled_terminal(harness, "r1")
     asyncio.run(asyncio.wait_for(run(), timeout=5))
 
 

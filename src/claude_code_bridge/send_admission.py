@@ -98,6 +98,20 @@ class ClaudeSendAdmissionMixin:
                         request_id, session_key, 1, msg_id, async_redis,
                     )
                 raise
+            except Exception as exc:
+                # TASK-1255: a preflight failure (bad structured reset, failed
+                # /new seed) must still leave an error event and an xack, not
+                # a silent empty terminal and a stranded PEL entry.
+                if scope.terminal_published:
+                    raise
+                logger.exception("Send preflight failed: request_id=%s", request_id)
+                self._publish_event(
+                    request_id, session_key, 1,
+                    kind=AgentEventKind.ERROR, text=f"Claude Code bridge: {exc}",
+                )
+                scope.terminal_published = True
+                await async_redis.xack(COMMANDS_STREAM, "claude-code-bridge", msg_id)
+                return
             if preflight is None:
                 return
             await self._run_send(preflight, msg_id, async_redis, terminal)
