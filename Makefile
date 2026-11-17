@@ -186,7 +186,7 @@ run: ## Stop app + bridges, rebuild dev, tail logs
 
 up: ## Docker compose up (production)
 	@echo "Starting containers (production mode)..."
-	docker compose up -d
+	scripts/compose-secrets -- up -d
 	@echo "$(GREEN)✓ Services started on ports $(MCP_PORT) (MCP) and $(SERVICE_PORT) (LLM)$(NC)"
 
 docker-dev: ## Docker compose up (dev mode — mounts ./src)
@@ -208,7 +208,7 @@ restart-app: ## Restart ONLY the app (leaves bridges/agents alive)
 
 rebuild: ## Rebuild and restart containers
 	docker compose down
-	docker compose up -d --build
+	scripts/compose-secrets -- up -d --build
 	@echo "$(GREEN)✓ Containers rebuilt and started$(NC)"
 
 logs: ## Follow container logs
