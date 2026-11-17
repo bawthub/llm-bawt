@@ -46,6 +46,26 @@ class CallRequest:
     max_chars: int = 4000
 
 
+def _sequence_child_schemas(conn, args) -> list[dict]:
+    """Per-step schemas for a sequence's ``steps``, so child x-sensitive args mask too."""
+    steps = args.get("steps") if isinstance(args, dict) else None
+    if not isinstance(steps, list):
+        return []
+    out = []
+    for step in steps[:64]:
+        child = {}
+        slug = step.get("operation") if isinstance(step, dict) else None
+        if isinstance(slug, str):
+            raw = conn.execute(text("SELECT args_schema_json FROM ops_operations WHERE slug=:slug"),
+                               {"slug": slug}).scalar()
+            try:
+                child = {"properties": {"args": json.loads(raw)}} if raw else {}
+            except (ValueError, RecursionError):
+                child = {}
+        out.append(child)
+    return out
+
+
 def _wire_size(value) -> int:
     return len(serialize(value).encode("utf-8"))
 
@@ -180,7 +200,14 @@ class ToolCallLookup:
                 schema = conn.execute(text("SELECT args_schema_json FROM ops_operations WHERE slug=:slug"),
                                       {"slug": args["operation"]}).scalar()
                 if schema is not None:
-                    schema = serialize({"properties": {"args": json.loads(schema)}})
+                    parent = json.loads(schema)
+                    children = _sequence_child_schemas(conn, args.get("args"))
+                    if children:
+                        steps = dict(parent.get("properties", {}).get("steps", {}))
+                        steps["prefixItems"] = children
+                        parent = {**parent, "properties": {**parent.get("properties", {}),
+                                                           "steps": steps}}
+                    schema = serialize({"properties": {"args": parent}})
             elif (raw["total"] or 0) > ARG_READ_CHARS:
                 # A cut JSON document cannot apply the operation's schema masks.
                 return {"truncated": True, "source_truncated": True,

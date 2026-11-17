@@ -154,6 +154,11 @@ def _card(row) -> OpsApprovalCard | None:
         snapshot = json.loads(row.operations_snapshot_json or "null")
         operation = snapshot["operation"]
         args = display_args(snapshot["resolved_args"], json.dumps(snapshot["schema"]))
+        if isinstance(snapshot.get("sequence"), dict):
+            # Reuse each step's bound, child-schema-redacted display_args.
+            args = {**args, "steps": [
+                {"operation": step["snapshot"]["operation"]["slug"], "args": step["display_args"]}
+                for step in snapshot["sequence"]["steps"]]}
         slug = operation["slug"]
     except (TypeError, KeyError, ValueError, AttributeError):
         return None

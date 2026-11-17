@@ -123,7 +123,10 @@ def display_args(args, schema_json):
         if isinstance(value, dict):
             return {k: redact(v, schema.get("properties", {}).get(k, {})) for k, v in value.items()}
         if isinstance(value, list):
-            return [redact(v, schema.get("items", {})) for v in value]
+            # prefixItems carries per-position schemas (sequence steps' child schemas).
+            prefix = schema.get("prefixItems", [])
+            return [redact(v, prefix[i] if i < len(prefix) else schema.get("items", {}))
+                    for i, v in enumerate(value)]
         return value
     return redact(args, json.loads(schema_json))
 
