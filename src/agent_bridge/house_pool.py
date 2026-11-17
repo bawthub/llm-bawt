@@ -191,6 +191,11 @@ def render_compose(config: object, base_compose: Path) -> dict:
                 # TASK-2184: the preview's Repos page reads the dev tree from
                 # /repos (read-only below) and shows host paths from here.
                 "REPOS_HOST_ROOT": "${HOME}/dev",
+                # TASK-2386: the preview's DB URL is injected at creation from
+                # the root-only secrets volume (scripts/compose-secrets), never
+                # read from the frontend env file. Null takes it from Compose's
+                # environment and, unset, removes the env-file value.
+                "DATABASE_URL": None,
             },
             # Claude state comes from the mansion parent. Add Codex state in
             # the identical locations, regardless of the selected start command.

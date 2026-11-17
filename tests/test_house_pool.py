@@ -99,6 +99,13 @@ def test_repos_viewer_gets_read_only_dev_tree(config):
         assert service["environment"]["REPOS_HOST_ROOT"] == "${HOME}/dev"
 
 
+def test_preview_db_url_is_injected_not_read_from_the_env_file(config):
+    """TASK-2386: null overrides the frontend env file's value with Compose's
+    environment (the secrets volume), so the file need not hold it."""
+    for service in render_compose(config, ROOT / "docker-compose.yml")["services"].values():
+        assert "DATABASE_URL" in service["environment"] and service["environment"]["DATABASE_URL"] is None
+
+
 def test_parent_limits_and_per_house_override(config):
     config["cgroup_parent"] = "tenant-agents.slice"
     config["houses"][1]["memory"] = "6144m"
@@ -149,7 +156,7 @@ def test_preview_auth_comes_only_from_the_shared_frontend_env(config):
         assert env["npm_config_store_dir"] == "/home/bridge/dev/.pnpm-store"
         assert env["BAWTHUB_LLM_URL"] == "http://app:8642"
         assert env["BAWTHUB_SERVICE_TOKEN_FILE"] == "/run/bawthub-service-token/token"
-        assert "DATABASE_URL" not in env  # only a deployment-local env_file reference
+        assert env["DATABASE_URL"] is None  # never a value; injected at creation (TASK-2386)
 
 
 def test_routes_clone_owning_api_prefixes_and_leave_voice_shared(config, template):
