@@ -134,16 +134,26 @@ def _module_file(src: Path, module: str) -> Path | None:
     return None
 
 
-def _is_optional(parents: list[ast.AST]) -> bool:
-    for node in parents:
-        if isinstance(node, ast.If) and "TYPE_CHECKING" in ast.unparse(node.test):
-            return True
-        if isinstance(node, ast.Try) and any(
-            h.type is None or re.search(r"ImportError|ModuleNotFoundError|Exception", ast.unparse(h.type))
-            for h in node.handlers
-        ):
-            return True
-    return False
+_TYPE_CHECKING = {"TYPE_CHECKING", "typing.TYPE_CHECKING"}
+
+
+def _optional_bodies(node: ast.AST) -> list[list[ast.stmt]]:
+    """Statement lists of ``node`` whose imports are optional: the
+    type-checking-only branch of an ``if``, or a ``try`` body whose handler
+    catches import failure. Runtime branches, handlers, ``else`` and
+    ``finally`` stay required."""
+    if isinstance(node, ast.If):
+        test = ast.unparse(node.test)
+        if test in _TYPE_CHECKING:
+            return [node.body]
+        if test in {f"not {t}" for t in _TYPE_CHECKING}:
+            return [node.orelse]
+    if isinstance(node, (ast.Try, ast.TryStar)) and any(
+        h.type is None or re.search(r"\b(ImportError|ModuleNotFoundError|Exception)\b", ast.unparse(h.type))
+        for h in node.handlers
+    ):
+        return [node.body]
+    return []
 
 
 def _imports(src: Path, module: str) -> list[tuple[str, int, bool, bool]]:
@@ -153,9 +163,11 @@ def _imports(src: Path, module: str) -> list[tuple[str, int, bool, bool]]:
     package = module if path.name == "__init__.py" else module.rpartition(".")[0]
     found: list[tuple[str, int, bool, bool]] = []
 
-    def visit(node: ast.AST, parents: list[ast.AST]) -> None:
+    def visit(node: ast.AST, parents: list[ast.AST], optional: bool = False) -> None:
+        guarded = {id(stmt) for body in _optional_bodies(node) for stmt in body}
         for child in ast.iter_child_nodes(node):
             chain = [*parents, node]
+            child_optional = optional or id(child) in guarded
             names: list[str] = []
             if isinstance(child, ast.ImportFrom):
                 base = child.module or ""
@@ -168,8 +180,8 @@ def _imports(src: Path, module: str) -> list[tuple[str, int, bool, bool]]:
             elif isinstance(child, ast.Import):
                 names = [a.name for a in child.names]
             deferred = any(isinstance(p, (ast.FunctionDef, ast.AsyncFunctionDef)) for p in chain)
-            found.extend((n, child.lineno, deferred, _is_optional(chain)) for n in names)
-            visit(child, chain)
+            found.extend((n, child.lineno, deferred, child_optional) for n in names)
+            visit(child, chain, child_optional)
 
     visit(ast.parse(path.read_text(encoding="utf-8")), [])
     return found
@@ -219,8 +231,14 @@ def test_bridge_startup_imports_stay_in_lean_venv() -> None:
             "brg/__main__.py": "def main():\n    from brg.helper import start\n    start()\n",
             "brg/helper.py": "def start():\n    from rich import console\n",
         },
+        {"brg/__main__.py": "from typing import TYPE_CHECKING\ndef main():\n    if not TYPE_CHECKING:\n        import rich\n"},
+        {"brg/__main__.py": "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    pass\nelse:\n    import rich\n"},
+        {"brg/__main__.py": "def main():\n    try:\n        raise ImportError\n    except ImportError:\n        import rich\n"},
+        {"brg/__main__.py": "def main():\n    try:\n        import json\n    except ImportError:\n        pass\n    else:\n        import rich\n"},
+        {"brg/__main__.py": "def main():\n    try:\n        pass\n    except ImportError:\n        pass\n    finally:\n        import rich\n"},
     ],
-    ids=["main", "imported-helper", "deferred-helper"],
+    ids=["main", "imported-helper", "deferred-helper", "not-type-checking",
+         "type-checking-else", "except-fallback", "try-else", "try-finally"],
 )
 def test_startup_scan_catches_deferred_imports(tmp_path: Path, files: dict[str, str]) -> None:
     for rel, body in {"brg/__init__.py": "", **files}.items():
