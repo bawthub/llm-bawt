@@ -105,3 +105,26 @@ def test_external_process_detach_is_respected_before_provider_side_effects():
         guard.start()
     guard.protocol.renew.assert_not_called()
     assert guard.close()
+
+
+def test_partial_checkpoint_lock_timeout_keeps_the_turn_running():
+    """TASK-2402: a transient row-lock timeout skips one checkpoint only."""
+    from sqlalchemy.exc import OperationalError
+
+    guard = follower()
+    guard.protocol.write_partial.side_effect = [
+        OperationalError("SELECT ... FOR UPDATE", {}, Exception("lock timeout")), None,
+    ]
+    guard.write_partial(text_value="first")
+    guard.write_partial(text_value="first second")
+    assert guard.protocol.write_partial.call_count == 2
+    assert not guard.execution.detach_requested()
+    assert not guard.execution.cancel_event.is_set()
+
+
+def test_partial_checkpoint_fence_loss_still_detaches():
+    guard = follower()
+    guard.protocol.write_partial.side_effect = FollowerFenceLost("new owner")
+    with pytest.raises(TurnExecutionDetached):
+        guard.write_partial(text_value="x")
+    assert guard.execution.detach_requested()

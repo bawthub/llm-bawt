@@ -4,6 +4,8 @@ from __future__ import annotations
 import logging
 from threading import Event, Lock, Thread, current_thread
 
+from sqlalchemy.exc import OperationalError
+
 from .turn_execution import TurnExecution, TurnExecutionDetached, turn_executions
 from .turn_terminal_protocol import FollowerFenceLost, FollowerLease, RENEW_SECONDS, TurnTerminalProtocol
 
@@ -101,6 +103,12 @@ class TerminalFollower:
             # No more text, tools or events may leave this observation worker.
             self._detach()
             raise TurnExecutionDetached() from exc
+        except OperationalError:
+            # TASK-2402: a transient row lock timeout must not kill a healthy
+            # turn. Each checkpoint carries the full text so far, so the next
+            # one (or the terminal commit) catches up; the heartbeat still
+            # owns fence-loss detection.
+            log.warning("Skipped partial checkpoint for turn %s", self.lease.turn_id, exc_info=True)
 
     def close(self, *, timeout: float = 5.0) -> bool:
         """Stop heartbeats without pretending the provider itself has exited.
