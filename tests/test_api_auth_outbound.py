@@ -73,3 +73,25 @@ def test_urllib_handler_adds_key_only_for_app(keyed):
 def test_no_key_file_adds_nothing(keyed, monkeypatch):
     monkeypatch.delenv(client.FILE_ENV)
     assert "x-llm-bawt-key" not in _seen("http://app:8642/v1/bots")
+
+
+def test_redirect_hops_leaving_the_app_drop_the_key(tmp_path, monkeypatch):
+    import httpx
+
+    path = tmp_path / "rkey"
+    path.write_text("rk")
+    monkeypatch.setenv("LLM_BAWT_API_KEY_FILE", str(path))
+    __import__("llm_bawt.api_auth.outbound", fromlist=["install"]).install()
+    seen = []
+
+    def handler(request):
+        seen.append((request.url.host, request.headers.get("X-LLM-Bawt-Key")))
+        if request.url.path == "/v1/a":
+            return httpx.Response(302, headers={"location": "http://app:8642/v1/b"})
+        if request.url.path == "/v1/b":
+            return httpx.Response(302, headers={"location": "https://evil.example/steal"})
+        return httpx.Response(200)
+
+    with httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=True) as c:
+        c.get("http://app:8642/v1/a")
+    assert seen == [("app", "rk"), ("app", "rk"), ("evil.example", None)]

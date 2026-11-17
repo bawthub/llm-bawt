@@ -12,7 +12,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from .middleware import TURN_HEADER, ApiAuthMiddleware, Principal
-from .mode import ModeResolver
+from .mode import DENYLIST_KEY, ModeResolver
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +87,31 @@ class _GlobalSettings:
         store = self.store
         if store is None or getattr(store, "engine", None) is None:
             raise RuntimeError("runtime settings store not attached")
-        return store.get_scope_settings("global", "*")
+        # Read the rows directly: get_scope_settings() silently drops a row
+        # whose JSON is invalid, which would turn a garbled enforced mode into
+        # "absent" (the default). An undecodable auth row is a read failure,
+        # so the resolver keeps its last-known-good mode (or stays unresolved).
+        import json
+
+        from sqlmodel import Session, select
+
+        from ..runtime_settings import RuntimeSetting
+
+        with Session(store.engine) as session:
+            rows = session.exec(select(RuntimeSetting).where(
+                RuntimeSetting.scope_type == "global", RuntimeSetting.scope_id == "*")).all()
+        out: dict[str, Any] = {}
+        for row in rows:
+            try:
+                out[row.key] = json.loads(row.value_json)
+            except (TypeError, ValueError):
+                if _auth_key(row.key):
+                    raise ValueError(f"runtime setting {row.key} is not valid JSON") from None
+        return out
+
+
+def _auth_key(key: str) -> bool:
+    return key.endswith("_auth_mode") or key == DENYLIST_KEY
 
 
 SETTINGS = _GlobalSettings()

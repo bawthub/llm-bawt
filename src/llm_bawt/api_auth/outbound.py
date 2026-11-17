@@ -95,6 +95,20 @@ def _patch_httpx() -> None:
     httpx.Client.send = send
     httpx.AsyncClient.send = asend
 
+    # httpx follows redirects inside send() and copies every header but
+    # Authorization to the next hop, so a hop that leaves the app would carry
+    # the key. Strip it from any redirect whose destination is not the app.
+    base = httpx._client.BaseClient
+    redirect_headers = base._redirect_headers
+
+    def _redirect_headers(self, request, url, method):
+        headers = redirect_headers(self, request, url, method)
+        if not targets_app(str(url)):
+            headers.pop(client.HEADER_NAME, None)
+        return headers
+
+    base._redirect_headers = _redirect_headers
+
 
 def install() -> None:
     """Hook httpx and the global urllib opener once per process."""

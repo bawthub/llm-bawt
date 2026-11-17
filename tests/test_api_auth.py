@@ -208,3 +208,35 @@ def test_per_instance_key_policy():
     assert mw.authenticate(scope(other)) == (None, "key_not_permitted")
     assert mw.authenticate(scope(good, turn)) == (None, "ambiguous_credentials")
     assert mw.authenticate(scope(turn))[0].kind == "bot"
+
+
+def test_garbled_auth_row_in_real_store_keeps_last_good_mode():
+    """An undecodable api_auth_mode row must not read as absent (= default off)."""
+    from types import SimpleNamespace
+
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import Session, SQLModel, create_engine, select
+
+    from llm_bawt.api_auth.wiring import _GlobalSettings
+    from llm_bawt.runtime_settings import RuntimeSetting
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    SQLModel.metadata.create_all(engine, tables=[RuntimeSetting.__table__])
+    with Session(engine) as s:
+        s.add(RuntimeSetting(scope_type="global", scope_id="*", key="api_auth_mode", value_json='"enforce"'))
+        s.commit()
+    reader = _GlobalSettings()
+    reader.store = SimpleNamespace(engine=engine)
+    clock = Clock()
+    r = ModeResolver(reader, environ={"LLM_BAWT_API_AUTH_MODE": "off"}, clock=clock)
+    assert r.mode() == "enforce"
+    with Session(engine) as s:
+        row = s.exec(select(RuntimeSetting)).one()
+        row.value_json = "{not json"
+        s.add(row)
+        s.commit()
+    clock.t += 3600
+    assert r.mode() == "enforce"
+    # Cold start with the garbled row: unresolved (fail closed), never the off default.
+    cold = ModeResolver(reader, environ={"LLM_BAWT_API_AUTH_MODE": "off"}, clock=Clock())
+    assert cold.mode() != "off"
