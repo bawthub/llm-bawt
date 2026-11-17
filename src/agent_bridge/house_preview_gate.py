@@ -50,6 +50,7 @@ MAX_NONCES = 256
 HEAD_LIMIT = 64 * 1024
 FIRST_HEAD_TIMEOUT_S = 10.0
 IDLE_TIMEOUT_S = 120.0
+UPGRADE_DRAIN_S = 5.0
 CHUNK = 64 * 1024
 TOKEN_FILE_ENV = "BAWTHUB_SERVICE_TOKEN_FILE"
 TOKEN_ENV = "BAWTHUB_SERVICE_TOKEN"
@@ -163,6 +164,12 @@ def split_cookie(values: list[str], name: str) -> tuple[list[str], str | None]:
     return others, found
 
 
+def _status(head: bytes) -> int:
+    """The status code of an upstream response head; 0 when unreadable."""
+    parts = head.split(b"\r\n", 1)[0].split(b" ", 2)
+    return int(parts[1]) if len(parts) >= 2 and parts[1].isdigit() else 0
+
+
 def _b64(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
 
@@ -251,9 +258,9 @@ class PreviewGate:
         try:
             while True:
                 try:
-                    raw = await asyncio.wait_for(
-                        reader.readuntil(b"\r\n\r\n"),
-                        FIRST_HEAD_TIMEOUT_S if first else IDLE_TIMEOUT_S)
+                    raw = await self._next_head(reader, first, pump)
+                    if raw is None:  # upstream closed: its answers are all sent
+                        return
                 except asyncio.LimitOverrunError:
                     if up_writer is None:
                         await self._respond(writer, 431, "Request headers too large")
@@ -278,6 +285,13 @@ class PreviewGate:
                     if up_writer is None:
                         await self._unauthorized(writer)
                     return await self._finish(up_writer, pump)
+                if req.is_upgrade:
+                    # Its own upstream connection: earlier answers finish first.
+                    await self._finish(up_writer, pump, UPGRADE_DRAIN_S)
+                    if up_writer is not None:
+                        up_writer.close()
+                    up_writer = pump = None
+                    return await self._upgrade(reader, writer, req, framing, others, peer)
                 if up_writer is None:
                     try:
                         up_reader, up_writer = await asyncio.open_connection(
@@ -287,10 +301,6 @@ class PreviewGate:
                         return
                     pump = asyncio.create_task(self._pipe(up_reader, writer))
                 up_writer.write(self._forward_head(req, others, peer))
-                if req.is_upgrade:
-                    await self._pipe(reader, up_writer)
-                    await pump
-                    return
                 await self._forward_body(reader, up_writer, framing)
                 await up_writer.drain()
         except (asyncio.TimeoutError, asyncio.IncompleteReadError, ConnectionError,
@@ -306,16 +316,71 @@ class PreviewGate:
                     w.close()
 
     @staticmethod
-    async def _finish(up_writer: asyncio.StreamWriter | None, pump: asyncio.Task | None) -> None:
+    async def _next_head(reader: asyncio.StreamReader, first: bool,
+                         pump: asyncio.Task | None) -> bytes | None:
+        """The next request head, or None once upstream has closed.
+
+        The idle timer covers only a connection with no answer in flight: while
+        upstream is still sending (an SSE stream, a slow download) the client
+        has no reason to speak, so waiting for it never cuts the answer off.
+        Upstream's own keep-alive policy ends an idle upstream connection,
+        which ends the pump.
+        """
+        read = asyncio.ensure_future(reader.readuntil(b"\r\n\r\n"))
+        try:
+            if pump is not None:
+                await asyncio.wait({read, pump}, return_when=asyncio.FIRST_COMPLETED)
+                if not read.done():
+                    return None
+                return read.result()
+            return await asyncio.wait_for(read, FIRST_HEAD_TIMEOUT_S if first else IDLE_TIMEOUT_S)
+        finally:
+            if not read.done():
+                read.cancel()
+
+    async def _upgrade(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+                       req: Request, framing: tuple[str, int], others: list[str], peer: str) -> None:
+        """Tunnel only after upstream answers 101; a refusal passes through, then closes.
+
+        Until the 101 every client byte is a checked request, so a declined
+        upgrade never turns the connection into an unchecked pipe.
+        """
+        try:
+            up_reader, up_writer = await asyncio.open_connection("127.0.0.1", self.upstream_port)
+        except OSError:
+            await self._respond(writer, 200, self.page, html_body=True)
+            return
+        try:
+            up_writer.write(self._forward_head(req, others, peer))
+            await self._forward_body(reader, up_writer, framing)
+            await up_writer.drain()
+            head = await asyncio.wait_for(up_reader.readuntil(b"\r\n\r\n"), IDLE_TIMEOUT_S)
+            writer.write(head)
+            await writer.drain()
+            pump = asyncio.create_task(self._pipe(up_reader, writer))
+            if _status(head) == 101:
+                await self._pipe(reader, up_writer)
+                await pump
+            else:
+                await self._finish(up_writer, pump)
+        finally:
+            up_writer.close()
+
+    @staticmethod
+    async def _finish(up_writer: asyncio.StreamWriter | None, pump: asyncio.Task | None,
+                      wait_s: float = IDLE_TIMEOUT_S) -> None:
         """Stop forwarding requests, but let answers already asked for arrive."""
         if up_writer is None or pump is None:
             return
         try:
             if up_writer.can_write_eof():
                 up_writer.write_eof()
-            await asyncio.wait_for(asyncio.shield(pump), IDLE_TIMEOUT_S)
+            await asyncio.wait_for(asyncio.shield(pump), wait_s)
         except (asyncio.TimeoutError, OSError, RuntimeError):
             pass
+        finally:
+            if not pump.done():
+                pump.cancel()
 
     async def _pipe(self, src: asyncio.StreamReader, dst: asyncio.StreamWriter) -> None:
         try:

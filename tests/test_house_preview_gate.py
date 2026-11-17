@@ -67,6 +67,19 @@ class Upstream:
                             break
                         body += (await reader.readexactly(size + 2))[:-2]
                 self.bodies.append(body)
+                if req.is_upgrade and req.path == "/decline":
+                    # A legal refusal: an ordinary answer, connection kept alive.
+                    writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nno")
+                    await writer.drain()
+                    continue
+                if req.path == "/ticks":
+                    writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
+                                 b"Connection: close\r\n\r\n")
+                    for i in range(30):
+                        writer.write(b"data: tick %d\n\n" % i)
+                        await writer.drain()
+                        await asyncio.sleep(0.015)
+                    return
                 if req.is_upgrade:
                     writer.write(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
                                  b"Connection: Upgrade\r\n\r\n")
@@ -357,6 +370,60 @@ async def test_signed_in_websocket_upgrade_is_piped_both_ways():
     finally:
         await gate.stop()
         await up.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_declined_upgrade_never_becomes_an_unchecked_tunnel():
+    up = await Upstream().start()
+    gate = await _gate(upstream_port=up.port)
+    try:
+        cookie = await _enter(gate)
+        reader, writer = await asyncio.open_connection("127.0.0.1", gate.port)
+        writer.write((f"GET /decline HTTP/1.1\r\nHost: p\r\nCookie: {cookie}\r\n"
+                      "Upgrade: websocket\r\nConnection: Upgrade\r\n\r\n").encode())
+        await writer.drain()
+        head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 5)
+        assert head.startswith(b"HTTP/1.1 200")
+        writer.write(b"GET /smuggled HTTP/1.1\r\nHost: p\r\n\r\n")  # no cookie
+        await writer.drain()
+        rest = (await asyncio.wait_for(reader.read(), 5)).decode()
+        writer.close()
+        assert rest == "no"  # the refusal's own body, then the connection closes
+        assert [h.split(" ")[1] for h in up.heads] == ["/decline"]
+    finally:
+        await gate.stop()
+        await up.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_streaming_answer_outlives_the_idle_timer(monkeypatch):
+    monkeypatch.setattr(hg, "IDLE_TIMEOUT_S", 0.1)
+    up = await Upstream().start()
+    gate = await _gate(upstream_port=up.port)
+    try:
+        cookie = await _enter(gate)
+        reader, writer = await asyncio.open_connection("127.0.0.1", gate.port)
+        writer.write(_get("/ticks", cookie=cookie).replace(b"Connection: close\r\n", b""))
+        await writer.drain()
+        data = await asyncio.wait_for(reader.read(), 5)
+        writer.close()
+        assert b"data: tick 29" in data  # ~0.45 s of events, well past the 0.1 s timer
+    finally:
+        await gate.stop()
+        await up.stop()
+
+
+@pytest.mark.asyncio
+async def test_an_idle_connection_with_nothing_in_flight_still_times_out(monkeypatch):
+    monkeypatch.setattr(hg, "IDLE_TIMEOUT_S", 0.1)
+    monkeypatch.setattr(hg, "FIRST_HEAD_TIMEOUT_S", 0.1)
+    gate = await _gate()
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", gate.port)
+        assert await asyncio.wait_for(reader.read(), 5) == b""  # closed by the gate
+        writer.close()
+    finally:
+        await gate.stop()
 
 
 @pytest.mark.asyncio
