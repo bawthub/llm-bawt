@@ -57,6 +57,12 @@ async def lifespan(app):
 
     export_ops_secrets()
 
+    # TASK-2380: each caller's API key into its own directory volume.
+    # Never raises; a key that can't be derived keeps its last copy.
+    from ..api_auth.export import export_all as export_api_keys
+
+    export_api_keys()
+
     # TASK-1477: export the derived bridge-gate tokens for the bridges, and
     # record enforcement for a tenant bootstrap marked fresh. Before any route
     # serves, so an enforced gate has no open window.
