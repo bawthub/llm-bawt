@@ -38,7 +38,7 @@ def _turn(bot="loopy"):
 
 def _gate(values):
     store = Store(values)
-    gate = mcp.wrap(None)
+    gate = mcp.wrap(None).gate
     gate.resolver = ModeResolver(store, environ={}, setting_key=mcp.SETTING_KEY, ttl=0)
     gate._root = ROOT
     return gate, store
@@ -69,7 +69,7 @@ def _key(principal):
 
 
 def test_wrap_gates_every_path_with_service_keys_only():
-    gate = mcp.wrap(None)
+    gate = mcp.wrap(None).gate
     assert isinstance(gate, ApiAuthMiddleware)
     assert gate.allowed_paths == frozenset()
     assert gate.resolver is mcp.RESOLVER and mcp.RESOLVER._key == "mcp_auth_mode"
@@ -169,3 +169,55 @@ def test_run_server_attaches_store_before_wrapping():
 
     src = open(server.__file__).read()
     assert src.index("mcp_auth.ensure_store()") < src.index("mcp_auth.wrap(")
+
+
+def _get_observations(endpoint, *headers, method="GET"):
+    sent = []
+
+    async def send(msg):
+        sent.append(msg)
+
+    scope = {"type": "http", "path": mcp.OBSERVATIONS_PATH, "method": method,
+             "client": ("10.0.0.9", 1),
+             "headers": [(k.lower().encode(), v.encode()) for k, v in headers]}
+    asyncio.run(endpoint(scope, None, send))
+    import json
+    return sent[0]["status"], json.loads(sent[1]["body"])
+
+
+@pytest.mark.parametrize("mode", ["off", "log", "enforce"])
+def test_mcp_server_serves_its_own_counts_to_the_app_key_only(fernet, mode):
+    endpoint = mcp.wrap(None)
+    gate, _ = _gate({"mcp_auth_mode": "log"})
+    endpoint.gate = gate
+    assert _call(gate, (TURN, _turn("loopy")))[0] == 200  # recorded in this process
+    gate.resolver = ModeResolver(Store({"mcp_auth_mode": mode}), environ={},
+                                 setting_key=mcp.SETTING_KEY, ttl=0)
+    status, body = _get_observations(endpoint, _key(mcp.APP_PRINCIPAL))
+    assert status == 200 and body["mode"] == mode
+    assert ["bot", "loopy", "POST", "/mcp"] in [row["key"] for row in body["rows"]]
+    for headers in ((), (_key("caid"),), ((keys.HEADER, "x"),)):
+        assert _get_observations(endpoint, *headers) == (401, {"detail": "service_key_required"})
+    assert _get_observations(endpoint, (TURN, _turn("loopy")))[0] == 401
+    assert _get_observations(endpoint, _key(mcp.APP_PRINCIPAL), method="POST")[0] == 401
+
+
+def test_admin_view_fetches_from_the_mcp_server(monkeypatch):
+    import httpx
+
+    seen = {}
+
+    def handler(request):
+        seen["url"], seen["key"] = str(request.url), request.headers.get(keys.HEADER)
+        return httpx.Response(200, json={"mode": "enforce", "rows": []})
+
+    real = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient",
+                        lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+    monkeypatch.setattr(mcp, "app_key_header", lambda: {keys.HEADER: "k"})
+    view = asyncio.run(mcp.fetch_observations("http://mcp:8001/"))
+    assert view == {"mode": "enforce", "rows": [], "source": "mcp_server"}
+    assert seen == {"url": "http://mcp:8001" + mcp.OBSERVATIONS_PATH, "key": "k"}
+
+    fallback = asyncio.run(mcp.fetch_observations(None))
+    assert fallback["source"] == "in_process" and fallback["remote_error"] == "no_server_url"

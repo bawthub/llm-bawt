@@ -62,10 +62,67 @@ def ensure_store(make_store=None) -> None:
 
 def wrap(app):
     """The MCP ASGI app behind the :8001 gate. Nothing on :8001 is public."""
-    return ApiAuthMiddleware(
+    gate = ApiAuthMiddleware(
         app, resolver=RESOLVER, checkers=(turn_capability,), observations=OBSERVATIONS,
         allowed_paths=frozenset(), route_template=_path,
         key_principal_allowed=SERVICE_PRINCIPALS.__contains__, refuse_turn_with_key=True)
+    return _ObservationsEndpoint(gate)
+
+
+# The MCP server usually runs as its own process, so its counts live there.
+# It serves them to the app's service key, whatever the mode, and the app's
+# /v1/admin/auth-observations fetches them from here.
+OBSERVATIONS_PATH = "/_auth/observations"
+
+
+class _ObservationsEndpoint:
+    """Serves the gate's own counts at OBSERVATIONS_PATH; everything else goes to the gate."""
+
+    def __init__(self, gate: ApiAuthMiddleware):
+        self.gate = gate
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http" or scope.get("path") != OBSERVATIONS_PATH:
+            return await self.gate(scope, receive, send)
+        import json
+
+        from . import keys
+
+        header = keys.HEADER.encode()
+        presented = [v for k, v in scope.get("headers") or () if k.lower() == header]
+        allowed = False
+        if scope.get("method") == "GET" and len(presented) == 1:
+            result = self.gate._verify_key(presented[0].decode("latin-1"))
+            allowed = result.ok and result.principal in SERVICE_PRINCIPALS
+        status, payload = (
+            (200, {"mode": self.gate.resolver.mode(), "rows": self.gate.observations.snapshot()})
+            if allowed else (401, {"detail": "service_key_required"}))
+        body = json.dumps(payload).encode()
+        await send({"type": "http.response.start", "status": status,
+                    "headers": [(b"content-type", b"application/json"),
+                                (b"cache-control", b"no-store"),
+                                (b"content-length", str(len(body)).encode())]})
+        await send({"type": "http.response.body", "body": body})
+
+
+async def fetch_observations(server_url: str | None) -> dict:
+    """The MCP server's own mode and counts; this process's if it can't be reached."""
+    if server_url:
+        import httpx
+
+        try:
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                response = await client.get(server_url.rstrip("/") + OBSERVATIONS_PATH,
+                                            headers=app_key_header())
+            if response.status_code == 200:
+                return {**response.json(), "source": "mcp_server"}
+            reason = f"http_{response.status_code}"
+        except Exception as error:  # noqa: BLE001 - report, never fail the admin view
+            reason = type(error).__name__
+    else:
+        reason = "no_server_url"
+    return {"mode": RESOLVER.mode(), "rows": OBSERVATIONS.snapshot(),
+            "source": "in_process", "remote_error": reason}
 
 
 def app_key_header() -> dict[str, str]:
