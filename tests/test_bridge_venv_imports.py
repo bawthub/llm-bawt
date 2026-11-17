@@ -14,6 +14,7 @@ constraints snapshot.
 from __future__ import annotations
 
 import ast
+import re
 import subprocess
 import sys
 import textwrap
@@ -107,3 +108,135 @@ def test_bridge_entrypoint_imports_in_lean_venv(module: str) -> None:
     assert result.returncode == 0, (
         f"{module} needs a module outside the agent-bridge venv:\n{result.stderr[-3000:]}"
     )
+
+
+# Static pass for imports that only run once startup executes (inside main()
+# or a helper it calls), which the import probe above never reaches. Scope:
+# the entrypoints, their deferred project imports (one hop), and everything
+# reachable from those through module-level project imports. Imports guarded
+# by TYPE_CHECKING or an ImportError/Exception handler are treated as optional.
+
+
+def _allowed_dists() -> set[str]:
+    allowed = set()
+    for line in CONSTRAINTS.read_text(encoding="utf-8").splitlines():
+        line = line.split("#", 1)[0].strip()
+        if line:
+            allowed.add(re.split(r"[=<>!~;\[ ]", line, maxsplit=1)[0].lower().replace("_", "-"))
+    return allowed
+
+
+def _module_file(src: Path, module: str) -> Path | None:
+    base = src / module.replace(".", "/")
+    for candidate in (base / "__init__.py", base.with_suffix(".py")):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _is_optional(parents: list[ast.AST]) -> bool:
+    for node in parents:
+        if isinstance(node, ast.If) and "TYPE_CHECKING" in ast.unparse(node.test):
+            return True
+        if isinstance(node, ast.Try) and any(
+            h.type is None or re.search(r"ImportError|ModuleNotFoundError|Exception", ast.unparse(h.type))
+            for h in node.handlers
+        ):
+            return True
+    return False
+
+
+def _imports(src: Path, module: str) -> list[tuple[str, int, bool, bool]]:
+    """(name, line, deferred, optional) for each import in ``module``."""
+    path = _module_file(src, module)
+    assert path is not None
+    package = module if path.name == "__init__.py" else module.rpartition(".")[0]
+    found: list[tuple[str, int, bool, bool]] = []
+
+    def visit(node: ast.AST, parents: list[ast.AST]) -> None:
+        for child in ast.iter_child_nodes(node):
+            chain = [*parents, node]
+            names: list[str] = []
+            if isinstance(child, ast.ImportFrom):
+                base = child.module or ""
+                if child.level:
+                    anchor = package
+                    for _ in range(child.level - 1):
+                        anchor = anchor.rpartition(".")[0]
+                    base = f"{anchor}.{base}" if base else anchor
+                names = [base, *(f"{base}.{a.name}" for a in child.names)]
+            elif isinstance(child, ast.Import):
+                names = [a.name for a in child.names]
+            deferred = any(isinstance(p, (ast.FunctionDef, ast.AsyncFunctionDef)) for p in chain)
+            found.extend((n, child.lineno, deferred, _is_optional(chain)) for n in names)
+            visit(child, chain)
+
+    visit(ast.parse(path.read_text(encoding="utf-8")), [])
+    return found
+
+
+def _startup_violations(src: Path, roots: list[str], allowed: set[str], owners) -> list[str]:
+    project = {p.name for p in src.iterdir() if p.is_dir()}
+    seen: set[str] = set()
+    todo = list(roots)
+    bad: list[str] = []
+    while todo:
+        module = todo.pop()
+        if module in seen or _module_file(src, module) is None:
+            continue
+        seen.add(module)
+        for name, line, deferred, optional in _imports(src, module):
+            top = name.partition(".")[0]
+            if top in project:
+                if not deferred or module in roots:
+                    todo.append(name)
+                continue
+            if optional or top in sys.stdlib_module_names or top in sys.builtin_module_names:
+                continue
+            dists = {d.lower().replace("_", "-") for d in owners.get(top, ())}
+            dists.add(top.lower().replace("_", "-"))
+            if not dists & allowed:
+                bad.append(f"{module}:{line} imports {top!r}")
+    return sorted(set(bad))
+
+
+def test_bridge_startup_imports_stay_in_lean_venv() -> None:
+    import importlib.metadata as md
+
+    bad = _startup_violations(ROOT / "src", ENTRYPOINTS, _allowed_dists(), md.packages_distributions())
+    assert not bad, "bridge startup needs modules outside the agent-bridge venv:\n" + "\n".join(bad)
+
+
+@pytest.mark.parametrize(
+    "files",
+    [
+        {"brg/__main__.py": "def main():\n    import rich\n"},
+        {
+            "brg/__main__.py": "from brg import helper\ndef main():\n    helper.start()\n",
+            "brg/helper.py": "def start():\n    import rich\n",
+        },
+        {
+            "brg/__main__.py": "def main():\n    from brg.helper import start\n    start()\n",
+            "brg/helper.py": "def start():\n    from rich import console\n",
+        },
+    ],
+    ids=["main", "imported-helper", "deferred-helper"],
+)
+def test_startup_scan_catches_deferred_imports(tmp_path: Path, files: dict[str, str]) -> None:
+    for rel, body in {"brg/__init__.py": "", **files}.items():
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(body, encoding="utf-8")
+    bad = _startup_violations(tmp_path, ["brg.__main__"], {"httpx"}, {"rich": ["rich"]})
+    assert bad and all("'rich'" in b for b in bad)
+
+
+def test_startup_scan_allows_optional_and_allowed_imports(tmp_path: Path) -> None:
+    (tmp_path / "brg").mkdir()
+    (tmp_path / "brg/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "brg/__main__.py").write_text(
+        "import json\nimport httpx\nfrom typing import TYPE_CHECKING\n"
+        "if TYPE_CHECKING:\n    import rich\n"
+        "def main():\n    try:\n        import rich\n    except ImportError:\n        pass\n",
+        encoding="utf-8",
+    )
+    assert _startup_violations(tmp_path, ["brg.__main__"], {"httpx"}, {"httpx": ["httpx"]}) == []
