@@ -64,18 +64,80 @@ def test_reconciler_reads_what_the_app_derives(app_key, tmp_path, monkeypatch):
     assert not (tmp_path / "home" / ".config" / "llm-bawt" / "secret.key").exists()
 
 
-def test_real_sources_read_the_stored_credentials(app_key, tmp_path, monkeypatch):
-    """The default sources, not injected lambdas: imports, Config and adapters resolve."""
-    from llm_bawt.service.providers import github_deploy
+@pytest.fixture
+def store(app_key, monkeypatch):
+    """A real runtime_settings table behind the default sources (sqlite)."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel
 
-    monkeypatch.setattr(github_deploy.GhcrPullAdapter, "pull_auth", lambda self: dict(PULL))
-    monkeypatch.setattr(github_deploy.GitHubReleaseAdapter, "api_key", lambda self: "r" * 11)
-    monkeypatch.setattr(github_deploy.GitHubReleaseDispatchAdapter, "api_key", lambda self: "d" * 12)
+    from llm_bawt import runtime_settings
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    SQLModel.metadata.create_all(engine, tables=[runtime_settings.RuntimeSetting.__table__])
+
+    class _Store:
+        def __init__(self, config):
+            self.engine = state["engine"]
+
+    state = {"engine": engine}
+    monkeypatch.setattr(runtime_settings, "RuntimeSettingsStore", _Store)
+
+    def put(provider, row):
+        from sqlalchemy import text
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM runtime_settings WHERE key = :k"), {"k": f"provider_connection:{provider}"})
+            if row is not None:
+                conn.execute(text("INSERT INTO runtime_settings (scope_type, scope_id, key, value_json, updated_at) "
+                                  "VALUES ('global', '*', :k, :v, CURRENT_TIMESTAMP)"),
+                             {"k": f"provider_connection:{provider}", "v": row if isinstance(row, str) else json.dumps(row)})
+
+    def connected(provider, key, account=None):
+        put(provider, {"status": "connected", "account": account,
+                       "secret_enc": crypto.encrypt(json.dumps({"api_key": key}))})
+
+    connected("ghcr-pull", PULL["password"], account=PULL["username"])
+    connected("github-release", "r" * 11)
+    connected("github-release-dispatch", "d" * 12)
+    return state, put, connected
+
+
+def test_real_sources_read_the_stored_credentials(store, tmp_path, monkeypatch):
+    """The default sources, not injected lambdas: imports, Config and the store resolve."""
     out = tmp_path / "ops-secrets"
     assert export_all(out) == dict.fromkeys(FILES, "written")
     monkeypatch.setenv(secret_exports.READ_DIR_ENV, str(out))
     assert read_pull_auth() == PULL
     assert read(GITHUB_RELEASE) == "r" * 11 and read(GITHUB_RELEASE_DISPATCH) == "d" * 12
+
+
+def test_only_an_authoritative_disconnect_removes_an_export(store, tmp_path):
+    """Codex: unreadable rows, decrypt failures and a down store keep the last copy."""
+    state, put, _ = store
+    out = tmp_path / "ops-secrets"
+    export_all(out)
+    put("github-release", {"status": "connected", "secret_enc": "enc:v1:not-a-fernet-token"})
+    put("github-release-dispatch", "{not json")
+    put("ghcr-pull", {"status": "connected", "secret_enc": ""})
+    result = export_all(out)
+    assert {n: result[n] for n in (GITHUB_RELEASE, GITHUB_RELEASE_DISPATCH, GHCR_PULL)} == dict.fromkeys(
+        (GITHUB_RELEASE, GITHUB_RELEASE_DISPATCH, GHCR_PULL), "kept")
+    assert all((out / n).exists() for n in FILES)
+
+    state["engine"] = None
+    assert export_all(out)[GITHUB_RELEASE] == "kept"
+    assert all((out / n).exists() for n in FILES)
+
+
+def test_disconnected_or_absent_record_removes_the_export(store, tmp_path):
+    _, put, _ = store
+    out = tmp_path / "ops-secrets"
+    export_all(out)
+    put("github-release", {"status": "disconnected"})
+    put("github-release-dispatch", None)
+    result = export_all(out)
+    assert (result[GITHUB_RELEASE], result[GITHUB_RELEASE_DISPATCH]) == ("removed", "removed")
+    assert not (out / GITHUB_RELEASE).exists() and not (out / GITHUB_RELEASE_DISPATCH).exists()
 
 
 def test_missing_exports_fail_closed(tmp_path, monkeypatch):

@@ -95,28 +95,65 @@ def _derived(label: str) -> str:
     return crypto.derive_key(label).hex()
 
 
-def _credential(adapter_cls):
+def _stored(provider: str) -> tuple[str | None, str] | None:
+    """``(account, api_key)`` of a connected provider record; None only when
+    the record is authoritatively absent or not connected.
+
+    Strict on purpose (Codex): the generic adapter readers return None for an
+    unavailable store, unreadable JSON or a secret that fails to decrypt, and
+    None here deletes the reconciler's last good copy. Every one of those is
+    :class:`Unreadable` instead, so the export keeps the previous file."""
+    from sqlalchemy import select
+
+    from ..runtime_settings import RuntimeSetting, RuntimeSettingsStore
+    from ..service.providers import crypto
+    from ..service.providers.base import _SETTING_PREFIX, STATUS_CONNECTED
     from ..utils.config import Config
 
     try:
-        return adapter_cls(Config()).api_key()
+        engine = RuntimeSettingsStore(Config()).engine
+        if engine is None:
+            raise Unreadable("store_unavailable")
+        table = RuntimeSetting.__table__
+        with engine.connect() as conn:
+            raw = conn.execute(select(table.c.value_json).where(
+                table.c.scope_type == "global", table.c.scope_id == "*",
+                table.c.key == f"{_SETTING_PREFIX}{provider}")).scalar_one_or_none()
+        if raw is None:
+            return None
+        row = json.loads(raw)
+        if not isinstance(row, dict):
+            raise Unreadable("malformed")
+        if row.get("status") != STATUS_CONNECTED:
+            return None
+        secret = json.loads(crypto.decrypt(row.get("secret_enc") or ""))
+        key = secret.get("api_key") if isinstance(secret, dict) else None
+        if not isinstance(key, str) or not key:
+            raise Unreadable("malformed")
+        account = row.get("account")
+        return (account if isinstance(account, str) and account else None), key
+    except Unreadable:
+        raise
     except Exception as exc:  # noqa: BLE001 - never surface secret-bearing text
         raise Unreadable(type(exc).__name__) from None
 
 
-def _pull_auth():
-    from ..utils.config import Config
-    from ..service.providers.github_deploy import GhcrPullAdapter
+def _credential(provider: str) -> str | None:
+    found = _stored(provider)
+    return found[1] if found else None
 
-    try:
-        auth = GhcrPullAdapter(Config()).pull_auth()
-    except Exception as exc:  # noqa: BLE001
-        raise Unreadable(type(exc).__name__) from None
-    return json.dumps(auth, sort_keys=True) if auth else None
+
+def _pull_auth() -> str | None:
+    found = _stored("ghcr-pull")
+    if found is None:
+        return None
+    account, token = found
+    if not account:
+        raise Unreadable("malformed")
+    return json.dumps({"username": account, "password": token}, sort_keys=True)
 
 
 def _sources():
-    from ..service.providers.github_deploy import GitHubReleaseAdapter, GitHubReleaseDispatchAdapter
     from . import gate_trust
     from .control_protocol import TOKEN_LABEL
 
@@ -124,8 +161,8 @@ def _sources():
         CONTROL_TOKEN: lambda: _derived(TOKEN_LABEL),
         GATE_PROVENANCE_KEY: lambda: _derived(gate_trust._KEY_LABEL),
         GHCR_PULL: _pull_auth,
-        GITHUB_RELEASE: lambda: _credential(GitHubReleaseAdapter),
-        GITHUB_RELEASE_DISPATCH: lambda: _credential(GitHubReleaseDispatchAdapter),
+        GITHUB_RELEASE: lambda: _credential("github-release"),
+        GITHUB_RELEASE_DISPATCH: lambda: _credential("github-release-dispatch"),
     }
 
 
