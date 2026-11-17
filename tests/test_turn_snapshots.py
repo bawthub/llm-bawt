@@ -315,6 +315,80 @@ def test_marker_from_previous_bridge_process_is_dead(repo: Path) -> None:
     assert len(files) == 1 and not (registry / "crashed.json").exists()
 
 
+@pytest.mark.parametrize("directory", [
+    "site-packages", "node_modules", ".venv", ".venv-bridge", ".venv310",
+    "venv", "__pycache__", ".git", "NODE_MODULES",
+])
+@pytest.mark.parametrize("prefix", ["", "nested/"])
+def test_ignored_dependencies_never_become_sensitive_candidates(
+    repo: Path, directory: str, prefix: str,
+) -> None:
+    relative = f"{prefix}{directory}"
+    with (repo / ".gitignore").open("a") as handle:
+        handle.write(f"/{relative}/\n")
+    git(repo, "commit", "-qam", "ignore dependency fixture")
+    obs = TurnSnapshotObserver()
+    bash(obs, "r-dependencies", "create dependency tree", repo)
+    for name in ("pkg/secrets.pyi", "pkg/secret.js", "pkg/.env", "pkg/private.key"):
+        target = repo / relative / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("dependency fixture\n")
+    files, receipts = obs.finish("r-dependencies")
+    assert files == []
+    assert receipts[0]["status"] == "unchanged"
+
+
+def test_fresh_worktree_dependency_creation_keeps_real_ignored_env_metadata(
+    repo: Path, tmp_path: Path,
+) -> None:
+    (repo / ".gitignore").write_text(".venv*/\nnode_modules/\n.env\n")
+    git(repo, "commit", "-qam", "ignore local environment")
+    worktree = tmp_path / "fresh-worktree"
+    git(repo, "worktree", "add", "-qb", "fixture-worktree", str(worktree))
+    obs = TurnSnapshotObserver()
+    bash(obs, "r-fresh-dependencies", "create virtualenv and node modules", worktree)
+    for relative in (
+        ".venv-bridge/lib/python3.12/site-packages/x/secrets.pyi",
+        "node_modules/y/secret.js",
+    ):
+        target = worktree / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("dependency fixture\n")
+    files, receipts = obs.finish("r-fresh-dependencies")
+    assert files == []
+    assert receipts[0]["status"] == "unchanged"
+    env = worktree / ".env"
+    env.write_text("fixture-before\n")
+    bash(obs, "r-fresh-env", "change local environment", worktree)
+    env.write_text("fixture-after-longer\n")
+    (row,), receipts = obs.finish("r-fresh-env")
+    assert row["path"] == str(env)
+    assert row["change_kind"] == "modified"
+    assert row["before_b64"] is row["after_b64"] is None
+    assert row["git_before_blob"] is row["git_after_blob"] is None
+    assert row["truncated"] is True
+    assert receipts[0]["status"] == "observed"
+    # Metadata-only observation must not make ignored files stageable through
+    # ordinary Git staging. Commit-prompt classification is a separate concern.
+    assert git(worktree, "check-ignore", "--", ".env") == ".env"
+    git(worktree, "add", "-A")
+    assert git(worktree, "diff", "--cached", "--name-only") == ""
+
+
+def test_tracked_source_inside_dependency_named_tree_keeps_normal_diff(repo: Path) -> None:
+    target = repo / "node_modules" / "secret_store.py"
+    target.parent.mkdir()
+    target.write_text("before\n")
+    git(repo, "add", "--", "node_modules/secret_store.py")
+    git(repo, "commit", "-qm", "tracked source fixture")
+    obs = TurnSnapshotObserver()
+    bash(obs, "r-tracked-dependency-name", "update tracked source", repo)
+    target.write_text("after\n")
+    (row,), _ = obs.finish("r-tracked-dependency-name")
+    assert base64.b64decode(row["before_b64"]) == b"before\n"
+    assert base64.b64decode(row["after_b64"]) == b"after\n"
+
+
 @pytest.mark.parametrize("name", [".env", ".env.bak", ".env.local", "private.key", "secret-data.json", "nested/.env.bak"])
 @pytest.mark.parametrize("placement", ["untracked", "staged", "tracked", "ignored"])
 def test_sensitive_paths_have_metadata_but_no_snapshot_content(repo: Path, name: str, placement: str) -> None:

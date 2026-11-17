@@ -487,14 +487,21 @@ class TurnSnapshotObserver:
         }
         state.tracked_paths.update(tracked)
         candidates = set(paths) | excluded | tracked
-        # Include ignored sensitive files for stat-only attribution. Restrict
-        # this names-only query so unrelated ignored build output stays out.
+        # Include ignored sensitive files for stat-only attribution. Exclude
+        # dependency/cache trees in Git so their secret-named files never enter
+        # the candidate set. This does not change tracked/source attribution.
         ignored = _git(
             root, "ls-files", "--others", "--ignored", "--exclude-standard", "-z", "--",
             ":(icase,glob)**/.env", ":(icase,glob)**/.env.*",
             ":(icase,glob)**/.env/**", ":(icase,glob)**/.env.*/**",
             ":(icase,glob)**/*.key", ":(icase,glob)**/*.key/**",
             ":(icase,glob)**/*secret*", ":(icase,glob)**/*secret*/**",
+            ":(exclude,icase,glob)**/site-packages/**",
+            ":(exclude,icase,glob)**/node_modules/**",
+            ":(exclude,icase,glob)**/.venv*/**",
+            ":(exclude,icase,glob)**/venv/**",
+            ":(exclude,icase,glob)**/__pycache__/**",
+            ":(exclude,icase,glob)**/.git/**",
         )
         candidates.update(p.decode("utf-8", "surrogateescape") for p in ignored.split(b"\0") if p)
         if len(candidates - tracked) > MAX_STATUS_PATHS:
