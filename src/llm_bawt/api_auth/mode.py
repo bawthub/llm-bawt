@@ -41,18 +41,21 @@ def _parse(value: Any) -> str | None:
 class ModeResolver:
     def __init__(self, settings: Callable[[], Mapping[str, Any]], *,
                  environ: Mapping[str, str] | None = None,
+                 setting_key: str = SETTING_KEY, mode_env: str = MODE_ENV,
+                 force_env: str = FORCE_ENV,
                  ttl: float = TTL_SECONDS, clock: Callable[[], float] = time.monotonic):
         env = os.environ if environ is None else environ
         self._settings = settings
         self._ttl = ttl
         self._clock = clock
-        self._default = _parse(env.get(MODE_ENV)) or "off"
-        self._force = _parse(env.get(FORCE_ENV))
-        if (env.get(FORCE_ENV) or "").strip() and self._force is None:
-            logger.error("%s=%r is not a mode; ignored", FORCE_ENV, env.get(FORCE_ENV))
+        self._key = setting_key
+        self._default = _parse(env.get(mode_env)) or "off"
+        self._force = _parse(env.get(force_env))
+        if (env.get(force_env) or "").strip() and self._force is None:
+            logger.error("%s=%r is not a mode; ignored", force_env, env.get(force_env))
         if self._force:
             logger.warning("API auth mode forced to %r by %s; the database setting is ignored",
-                           self._force, FORCE_ENV)
+                           self._force, force_env)
         self._lock = threading.Lock()
         self._mode: str | None = None  # last successfully read mode
         self._denylist: frozenset[str] = frozenset()
@@ -75,10 +78,10 @@ class ModeResolver:
                 self._failing = True
                 self._read_at = now  # retry after one TTL, not every request
                 return
-            raw = values.get(SETTING_KEY)
+            raw = values.get(self._key)
             mode = self._default if raw is None else _parse(raw)
             if mode is None:  # a garbled row must not open anything
-                logger.error("api_auth_mode=%r is not a mode; treating as enforce", raw)
+                logger.error("%s=%r is not a mode; treating as enforce", self._key, raw)
                 mode = "enforce"
             deny = values.get(DENYLIST_KEY) or []
             self._denylist = frozenset(str(p) for p in deny) if isinstance(deny, list) else frozenset()

@@ -167,3 +167,22 @@ def test_observations_cap_and_age():
     assert {tuple(r["key"]) for r in obs.snapshot()} == {("anon", "0"), ("anon", "1"), ("<overflow>",)}
     clock.t = 20
     assert obs.snapshot() == []
+
+
+def test_resolver_custom_setting_key():
+    from llm_bawt.api_auth.mode import ModeResolver
+    r = ModeResolver(lambda: {"mcp_auth_mode": "enforce", "api_auth_mode": "off"},
+                     environ={}, setting_key="mcp_auth_mode")
+    assert r.mode() == "enforce"
+
+
+def test_wiring_checkers_ignore_missing_headers():
+    from llm_bawt.api_auth import wiring
+    assert wiring.turn_capability({}) is None
+    assert wiring.bridge_token({}) is None
+
+
+def test_app_installs_api_auth_middleware():
+    from llm_bawt.api_auth.middleware import ApiAuthMiddleware
+    from llm_bawt.service.api import app
+    assert any(m.cls is ApiAuthMiddleware for m in app.user_middleware)

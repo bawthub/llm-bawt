@@ -71,6 +71,9 @@ async def lifespan(app):
 
     export_crawl4ai_token()
     use_store(gate_settings)
+    from ..api_auth import wiring as api_auth_wiring
+
+    api_auth_wiring.use_store(gate_settings)
     try:
         seed_enforced_defaults(gate_settings.engine)
     except Exception as exc:  # noqa: BLE001 - the env default still enforces
@@ -576,6 +579,11 @@ try:
     from .request_guard import RequestGuardMiddleware
 
     app.add_middleware(RequestGuardMiddleware)
+
+    # TASK-2380: added last so it runs first; mode off unless set.
+    from ..api_auth.wiring import install as install_api_auth
+
+    install_api_auth(app)
 
 except ImportError:
     # FastAPI not installed - create stub
