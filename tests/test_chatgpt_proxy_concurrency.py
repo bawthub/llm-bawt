@@ -63,10 +63,13 @@ def test_broker_epoch_seconds_cache_and_refresh_buffer(monkeypatch) -> None:
 
 def test_broker_route_preserves_epoch_seconds_contract(monkeypatch) -> None:
     from llm_bawt.service.routes.providers import chatgpt_access_token
+    from llm_bawt.service import bridge_gate
     from llm_bawt.service.usage import codex_oauth
 
     expires_at_seconds = 1_800_003_600.0
     monkeypatch.delenv("BRIDGE_CLAUDE_TOKEN_SECRET", raising=False)
+    # This test covers the payload contract; gate policy is covered in test_bridge_gate.
+    monkeypatch.setattr(bridge_gate, "check", lambda request, purpose: None)
     monkeypatch.setattr(
         codex_oauth,
         "get_access_token",
