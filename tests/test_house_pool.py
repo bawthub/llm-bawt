@@ -80,6 +80,59 @@ def test_count_renderer_refuses_second_house_list_or_repeated_origin(config):
         count_pool(config, 2, "https://shared.example.test")
 
 
+def test_count_bundle_preserves_aliases_voice_route_and_environment(config, template):
+    config.pop("houses")
+    config["preview_aliases"] = {
+        "h1": ["old-one.example.test"], "h2": ["old-two.example.test"],
+    }
+    api = template["http"]["routers"]["frontend-api"]
+    api["rule"] = api["rule"].replace(
+        "PathPrefix(`/api/chat`)", "PathPrefix(`/api/chat`) || PathPrefix(`/api/v1`)")
+    before = deepcopy(config)
+    bundle = render_bundle({
+        "count": 3, "pool": config, "origin_template": "https://{id}.example.test",
+        "base_compose": str(ROOT / "docker-compose.yml"),
+        "route_template": yaml.safe_dump(template),
+    })
+    for index in (1, 2, 3):
+        service = f"house-h{index}"
+        for suffix in ("frontend", "frontend-api"):
+            rule = bundle["routes"]["http"]["routers"][f"{service}-{suffix}"]["rule"]
+            assert f"Host(`h{index}.example.test`)" in rule
+            aliases = config["preview_aliases"].get(f"h{index}", [])
+            for alias in aliases:
+                assert f"Host(`{alias}`)" in rule
+            for other in {"old-one.example.test", "old-two.example.test"} - set(aliases):
+                assert other not in rule
+        assert "PathPrefix(`/api/v1`)" in bundle["routes"]["http"]["routers"][
+            f"{service}-frontend-api"]["rule"]
+        rendered = bundle["compose"]["services"][service]
+        assert rendered["env_file"] == [config["frontend_env_file"]]
+        assert rendered["environment"]["BAWTHUB_VOICE_PROXY_TOKEN_FILE"] == (
+            "/run/bawthub-service-token/token")
+        assert rendered["environment"]["BAWTHUB_LLM_URL"] == "http://app:8642"
+    assert config == before
+    smaller = count_pool(config, 1, "https://{id}.example.test")
+    routes = render_routes(smaller, template)["http"]["routers"]
+    assert len(routes) == 2
+    assert all("old-two.example.test" not in row["rule"] for row in routes.values())
+    assert render_routes(count_pool(config, 0, ""), {})["http"]["routers"] == {}
+
+
+@pytest.mark.parametrize("aliases", [
+    [], {"BAD": []}, {"h1": "old.example.test"}, {"h1": [None]},
+    {"h1": ["https://old.example.test"]}, {"h1": ["old.example.test:443"]},
+    {"h1": ["old.example.test`) || PathPrefix(`/"]},
+    {"h1": ["old.example.test", "old.example.test"]},
+    {"h1": ["old.example.test"], "h2": ["old.example.test"]},
+    {"h1": ["dev2.example.test"]},
+])
+def test_preview_aliases_refuse_invalid_or_ambiguous_hosts(config, aliases):
+    config["preview_aliases"] = aliases
+    with pytest.raises(ValueError, match="aliases|unique"):
+        validate_pool(config)
+
+
 def test_one_definition_supports_either_command(config):
     before = deepcopy(config)
     rendered = render_compose(config, ROOT / "docker-compose.yml")

@@ -38,7 +38,7 @@ HOUSE_TMPFS = (
 )
 POOL_KEYS = {
     "image", "base_image", "memory", "cgroup_parent", "preview_network",
-    "service_token_volume", "frontend_env_file", "houses",
+    "service_token_volume", "frontend_env_file", "houses", "preview_aliases",
     # Optional: the shared dev site the mansion serves, linked from Campus.
     "mansion_origin",
 }
@@ -126,6 +126,20 @@ def validate_pool(config: object, *, renderer: bool = True) -> dict:
             "id": house_id, "harness": harness, "origin": origin, "host": host,
             "memory": _memory(row.get("memory", config.get("memory"))),
         })
+    aliases = config.get("preview_aliases", {})
+    if not isinstance(aliases, dict):
+        raise ValueError("preview_aliases must map house ids to hostname lists")
+    for house_id, names in aliases.items():
+        if not isinstance(house_id, str) or not HOUSE_ID.fullmatch(house_id):
+            raise ValueError("preview_aliases requires valid house ids")
+        if not isinstance(names, list):
+            raise ValueError("preview_aliases requires hostname lists")
+        for name in names:
+            if not isinstance(name, str) or not HOSTNAME.fullmatch(name):
+                raise ValueError("preview_aliases requires bare lowercase hostnames")
+            if name in hosts:
+                raise ValueError("preview hostnames and aliases must be unique")
+            hosts.add(name)
     # With zero houses nothing else is required and no resources are produced.
     if houses and renderer:
         for key in (
@@ -244,10 +258,14 @@ def render_routes(config: object, template: dict) -> dict:
         if not house["origin"].startswith("https://") or ":" in house["host"]:
             raise ValueError("Traefik preview routes need a bare HTTPS origin (no port)")
         service_name = f"house-{house['id']}"
+        hosts = [house["host"], *pool.get("preview_aliases", {}).get(house["id"], [])]
+        host_rule = " || ".join(f"Host(`{host}`)" for host in hosts)
+        if len(hosts) > 1:
+            host_rule = f"({host_rule})"
         for source in ("frontend", "frontend-api"):
             router = copy.deepcopy(template["http"]["routers"][source])
             rule, count = re.subn(
-                r"Host\(`[^`]+`\)", f"Host(`{house['host']}`)", router["rule"],
+                r"Host\(`[^`]+`\)", host_rule, router["rule"],
             )
             if count != 1:
                 raise ValueError(f"{source} template must contain exactly one Host rule")

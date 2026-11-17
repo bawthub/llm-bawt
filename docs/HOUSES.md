@@ -137,6 +137,17 @@ Verify them explicitly and record the nonsecret receipt as
 `edge.proxy_policy_receipt`; without it, output lists this remaining manual
 check. No NPM restart, public DNS change or new certificate is implicit.
 
+To retain existing preview aliases, set `renderer.pool.preview_aliases` to a
+mapping such as `{"h1": ["legacy-preview.example.test"]}`. Values are bare
+lowercase hostnames, unique across houses and canonical preview hosts. Aliases
+are added to both frontend routers; API path rules (including `/api/v1`) remain
+cloned from the current route template. The mapping does not create houses:
+entries outside the current count remain dormant, so changing `HOUSES` still
+controls the pool. Existing alias DNS/TLS/proxy records must already work and
+remain operator-owned; reconciliation manages DNS only for canonical origins.
+Keep voice backend configuration in the existing private `frontend_env_file`;
+the renderer retains that file and the shared voice-token mount/path.
+
 ## Advanced explicit-pool configuration
 
 Copy `docker/houses.example.json` outside source control. All images, resource
