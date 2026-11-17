@@ -57,15 +57,16 @@ def by_path(files: list[dict]) -> dict[str, dict]:
 def test_sed_after_relative_cd_is_observed(repo: Path) -> None:
     obs = TurnSnapshotObserver()
     dev = repo.parent
-    bash(obs, "r1", "cd proj && sed -i s/one/ONE/ a.txt", dev)
-    (repo / "a.txt").write_text("ONE\ntwo\n")
+    bash(obs, "r1", "cd proj && sed -i s/one/ONE-EDIT/ a.txt", dev)
+    # Change size so Git's stat cache detects the edit even within one clock tick.
+    (repo / "a.txt").write_text("ONE-EDIT\ntwo\n")
     files, receipts = obs.finish("r1")
     assert [f["change_kind"] for f in files] == ["modified"]
     f = files[0]
     assert f["provenance"] == PROVENANCE
     assert f["path"] == str(repo / "a.txt") and f["absolute_path"] == f["path"]
     assert base64.b64decode(f["before_b64"]) == b"one\ntwo\n"
-    assert base64.b64decode(f["after_b64"]) == b"ONE\ntwo\n"
+    assert base64.b64decode(f["after_b64"]) == b"ONE-EDIT\ntwo\n"
     assert (f["additions"], f["deletions"]) == (1, 1)
     assert receipts[0]["status"] == "observed"
 
