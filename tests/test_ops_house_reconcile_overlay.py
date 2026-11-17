@@ -243,3 +243,59 @@ def test_an_occupied_or_foreign_held_house_is_refused_and_nothing_is_reserved(en
     release_houses(engine, ["h3"], "ops-b")  # another owner's hold is never touched
     with engine.connect() as conn:
         assert reservations(conn) == {"h3": "ops-a"}
+
+
+# ── review cmwl71pwf: overlay inputs must be regular files ──────────────────
+
+class _FakeSealed:
+    def __init__(self, listed, status=0):
+        self.listed, self.status, self.calls = listed, status, []
+
+    def run(self, **kwargs):
+        self.calls.append(kwargs)
+        out = "".join(f"{p}\n" for p in self.listed).encode()
+        return self.status, b"\x01\x00\x00\x00" + len(out).to_bytes(4, "big") + out
+
+
+def _renderer():
+    from llm_bawt.ops.compose_render import ComposeRenderer
+    return ComposeRenderer(object(), {"compose_config": _config()}, tag="t1")
+
+
+def test_regular_overlay_files_pass_the_type_check():
+    sealed = _FakeSealed([HOUSE_FILE, ENV_FILE])
+    _renderer()._check_overlay_files(sealed, {"project_dir": PROJECT}, (HOUSE_FILE, ENV_FILE))
+    call = sealed.calls[0]
+    assert call["entrypoint"] == ["find"] and call["ro_bind_files"] == (HOUSE_FILE, ENV_FILE)
+    assert call["cmd"][-4:] == ["-maxdepth", "0", "-type", "f"]
+
+
+@pytest.mark.parametrize("listed, status", [([HOUSE_FILE], 0), ([], 0), ([HOUSE_FILE, ENV_FILE], 1)])
+def test_a_directory_or_unreadable_overlay_input_is_refused(listed, status):
+    with pytest.raises(ComposeError) as caught:
+        _renderer()._check_overlay_files(_FakeSealed(listed, status), {"project_dir": PROJECT},
+                                         (HOUSE_FILE, ENV_FILE))
+    assert caught.value.code == "compose_source_invalid"
+
+
+# ── review cmwl71pwf: a missed release is retried by the pump ───────────────
+
+def test_the_pump_settles_holds_of_known_outcome_jobs_only(engine):
+    import json
+    from types import SimpleNamespace
+    from llm_bawt.ops.service import OpsService
+
+    def snap(service):
+        return json.dumps({"spec": {**APP_SPEC, "container_name": f"llm-bawt-house-{service}",
+                                    "compose_service": f"house-{service}"}, "resolved_args": {}})
+
+    jobs = {"a" * 32: ("succeeded", "h1"), "b" * 32: ("failed", "h2"), "c" * 32: ("lost", "h3"),
+            "d" * 32: ("running", "h4")}
+    for job_id, (_state, house) in jobs.items():
+        assert reserve_houses(engine, lambda h: [], [house], hold_id(job_id)) is None
+    service = OpsService.__new__(OpsService)
+    service.store = SimpleNamespace(engine=engine, get_job=lambda i: SimpleNamespace(
+        id=i, state=jobs[i][0], invocation_snapshot_json=snap(jobs[i][1])) if i in jobs else None)
+    service._settle_house_holds()
+    with engine.connect() as conn:
+        assert reservations(conn) == {"h3": hold_id("c" * 32), "h4": hold_id("d" * 32)}

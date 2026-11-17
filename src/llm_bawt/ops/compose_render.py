@@ -498,6 +498,22 @@ class ComposeRenderer:
             raise ComposeError("renderer_output_invalid")
         return config
 
+    def _check_overlay_files(self, sealed, source: dict, overlay: tuple) -> None:
+        """Every overlay bind must be a regular file as the daemon mounted it:
+        a bind source that is (or links to) a directory would expose its whole
+        subtree to Compose's readers. Checked in its own sealed run with the
+        same binds, right before the render; a swap between the two is the
+        same residual as any other host file read later by Compose."""
+        try:
+            status, raw = sealed.run(entrypoint=["find"], cmd=[*overlay, "-maxdepth", "0", "-type", "f"],
+                                     env=[f"PATH={RENDER_PATH}"], directory=source["project_dir"],
+                                     max_bytes=64 * 1024, ro_bind_files=overlay)
+        except SealedRunError as exc:
+            raise ComposeError(f"renderer_{exc.kind}") from None
+        stdout, _stderr = demux_streams(raw)
+        if status != 0 or stdout.splitlines() != list(overlay):
+            raise ComposeError("compose_source_invalid", detail="an overlay file is not a regular file")
+
     def _run(self, source: dict, image_ref: str, argv: list[str]) -> str:
         sealed = SealedContainer(self.api, self.spec["compose_config"]["renderer_image"], role=RENDER_ROLE,
                                  tag=self.tag, labels={RENDER_LABEL: "1"})
@@ -508,6 +524,8 @@ class ComposeRenderer:
             overlay = overlay_mounts(self.spec["compose_config"], source["project_dir"])
         except ValueError as exc:
             raise ComposeError("compose_source_invalid", detail=str(exc)) from None
+        if overlay:
+            self._check_overlay_files(sealed, source, overlay)
         try:
             # ``env -i``: Docker ``Env`` would only add to the image's own (HOME=/root).
             status, raw = sealed.run(entrypoint=["env", "-i", *env, "docker"], cmd=argv, env=[],

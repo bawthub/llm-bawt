@@ -916,6 +916,25 @@ class OpsService:
                 return
         self._submit(job, snapshot, executor)
 
+    def _settle_house_holds(self) -> None:
+        """TASK-2406: retry the release of any ops-owned house hold whose job
+        already reached a known outcome (the release after the terminal
+        commit is a second transaction and may have failed). Holds of active,
+        lost or unreadable jobs stay."""
+        try:
+            from ..house_retirement import reservations
+            with self.store.engine.connect() as conn:
+                held = reservations(conn)
+            for owner in sorted(set(held.values())):
+                if not owner.startswith("ops-"):
+                    continue
+                job = self.store.get_job(owner[len("ops-"):])
+                if job is None or job.state not in (JOB_SUCCEEDED, JOB_FAILED) or not job.invocation_snapshot_json:
+                    continue
+                self._release_recreated(job.id, json.loads(job.invocation_snapshot_json), job.state)
+        except Exception:  # noqa: BLE001 - retried next cycle; holds fail closed
+            logger.exception("house hold settlement pass failed; holds stay")
+
     def _release_recreated(self, job_id: str, snapshot: dict, state: str) -> None:
         """TASK-2406: a known outcome (succeeded, or failed with nothing
         changed / the previous container restored healthy) frees the house.
@@ -1106,6 +1125,7 @@ class OpsService:
         self._reap_finished_workers()
         if self.quiesce_driver is not None:
             self.quiesce_driver.release_terminal()
+        self._settle_house_holds()
         if self.gate_driver is not None:
             try:
                 self.gate_driver.retire_pending()
