@@ -35,6 +35,7 @@ if __package__:
     from . import sequence
     from . import wake_on_lan
     from . import compose_secrets
+    from . import import_preflight
     from .routing_reconcile import ACTION as ROUTING_ACTION, RoutingReconciler
     from .tagged_config_reconcile import ACTION as TAGGED_CONFIG_ACTION, TaggedConfigReconciler
 else:  # pragma: no cover - standalone worker image
@@ -52,6 +53,7 @@ else:  # pragma: no cover - standalone worker image
     import sequence
     import wake_on_lan
     import compose_secrets
+    import import_preflight
     from routing_reconcile import ACTION as ROUTING_ACTION, RoutingReconciler
     from tagged_config_reconcile import ACTION as TAGGED_CONFIG_ACTION, TaggedConfigReconciler
 
@@ -217,6 +219,14 @@ class DockerAPI:
             path = f"/containers/{container_id}/{action}"
             if action in ("stop", "restart"):
                 path += f"?t={grace}"
+        preflight = spec.get("import_preflight") if action == "restart" else None
+        if preflight is not None:
+            # TASK-2403: a restart reloads the bind-mounted source; refuse
+            # before the running process is touched if it cannot import.
+            preflight_tag = "ip" + hashlib.sha256((tag or container["Id"]).encode()).hexdigest()[:20]
+            summary = import_preflight.run(
+                self, preflight, image=container["Image"], tag=preflight_tag,
+                source_dir=import_preflight.mount_source(container, preflight["source_mount"]))
         if before_submit is not None:
             before_submit()
         # Once handed to Docker, timeout/transport failure means the side effect
@@ -224,6 +234,8 @@ class DockerAPI:
         self.side_effect_started = True
         self.request("POST", path)
         done = f"Docker {action} completed for {container['Id']}"
+        if preflight is not None:
+            done += "; " + summary
         if has_health(spec):
             # TASK-1697: Docker accepting the restart is not the service being up.
             done += "; " + wait_healthy(self, container_id, spec, clock=self.clock, sleep=self.sleep)

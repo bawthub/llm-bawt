@@ -55,6 +55,7 @@ from .validation import canonical_json
 from . import sequence
 from . import wake_on_lan
 from . import compose_secrets
+from . import import_preflight
 from .compose_render import COMPOSE_SECRETS_RENDER_LABEL
 from .execution_mode import EXECUTION_ISOLATED, EXECUTION_PROCESS, EXECUTOR_MODES, snapshot_execution_mode
 from .process_launch import ProcessLauncher
@@ -106,6 +107,9 @@ def spec_capability_labels(spec: dict) -> tuple[str, ...]:
             labels.append(RUNTIME_SOURCE_V2_LABEL)
     if "health_probe" in spec:
         labels.append(HEALTH_PROBE_LABEL)
+    if "import_preflight" in spec:
+        # TASK-2403: an older worker would skip it on a restart.
+        labels.append(import_preflight.WORKER_CAPABILITY_LABEL)
     config = spec.get("compose_config") or {}
     if config.get("profile") == HARDENED_PROFILE.name or "adopt_files" in config:
         labels.append(HARDENED_PROFILE_LABEL)
@@ -328,15 +332,19 @@ def validate_spec(command_script: str) -> dict:
         return spec
     allowed = {"action", "container_name", "container_name_from_arg", "compose_project",
                "compose_service", "compose_service_from_arg", "stop_grace_seconds", "runtime_source",
-               *RESTART_HEALTH_KEYS}
+               "import_preflight", *RESTART_HEALTH_KEYS}
     if not isinstance(spec, dict) or set(spec) - allowed:
         raise ValueError("Docker spec must be an object with supported fields only")
     if not isinstance(spec.get("action"), str) or spec["action"] not in SUPPORTED_ACTIONS:
         raise ValueError("unsupported Docker action")
     validate_restart_health(spec)  # TASK-1697: optional post-action health probe
     validate_runtime_source(spec)
+    if "import_preflight" in spec:
+        if spec["action"] != "restart":
+            raise ValueError("import_preflight applies to restart only")
+        import_preflight.validate(spec["import_preflight"])
     for k, v in spec.items():
-        if k in RESTART_HEALTH_KEYS or k == "runtime_source":
+        if k in RESTART_HEALTH_KEYS or k in ("runtime_source", "import_preflight"):
             continue
         if k != "stop_grace_seconds" and (not isinstance(v, str) or not v.strip()):
             raise ValueError(f"Docker spec {k} must be a nonempty string")

@@ -27,12 +27,14 @@ restart.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
 from urllib.parse import urlencode
 
 if __package__:
+    from . import import_preflight
     from .compose_config import (BUILT_PROFILE, GPU_BUILT_PROFILE, ComposeError, built_image_tag, evaluate,
                                 gpu_preflight, gpu_verify, port_list)
     from .compose_render import (OPS_JOB_LABEL, SAFE_PATH, label_files_valid, validate_compose_secrets,
@@ -45,6 +47,7 @@ if __package__:
     from .source_state import (SOURCE_FIELDS, SourceChecker, SourceStateError, source_commit, source_plan,
                                valid_classification, valid_source_commit, validate_source_spec)
 else:  # standalone immutable worker
+    import import_preflight
     from compose_config import (BUILT_PROFILE, GPU_BUILT_PROFILE, ComposeError, built_image_tag, evaluate,
                                 gpu_preflight, gpu_verify, port_list)
     from compose_render import (OPS_JOB_LABEL, SAFE_PATH, label_files_valid, validate_compose_secrets,
@@ -187,8 +190,12 @@ def valid_image_swap(snapshot: dict) -> bool:
 
 
 def validate_app_spec(spec: dict) -> dict:
-    if not isinstance(spec, dict) or set(spec) - {"gpu", "image_swap"} != _SPEC_KEYS:
+    if not isinstance(spec, dict) or set(spec) - {"gpu", "image_swap", "import_preflight"} != _SPEC_KEYS:
         raise ValueError("app config reconcile spec has missing or unsupported fields")
+    if "import_preflight" in spec:  # TASK-2403
+        import_preflight.validate(spec["import_preflight"])
+        if spec["import_preflight"]["source_mount"] not in spec["source_mounts"]:
+            raise ValueError("import_preflight source_mount must be one of source_mounts")
     if "gpu" in spec and spec["gpu"] is not True:  # TASK-1844: opt-in only
         raise ValueError("gpu must be true when present")
     if "image_swap" in spec and (spec["image_swap"] not in IMAGE_SWAP_MODES or spec.get("gpu") is not True):
@@ -563,6 +570,22 @@ class AppConfigReconciler(SourceGuardedReconciler):
         self._check_dependencies()
         self._check_gpu()
         self._recheck_source()
+        self._import_preflight()
+
+    def _import_preflight(self):
+        """TASK-2403: the old container's restore cannot restore its bind-mounted
+        source, so import the new source's entrypoints before anything stops."""
+        config = self.spec.get("import_preflight")
+        if config is None:
+            return
+        self._phase("import-preflight")
+        mount = self._desired["mounts"].get(config["source_mount"]) or {}
+        try:
+            self.detail["import_preflight"] = import_preflight.run(
+                self.api, config, image=self._approved_image_id, source_dir=mount.get("source"),
+                tag="ip" + hashlib.sha256(self.job_id.encode()).hexdigest()[:20])
+        except import_preflight.ImportPreflightError as exc:
+            self._fail(f"{exc}\nnothing changed", known=True)
 
     def _check_gpu(self):
         """TASK-1844: the daemon must offer every desired CDI device and the

@@ -76,6 +76,15 @@ def _spec(**fields: Any) -> str:
     return json.dumps(fields, ensure_ascii=False)
 
 
+# TASK-2403: what the bridge container's processes run from its mounted source.
+# A bridge reconcile/restart imports these (and every module their files name)
+# in a throwaway container before it stops the running bridge.
+_BRIDGE_IMPORT_PREFLIGHT = {
+    "source_mount": "/app/src",
+    "modules": ["claude_code_bridge.__main__", "codex_bridge.__main__", "agent_bridge.house_preview_supervisor"],
+}
+
+
 # ---------------------------------------------------------------------------
 # llm-bawt service restarts
 # ---------------------------------------------------------------------------
@@ -160,6 +169,7 @@ _LLM_BAWT_SEEDS: list[dict[str, Any]] = [
             action="restart",
             compose_project=_LLM_BAWT_PROJECT,
             compose_service_from_arg="bridge",
+            import_preflight=_BRIDGE_IMPORT_PREFLIGHT,
         ),
         "args_schema_json": _schema(
             {
@@ -574,6 +584,7 @@ _CONFIG_SEEDS: list[dict[str, Any]] = [{
             display_values={}, stat_paths=[], stop_grace_seconds=10, health_timeout_seconds=180,
             health_url=f"http://127.0.0.1:{port}/health", health_field="redis", health_value=True,
             source_repository="bawthub/llm-bawt", source_branch="master", source_mounts=["/app/src"],
+            import_preflight=_BRIDGE_IMPORT_PREFLIGHT,
             # Destinations are the product's own Compose files' container paths.
             data_mounts=data_mounts,
             # The bridge's own Compose environment names (never values): URLs,

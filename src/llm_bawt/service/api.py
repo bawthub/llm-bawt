@@ -370,6 +370,10 @@ async def lifespan(app):
     service._house_watcher = HouseWatcher(service.config)
     service._house_watcher_task = asyncio.create_task(
         service._house_watcher.run(), name="house-watcher")
+    # TASK-2403: the bridge's own watchers can't report its outage; the app does.
+    from .bridge_down_alert import run_bridge_down_alert
+    service._bridge_down_alert_task = asyncio.create_task(
+        run_bridge_down_alert(config), name="bridge-down-alert")
     if scheduler is not None:
         scheduler.wake_hub = service._commit_wake_hub
         scheduler.on_runs_changed = lambda: mark_state(service, MAINTENANCE_JOBS)
@@ -503,6 +507,7 @@ BACKGROUND_TASK_ATTRIBUTES = (
     "_state_watcher_task",
     "_ops_bell_task",
     "_house_watcher_task",
+    "_bridge_down_alert_task",
     "_claude_refresh_task",
     "_codex_refresh_task",
 )
