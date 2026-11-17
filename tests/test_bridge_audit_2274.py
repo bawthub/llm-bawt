@@ -107,6 +107,7 @@ def test_preview_launch_exception_restores_fallback_and_backs_off(tmp_path, monk
 
     async def go():
         s = _supervisor(CasRedis(), tmp_path)
+        s.gated = False  # This legacy scenario hands the preview port to Vite.
         s._proc, s._failures, s._retry_at = None, 0, 0.0
         s.occ, s.campus_url = sup.Occupancy((), 0), ""
         s.fallback = SimpleNamespace(serving=False, page="", start=AsyncMock(),
