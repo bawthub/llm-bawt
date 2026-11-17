@@ -406,6 +406,10 @@ _CONFIG_SEEDS: list[dict[str, Any]] = [{
                      "/run/llm-bawt-crawl4ai-token",
                      # TASK-2386: the reconciler's secrets, which the app exports.
                      "/run/llm-bawt-ops-secrets",
+                     # TASK-2380: per-caller API key export directories the app writes.
+                     "/run/llm-bawt-api-keys/app", "/run/llm-bawt-api-keys/bridge-claude-code",
+                     "/run/llm-bawt-api-keys/bridge-local-model", "/run/llm-bawt-api-keys/bawthub-web",
+                     "/run/llm-bawt-api-keys/bawthub-voice",
                      # Read-only pin list the weekly harness check reads (TASK-1975); never executed.
                      "/app/docker/agent-bridge-constraints.txt"],
         # Every environment name the container carries beyond the product's
@@ -451,10 +455,10 @@ _CONFIG_SEEDS: list[dict[str, Any]] = [{
         source_repository="bawthub/llm-bawt", source_branch="master", source_mounts=["/app/src"],
         # Destinations are the product's own Compose file's container paths.
         data_mounts=["/app/.logs", "/app/models", "/root/.config/llm-bawt", "/root/.cache/huggingface",
-                     "/root/.cache/llm-bawt/models"],
+                     "/root/.cache/llm-bawt/models", "/run/llm-bawt-api-key"],
         # The service's own Compose environment names (never values).
         env_names=["FLASHINFER_CUDA_ARCH_LIST", "HF_HUB_DISABLE_PROGRESS_BARS", "HF_HUB_DISABLE_XET", "HF_TOKEN",
-                   "LLAMA_CPP_N_GPU_LAYERS", "LLM_BAWT_API_URL", "LLM_BAWT_DEFAULT_MODEL_ALIAS",
+                   "LLAMA_CPP_N_GPU_LAYERS", "LLM_BAWT_API_KEY_FILE", "LLM_BAWT_API_URL", "LLM_BAWT_DEFAULT_MODEL_ALIAS",
                    "LLM_BAWT_DEFAULT_USER", "LLM_BAWT_LLAMA_CPP_FLASH_ATTN", "LLM_BAWT_LLAMA_CPP_N_BATCH",
                    "LLM_BAWT_LLAMA_CPP_N_CTX", "LLM_BAWT_LLAMA_CPP_N_GPU_LAYERS", "LLM_BAWT_LOG_DIR",
                    "LLM_BAWT_LOG_PREFIX", "LLM_BAWT_MODEL_CACHE_DIR", "LLM_BAWT_POSTGRES_DATABASE",
@@ -589,12 +593,13 @@ _CONFIG_SEEDS: list[dict[str, Any]] = [{
     for bridge, port, data_mounts, env_names in (
         ("claude-code-bridge", 8681,
          ["/app/.logs", "/home/bridge/dev", "/home/bridge/.claude", "/home/bridge/.claude.json",
-          "/home/bridge/.ssh", "/etc/ssh/ssh_config", "/opt/agent-skills/bin", "/run/llm-bawt-bridge-tokens"],
+          "/home/bridge/.ssh", "/etc/ssh/ssh_config", "/opt/agent-skills/bin", "/run/llm-bawt-bridge-tokens",
+          "/run/llm-bawt-api-key"],
          ["ANTHROPIC_API_KEY", "BAWT_WT_DEV_ROOT", "BRIDGE_BROKER_TOKEN_FILE", "BRIDGE_GIT_CREDENTIAL_TOKEN_FILE",
           "BRIDGE_VAULT_TOKEN_FILE", "CLAUDE_CODE_BAWTHUB_MCP_URL", "CLAUDE_CODE_BRIDGE_LOG_LEVEL", "CLAUDE_CODE_CRAWL4AI_MCP_URL",
           "CLAUDE_CODE_CWD", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_PERMISSION_MODE",
           "CLAUDE_CODE_PLAYWRIGHT_MCP_URL", "CLAUDE_CODE_SKILLS_PATH",
-          "CRAWL4AI_API_TOKEN_FILE", "ENABLE_TOOL_SEARCH", "LLM_BAWT_API_URL", "LLM_BAWT_REDIS_URL",
+          "CRAWL4AI_API_TOKEN_FILE", "ENABLE_TOOL_SEARCH", "LLM_BAWT_API_KEY_FILE", "LLM_BAWT_API_URL", "LLM_BAWT_REDIS_URL",
           "LLM_BAWT_CLAUDE_BACKGROUND_TASKS",
           "LLM_BAWT_SERVICE_HOST", "LLM_BAWT_XAI_API_KEY", "LOCAL_ANTHROPIC_API_KEY", "LOCAL_ANTHROPIC_BASE_URL",
           "OPENAI_API_KEY", "REDIS_URL", "XAI_API_KEY"]),

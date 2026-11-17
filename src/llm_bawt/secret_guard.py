@@ -33,6 +33,11 @@ from pathlib import Path
 _SECRET_NAME = re.compile(r"(^|_)(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?)(_|$)")
 _POINTER_SUFFIXES = ("_FILE", "_PATH", "_UID", "_ENV", "_MODE")
 _GIT_CONFIG_NAME = re.compile(r"^GIT_CONFIG_KEY_\d+$")
+#: Exact names that look secret-shaped but hold only metadata. Exact match,
+#: never a pattern, so the guard stays fail-closed for every other name.
+#: ``LLM_BAWT_API_KEY_EXPORTS`` maps caller principals to export directories
+#: and uids (``principal=/dir[:uid[:gid]]``); the keys are generated at runtime.
+METADATA_NAMES = frozenset({"LLM_BAWT_API_KEY_EXPORTS"})
 #: Connection URLs: secret only through their credentials, so only the
 #: ``credential_url`` check applies (a host-only URL is fine).
 URL_NAMES = frozenset({"DATABASE_URL"})
@@ -51,7 +56,7 @@ _PLACEHOLDER = re.compile(
 
 def is_secret_shaped(name: str) -> bool:
     return (bool(_SECRET_NAME.search(name.upper())) and not name.upper().endswith(_POINTER_SUFFIXES)
-            and not _GIT_CONFIG_NAME.match(name))
+            and not _GIT_CONFIG_NAME.match(name) and name.upper() not in METADATA_NAMES)
 
 
 @dataclass(frozen=True)

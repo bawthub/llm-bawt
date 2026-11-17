@@ -29,6 +29,8 @@ _SECRET_NAME = re.compile(r"(^|_)(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?)
 _POINTER_SUFFIXES = ("_FILE", "_PATH", "_UID", "_ENV", "_MODE")
 #: git's ``GIT_CONFIG_KEY_<n>`` holds a config key name (its value is ``GIT_CONFIG_VALUE_<n>``).
 _GIT_CONFIG_NAME = re.compile(r"^GIT_CONFIG_KEY_\d+$")
+#: Exact metadata names (principal-to-directory maps); exact match only.
+METADATA_NAMES = frozenset({"LLM_BAWT_API_KEY_EXPORTS"})
 #: Compose interpolation, ``$NAME`` or ``${NAME...}``; ``$$`` is a literal ``$``.
 _INTERPOLATION = re.compile(r"\$(?:\$|\{([A-Za-z_][A-Za-z0-9_]*)|([A-Za-z_][A-Za-z0-9_]*))")
 _ASSIGNMENT = re.compile(r"^\s*(?:export\s+)?([A-Z][A-Z0-9_]*)\s*=")
@@ -108,7 +110,7 @@ def _template_names(path: Path) -> set[str]:
 
 def is_secret_shaped(name: str) -> bool:
     return (bool(_SECRET_NAME.search(name)) and not name.endswith(_POINTER_SUFFIXES)
-            and not _GIT_CONFIG_NAME.match(name))
+            and not _GIT_CONFIG_NAME.match(name) and name not in METADATA_NAMES)
 
 
 def _shipped_secret_names() -> dict[str, set[str]]:
