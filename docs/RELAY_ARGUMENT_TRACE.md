@@ -66,7 +66,7 @@ These are the OpenAI client's decoded Responses string values, **not raw HTTP
 bytes or original SSE wire JSON**. Re-parse each JSONL record to compare strings;
 comparison of the escaped on-disk representation to prose is invalid.
 
-Hard limits: **65,536 artifact bytes total, 256 records total**, including header
+Hard limits: **65,536 artifact bytes total, 4,096 records total**, including header
 and reserved terminal marker. Limit hits stop immediately, preserve only prior
 whole records, and record `byte_limit` or `event_limit`; no truncated argument is
 represented as complete. Missing `.done` uses the distinct `fallback_partial_json`
