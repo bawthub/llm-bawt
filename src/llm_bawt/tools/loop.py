@@ -59,6 +59,8 @@ class ToolLoop:
         history_manager: "HistoryManager | None" = None,
         generation_kwargs: dict | None = None,
         ha_mode: bool = False,
+        trigger_message_id: str | None = None,
+        turn_id: str | None = None,
     ):
         """
         Args:
@@ -77,9 +79,12 @@ class ToolLoop:
             adapter: Model adapter for model-specific stop sequences and output cleaning.
             history_manager: History manager for recall operations.
             ha_mode: If True, force tool_choice="required" on first iteration.
+            trigger_message_id: Service-owned persisted user message identity.
+            turn_id: Service-owned turn identity for durable content provenance.
         """
         if not user_id:
             raise ValueError("user_id is required for ToolLoop")
+        self._trigger_message_id = trigger_message_id
         self.executor = ToolExecutor(
             memory_client=memory_client,
             profile_manager=profile_manager,
@@ -93,6 +98,8 @@ class ToolLoop:
             user_id=user_id,
             bot_id=bot_id,
             history_manager=history_manager,
+            trigger_message_id=trigger_message_id,
+            turn_id=turn_id,
         )
         # Use config value if not explicitly provided (0 = unlimited, cap at reasonable max)
         if max_iterations is None:
@@ -133,9 +140,10 @@ class ToolLoop:
         """
         
         self.executor.reset_call_count()
-        # Provenance for bot-written memories/traits: the turn's user message.
+        # Service identity is authoritative. Non-service callers may fall back
+        # to their persisted user message, never to an invented turn identity.
         last_user = next((m for m in reversed(messages) if getattr(m, "role", None) == "user"), None)
-        self.executor.trigger_message_id = getattr(last_user, "db_id", None)
+        self.executor.trigger_message_id = self._trigger_message_id or getattr(last_user, "db_id", None)
         self.tool_context = []  # Reset tool context
         self.tool_call_details = []  # Reset per-call details
         current_messages = messages.copy()
@@ -487,6 +495,8 @@ def query_with_tools(
     history_manager: "HistoryManager | None" = None,
     generation_kwargs: dict | None = None,
     ha_mode: bool = False,
+    trigger_message_id: str | None = None,
+    turn_id: str | None = None,
 ) -> tuple[str, str, list[dict]]:
     """Convenience function for tool-enabled queries.
 
@@ -511,6 +521,8 @@ def query_with_tools(
         adapter: Model adapter for model-specific stop sequences.
         history_manager: History manager for recall operations.
         ha_mode: If True, force tool_choice="required" on first iteration.
+        trigger_message_id: Service-owned persisted user message identity.
+        turn_id: Service-owned turn identity for durable content provenance.
 
     Returns:
         Tuple of (final_response, tool_context_summary, tool_call_details).
@@ -538,6 +550,8 @@ def query_with_tools(
         history_manager=history_manager,
         generation_kwargs=generation_kwargs,
         ha_mode=ha_mode,
+        trigger_message_id=trigger_message_id,
+        turn_id=turn_id,
     )
     response = loop.run(messages, client, stream_final=stream)
     tool_context = loop.get_tool_context_summary()

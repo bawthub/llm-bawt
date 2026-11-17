@@ -659,6 +659,8 @@ class ServiceLLMBawt(BaseLLMBawt):
         bridge_event_callback=None,
         turn_execution=None,
         task_turn_capability: str | None = None,
+        trigger_message_id: str | None = None,
+        turn_id: str | None = None,
     ) -> tuple[str, str, list[dict]]:
         """Execute the LLM query and return response.
         
@@ -755,6 +757,8 @@ class ServiceLLMBawt(BaseLLMBawt):
                 adapter=self.adapter,
                 history_manager=self.history_manager,
                 ha_mode=self._ha_mode,
+                trigger_message_id=trigger_message_id,
+                turn_id=turn_id,
             )
         
         response = self.client.query(

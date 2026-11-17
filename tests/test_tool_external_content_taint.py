@@ -170,6 +170,43 @@ def test_query_with_tools_records_trigger_message_id():
     assert mem.stored[0]["source_message_ids"] == ["msg-1"]
 
 
+def test_query_with_tools_keeps_explicit_service_identity_over_prompt_message():
+    from llm_bawt.models.message import Message
+    from llm_bawt.tools.loop import query_with_tools
+
+    mem = _Memory()
+    replies = iter([
+        'Action: memory\nAction Input: {"action": "store", "content": "fixture fact"}',
+        "Final Answer: Saved.",
+    ])
+    client = SimpleNamespace(supports_native_tools=lambda: False, query=lambda *a, **k: next(replies))
+    query_with_tools(
+        messages=[Message(role="user", content="Remember fixture fact", db_id="prompt-only-id")],
+        client=client, memory_client=mem, user_id="u", bot_id="b", stream=False, tool_format="react",
+        trigger_message_id="service-trigger", turn_id="service-turn",
+    )
+    assert mem.stored[0]["source_message_ids"] == ["service-trigger"]
+
+
+def test_reused_tool_loop_refreshes_nonservice_message_identity_each_run():
+    from llm_bawt.models.message import Message
+    from llm_bawt.tools.loop import ToolLoop
+
+    mem = _Memory()
+    loop = ToolLoop(memory_client=mem, user_id="u", bot_id="b", tool_format="react")
+    for message_id in ("first-trigger", "second-trigger"):
+        replies = iter([
+            'Action: memory\nAction Input: {"action": "store", "content": "fixture fact"}',
+            "Final Answer: Saved.",
+        ])
+        client = SimpleNamespace(supports_native_tools=lambda: False,
+                                 query=lambda *a, _replies=replies, **k: next(_replies))
+        loop.run([Message(role="user", content="Remember fixture fact", db_id=message_id)], client)
+    assert [row["source_message_ids"] for row in mem.stored] == [
+        ["first-trigger"], ["second-trigger"],
+    ]
+
+
 def test_benign_result_text_is_preserved():
     text = 'Kitchen is 72 F.\n{"note": "ordinary text", "count": 2}'
     wrapped = format_tool_result("home", text)

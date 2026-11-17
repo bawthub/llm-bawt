@@ -279,6 +279,87 @@ def test_chat_backend_nonstream_turn_does_not_register(_isolate) -> None:
     assert _isolate == []
 
 
+@pytest.mark.parametrize("claimed", [False, True], ids=["api", "inter-bot"])
+@pytest.mark.parametrize("fetch_fails", [False, True], ids=["fetch-ok", "fetch-error"])
+def test_native_nonstream_tools_use_service_turn_identity(
+    monkeypatch, tmp_path, _isolate, claimed, fetch_fails,
+):
+    """Run chat_completion through the real service query and database-backed loop."""
+    from sqlalchemy import create_engine, select
+
+    from llm_bawt.content_provenance import ContentProvenanceStore, ContentTurn, _writes
+    from llm_bawt.models.message import Message
+    from llm_bawt.service.core import ServiceLLMBawt
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'content.sqlite'}")
+    store = ContentProvenanceStore(engine)
+    monkeypatch.setattr("llm_bawt.service.dependencies.get_content_provenance_store",
+                        lambda _config: store)
+    policy = SimpleNamespace(compile_bundle=lambda: SimpleNamespace(policies=[]),
+                             record_decision=Mock())
+    monkeypatch.setattr("llm_bawt.service.dependencies.get_tool_approval_policy_store",
+                        lambda _config: policy)
+    replies = iter([
+        'Action: home\nAction Input: {"action": "set", "entity": "light.kitchen", "state": "on"}',
+        'Action: memory\nAction Input: {"action": "store", "content": "clean fact"}',
+        'Action: web_fetch\nAction Input: {"url": "https://example.test"}',
+        'Action: memory\nAction Input: {"action": "store", "content": "injected fact"}',
+        'Action: self\nAction Input: {"action": "set", "key": "tone", "value": "injected"}',
+        "Final Answer: Done.",
+    ])
+    service = _service(None, model_type="openai")
+    llm = service._get_llm_bawt.return_value
+    llm.client.supports_native_tools = lambda: False
+    llm.client.query = Mock(side_effect=lambda *_a, **_k: next(replies))
+    llm.config = SimpleNamespace(POSTGRES_PASSWORD="fixture-only", MAX_TOOL_CALLS_PER_TURN=20)
+    llm.bot.uses_tools = True
+    llm.bot_id, llm.user_id = "caid", "operator"
+    llm.tool_format, llm.adapter, llm.history_manager, llm._ha_mode = "react", None, None, False
+    llm.memory = SimpleNamespace(store_memory=Mock(return_value=SimpleNamespace(id="clean")))
+    llm.profile_manager = SimpleNamespace(set_attribute=Mock())
+    llm.home_client = SimpleNamespace(set=Mock(return_value="light on"))
+    llm.web_fetch_client = SimpleNamespace(fetch=Mock(
+        side_effect=RuntimeError("fetch failed") if fetch_fails else None,
+        return_value="outside text",
+    ))
+    llm.search_client = llm.news_client = llm.ha_native_client = llm.model_lifecycle = None
+    llm._get_tool_definitions = Mock(return_value=[{"name": "home"}])
+    # No Message.db_id: service-owned identity must survive prompt preparation.
+    llm.prepare_messages_for_query.return_value = [Message(role="user", content="do the task")]
+    observed = {}
+
+    def execute(messages, **kwargs):
+        observed.update(kwargs)
+        result = ServiceLLMBawt.execute_llm_query(llm, messages, **kwargs)
+        observed["tool_context"] = result[1]
+        return result
+
+    llm.execute_llm_query = execute
+    request = _claimed(_request()) if claimed else _request()
+    try:
+        response = asyncio.run(service.chat_completion(request))
+        assert response.choices[0].message.content == "Done."
+        llm.home_client.set.assert_called_once_with(entity="light.kitchen", state="on", brightness=None)
+        llm.web_fetch_client.fetch.assert_called_once_with("https://example.test")
+        llm.memory.store_memory.assert_called_once()
+        assert llm.memory.store_memory.call_args.kwargs["source_message_ids"] == [
+            request.user_message_id,
+        ]
+        llm.profile_manager.set_attribute.assert_not_called()
+        assert "provenance is unavailable" not in observed["tool_context"]
+        assert "Held:" in observed["tool_context"]
+        with engine.connect() as conn:
+            receipts = conn.execute(select(_writes)).mappings().all()
+        assert [row["decision"] for row in receipts] == ["allowed", "held", "held"]
+        assert {row["source_turn"] for row in receipts} == {observed["turn_id"]}
+        assert observed["trigger_message_id"] == request.user_message_id
+        assert store.seen(ContentTurn("caid", "operator", observed["turn_id"],
+                                      request.user_message_id))
+        assert _isolate == []  # Native tool loop, not an agent bridge.
+    finally:
+        engine.dispose()
+
+
 def test_direct_usage_is_carried_from_worker_to_nonstream_terminal_event(monkeypatch, _isolate):
     from llm_bawt.clients.base import LLMClient
     from llm_bawt.clients.responses_client import ResponsesClient

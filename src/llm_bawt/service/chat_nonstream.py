@@ -713,6 +713,8 @@ class ChatNonStreamMixin:
                         bridge_event_callback=notice_bridge_event if _is_agent else bridge_event_callback,
                         turn_execution=turn_execution,
                         task_turn_capability=task_turn_capability,
+                        trigger_message_id=trigger_message_id,
+                        turn_id=turn_log_id,
                     )
                     if terminal_scope.follower is not None:
                         terminal_scope.follower.check()
