@@ -72,6 +72,18 @@ def docker_args(job):
             "/bin/sh", "-c", wrapper, "heavy-queue", *job["command"]]
 
 
+def api_key_header():
+    """TASK-2380: this host's llm-bawt API key (``LLM_BAWT_API_KEY_FILE``), or None."""
+    path = (os.environ.get("LLM_BAWT_API_KEY_FILE") or "").strip()
+    if not path:
+        return None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return handle.read().strip() or None
+    except OSError:
+        return None
+
+
 def notify(job, receipt, *, opener=urllib.request.urlopen):
     payload = {
         "sender_bot_id": job["notify_bot"], "target_bot_id": job["notify_bot"],
@@ -81,9 +93,13 @@ def notify(job, receipt, *, opener=urllib.request.urlopen):
         "idempotency_key": f"heavy-queue:{job['id']}", "task_id": job.get("task_id"),
         "prefer_steer": False,
     }
+    headers = {"Content-Type": "application/json"}
+    key = api_key_header()
+    if key:
+        headers["X-LLM-Bawt-Key"] = key
     request = urllib.request.Request(
         job["notify_url"].rstrip("/") + "/v1/inter-bot-deliveries",
-        data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"},
+        data=json.dumps(payload).encode(), headers=headers,
         method="POST",
     )
     # Do not copy arbitrary test output into a prompt or retain secret-bearing

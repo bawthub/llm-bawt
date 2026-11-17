@@ -970,6 +970,9 @@ def run_server(
         host: Bind host for HTTP transport.
         port: Bind port for HTTP transport.
     """
+    from llm_bawt.api_auth.outbound import install as _install_api_key  # TASK-2380
+
+    _install_api_key()
     import argparse
 
     # Parse CLI arguments when called as entry point

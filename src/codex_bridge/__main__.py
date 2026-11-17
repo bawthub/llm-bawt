@@ -137,6 +137,9 @@ def _redact(s: str | None, *, keep: int = 6) -> str:
 
 
 def main() -> None:
+    from llm_bawt.api_auth.outbound import install as _install_api_key  # TASK-2380
+
+    _install_api_key()
     log_level = os.getenv("CODEX_BRIDGE_LOG_LEVEL", "INFO")
     from agent_bridge.logfmt import configure_logging
 

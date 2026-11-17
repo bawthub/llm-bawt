@@ -511,6 +511,9 @@ async def fetch_house_of_bot(bot: str) -> Any:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from llm_bawt.api_auth.outbound import install as _install_api_key  # TASK-2380
+
+    _install_api_key()
     parser = argparse.ArgumentParser(description="Choose what this house's preview serves.")
     sub = parser.add_subparsers(dest="cmd", required=True)
     use = sub.add_parser("use", help="serve this checkout's frontend")

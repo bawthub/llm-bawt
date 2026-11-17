@@ -108,6 +108,9 @@ def _install_crash_handler() -> None:
 
 
 def main() -> None:
+    from llm_bawt.api_auth.outbound import install as _install_api_key  # TASK-2380
+
+    _install_api_key()
     _install_crash_handler()
 
     log_level = os.getenv("LOCAL_MODEL_BRIDGE_LOG_LEVEL", "INFO")

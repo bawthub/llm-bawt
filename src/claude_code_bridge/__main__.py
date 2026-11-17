@@ -40,6 +40,9 @@ async def _wait_for_shutdown(bridge_task: asyncio.Task, shutdown_event: asyncio.
 
 
 def main() -> None:
+    from llm_bawt.api_auth.outbound import install as _install_api_key  # TASK-2380
+
+    _install_api_key()
     log_level = os.getenv("CLAUDE_CODE_BRIDGE_LOG_LEVEL", "INFO")
     from agent_bridge.logfmt import configure_logging
 

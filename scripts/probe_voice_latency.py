@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import statistics
 import sys
 import time
@@ -54,6 +55,16 @@ def probe_once(url: str, payload: dict, timeout: float = 60.0) -> TurnTimings:
         method="POST",
         headers={"Content-Type": "application/json", "Accept": "text/event-stream"},
     )
+    # TASK-2380: send this caller's llm-bawt API key when one is provisioned.
+    key_file = os.environ.get("LLM_BAWT_API_KEY_FILE", "").strip()
+    if key_file:
+        try:
+            with open(key_file, encoding="utf-8") as handle:
+                key = handle.read().strip()
+        except OSError:
+            key = ""
+        if key:
+            req.add_header("X-LLM-Bawt-Key", key)
 
     timings = TurnTimings()
     t0 = time.perf_counter()

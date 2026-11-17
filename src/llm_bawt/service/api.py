@@ -62,6 +62,9 @@ async def lifespan(app):
     from ..api_auth.export import export_all as export_api_keys
 
     export_api_keys()
+    from ..api_auth.outbound import install as install_api_key
+
+    install_api_key()
 
     # TASK-1477: export the derived bridge-gate tokens for the bridges, and
     # record enforcement for a tenant bootstrap marked fresh. Before any route
