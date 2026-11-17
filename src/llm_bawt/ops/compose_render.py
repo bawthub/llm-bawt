@@ -128,7 +128,9 @@ COMPOSE_SECRETS_RENDER_LABEL = "llm-bawt.ops.compose-secrets-render"  # worker c
 COMPOSE_SECRETS_VOLUME = "llm-bawt-compose-secrets"
 COMPOSE_SECRETS_DIR = "/run/compose-secrets"
 COMPOSE_SECRET_NAMES = frozenset({"LLM_BAWT_SECRET_KEY", "LLM_BAWT_POSTGRES_PASSWORD",
-                                  "POSTGRES_PASSWORD", "DATABASE_URL"})
+                                  "POSTGRES_PASSWORD", "DATABASE_URL",
+                                  # TASK-2379: Redis AUTH (the URL embeds the password).
+                                  "LLM_BAWT_REDIS_PASSWORD", "LLM_BAWT_REDIS_URL"})
 
 
 def validate_compose_secrets(config: dict) -> tuple[str, ...]:

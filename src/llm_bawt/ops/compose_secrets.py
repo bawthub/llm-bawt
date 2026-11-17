@@ -34,7 +34,8 @@ SECRETS_VOLUME = "llm-bawt-compose-secrets"  # == compose_render.COMPOSE_SECRETS
 RECOVERY_VOLUME = "llm-bawt-env-recovery"
 # == compose_render.COMPOSE_SECRET_NAMES (kept literal: this file also runs alone
 # inside the helper, where no sibling module is importable).
-SECRET_NAMES = frozenset({"LLM_BAWT_SECRET_KEY", "LLM_BAWT_POSTGRES_PASSWORD", "POSTGRES_PASSWORD", "DATABASE_URL"})
+SECRET_NAMES = frozenset({"LLM_BAWT_SECRET_KEY", "LLM_BAWT_POSTGRES_PASSWORD", "POSTGRES_PASSWORD", "DATABASE_URL",
+                          "LLM_BAWT_REDIS_PASSWORD", "LLM_BAWT_REDIS_URL"})
 SOURCE_KINDS = frozenset({"project_env", "key_file"})
 MODES = frozenset({"write", "purge_recovery"})
 IN_PROJECT_ENV = "/in/project.env"
