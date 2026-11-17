@@ -27,7 +27,7 @@ from .gpu_guard import (GPU_VOICE_SERVICES, STOP_ACTION, GpuGuardUnverifiable, g
                         gpu_voice_target, handoff_only_service)
 from .gpu_reconcile import is_gpu_reconcile, nested_gpu_reconcile
 from .house_guard import (HouseOccupancyUnverifiable, hold_id, house_targets, occupancy_reader, override_requested,
-                          recreate_houses, release_houses, reserve_houses)
+                          recreate_houses, release_houses, reservations, reserve_houses)
 from .self_target import SelfTargetError
 from .image_deploy import DEPLOY_ACTION, IMAGE_ACTIONS
 from .release_spec import is_release_spec
@@ -922,7 +922,6 @@ class OpsService:
         commit is a second transaction and may have failed). Holds of active,
         lost or unreadable jobs stay."""
         try:
-            from ..house_retirement import reservations
             with self.store.engine.connect() as conn:
                 held = reservations(conn)
             for owner in sorted(set(held.values())):

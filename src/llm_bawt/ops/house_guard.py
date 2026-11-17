@@ -22,7 +22,11 @@ from __future__ import annotations
 import re
 from typing import Any, Callable
 
-from sqlalchemy import text
+from sqlalchemy import delete, insert, text
+
+# Eager (TASK-2406): admission/pump paths must not lazily import live-tree modules.
+from ..house_retirement import RESERVATIONS, reservations
+from ..house_tenancy import lock_house_assignments
 
 from .worker import target_selector
 
@@ -151,10 +155,6 @@ def reserve_houses(engine: Any, reasons: Callable[[str], list[str]], houses, own
     re-reading occupancy under that lock. Returns refusal text (nothing
     reserved) or None. A house already held by ``owner`` is kept (idempotent);
     one held by anything else refuses. Unreadable occupancy raises."""
-    from ..house_retirement import RESERVATIONS, reservations
-    from ..house_tenancy import lock_house_assignments
-    from sqlalchemy import insert
-
     with engine.begin() as conn:
         lock_house_assignments(conn)
         held = reservations(conn)
@@ -176,10 +176,6 @@ def reserve_houses(engine: Any, reasons: Callable[[str], list[str]], houses, own
 
 def release_houses(engine: Any, houses, owner: str) -> None:
     """Drop ``owner``'s reservations; another owner's are never touched."""
-    from ..house_retirement import RESERVATIONS
-    from ..house_tenancy import lock_house_assignments
-    from sqlalchemy import delete
-
     with engine.begin() as conn:
         lock_house_assignments(conn)
         for house in houses:
