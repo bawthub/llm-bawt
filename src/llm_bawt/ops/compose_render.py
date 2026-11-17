@@ -162,6 +162,15 @@ def compose_secret_args(config: dict, project_dir: str) -> list[str]:
     return args
 
 
+def compose_secret_mounts(names: tuple[str, ...]) -> tuple[tuple[str, str, str], ...]:
+    """Mount exactly the declared names' files, one volume subpath each.
+
+    The renderer never sees the rest of the secrets volume: a compose file
+    could otherwise read an undeclared name's file through its own readers
+    (``env_file``, ``label_file``, ``configs``...), not just ``--env-file``."""
+    return tuple((COMPOSE_SECRETS_VOLUME, f"{name}.env", f"{COMPOSE_SECRETS_DIR}/{name}.env") for name in names)
+
+
 def check_compose_secrets(config: dict, rendered: dict, service: str) -> None:
     """Output boundary: every declared secret reaches the target non-empty and
     only under its own name.
@@ -396,7 +405,7 @@ class ComposeRenderer:
             status, raw = sealed.run(entrypoint=["env", "-i", *env, "docker"], cmd=argv, env=[],
                                      directory=source["project_dir"], max_bytes=MAX_RENDER_BYTES,
                                      empty_dirs=(RENDER_DOCKER_CONFIG,),
-                                     ro_volumes=((COMPOSE_SECRETS_VOLUME, COMPOSE_SECRETS_DIR),) if secrets else ())
+                                     ro_volume_files=compose_secret_mounts(secrets))
         except SealedRunError as exc:
             raise ComposeError(f"renderer_{exc.kind}") from None
         stdout, stderr = demux_streams(raw)

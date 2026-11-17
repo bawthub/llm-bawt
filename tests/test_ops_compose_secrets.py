@@ -53,18 +53,27 @@ class _SecretsDocker(FakeDocker):
         argv = container["Config"]["Cmd"]
         if "--hash" in argv:
             return _Stream(_frame(1, f"{argv[-1]} {CONFIG_HASH}\n"))
-        mounted = f"{COMPOSE_SECRETS_VOLUME}:{COMPOSE_SECRETS_DIR}:ro" in container["HostConfig"]["Binds"]
+        # What the renderer can read from the volume: only the mounted subpaths.
+        visible = {m["Target"]: m["VolumeOptions"]["Subpath"].removesuffix(".env")
+                   for m in container["HostConfig"].get("Mounts", [])
+                   if m["Source"] == COMPOSE_SECRETS_VOLUME and m["ReadOnly"]}
         env_files = [argv[i + 1] for i, a in enumerate(argv) if a == "--env-file"]
         lookup = dict(self.project_env) if not env_files or f"{PROJECT_DIR}/.env" in env_files else {}
         for path in env_files:
             name = path.rsplit("/", 1)[-1].removesuffix(".env")
             if path.startswith(COMPOSE_SECRETS_DIR + "/"):
-                if not mounted or name not in self.volume:
+                if visible.get(path) != name or name not in self.volume:
                     self.render_status = 1  # Compose exits non-zero on a missing env file
                     return _Stream(_frame(2, "env file not found\n"))
                 lookup[name] = self.volume[name]
         project = copy.deepcopy(self.compose)
         service = project["services"][SERVICE]
+        # Compose's own file readers (label_file here) open the path inside the renderer.
+        for path in service.pop("label_file", []):
+            if path not in visible:
+                self.render_status = 1
+                return _Stream(_frame(2, "label file not found\n"))
+            service.setdefault("labels", {})["leak"] = self.volume[visible[path]]
         env = {}
         for key, value in service["environment"].items():
             if value is None:  # bare passthrough
@@ -111,7 +120,11 @@ def test_render_injects_values_but_never_into_the_renderer_container():
     assert {n: env[n] for n in names} == SECRETS
     assert len(api.render_bodies) == 2  # config and --hash: both load the same files
     for body in api.render_bodies:
-        assert f"{COMPOSE_SECRETS_VOLUME}:{COMPOSE_SECRETS_DIR}:ro" in body["HostConfig"]["Binds"]
+        assert sorted(m["Target"] for m in body["HostConfig"]["Mounts"]) == [
+            f"{COMPOSE_SECRETS_DIR}/{n}.env" for n in names]
+        assert all(m["ReadOnly"] and m["VolumeOptions"]["Subpath"] == m["Target"].rsplit("/", 1)[1]
+                   for m in body["HostConfig"]["Mounts"])
+        assert body["HostConfig"]["Binds"] == [f"{PROJECT_DIR}:{PROJECT_DIR}:ro"]
         blob = json.dumps({k: body[k] for k in ("Entrypoint", "Cmd", "Env", "Labels")})
         assert not any(value in blob for value in SECRETS.values())
 
@@ -119,7 +132,18 @@ def test_render_injects_values_but_never_into_the_renderer_container():
 def test_undeclared_target_mounts_nothing():
     api = _SecretsDocker()
     _render(SPEC, api)
-    assert all(len(b["HostConfig"]["Binds"]) == 1 for b in api.render_bodies)
+    assert all(len(b["HostConfig"]["Binds"]) == 1 and "Mounts" not in b["HostConfig"] for b in api.render_bodies)
+
+
+def test_compose_file_readers_cannot_reach_an_undeclared_secret():
+    """Codex: a target declaring one name must not read another's file via label_file."""
+    api = _api(["POSTGRES_PASSWORD"])
+    api.compose["services"][SERVICE]["label_file"] = [f"{COMPOSE_SECRETS_DIR}/LLM_BAWT_SECRET_KEY.env"]
+    with pytest.raises(ComposeError) as err:
+        _render(_spec(["POSTGRES_PASSWORD"]), api)
+    assert err.value.code == "renderer_failed"
+    body = api.render_bodies[0]
+    assert [m["Target"] for m in body["HostConfig"]["Mounts"]] == [f"{COMPOSE_SECRETS_DIR}/POSTGRES_PASSWORD.env"]
 
 
 def test_evaluate_carries_the_secret_in_private_desired_env_only():
