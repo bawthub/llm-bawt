@@ -39,6 +39,7 @@ SAB = "sab-fixture-value-kkkk1111"
 UNMAPPED = "openai-fixture-value-llll2222"
 ANTHROPIC = "anthropic-fixture-value-mmmm3333"
 VAULT = "vault-fixture-value-nnnn4444"
+AZURE = "azure-fixture-value-oooo5555"
 SECRETS = (ZAI, KIMI, BRAVE, NEWS, CLAW, CLAW_OTHER, S3_ACCESS, S3_SECRET, SONARR, RADARR, SAB, UNMAPPED,
            ANTHROPIC, VAULT)
 
@@ -60,6 +61,8 @@ FULL_ENV = {
     "LLM_BAWT_SABNZBD_API_KEY": SAB,
     "LLM_BAWT_ANTHROPIC_API_KEY": ANTHROPIC,
     "BW_PASSWORD": VAULT,
+    "AZURE_SPEECH_REGION": "eastus",
+    "AZURE_SPEECH_KEY": AZURE,
     # Set but not adoptable: never read. OpenClaw is being removed (TASK-1439), not adopted.
     "OPENAI_API_KEY": UNMAPPED,
     "OPENCLAW_GATEWAY_TOKEN": CLAW,
@@ -95,12 +98,14 @@ def row_count(engine) -> int:
 
 
 def test_mapping_is_closed():
-    assert {name for spec in SPECS for name in spec.env_names} == set(FULL_ENV) - NOT_ADOPTABLE
+    # The optional Azure endpoint alternative is mapped but unset in FULL_ENV.
+    assert ({name for spec in SPECS for name in spec.env_names}
+            == set(FULL_ENV) - NOT_ADOPTABLE | {"AZURE_SPEECH_ENDPOINT"})
     assert {(spec.destination, spec.kind) for spec in SPECS} == {
         ("zai", "provider"), ("kimi-coding", "provider"), ("brave", "provider"), ("newsapi", "provider"),
         ("object-store", "integration"), ("sonarr", "integration"),
         ("radarr", "integration"), ("sabnzbd", "integration"),
-        ("anthropic-api", "provider"), ("vaultwarden", "provider")}
+        ("anthropic-api", "provider"), ("vaultwarden", "provider"), ("azure-speech", "integration")}
 
 
 def test_every_destination_imports_verified_and_is_removable(env):
@@ -112,6 +117,8 @@ def test_every_destination_imports_verified_and_is_removable(env):
     assert (zai.status, zai.auth_method, zai.secret) == (STATUS_CONNECTED, AUTH_API_KEY, {"api_key": ZAI})
     assert providers.load("kimi-coding").secret == {"api_key": KIMI}
     assert providers.load("vaultwarden").secret == {"api_key": VAULT}
+    azure = integrations.load("azure-speech")
+    assert (azure.meta, azure.secret) == ({"region": "eastus"}, {"key": AZURE})
     store = integrations.load("object-store")
     assert store.meta == {"endpoint": "https://s3.example", "region": "us-east-1", "bucket": "media"}
     assert store.secret == {"access_key_id": S3_ACCESS, "secret_access_key": S3_SECRET}

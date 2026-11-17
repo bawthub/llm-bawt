@@ -105,6 +105,12 @@ SPECS: tuple[Spec, ...] = (
     # TASK-2386: the last secrets left in .env with a store home.
     _api_key("anthropic-api", "LLM_BAWT_ANTHROPIC_API_KEY", planned=False),
     _api_key("vaultwarden", "BW_PASSWORD", planned=False),
+    # BawtHub's voice backend; sourced from BawtHub's .env in a one-off run.
+    Spec("azure-speech", INTEGRATION, (
+        ("region", ("AZURE_SPEECH_REGION",)),
+        ("endpoint", ("AZURE_SPEECH_ENDPOINT",)),
+        ("key", ("AZURE_SPEECH_KEY",)),
+    ), planned=False),
 )
 
 # Outcomes. ``removable`` is decided separately (see :class:`Outcome`).

@@ -487,7 +487,7 @@ def test_probe_argv_is_fixed_by_id():
 
 def test_destinations_are_env_imports():
     assert set(DESTINATIONS) == {s.destination for s in ENV_IMPORT_SPECS if s.planned} == set(DESTINATION_PROBES)
-    assert {s.destination for s in ENV_IMPORT_SPECS if not s.planned} == {"anthropic-api", "vaultwarden"}
+    assert {s.destination for s in ENV_IMPORT_SPECS if not s.planned} == {"anthropic-api", "vaultwarden", "azure-speech"}
 
 
 GOOD_SPEC = {"action": PLAN_ACTION, "targets": ["a", "b"], "records_target": "a",
