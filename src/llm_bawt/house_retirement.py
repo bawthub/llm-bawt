@@ -20,10 +20,15 @@ class HouseAssignmentRetiring(ProfileWriteConflict):
 
 
 def ensure_schema(conn: Any) -> None:
-    _metadata.create_all(conn)
     if conn.dialect.name == "postgresql":
-        from .bot_tags.catalog import require_owned
+        from .bot_tags.catalog import owned, require_owned
+        # SQLAlchemy's unqualified checkfirst can see a later search_path
+        # schema's table. Check ownership, then create in current_schema().
+        if not owned(conn, "house_retirements"):
+            RESERVATIONS.create(conn)
         require_owned(conn, "house_retirements")
+    else:
+        _metadata.create_all(conn)
 
 
 def reservations(conn: Any) -> dict[str, str]:

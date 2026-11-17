@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 
 import pytest
 from sqlalchemy import create_engine, event, text
-from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError, ProgrammingError
 from sqlmodel import SQLModel
 
 from llm_bawt.bot_access import BotAccessError
@@ -190,6 +190,55 @@ def test_a_tenant_schema_migrates_its_own_rows_and_never_touches_public(rig):
     assert rig.tags("fixture-public-private", "tenant") == []
     assert rig.scalar("SELECT count(*) FROM public.bot_profile_tags") == before
     assert rig.tags("fixture-tenant") == []
+
+
+@pytest.mark.parametrize("schema", ["tenant", 'tenant"quoted'])
+def test_house_retirement_bootstrap_owns_current_schema_and_preserves_public(rig, schema):
+    from llm_bawt.house_retirement import RESERVATIONS, ensure_schema, reservations
+
+    rig.store()
+    with rig.engine.begin() as conn:
+        conn.execute(RESERVATIONS.insert().values(house="h1", reconcile_id="public-run"))
+
+    with rig.engine.begin() as conn:
+        quoted = conn.dialect.identifier_preparer.quote_schema(schema)
+        conn.exec_driver_sql(f"CREATE SCHEMA {quoted}")
+        conn.exec_driver_sql(f"SET LOCAL search_path TO {quoted}, public")
+        search_path = conn.exec_driver_sql("SHOW search_path").scalar_one()
+        assert reservations(conn) == {"h1": "public-run"}
+
+        ensure_schema(conn)
+        assert reservations(conn) == {}
+        conn.execute(RESERVATIONS.insert().values(house="h1", reconcile_id="tenant-run"))
+        ensure_schema(conn)
+        assert reservations(conn) == {"h1": "tenant-run"}
+        assert conn.exec_driver_sql("SHOW search_path").scalar_one() == search_path
+        assert RESERVATIONS.schema is None
+
+    with rig.engine.connect() as conn:
+        assert reservations(conn) == {"h1": "public-run"}
+        assert conn.exec_driver_sql(
+            f"SELECT house, reconcile_id FROM {quoted}.house_retirements"
+        ).all() == [("h1", "tenant-run")]
+
+
+def test_house_retirement_bootstrap_without_current_schema_fails_closed(rig):
+    from llm_bawt.house_retirement import ensure_schema, reservations
+
+    rig.store()
+    with rig.engine.begin() as conn:
+        conn.exec_driver_sql(
+            "INSERT INTO public.house_retirements VALUES ('h1', 'public-run')"
+        )
+
+    with pytest.raises(ProgrammingError, match="no schema has been selected"):
+        with rig.engine.begin() as conn:
+            conn.exec_driver_sql("SET LOCAL search_path TO missing_house_schema")
+            assert conn.exec_driver_sql("SELECT current_schema()").scalar_one() is None
+            ensure_schema(conn)
+
+    with rig.engine.connect() as conn:
+        assert reservations(conn) == {"h1": "public-run"}
 
 
 def test_a_tenant_seeing_only_public_bot_profiles_refuses_and_rolls_back(rig):
