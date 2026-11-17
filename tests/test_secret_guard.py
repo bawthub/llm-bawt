@@ -45,7 +45,7 @@ def test_credential_url_fails(line):
     "A_API_KEY=<your-key>", "A_API_KEY=changeme", "A_API_KEY=your-key-here", "A_API_KEY=xxxx",
     "DATABASE_URL=postgresql://user:password@host:5432/db", "DATABASE_URL=postgresql://db:5432/x",
     "DATABASE_URL=postgresql://app:${DB_PASSWORD}@db/x", "TOKENIZERS_PARALLELISM=false",
-    "GIT_CONFIG_KEY_0=credential.helper", "# DB_PASSWORD=" + SHORT, "LOG_LEVEL=INFO",
+    "GIT_CONFIG_KEY_0=credential.helper", "DB_PASSWORD= # required: set at bootstrap", "# DB_PASSWORD=" + SHORT, "LOG_LEVEL=INFO",
 ])
 def test_pointers_placeholders_and_interpolation_pass(line):
     assert scan_env_text(line) == []
@@ -61,6 +61,27 @@ def test_compose_list_and_map_forms():
     ])
     assert codes(scan_compose_text(text)) == [("A_TOKEN", "secret_literal"), ("D_SECRET", "secret_literal"),
                                               ("command", "credential_url")]
+
+
+@pytest.mark.parametrize("text, name", [
+    (f'services:\n  db:\n    environment:\n      "POSTGRES_PASSWORD": {SHORT}', "POSTGRES_PASSWORD"),
+    (f"services:\n  db:\n    environment:\n      'POSTGRES_PASSWORD': '{SHORT}'", "POSTGRES_PASSWORD"),
+    (f"services:\n  db:\n    environment: {{POSTGRES_PASSWORD: {SHORT}, LOG_LEVEL: info}}", "POSTGRES_PASSWORD"),
+    (f'services:\n  db:\n    environment: [LOG_LEVEL=info, "A_TOKEN={SHORT}"]', "A_TOKEN"),
+    (f"services:\n  db:\n    environment:\n      POSTGRES_PASSWORD: ${{ENABLE_DB:+{SHORT}}}", "POSTGRES_PASSWORD"),
+    (f"A_TOKEN=${{ON:+{ENTROPY}}}", "A_TOKEN"),
+])
+def test_quoted_keys_flow_maps_and_alternate_values_fail(text, name):
+    """Codex: the supported Compose forms a seven-character password can hide in."""
+    found = scan_compose_text(text) if text.startswith("services") else scan_env_text(text)
+    assert [(f.name, f.code) for f in found] == [(name, "secret_literal")]
+    assert SHORT not in str(found[0]) and ENTROPY not in str(found[0])
+
+
+def test_flow_forms_with_only_interpolation_pass():
+    text = 'services:\n  db:\n    environment: {POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}", B_TOKEN: ${B:?x}}'
+    assert scan_compose_text(text) == []
+    assert scan_env_text("A_TOKEN=${ON:+${A_TOKEN}}") == []
 
 
 def test_env_backups_fail_without_reading_them(tmp_path):
