@@ -305,6 +305,6 @@ async def test_foreign_backend_header_is_refused(monkeypatch, talk):
 @pytest.mark.asyncio
 async def test_non_allowlisted_actor_is_ignored(monkeypatch, talk):
     from llm_bawt.utils.config import config as app_config
-    monkeypatch.setattr(app_config, "NEXTCLOUD_ALLOWED_ACTORS", "nick, other")
+    monkeypatch.setattr(app_config, "NEXTCLOUD_ALLOWED_ACTORS", "allowed-user, other")
     assert await webhook.handle_nextcloud_webhook(FakeRequest()) == {"status": "actor_not_allowed"}
     assert talk == []
