@@ -1,6 +1,7 @@
 """Route router collection for app registration."""
 
 from .admin_gates import router as admin_gates_router
+from .auth_observations import router as auth_observations_router
 from .bawthub_auth_secrets import router as bawthub_auth_secrets_router
 from .internal_connections import router as internal_connections_router
 from .bot_grants import router as bot_grants_router
@@ -115,6 +116,7 @@ all_routers = [
     bawthub_auth_secrets_router,
     internal_connections_router,
     admin_gates_router,
+    auth_observations_router,
 ]
 
 __all__ = ["all_routers"]

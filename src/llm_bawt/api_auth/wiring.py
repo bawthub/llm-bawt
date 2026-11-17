@@ -11,7 +11,7 @@ import logging
 from collections.abc import Mapping
 from typing import Any
 
-from .middleware import TURN_HEADER, ApiAuthMiddleware, Principal
+from .middleware import TURN_HEADER, ApiAuthMiddleware, Observations, Principal
 from .mode import DENYLIST_KEY, ModeResolver
 
 logger = logging.getLogger(__name__)
@@ -116,6 +116,8 @@ def _auth_key(key: str) -> bool:
 
 SETTINGS = _GlobalSettings()
 RESOLVER = ModeResolver(SETTINGS)
+# One counter set for the /v1 middleware, read by /v1/admin/auth-observations.
+OBSERVATIONS = Observations()
 
 
 def use_store(store) -> None:
@@ -125,4 +127,4 @@ def use_store(store) -> None:
 
 def install(app) -> None:
     app.add_middleware(ApiAuthMiddleware, resolver=RESOLVER, checkers=CHECKERS,
-                       route_template=route_template(app))
+                       observations=OBSERVATIONS, route_template=route_template(app))
