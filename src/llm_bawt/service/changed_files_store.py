@@ -310,6 +310,7 @@ def serialize_changed_file(row: TurnChangedFile) -> dict[str, Any]:
     content lazily by (turn_id, repo_key, path)."""
     from .changed_file_decisions import snapshot_version
     from .changed_file_defaults import default_ignored
+    from agent_bridge.sensitive_paths import is_sensitive_path
 
     version = snapshot_version(row)
     has_before = bool(row.before_blob_key or row.before_sha256)
@@ -330,6 +331,11 @@ def serialize_changed_file(row: TurnChangedFile) -> dict[str, Any]:
         # Whether a text diff is available to open. Binary and content-less
         # rows render as a non-clickable entry.
         "has_content": (not row.binary) and (has_before or has_after),
+        # Metadata-only secret row (e.g. an ignored .env a bot touched): the
+        # snapshot recorded a stat change but withheld every byte. Commit
+        # scopes must never name it.
+        "sensitive": not (has_before or has_after)
+        and is_sensitive_path(row.repo_relative_path or row.path),
         "content_type": row.content_type,
         # None = unknown (legacy/fallback rows) — the UI treats only an explicit
         # False as "scratch file, not committable".

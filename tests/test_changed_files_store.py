@@ -190,6 +190,25 @@ def test_binary_stores_no_content(store):
     assert before.text == "" and after.text == ""
 
 
+def test_metadata_only_secret_row_is_marked_sensitive(store):
+    store.save_turn_files(
+        turn_id="turn-s", bot_id="b", user_id="u", trigger_message_id="m",
+        files=[
+            ChangedFileInput(repo_key="r", path=".env", change_kind="modified",
+                             truncated=True, before=None, after=None),
+            ChangedFileInput(repo_key="r", path="app.py", change_kind="modified",
+                             before=b"a", after=b"b"),
+            ChangedFileInput(repo_key="r", path="docs/secrets.md", change_kind="modified",
+                             before=b"a", after=b"b"),
+        ],
+    )
+    files = {f["path"]: f for f in store.summary_for_turn("turn-s")["files"]}
+    assert files[".env"]["sensitive"] is True
+    assert files["app.py"]["sensitive"] is False
+    # A secret-looking name whose content was captured is ordinary content.
+    assert files["docs/secrets.md"]["sensitive"] is False
+
+
 def test_upsert_is_idempotent(store):
     for after in ("v1", "v2"):
         store.save_turn_files(
