@@ -126,6 +126,8 @@ services:
       - LLM_BAWT_POSTGRES_USER
       - LLM_BAWT_POSTGRES_PASSWORD
       - LLM_BAWT_POSTGRES_DATABASE
+      # TASK-2379: libpq sslmode (unset = libpq default "prefer").
+      - PGSSLMODE
       # Root key (TASK-2386): injected at creation from the root-only secrets
       # volume (ops compose_secrets or scripts/compose-secrets); never in .env.
       - LLM_BAWT_SECRET_KEY
@@ -260,14 +262,25 @@ services:
   redis:
     image: redis:7-alpine
     container_name: llm-bawt-redis
-    command: ["redis-server", "--maxmemory", "1gb", "--maxmemory-policy", "volatile-lru"]
-    # No host port: redis is unauthenticated and carries the agent bridge
-    # transport, so only compose-network clients (redis://redis:6379) may reach it.
+    # TASK-2379: LLM_BAWT_REDIS_PASSWORD (when set) turns on requirepass; every
+    # client then needs it in LLM_BAWT_REDIS_URL (redis://:<pw>@redis:6379/0).
+    # $$ defers expansion to the container shell, so the password stays out of
+    # the container's command line.
+    command:
+      - sh
+      - -c
+      - >-
+        exec redis-server --maxmemory 1gb --maxmemory-policy volatile-lru
+        $${REDISCLI_AUTH:+--requirepass "$$REDISCLI_AUTH"}
+    environment:
+      - REDISCLI_AUTH=${LLM_BAWT_REDIS_PASSWORD:-}
+    # No host port: redis carries the agent bridge transport, so only
+    # compose-network clients (redis://redis:6379) may reach it.
     volumes:
       - redis-data:/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "[ -n \"$$REDISCLI_AUTH\" ] || unset REDISCLI_AUTH; redis-cli ping | grep -q PONG"]
       interval: 10s
       timeout: 3s
       retries: 3
@@ -314,7 +327,7 @@ services:
       # the editable `llm` CLI (installed via uv tool in Dockerfile.agent-bridge)
       # talk to the API without a flag override.
       - LLM_BAWT_SERVICE_HOST=app
-      - REDIS_URL=redis://redis:6379/0
+      - REDIS_URL=${LLM_BAWT_REDIS_URL:-redis://redis:6379/0}
       # TASK-636: CODEX_AUTH_PATH removed — the proxy adapter fetches tokens
       # from the app's broker endpoint (GET /v1/providers/openai_chatgpt/token).
       # Z.AI (Zhipu GLM) — native Anthropic Messages API passthrough.
@@ -466,7 +479,7 @@ services:
       # container's bind address). From inside a bridge the service is reachable
       # at the compose service name `app`.
       - LLM_BAWT_SERVICE_HOST=app
-      - REDIS_URL=redis://redis:6379/0
+      - REDIS_URL=${LLM_BAWT_REDIS_URL:-redis://redis:6379/0}
       # TASK-2235: see the app; the video server's voice-park check sends it.
       - LLM_BAWT_VOICE_BACKEND_ORIGINS
       # -- From .env (TASK-1476) --
@@ -480,6 +493,8 @@ services:
       - LLM_BAWT_POSTGRES_USER
       - LLM_BAWT_POSTGRES_PASSWORD
       - LLM_BAWT_POSTGRES_DATABASE
+      # TASK-2379: libpq sslmode (unset = libpq default "prefer").
+      - PGSSLMODE
       - LLM_BAWT_DEFAULT_USER
       - LLM_BAWT_DEFAULT_MODEL_ALIAS
       - LLM_BAWT_MODEL_CACHE_DIR

@@ -156,14 +156,25 @@ class LocalModelBridge:
         db = conn_kwargs.get("db", 0)
         # socket_timeout=None: redis-py 8.0 defaults to 5s, which races our
         # blocking XREADGROUP(block=5000) reads. Bound only the connect.
-        async_redis = aioredis.Redis(
-            host=host,
-            port=port,
-            db=db,
-            decode_responses=True,
-            socket_timeout=None,
-            socket_connect_timeout=5,
-        )
+        # Reconnect from the publisher's original URL so auth, TLS and URL
+        # options survive (TASK-2379); host/port/db is the URL-less fallback.
+        redis_url = getattr(self._publisher, "redis_url", None)
+        if redis_url:
+            async_redis = aioredis.from_url(
+                redis_url,
+                decode_responses=True,
+                socket_timeout=None,
+                socket_connect_timeout=5,
+            )
+        else:
+            async_redis = aioredis.Redis(
+                host=host,
+                port=port,
+                db=db,
+                decode_responses=True,
+                socket_timeout=None,
+                socket_connect_timeout=5,
+            )
         await async_redis.ping()
         self._redis = async_redis
 
