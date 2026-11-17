@@ -264,6 +264,28 @@ def force_fs_media_backend(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def isolated_master_key_file(monkeypatch, request):
+    """Never read or mint the real ``~/.config/llm-bawt/secret.key`` (TASK-2399).
+
+    With the key moved off that path, an unguarded test reaching
+    ``crypto._load_or_create_key`` minted a fresh key file on the host. Each
+    test gets its own lazily created temp path; tests that patch ``_key_file``
+    or set ``LLM_BAWT_SECRET_KEY`` themselves still win.
+    """
+    from llm_bawt.service.providers import crypto
+
+    real_key_file = crypto._key_file
+    real_home = Path.home()
+
+    def test_key_file():
+        if Path.home() != real_home:  # the test already pointed HOME at a temp dir
+            return real_key_file()
+        return request.getfixturevalue("tmp_path") / "llm-bawt" / "secret.key"
+
+    monkeypatch.setattr(crypto, "_key_file", test_key_file)
+
+
+@pytest.fixture(autouse=True)
 def no_derived_bawthub_service_token(monkeypatch):
     """Never derive the BawtHub service token from a real master key (TASK-1472).
 
