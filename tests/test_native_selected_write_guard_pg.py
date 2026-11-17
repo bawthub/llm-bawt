@@ -27,7 +27,10 @@ from tests.test_message_native_upsert_pg import http_runtime, proof_for, real_st
 from tests.test_native_selected_owner_pg import _body, _record, native_runtime, rig
 
 __all__ = ["rig", "real_storage", "http_runtime", "native_runtime"]
-pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("private_app_pg")]
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.usefixtures("private_app_pg", "persisted_master_key"),
+]
 
 
 @contextmanager

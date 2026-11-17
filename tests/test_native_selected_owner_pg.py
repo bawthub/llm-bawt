@@ -33,7 +33,10 @@ from tests.test_message_native_upsert_pg import http_runtime, real_storage
 from tests.test_nonstream_turn_execution import _service
 
 __all__ = ["rig", "http_runtime", "real_storage"]
-pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("private_app_pg")]
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.usefixtures("private_app_pg", "persisted_master_key"),
+]
 
 
 def _receipt(sql):

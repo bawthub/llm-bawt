@@ -285,6 +285,27 @@ def isolated_master_key_file(monkeypatch, request):
     monkeypatch.setattr(crypto, "_key_file", test_key_file)
 
 
+@pytest.fixture
+def persisted_master_key(isolated_master_key_file):
+    """A valid synthetic root already on disk at the test's isolated key path.
+
+    Since TASK-2381 every app MCP call derives its service key. Without a
+    persisted root, the first derivation runs the missing-root guard's
+    encrypted-record queries inside a test's measured SQL and resolves the
+    lazy ``tmp_path`` from whatever thread made the call. Tests that measure
+    SQL around app requests opt in; missing-root guard tests do not.
+    """
+    from cryptography.fernet import Fernet
+
+    from llm_bawt.service.providers import crypto
+
+    path = crypto._key_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        path.write_bytes(Fernet.generate_key())
+    return path
+
+
 @pytest.fixture(autouse=True)
 def no_derived_bawthub_service_token(monkeypatch):
     """Never derive the BawtHub service token from a real master key (TASK-1472).

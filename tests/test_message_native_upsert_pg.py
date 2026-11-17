@@ -36,7 +36,10 @@ from tests.test_message_native_upsert import (
 from tests.test_nonstream_turn_execution import _claimed, _isolate, _request, _service
 
 __all__ = ["rig", "_isolate"]
-pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("private_app_pg")]
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.usefixtures("private_app_pg", "persisted_master_key"),
+]
 
 
 @pytest.fixture
