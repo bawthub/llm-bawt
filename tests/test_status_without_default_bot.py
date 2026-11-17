@@ -38,7 +38,7 @@ def status(monkeypatch):
     monkeypatch.setattr(status_mod, "_collect_model_info", lambda config, alias: None)
     monkeypatch.setattr(status_mod, "_collect_dependencies", lambda config: None)
     config = SimpleNamespace(
-        DEFAULT_USER="nick", SERVICE_HOST="127.0.0.1", SERVICE_PORT=8642, defined_models={"models": {}},
+        DEFAULT_USER="test-user", SERVICE_HOST="127.0.0.1", SERVICE_PORT=8642, defined_models={"models": {}},
         SCHEDULER_ENABLED=False, SCHEDULER_CHECK_INTERVAL_SECONDS=60,
     )
     return config, seen
