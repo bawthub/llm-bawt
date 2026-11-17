@@ -299,7 +299,7 @@ class PreviewGate:
                     except OSError:
                         await self._respond(writer, 200, self.page, html_body=True)
                         return
-                    pump = asyncio.create_task(self._pipe(up_reader, writer))
+                    pump = asyncio.create_task(self._pipe(up_reader, writer, half_close=False))
                 up_writer.write(self._forward_head(req, others, peer))
                 await self._forward_body(reader, up_writer, framing)
                 await up_writer.drain()
@@ -382,7 +382,12 @@ class PreviewGate:
             if not pump.done():
                 pump.cancel()
 
-    async def _pipe(self, src: asyncio.StreamReader, dst: asyncio.StreamWriter) -> None:
+    async def _pipe(self, src: asyncio.StreamReader, dst: asyncio.StreamWriter,
+                    half_close: bool = True) -> None:
+        """Copy src to dst. half_close=False leaves dst writable: the HTTP answer
+        pump never ends the client's write side, so a later answer (an upgrade's
+        101 after a drained keep-alive) can still go out; the gate closes the
+        client connection itself when it is done."""
         try:
             while data := await src.read(CHUNK):
                 dst.write(data)
@@ -391,7 +396,7 @@ class PreviewGate:
             pass
         finally:
             try:
-                if dst.can_write_eof():
+                if half_close and dst.can_write_eof():
                     dst.write_eof()
             except (OSError, RuntimeError):
                 pass

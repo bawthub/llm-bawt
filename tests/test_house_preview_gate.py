@@ -396,6 +396,33 @@ async def test_a_declined_upgrade_never_becomes_an_unchecked_tunnel():
 
 
 @pytest.mark.asyncio
+async def test_an_upgrade_after_a_kept_alive_request_on_the_same_connection_works():
+    up = await Upstream().start()
+    gate = await _gate(upstream_port=up.port)
+    try:
+        cookie = await _enter(gate)
+        reader, writer = await asyncio.open_connection("127.0.0.1", gate.port)
+        writer.write(f"GET /plain HTTP/1.1\r\nHost: p\r\nCookie: {cookie}\r\n\r\n".encode())
+        await writer.drain()
+        head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 5)
+        length = int(next(line.split(b":")[1] for line in head.split(b"\r\n")
+                          if line.lower().startswith(b"content-length")))
+        assert await asyncio.wait_for(reader.readexactly(length), 5) == b"upstream GET /plain 0"
+        writer.write((f"GET /ws HTTP/1.1\r\nHost: p\r\nCookie: {cookie}\r\n"
+                      "Upgrade: websocket\r\nConnection: Upgrade\r\n\r\n").encode())
+        await writer.drain()
+        head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 5)
+        assert head.startswith(b"HTTP/1.1 101")
+        writer.write(b"ping")
+        await writer.drain()
+        assert await asyncio.wait_for(reader.readexactly(9), 5) == b"echo:ping"
+        writer.close()
+    finally:
+        await gate.stop()
+        await up.stop()
+
+
+@pytest.mark.asyncio
 async def test_a_streaming_answer_outlives_the_idle_timer(monkeypatch):
     monkeypatch.setattr(hg, "IDLE_TIMEOUT_S", 0.1)
     up = await Upstream().start()
