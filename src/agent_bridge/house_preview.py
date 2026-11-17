@@ -30,6 +30,19 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 PREVIEW_PORT = 5173
+#: With the sign-in gate on (TASK-2390, :mod:`agent_bridge.house_preview_gate`)
+#: the gate owns :data:`PREVIEW_PORT` and Vite listens here, on loopback only.
+INNER_PORT = 5174
+GATE_ENV = "BAWT_HOUSE_PREVIEW_GATE"
+
+
+def gate_enabled() -> bool:
+    return os.environ.get(GATE_ENV, "").strip().lower() == "on"
+
+
+def vite_port() -> int:
+    """The port this house's Vite listens on."""
+    return INNER_PORT if gate_enabled() else PREVIEW_PORT
 TTL_S = 30
 TASK_RE = re.compile(r"TASK-\d+", re.IGNORECASE)
 _GIT_TIMEOUT_S = 2.0
@@ -47,7 +60,7 @@ def _is_vite(argv: list[str]) -> bool:
     if "concurrently" in joined or not any(
             Path(a).name in ("vite", "vite.js") for a in argv):
         return False
-    port = str(PREVIEW_PORT)
+    port = str(vite_port())
     # Exact --port value; a substring match also accepted --port 15173.
     return any(
         (a == "--port" and i + 1 < len(argv) and argv[i + 1] == port)
@@ -112,11 +125,15 @@ def describe(cwd: Path, up: bool) -> dict:
     if branch == "HEAD":  # detached
         branch = None
     match = TASK_RE.search(branch or "") or TASK_RE.search(checkout)
-    return {
+    value = {
         "up": up, "checkout": checkout, "repo": _repo_name(cwd), "branch": branch,
         "commit": _git(cwd, "rev-parse", "--short", "HEAD"),
         "task": match.group(0).upper() if match else None,
     }
+    if gate_enabled():
+        # BawtHub links a gated preview through its one-use link route.
+        value["gated"] = True
+    return value
 
 
 def probe(proc: Path = Path("/proc")) -> dict | None:
@@ -124,7 +141,7 @@ def probe(proc: Path = Path("/proc")) -> dict | None:
     cwd = find_preview_cwd(proc)
     if cwd is None:
         return None
-    return describe(cwd, _port_open())
+    return describe(cwd, _port_open(vite_port()))
 
 
 class PreviewPublisher:
@@ -161,5 +178,5 @@ class PreviewPublisher:
             self._last = None
 
 
-__all__ = ["PREVIEW_PORT", "TTL_S", "PreviewPublisher", "describe", "find_preview_cwd",
+__all__ = ["GATE_ENV", "INNER_PORT", "PREVIEW_PORT", "TTL_S", "gate_enabled", "vite_port", "PreviewPublisher", "describe", "find_preview_cwd",
            "preview_key", "probe"]

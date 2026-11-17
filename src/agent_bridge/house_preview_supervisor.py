@@ -25,6 +25,10 @@ Each preview step runs in its own process group. Stopping it ends the whole
 group (TERM, then KILL after a grace), even when the launcher already exited,
 so no leftover server holds the preview ports.
 
+With ``BAWT_HOUSE_PREVIEW_GATE=on`` (TASK-2390) a sign-in gate
+(:mod:`agent_bridge.house_preview_gate`) holds port 5173 instead, serving the
+page or proxying to Vite on loopback; it never hands the port over.
+
 Nothing here runs installs into shared checkouts, migrations, schema pushes or
 a per-house backend: Hono is part of the frontend, everything else is shared.
 
@@ -49,7 +53,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from .house_preview import PREVIEW_PORT
+from .house_preview import INNER_PORT, PREVIEW_PORT, gate_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +70,8 @@ INSTALL_TIMEOUT_S = 900.0
 PAIR = ["pnpm", "exec", "concurrently", "--kill-others",
         f"vite --host 0.0.0.0 --port {PREVIEW_PORT} --strictPort",
         "tsx watch server/index.ts"]
+#: The same pair behind the sign-in gate (TASK-2390): Vite on loopback only.
+GATED_PAIR = [*PAIR[:4], f"vite --host 127.0.0.1 --port {INNER_PORT} --strictPort", PAIR[5]]
 
 
 def target_key(house: str) -> str:
@@ -257,7 +263,17 @@ class PreviewSupervisor:
         self._fetch = fetch_campus or self._fetch_campus
         self._house_of = fetch_house_of or fetch_house_of_bot
         self.dev_root = dev_root
-        self.fallback = fallback or FallbackServer()
+        #: TASK-2390: with the gate on, the gate holds the preview port for
+        #: good (page or proxy), and Vite listens behind it on loopback.
+        self.gated = gate_enabled()
+        if fallback is None:
+            if self.gated:
+                from .house_preview_gate import PreviewGate
+
+                fallback = PreviewGate(house)
+            else:
+                fallback = FallbackServer()
+        self.fallback = fallback
         self.occ: Occupancy | None = None
         self.campus_url: str | None = None
         self.target: Path | None = None
@@ -364,7 +380,9 @@ class PreviewSupervisor:
 
     async def _show(self, status: str, detail: str) -> None:
         self.fallback.page = render_page(self.house, self.occ, status, detail, self.campus_url)
-        if not self.fallback.serving and self._proc is None:
+        if self.gated:
+            self.fallback.campus_url = self.campus_url
+        if not self.fallback.serving and (self.gated or self._proc is None):
             try:
                 await self.fallback.start()
             except OSError as exc:  # something else holds the port, e.g. a manual run
@@ -380,11 +398,12 @@ class PreviewSupervisor:
         ok = ok and await self._step(front, ["pnpm", "exec", "prisma", "generate"])
         if not ok:
             return await self._failed(front, "dependency install failed")
-        await self.fallback.stop()
+        if not self.gated:
+            await self.fallback.stop()  # Vite takes the port itself
         try:
             with LOG_PATH.open("ab") as log:
                 self._proc = await asyncio.create_subprocess_exec(
-                    *PAIR, cwd=front, env=_child_env(), stdout=log,
+                    *(GATED_PAIR if self.gated else PAIR), cwd=front, env=_child_env(), stdout=log,
                     stderr=asyncio.subprocess.STDOUT, start_new_session=True)
         except Exception as exc:  # e.g. checkout removed, spawn resource error
             # Nothing was started: restore the fallback page and back off.
