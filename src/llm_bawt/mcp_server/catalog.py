@@ -18,6 +18,8 @@ from mcp.types import CallToolResult, TextContent, Tool
 from .approval_interceptor import ApprovalAwareFastMCP, PolicyResult
 from .catalog_contracts import TOOL_SUMMARIES, tool_description
 from .bot_access import ToolBotAccess, invocation_context
+from .content_provenance import ToolContentProvenance
+from agent_bridge.content_provenance import external_source, provenance_envelope
 from agent_bridge.mcp_call_context import MCP_CALL_CONTEXT_KEY
 
 # JSON Schema locations that hold schemas (not arbitrary user data/defaults).
@@ -90,15 +92,38 @@ def compact_call_result(result: Any) -> Any:
     return result.model_copy(update={"content": content})
 
 
+def label_external_result(result: Any, source: str | None) -> Any:
+    """Keep output schemas and image blocks intact; label every result view."""
+    if source is None or not isinstance(result, CallToolResult) or isinstance(result, PolicyResult):
+        return result
+    provenance = {
+        "untrusted_content": True, "source": source,
+        "applies_to": ["content", "structuredContent"],
+    }
+    content = [
+        block.model_copy(update={"text": provenance_envelope(block.text, source)})
+        if isinstance(block, TextContent) else block
+        for block in result.content
+    ]
+    # Standard MCP result metadata scopes provenance over BOTH representations.
+    # Do not change structuredContent: clients validate it against outputSchema.
+    return result.model_copy(update={
+        "content": content,
+        "meta": {**(result.meta or {}), "content_provenance": provenance},
+    })
+
+
 class CatalogFastMCP(ApprovalAwareFastMCP):
     """Approval-aware server with a compact, skill-linked discovery catalog."""
 
-    def __init__(self, *args, bot_policy_resolver=None, **kwargs):
+    def __init__(self, *args, bot_policy_resolver=None, content_store_provider=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.bot_access = ToolBotAccess(bot_policy_resolver)
+        self.content_provenance = ToolContentProvenance(content_store_provider)
 
     def add_tool(self, fn, name=None, *args, **kwargs):
-        wrapped = self.bot_access.register(name or fn.__name__, fn)
+        wrapped = self.content_provenance.register(name or fn.__name__, fn)
+        wrapped = self.bot_access.register(name or fn.__name__, wrapped)
         return super().add_tool(wrapped, name, *args, **kwargs)
 
     async def call_tool(self, name, arguments, context=None):
@@ -108,11 +133,14 @@ class CatalogFastMCP(ApprovalAwareFastMCP):
             # Avoid doomed ASK cards. The registered callable checks again at
             # execution, including approved execution's bypass of call_tool.
             await self.bot_access.preflight(name, public)
-            return compact_call_result(await super().call_tool(name, arguments, context))
+            await self.content_provenance.check(name, public, preflight=True)
+            result = compact_call_result(await super().call_tool(name, arguments, context))
+            return label_external_result(result, external_source(name))
 
     async def call_approved_tool(self, name, arguments, **kwargs):
         with invocation_context(name, arguments):
-            return await super().call_approved_tool(name, arguments, **kwargs)
+            result = compact_call_result(await super().call_approved_tool(name, arguments, **kwargs))
+            return label_external_result(result, external_source(name))
 
     async def list_tools(self) -> list[Tool]:
         tools = await super().list_tools()

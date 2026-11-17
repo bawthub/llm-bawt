@@ -364,6 +364,13 @@ class ChatStreamingMixin(BridgeSessionResetMixin):
             is_agent=is_agent_backend,
             on_close=lambda: self._end_generation(cancel_event, done_event, bot_id),
         )
+        from ..content_provenance import ContentTurn
+        from .content_lineage import inherit_admitted_request
+
+        await asyncio.to_thread(
+            inherit_admitted_request, self, request,
+            ContentTurn(bot_id, user_id, turn_log_id, trigger_message_id),
+        )
         if is_agent_backend:
             from .turn_task_attribution import stamp_turn_task
             await stamp_turn_task(

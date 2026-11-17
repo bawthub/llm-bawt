@@ -344,6 +344,13 @@ async def dispatch_mcp_result_continuation(
                 **protocol_options,
             ):
                 raise RuntimeError("Turn admission unavailable; refusing unfenced continuation")
+        from ..content_provenance import ContentTurn
+        from .content_lineage import inherit_approval
+
+        await asyncio.to_thread(
+            inherit_approval, service, row,
+            ContentTurn(row.bot_id, row.user_id, identity["inter_bot_turn_id"], identity["user_message_id"]),
+        )
         if row.request_kind != KIND_MCP:
             await _send_harness_grant(service, store, row, claim_token=token)
         async for chunk in service.chat_completion_stream(request):

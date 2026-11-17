@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
 
 import pytest
 
@@ -171,7 +170,8 @@ def test_post_tool_hook_returns_curlable_urls_and_preserves_output() -> None:
     assert "original: http://app:8642/v1/uploads/ma_test" in context
     assert "preview: http://app:8642/v1/uploads/ma_test/preview" in context
     assert "thumb: http://app:8642/v1/uploads/ma_test/thumb" in context
-    assert "updatedMCPToolOutput" not in specific
+    assert specific["updatedMCPToolOutput"]["content"][1] == _hook_input()["tool_response"]["content"][1]
+    assert "untrusted_content=true" in context
     assert uploads == [(
         _hook_input()["tool_response"]["content"],
         "loopy:operator",
@@ -196,22 +196,25 @@ def test_post_tool_hook_failure_is_model_visible_without_fake_urls() -> None:
     assert "/v1/uploads/" not in context
 
 
-def test_post_tool_hook_ignores_non_screenshot_and_named_file_result() -> None:
+def test_post_tool_hook_labels_non_screenshot_and_named_file_result() -> None:
     bridge = _bridge()
     hook = bridge._make_post_tool_use_hook(
         session_key="loopy:operator",
         screenshot_artifacts_by_tool_use_id={},
     )
-    assert asyncio.run(hook(
+    snapshot = asyncio.run(hook(
         _hook_input(tool_name="mcp__playwright__browser_snapshot"),
         "toolu_shot",
         {"signal": None},
-    )) == {}
+    ))
+    assert "untrusted_content=true" in snapshot["hookSpecificOutput"]["additionalContext"]
+    assert "updatedMCPToolOutput" in snapshot["hookSpecificOutput"]
     named_result = _hook_input()
     named_result["tool_response"] = {
         "content": [{"type": "text", "text": "Saved to ./shot.png"}]
     }
-    assert asyncio.run(hook(named_result, "toolu_named", {"signal": None})) == {}
+    named = asyncio.run(hook(named_result, "toolu_named", {"signal": None}))
+    assert "untrusted_content=true" in named["hookSpecificOutput"]["additionalContext"]
 
 
 def test_tool_end_reuses_cached_upload_and_deduplicates_turn_refs() -> None:
@@ -345,7 +348,6 @@ def test_agent_options_registers_playwright_post_tool_hook() -> None:
         stderr=lambda line: None,
     )
     matcher = options.hooks["PostToolUse"][0]
-    assert matcher.matcher == (
-        "mcp__playwright__browser_take_screenshot|browser_take_screenshot"
-    )
+    assert matcher.matcher is None
     assert matcher.hooks == [noop]
+    assert options.hooks["PostToolUseFailure"][0].matcher is None

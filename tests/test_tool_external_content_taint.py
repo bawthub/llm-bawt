@@ -191,14 +191,16 @@ def test_taint_resets_each_turn():
     assert 'status="success"' in ex.execute(_call("home", action="set", entity="lock.front_door", state="unlock"))
 
 
-def test_failed_fetch_does_not_taint():
+def test_failed_fetch_still_taints_before_dispatch():
     class _Broken:
         def fetch(self, url):
             raise RuntimeError("down")
 
     ex = _executor(web_fetch_client=_Broken())
-    ex.execute(_call("web_fetch", url="https://example.test"))
-    assert ex.external_content_seen is False
+    result = ex.execute(_call("web_fetch", url="https://example.test"))
+    assert ex.external_content_seen is True
+    assert UNTRUSTED_LABEL in result
+    assert 'status="error"' in result
 
 
 def test_external_results_are_labelled_in_every_format():
@@ -224,19 +226,18 @@ def test_crafted_result_cannot_close_envelope_or_forge_protocol_lines():
     assert "</tool_result>" not in react
 
 
-def test_memory_and_traits_record_turn_and_taint():
+def test_memory_and_traits_are_held_after_external_content():
     mem, prof = _Memory(), _Profiles()
     ex = _executor(memory_client=mem, profile_manager=prof, trigger_message_id="msg-1")
     ex.execute(_call("memory", action="store", content="clean fact"))
     _taint(ex)
-    ex.execute(_call("memory", action="store", content="from page", tags=["misc"]))
-    ex.execute(_call("self", action="set", key="tone", value="dry"))
+    memory_result = ex.execute(_call("memory", action="store", content="from page", tags=["misc"]))
+    trait_result = ex.execute(_call("self", action="set", key="tone", value="dry"))
 
     assert mem.stored[0]["source_message_ids"] == ["msg-1"]
     assert EXTERNAL_CONTENT_TAG not in mem.stored[0]["tags"]
-    assert EXTERNAL_CONTENT_TAG in mem.stored[1]["tags"]
-    assert prof.sets[0]["source"] == f"self:{EXTERNAL_CONTENT_TAG}"
-    assert prof.sets[0]["source_message_id"] == "msg-1"
+    assert len(mem.stored) == 1 and prof.sets == []
+    assert "Held:" in memory_result and "Held:" in trait_result
 
 
 def test_safety_rule_is_in_both_tool_prompts():

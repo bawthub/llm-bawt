@@ -136,10 +136,11 @@ class _Bridge:
         self.forced: list[str] = []
 
     async def steer_active_turn(self, service, request, *, steer_request_id, author, wire_suffix,
-                                control=None):
+                                control=None, content_delivery_id=None):
         from llm_bawt.service.routes.chat import ChatSteerResponse
 
         assert control is None  # a normal row never steers under a control grant
+        assert content_delivery_id == DELIVERY_ID
         self.calls.append((request.turn_id, steer_request_id))
         if self.forced:
             raise HTTPException(status_code=409, detail=self.forced.pop(0))

@@ -61,7 +61,7 @@ PRIVILEGED_FIELDS = ("session_id", "augment_memory", "raw_message")
 # is refused on every route.
 SERVER_OWNED_METADATA_KEYS = (
     "new_session_intent", "batch_id", "batch", "control", "prompt_schedule",
-    "_failure_origin", "_failure_notice",
+    "_failure_origin", "_failure_notice", "_content_approval_id",
 )
 
 

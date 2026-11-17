@@ -391,6 +391,7 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                         history_manager=llm_bawt.history_manager,
                         tool_call_details=tool_call_details_holder,
                         trigger_message_id=trigger_message_id,
+                        turn_id=turn_log_id,
                     )
             else:
                 # Resolve per-bot generation parameters

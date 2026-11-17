@@ -668,6 +668,31 @@ class ClaudeApprovalMixin:
         async def pre_tool_use(input_data, tool_use_id, context):
             decision = await decide(input_data, tool_use_id, context)
             if not self._hook_denies(decision):
+                from agent_bridge.content_provenance import external_source
+
+                name = (input_data or {}).get("tool_name") or ""
+                source = external_source(name)
+                if source and not name.startswith("mcp__bawthub__"):
+                    # Register BEFORE remote dispatch, even if its eventual
+                    # response is an error. Failure cannot silently lose taint.
+                    try:
+                        if not task_turn_capability or not self._app_api_url:
+                            raise ValueError("verified exposure endpoint unavailable")
+                        async with httpx.AsyncClient(timeout=5) as client:
+                            response = await client.post(
+                                f"{self._app_api_url}/v1/agent-content/exposure",
+                                headers={"X-LLM-Bawt-Task-Turn-Context": task_turn_capability},
+                                json={"tool_name": name},
+                            )
+                            response.raise_for_status()
+                            if response.json().get("registered") is not True:
+                                raise ValueError("exposure was not registered")
+                    except Exception:
+                        return self._hook_deny(
+                            "[Content provenance unavailable; external read blocked. "
+                            "Nothing was executed.]"
+                        )
+            if not self._hook_denies(decision):
                 # TASK-1218: the CLI awaits this hook before running the tool,
                 # so a tree's start snapshot precedes the command's effects.
                 # Attribution must never change whether a tool runs.

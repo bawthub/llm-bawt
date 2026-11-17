@@ -146,6 +146,63 @@ def test_accepted_persistence_does_not_reread_a_new_destination(rig):
     assert rig.memory.add_message.call_args.args[2] == "durable-A"
 
 
+@pytest.mark.parametrize("failure", [None, "target", "store"])
+def test_delivery_inheritance_precedes_bridge_rpc_and_failure_blocks_it(rig, monkeypatch, failure):
+    import json
+
+    from sqlalchemy import text
+
+    from llm_bawt.content_provenance import ContentProvenanceStore, ContentTurn
+    from llm_bawt.service import content_lineage
+
+    store = ContentProvenanceStore(rig.engine)
+    monkeypatch.setattr(content_lineage, "get_content_provenance_store", lambda _: store)
+    rig.service._inter_bot_dispatcher = SimpleNamespace(store=SimpleNamespace(engine=rig.engine))
+    origin = ContentTurn("fixture-sender", "operator", "sender-turn", "sender-trigger")
+    store.expose(origin)
+    with rig.engine.begin() as conn:
+        conn.exec_driver_sql(
+            "CREATE TABLE inter_bot_deliveries "
+            "(id TEXT,sender_bot_id TEXT,sender_turn_id TEXT,author_entity_type TEXT,"
+            "author_entity_id TEXT,target_bot_id TEXT,turn_id TEXT,target_turn_id TEXT,"
+            "batch_head_id TEXT,metadata_json JSON)"
+        )
+        conn.execute(text(
+            "INSERT INTO inter_bot_deliveries VALUES "
+            "('delivery','fixture-sender','sender-turn','bot','fixture-sender',"
+            ":target,'turn','turn',NULL,:metadata)"
+        ), {
+            "target": "wrong-target" if failure == "target" else "target",
+            "metadata": json.dumps({"_failure_origin": {
+                "version": 1, "bot_id": origin.bot_id, "user_id": origin.user_id,
+                "turn_id": origin.turn_id, "trigger_message_id": origin.trigger_message_id,
+                "session_id": "sender-session",
+            }}),
+        })
+    if failure == "store":
+        monkeypatch.setattr(store, "inherit", Mock(side_effect=RuntimeError("fixture outage")))
+
+    async def bridge(**_kwargs):
+        assert store.admit(
+            ContentTurn("target", "operator", "turn", "trigger"),
+            tool_name="memory_store", write_kind="memory", invocation_hash="a" * 64,
+        ).held
+        return {"ok": True}
+
+    rig.sub.send_steer.side_effect = bridge
+    call = chat.steer_active_turn(
+        rig.service, request(), steer_request_id="delivery-steer", content_delivery_id="delivery",
+    )
+    if failure is not None:
+        with pytest.raises((ValueError, RuntimeError)):
+            asyncio.run(call)
+        rig.sub.send_steer.assert_not_awaited()
+        rig.memory.add_message.assert_not_called()
+    else:
+        assert asyncio.run(call).ok
+        rig.sub.send_steer.assert_awaited_once()
+
+
 def test_no_active_retry_revalidates_original_target_before_second_rpc(rig, monkeypatch):
     async def ended(**_):
         rig.turn.ended_at, rig.turn.status = "ended", "ok"

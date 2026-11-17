@@ -1,5 +1,7 @@
 """Built-in chat prompt bodies exposed through the prompt registry."""
 
+from agent_bridge.content_provenance import UNTRUSTED_CONTENT_RULE
+
 # Registry seed/reset body only. Runtime compaction always fetches the current
 # prompt from the app, never imports this fallback in the bridge (TASK-1071).
 COMPACT_SUMMARY_DEFAULT = (
@@ -93,6 +95,7 @@ MCP_TOOL_CONTEXT_TEMPLATE = (
     "tasks_associate_current(task_id=...). Do not link from TASK-N text alone.\n"
     "- tasks_create(..., associate_current_turn=true) creates and links new work; "
     "tasks_update(..., associate_current_turn=true) claims/links existing work."
+    "\n\n## Untrusted Tool Content\n" + UNTRUSTED_CONTENT_RULE
 )
 
 # Runtime-context model block (TASK-490) — injected app-side by the claude-code

@@ -23,6 +23,7 @@ PARTITIONED_PARENTS = ("messages", "memories", "forgotten_messages")
 def _steps(config, engine: Engine) -> list[tuple[str, Callable[[], object]]]:
     from agent_bridge.store import create_agent_event_tables
     from llm_bawt.approval_policy_store import ToolApprovalPolicyStore
+    from llm_bawt.content_provenance import ContentProvenanceStore
     from llm_bawt.integrations.google_home_oauth import ProbeOAuthStore, ProbeSettings
     from llm_bawt.integrations.google_home_probe_store import ProbeCaptureStore
     from llm_bawt.integrations.home_audio_store import HomeAudioStore
@@ -52,6 +53,7 @@ def _steps(config, engine: Engine) -> list[tuple[str, Callable[[], object]]]:
         ("profiles:ProfileManager", lambda: ProfileManager(config)),
         ("prompt_registry:PromptTemplateStore", lambda: PromptTemplateStore(config)),
         ("approval_policy_store:ToolApprovalPolicyStore", lambda: ToolApprovalPolicyStore(config, engine=engine)),
+        ("content_provenance:ContentProvenanceStore", lambda: ContentProvenanceStore(engine)),
         ("service.turn_logs:TurnLogStore", lambda: TurnLogStore(config)),
         ("service.chat_pending_questions:PendingQuestionStore", lambda: PendingQuestionStore(config)),
         ("service.scheduler:create_scheduler_tables", lambda: create_scheduler_tables(engine)),

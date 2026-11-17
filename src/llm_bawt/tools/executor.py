@@ -22,10 +22,13 @@ from difflib import SequenceMatcher
 from datetime import datetime, timedelta
 from typing import Callable, TYPE_CHECKING
 
+from agent_bridge.content_provenance import external_source, provenance_envelope, write_kind
+from agent_bridge.mcp_call_context import canonical_invocation_hash
+
+from .approval import NativePolicyGate
 from .parser import ToolCall, format_tool_result, tool_result_is_error
 from .taint import (
     EXTERNAL_CONTENT_TAG,
-    EXTERNAL_CONTENT_TOOLS,
     confirmation_required_message,
     label_untrusted,
     needs_confirmation_reason,
@@ -124,6 +127,9 @@ class ToolExecutor:
         bot_id: str = "",
         history_manager: "HistoryManager | None" = None,
         trigger_message_id: str | None = None,
+        turn_id: str | None = None,
+        content_store=None,
+        policy_gate=None,
     ):
         """Initialize the executor.
 
@@ -157,6 +163,9 @@ class ToolExecutor:
         self._call_count = 0
         # Per-turn external-content taint (see tools/taint.py).
         self.trigger_message_id = trigger_message_id
+        self.turn_id = turn_id
+        self._content_store = content_store
+        self._policy_gate = policy_gate if policy_gate is not None else NativePolicyGate(config)
         self.external_content_seen = False
         # Get max tool calls from config (0 = unlimited)
         self._max_tool_calls = getattr(config, 'MAX_TOOL_CALLS_PER_TURN', self.DEFAULT_MAX_TOOL_CALLS) if config else self.DEFAULT_MAX_TOOL_CALLS
@@ -197,9 +206,66 @@ class ToolExecutor:
         }
 
     def reset_call_count(self):
-        """Reset per-turn state: the call counter and external-content taint."""
+        """Reset local state; durable exposure for the same turn stays sticky."""
         self._call_count = 0
         self.external_content_seen = False
+
+    def _provenance_store(self):
+        if self._content_store is None:
+            password = getattr(self.config, "POSTGRES_PASSWORD", "")
+            if isinstance(password, str) and password.strip():
+                from ..service.dependencies import get_content_provenance_store
+
+                self._content_store = get_content_provenance_store(self.config)
+        return self._content_store
+
+    def _content_turn(self):
+        from ..content_provenance import ContentTurn
+
+        # Non-service callers use their persisted triggering message as the
+        # stable turn key. Missing identity is rejected by the store.
+        return ContentTurn(
+            self.bot_id, self.user_id, self.turn_id or self.trigger_message_id or "",
+            self.trigger_message_id or "",
+        )
+
+    def _admit_content(self, call: ToolCall, source: str | None) -> str | None:
+        """Register exposure before dispatch and refuse prompt-persistent writes."""
+        kind = write_kind(call.name, call.arguments, native=True)
+        try:
+            store = self._provenance_store()
+            if store is not None:
+                turn = self._content_turn()
+                if source:
+                    store.expose(turn)
+                if kind:
+                    receipt = store.admit(
+                        turn, tool_name=call.name, write_kind=kind,
+                        invocation_hash=canonical_invocation_hash(call.name, call.arguments),
+                        action=str(call.arguments.get("action", "")),
+                    )
+                    self.external_content_seen |= receipt.untrusted_seen
+                    if receipt.held:
+                        return (
+                            f"Held: {kind} write refused after untrusted content. "
+                            f"Receipt {receipt.receipt_id}; source turn {receipt.source_turn}; "
+                            "untrusted_seen=true. Nothing was written; no proposal was retained."
+                        )
+                else:
+                    self.external_content_seen |= store.seen(turn)
+            if source:
+                self.external_content_seen = True
+            # Offline executors have no durable store but still cannot write
+            # after external content. Production always uses the shared ledger.
+            if kind and self.external_content_seen:
+                return (
+                    f"Held: {kind} write refused after untrusted content. "
+                    "Nothing was written; no proposal was retained."
+                )
+        except Exception:
+            logger.warning("Content provenance source/audit unavailable; native call held")
+            return "Held: content provenance is unavailable. Nothing was executed."
+        return None
 
     def can_execute_more(self) -> bool:
         """Check if more tool calls are allowed this turn."""
@@ -239,10 +305,20 @@ class ToolExecutor:
         if original_name != new_name:
             logger.debug(f"Normalized legacy tool '{original_name}' -> '{new_name}'")
 
-        logger.debug(f"Executing: {normalized_call.name}({normalized_call.arguments})")
+        logger.debug("Executing native tool: %s", normalized_call.name)
 
         result: str
+        source = external_source(normalized_call.name, native=True)
         try:
+            policy_hold = self._policy_gate.check(
+                tool_call, normalized_call, bot_id=self.bot_id,
+                user_id=self.user_id, turn_id=self.turn_id or self.trigger_message_id,
+            )
+            if policy_hold:
+                return format_tool_result(normalized_call.name, None, error=policy_hold)
+            content_hold = self._admit_content(normalized_call, source)
+            if content_hold:
+                return format_tool_result(normalized_call.name, None, error=content_hold)
             is_ha_native = bool(
                 self.ha_native_client and self.ha_native_client.is_ha_tool(normalized_call.name)
             )
@@ -268,9 +344,17 @@ class ToolExecutor:
             logger.exception(f"Tool execution failed: {normalized_call.name}")
             result = format_tool_result(normalized_call.name, None, error=str(e))
 
-        if normalized_call.name in EXTERNAL_CONTENT_TOOLS and not tool_result_is_error(result):
-            self.external_content_seen = True
-            result = label_untrusted(result)
+        if source:
+            # Keep the native status wrapper intact and label errors too: a
+            # failed read can return an attacker-controlled response body.
+            from .parser import strip_tool_result_tags
+
+            data = provenance_envelope(strip_tool_result_tags(result), source)
+            labelled = label_untrusted(data)
+            result = format_tool_result(
+                normalized_call.name, None if tool_result_is_error(result) else labelled,
+                error=labelled if tool_result_is_error(result) else None,
+            )
 
         # Log the result in verbose mode
         if slog:

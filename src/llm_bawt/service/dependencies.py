@@ -164,6 +164,17 @@ def get_tool_approval_policy_store(config: Any):
     )
 
 
+def get_content_provenance_store(config: Any):
+    """Share durable exposure across native, MCP and bridge requests."""
+    from ..content_provenance import ContentProvenanceStore
+    from ..utils.db import get_shared_engine
+
+    return _get_or_build_store(
+        "content_provenance_store", config,
+        lambda: ContentProvenanceStore(get_shared_engine(config)),
+    )
+
+
 def get_ops_store(config: Any):
     """Process-wide ``OpsStore`` singleton (TASK-639)."""
     return _get_or_build_store("ops_store", config, lambda: OpsStore(config))

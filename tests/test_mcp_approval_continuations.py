@@ -77,10 +77,16 @@ def _ready_row(store, *, tool_name="ops_run", result=None):
 
 class FakeService:
     def __init__(self, error=None):
+        from llm_bawt.content_provenance import ContentProvenanceStore
+
         self.requests = []
         self.error = error
         self.config = None
         self._turn_log_store = FakeTurnStore()
+        self._content_provenance_store = (
+            ContentProvenanceStore(FakeTurnStore.default_engine)
+            if FakeTurnStore.default_engine is not None else None
+        )
 
     def get_memory_client(self, bot_id, user_id):
         from types import SimpleNamespace

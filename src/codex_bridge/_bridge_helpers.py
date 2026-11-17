@@ -12,6 +12,8 @@ import logging
 
 import httpx
 
+from agent_bridge.content_provenance import UNTRUSTED_CONTENT_RULE
+
 logger = logging.getLogger("codex_bridge.bridge")
 
 CONSUMER_GROUP = "codex-bridge"
@@ -22,6 +24,7 @@ CONSUMER_NAME = "worker-0"
 # fetches the (overridable) body via GET /v1/prompts/{key} and falls back to
 # this BYTE-IDENTICAL copy. The leading "\n\n" separator is added at append time.
 MCP_TOOL_CONTEXT_KEY = "agents.mcp_tool_context_template"
+
 _MCP_TOOL_CONTEXT_FALLBACK = (
     "## MCP Tool Context\n"
     "Your bot_id is \"{bot_slug}\". When using bawthub MCP tools:\n"
@@ -32,6 +35,7 @@ _MCP_TOOL_CONTEXT_FALLBACK = (
     "tasks_associate_current(task_id=...). Do not link from TASK-N text alone.\n"
     "- tasks_create(..., associate_current_turn=true) creates and links new work; "
     "tasks_update(..., associate_current_turn=true) claims/links existing work."
+    "\n\n## Untrusted Tool Content\n" + UNTRUSTED_CONTENT_RULE
 )
 
 

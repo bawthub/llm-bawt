@@ -9,6 +9,8 @@ from contextlib import contextmanager
 
 import pytest
 from cryptography.fernet import Fernet
+from sqlalchemy import create_engine
+from sqlalchemy.pool import StaticPool
 
 from agent_bridge.mcp_call_context import canonical_invocation_hash
 from llm_bawt import task_turn_context as turn_codec
@@ -38,6 +40,20 @@ class Resolver:
     async def resolve(self, caller=None):
         self.calls += 1
         return BotPolicyResolver._compile(self.rows, caller)
+
+
+@pytest.fixture(autouse=True)
+def content_ledger(monkeypatch):
+    from llm_bawt.content_provenance import ContentProvenanceStore
+    from llm_bawt.service import dependencies
+
+    engine = create_engine(
+        "sqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False},
+    )
+    store = ContentProvenanceStore(engine)
+    monkeypatch.setattr(dependencies, "get_content_provenance_store", lambda config: store)
+    yield store
+    engine.dispose()
 
 
 @pytest.fixture

@@ -252,6 +252,7 @@ async def steer_active_turn(
     wire_suffix: str | None = None,
     control: "DeliveryControlGrant | None" = None,
     send_now_delivery_id: str | None = None,
+    content_delivery_id: str | None = None,
 ) -> ChatSteerResponse:
     """Shared steer implementation for public chat and durable inter-bot work.
 
@@ -379,6 +380,14 @@ async def steer_active_turn(
                 revalidate_steer_target, service, request, turn, session_id,
                 allow_ended=bool(steer_request_id),
             )
+            if content_delivery_id is not None:
+                from ...content_provenance import ContentTurn
+                from ..content_lineage import inherit_delivery
+
+                await asyncio.to_thread(
+                    inherit_delivery, service, content_delivery_id,
+                    ContentTurn(turn.bot_id, turn.user_id, turn.id, turn.trigger_message_id),
+                )
             result = await subscriber.send_steer(
                 session_key=session_key,
                 message=wire_message,

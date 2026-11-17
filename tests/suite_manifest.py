@@ -23,6 +23,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_native_selected_owner_pg.py::",
     "test_native_selected_write_guard_pg.py::",
     "test_bot_tags_pg.py::",
+    "test_content_provenance_pg.py::",
     "test_embedding_repair_pg.py::",
     "test_forget_message_state_pg.py::",
     "test_forget_owner_scope_pg.py::",

@@ -103,10 +103,12 @@ def request_steer(service, row, prompt: str) -> None:
     if dispatcher is None:
         return
     try:
+        from .content_lineage import APPROVAL_ORIGIN_KEY
+
         record, duplicate = dispatcher.store.enqueue(
             sender_bot_id=SYSTEM_BOT_ID, target_bot_id=row.bot_id, message=prompt,
             idempotency_key=steer_key(row), message_kind=MESSAGE_KIND, on_gate="hold",
-            metadata={"approval_continuation_id": row.id},
+            metadata={"approval_continuation_id": row.id, APPROVAL_ORIGIN_KEY: row.id},
             payload={
                 "bot_id": row.bot_id, "user": row.user_id, "session_id": None,
                 "messages": [{"role": "user", "content": prompt}],

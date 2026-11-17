@@ -19,6 +19,7 @@ from typing import Callable
 import httpx
 
 from agent_bridge import bridge_token
+from agent_bridge.content_provenance import UNTRUSTED_CONTENT_RULE
 
 # Shared with the codex bridge's seed acknowledgement (TASK-1579).
 from agent_bridge.continuity import fmt_tokens as _fmt_tokens  # noqa: F401
@@ -37,6 +38,7 @@ SESSION_PREFIX = "claude-code:"
 # fetches the (overridable) body via GET /v1/prompts/{key} and falls back to
 # this BYTE-IDENTICAL copy. The leading "\n\n" separator is added at append time.
 MCP_TOOL_CONTEXT_KEY = "agents.mcp_tool_context_template"
+
 _MCP_TOOL_CONTEXT_FALLBACK = (
     "## MCP Tool Context\n"
     "Your bot_id is \"{bot_slug}\". When using bawthub MCP tools:\n"
@@ -47,6 +49,7 @@ _MCP_TOOL_CONTEXT_FALLBACK = (
     "tasks_associate_current(task_id=...). Do not link from TASK-N text alone.\n"
     "- tasks_create(..., associate_current_turn=true) creates and links new work; "
     "tasks_update(..., associate_current_turn=true) claims/links existing work."
+    "\n\n## Untrusted Tool Content\n" + UNTRUSTED_CONTENT_RULE
 )
 # Stamped on synthetic seed transcript entries. Not load-bearing for resume
 # (the CLI reads message content, not this), just keeps entries well-formed.

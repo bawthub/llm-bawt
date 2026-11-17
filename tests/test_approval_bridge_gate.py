@@ -14,18 +14,20 @@ import ast
 import asyncio
 import json
 import logging
-import math
+import math  # noqa: F401 (production AST namespace)
 import time
 import types
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 
+import pytest
+
 from agent_bridge.mcp_call_context import (
-    MCP_CALL_CONTEXT_KEY, mint_mcp_call_context, verify_mcp_call_context,
+    MCP_CALL_CONTEXT_KEY, mint_mcp_call_context, verify_mcp_call_context,  # noqa: F401 (AST namespace)
 )
 from agent_bridge.approval import (
-    ApprovalDecision, ApprovalPolicy, MatcherType, PolicyAction, PolicyBundle,
+    ApprovalDecision, ApprovalPolicy, MatcherType, PolicyAction, PolicyBundle,  # noqa: F401 (AST namespace)
     evaluate as evaluate_policies, grant_key,
 )
 from agent_bridge.events import AgentEventKind
@@ -263,15 +265,34 @@ class _FakeNodeParser:
 def test_pre_tool_use_playwright_syntax_error_is_model_visible_and_does_not_execute(monkeypatch):
     parsed = []
 
+    class Client:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def post(self, *args, **kwargs):
+            return types.SimpleNamespace(
+                raise_for_status=lambda: None, json=lambda: {"registered": True},
+            )
+
     async def spawn(*_args, **_kwargs):
         parsed.append(_FakeNodeParser())
         return parsed[-1]
 
     monkeypatch.setattr(preflight.asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setitem(_namespace, "httpx", types.SimpleNamespace(AsyncClient=Client))
     b = _bridge()
+    b._app_api_url = "http://fixture"
     published = []
     b._publish_event = lambda *a, **k: published.append(k)  # type: ignore[assignment]
-    hook = b._make_pre_tool_use_hook(request_id="r", session_key="s", seq_holder=[0])
+    hook = b._make_pre_tool_use_hook(
+        request_id="r", session_key="s", seq_holder=[0], task_turn_capability="fixture",
+    )
 
     async def run(name, args):
         return await hook({"tool_name": name, "tool_input": args, "tool_use_id": "x"}, "x", {})
@@ -606,6 +627,125 @@ def test_pre_tool_use_hook_stamps_execution_only_when_tool_will_run():
     asyncio.run(run("dd of=/dev/sda", "t-deny"))        # deny
     asyncio.run(run("rm -rf /home/x", "t-require"))     # require → deny pending approval
     assert [k["tool_use_id"] for k in executing()] == ["t-allow"]
+
+
+def test_remote_exposure_registration_precedes_execution_and_fails_closed(monkeypatch):
+    events = []
+    unavailable = [False]
+
+    class Client:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def post(self, url, **kwargs):
+            events.append(("registered", url, kwargs))
+            if unavailable[0]:
+                raise RuntimeError("down")
+            return types.SimpleNamespace(
+                raise_for_status=lambda: None, json=lambda: {"registered": True},
+            )
+
+    monkeypatch.setitem(_namespace, "httpx", types.SimpleNamespace(AsyncClient=Client))
+    b = _bridge()
+    b._app_api_url = "http://app"
+    b._publish_event = lambda *a, **kw: (
+        events.append(("executing", kw)) if kw.get("kind") == AgentEventKind.TOOL_EXECUTING else None
+    )
+    hook = b._make_pre_tool_use_hook(
+        request_id="r", session_key="s", seq_holder=[0],
+        task_turn_capability="opaque-verified-capability",
+    )
+    data = {"tool_name": "WebFetch", "tool_input": {"url": "https://example.test"}}
+    assert not b._hook_denies(asyncio.run(hook(data, "tool-1", {})))
+    assert [event[0] for event in events] == ["registered", "executing"]
+    assert events[0][2]["json"] == {"tool_name": "WebFetch"}
+    assert events[0][2]["headers"]["X-LLM-Bawt-Task-Turn-Context"] == "opaque-verified-capability"
+    unavailable[0] = True
+    result = asyncio.run(hook(data, "tool-2", {}))
+    assert b._hook_denies(result) and "external read blocked" in str(result)
+    assert [event[0] for event in events].count("executing") == 1
+    # Even a fail-open approval configuration cannot fail open for provenance.
+    assert b._approval_fail_closed is False
+
+
+def test_missing_remote_exposure_context_blocks_read_but_not_local_tools():
+    b = _bridge()
+    hook = b._make_pre_tool_use_hook(request_id="r", session_key="s", seq_holder=[0])
+    result = asyncio.run(hook({"tool_name": "WebSearch", "tool_input": {"query": "q"}}, "t", {}))
+    assert b._hook_denies(result)
+    assert asyncio.run(hook({"tool_name": "Read", "tool_input": {"file_path": "/fixture"}}, "t2", {})) == {}
+
+
+@pytest.mark.parametrize("failure", ["timeout", "status", "false", "missing"])
+def test_exposure_transport_or_receipt_failure_never_emits_execution(monkeypatch, failure):
+    class Client:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def post(self, *_args, **_kwargs):
+            if failure == "timeout":
+                raise TimeoutError("fixture timeout")
+
+            def status():
+                if failure == "status":
+                    raise RuntimeError("fixture non-2xx")
+
+            return types.SimpleNamespace(
+                raise_for_status=status,
+                json=lambda: {} if failure == "missing" else {"registered": False},
+            )
+
+    monkeypatch.setitem(_namespace, "httpx", types.SimpleNamespace(AsyncClient=Client))
+    b = _bridge()
+    b._app_api_url = "http://fixture-app"
+    events = []
+    b._publish_event = lambda *a, **kw: events.append(kw)
+    hook = b._make_pre_tool_use_hook(
+        request_id="r", session_key="s", seq_holder=[0], task_turn_capability="capability",
+    )
+    result = asyncio.run(hook(
+        {"tool_name": "mcp__crawl4ai__md", "tool_input": {"url": "https://example.test"}},
+        "external", {},
+    ))
+    assert b._hook_denies(result)
+    assert not any(e.get("kind") == AgentEventKind.TOOL_EXECUTING for e in events)
+
+
+def test_denied_external_and_first_party_reads_do_not_register_remote_exposure(monkeypatch):
+    requests = []
+
+    def unexpected_client(**kwargs):
+        requests.append(kwargs)
+        raise AssertionError("unexpected remote exposure request")
+
+    monkeypatch.setitem(_namespace, "httpx", types.SimpleNamespace(AsyncClient=unexpected_client))
+    b = _bridge()
+    b._app_api_url = "http://fixture-app"
+    b._publish_event = lambda *a, **kw: None
+    b._policy_bundle.policies.insert(0, ApprovalPolicy(
+        id="deny-fetch", order=0, tool_name="WebFetch",
+        matcher_type=MatcherType.ALWAYS, pattern="", action=PolicyAction.DENY,
+    ))
+    hook = b._make_pre_tool_use_hook(request_id="r", session_key="s", seq_holder=[0])
+    assert b._hook_denies(asyncio.run(hook(
+        {"tool_name": "WebFetch", "tool_input": {"url": "https://example.test"}}, "t1", {},
+    )))
+    assert not b._hook_denies(asyncio.run(hook(
+        {"tool_name": "mcp__bawthub__web_search", "tool_input": {"query": "fixture"}}, "t2", {},
+    )))
+    assert requests == []
 
 
 def test_policy_fetch_failure_backoff_without_cache(monkeypatch):

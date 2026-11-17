@@ -368,12 +368,12 @@ class ClaudeStreamMixin:
                 ],
                 "PostToolUse": [
                     HookMatcher(
-                        matcher=(
-                            "mcp__playwright__browser_take_screenshot|"
-                            "browser_take_screenshot"
-                        ),
+                        matcher=None,
                         hooks=[post_tool_use_cb],
                     ),
+                ],
+                "PostToolUseFailure": [
+                    HookMatcher(matcher=None, hooks=[self._make_external_failure_hook()]),
                 ],
             },
             # The SDK's stdio reader defaults to a 1 MiB JSON buffer

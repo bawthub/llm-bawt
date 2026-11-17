@@ -7,7 +7,8 @@ output can carry prompt injection, so in a tainted turn:
 - results from those tools are labelled as untrusted data;
 - physical-security actions (locks, doors, covers, garage, alarms) are held
   until the user confirms in their own next message;
-- memories and traits the bot writes record that they came from such a turn.
+- bot-initiated memory and trait writes are refused before mutation; the
+  configured provenance ledger retains a data-minimal admission receipt.
 
 A direct user request with no external content in the turn is unaffected.
 """
@@ -19,7 +20,9 @@ from typing import Any
 
 # Consolidated tool names (after legacy normalisation) whose output is
 # external-origin content.
-EXTERNAL_CONTENT_TOOLS = frozenset({"web_fetch", "search", "news"})
+from agent_bridge.content_provenance import NATIVE_EXTERNAL_TOOLS
+
+EXTERNAL_CONTENT_TOOLS = NATIVE_EXTERNAL_TOOLS
 # Provenance marker on memories/traits written in a tainted turn.
 EXTERNAL_CONTENT_TAG = "external-content-turn"
 

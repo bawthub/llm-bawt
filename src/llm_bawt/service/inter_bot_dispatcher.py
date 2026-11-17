@@ -551,6 +551,7 @@ class InterBotDeliveryDispatcher:
                 ),
                 steer_request_id=steer.request_id, author=record.author,
                 wire_suffix=wire_suffix, control=control,
+                content_delivery_id=record.id,
                 **({"send_now_delivery_id": record.id} if (record.metadata or {}).get("send_now") else {}),
             )
             if response.ok:

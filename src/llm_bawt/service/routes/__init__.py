@@ -37,6 +37,7 @@ from .sessions import router as sessions_router
 from .skills import router as skills_router
 from .session_continuity import router as session_continuity_router
 from .approval_policies import router as approval_policies_router
+from .content_provenance import router as content_provenance_router
 from .ops import router as ops_router
 from .ops_approvals import router as ops_approvals_router
 from .tasks import router as tasks_router
@@ -103,6 +104,7 @@ all_routers = [
     session_continuity_router,
     config_router,
     approval_policies_router,
+    content_provenance_router,
     ops_router,
     ops_approvals_router,
     profiles_router,

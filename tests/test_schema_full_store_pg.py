@@ -47,12 +47,14 @@ def test_pristine_full_store_catalog(full_store_db, tmp_path):
     # + TASK-1183's ops_bell_outbox (OpsStore bootstraps it).
     # + TASK-502's turn_egress_requests (EgressCaptureStore via TurnLogStore).
     # + TASK-2396's house_retirements (BotProfileStore bootstraps it).
-    assert len(relations) == 69, sorted(relations)
+    # + TASK-2383's turn exposure, lineage and write-admission receipts.
+    assert len(relations) == 72, sorted(relations)
     assert "memory_ownership_activations" in {key.split(".")[-1] for key in relations}
     assert {"system_events", "system_gates", "gate_members", "gate_escalations", "bot_tag_catalog", "bot_profile_tags",
             "api_balance_ledger", "api_balances", "llm_response_records", "worker_lifecycle_records", "utility_usage",
             "bot_profile_changes", "bot_slug_aliases", "approval_approver_fanout", "session_resumption_receipts", "turn_egress_requests",
-            "house_retirements"} <= {key.split(".")[-1] for key in relations}
+            "house_retirements",
+            "agent_content_turns", "agent_content_lineage", "agent_content_write_decisions"} <= {key.split(".")[-1] for key in relations}
     assert not any("schema_full_fixture" in key for _, key in catalog)
     assert catalog_tool["compare"](catalog, catalog) == []
     metadata["bootstrap_manifest"] = manifest
@@ -60,7 +62,7 @@ def test_pristine_full_store_catalog(full_store_db, tmp_path):
     output_dir.mkdir(parents=True, exist_ok=True)
     catalog_tool["write_snapshot"](output_dir / "pristine-full-store.jsonl", lines, metadata)
     # utility_usage is nested in the existing TurnLogStore step, not a new step.
-    assert len(json.loads((output_dir / "pristine-full-store.jsonl.meta.json").read_text())["bootstrap_manifest"]) == 21
+    assert len(json.loads((output_dir / "pristine-full-store.jsonl.meta.json").read_text())["bootstrap_manifest"]) == 22
 
 
 def test_upgrade_synthetic_legacy_converges(full_store_db, tmp_path, monkeypatch):

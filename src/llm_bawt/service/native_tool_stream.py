@@ -63,6 +63,7 @@ class NativeToolStream:
             user_id=llm_bawt.user_id,
             bot_id=llm_bawt.bot_id,
             trigger_message_id=trigger_message_id,
+            turn_id=turn_log_id,
         )
 
         def native_stream_with_tool_loop():
