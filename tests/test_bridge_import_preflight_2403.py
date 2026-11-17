@@ -130,6 +130,30 @@ def test_restart_spec_accepts_preflight_only_on_restart_and_needs_a_capable_work
     assert import_preflight.WORKER_CAPABILITY_LABEL in spec_capability_labels(SPEC)
 
 
+@pytest.mark.parametrize("source,ok", [
+    ("def main():\n    import nosuchmod_2403\n", False),                      # deferred, required
+    ("from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    import nosuchmod_2403\n", True),
+    ("def main():\n    try:\n        import nosuchmod_2403\n    except ImportError:\n        pass\n", True),
+    ("try:\n    import nosuchmod_2403\nexcept (KeyError, ModuleNotFoundError):\n    pass\n", True),
+    ("try:\n    import nosuchmod_2403\nexcept KeyError:\n    pass\n", False),     # unguarded try
+    ("try:\n    import json\nexcept ImportError:\n    import nosuchmod_2403\n", False),  # handler runs
+    ("try:\n    import json\nexcept ImportError:\n    pass\nelse:\n    import nosuchmod_2403\n", False),
+    ("try:\n    pass\nfinally:\n    import nosuchmod_2403\n", False),
+    ("from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    pass\nelse:\n    import nosuchmod_2403\n", False),
+])
+def test_probe_counts_only_required_imports(tmp_path, source, ok):
+    import subprocess
+    import sys
+
+    (tmp_path / "entry_2403.py").write_text(source)
+    result = subprocess.run([sys.executable, "-c", import_preflight.PROBE, "entry_2403"],
+                            env={"PYTHONPATH": str(tmp_path), "PYTHONDONTWRITEBYTECODE": "1"},
+                            capture_output=True, text=True, timeout=60)
+    assert (result.returncode == 0) is ok, result.stderr
+    if not ok:
+        assert "nosuchmod_2403" in result.stderr
+
+
 def test_bridge_seeds_carry_the_preflight():
     rows = {row["slug"]: row["command_script"] for row in SEEDS}
     modules = {"claude_code_bridge.__main__", "codex_bridge.__main__", "agent_bridge.house_preview_supervisor"}

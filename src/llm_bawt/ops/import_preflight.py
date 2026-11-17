@@ -35,18 +35,42 @@ _PATH_RE = re.compile(r"/[A-Za-z0-9._/-]{1,255}")
 PROBE = r"""
 import ast, importlib, importlib.util, sys, traceback
 failed = 0
+GUARDS = {"ImportError", "ModuleNotFoundError", "Exception", "BaseException"}
+
+def _name(n):
+    return n.id if isinstance(n, ast.Name) else n.attr if isinstance(n, ast.Attribute) else None
+
+def _guarded(handler):
+    # A try whose handler absorbs a failed import: its body is optional.
+    t = handler.type
+    if t is None:
+        return True
+    return any(_name(x) in GUARDS for x in (t.elts if isinstance(t, ast.Tuple) else [t]))
+
+def _collect(node, names, package):
+    # Required imports only: skip `if TYPE_CHECKING:` bodies and import-guarded try bodies;
+    # their else/except/finally branches still count.
+    if isinstance(node, ast.If) and _name(node.test) == "TYPE_CHECKING":
+        children = node.orelse
+    elif isinstance(node, ast.Try) and any(_guarded(h) for h in node.handlers):
+        children = [*node.handlers, *node.orelse, *node.finalbody]
+    else:
+        if isinstance(node, ast.Import):
+            names.update(a.name for a in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            base = "." * node.level + (node.module or "")
+            names.add(importlib.util.resolve_name(base, package) if node.level else base)
+        children = list(ast.iter_child_nodes(node))
+    for child in children:
+        _collect(child, names, package)
+
 for entry in sys.argv[1:]:
     try:
         mod = importlib.import_module(entry)
         with open(mod.__file__, encoding="utf-8") as f:
             tree = ast.parse(f.read())
         names = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                names.update(a.name for a in node.names)
-            elif isinstance(node, ast.ImportFrom):
-                base = "." * node.level + (node.module or "")
-                names.add(importlib.util.resolve_name(base, mod.__package__) if node.level else base)
+        _collect(tree, names, mod.__package__)
         for name in sorted(names):
             importlib.import_module(name)
         print(f"ok {entry} ({len(names)} imports)")
