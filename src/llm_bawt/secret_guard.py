@@ -140,9 +140,23 @@ def _flow_items(body: str) -> list[str]:
     return [item.strip() for item in items if item.strip()]
 
 
+def _strip_comment(value: str) -> str:
+    """Cut a trailing `` # comment``, but never inside a quoted scalar."""
+    quote = ""
+    for index, char in enumerate(value):
+        if quote:
+            quote = "" if char == quote else quote
+        elif char in "'\"":
+            quote = char
+        elif char == "#" and (index == 0 or value[index - 1].isspace()):
+            return value[:index].strip()
+    return value.strip()
+
+
 def _scan_flow(path: str, line: int, value: str, parent: str = "-") -> list[Finding]:
-    """``environment: {A: x, B: y}`` / ``[A=x, "B=y"]``: check each item."""
-    value = re.split(r"\s+#", value, maxsplit=1)[0].strip()
+    """``environment: {A: x, B: y}`` / ``[A=x, "B=y"]``: check each item,
+    recursing into nested collections (``services: {db: {environment: {...}}}``)."""
+    value = _strip_comment(value)
     if len(value) < 2 or value[0] + value[-1] not in ("{}", "[]"):
         return []
     findings: list[Finding] = []
@@ -152,7 +166,9 @@ def _scan_flow(path: str, line: int, value: str, parent: str = "-") -> list[Find
             continue
         match = (re.fullmatch(r"(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1\s*:\s*(.*)", item, re.S)
                  or re.fullmatch(r"(['\"]?)([A-Za-z_][A-Za-z0-9_]*)=(.*?)\1", item, re.S))
-        if match:
+        if match and match.group(3).strip()[:1] in ("{", "["):
+            findings += _scan_flow(path, line, match.group(3), match.group(2))
+        elif match:
             findings += _check(path, line, match.group(2), match.group(3))
         elif _credential_url(_unquote(item)):
             findings.append(Finding(path, line, parent, "credential_url"))

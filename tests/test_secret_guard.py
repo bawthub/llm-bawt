@@ -70,6 +70,8 @@ def test_compose_list_and_map_forms():
     (f'services:\n  db:\n    environment: [LOG_LEVEL=info, "A_TOKEN={SHORT}"]', "A_TOKEN"),
     (f"services:\n  db:\n    environment:\n      POSTGRES_PASSWORD: ${{ENABLE_DB:+{SHORT}}}", "POSTGRES_PASSWORD"),
     (f"A_TOKEN=${{ON:+{ENTROPY}}}", "A_TOKEN"),
+    (f"services: {{db: {{image: postgres, environment: {{POSTGRES_PASSWORD: {SHORT}}}}}}}", "POSTGRES_PASSWORD"),
+    ('services:\n  db:\n    environment: {POSTGRES_PASSWORD: "Sh #7!x"}  # note', "POSTGRES_PASSWORD"),
 ])
 def test_quoted_keys_flow_maps_and_alternate_values_fail(text, name):
     """Codex: the supported Compose forms a seven-character password can hide in."""
