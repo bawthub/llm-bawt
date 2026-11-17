@@ -121,6 +121,9 @@ services:
       - LLM_BAWT_POSTGRES_USER
       - LLM_BAWT_POSTGRES_PASSWORD
       - LLM_BAWT_POSTGRES_DATABASE
+      # Root key (TASK-2386): injected at creation from the root-only secrets
+      # volume (ops compose_secrets or scripts/compose-secrets); never in .env.
+      - LLM_BAWT_SECRET_KEY
       # Config (utils/config.py, env_prefix LLM_BAWT_) and runtime settings.
       - LLM_BAWT_DEFAULT_USER
       - LLM_BAWT_DEFAULT_BOT

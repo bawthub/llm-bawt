@@ -60,10 +60,12 @@ COMPOSE_DEV    := docker-compose.dev.yml
 # override it and silently drop them; with --remove-orphans that deleted
 # ops-reconciler and unmounted the ops receipt volume (TASK-1145). Name the
 # base+dev files explicitly only when COMPOSE_FILE is defined nowhere.
+# scripts/compose-secrets adds the root-only bootstrap secrets when their
+# volume exists (TASK-2386) and is plain `docker compose` otherwise.
 ifeq ($(origin COMPOSE_FILE)$(filter COMPOSE_FILE=%,$(file <.env)),undefined)
-DEV_COMPOSE    := docker compose -f $(COMPOSE_BASE) -f $(COMPOSE_DEV)
+DEV_COMPOSE    := scripts/compose-secrets -- -f $(COMPOSE_BASE) -f $(COMPOSE_DEV)
 else
-DEV_COMPOSE    := docker compose
+DEV_COMPOSE    := scripts/compose-secrets --
 endif
 
 # Local servers
