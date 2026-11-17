@@ -406,3 +406,65 @@ def test_first_bot_audit_names_the_proxy_bound_user():
 
     assert response.status_code == 200, response.text
     assert env.persist.call_args.args[0][CHANGED_BY] == "fixture-user"
+
+
+# TASK-2404: the first bot becomes the default; a partial setup recovers on retry.
+
+
+def _default_store(order: list[str] | None = None) -> MagicMock:
+    store = MagicMock()
+    store.engine = MagicMock()
+    if order is not None:
+        store.set_value.side_effect = lambda *a: order.append(a[2])
+    return store
+
+
+def test_first_bot_records_default_when_none_configured():
+    store = _default_store()
+    with (
+        _first_bot_env(),
+        patch.object(setup_routes, "get_runtime_settings_store", return_value=store),
+        patch.object(setup_routes, "optional_default_bot_id", return_value=None),
+    ):
+        response = _client().post("/v1/setup/first-bot", json=_FIRST_BOT)
+    assert response.status_code == 200, response.text
+    store.set_value.assert_called_once_with("global", "*", "default_bot", "helper")
+
+
+def test_retry_after_partial_setup_records_default_then_keeps_409():
+    store = _default_store()
+    persist = AsyncMock(side_effect=HTTPException(status_code=409, detail="Bot 'helper' already exists"))
+    with (
+        _first_bot_env(persist=persist),
+        patch.object(setup_routes, "get_runtime_settings_store", return_value=store),
+        patch.object(setup_routes, "optional_default_bot_id", return_value=None),
+    ):
+        response = _client().post("/v1/setup/first-bot", json=_FIRST_BOT)
+    assert response.status_code == 409
+    store.set_value.assert_called_once_with("global", "*", "default_bot", "helper")
+
+
+def test_retry_conflict_keeps_an_existing_default():
+    store = _default_store()
+    persist = AsyncMock(side_effect=HTTPException(status_code=409, detail="exists"))
+    with (
+        _first_bot_env(persist=persist),
+        patch.object(setup_routes, "get_runtime_settings_store", return_value=store),
+        patch.object(setup_routes, "optional_default_bot_id", return_value="chosen"),
+    ):
+        response = _client().post("/v1/setup/first-bot", json=_FIRST_BOT)
+    assert response.status_code == 409
+    store.set_value.assert_not_called()
+
+
+def test_other_create_errors_record_no_default():
+    store = _default_store()
+    persist = AsyncMock(side_effect=HTTPException(status_code=422, detail="nope"))
+    with (
+        _first_bot_env(persist=persist),
+        patch.object(setup_routes, "get_runtime_settings_store", return_value=store),
+        patch.object(setup_routes, "optional_default_bot_id", return_value=None),
+    ):
+        response = _client().post("/v1/setup/first-bot", json=_FIRST_BOT)
+    assert response.status_code == 422
+    store.set_value.assert_not_called()

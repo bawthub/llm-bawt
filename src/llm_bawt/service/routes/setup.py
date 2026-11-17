@@ -180,31 +180,36 @@ async def create_first_bot(body: FirstBotRequest, http_request: Request,
         runtime = await check_agent_runtime(service.config)
         if not runtime.ready:
             raise HTTPException(status_code=503, detail=f"Agent runtime not ready: {runtime.detail}")
-        bot = await _persist_bot_profile(
-            {
-                "slug": body.slug,
-                "name": body.name,
-                "description": body.description,
-                "system_prompt": body.system_prompt,
-                "requires_memory": True,
-                "voice_optimized": False,
-                "tts_mode": False,
-                "include_summaries": True,
-                "include_in_global_search": True,
-                "uses_tools": True,
-                "uses_search": True,
-                "uses_home_assistant": False,
-                "bot_type": "agent",
-                "agent_backend": FIRST_BOT_AGENT_BACKEND,
-                # The writer heals this to ``claude-proxy`` for non-Anthropic endpoints.
-                "harness": FIRST_BOT_AGENT_BACKEND,
-                "endpoint_id": body.endpoint_id,
-                profile_changes.CHANGED_BY: profile_actor(http_request, user_id),
-            },
-            create_only=True,
-        )
-        preferences = await run_in_threadpool(_store_setup_preferences, service, body)
+        try:
+            bot = await _persist_bot_profile({
+                    "slug": body.slug,
+                    "name": body.name,
+                    "description": body.description,
+                    "system_prompt": body.system_prompt,
+                    "requires_memory": True,
+                    "voice_optimized": False,
+                    "tts_mode": False,
+                    "include_summaries": True,
+                    "include_in_global_search": True,
+                    "uses_tools": True,
+                    "uses_search": True,
+                    "uses_home_assistant": False,
+                    "bot_type": "agent",
+                    "agent_backend": FIRST_BOT_AGENT_BACKEND,
+                    # The writer heals this to ``claude-proxy`` for non-Anthropic endpoints.
+                    "harness": FIRST_BOT_AGENT_BACKEND,
+                    "endpoint_id": body.endpoint_id,
+                    profile_changes.CHANGED_BY: profile_actor(http_request, user_id),
+                }, create_only=True)
+        except HTTPException as exc:
+            # Retry after a partial setup (bot saved, default write failed):
+            # the wizard resumes on this 409, so finish the default here first.
+            # Never overwrites an existing default (TASK-2404).
+            if exc.status_code == 409:
+                await run_in_threadpool(_record_first_default_bot, service, body.slug)
+            raise
         await run_in_threadpool(_record_first_default_bot, service, body.slug)
+        preferences = await run_in_threadpool(_store_setup_preferences, service, body)
     except Exception as exc:  # noqa: BLE001 — mapped to HTTP below
         raise _http_error(exc, what="First bot setup") from exc
 
@@ -214,3 +219,4 @@ async def create_first_bot(body: FirstBotRequest, http_request: Request,
         "runtime": runtime.to_dict(),
         "preferences": preferences,
     }
+
