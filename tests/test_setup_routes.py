@@ -419,10 +419,17 @@ def _default_store(order: list[str] | None = None) -> MagicMock:
     return store
 
 
+def _profiles(existing: bool) -> MagicMock:
+    profiles = MagicMock()
+    profiles.get.return_value = object() if existing else None
+    return profiles
+
+
 def test_first_bot_records_default_when_none_configured():
     store = _default_store()
     with (
         _first_bot_env(),
+        patch.object(setup_routes, "get_bot_profile_store", return_value=_profiles(True)),
         patch.object(setup_routes, "get_runtime_settings_store", return_value=store),
         patch.object(setup_routes, "optional_default_bot_id", return_value=None),
     ):
@@ -436,6 +443,7 @@ def test_retry_after_partial_setup_records_default_then_keeps_409():
     persist = AsyncMock(side_effect=HTTPException(status_code=409, detail="Bot 'helper' already exists"))
     with (
         _first_bot_env(persist=persist),
+        patch.object(setup_routes, "get_bot_profile_store", return_value=_profiles(True)),
         patch.object(setup_routes, "get_runtime_settings_store", return_value=store),
         patch.object(setup_routes, "optional_default_bot_id", return_value=None),
     ):
@@ -467,4 +475,19 @@ def test_other_create_errors_record_no_default():
     ):
         response = _client().post("/v1/setup/first-bot", json=_FIRST_BOT)
     assert response.status_code == 422
+    store.set_value.assert_not_called()
+
+
+def test_conflict_without_a_saved_profile_records_no_default():
+    """Retired/retained identities and busy admission also 409 before any save."""
+    store = _default_store()
+    persist = AsyncMock(side_effect=HTTPException(status_code=409, detail="retained data"))
+    with (
+        _first_bot_env(persist=persist),
+        patch.object(setup_routes, "get_bot_profile_store", return_value=_profiles(False)),
+        patch.object(setup_routes, "get_runtime_settings_store", return_value=store),
+        patch.object(setup_routes, "optional_default_bot_id", return_value=None),
+    ):
+        response = _client().post("/v1/setup/first-bot", json=_FIRST_BOT)
+    assert response.status_code == 409
     store.set_value.assert_not_called()

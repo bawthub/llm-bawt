@@ -58,7 +58,9 @@ def test_first_bot_becomes_default_only_when_none_configured():
     store = MagicMock()
     store.engine = MagicMock()
     service = SimpleNamespace(config=_botless())
+    profiles = MagicMock()
     with (
+        patch.object(setup_routes, "get_bot_profile_store", return_value=profiles),
         patch.object(setup_routes, "get_runtime_settings_store", return_value=store),
         patch.object(setup_routes, "optional_default_bot_id", return_value=None),
     ):

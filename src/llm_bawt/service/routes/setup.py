@@ -35,7 +35,7 @@ from ...prompt_registry import get_prompt_resolver
 from ...seeding import FIRST_BOT_AGENT_BACKEND, seed_tenant
 from ..agent_runtime import check_agent_runtime
 from ...utils.bot_identity import optional_default_bot_id
-from ..dependencies import get_runtime_settings_store, get_service
+from ..dependencies import get_bot_profile_store, get_runtime_settings_store, get_service
 from ... import bot_profile_changes as profile_changes
 from .settings import _USER_ID_QUERY, _persist_bot_profile, profile_actor
 
@@ -106,10 +106,15 @@ def _record_first_default_bot(service, slug: str) -> None:
     """Make the first bot the default when none is configured yet (TASK-2404)."""
     if optional_default_bot_id(service.config):
         return
+    slug = slug.strip().lower()
+    # A 409 can come from a refused identity with no saved profile (retired or
+    # retained data, busy admission); only a real profile may become the default.
+    if get_bot_profile_store(service.config).get(slug) is None:
+        return
     store = get_runtime_settings_store(service.config)
     if store.engine is None:
         raise RuntimeError("Runtime settings DB unavailable")
-    store.set_value("global", "*", "default_bot", slug.strip().lower())
+    store.set_value("global", "*", "default_bot", slug)
 
 
 def _first_agent_prompt(service) -> str:
