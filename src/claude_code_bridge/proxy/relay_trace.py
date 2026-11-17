@@ -18,7 +18,7 @@ from .request_context import ProxyRequestContext
 
 TOOL_NAME = "mcp__bawthub__bots_send_message"
 MAX_BYTES = 65_536
-MAX_EVENTS = 256
+MAX_EVENTS = 4096
 MAX_TTL = 300
 _FOOTER_RESERVE = 512
 

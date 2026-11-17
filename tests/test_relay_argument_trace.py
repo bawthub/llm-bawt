@@ -120,6 +120,23 @@ def test_exact_fragments_done_buffer_and_emission(arm):
     assert sum(1 for f in frames if rows[0]["message_id"].encode() in f) == 1
 
 
+def test_more_than_256_tiny_fragments_capture_completely(arm):
+    # Regression: the old 256-record cap killed a real capture after 254 deltas.
+    directory = arm()
+    done = json.dumps({"message": "x" * 600})
+    fragments = [done[i:i + 2] for i in range(0, len(done), 2)]
+    assert len(fragments) > 256
+    frames = asyncio.run(_collect(_events(deltas=fragments, done=done), _context()))
+    rows = _rows(directory)
+    assert rows[-1] == {"stage": "end", "status": "captured"}
+    assert [r["delta"] for r in rows if r["stage"] == "delta"] == fragments
+    before = next(r for r in rows if r["stage"] == "before_selection")
+    assert before["buffered"] == done and before["arguments"] == done
+    emitted = next(r["partial_json"] for r in rows if r["stage"] == "translator_partial_json")
+    assert _partials(frames) == [emitted]
+    assert json.loads(emitted) == json.loads(done)
+
+
 @pytest.mark.parametrize("done,expected", [(None, "buffer"), ("", "buffer"), (None, "empty_object")])
 def test_authoritative_absent_and_empty_fallback(arm, done, expected):
     directory = arm()
@@ -201,6 +218,10 @@ def test_hard_limits_disarm_and_do_not_change_output(arm, kind, monkeypatch):
     # The whitespace payload is a deliberate repetition-breaker trip (TASK-1915);
     # disable it so this test isolates trace hard limits.
     monkeypatch.setenv(ENV_MIN_SPAN, "0")
+    if kind == "event_limit":
+        # 4,096 records would hit the byte cap first; shrink the record cap so
+        # this case still isolates the event-limit path.
+        monkeypatch.setattr(trace_mod, "MAX_EVENTS", 64)
     directory = arm()
     deltas = [" " * trace_mod.MAX_BYTES] if kind == "byte_limit" else [" "] * trace_mod.MAX_EVENTS
     frames = asyncio.run(_collect(_events(deltas=deltas), _context()))
