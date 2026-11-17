@@ -697,7 +697,7 @@ async def api_key_token(provider_id: str, request: Request):
     bridge_gate.check(request, bridge_gate.BROKER)
 
     adapter = _adapter_or_404(provider_id)
-    if not isinstance(adapter, ApiKeyAdapter):
+    if not isinstance(adapter, ApiKeyAdapter) or not adapter.generic_broker:
         raise HTTPException(status_code=404, detail=f"{provider_id} has no api-key broker")
     if adapter.keeps_disconnected_record:
         # TASK-1476: 503 is the one answer that lets a bridge use its legacy

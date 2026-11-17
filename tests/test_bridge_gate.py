@@ -393,6 +393,25 @@ def test_vault_password_route_opens_only_for_the_vault_token(monkeypatch):
     assert client.get(url, headers={"X-Bridge-Token": DERIVED[VAULT.label]}).status_code == 503
 
 
+def test_generic_token_broker_never_serves_the_vault_password(monkeypatch):
+    """Codex: /v1/providers/vaultwarden/token must not bypass the vault gate."""
+    from llm_bawt.service.providers.vaultwarden import VaultwardenAdapter
+    from llm_bawt.service.routes import providers
+
+    password = "v" * 9  # synthetic
+    adapter = object.__new__(VaultwardenAdapter)
+    adapter.api_key = lambda: password
+    monkeypatch.setattr(bridge_gate, "_GATES", make({}))  # BROKER left open
+    monkeypatch.setattr(providers, "get_service", lambda: type("S", (), {"config": None})())
+    monkeypatch.setattr(providers, "get_adapter", lambda _config, _id: adapter if _id == "vaultwarden" else None)
+    app = FastAPI()
+    app.include_router(providers.router)
+    client = TestClient(app)
+    for header in (None, DERIVED[BROKER.label], DERIVED[VAULT.label]):
+        response = client.get("/v1/providers/vaultwarden/token", headers={"X-Bridge-Token": header} if header else {})
+        assert response.status_code in (401, 404) and password not in response.text
+
+
 def test_present_empty_header_is_refused_on_an_open_gate(monkeypatch):
     """(N) default: an absent header passes, an empty one is BAD (401)."""
     from llm_bawt.service.routes import providers

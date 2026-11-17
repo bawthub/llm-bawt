@@ -19,6 +19,9 @@ class VaultwardenAdapter(ApiKeyAdapter):
     id = "vaultwarden"
     label = "Agent vault (Vaultwarden)"
     operator_only = True
+    # Only the vault-gated /password route returns it; the generic token
+    # broker's BROKER gate (which an operator may leave open) must not.
+    generic_broker = False
 
     def descriptor(self) -> dict:
         return {

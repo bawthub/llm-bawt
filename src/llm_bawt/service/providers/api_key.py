@@ -53,6 +53,9 @@ class ApiKeyAdapter(ProviderAdapter):
     #: exists (:func:`resolve_stored_api_key`, the bridge broker's 503), so a
     #: disconnect can't bring the env key back.
     keeps_disconnected_record: bool = False
+    #: Served by the generic ``/v1/providers/{id}/token`` broker. False for a
+    #: credential with its own, stricter route (TASK-2386: the vault password).
+    generic_broker: bool = True
 
     def disconnect(self) -> bool:
         if not self.keeps_disconnected_record:
