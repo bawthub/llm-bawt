@@ -16,6 +16,8 @@ from llm_bawt.bawthub_auth.voice_credential import (
 )
 from llm_bawt.runtime_settings import RuntimeSettingsStore
 
+pytestmark = pytest.mark.integration
+
 TOKEN = "t" * 64
 URL = "http://voice.example/v1/internal/voice/sessions"
 
