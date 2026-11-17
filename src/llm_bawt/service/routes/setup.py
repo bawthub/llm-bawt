@@ -224,4 +224,3 @@ async def create_first_bot(body: FirstBotRequest, http_request: Request,
         "runtime": runtime.to_dict(),
         "preferences": preferences,
     }
-
