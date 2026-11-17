@@ -17,6 +17,7 @@ from llm_bawt.approval_policies import (
     CONT_NOT_NEEDED, CONT_PENDING, EXEC_FAILED, EXEC_SUCCEEDED,
     REQ_APPROVED, REQ_DENIED, ToolApprovalPolicyStore, ToolApprovalRequest,
 )
+from llm_bawt.content_provenance import ContentProvenanceStore
 from llm_bawt.mcp_server.approval_interceptor import ApprovalAwareFastMCP
 from llm_bawt.service import approval_continuations as continuations
 from llm_bawt.service.routes import approval_policies as routes
@@ -25,9 +26,13 @@ from llm_bawt.service.routes.service_auth import require_service_token
 
 
 @pytest.fixture
-def store():
+def store(monkeypatch):
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     value = ToolApprovalPolicyStore(None, engine=engine)
+    # Turn stores here may be pure fakes; lineage still needs a real database.
+    monkeypatch.setattr(
+        SessionService, "_content_provenance_store", ContentProvenanceStore(engine), raising=False,
+    )
     FakeTurnStore.default_engine = engine
     yield value
     engine.dispose()
@@ -336,11 +341,6 @@ class SessionService:
         if name == "_turn_log_store":
             self._turn_log_store = FakeTurnStore()
             return self._turn_log_store
-        if name == "_content_provenance_store":
-            from llm_bawt.content_provenance import ContentProvenanceStore
-
-            self._content_provenance_store = ContentProvenanceStore(self._turn_log_store.engine)
-            return self._content_provenance_store
         raise AttributeError(name)
 
     def get_memory_client(self, bot_id, user_id):
