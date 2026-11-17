@@ -24,6 +24,9 @@ class FakeRequest:
 
 @pytest.fixture
 def talk(monkeypatch):
+    from llm_bawt.utils.config import config as app_config
+    monkeypatch.setattr(app_config, "NEXTCLOUD_URL", "https://talk.example")
+    monkeypatch.setattr(app_config, "NEXTCLOUD_ALLOWED_ACTORS", None)
     monkeypatch.setattr(webhook, "verify_nextcloud_signature", lambda *args: True)
     monkeypatch.setattr(webhook, "get_nextcloud_manager", lambda: SimpleNamespace(
         get_bot_by_conversation=lambda token: SimpleNamespace(llm_bawt_bot="nova", secret="secret")
@@ -255,6 +258,8 @@ async def test_inline_reply_uses_real_sender_outcome(monkeypatch, talk, exc, exp
     import httpx
 
     monkeypatch.undo()  # drop the stubbed senders; keep the real one
+    from llm_bawt.utils.config import config as app_config
+    monkeypatch.setattr(app_config, "NEXTCLOUD_URL", "https://talk.example")
     monkeypatch.setattr(webhook, "verify_nextcloud_signature", lambda *args: True)
     monkeypatch.setattr(webhook, "get_nextcloud_manager", lambda: SimpleNamespace(
         get_bot_by_conversation=lambda token: SimpleNamespace(llm_bawt_bot="nova", secret="secret")
@@ -284,3 +289,22 @@ async def test_inline_reply_uses_real_sender_outcome(monkeypatch, talk, exc, exp
     result = await webhook.handle_nextcloud_webhook(FakeRequest())
     assert result["status"] == expected
     assert len(posts) == 1
+
+
+@pytest.mark.asyncio
+async def test_foreign_backend_header_is_refused(monkeypatch, talk):
+    from fastapi import HTTPException
+    from llm_bawt.utils.config import config as app_config
+    monkeypatch.setattr(app_config, "NEXTCLOUD_URL", "https://cloud.example")
+    with pytest.raises(HTTPException) as err:
+        await webhook.handle_nextcloud_webhook(FakeRequest())
+    assert err.value.status_code == 403
+    assert talk == []
+
+
+@pytest.mark.asyncio
+async def test_non_allowlisted_actor_is_ignored(monkeypatch, talk):
+    from llm_bawt.utils.config import config as app_config
+    monkeypatch.setattr(app_config, "NEXTCLOUD_ALLOWED_ACTORS", "nick, other")
+    assert await webhook.handle_nextcloud_webhook(FakeRequest()) == {"status": "actor_not_allowed"}
+    assert talk == []

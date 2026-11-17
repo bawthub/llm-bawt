@@ -176,6 +176,23 @@ async def handle_nextcloud_webhook(request: Request) -> dict:
     if user_id.startswith('users/'):
         user_id = user_id[6:]
 
+    # The signature does not cover the backend header, so replies may only go
+    # to the configured instance, and only allowlisted actors (when set) count.
+    from ...utils.config import config as app_config
+    from .setup import canonical_instance
+
+    try:
+        backend_ok = canonical_instance(backend) == canonical_instance(app_config.NEXTCLOUD_URL)
+    except Exception:
+        backend_ok = False
+    if not backend_ok:
+        log.error("Nextcloud backend header does not match NEXTCLOUD_URL")
+        raise HTTPException(status_code=403, detail="Unknown Nextcloud backend")
+    allowed_actors = {a.strip() for a in (app_config.NEXTCLOUD_ALLOWED_ACTORS or "").split(",") if a.strip()}
+    if allowed_actors and user_id not in allowed_actors:
+        log.warning("Ignoring Nextcloud message from non-allowlisted actor")
+        return {"status": "actor_not_allowed"}
+
     # Parse the actual message text from the content field
     content = payload.get('object', {}).get('content', '')
     try:

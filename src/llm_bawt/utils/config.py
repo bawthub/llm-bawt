@@ -337,6 +337,7 @@ class Config(RuntimeTunables, BaseSettings):
     # --- Nextcloud Talk --- #
     # Per-bot Talk secrets live in bot_profiles (DB), never in env.
     NEXTCLOUD_URL: str = Field(default="https://nextcloud.example.com", description="Nextcloud instance URL")
+    NEXTCLOUD_ALLOWED_ACTORS: Optional[str] = Field(default=None, description="Comma-separated Talk user ids allowed to drive bots; unset allows any room member")
 
     # --- Nextcloud Talk Provisioner --- #
     TALK_PROVISIONER_URL: str = Field(default="http://localhost:8790", description="Nextcloud Talk provisioner service URL")
