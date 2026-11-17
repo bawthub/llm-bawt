@@ -216,6 +216,8 @@ class BotProfileStore:
             tag_catalog.require_owned(conn, "bot_profiles")
             tag_catalog.ensure_schema(conn)
             tag_catalog.seed(conn)
+            from .house_retirement import ensure_schema as ensure_house_retirements
+            ensure_house_retirements(conn)
             if not tags_existed:
                 tag_catalog.seed_starter_roles(conn)
                 migrated = tag_catalog.migrate_legacy_flag(conn)
@@ -311,6 +313,8 @@ class BotProfileStore:
                 # so a manual PATCH can't interleave with a self-move's check.
                 from .house_tenancy import lock_house_assignments
                 lock_house_assignments(session.connection())
+                from .house_retirement import assert_assignable
+                assert_assignable(session.connection(), payload.get("house"), slug)
             if guard is not None:
                 guard.lock(session.connection(), slug)
             # Every profile write reads the row under the bot's tag lock (the one

@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from sqlalchemy import text
@@ -81,12 +81,18 @@ class HouseState:
     busy_streams: frozenset[str] = frozenset()
     #: ``{house: harness}`` from the deployment's pool; None when none is configured.
     pool: dict[str, str] | None = None
+    #: Durable reservations for removal, read under the assignment lock.
+    retiring: frozenset[str] = frozenset()
+    #: Advertised preview origins from the same pool snapshot as ``pool``.
+    preview_hosts: dict[str, str] = field(default_factory=dict)
 
     def status(self, house: str, backend: str, tenants: list) -> str:
         """``free`` | ``occupied`` | ``unconfigured`` | ``incompatible`` | ``down``
-        | ``recycling`` | ``draining``."""
+        | ``recycling`` | ``draining`` | ``retiring``."""
         if tenants:
             return "occupied"
+        if house in self.retiring:
+            return "retiring"
         if self.pool is None or house not in self.pool:
             return "unconfigured"
         if self.pool[house] != backend:
@@ -119,7 +125,10 @@ def _stream_busy(client: Any, stream: str) -> bool:
     """
     if not client.exists(stream):
         return False
-    for group in client.xinfo_groups(stream):
+    groups = client.xinfo_groups(stream)
+    if not groups:
+        return True  # without a consumer group, acknowledged progress is unknown
+    for group in groups:
         lag = group.get("lag")
         if lag is None or int(lag) > 0 or int(group.get("pending") or 0) > 0:
             return True
@@ -145,12 +154,17 @@ def read_house_state(client: Any, pool: list[dict] | None = None) -> HouseState:
         stream = client.get(key)
         if stream:
             busy.add(str(stream))
-    for house in leases:
-        stream = commands_stream(house)
+    streams = {commands_stream(house) for house in leases}
+    # Stopped houses lose their lease, not their unread/unacked deliveries.
+    streams.update(str(key) for key in client.scan_iter(match="agent:commands:house:*"))
+    for stream in streams:
         if stream not in busy and _stream_busy(client, stream):
             busy.add(stream)
     configured = None if pool is None else {h["id"]: h["harness"] for h in pool}
-    return HouseState(leases, recycling, frozenset(busy), configured)
+    preview_hosts = {h["id"]: h["preview_host"] for h in (pool or [])
+                     if h.get("preview_host")}
+    return HouseState(leases, recycling, frozenset(busy), configured,
+                      preview_hosts=preview_hosts)
 
 
 StateReader = Callable[[], HouseState]
@@ -225,9 +239,11 @@ def list_houses(store: Any, slug: str, read_state: StateReader,
     state = read_state()
     with store.engine.connect() as conn:
         tenants = _tenants(conn)
+        from .house_retirement import reservations
+        state = replace(state, retiring=frozenset(reservations(conn)))
     hidden = _private_bots(store) if private_bots is None else private_bots
     houses = []
-    for house in sorted(set(state.pool or ()) | set(state.leases) | set(tenants)):
+    for house in sorted(set(state.pool or ()) | set(state.leases) | set(tenants) | state.retiring):
         held = tenants.get(house, [])
         houses.append({
             "house": house,
@@ -256,6 +272,7 @@ _REFUSALS = {
     "down": "{house} has no live {backend} bridge; pick a free house from the list",
     "recycling": "{house} is restarting for a fresh container; try again shortly or pick another",
     "draining": "{house} is still finishing a turn; try again shortly or pick another",
+    "retiring": "{house} is reserved for removal; choose another house",
 }
 
 
@@ -281,6 +298,8 @@ def move_in(store: Any, slug: str, house: str | None, read_state: StateReader) -
                 "already_housed", f"you live in {current}; move out first", house=current)
         tenants = _tenants(conn)
         state = read_state()
+        from .house_retirement import reservations
+        state = replace(state, retiring=frozenset(reservations(conn)))
         if state.pool is None:
             raise HouseMoveRefused("no_pool", "no house pool is configured; nothing to move into",
                                    status_code=503)

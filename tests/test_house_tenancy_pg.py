@@ -109,3 +109,41 @@ def test_a_pinned_bot_leaves_and_its_pin_goes_with_it(rig):  # noqa: F811
     out = move_out(store, "fixture-a")
     row = store.get("fixture-a")
     assert out.vacated == "h1" and row.house is None and row.house_pinned is False
+
+
+def test_profile_patch_cannot_assign_a_reserved_house(rig):  # noqa: F811
+    from llm_bawt.house_reconcile_runtime import operate
+    from llm_bawt.house_retirement import HouseAssignmentRetiring
+
+    store = rig.store()
+    agent(store, "fixture-a")
+    operate(store, LIVE, "reserve", ["h1"], "fixture-run")
+    with pytest.raises(HouseAssignmentRetiring):
+        store.upsert({"slug": "fixture-a", "house": "h1", "house_pinned": True},
+                     require_existing=True)
+    assert store.get("fixture-a").house is None
+    # Unrelated profile writes and assigning another house remain available.
+    store.upsert({"slug": "fixture-a", "description": "still allowed"}, require_existing=True)
+    store.upsert({"slug": "fixture-a", "house": "h2"}, require_existing=True)
+    assert store.get("fixture-a").house == "h2"
+
+
+def test_profile_assignment_waiting_on_lock_sees_committed_reservation(rig):  # noqa: F811
+    from llm_bawt.house_retirement import RESERVATIONS, HouseAssignmentRetiring
+
+    store = rig.store()
+    agent(store, "fixture-a")
+    with rig.engine.connect() as holder:
+        holder.execute(text("BEGIN"))
+        holder.execute(text("SELECT pg_advisory_xact_lock(2118, 1)"))
+        holder.execute(RESERVATIONS.insert().values(house="h1", reconcile_id="fixture-run"))
+        pid = holder.execute(text("SELECT pg_backend_pid()")).scalar_one()
+        with ThreadPoolExecutor(1) as pool:
+            assignment = pool.submit(
+                store.upsert, {"slug": "fixture-a", "house": "h1"}, require_existing=True,
+            )
+            wait_blocked_by(rig.engine, pid, assignment)
+            holder.execute(text("COMMIT"))
+            with pytest.raises(HouseAssignmentRetiring):
+                assignment.result(timeout=10)
+    assert store.get("fixture-a").house is None

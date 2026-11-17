@@ -6,7 +6,9 @@ from pathlib import Path
 import pytest
 import yaml
 
-from agent_bridge.house_pool import render_compose, render_routes, validate_houses, validate_pool
+from agent_bridge.house_pool import (
+    count_pool, render_bundle, render_compose, render_routes, validate_houses, validate_pool,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -45,6 +47,37 @@ def template():
 def test_zero_pool_is_opt_in_and_resource_free():
     assert render_compose({}, ROOT / "docker-compose.yml") == {"services": {}}
     assert render_routes({}, {}) == {"http": {"routers": {}, "services": {}}}
+
+
+def test_count_renderer_uses_one_count_without_mutating_settings(config, template):
+    config.pop("houses")
+    before = deepcopy(config)
+    bundle = render_bundle({
+        "count": 3, "pool": config, "origin_template": "https://{id}.example.test",
+        "base_compose": str(ROOT / "docker-compose.yml"),
+        "route_template": yaml.safe_dump(template),
+    })
+    assert config == before
+    assert [h["id"] for h in bundle["pool"]["houses"]] == ["h1", "h2", "h3"]
+    assert bundle["pool"]["houses"][2]["origin"] == "https://h3.example.test"
+    assert set(bundle["compose"]["services"]) == {"house-h1", "house-h2", "house-h3"}
+    assert len(bundle["routes"]["http"]["routers"]) == 6
+    assert count_pool({}, 0, "") == {"houses": []}
+
+
+@pytest.mark.parametrize("count", [-1, 17, True, "3"])
+def test_count_renderer_refuses_invalid_counts(config, count):
+    config.pop("houses")
+    with pytest.raises(ValueError):
+        count_pool(config, count, "https://{id}.example.test")
+
+
+def test_count_renderer_refuses_second_house_list_or_repeated_origin(config):
+    with pytest.raises(ValueError, match="houses list"):
+        count_pool(config, 3, "https://{id}.example.test")
+    config.pop("houses")
+    with pytest.raises(ValueError, match="unique"):
+        count_pool(config, 2, "https://shared.example.test")
 
 
 def test_one_definition_supports_either_command(config):

@@ -12,6 +12,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.pool import StaticPool
 
 from llm_bawt import house_lease, house_tenancy
+from llm_bawt.house_retirement import ensure_schema as ensure_retirements
 from llm_bawt.house_tenancy import (
     HouseMoveRefused, HouseState, list_houses, move_in, move_out, read_house_state,
 )
@@ -27,6 +28,7 @@ class Store:
         with self.engine.begin() as conn:
             conn.execute(text("CREATE TABLE bot_profiles (slug TEXT PRIMARY KEY, bot_type TEXT, "
                               "agent_backend TEXT, house TEXT, house_pinned BOOLEAN)"))
+            ensure_retirements(conn)
             for slug, fields in bots.items():
                 conn.execute(text("INSERT INTO bot_profiles VALUES (:slug, :bot_type, :backend, "
                                   ":house, :pinned)"), {
@@ -70,7 +72,8 @@ class FakeRedis:
     def scan_iter(self, match):
         import fnmatch
 
-        return [k for k in self.values if fnmatch.fnmatchcase(k, match)]
+        return [k for k in self.values.keys() | self.groups.keys()
+                if fnmatch.fnmatchcase(k, match)]
 
     def get(self, key):
         return self.values.get(key)
@@ -107,6 +110,13 @@ def test_read_house_state_reads_leases_recycle_markers_and_running_turns():
     assert read_house_state(client).pool is None
 
 
+def test_read_house_state_carries_origin_from_its_configured_pool_snapshot():
+    got = read_house_state(FakeRedis(), [
+        {"id": "h1", "harness": "claude-code", "preview_host": "https://h1.example.test"},
+    ])
+    assert got.preview_hosts == {"h1": "https://h1.example.test"}
+
+
 @pytest.mark.parametrize("group,busy", [
     ({"lag": 0, "pending": 0}, False),
     ({"lag": 1, "pending": 0}, True),  # routed, nobody has read it yet
@@ -118,6 +128,15 @@ def test_an_unread_or_unacked_send_holds_the_house(group, busy):
     client = FakeRedis(groups={stream: [group]}, **{"agent:house:h1:lease:claude-code": "5"})
     got = read_house_state(client, [{"id": "h1", "harness": "claude-code"}])
     assert got.status("h1", "claude-code", []) == ("draining" if busy else "free")
+
+
+@pytest.mark.parametrize("groups", [[], [{"lag": 1, "pending": 0}],
+                                   [{"lag": 0, "pending": 1}]])
+def test_stopped_house_stream_is_not_forgotten_when_its_lease_expires(groups):
+    stream = "agent:commands:house:h3"
+    client = FakeRedis(groups={stream: groups})
+    got = read_house_state(client, [])
+    assert got.busy_streams == {stream}
 
 
 @pytest.mark.parametrize("overrides,house,status", [

@@ -257,16 +257,59 @@ def render_routes(config: object, template: dict) -> dict:
     return {"http": {"routers": routers, "services": services}}
 
 
+def count_pool(config: dict, count: int, origin_template: str) -> dict:
+    """Expand HOUSES without a second, hand-maintained list of house IDs."""
+    if type(count) is not int or not 0 <= count <= 16:
+        raise ValueError("HOUSES must be an integer from 0 to 16")
+    if not isinstance(config, dict) or "houses" in config:
+        raise ValueError("count renderer settings must not include a houses list")
+    if not isinstance(origin_template, str):
+        raise ValueError("origin_template must be a string")
+    result = copy.deepcopy(config)
+    result["houses"] = [
+        {"id": f"h{i}", "harness": "claude-code",
+         "origin": origin_template.replace("{id}", f"h{i}"),
+         "memory": config.get("memory")}
+        for i in range(1, count + 1)
+    ]
+    # Return the portable source schema, not validator-only `host` fields.
+    validate_pool(result)
+    return result
+
+
+def render_bundle(request: object) -> dict:
+    """App-side renderer transport; stdin contains deployment data, not secrets."""
+    keys = {"count", "pool", "origin_template", "base_compose", "route_template"}
+    if not isinstance(request, dict) or request.keys() != keys:
+        raise ValueError("invalid count renderer request")
+    pool = count_pool(request["pool"], request["count"], request["origin_template"])
+    base = request["base_compose"]
+    if not isinstance(base, str) or not Path(base).is_absolute():
+        raise ValueError("base_compose must be an absolute path")
+    template = yaml.safe_load(request["route_template"])
+    return {"pool": pool, "compose": render_compose(pool, Path(base)),
+            "routes": render_routes(pool, template)}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("kind", choices=("compose", "routes"))
+    parser.add_argument("kind", choices=("compose", "routes", "bundle"))
     parser.add_argument("config", type=Path, help="nonsecret JSON pool configuration")
     parser.add_argument("--base-compose", type=Path)
     parser.add_argument("--route-template", type=Path)
     args = parser.parse_args()
     try:
-        config = json.loads(args.config.read_text())
-        if args.kind == "compose":
+        if str(args.config) == "-":
+            import sys
+            raw = sys.stdin.read(131073)
+            if len(raw) > 131072:
+                raise ValueError("renderer request too large")
+            config = json.loads(raw)
+        else:
+            config = json.loads(args.config.read_text())
+        if args.kind == "bundle":
+            output = render_bundle(config)
+        elif args.kind == "compose":
             if not args.base_compose:
                 parser.error("compose requires --base-compose")
             output = render_compose(config, args.base_compose)

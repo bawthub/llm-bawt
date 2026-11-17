@@ -16,8 +16,8 @@ turn only, no bot argument; rules in `llm_bawt/house_tenancy.py`):
   tenants (private bots masked) and a status for the caller's harness: `free`,
   `occupied`, `unconfigured` (not in the pool, or no pool), `incompatible`
   (another harness), `down` (no live lease), `recycling` (asked to restart at
-  the current lease epoch) or `draining` (a turn running, or a send unread or
-  unacked on its stream).
+  the current lease epoch), `draining` (a turn running, or a send unread or
+  unacked on its stream), or `retiring` (reserved for count-based removal).
 - `move_in`: a named house, or any free one; only `free` is claimable, so an
   occupied house is always refused. A bot housed elsewhere must move out
   first. Never pins. Applies from the bot's next turn.
@@ -35,7 +35,109 @@ get `unsupported_harness`.
 Bots never patch another bot's `house` field. Pinning, and assigning a bot by
 profile, stay with a coordinator or the user.
 
-## Local configuration
+## One count, one reconciliation path
+
+For a new tenant, set `HOUSES=3` in `deploy/tenant.env`. Use
+`deploy/bootstrap.sh houses` to inspect the read-only plan and
+`deploy/bootstrap.sh houses --apply` to reconcile. Normal bootstrap `up`
+uses the same reconciler after starting its named core services. Both the app
+image and installer must contain this feature before the first apply.
+
+An extended Compose deployment uses BawtHub's
+`deploy/house_reconcile_host.py` with `layout: "extends"`. Keep these nonsecret
+settings outside product source control:
+
+```json
+{
+  "layout": "extends",
+  "project": "tenant",
+  "compose_command": [
+    "/deployment/llm-bawt/scripts/compose-secrets",
+    "--project-dir", "/deployment/llm-bawt", "--",
+    "--project-name", "tenant",
+    "-f", "/deployment/llm-bawt/docker-compose.yml",
+    "-f", "/private/houses/houses.compose.json"
+  ],
+  "compose_file": "/private/houses/houses.compose.json",
+  "pool_file": "/private/houses/houses.json",
+  "routes_file": "/watched/traefik/houses.local.yml",
+  "journal_file": "/private/houses/reconcile-state.json",
+  "renderer": {
+    "base_compose": "/deployment/llm-bawt/docker-compose.yml",
+    "route_template_file": "/deployment/bawthub/deploy/traefik/dynamic/routes.yml",
+    "origin_template": "https://{id}.preview.example.test",
+    "pool": {
+      "image": "example-house:pinned",
+      "base_image": "example-bridge:pinned",
+      "memory": "4g",
+      "preview_network": "tenant-frontend",
+      "service_token_volume": "tenant-service-token",
+      "frontend_env_file": "/private/houses/frontend.env"
+    }
+  }
+}
+```
+
+The command array must preserve **all** existing project overlays in their
+existing order, with the published house overlay last. The example is not a
+replacement for a deployment's full stack. Preserve its image pins, mounts,
+frontend settings and optional `mansion_origin` in `renderer.pool`; do not put
+a second `houses` list there. The existing app and its published house overlay
+must be available for the app-side renderer. Activate the new app code through
+the deployment's normal approved procedure before using its runtime command.
+
+```sh
+HOUSES=3 python3 /deployment/bawthub/deploy/house_reconcile_host.py \
+  --settings /private/houses/reconcile.json
+# Review the same plan before the approved service change:
+HOUSES=3 python3 /deployment/bawthub/deploy/house_reconcile_host.py \
+  --settings /private/houses/reconcile.json --apply
+```
+
+The count derives `h1` through `hN` (0–16). Planning reads actual Compose
+ownership, service hashes, app occupancy and DNS; it writes only disposable
+rendering scratch. Apply adopts matching healthy houses and starts only
+missing/stopped named services, with `--no-deps --no-build --no-recreate`.
+Definition drift refuses the whole change; this is not an image-upgrade tool.
+No whole-stack `up`, `down`, orphan cleanup or volume deletion is used.
+
+Lower the same count to remove surplus houses. Assigned bots, active turns,
+unread/unacked sends, another reconciliation or unreadable runtime state refuse
+removal. The app reserves all targets under the assignment lock before any
+deletion, and **every** profile assignment writer checks that reservation.
+Pool publication preserves an existing file's inode for single-file binds.
+Health, the expected harness lease and preview HTTP/TLS are checked before
+success. A rerun does not recreate already matching houses.
+
+Failures leave a durable journal and any removal reservations in place. Resume
+with the same count and rendered definitions. Do not delete the journal to
+bypass a refusal. Recovery that restores a retained house must restore its
+configuration, start and verify it, then run the app-side runtime command's
+`cancel` action for the journal's exact `reconcile_id` and house IDs. Release
+after removal requires an empty target absent from the advertised pool.
+Both actions take bounded JSON on stdin via the deployment wrapper's
+`exec -T app python -m llm_bawt.house_reconcile_runtime`. Never clear
+reservations with host database edits.
+
+## DNS and existing proxy policy
+
+Optional `edge` settings support only AdGuard rewrites and UniFi static A
+records. Configure `answer`, plus `adguard` (`base_url`, `username_env`,
+`password_env`) and/or `unifi` (`base_url`, `site`, `api_key_env`). The named
+environment variables come from the deployment's credential helper, never
+command arguments or committed files. TLS verification is on; use
+`insecure_tls: true` only for an explicitly accepted local API endpoint.
+Exact records are adopted, conflicts refuse, and only records created and
+recorded by this reconciler are eligible for later deletion. Adopted records
+and existing certificates/proxy policy are never removed or rewritten.
+
+Proxy routes clone the deployment's existing Traefik rules. Certificate
+issuance and ingress authentication/LAN-only policy are not inferred from DNS.
+Verify them explicitly and record the nonsecret receipt as
+`edge.proxy_policy_receipt`; without it, output lists this remaining manual
+check. No NPM restart, public DNS change or new certificate is implicit.
+
+## Advanced explicit-pool configuration
 
 Copy `docker/houses.example.json` outside source control. All images, resource
 limits, hostnames, network/volume names and secrets-file paths are deployment
