@@ -94,7 +94,9 @@ class ApiAuthMiddleware:
                  root: Callable[[], bytes] | None = None,
                  observations: Observations | None = None,
                  allowed_paths: frozenset[str] = ALLOWED_PATHS,
-                 route_template: Callable[[dict], str] | None = None):
+                 route_template: Callable[[dict], str] | None = None,
+                 key_principal_allowed: Callable[[str], bool] | None = None,
+                 refuse_turn_with_key: bool = False):
         self.app = app
         self.resolver = resolver
         self.checkers = tuple(checkers)
@@ -103,6 +105,10 @@ class ApiAuthMiddleware:
         self.allowed_paths = allowed_paths
         self._template = route_template or (lambda scope: "<unmatched>")
         self._last_log = 0.0
+        # Per-instance policy (TASK-2381 :8001): which key principals count,
+        # and whether a turn capability alongside a key is ambiguous.
+        self._key_allowed = key_principal_allowed
+        self._refuse_turn_with_key = refuse_turn_with_key
 
     def _verify_key(self, value: str):
         kwargs = {"denylist": self.resolver.denylist()}
@@ -121,10 +127,14 @@ class ApiAuthMiddleware:
             result = self._verify_key(presented[0].decode("latin-1"))
             if not result.ok:
                 return None, f"key_{result.reason}"
+            if self._key_allowed is not None and not self._key_allowed(result.principal):
+                return None, "key_not_permitted"
             key_principal = Principal(result.principal, "key")
         for check in self.checkers:  # turn capability first, then key, then legacy
             found = check(headers)
             if found is not None and found.kind == "bot":
+                if key_principal and self._refuse_turn_with_key:
+                    return None, "ambiguous_credentials"
                 return found, None
         if key_principal:
             return key_principal, None

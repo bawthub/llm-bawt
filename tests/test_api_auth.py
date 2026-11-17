@@ -186,3 +186,25 @@ def test_app_installs_api_auth_middleware():
     from llm_bawt.api_auth.middleware import ApiAuthMiddleware
     from llm_bawt.service.api import app
     assert any(m.cls is ApiAuthMiddleware for m in app.user_middleware)
+
+
+def test_per_instance_key_policy():
+    from llm_bawt.api_auth.middleware import ApiAuthMiddleware, Principal
+    from llm_bawt.api_auth import keys
+    root = lambda: b"r" * 32
+    resolver = type("R", (), {"denylist": lambda self: frozenset(), "mode": lambda self: "log"})()
+    bot = lambda h: Principal("vex", "bot") if b"x-llm-bawt-task-turn-context" in h else None
+
+    def scope(*hdrs):
+        return {"type": "http", "headers": list(hdrs)}
+
+    mw = ApiAuthMiddleware(None, resolver=resolver, checkers=(bot,), root=root,
+                           key_principal_allowed=lambda p: p == "llm-bawt-app",
+                           refuse_turn_with_key=True)
+    good = (b"x-llm-bawt-key", keys.header_value("llm-bawt-app", root=root).encode())
+    other = (b"x-llm-bawt-key", keys.header_value("bot-vex", root=root).encode())
+    turn = (b"x-llm-bawt-task-turn-context", b"t")
+    assert mw.authenticate(scope(good))[0].name == "llm-bawt-app"
+    assert mw.authenticate(scope(other)) == (None, "key_not_permitted")
+    assert mw.authenticate(scope(good, turn)) == (None, "ambiguous_credentials")
+    assert mw.authenticate(scope(turn))[0].kind == "bot"
