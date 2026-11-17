@@ -36,6 +36,30 @@ def _path(scope) -> str:
     return scope.get("path") or "<none>"
 
 
+def ensure_store(make_store=None) -> None:
+    """Attach the runtime settings store when no app startup did (standalone).
+
+    Inside the app, startup attaches it first. A store that can't be built
+    leaves the mode unresolved, so the gate answers 503 rather than opening.
+    """
+    if SETTINGS.store is not None:
+        return
+    try:
+        if make_store is None:
+            from ..runtime_settings import RuntimeSettingsStore
+            from ..utils.config import Config
+
+            def make_store():
+                return RuntimeSettingsStore(Config())
+        SETTINGS.store = make_store()
+    except Exception as error:  # noqa: BLE001 - fail closed: stays unresolved
+        import logging
+
+        logging.getLogger(__name__).error(
+            "MCP auth: runtime settings store unavailable (%s); :8001 answers 503 "
+            "until it is (or set %s)", type(error).__name__, FORCE_ENV)
+
+
 def wrap(app):
     """The MCP ASGI app behind the :8001 gate. Nothing on :8001 is public."""
     return ApiAuthMiddleware(

@@ -1042,6 +1042,7 @@ def run_server(
 
         # TASK-2381: outer per-caller gate (mode mcp_auth_mode); the inner
         # bot-access middleware still decides who each call acts for.
+        mcp_auth.ensure_store()  # standalone: no app startup attached it
         app = mcp_auth.wrap(BotAccessMiddleware(TaskTurnCapabilityMiddleware(
             mcp.streamable_http_app(**HTTP_APP_OPTIONS, host=final_host))))
         config = uvicorn.Config(

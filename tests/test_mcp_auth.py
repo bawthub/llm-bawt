@@ -148,3 +148,24 @@ def test_self_fwd_refuses_spoofed_sender_before_reading(monkeypatch):
     fn = getattr(self_tools.self_fwd, "fn", self_tools.self_fwd)
     result = asyncio.run(fn(sender_bot_id="vex", target_bot_id="loopy"))
     assert result["success"] is False and "does not match" in result["error"]
+
+
+def test_standalone_attaches_store_and_failure_stays_closed(monkeypatch):
+    from llm_bawt.api_auth import wiring
+
+    monkeypatch.setattr(wiring.SETTINGS, "store", None)
+    mcp.ensure_store(lambda: (_ for _ in ()).throw(RuntimeError("db down")))
+    assert wiring.SETTINGS.store is None  # unresolved -> 503, never open
+
+    sentinel = object()
+    mcp.ensure_store(lambda: sentinel)
+    assert wiring.SETTINGS.store is sentinel
+    mcp.ensure_store(lambda: object())  # an attached store is kept
+    assert wiring.SETTINGS.store is sentinel
+
+
+def test_run_server_attaches_store_before_wrapping():
+    from llm_bawt.mcp_server import server
+
+    src = open(server.__file__).read()
+    assert src.index("mcp_auth.ensure_store()") < src.index("mcp_auth.wrap(")

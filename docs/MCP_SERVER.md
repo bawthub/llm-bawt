@@ -26,6 +26,25 @@ Start it directly:
 uv run python -m llm_bawt.mcp_server --transport http --host 0.0.0.0 --port 8001
 ```
 
+## Authentication
+
+HTTP requests pass a per-caller gate whose mode is the global runtime setting
+`mcp_auth_mode` (`off|log|enforce`; default from `LLM_BAWT_MCP_AUTH_MODE`,
+operator override `LLM_BAWT_MCP_AUTH_MODE_FORCE`), independent of `/v1`'s
+`api_auth_mode`. Accepted callers: a bot's signed turn capability
+(`X-LLM-Bawt-Task-Turn-Context`, sent by the agent bridges) or
+`X-LLM-Bawt-Key` for the service principal `llm-bawt-app` (the app's own
+client). Bot keys, and a turn capability presented together with a key, are
+refused. In `log` mode anonymous calls are admitted and counted under `mcp` in
+`GET /v1/admin/auth-observations`; in `enforce` they get 401. Writing `off`
+rolls back. A standalone server reads the mode from the same database; if it
+can't, it answers 503 until it can (or the force override is set).
+
+Under `enforce`, unauthenticated operator tools stop working: a manual MCP
+client configuration with no turn capability, and
+`scripts/mcp_catalog_report.py --url` against a live server. Point them at a
+server in `log`/`off`, or run them inside the app with its key.
+
 ## Tool groups
 
 | Group | Examples |
