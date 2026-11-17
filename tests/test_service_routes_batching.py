@@ -126,7 +126,11 @@ def test_unexpected_workspace_error_logs_class_only(workspace_client, monkeypatc
     assert "SECRET" not in response.text
     records = [r for r in caplog.records if r.name == workspace_routes.logger.name]
     assert [r.getMessage() for r in records] == ["Workspace bridge GET list failed: RuntimeError"]
-    assert not any("SECRET" in r.getMessage() for r in caplog.records)
+    # Match the synthetic credential parts, not the bare word: unrelated records
+    # (e.g. the crypto warning naming LLM_BAWT_SECRET_KEY) may legitimately say SECRET.
+    assert not any(
+        leak in r.getMessage() for r in caplog.records for leak in ("tok-SECRET", "body-SECRET")
+    )
 
 
 def test_profile_batch_helper_handles_empty_and_case():
