@@ -78,13 +78,18 @@ class ModeResolver:
                 self._failing = True
                 self._read_at = now  # retry after one TTL, not every request
                 return
+            # Only an absent key takes the default; a present value that isn't a
+            # mode (JSON null included) is garbled and must not open anything.
             raw = values.get(self._key)
-            mode = self._default if raw is None else _parse(raw)
+            mode = self._default if self._key not in values else _parse(raw)
             if mode is None:  # a garbled row must not open anything
                 logger.error("%s=%r is not a mode; treating as enforce", self._key, raw)
                 mode = "enforce"
-            deny = values.get(DENYLIST_KEY) or []
-            self._denylist = frozenset(str(p) for p in deny) if isinstance(deny, list) else frozenset()
+            deny = values.get(DENYLIST_KEY, [])
+            if isinstance(deny, list):
+                self._denylist = frozenset(str(p) for p in deny)
+            else:  # a garbled denylist keeps the last good one, never empties it
+                logger.error("%s is not a list; keeping the previous denylist", DENYLIST_KEY)
             if self._failing:
                 logger.info("API auth settings readable again; mode %s", mode)
             self._mode, self._read_at, self._failing = mode, now, False

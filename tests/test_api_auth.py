@@ -240,3 +240,18 @@ def test_garbled_auth_row_in_real_store_keeps_last_good_mode():
     # Cold start with the garbled row: unresolved (fail closed), never the off default.
     cold = ModeResolver(reader, environ={"LLM_BAWT_API_AUTH_MODE": "off"}, clock=Clock())
     assert cold.mode() != "off"
+
+
+def test_present_null_mode_or_denylist_never_opens():
+    clock = Clock()
+    store = Store({"api_auth_mode": "enforce", "api_auth_denylist": ["bad"]})
+    r = ModeResolver(store, environ={"LLM_BAWT_API_AUTH_MODE": "off"}, clock=clock)
+    assert r.mode() == "enforce"
+    store.values = {"api_auth_mode": None, "api_auth_denylist": None}
+    clock.t += 3600
+    assert r.mode() == "enforce"
+    assert "bad" in r._denylist
+    # Only an absent key takes the default.
+    store.values = {}
+    clock.t += 3600
+    assert r.mode() == "off"
