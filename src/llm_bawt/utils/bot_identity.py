@@ -23,9 +23,31 @@ def require_bot_id(bot_id: str | None, where: str) -> str:
     return slug
 
 
+def optional_default_bot_id(config: Any) -> str | None:
+    """The configured ``DEFAULT_BOT``, or ``None`` on a botless install.
+
+    For startup and status paths only (TASK-2404): a fresh install has no bots
+    until first-run setup, so those must not require one.
+    """
+    if config is None:
+        return None
+    slug = (getattr(config, "DEFAULT_BOT", "") or "").strip().lower()
+    if slug:
+        return slug
+    try:
+        from ..runtime_setting_resolution import resolve_global_runtime_setting
+        from .config import has_database_credentials
+
+        if has_database_credentials(config):
+            slug = str(resolve_global_runtime_setting(config, "default_bot") or "").strip().lower()
+    except Exception:  # noqa: BLE001 - an unreadable setting means "not configured"
+        slug = ""
+    return slug or None
+
+
 def configured_default_bot_id(config: Any) -> str:
     """The configured ``DEFAULT_BOT``; raises if none is configured."""
-    slug = (getattr(config, "DEFAULT_BOT", "") or "").strip().lower() if config is not None else ""
+    slug = optional_default_bot_id(config)
     if not slug:
         raise MissingBotIdentity("DEFAULT_BOT is not configured (set LLM_BAWT_DEFAULT_BOT or the DB runtime setting)")
     return slug

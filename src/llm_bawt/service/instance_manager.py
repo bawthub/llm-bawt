@@ -11,6 +11,7 @@ from typing import Any
 from ..bot_types import agent_backend_for_model_def
 from ..bots import BotManager
 from ..model_catalog import bot_model_ref, resolve_model_config
+from ..utils.bot_identity import optional_default_bot_id
 from .logging import get_service_logger
 
 log = get_service_logger(__name__)
@@ -144,7 +145,11 @@ class InstanceManagerMixin:
             self._agent_backend_models[bot.slug] = backend_name
 
         # Resolve default model: bot default → config default → first available
-        default_bot = bot_manager.get_bot(self._default_bot) or bot_manager.get_default_bot()
+        # TASK-2404: a botless install (before first-run setup) has no default.
+        default_slug = getattr(self, "_default_bot_override", None) or optional_default_bot_id(self.config)
+        default_bot = (
+            (bot_manager.get_bot(default_slug) or bot_manager.get_default_bot()) if default_slug else None
+        )
         if default_bot:
             backend_name = self._agent_backend_models.get(default_bot.slug)
             if backend_name:

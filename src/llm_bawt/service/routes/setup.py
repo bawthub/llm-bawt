@@ -34,6 +34,7 @@ from pydantic import BaseModel, Field, field_validator
 from ...prompt_registry import get_prompt_resolver
 from ...seeding import FIRST_BOT_AGENT_BACKEND, seed_tenant
 from ..agent_runtime import check_agent_runtime
+from ...utils.bot_identity import optional_default_bot_id
 from ..dependencies import get_runtime_settings_store, get_service
 from ... import bot_profile_changes as profile_changes
 from .settings import _USER_ID_QUERY, _persist_bot_profile, profile_actor
@@ -99,6 +100,16 @@ def _store_setup_preferences(service, body: TenantPreferences | None) -> dict[st
     for key, value in selected.items():
         store.set_value("global", "*", key, value)
     return selected
+
+
+def _record_first_default_bot(service, slug: str) -> None:
+    """Make the first bot the default when none is configured yet (TASK-2404)."""
+    if optional_default_bot_id(service.config):
+        return
+    store = get_runtime_settings_store(service.config)
+    if store.engine is None:
+        raise RuntimeError("Runtime settings DB unavailable")
+    store.set_value("global", "*", "default_bot", slug.strip().lower())
 
 
 def _first_agent_prompt(service) -> str:
@@ -193,6 +204,7 @@ async def create_first_bot(body: FirstBotRequest, http_request: Request,
             create_only=True,
         )
         preferences = await run_in_threadpool(_store_setup_preferences, service, body)
+        await run_in_threadpool(_record_first_default_bot, service, body.slug)
     except Exception as exc:  # noqa: BLE001 — mapped to HTTP below
         raise _http_error(exc, what="First bot setup") from exc
 

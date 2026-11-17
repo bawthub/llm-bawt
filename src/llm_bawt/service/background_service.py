@@ -15,7 +15,7 @@ from queue import PriorityQueue
 from typing import Any
 from urllib.parse import urlparse
 
-from ..utils.bot_identity import configured_default_bot_id
+from ..utils.bot_identity import configured_default_bot_id, optional_default_bot_id
 from ..utils.config import Config
 from .background_tasks import BackgroundTasksMixin
 from .chat_nonstream import ChatNonStreamMixin
@@ -170,11 +170,22 @@ class BackgroundService(
         # Model configuration
         self._available_models: list[str] = []
         self._default_model: str | None = None
-        self._default_bot: str = configured_default_bot_id(config)
+        # TASK-2404: resolved on use, so a fresh install with no bots can start
+        # and first-run setup's default is picked up without a restart.
+        self._default_bot_override: str | None = None
         self._load_available_models()
 
         # Register callback for model unload - clears caches when model changes
         self._model_lifecycle.on_model_unloaded(self._on_model_unloaded)
+
+    @property
+    def _default_bot(self) -> str:
+        """Configured default bot; raises ``MissingBotIdentity`` when none is set."""
+        return self._default_bot_override or configured_default_bot_id(self.config)
+
+    @_default_bot.setter
+    def _default_bot(self, value: str | None) -> None:
+        self._default_bot_override = value or None
 
     @property
     def uptime_seconds(self) -> float:
@@ -281,8 +292,9 @@ class BackgroundService(
         from ..utils.config import has_database_credentials
 
         current = self._model_lifecycle.current_model
-        memory_info = _collect_memory_info(self.config, self._default_bot)
-        mcp_info = _collect_mcp_info(self.config, self._default_bot)
+        default_bot = self._default_bot_override or optional_default_bot_id(self.config)
+        memory_info = _collect_memory_info(self.config, default_bot)
+        mcp_info = _collect_mcp_info(self.config, default_bot)
 
         db_required = has_database_credentials(self.config)
         db_ok = memory_info.postgres_connected if db_required else True
@@ -305,7 +317,7 @@ class BackgroundService(
             models_loaded=[current] if current else [],
             current_model=current,
             default_model=self._default_model,
-            default_bot=self._default_bot,
+            default_bot=default_bot,
             available_models=self._available_models,
             checks=checks,
             database_connected=memory_info.postgres_connected,

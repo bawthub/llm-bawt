@@ -197,7 +197,7 @@ def _mcp_probe_ok(response) -> bool:
     return isinstance(result, dict) and not result.get("isError")
 
 
-def _collect_mcp_info(config: Config, default_bot_slug: str) -> McpInfo:
+def _collect_mcp_info(config: Config, default_bot_slug: str | None) -> McpInfo:
     """Collect llm-bawt MCP server status."""
     mcp_server_url = (config.MCP_SERVER_URL or "").strip()
     if not mcp_server_url:
@@ -240,7 +240,7 @@ def _collect_mcp_info(config: Config, default_bot_slug: str) -> McpInfo:
     return info
 
 
-def _collect_memory_info(config: Config, default_bot_slug: str) -> MemoryInfo:
+def _collect_memory_info(config: Config, default_bot_slug: str | None) -> MemoryInfo:
     """Collect database and memory status (service-side only).
 
     Only called from the service process (BackgroundService.get_status() and
@@ -255,6 +255,22 @@ def _collect_memory_info(config: Config, default_bot_slug: str) -> MemoryInfo:
         return info
 
     try:
+        if not default_bot_slug:
+            # TASK-2404: botless install (before first-run setup); prove the
+            # database is reachable without a bot-scoped memory backend.
+            from sqlalchemy import text
+
+            from llm_bawt.utils.db import get_shared_engine
+
+            engine = get_shared_engine(config)
+            if engine is None:
+                return info
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            info.postgres_connected = True
+            info.postgres_host = config.POSTGRES_HOST
+            return info
+
         from llm_bawt.memory.postgresql import PostgreSQLMemoryBackend
 
         backend = PostgreSQLMemoryBackend(

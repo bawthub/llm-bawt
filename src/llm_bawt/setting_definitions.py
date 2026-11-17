@@ -685,6 +685,19 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
             "CLI default. Read every turn, so a change applies on the next turn."
         ),
     ),
+    "default_bot": SettingDefinition(
+        key="default_bot",
+        type="str",
+        default="",
+        applies_to=(),  # GLOBAL-ONLY
+        storage=STORAGE_RUNTIME_SETTING,
+        label="Default bot",
+        help=(
+            "Bot slug used when a request names no bot (TASK-2404). The "
+            "LLM_BAWT_DEFAULT_BOT env value wins when set; first-run setup "
+            "records the first bot here when neither is configured."
+        ),
+    ),
     "max_output_tokens": SettingDefinition(
         key="max_output_tokens",
         type="int",

@@ -25,6 +25,7 @@ from ...runtime_settings import (
     cleanup_orphaned_bot_data,
 )
 from ...bot_create_transaction import BotCreateTransaction
+from ...utils.bot_identity import optional_default_bot_id
 from ...orphan_partitions import PartitionExecutionHalted
 from ..providers.base import CREDENTIAL_SETTING_PREFIXES, is_credential_setting_key
 from ...working_memory.contracts import WorkingMemoryError
@@ -69,7 +70,12 @@ router = APIRouter()
 RETIRED_BALANCE_SETTINGS = frozenset({"anthropic_api_monthly_budget_usd", "anthropic_api_balance_anchor"})
 
 
-def _normalize_scope(scope_type: str, scope_id: str | None, default_bot: str) -> tuple[str, str]:
+def _optional_default_bot(service) -> str | None:
+    # TASK-2404: global-scope settings must work before first-run setup.
+    return getattr(service, "_default_bot_override", None) or optional_default_bot_id(service.config)
+
+
+def _normalize_scope(scope_type: str, scope_id: str | None, default_bot: str | None) -> tuple[str, str]:
     st = (scope_type or "").strip().lower()
     if st not in {"global", "bot"}:
         raise HTTPException(status_code=400, detail="scope_type must be 'global' or 'bot'")
@@ -474,7 +480,7 @@ def list_runtime_settings(
 ):
     """List runtime settings for a scope."""
     service = get_service()
-    st, sid = _normalize_scope(scope_type, scope_id, service._default_bot)
+    st, sid = _normalize_scope(scope_type, scope_id, _optional_default_bot(service))
     store = get_runtime_settings_store(service.config)
     if store.engine is None:
         raise HTTPException(status_code=503, detail="Runtime settings DB unavailable")
@@ -567,7 +573,7 @@ def list_all_runtime_settings(
 def upsert_runtime_setting(request: RuntimeSettingUpsertRequest):
     """Upsert one runtime setting for global or bot scope."""
     service = get_service()
-    st, sid = _normalize_scope(request.scope_type, request.scope_id, service._default_bot)
+    st, sid = _normalize_scope(request.scope_type, request.scope_id, _optional_default_bot(service))
     store = get_runtime_settings_store(service.config)
     if store.engine is None:
         raise HTTPException(status_code=503, detail="Runtime settings DB unavailable")
@@ -595,7 +601,7 @@ def delete_runtime_setting(
     """Delete one runtime setting."""
     _refuse_credential_key(key)
     service = get_service()
-    st, sid = _normalize_scope(scope_type, scope_id, service._default_bot)
+    st, sid = _normalize_scope(scope_type, scope_id, _optional_default_bot(service))
     store = get_runtime_settings_store(service.config)
     if store.engine is None:
         raise HTTPException(status_code=503, detail="Runtime settings DB unavailable")
@@ -622,7 +628,7 @@ def batch_upsert_runtime_settings(request: RuntimeSettingBatchUpsertRequest):
         raise HTTPException(status_code=503, detail="Runtime settings DB unavailable")
 
     scoped = [
-        (*_normalize_scope(item.scope_type, item.scope_id, service._default_bot), item)
+        (*_normalize_scope(item.scope_type, item.scope_id, _optional_default_bot(service)), item)
         for item in request.items
     ]
     # Every item is validated before any is applied.
