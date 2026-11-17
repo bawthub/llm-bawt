@@ -43,10 +43,11 @@ if (typeof inner === "function" && !inner.__houseLlmKey) {
   const keyed = async (input, init) => {
     let origin = null;
     try { origin = new URL(urlOf(input)).origin; } catch { /* not llm-bawt */ }
-    const key = origin && llm.has(origin) ? readKey() : null;
-    if (!key) return inner(input, init);
+    if (!origin || !llm.has(origin)) return inner(input, init);
     const request = new Request(input, init);
-    if (request.headers.has(HEADER)) return inner(request);
+    // A caller-set key is kept but confined exactly like the file's key.
+    const key = request.headers.get(HEADER) || readKey();
+    if (!key) return inner(request);
     const headers = new Headers(request.headers);
     headers.set(HEADER, key);
     if (request.redirect === "manual") return inner(new Request(request, { headers }));
