@@ -57,6 +57,7 @@ def inherit_approval(service, row, target: ContentTurn):
 class DeliverySource:
     turn: ContentTurn
     purpose: str
+    harness_control: bool = False
 
 
 def delivery_origins(service, delivery_id: str, target: ContentTurn) -> list[DeliverySource]:
@@ -101,7 +102,10 @@ def delivery_origins(service, delivery_id: str, target: ContentTurn) -> list[Del
                 raise ValueError("content lineage user mismatch")
             sources.append(DeliverySource(ContentTurn(
                 origin.bot_id, origin.user_id, origin.turn_id, origin.trigger_message_id,
-            ), "fleet"))
+            ), "fleet", harness_control=(
+                row.get("message_kind") == "CONTEXT_MAINTENANCE"
+                and metadata.get("context_action") == "compact"
+            )))
         elif "_failure_origin" in metadata:
             raise ValueError("content lineage sender mismatch")
     return sources
@@ -115,7 +119,11 @@ def inherit_delivery(service, delivery_id: str, target: ContentTurn):
     origins = delivery_origins(service, delivery_id, target)
     for origin in origins:
         _inherit(service, [origin.turn], target, purpose=origin.purpose)
-    fleet = [origin.turn for origin in origins if origin.purpose == "fleet"]
+    # The producer validates compact maintenance and batching excludes it.
+    # Its text is a harness control command, not relayed conversational data:
+    # keep its graph ancestry, but never prefix it and turn it into prose.
+    fleet = [origin.turn for origin in origins
+             if origin.purpose == "fleet" and not origin.harness_control]
     if fleet:
         # A model-visible source label, scoped to relayed data rather than the
         # coordination envelope. Preserve any original labels inside the body.
