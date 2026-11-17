@@ -413,7 +413,7 @@ def test_the_listener_routes_codex_steers_only(monkeypatch):
 
     redis = SimpleNamespace(xack=AsyncMock(), ping=AsyncMock(), xgroup_create=AsyncMock(),
                             aclose=AsyncMock(), xreadgroup=xreadgroup)
-    monkeypatch.setattr("redis.asyncio.Redis", lambda **kwargs: redis)
+    monkeypatch.setattr("redis.asyncio.Redis.from_url", lambda *args, **kwargs: redis)
 
     async def run():
         with pytest.raises(asyncio.CancelledError):

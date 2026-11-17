@@ -1,7 +1,8 @@
 """No new credential may be handed to a container through env (TASK-1476).
 
 The only secrets outside the database are the bootstrap root
-(``LLM_BAWT_SECRET_KEY``) and the database password. Every other credential
+(``LLM_BAWT_SECRET_KEY``), the database password and the Redis password
+(infrastructure AUTH, held in the compose secrets volume; TASK-2379). Every other credential
 is connected in Settings and stored encrypted. This guard scans the tracked
 compose files and env templates for secret-shaped names and fails on any name
 that is neither bootstrap nor listed in :data:`PENDING_RETIREMENT`.
@@ -41,6 +42,8 @@ BOOTSTRAP = frozenset({
     "POSTGRES_PASSWORD",
     "LLM_BAWT_POSTGRES_PASSWORD",
     "PGPASSWORD",
+    # TASK-2379: Redis AUTH is infrastructure, needed before the DB is reachable.
+    "LLM_BAWT_REDIS_PASSWORD",
 })
 
 #: Credentials that still ship through env, each with why. Shrink only.
