@@ -31,7 +31,10 @@ pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("private_app_pg")
 @pytest.fixture
 def rig(delivery_store, monkeypatch):  # noqa: F811
     store, sender, target = delivery_store
-    bridge = _Bridge(registers_after=None)
+    first, _ = _enqueue(store, sender, target, "start work")
+    second, _ = _enqueue(store, sender, target, "mid-turn reply")
+    third, _ = _enqueue(store, sender, target, "after that")
+    bridge = _Bridge(registers_after=None, delivery_id=second.id)
     monkeypatch.setattr("llm_bawt.service.routes.chat.steer_active_turn", bridge.steer_active_turn)
     monkeypatch.setattr("llm_bawt.inter_bot_reply_channel.delivery_reply_channel_note", lambda _r: None)
     # Backoff is unit-tested; here each requeue is claimable at once.
@@ -44,9 +47,6 @@ def rig(delivery_store, monkeypatch):  # noqa: F811
         return None
 
     dispatcher._emit = _emit
-    first, _ = _enqueue(store, sender, target, "start work")
-    second, _ = _enqueue(store, sender, target, "mid-turn reply")
-    third, _ = _enqueue(store, sender, target, "after that")
     head = store.claim_next(target, claim_owner="owner", steer_capable=True)
     assert head.id == first.id and head.status == DISPATCHING
     assert store.mark_transport_accepted(first.id, head.claim_token or "")

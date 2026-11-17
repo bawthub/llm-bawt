@@ -441,9 +441,11 @@ class _Route:
         self.errors = list(errors)
         self.calls = []
 
-    async def __call__(self, service, request, *, steer_request_id, author, wire_suffix=None, control=None):
+    async def __call__(self, service, request, *, steer_request_id, author, wire_suffix=None,
+                       control=None, content_delivery_id=None):
         from fastapi import HTTPException
 
+        assert control is not None and content_delivery_id == control.delivery_id
         self.calls.append((request, steer_request_id, author, control))
         check_steer(self.engine, request.bot_id, turn_id=request.turn_id, grant=control)
         error = self.errors.pop(0) if self.errors else None

@@ -127,8 +127,9 @@ class _Bridge:
     and replayed. The target's run registers after ``registers_after`` fresh
     (uncached) steer commands."""
 
-    def __init__(self, *, registers_after: int | None = 0, persisted=None):
+    def __init__(self, *, registers_after: int | None = 0, persisted=None, delivery_id=DELIVERY_ID):
         self.registers_after = registers_after
+        self.delivery_id = delivery_id
         self.cache: dict[str, str] = {}
         self.fresh = 0
         self.calls: list[tuple[str, str]] = []
@@ -140,7 +141,7 @@ class _Bridge:
         from llm_bawt.service.routes.chat import ChatSteerResponse
 
         assert control is None  # a normal row never steers under a control grant
-        assert content_delivery_id == DELIVERY_ID
+        assert content_delivery_id == self.delivery_id
         self.calls.append((request.turn_id, steer_request_id))
         if self.forced:
             raise HTTPException(status_code=409, detail=self.forced.pop(0))
