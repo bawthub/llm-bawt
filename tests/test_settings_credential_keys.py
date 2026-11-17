@@ -163,6 +163,8 @@ PROTECTED_KEYS = [
     "history_mutation_service_auth",
     "workspace.bridge_url",
     "google_home_probe",
+    "voice_backend_auth_mode",
+    " VOICE_BACKEND_AUTH_MODE ",
     "crawl4ai.token_generation",
     " Bridge_Gate_Enforced:broker",
     "HISTORY_MUTATION_SERVICE_AUTH",

@@ -777,6 +777,19 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
         label="Playground trash retention (days)",
         help="A Playground artifact in Trash is deleted forever this many days after it was trashed.",
     ),
+    "voice_backend_auth_mode": SettingDefinition(
+        key="voice_backend_auth_mode",
+        type="str",
+        default="legacy",
+        applies_to=(),
+        storage=STORAGE_RUNTIME_SETTING,
+        label="Direct voice credential protocol",
+        help=(
+            "Operator-only global wire migration: legacy or derived-v1. Read live "
+            "by app and video bridge on each trusted-origin voice request. Switch "
+            "only in the paired frontend/voice/HA maintenance window."
+        ),
+    ),
     # TASK-2279: global only; read per request by the history/memory mutation routes.
     "history_mutation_service_auth": SettingDefinition(
         key="history_mutation_service_auth",

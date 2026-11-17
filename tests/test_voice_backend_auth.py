@@ -1,8 +1,7 @@
-"""llm-bawt's direct voice-backend calls carry the voice proxy token (TASK-2235).
+"""Direct voice clients support the gated legacy and derived protocols.
 
-The voice backend can require the service token in ``x-bawthub-voice-proxy-token``
-on every route except health. Each llm-bawt caller must send it, or enforcing
-it would break GPU handoff, video preflight and home-audio speech.
+Every consumer uses the same auth helper; a live DB setting coordinates the
+paired backend/HA migration without tying activation to an unrelated restart.
 """
 
 import asyncio
@@ -13,6 +12,7 @@ import pytest
 
 from llm_bawt.bawthub_auth import VOICE_PROXY_TOKEN_HEADER, service_token_source, voice_backend_auth
 from llm_bawt.bawthub_auth.service_token import VOICE_ORIGINS_ENV, trusted_voice_origins
+from llm_bawt.bawthub_auth.voice_credential import derive_voice_credential
 from llm_bawt.integrations.home_audio import HomeAudioClient, HomeAudioSettings
 from llm_bawt.media.gpu_handoff_adapter import LocalHandoffAdapter
 from llm_bawt.media.gpu_preflight import GpuPreflight
@@ -22,10 +22,14 @@ SETTINGS = HomeAudioSettings(tts_url="http://voice.example/api", media_base_url=
                              targets=("media_player.test",))
 
 
-@pytest.fixture
-def token(monkeypatch):
+@pytest.fixture(params=["legacy", "derived-v1"])
+def token(monkeypatch, request):
     monkeypatch.setattr(service_token_source(), "read", lambda: TOKEN)
     monkeypatch.setenv(VOICE_ORIGINS_ENV, "http://voice.example")
+    monkeypatch.setattr(
+        "llm_bawt.bawthub_auth.service_token.read_voice_auth_mode", lambda: request.param,
+    )
+    return TOKEN if request.param == "legacy" else derive_voice_credential(TOKEN)
 
 
 @pytest.fixture
@@ -40,7 +44,7 @@ def _send(request: httpx.Request) -> httpx.Request:
 
 def test_adds_the_proxy_header_and_no_bearer(token):
     sent = _send(httpx.Request("GET", "http://voice.example/v1/internal/voice/sessions"))
-    assert sent.headers[VOICE_PROXY_TOKEN_HEADER] == TOKEN
+    assert sent.headers[VOICE_PROXY_TOKEN_HEADER] == token
     assert "authorization" not in sent.headers
 
 
@@ -130,7 +134,7 @@ def test_gpu_preflight_sends_the_token(token, voice_settings):
 
     voice, error = asyncio.run(run())
     assert error is None and voice["active_count"] == 0
-    assert seen[0].headers[VOICE_PROXY_TOKEN_HEADER] == TOKEN
+    assert seen[0].headers[VOICE_PROXY_TOKEN_HEADER] == token
 
 
 def test_handoff_adapter_sends_the_token_on_sessions_park_and_unpark(token, voice_settings):
@@ -158,7 +162,7 @@ def test_handoff_adapter_sends_the_token_on_sessions_park_and_unpark(token, voic
     paths = [r.url.path for r in seen]
     assert paths == ["/api/v1/internal/voice/sessions", "/api/v1/internal/voice/park",
                      "/api/v1/internal/voice/unpark"]
-    assert all(r.headers[VOICE_PROXY_TOKEN_HEADER] == TOKEN for r in seen)
+    assert all(r.headers[VOICE_PROXY_TOKEN_HEADER] == token for r in seen)
 
 
 def test_home_audio_render_sends_the_token(token):
@@ -179,4 +183,46 @@ def test_home_audio_render_sends_the_token(token):
 
     assert asyncio.run(run()) == buf.getvalue()
     assert seen[0].url.path == "/api/v1/tts/render"
-    assert seen[0].headers[VOICE_PROXY_TOKEN_HEADER] == TOKEN
+    assert seen[0].headers[VOICE_PROXY_TOKEN_HEADER] == token
+
+
+def test_video_bridge_lease_check_uses_selected_credential(token, voice_settings, monkeypatch):
+    from local_model_bridge import video_server
+
+    seen = []
+    transport = _recording(seen, {"json": {
+        "parked": True, "park_id": "lease", "active_count": 0, "active_gpu_work": 0,
+    }})
+    client_type = httpx.AsyncClient
+    monkeypatch.setattr(video_server.httpx, "AsyncClient", lambda: client_type(transport=transport))
+    asyncio.run(video_server.verify_voice_park(SimpleNamespace(voice_lease=lambda: "lease")))
+    assert seen[0].url.path == "/api/v1/internal/voice/sessions"
+    assert seen[0].headers[VOICE_PROXY_TOKEN_HEADER] == token
+
+
+def test_unknown_destination_strips_a_preexisting_voice_header(token):
+    request = httpx.Request("GET", "http://receiver.example/v1/voices",
+                            headers={VOICE_PROXY_TOKEN_HEADER: TOKEN})
+    assert VOICE_PROXY_TOKEN_HEADER not in _send(request).headers
+
+
+def test_seed_rotation_is_seen_by_the_same_auth_instance(token, monkeypatch):
+    monkeypatch.setattr(service_token_source(), "read", lambda: "r" * 64)
+    sent = _send(httpx.Request("GET", "http://voice.example/v1/voices"))
+    expected = "r" * 64 if token == TOKEN else derive_voice_credential("r" * 64)
+    assert sent.headers[VOICE_PROXY_TOKEN_HEADER] == expected
+
+
+def test_bawthub_shared_hmac_vector():
+    # Also pinned in bawthub tests/test_voice_proxy_auth.py and voiceProxyToken.test.ts.
+    vector = "dd8e93cebe290185616abf0205545265abc5fdbdc317e35b628c799b518aa242"
+    assert derive_voice_credential("v" * 40) == vector
+    assert derive_voice_credential("  " + "v" * 40 + "\n") == vector
+
+
+@pytest.mark.parametrize("seed", ["", "short", " " * 40])
+def test_derived_credential_refuses_an_unusable_seed(seed):
+    from llm_bawt.bawthub_auth.voice_credential import VoiceCredentialUnavailable
+
+    with pytest.raises(VoiceCredentialUnavailable):
+        derive_voice_credential(seed)

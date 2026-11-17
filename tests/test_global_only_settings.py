@@ -28,6 +28,7 @@ GLOBAL_READ_KEYS = (
     "maintenance_fallback_cooldown_seconds",
     "model_context_window_default",
     "max_output_tokens",
+    "voice_backend_auth_mode",
 )
 
 

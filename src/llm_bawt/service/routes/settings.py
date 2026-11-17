@@ -119,6 +119,7 @@ def is_protected_setting_key(key: str) -> bool:
         GENERATION_KEY,
         "workspace.bridge_url",
         "google_home_probe",
+        "voice_backend_auth_mode",
     }
 
 

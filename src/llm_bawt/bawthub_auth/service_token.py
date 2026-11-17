@@ -27,6 +27,7 @@ a token BawtHub's file doesn't hold yet. The value is never logged.
 
 from __future__ import annotations
 
+import asyncio
 import enum
 import hmac
 import logging
@@ -38,6 +39,8 @@ from pathlib import Path
 import httpx
 
 from llm_bawt.service.providers import crypto
+
+from .voice_credential import derive_voice_credential, read_voice_auth_mode
 
 logger = logging.getLogger(__name__)
 
@@ -255,12 +258,10 @@ def trusted_voice_origins(environ: Mapping[str, str] | None = None) -> frozenset
 class VoiceBackendAuth(httpx.Auth):
     """httpx auth for direct calls to BawtHub's voice backend (TASK-2235).
 
-    The backend can require the service token in its proxy header
-    (``BAWTHUB_VOICE_REQUIRE_PROXY_TOKEN_FILE``), the same credential the
-    BawtHub frontend proxy sends. Callers take their destination from a
-    runtime setting anyone on the network can edit, so the token goes only to
-    an origin the deployment declares in :data:`VOICE_ORIGINS_ENV` (read per
-    request); any other destination, or no usable token, gets no header.
+    The global live DB mode gates the legacy-to-derived wire migration.
+    Loading new code never opts an existing installation into the new mode.
+    Callers take their destination from editable runtime settings, so only an
+    origin declared in :data:`VOICE_ORIGINS_ENV` receives a credential.
     """
 
     def __init__(self, source: ServiceTokenSource, environ: Mapping[str, str] | None = None):
@@ -268,17 +269,28 @@ class VoiceBackendAuth(httpx.Auth):
         self._environ = environ
         self._withheld: set[str] = set()
 
-    def auth_flow(self, request: httpx.Request) -> Generator[httpx.Request, httpx.Response, None]:
+    def _authorize(self, request: httpx.Request) -> httpx.Request:
+        request.headers.pop(VOICE_PROXY_TOKEN_HEADER, None)
         origin = _origin(request.url)
         if origin is not None and origin in trusted_voice_origins(self._environ):
             token = self._source.read()
             if token:
-                request.headers[VOICE_PROXY_TOKEN_HEADER] = token
+                mode = read_voice_auth_mode()
+                request.headers[VOICE_PROXY_TOKEN_HEADER] = (
+                    derive_voice_credential(token) if mode == "derived-v1" else token
+                )
         elif request.url.host not in self._withheld and len(self._withheld) < 16:
             self._withheld.add(request.url.host)
             logger.warning("Voice backend %s is not in %s; sending no proxy token",
                            request.url.host, VOICE_ORIGINS_ENV)
-        yield request
+        return request
+
+    def auth_flow(self, request: httpx.Request) -> Generator[httpx.Request, httpx.Response, None]:
+        yield self._authorize(request)
+
+    async def async_auth_flow(self, request: httpx.Request):
+        # DB and seed-file reads must not block the app or bridge event loop.
+        yield await asyncio.to_thread(self._authorize, request)
 
 
 _SOURCE = ServiceTokenSource()
