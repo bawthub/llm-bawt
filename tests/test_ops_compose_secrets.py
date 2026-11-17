@@ -27,6 +27,8 @@ SECRETS = {
     "LLM_BAWT_POSTGRES_PASSWORD": "seven77",
     "LLM_BAWT_SECRET_KEY": "k3y=with=equals$$and#hash",
     "DATABASE_URL": "postgresql://u:pw$1@db:5432/x",
+    "LLM_BAWT_REDIS_PASSWORD": "0a1b2c3d",
+    "LLM_BAWT_REDIS_URL": "redis://:0a1b2c3d@redis:6379/0",
 }
 
 
