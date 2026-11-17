@@ -27,7 +27,7 @@ def _line(**fields):
 
 
 def test_destination_probes_cover_exactly_the_env_import_destinations():
-    assert set(pc.DESTINATION_PROBES) == {spec.destination for spec in SPECS}
+    assert set(pc.DESTINATION_PROBES) == {spec.destination for spec in SPECS if spec.planned}
     assert set(pc.DESTINATION_PROBES.values()) <= pc.PROBE_IDS
     assert pc.RECORD_KEYS == set(pc.DESTINATION_PROBES) | {"anthropic-api", "claude"}
 

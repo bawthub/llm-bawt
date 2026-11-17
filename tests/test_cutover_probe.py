@@ -349,7 +349,7 @@ def test_records_reads_each_key_with_its_kind():
     ctx.read = read
     _run("records", ctx)
     assert {connection_id for _, connection_id in asked} == pc.RECORD_KEYS
-    assert dict((cid, kind) for kind, cid in asked) == {**{s.destination: s.kind for s in SPECS},
+    assert dict((cid, kind) for kind, cid in asked) == {**{s.destination: s.kind for s in SPECS if s.planned},
                                                         "anthropic-api": "provider", "claude": "provider"}
 
 

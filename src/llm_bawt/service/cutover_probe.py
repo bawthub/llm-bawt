@@ -397,10 +397,14 @@ class S3HeadProbe(Probe):
 
 
 def record_sources() -> dict[str, str]:
-    """``{record key: connection kind}`` for every key the ``records`` probe reports."""
+    """``{record key: connection kind}`` for every key the ``records`` probe reports.
+
+    Only the cutover plan's (``planned``) destinations: one-off imports such as
+    vaultwarden or azure-speech are not part of the probe contract."""
     from llm_bawt.env_import import SPECS  # noqa: PLC0415
 
-    return {**{spec.destination: spec.kind for spec in SPECS}, "anthropic-api": PROVIDER, "claude": PROVIDER}
+    return {**{spec.destination: spec.kind for spec in SPECS if spec.planned},
+            "anthropic-api": PROVIDER, "claude": PROVIDER}
 
 
 class RecordsProbe(Probe):
