@@ -366,3 +366,15 @@ async def test_stopping_ends_the_whole_group(tmp_path, monkeypatch, leader_exits
     finally:
         await s._stop_run()
         await s.fallback.stop()
+
+
+def test_child_env_preloads_llm_key_wrapper_once(monkeypatch):
+    """TASK-2380: previews of branches predating BawtHub's key wrapper still
+    key their llm-bawt calls; an existing NODE_OPTIONS is kept, never doubled."""
+    assert sup.LLM_KEY_PRELOAD.is_file()
+    preload = f"--import={sup.LLM_KEY_PRELOAD.as_uri()}"
+    monkeypatch.setenv("NODE_OPTIONS", "--max-old-space-size=2048")
+    env = sup._child_env()
+    assert env["NODE_OPTIONS"].split() == ["--max-old-space-size=2048", preload]
+    monkeypatch.setenv("NODE_OPTIONS", env["NODE_OPTIONS"])
+    assert sup._child_env()["NODE_OPTIONS"].split().count(preload) == 1

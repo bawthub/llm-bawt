@@ -59,6 +59,7 @@ logger = logging.getLogger(__name__)
 
 DEV_ROOT = Path(os.environ.get("BAWT_HOUSE_DEV_ROOT", "/home/bridge/dev"))
 PNPM_STORE = DEV_ROOT / ".pnpm-store"
+LLM_KEY_PRELOAD = Path(__file__).with_name("house_preview_llm_key.mjs")
 LOG_PATH = Path("/tmp/house-preview.log")
 CHECK_S = 10.0
 RETRY_S = (15.0, 60.0, 300.0)
@@ -248,6 +249,11 @@ def _child_env() -> dict[str, str]:
     # at the shared store explicitly (same filesystem, so packages are linked).
     env["npm_config_store_dir"] = str(PNPM_STORE)
     env["CI"] = "true"  # never prompt
+    # TASK-2380: key the preview's llm-bawt calls even on branches that
+    # predate BawtHub's own key wrapper (the preload yields to it).
+    preload = f"--import={LLM_KEY_PRELOAD.as_uri()}"
+    if preload not in env.get("NODE_OPTIONS", "").split():
+        env["NODE_OPTIONS"] = f"{env.get('NODE_OPTIONS', '')} {preload}".strip()
     return env
 
 
