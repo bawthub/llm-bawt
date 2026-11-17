@@ -95,6 +95,9 @@ class ConnectionSecret:
     id: str
     meta: dict[str, str]
     secret: dict[str, str]
+    #: Where the fields came from: the stored ``"record"`` or the deprecated
+    #: ``"legacy"`` settings. Lets a preflight prove record-first (TASK-1613).
+    source: str = "record"
 
 
 def _store(config, kind: str) -> CredentialStore:
@@ -236,6 +239,7 @@ def resolve_integration(config, integration_id: str, legacy: Mapping[str, str | 
         id=integration_id,
         meta={name: values[name] for name in (*spec.meta, *spec.meta_optional) if name in values},
         secret={name: values[name] for name in spec.secret},
+        source="legacy",
     )
 
 

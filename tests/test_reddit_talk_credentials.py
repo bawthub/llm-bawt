@@ -439,3 +439,19 @@ def test_a_real_talk_record_is_read_and_a_disconnect_turns_it_off(monkeypatch):
         with pytest.raises(ValueError) as raised:
             get_provisioner_client(_config())
         assert raised.value.code == "not_connected"
+
+
+# --- source (TASK-1613) -----------------------------------------------------------
+
+
+def test_resolved_credentials_report_their_source(monkeypatch):
+    legacy = {"client_id": "legacy-id", "client_secret": "legacy-secret"}
+    names = ("LLM_BAWT_REDDIT_CLIENT_ID", "LLM_BAWT_REDDIT_CLIENT_SECRET")
+
+    stub_integrations(monkeypatch, {"reddit": STORED_REDDIT})
+    stored = connection_secrets.resolve_integration(_config(), "reddit", legacy, legacy_names=names)
+    assert (stored.source, stored.meta["client_id"]) == ("record", "stored-id")
+
+    stub_integrations(monkeypatch, {})
+    fallback = connection_secrets.resolve_integration(_config(), "reddit", legacy, legacy_names=names)
+    assert (fallback.source, fallback.meta["client_id"]) == ("legacy", "legacy-id")

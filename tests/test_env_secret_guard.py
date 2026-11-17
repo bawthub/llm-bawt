@@ -46,9 +46,9 @@ BOOTSTRAP = frozenset({
 #: Credentials that still ship through env, each with why. Shrink only.
 PENDING_RETIREMENT: dict[str, str] = {
     "ANTHROPIC_API_KEY": "TASK-1476: anthropic-api connection is DB-first; env is the legacy fallback",
-    # Still env-only; each needs a DB home first.
-    "LLM_BAWT_REDDIT_CLIENT_SECRET": "TASK-1476: Reddit search credentials have no connection yet",
-    "LLM_BAWT_TALK_PROVISIONER_TOKEN": "TASK-1476: talk provisioner token has no connection yet",
+    "LLM_BAWT_REDDIT_CLIENT_SECRET": "TASK-1613: reddit integration connection is DB-first; env is the legacy fallback",
+    "LLM_BAWT_TALK_PROVISIONER_TOKEN": "TASK-1613: talk-provisioner integration connection is DB-first; env is the legacy fallback",
+    # Still env-only; needs a DB home first.
     "HF_TOKEN": "TASK-1476: model downloads on GPU containers; not an app credential",
     "LOCAL_ANTHROPIC_API_KEY": "TASK-1476: optional placeholder for a LAN local-model passthrough",
 }
