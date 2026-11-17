@@ -290,6 +290,21 @@ class _NativeSelectedOwnerConstraint:
             raise NativeSelectedOwnerDenied()
 
 
+def _without_nul(value):
+    """PostgreSQL text/JSON rejects U+0000; store U+FFFD in its place.
+
+    Deterministic, so a retried terminal projection compares equal to the row
+    an earlier attempt stored, and recovery stays exactly-once.
+    """
+    if isinstance(value, str):
+        return value.replace("\x00", "�")
+    if isinstance(value, list):
+        return [_without_nul(item) for item in value]
+    if isinstance(value, dict):
+        return {_without_nul(key): _without_nul(item) for key, item in value.items()}
+    return value
+
+
 class MessageRowStore:
     """Persist canonical rows while preserving stable-id upsert semantics."""
 
@@ -327,8 +342,9 @@ class MessageRowStore:
         else:
             raise NotImplementedError(f"terminal projection is unsupported for {dialect}")
         frozen = dict(
-            id=message_id, role=role, content=content, timestamp=timestamp,
-            session_id=session_id, attachments=attachments or [], reasoning=reasoning,
+            id=message_id, role=role, content=_without_nul(content), timestamp=timestamp,
+            session_id=session_id, attachments=_without_nul(attachments or []),
+            reasoning=_without_nul(reasoning),
             author_entity_type=author.entity_type if author else None,
             author_entity_id=author.entity_id if author else None,
         )

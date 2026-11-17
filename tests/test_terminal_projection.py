@@ -68,6 +68,40 @@ def history_rows(rows):
         ).order_by(rows.table.c.timestamp)).mappings())
 
 
+def test_nul_bytes_project_once_and_rerun_adds_no_duplicates(rig, private_redis):
+    """PostgreSQL rejects U+0000; recovery must still write each row exactly once."""
+    from llm_bawt.service.turn_logs import TurnLogStore
+    from tests.pg_isolation import isolated_pg_store
+
+    protocol = TurnTerminalProtocol(isolated_pg_store(TurnLogStore))
+    rows = terminal_message_rows(protocol.engine, rig.bot)
+    turn = insert_turn(
+        protocol.engine, bot_id=rig.bot, user_id=rig.user, history_session_id=rig.session_id,
+    )
+    protocol.commit(
+        # Live shape: NUL inside tool output, which only the JSON snapshot carries.
+        protocol.claim(turn), status="ok", end_reason="stop", response_text="answer",
+        tool_context="[Bash]\nbinary\x00result",
+    )
+
+    async def scenario():
+        client = aioredis.Redis(unix_socket_path=private_redis, decode_responses=True)
+        try:
+            await project_committed_terminal(protocol, turn, client, rows_for_bot=lambda bot: rows)
+            first = history_rows(rows)
+            # Rerun the projection itself, as a crash before its receipt would.
+            snapshot = json.loads(read(protocol.engine, turn).terminal_snapshot_json)
+            from llm_bawt.service.turn_terminal_history import project_terminal_history
+            project_terminal_history(snapshot, rows)
+            return first, history_rows(rows)
+        finally:
+            await client.aclose()
+
+    first, again = asyncio.run(scenario())
+    assert len(first) == 2 and again == first
+    assert [r["content"] for r in first] == ["[Tool Results]\n[Bash]\nbinary�result", "answer"]
+
+
 def test_committed_snapshot_projects_history_then_ordered_completion(projection_case):
     protocol, rows, turn, frozen, stream, run = projection_case
 
