@@ -209,6 +209,8 @@ def _collect_mcp_info(config: Config, default_bot_slug: str | None) -> McpInfo:
     try:
         import httpx
 
+        from ..api_auth.mcp import app_key_header
+
         # Protocol-level probe: initialize reads no conversation content.
         probe_payload = {
             "jsonrpc": "2.0",
@@ -223,7 +225,7 @@ def _collect_mcp_info(config: Config, default_bot_slug: str | None) -> McpInfo:
         response = httpx.post(
             f"{mcp_url}/mcp",
             json=probe_payload,
-            headers={"Accept": "application/json, text/event-stream"},
+            headers={"Accept": "application/json, text/event-stream", **app_key_header()},
             timeout=2.0,
         )
         if response.status_code != 200:

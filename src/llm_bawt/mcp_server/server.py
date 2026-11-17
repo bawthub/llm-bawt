@@ -1038,8 +1038,12 @@ def run_server(
         from .registry import HTTP_APP_OPTIONS
         from .task_association import TaskTurnCapabilityMiddleware
 
-        app = BotAccessMiddleware(TaskTurnCapabilityMiddleware(
-            mcp.streamable_http_app(**HTTP_APP_OPTIONS, host=final_host)))
+        from llm_bawt.api_auth import mcp as mcp_auth
+
+        # TASK-2381: outer per-caller gate (mode mcp_auth_mode); the inner
+        # bot-access middleware still decides who each call acts for.
+        app = mcp_auth.wrap(BotAccessMiddleware(TaskTurnCapabilityMiddleware(
+            mcp.streamable_http_app(**HTTP_APP_OPTIONS, host=final_host))))
         config = uvicorn.Config(
             app,
             host=final_host,

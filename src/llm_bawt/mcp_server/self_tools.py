@@ -199,6 +199,15 @@ async def self_fwd(
             "forwarded": 0,
             "error": "target_bot_id is required.",
         }
+    # TASK-2381: the sender is a caller assertion. Refuse a sender that is
+    # not the signed caller before reading that bot's tail.
+    from .inter_bot_sender import SenderIdentityError, resolve_sender_bot_id
+
+    try:
+        sender = resolve_sender_bot_id(sender)
+    except SenderIdentityError as error:
+        return {"success": False, "sender": sender, "target": target,
+                "forwarded": 0, "error": str(error)}
     if target == sender:
         return {
             "success": False,

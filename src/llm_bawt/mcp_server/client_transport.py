@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from llm_bawt.api_auth.mcp import app_key_header
 from llm_bawt.bot_access.service import SERVICE_HEADER
 
 # Logger identity is part of the extraction contract: MCP call logs keep the
@@ -89,6 +90,8 @@ class MemoryClientTransportMixin:
             # MCP streamable-http transport requires Accept header to include text/event-stream
             "Accept": "application/json, text/event-stream",
             SERVICE_HEADER: self._service_principal.mint(method, params),
+            # TASK-2381: the app's service key for the :8001 gate.
+            **app_key_header(),
         }
 
         start = time.perf_counter()

@@ -9,7 +9,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 from starlette.responses import JSONResponse
 
-from llm_bawt.api_auth import wiring
+from llm_bawt.api_auth import mcp, wiring
 
 from .service_auth import NO_STORE, require_service_token
 
@@ -19,5 +19,7 @@ router = APIRouter(prefix="/v1/admin", dependencies=[Depends(require_service_tok
 
 @router.get("/auth-observations")
 async def get_auth_observations() -> JSONResponse:
-    return JSONResponse({"mode": wiring.RESOLVER.mode(), "rows": wiring.OBSERVATIONS.snapshot()},
+    return JSONResponse({"mode": wiring.RESOLVER.mode(), "rows": wiring.OBSERVATIONS.snapshot(),
+                         # TASK-2381: the MCP server (:8001) has its own mode and counts.
+                         "mcp": {"mode": mcp.RESOLVER.mode(), "rows": mcp.OBSERVATIONS.snapshot()}},
                         headers=NO_STORE)
