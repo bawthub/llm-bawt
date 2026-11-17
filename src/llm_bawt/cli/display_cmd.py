@@ -18,6 +18,7 @@ from llm_bawt.bot_colors import cli_color_for
 from llm_bawt.bot_types import format_bot_type
 from llm_bawt.bots import BotManager
 from llm_bawt.service.delivery_reply import is_accepted_receipt
+from llm_bawt.utils.bot_identity import optional_default_bot_id
 from llm_bawt.utils.config import Config
 from llm_bawt.utils.streaming import render_complete_response, render_streaming_response
 
@@ -676,7 +677,8 @@ def _show_bots_from_local(config: Config):
     """Render bot list from local BotManager (YAML only, no DB)."""
     bot_manager = BotManager(config, local_only=True)
     bots = bot_manager.list_bots()
-    default_bot = bot_manager.get_default_bot()
+    # Listing is read-only: a botless or default-less install still lists (TASK-2413).
+    default_slug = optional_default_bot_id(config)
 
     console.print(Panel.fit("[bold cyan]Available Bots[/bold cyan] [dim](local)[/dim]", border_style="cyan"))
     console.print()
@@ -691,7 +693,7 @@ def _show_bots_from_local(config: Config):
     table.add_column("Memory", justify="center")
 
     for bot in bots:
-        is_default = " ⭐" if bot.slug == default_bot.slug else ""
+        is_default = " ⭐" if bot.slug == default_slug else ""
         memory_icon = "[green]✓[/green]" if bot.requires_memory else "[dim]✗[/dim]"
         selection = bot_manager.select_model(None, bot_slug=bot.slug)
         default_model = selection.alias or f"[dim]{config.DEFAULT_MODEL_ALIAS or 'global'}[/dim]"
