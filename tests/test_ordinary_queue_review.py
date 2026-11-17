@@ -41,6 +41,11 @@ def test_retry_of_queued_new_does_not_rotate_durable_thread_twice(monkeypatch):
         "llm_bawt.service.chat_streaming.turn_admission_claim",
         lambda *_: AdmissionClaim(owner="current-claim", fence=lambda _: True),
     )
+    # This rotation probe mocks admission/persistence and has no delivery DB.
+    # Real delivery inheritance (including held writes) is covered separately.
+    monkeypatch.setattr(
+        "llm_bawt.service.content_lineage.inherit_admitted_request", lambda *_: None,
+    )
     monkeypatch.setattr(
         "llm_bawt.task_turn_context.mint_for_agent_turn",
         Mock(side_effect=RuntimeError("transient setup error after rotation")),

@@ -28,6 +28,7 @@ from llm_bawt.service.providers.search_keys import (
     TavilySearchKeyAdapter,
 )
 from tests.stored_provider_keys import real_credential_store, stub_stored_keys
+from tests.content_admission_fixtures import _content_store, _native_admission  # noqa: F401
 
 _ENV_NAMES = [name for cls in SEARCH_KEY_ADAPTERS for name in cls.env_vars]
 
@@ -254,7 +255,7 @@ def test_probe_accepts_a_good_key_and_reports_outages(monkeypatch, real_store, c
     assert "unreachable" in cls(SimpleNamespace())._probe("synthetic-key")[1]
 
 
-def test_an_existing_executor_follows_a_disconnect_or_rotation(monkeypatch):
+def test_an_existing_executor_follows_a_disconnect_or_rotation(monkeypatch, native_admission):
     # Codex r1 Blocker: a cached keyed client kept sending a disconnected key.
     from llm_bawt.search.brave_client import BraveSearchClient
     from llm_bawt.search.ddgs_client import DuckDuckGoClient
@@ -270,7 +271,8 @@ def test_an_existing_executor_follows_a_disconnect_or_rotation(monkeypatch):
                         lambda self, query, **_kw: calls.append(self._api_key) or [])
     monkeypatch.setattr(DuckDuckGoClient, "search", lambda self, query, **_kw: calls.append("ddg") or [])
     executor = ToolExecutor(user_id="synthetic", config=config,
-                            search_client=get_search_client(config, provider=SearchProvider.BRAVE))
+                            search_client=get_search_client(config, provider=SearchProvider.BRAVE),
+                            **native_admission)
 
     def search():
         executor.execute(ToolCall(name="search", arguments={"query": "q"}, raw_text=""))
@@ -424,7 +426,7 @@ def test_get_search_client_without_fallback_returns_none(monkeypatch):
     assert isinstance(factory.get_search_client(config, provider="brave"), DuckDuckGoClient)
 
 
-def test_the_search_tool_says_when_ddg_stood_in_for_the_configured_provider(monkeypatch):
+def test_the_search_tool_says_when_ddg_stood_in_for_the_configured_provider(monkeypatch, native_admission):
     from llm_bawt.search.brave_client import BraveSearchClient
     from llm_bawt.search.ddgs_client import DuckDuckGoClient
     from llm_bawt.tools.executor import ToolExecutor
@@ -436,7 +438,8 @@ def test_the_search_tool_says_when_ddg_stood_in_for_the_configured_provider(monk
                         lambda self, q, **kw: [_result("https://b.example", SearchProvider.BRAVE)])
     monkeypatch.setattr(DuckDuckGoClient, "search",
                         lambda self, q, **kw: [_result("https://d.example", SearchProvider.DUCKDUCKGO)])
-    executor = ToolExecutor(user_id="synthetic", config=_config(SEARCH_PROVIDER="brave"))
+    executor = ToolExecutor(user_id="synthetic", config=_config(SEARCH_PROVIDER="brave"),
+                            **native_admission)
 
     def search() -> str:
         return executor.execute(ToolCall(name="search", arguments={"query": "q"}, raw_text=""))

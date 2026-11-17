@@ -9,6 +9,7 @@ from llm_bawt.memory.ownership import MemoryAuthority
 from llm_bawt.mcp_server import server as tools
 from llm_bawt.mcp_server.catalog import CatalogFastMCP
 from tests.test_bot_access_mcp import Resolver, identity, signer, turn  # noqa: F401
+from tests.content_admission_fixtures import _content_store  # noqa: F401
 
 
 @pytest.mark.asyncio
@@ -30,7 +31,7 @@ from tests.test_bot_access_mcp import Resolver, identity, signer, turn  # noqa: 
      "delete_memories_by_source_message_ids", {"message_ids": ["source"]}),
 ])
 @pytest.mark.parametrize("user", ["user_a", "user_b"])
-async def test_registered_crud_passes_personal_authority(monkeypatch, name, handler, method, extra, user):
+async def test_registered_crud_passes_personal_authority(monkeypatch, name, handler, method, extra, user, content_store):
     calls = []
 
     async def record(**kwargs):
@@ -40,7 +41,8 @@ async def test_registered_crud_passes_personal_authority(monkeypatch, name, hand
         return []
 
     monkeypatch.setattr(tools, "_get_storage", lambda: SimpleNamespace(**{method: record}))
-    catalog = CatalogFastMCP("memory-owner-probe", bot_policy_resolver=Resolver())
+    catalog = CatalogFastMCP("memory-owner-probe", bot_policy_resolver=Resolver(),
+                            content_store_provider=lambda: content_store)
     catalog.add_tool(handler, name=name)
     with identity(turn(user=user)):
         await catalog._tool_manager.call_tool(name, {"bot_id": "public_fixture", **extra}, None)
@@ -79,7 +81,7 @@ async def test_unbound_crud_fails_before_storage(monkeypatch, handler, extra):
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("signer")
-async def test_registered_fact_extraction_uses_sourced_writer_and_bound_owner(monkeypatch):
+async def test_registered_fact_extraction_uses_sourced_writer_and_bound_owner(monkeypatch, content_store):
     calls = []
 
     async def extract(**kwargs):
@@ -91,7 +93,8 @@ async def test_registered_fact_extraction_uses_sourced_writer_and_bound_owner(mo
 
     monkeypatch.setattr("llm_bawt.mcp_server.extraction.extract_facts_from_messages", extract)
     monkeypatch.setattr(tools, "_get_storage", lambda: SimpleNamespace(store_extracted_memory=store))
-    catalog = CatalogFastMCP("extracted-owner-probe", bot_policy_resolver=Resolver())
+    catalog = CatalogFastMCP("extracted-owner-probe", bot_policy_resolver=Resolver(),
+                            content_store_provider=lambda: content_store)
     catalog.add_tool(tools.extract_facts, name="facts_extract")
     arguments = {"bot_id": "public_fixture", "user_id": "user_a",
                  "messages": [{"id": "source", "role": "user", "content": "Synthetic fact"}],
@@ -194,12 +197,13 @@ async def test_storage_embedding_repair_forwards_exact_authority(monkeypatch):
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("signer")
 @pytest.mark.parametrize("user", ["user_a", "user_b"])
-async def test_supersede_is_noop_for_either_registered_user(monkeypatch, user):
+async def test_supersede_is_noop_for_either_registered_user(monkeypatch, user, content_store):
     def forbidden_storage():
         raise AssertionError("unimplemented supersede reached storage")
 
     monkeypatch.setattr(tools, "_get_storage", forbidden_storage)
-    catalog = CatalogFastMCP("supersede-owner-probe", bot_policy_resolver=Resolver())
+    catalog = CatalogFastMCP("supersede-owner-probe", bot_policy_resolver=Resolver(),
+                            content_store_provider=lambda: content_store)
     catalog.add_tool(tools.supersede_memory, name="memory_supersede")
     with identity(turn(user=user)):
         await catalog._tool_manager.call_tool("memory_supersede", {

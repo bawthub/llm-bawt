@@ -138,6 +138,7 @@ class ClaudeGitCapabilityEnvironmentTests(unittest.TestCase):
         bridge = SimpleNamespace(
             _mcp_servers={"bawthub": {"type": "http", "url": "http://test/mcp"}},
             _cwd="/tmp", _permission_mode="default", _add_dirs=[],
+            _make_external_failure_hook=lambda: None,
         )
         mcp_before = copy.deepcopy(bridge._mcp_servers)
         base = {"KEEP": "unchanged", MCP_TASK_TURN_CONTEXT_ENV: "stale-test-context"}

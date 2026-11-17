@@ -336,6 +336,11 @@ class SessionService:
         if name == "_turn_log_store":
             self._turn_log_store = FakeTurnStore()
             return self._turn_log_store
+        if name == "_content_provenance_store":
+            from llm_bawt.content_provenance import ContentProvenanceStore
+
+            self._content_provenance_store = ContentProvenanceStore(self._turn_log_store.engine)
+            return self._content_provenance_store
         raise AttributeError(name)
 
     def get_memory_client(self, bot_id, user_id):

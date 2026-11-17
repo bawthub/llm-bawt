@@ -4,6 +4,7 @@ import pytest
 from llm_bawt.mcp_server import server as tools
 from llm_bawt.mcp_server.catalog import CatalogFastMCP
 from tests.test_bot_access_mcp import Resolver, identity, signer, turn  # noqa: F401 (signer is a fixture)
+from tests.content_admission_fixtures import _content_store  # noqa: F401
 
 pytestmark = pytest.mark.usefixtures("signer")
 
@@ -14,14 +15,15 @@ pytestmark = pytest.mark.usefixtures("signer")
     ("messages_restore_ignored", tools.restore_ignored_messages, {}),
 ])
 @pytest.mark.parametrize("bot", ["public_fixture", "private_fixture"])
-async def test_owner_omission(monkeypatch, name, handler, extra, bot):
+async def test_owner_omission(monkeypatch, name, handler, extra, bot, content_store):
     calls = []
     async def record(**kwargs):
         calls.append(kwargs)
         return 1
     storage = SimpleNamespace(delete_memory=record, ignore_message_by_id=record, restore_ignored_messages=record)
     monkeypatch.setattr(tools, "_get_storage", lambda: storage)
-    catalog = CatalogFastMCP("owner-omission-probe", bot_policy_resolver=Resolver())
+    catalog = CatalogFastMCP("owner-omission-probe", bot_policy_resolver=Resolver(),
+                            content_store_provider=lambda: content_store)
     catalog.add_tool(handler, name=name)
     with identity(turn(user="user_a")):
         await catalog._tool_manager.call_tool(name, {"bot_id": bot, **extra}, None)

@@ -25,6 +25,7 @@ from llm_bawt.approval_policies import (
     REQ_RESPONDED,
     ToolApprovalPolicyStore,
 )
+from llm_bawt.content_provenance import ContentProvenanceStore
 from llm_bawt.service import approval_continuations as continuations
 from llm_bawt.service.approval_continuations import (
     _continuation_identity,
@@ -108,6 +109,7 @@ class FakeService:
         self._turn_log_store = turn_store
         if getattr(turn_store, "engine", None) is None:
             turn_store.engine = store.engine
+        self._content_provenance_store = ContentProvenanceStore(store.engine)
         self.config = None
         self.requests = []
         self.save_busy = save_busy

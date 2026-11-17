@@ -42,6 +42,11 @@ def _build_service_for_finalize() -> BackgroundService:
 def test_inter_bot_nonstream_turn_publishes_visible_lifecycle(
     monkeypatch, sender_mode: str,
 ) -> None:
+    # Lifecycle probe: admission and delivery persistence are fakes. The real
+    # provenance boundary has its own database-backed route regression.
+    monkeypatch.setattr(
+        "llm_bawt.service.content_lineage.inherit_admitted_request", lambda *_: None,
+    )
     service = BackgroundService.__new__(BackgroundService)
     service.config = SimpleNamespace(DEFAULT_BOT="nova", DEFAULT_USER="operator")
     service._inter_bot_dispatcher = SimpleNamespace(
@@ -194,6 +199,10 @@ def test_inter_bot_nonstream_turn_start_prefers_request_session_over_archived_se
     route to the TARGET, not the archived source — otherwise turn_start
     events go to the dead thread and the pane on the fresh session gates
     them out as "wrong thread"."""
+    # This fixture deliberately has no delivery database (see lifecycle probe).
+    monkeypatch.setattr(
+        "llm_bawt.service.content_lineage.inherit_admitted_request", lambda *_: None,
+    )
     service = BackgroundService.__new__(BackgroundService)
     service.config = SimpleNamespace(DEFAULT_BOT="nova", DEFAULT_USER="operator")
     service._inter_bot_dispatcher = SimpleNamespace(

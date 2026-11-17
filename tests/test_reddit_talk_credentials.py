@@ -17,6 +17,7 @@ from llm_bawt.search.base import SearchProvider
 from llm_bawt.service import connection_secrets
 from llm_bawt.service.connection_secrets import ConnectionSecret, ConnectionUnavailable
 from tests.stored_provider_keys import real_credential_store
+from tests.content_admission_fixtures import _content_store, _native_admission  # noqa: F401
 
 CLIENT_SECRET = "reddit-secret-do-not-echo"
 TOKEN = "provisioner-token-do-not-echo"
@@ -206,7 +207,7 @@ def test_search_skips_reddit_whose_record_is_unusable(monkeypatch, code):
     assert "legacy-secret" not in reason
 
 
-def test_an_existing_executor_follows_a_reddit_disconnect_or_rotation(monkeypatch):
+def test_an_existing_executor_follows_a_reddit_disconnect_or_rotation(monkeypatch, native_admission):
     # The Brave/Tavily slice's Codex r1 Blocker, for Reddit: a cached client
     # must not keep using credentials that were rotated or disconnected.
     from llm_bawt.search.ddgs_client import DuckDuckGoClient
@@ -224,7 +225,8 @@ def test_an_existing_executor_follows_a_reddit_disconnect_or_rotation(monkeypatc
                         lambda self, query, **_kw: calls.append(self._client_secret) or [])
     monkeypatch.setattr(DuckDuckGoClient, "search", lambda self, query, **_kw: calls.append("ddg") or [])
     executor = ToolExecutor(user_id="synthetic", config=config,
-                            search_client=get_search_client(config, provider=SearchProvider.REDDIT))
+                            search_client=get_search_client(config, provider=SearchProvider.REDDIT),
+                            **native_admission)
 
     def search():
         executor.execute(ToolCall(name="search", arguments={"query": "q"}, raw_text=""))
@@ -238,7 +240,7 @@ def test_an_existing_executor_follows_a_reddit_disconnect_or_rotation(monkeypatc
     assert calls == [CLIENT_SECRET, "rotated-secret", "ddg"]
 
 
-def _executor_searches(monkeypatch, config, initial):
+def _executor_searches(monkeypatch, config, initial, admission):
     """An executor holding ``initial``; returns ``search()`` and the list of who served."""
     from llm_bawt.search.ddgs_client import DuckDuckGoClient
     from llm_bawt.search.reddit_client import RedditSearchClient
@@ -249,7 +251,7 @@ def _executor_searches(monkeypatch, config, initial):
     monkeypatch.setattr(RedditSearchClient, "search",
                         lambda self, query, **_kw: calls.append(self._client_secret) or [])
     monkeypatch.setattr(DuckDuckGoClient, "search", lambda self, query, **_kw: calls.append("ddg") or [])
-    executor = ToolExecutor(user_id="synthetic", config=config, search_client=initial)
+    executor = ToolExecutor(user_id="synthetic", config=config, search_client=initial, **admission)
 
     def search():
         executor.execute(ToolCall(name="search", arguments={"query": "q"}, raw_text=""))
@@ -258,7 +260,7 @@ def _executor_searches(monkeypatch, config, initial):
 
 
 @pytest.mark.parametrize("preferred", ["reddit", None])
-def test_an_existing_executor_returns_to_reddit_when_it_is_reconnected(monkeypatch, preferred):
+def test_an_existing_executor_returns_to_reddit_when_it_is_reconnected(monkeypatch, preferred, native_admission):
     # Loopy r1 B1: the DuckDuckGo stand-in was "always current", so a long-lived
     # executor kept serving DuckDuckGo after Reddit was connected again.
     from llm_bawt.search.factory import get_search_client
@@ -267,7 +269,7 @@ def test_an_existing_executor_returns_to_reddit_when_it_is_reconnected(monkeypat
     outcomes: dict[str, object] = {"reddit": STORED_REDDIT}
     stub_integrations(monkeypatch, outcomes)
     config = _config(SEARCH_PROVIDER=preferred)
-    search, calls = _executor_searches(monkeypatch, config, get_search_client(config))
+    search, calls = _executor_searches(monkeypatch, config, get_search_client(config), native_admission)
 
     search()
     outcomes["reddit"] = ConnectionUnavailable("not_connected")
@@ -278,14 +280,14 @@ def test_an_existing_executor_returns_to_reddit_when_it_is_reconnected(monkeypat
     assert calls == [CLIENT_SECRET, "ddg", CLIENT_SECRET]
 
 
-def test_an_existing_executor_picks_up_a_first_reddit_connection(monkeypatch):
+def test_an_existing_executor_picks_up_a_first_reddit_connection(monkeypatch, native_admission):
     from llm_bawt.search.factory import get_search_client
 
     _every_search_available(monkeypatch)
     outcomes: dict[str, object] = {}
     stub_integrations(monkeypatch, outcomes)
     config = _config()
-    search, calls = _executor_searches(monkeypatch, config, get_search_client(config))
+    search, calls = _executor_searches(monkeypatch, config, get_search_client(config), native_admission)
 
     search()
     outcomes["reddit"] = STORED_REDDIT
@@ -294,13 +296,13 @@ def test_an_existing_executor_picks_up_a_first_reddit_connection(monkeypatch):
     assert calls == ["ddg", CLIENT_SECRET]
 
 
-def test_an_existing_executor_follows_a_change_of_preferred_provider(monkeypatch):
+def test_an_existing_executor_follows_a_change_of_preferred_provider(monkeypatch, native_admission):
     from llm_bawt.search.factory import get_search_client
 
     _every_search_available(monkeypatch)
     stub_integrations(monkeypatch, {"reddit": STORED_REDDIT})
     config = _config(SEARCH_PROVIDER="reddit")
-    search, calls = _executor_searches(monkeypatch, config, get_search_client(config))
+    search, calls = _executor_searches(monkeypatch, config, get_search_client(config), native_admission)
 
     search()
     config.SEARCH_PROVIDER = "duckduckgo"
