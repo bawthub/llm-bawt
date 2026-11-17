@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from llm_bawt.service.background_service import BackgroundService
+from llm_bawt.service.content_lineage import inherit_admitted_request
 from llm_bawt.service.schemas import ChatCompletionRequest, ChatMessage
 from llm_bawt.service.turn_execution import turn_executions
 
@@ -80,6 +81,10 @@ def _isolate(monkeypatch):
     from llm_bawt.service import chat_nonstream, chat_streaming
     from llm_bawt.service.turn_admission import AdmissionClaim
 
+    # These service fakes have no delivery database. The provenance regression
+    # below restores the real boundary and supplies actual durable delivery rows.
+    monkeypatch.setattr("llm_bawt.service.content_lineage.inherit_admitted_request",
+                        lambda *_args: None)
     for module in (chat_nonstream, chat_streaming):
         validate, claim = module.validate_inter_bot_claim, module.turn_admission_claim
         monkeypatch.setattr(module, "validate_inter_bot_claim", lambda svc, req, original=validate: (
@@ -279,13 +284,13 @@ def test_chat_backend_nonstream_turn_does_not_register(_isolate) -> None:
     assert _isolate == []
 
 
-@pytest.mark.parametrize("claimed", [False, True], ids=["api", "inter-bot"])
+@pytest.mark.parametrize("origin", ["api", "clean-delivery", "exposed-delivery"])
 @pytest.mark.parametrize("fetch_fails", [False, True], ids=["fetch-ok", "fetch-error"])
 def test_native_nonstream_tools_use_service_turn_identity(
-    monkeypatch, tmp_path, _isolate, claimed, fetch_fails,
+    monkeypatch, tmp_path, _isolate, origin, fetch_fails,
 ):
     """Run chat_completion through the real service query and database-backed loop."""
-    from sqlalchemy import create_engine, select
+    from sqlalchemy import JSON, Column, MetaData, String, Table, create_engine, select
 
     from llm_bawt.content_provenance import ContentProvenanceStore, ContentTurn, _writes
     from llm_bawt.models.message import Message
@@ -294,6 +299,10 @@ def test_native_nonstream_tools_use_service_turn_identity(
     engine = create_engine(f"sqlite:///{tmp_path / 'content.sqlite'}")
     store = ContentProvenanceStore(engine)
     monkeypatch.setattr("llm_bawt.service.dependencies.get_content_provenance_store",
+                        lambda _config: store)
+    monkeypatch.setattr("llm_bawt.service.content_lineage.inherit_admitted_request",
+                        inherit_admitted_request)
+    monkeypatch.setattr("llm_bawt.service.content_lineage.get_content_provenance_store",
                         lambda _config: store)
     policy = SimpleNamespace(compile_bundle=lambda: SimpleNamespace(policies=[]),
                              record_decision=Mock())
@@ -335,22 +344,53 @@ def test_native_nonstream_tools_use_service_turn_identity(
         return result
 
     llm.execute_llm_query = execute
-    request = _claimed(_request()) if claimed else _request()
+    request = _claimed(_request()) if origin != "api" else _request()
+    if origin != "api":
+        rows = Table(
+            "inter_bot_deliveries", MetaData(),
+            *[Column(name, String) for name in (
+                "id", "sender_bot_id", "sender_turn_id", "author_entity_type", "author_entity_id",
+                "target_bot_id", "turn_id", "target_turn_id", "batch_head_id",
+            )],
+            Column("metadata_json", JSON),
+        )
+        rows.metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.execute(rows.insert(), {
+                "id": "delivery-test", "sender_bot_id": "reader", "sender_turn_id": "source-turn",
+                "author_entity_type": "bot", "author_entity_id": "reader",
+                "target_bot_id": "caid", "turn_id": "turn-delivery-test",
+                "target_turn_id": "turn-delivery-test",
+                "metadata_json": {"_failure_origin": {
+                    "version": 1, "bot_id": "reader", "user_id": "operator",
+                    "turn_id": "source-turn", "trigger_message_id": "source-trigger",
+                    "session_id": "source-session",
+                }},
+            })
+        service._inter_bot_dispatcher = SimpleNamespace(
+            store=SimpleNamespace(engine=engine, get=Mock(return_value=None)),
+        )
+        if origin == "exposed-delivery":
+            store.expose(ContentTurn("reader", "operator", "source-turn", "source-trigger"))
     try:
         response = asyncio.run(service.chat_completion(request))
         assert response.choices[0].message.content == "Done."
         llm.home_client.set.assert_called_once_with(entity="light.kitchen", state="on", brightness=None)
         llm.web_fetch_client.fetch.assert_called_once_with("https://example.test")
-        llm.memory.store_memory.assert_called_once()
-        assert llm.memory.store_memory.call_args.kwargs["source_message_ids"] == [
-            request.user_message_id,
-        ]
+        if origin == "exposed-delivery":
+            llm.memory.store_memory.assert_not_called()
+        else:
+            llm.memory.store_memory.assert_called_once()
+            assert llm.memory.store_memory.call_args.kwargs["source_message_ids"] == [
+                request.user_message_id,
+            ]
         llm.profile_manager.set_attribute.assert_not_called()
         assert "provenance is unavailable" not in observed["tool_context"]
         assert "Held:" in observed["tool_context"]
         with engine.connect() as conn:
             receipts = conn.execute(select(_writes)).mappings().all()
-        assert [row["decision"] for row in receipts] == ["allowed", "held", "held"]
+        initial = "held" if origin == "exposed-delivery" else "allowed"
+        assert [row["decision"] for row in receipts] == [initial, "held", "held"]
         assert {row["source_turn"] for row in receipts} == {observed["turn_id"]}
         assert observed["trigger_message_id"] == request.user_message_id
         assert store.seen(ContentTurn("caid", "operator", observed["turn_id"],
