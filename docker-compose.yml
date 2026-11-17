@@ -86,6 +86,11 @@ services:
       # `bridge` in Dockerfile.agent-bridge); the bridges mount it read-only and
       # read each file on every call (agent_bridge/bridge_token.py).
       - BRIDGE_TOKEN_EXPORT_UID=${BRIDGE_TOKEN_EXPORT_UID:-${BRIDGE_UID:-1000}}
+      # TASK-2380: per-caller API keys, one directory volume per consumer
+      # (principal=/dir[:uid[:gid]]). The app's own in-process callers read
+      # theirs from the first; each other consumer mounts only its own.
+      - LLM_BAWT_API_KEY_EXPORTS=${LLM_BAWT_API_KEY_EXPORTS:-llm-bawt-app=/run/llm-bawt-api-keys/app,bridge-claude-code=/run/llm-bawt-api-keys/bridge-claude-code:${BRIDGE_UID:-1000},bridge-local-model=/run/llm-bawt-api-keys/bridge-local-model,bawthub-web=/run/llm-bawt-api-keys/bawthub-web:${BAWTHUB_SERVICE_TOKEN_EXPORT_UID:-1001},bawthub-voice=/run/llm-bawt-api-keys/bawthub-voice:${BAWTHUB_SERVICE_TOKEN_EXPORT_UID:-1001}}
+      - LLM_BAWT_API_KEY_FILE=/run/llm-bawt-api-keys/app/api-key
       - BRIDGE_BROKER_TOKEN_EXPORT_FILE=/run/llm-bawt-bridge-tokens/broker
       - BRIDGE_GIT_CREDENTIAL_TOKEN_EXPORT_FILE=/run/llm-bawt-bridge-tokens/git-credential
       # TASK-2386: the vault gate's token, for bw-secret. The bridges read it
@@ -196,6 +201,12 @@ services:
       # so atomic replaces reach the readers).
       - bridge-tokens:/run/llm-bawt-bridge-tokens
       - crawl4ai-token:/run/llm-bawt-crawl4ai-token
+      # TASK-2380: the app writes every caller's key directory.
+      - api-key-app:/run/llm-bawt-api-keys/app
+      - api-key-bridge-claude-code:/run/llm-bawt-api-keys/bridge-claude-code
+      - api-key-bridge-local-model:/run/llm-bawt-api-keys/bridge-local-model
+      - api-key-bawthub-web:/run/llm-bawt-api-keys/bawthub-web
+      - api-key-bawthub-voice:/run/llm-bawt-api-keys/bawthub-voice
       # TASK-636: codex auth.json bind mount REMOVED — the app reads the
       # bundle from the encrypted DB store (usage probe calls codex_oauth
       # in-process; broker endpoint serves bridges).
@@ -328,6 +339,7 @@ services:
       - BRIDGE_GIT_CREDENTIAL_TOKEN_FILE=/run/llm-bawt-bridge-tokens/git-credential
       - BRIDGE_VAULT_TOKEN_FILE=/run/llm-bawt-bridge-tokens/vault
       - CRAWL4AI_API_TOKEN_FILE=/run/llm-bawt-bridge-tokens/crawl4ai
+      - LLM_BAWT_API_KEY_FILE=/run/llm-bawt-api-key/api-key
       # TASK-2072: bawt-wt defaults to the host-identical root (mounted below),
       # so new worktrees' gitdir links also resolve on the host.
       - BAWT_WT_DEV_ROOT=${HOME}/dev
@@ -367,6 +379,8 @@ services:
       - ${HOME}/dev/agent-skills/scripts:/opt/agent-skills/bin:ro
       # TASK-1604: the app's exported bridge tokens, read-only.
       - bridge-tokens:/run/llm-bawt-bridge-tokens:ro
+      # TASK-2380: this bridge's own API key directory, read-only.
+      - api-key-bridge-claude-code:/run/llm-bawt-api-key:ro
     depends_on:
       redis:
         condition: service_healthy
@@ -485,6 +499,8 @@ services:
       - TRANSFORMERS_VERBOSITY
       # Model downloads (PENDING_RETIREMENT).
       - HF_TOKEN
+      # TASK-2380: this bridge's API key (its own read-only directory volume).
+      - LLM_BAWT_API_KEY_FILE=/run/llm-bawt-api-key/api-key
     extra_hosts:
       - "host.docker.internal:host-gateway"
       # The LAN host's names and address are deployment data (.env); see .env.docker.
@@ -501,6 +517,8 @@ services:
       - ${LLM_BAWT_MODEL_CACHE_DIR:-${HOME}/.cache/llm-bawt/models}:/root/.cache/llm-bawt/models
       # HuggingFace cache (HF_HOME) for GGUF / vLLM model downloads
       - ${HF_HOME:-${HOME}/.cache/huggingface}:/root/.cache/huggingface
+      # TASK-2380: this bridge's own API key directory, read-only.
+      - api-key-bridge-local-model:/run/llm-bawt-api-key:ro
     depends_on:
       redis:
         condition: service_healthy
@@ -610,3 +628,13 @@ volumes:
   # readers mount these read-only.
   bridge-tokens:
   crawl4ai-token:
+  # TASK-2380: one API key directory per caller; the app writes them all.
+  # BawtHub's are fixed-name so its separate compose project can mount them
+  # as external volumes (bring `app` up first; it creates them).
+  api-key-app:
+  api-key-bridge-claude-code:
+  api-key-bridge-local-model:
+  api-key-bawthub-web:
+    name: llm-bawt-api-key-bawthub-web
+  api-key-bawthub-voice:
+    name: llm-bawt-api-key-bawthub-voice
