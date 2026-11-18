@@ -6,35 +6,26 @@ the live task board and builds a short list of the bot's open cards (short ID,
 status, WAITING kind, title). Coordinators also get one fleet line: each bot's
 active card and its waiting count.
 
-The list rides the outbound user message, never the pinned system prompt, so
-the cacheable prefix stays byte-stable. It is built every turn but sent only
-when the transcript doesn't already hold the current list: on a new pin
-episode (a session start or reset), after a compaction, or when the list
-changed. ``sessions.session_metadata`` records what this session was last
-told. Every failure is logged and the turn continues without the list.
+The list rides the outbound user message on every eligible turn, never the
+pinned system prompt, so the cacheable prefix stays byte-stable. Every
+failure is logged and the turn continues without the list.
 """
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
 import os
 import threading
 import time
 from typing import Any
 
-from sqlalchemy import text
-
 logger = logging.getLogger(__name__)
 
 ASSIGNED_CARDS_KEY = "agents.assigned_cards"
-#: ``sessions.session_metadata`` key: ``{"pin_turn_id", "compaction_gen", "digest"}``.
-STATE_KEY = "assigned_cards"
 #: The role capability whose holders get the fleet line.
 FLEET_CAPABILITY = "coordinate"
 
-#: Display order; any other status is left out.
-STATUS_ORDER = ("IN_PROGRESS", "WAITING", "BLOCKED", "REVIEW", "QUEUED")
+#: Display order of the open statuses; closed ones (COMPLETED, CANCELLED, DELETED) are left out.
+STATUS_ORDER = ("IN_PROGRESS", "WAITING", "BLOCKED", "REVIEW", "QUEUED", "PLANNING", "REFINED", "BUG")
 MAX_LINES = 12
 TITLE_CHARS = 90
 BOARD_TTL_SECONDS = 10.0
@@ -103,19 +94,6 @@ def render(rows: list[dict], bot_id: str, coordinator: bool) -> tuple[str, str]:
     return cards, fleet
 
 
-def digest(cards: str, fleet: str) -> str:
-    return hashlib.sha256(f"{cards}\n{fleet}".encode()).hexdigest()[:16]
-
-
-def should_send(marker: Any, decision: Any, compaction_gen: int, current: str) -> bool:
-    """Whether the transcript lacks the current list."""
-    if not isinstance(marker, dict):
-        return True
-    return (marker.get("pin_turn_id") != decision.pin_turn_id
-            or marker.get("compaction_gen") != compaction_gen
-            or marker.get("digest") != current)
-
-
 # -- reads ---------------------------------------------------------------------
 
 def board_rows() -> list[dict]:
@@ -132,7 +110,7 @@ def board_rows() -> list[dict]:
     base = os.getenv("LLM_BAWT_TASK_API_URL", DEFAULT_TASK_API_URL)
     resp = httpx.get(
         f"{base}/api/tasks/board",
-        params={"view": "status", "rows": "active", "updated": "all", "limit": "50"},
+        params={"view": "status", "rows": "active", "updated": "all"},  # no limit: every row
         auth=service_auth(), timeout=BOARD_TIMEOUT_SECONDS,
     )
     resp.raise_for_status()
@@ -168,34 +146,6 @@ def render_block(bot_id: str, cards: str, fleet: str) -> str:
     return render_template(definition.default_body(), variables).rstrip()
 
 
-def _claim(engine, session_id: str, decision: Any, current: str) -> bool:
-    """Under the session row lock, record and report whether to send ``current``."""
-    from .working_memory.session_state import compaction_gen_of, state_of
-
-    with engine.begin() as conn:
-        row = conn.execute(
-            text("SELECT session_metadata FROM sessions WHERE id=:sid FOR UPDATE"),
-            {"sid": session_id},
-        ).first()
-        if row is None:
-            return False
-        meta = row[0] if isinstance(row[0], dict) else {}
-        gen = compaction_gen_of(state_of(meta))
-        if not should_send(meta.get(STATE_KEY), decision, gen, current):
-            return False
-        mark = {"pin_turn_id": decision.pin_turn_id, "compaction_gen": gen, "digest": current}
-        conn.execute(
-            text("""
-                UPDATE sessions SET session_metadata=jsonb_set(
-                    COALESCE(session_metadata, '{}'::jsonb),
-                    '{assigned_cards}', CAST(:mark AS jsonb)
-                ) WHERE id=:sid
-            """),
-            {"mark": json.dumps(mark), "sid": session_id},
-        )
-    return True
-
-
 def assigned_cards_notice(engine, *, bot_id: str | None, session_id: str | None,
                           decision: Any, eligible: bool = True) -> str | None:
     """The block for this turn, or None. Never raises."""
@@ -207,8 +157,6 @@ def assigned_cards_notice(engine, *, bot_id: str | None, session_id: str | None,
         if is_protected(bot_id, engine):
             return None
         cards, fleet = render(board_rows(), bot_id, is_coordinator(engine, bot_id))
-        if not _claim(engine, session_id, decision, digest(cards, fleet)):
-            return None
         return render_block(bot_id, cards, fleet)
     except Exception:
         logger.warning("assigned cards block failed for %s session %s; the turn continues without it",
@@ -217,7 +165,7 @@ def assigned_cards_notice(engine, *, bot_id: str | None, session_id: str | None,
 
 
 def apply_assigned_cards(ctx: Any, messages: list, decision: Any) -> list:
-    """``messages`` with the block on the last user message when it is due."""
+    """``messages`` with the block on the last user message of an eligible turn."""
     from .working_memory.turn import append_to_last_user, is_maintenance_command, scheduler_turn
 
     block = assigned_cards_notice(
@@ -231,6 +179,6 @@ def apply_assigned_cards(ctx: Any, messages: list, decision: Any) -> list:
 
 
 __all__ = [
-    "ASSIGNED_CARDS_KEY", "STATE_KEY", "apply_assigned_cards", "assigned_cards_notice",
-    "card_lines", "digest", "fleet_line", "render", "should_send",
+    "ASSIGNED_CARDS_KEY", "apply_assigned_cards", "assigned_cards_notice", "card_lines",
+    "fleet_line", "render",
 ]

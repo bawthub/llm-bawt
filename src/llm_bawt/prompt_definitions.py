@@ -509,9 +509,8 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
         loader=lambda: ASSIGNED_CARDS,
         metadata={
             "notes": (
-                "Appended to an agent turn's user message (never the pinned system "
-                "prompt) when the session lacks the bot's current open-card list: a "
-                "new session, a compaction, or a changed list. {cards} is one line per "
+                "Appended to every eligible agent turn's user message (never the pinned "
+                "system prompt), built from the live board. {cards} is one line per "
                 "card (ID, status with WAITING kind, title), IN_PROGRESS first, capped. "
                 "{fleet} is empty, or for coordinators a leading newline and one fleet "
                 "line. Resolved per bot at dispatch. TASK-2432."

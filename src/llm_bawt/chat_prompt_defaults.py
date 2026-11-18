@@ -68,8 +68,7 @@ MODEL_SWITCH_NOTICE = (
     "block is out of date: report `{model}` if asked which model you are.]"
 )
 
-# Appended to an agent turn when the transcript lacks the current list of the
-# bot's assigned task cards: a new session, a compaction, or a changed list
+# Appended to every eligible agent turn: the bot's open assigned task cards
 # (TASK-2432). {cards} is one line per card; {fleet} is a coordinator's fleet
 # line with a leading newline, or empty.
 ASSIGNED_CARDS = (

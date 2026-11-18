@@ -61,20 +61,37 @@ def test_render_default_body_coordinator_and_not():
     assert "- none\nFleet (bot, IN_PROGRESS card, W=waiting): no open assigned cards\n" in text
 
 
-def test_should_send():
-    decision = SimpleNamespace(pin_turn_id="p1")
-    mark = {"pin_turn_id": "p1", "compaction_gen": 0, "digest": "d"}
-    assert acn.should_send(None, decision, 0, "d")
-    assert not acn.should_send(mark, decision, 0, "d")
-    assert acn.should_send(mark, decision, 1, "d")  # compacted
-    assert acn.should_send(mark, decision, 0, "e")  # list changed
-    assert acn.should_send(mark, SimpleNamespace(pin_turn_id="p2"), 0, "d")  # new session
+def test_own_card_after_many_others_is_kept():
+    rows = [row(n, "QUEUED", bot="vex") for n in range(1, 61)] + [row(99, "QUEUED")]
+    assert acn.card_lines(rows, "al") == ["- TASK-99 QUEUED: Do the thing"]
 
 
-def test_digest_changes_with_assignment():
-    a = acn.digest(*acn.render(ROWS, "al", False))
-    b = acn.digest(*acn.render(ROWS + [row(10, "QUEUED")], "al", False))
-    assert a != b
+def test_other_open_statuses_trail():
+    rows = [row(1, "BUG"), row(2, "REFINED"), row(3, "PLANNING"), row(4, "QUEUED"), row(5, "CANCELLED")]
+    assert [line.split(":")[0] for line in acn.card_lines(rows, "al")] == [
+        "- TASK-4 QUEUED", "- TASK-3 PLANNING", "- TASK-2 REFINED", "- TASK-1 BUG",
+    ]
+
+
+def test_board_request_has_no_row_limit(monkeypatch):
+    seen = {}
+
+    class Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"lanes": [{"rows": [row(1, "QUEUED")]}]}
+
+    def get(url, params, auth, timeout):
+        seen.update(params)
+        return Resp()
+
+    monkeypatch.setattr("httpx.get", get)
+    monkeypatch.setattr("llm_bawt.bawthub_auth.service_auth", lambda: None)
+    monkeypatch.setattr(acn, "_board_cache", None)
+    assert acn.board_rows() == [row(1, "QUEUED")]
+    assert "limit" not in seen and seen["updated"] == "all"
 
 
 @pytest.fixture
@@ -83,14 +100,18 @@ def stubs(monkeypatch):
     monkeypatch.setattr("llm_bawt.working_memory.policy.is_protected", lambda bot, engine: bot == "mira")
     monkeypatch.setattr(acn, "board_rows", lambda: ROWS)
     monkeypatch.setattr(acn, "is_coordinator", lambda engine, bot: False)
-    monkeypatch.setattr(acn, "_claim", lambda engine, sid, decision, current: calls.setdefault("claim", current) is not None)
-    monkeypatch.setattr(acn, "render_block", lambda bot, cards, fleet: f"BLOCK {cards}")
+    def block(bot, cards, fleet):
+        calls["rendered"] = calls.get("rendered", 0) + 1
+        return f"BLOCK {cards}"
+    monkeypatch.setattr(acn, "render_block", block)
     return calls
 
 
-def test_notice_sends_block(stubs):
-    out = acn.assigned_cards_notice(object(), bot_id="al", session_id="s", decision=SimpleNamespace(pin_turn_id="p"))
-    assert out.startswith("BLOCK - TASK-2 IN_PROGRESS")
+def test_notice_sends_block_every_turn(stubs):
+    for _ in range(3):  # unchanged list, same session: still sent each turn
+        out = acn.assigned_cards_notice(object(), bot_id="al", session_id="s", decision=SimpleNamespace(pin_turn_id="p"))
+        assert out.startswith("BLOCK - TASK-2 IN_PROGRESS")
+    assert stubs["rendered"] == 3
 
 
 @pytest.mark.parametrize("kwargs", [
@@ -99,7 +120,7 @@ def test_notice_sends_block(stubs):
 def test_notice_skips(stubs, kwargs):
     base = {"bot_id": "al", "session_id": "s", "decision": SimpleNamespace(pin_turn_id="p"), "eligible": True}
     assert acn.assigned_cards_notice(object(), **{**base, **kwargs}) is None
-    assert "claim" not in stubs
+    assert "rendered" not in stubs
 
 
 def test_notice_failure_is_swallowed(stubs, monkeypatch):

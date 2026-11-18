@@ -282,7 +282,7 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                 messages = working_memory.after_pin(messages, system_prompt_pin)
                 # TASK-1956: a kept pin may name the model from before a switch.
                 messages = apply_model_switch_notice(ctx, llm_bawt.client, messages, system_prompt_pin)
-                # TASK-2432: the bot's open cards, when this session lacks the current list.
+                # TASK-2432: the bot's open cards, on every eligible turn.
                 messages = apply_assigned_cards(ctx, messages, system_prompt_pin)
 
             from .scheduled_run_notice import ScheduledRunNotices
