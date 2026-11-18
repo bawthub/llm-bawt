@@ -67,7 +67,8 @@ def rig(private_app_pg):
                 'claude-code', :now, :now)
         """), {"slug": bot, "now": now})
     slug = f"test.quiesce-{tag}"
-    store.create_operation(_op_data(slug=slug, quiesce_enabled=True, quiesce_timeout_seconds=300,
+    store.create_operation(_op_data(slug=slug, approval_required=False,
+                                    quiesce_enabled=True, quiesce_timeout_seconds=300,
                                     quiesce_scope_json=json.dumps({"bots": [bot]}), max_concurrent=1))
     executor = FakeExecutor()
     service = OpsService(store, executor=executor)
