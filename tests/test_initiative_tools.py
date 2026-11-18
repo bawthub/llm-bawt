@@ -81,3 +81,42 @@ def test_get_needs_no_turn_identity(rig):
     rig["tags"] = TagSnapshot.unavailable()
 
     assert _call("get") == {"generation": 1, "events": []}
+
+
+def test_acquire_without_snapshot_resumes_and_forwards_resolved_ref(rig):
+    res = asyncio.run(it.initiative_state(task_id="TASK-1", action="acquire",
+                                          resolved_ref="approval-9"))
+
+    assert res["body"]["snapshot"] is None
+    assert res["body"]["resolvedRef"] == "approval-9"
+
+
+def test_checkpoint_forwards_defer(rig):
+    defer = {"reason": "quota", "until": "2026-11-18T02:00:00Z"}
+    res = asyncio.run(it.initiative_state(task_id="TASK-1", action="checkpoint", snapshot={},
+                                          run_id="r", lease_token="t", expected_generation=1,
+                                          defer=defer))
+
+    assert res["body"]["defer"] == defer
+
+
+@pytest.mark.parametrize("action,held", [("hold", True), ("resume", False)])
+def test_hold_and_resume_use_the_trusted_bot_as_actor(rig, action, held):
+    res = asyncio.run(it.initiative_state(task_id="TASK-1", action=action, reason="weekend"))
+
+    assert rig["requests"][0].url.path == "/internal/tasks/TASK-1/initiative/hold"
+    assert res["body"] == {"held": held, "actor": "fixture-public", "reason": "weekend"}
+
+
+def test_held_and_deferred_refusals_keep_their_reason(rig, monkeypatch):
+    real_client = httpx.AsyncClient
+    payload = {"error": "deferred", "code": "deferred", "deferReason": "quota",
+               "deferUntil": "2026-11-18T02:00:00Z", "deferRef": None}
+    monkeypatch.setattr(it.httpx, "AsyncClient", lambda **kw: real_client(
+        transport=httpx.MockTransport(lambda request: httpx.Response(429, json=payload)), **kw))
+
+    res = _call("acquire")
+
+    assert res["status"] == 429
+    assert res["code"] == "deferred"
+    assert res["deferUntil"] == "2026-11-18T02:00:00Z"

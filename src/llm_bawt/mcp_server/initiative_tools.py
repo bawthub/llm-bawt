@@ -41,13 +41,19 @@ def _error(error: httpx.HTTPStatusError) -> dict[str, Any]:
     except Exception:
         payload = None
     message = payload.get("error") if isinstance(payload, dict) else str(error)
-    return {"error": str(message), "status": error.response.status_code}
+    result: dict[str, Any] = {"error": str(message), "status": error.response.status_code}
+    if isinstance(payload, dict):
+        # Held/deferred refusals carry why and until when (TASK-894).
+        for key in ("code", "heldBy", "holdReason", "deferReason", "deferUntil", "deferRef"):
+            if key in payload:
+                result[key] = payload[key]
+    return result
 
 
 @mcp.tool(name="initiative_state")
 async def initiative_state(
     task_id: str,
-    action: Literal["get", "acquire", "checkpoint"],
+    action: Literal["get", "acquire", "checkpoint", "hold", "resume"],
     snapshot: dict[str, Any] | None = None,
     expected_generation: int | None = None,
     run_id: str | None = None,
@@ -55,8 +61,19 @@ async def initiative_state(
     lease_seconds: int = 900,
     release_lease: bool = False,
     event: dict[str, Any] | None = None,
+    defer: dict[str, Any] | None = None,
+    resolved_ref: str | None = None,
+    reason: str | None = None,
 ) -> dict:
-    """Read, lease, or CAS-checkpoint recurring task state using trusted turn identity."""
+    """Read, lease, CAS-checkpoint, hold or resume recurring task state using trusted turn identity.
+
+    acquire: omit snapshot to resume the stored plan; pass resolved_ref when the
+    wake reports the approval the initiative is deferred on. A 423 means held
+    (a person or a cap paused it: stop), a 429 means deferred (stop until
+    defer_until or the approval wake). checkpoint: defer={"reason": "quota" |
+    "failure", "until": ISO} or {"reason": "approval", "ref": id} parks the
+    initiative and releases the lease instead of retrying. hold needs reason.
+    """
     path = f"/internal/tasks/{task_id}/initiative"
     run = None if action == "get" else _run(await asyncio.to_thread(BotTags().snapshot))
     try:
@@ -68,6 +85,11 @@ async def initiative_state(
                 events = await client.get(f"{path}/events", params={"limit": 50})
                 events.raise_for_status()
                 return {**state.json(), **events.json()}
+            if action in ("hold", "resume"):
+                response = await client.post(f"{path}/hold", json={
+                    "held": action == "hold", "actor": run["botId"], "reason": reason})
+                response.raise_for_status()
+                return response.json()
             body: dict[str, Any] = {
                 "snapshot": snapshot,
                 "run": run,
@@ -76,6 +98,8 @@ async def initiative_state(
             if expected_generation is not None:
                 body["expectedGeneration"] = expected_generation
             if action == "acquire":
+                if resolved_ref:
+                    body["resolvedRef"] = resolved_ref
                 response = await client.post(f"{path}/acquire", json=body)
             else:
                 body.update({
@@ -84,6 +108,8 @@ async def initiative_state(
                     "event": event,
                     "releaseLease": release_lease,
                 })
+                if defer is not None:
+                    body["defer"] = defer
                 response = await client.post(f"{path}/checkpoint", json=body)
             response.raise_for_status()
             return response.json()
