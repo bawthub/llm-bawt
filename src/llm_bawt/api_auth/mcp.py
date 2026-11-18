@@ -8,7 +8,11 @@ rolled back independently of ``/v1``.
 Accepted credentials:
 
 * a bot's signed turn capability (bridges send it on every MCP call);
-* ``X-LLM-Bawt-Key`` for service principals only (the app's own MCP client).
+* ``X-LLM-Bawt-Key`` for service principals only: the app's own MCP client,
+  plus any principal named in ``LLM_BAWT_MCP_SERVICE_PRINCIPALS`` that also
+  has a key export in ``LLM_BAWT_API_KEY_EXPORTS`` (TASK-2426);
+* an OAuth bearer from BawtHub for allowed human users (TASK-2426,
+  ``mcp_oauth.py``; dormant unless configured).
 
 Bot keys are not accepted here, and a turn capability presented with a key is
 refused as ambiguous. Which bot a call acts for is still decided per tool by
@@ -25,7 +29,35 @@ SETTING_KEY = "mcp_auth_mode"
 MODE_ENV = "LLM_BAWT_MCP_AUTH_MODE"
 FORCE_ENV = "LLM_BAWT_MCP_AUTH_MODE_FORCE"
 APP_PRINCIPAL = "llm-bawt-app"
-SERVICE_PRINCIPALS = frozenset({APP_PRINCIPAL})
+SERVICE_PRINCIPALS_ENV = "LLM_BAWT_MCP_SERVICE_PRINCIPALS"
+
+
+def service_principals(environ=None) -> frozenset[str]:
+    """The app plus each named principal the app also exports a key for.
+
+    A name without an export is not a service and is ignored (logged), so the
+    MCP gate never admits a key principal that has no export policy.
+    """
+    import logging
+    import os
+
+    from .export import EXPORTS_ENV, parse
+
+    env = os.environ if environ is None else environ
+    wanted = {p.strip() for p in env.get(SERVICE_PRINCIPALS_ENV, "").split(",") if p.strip()}
+    if not wanted:
+        return frozenset({APP_PRINCIPAL})
+    try:
+        exported = {spec.principal for spec in parse(env.get(EXPORTS_ENV))}
+    except ValueError:
+        exported = set()
+    missing = wanted - exported - {APP_PRINCIPAL}
+    if missing:
+        logging.getLogger(__name__).error(
+            "MCP auth: %s names %s with no key export; not admitted",
+            SERVICE_PRINCIPALS_ENV, ", ".join(sorted(missing)))
+    return frozenset({APP_PRINCIPAL} | (wanted & exported))
+
 
 RESOLVER = ModeResolver(SETTINGS, setting_key=SETTING_KEY, mode_env=MODE_ENV,
                         force_env=FORCE_ENV)
@@ -65,8 +97,12 @@ def wrap(app):
     gate = ApiAuthMiddleware(
         app, resolver=RESOLVER, checkers=(turn_capability,), observations=OBSERVATIONS,
         allowed_paths=frozenset(), route_template=_path,
-        key_principal_allowed=SERVICE_PRINCIPALS.__contains__, refuse_turn_with_key=True)
-    return _ObservationsEndpoint(gate)
+        key_principal_allowed=service_principals().__contains__, refuse_turn_with_key=True)
+    from .mcp_oauth import McpOAuthLayer, load_config
+
+    config = load_config()  # TASK-2426: dormant unless configured
+    outer = McpOAuthLayer(gate, config) if config else gate
+    return _ObservationsEndpoint(gate, outer)
 
 
 # The MCP server usually runs as its own process, so its counts live there.
@@ -78,12 +114,13 @@ OBSERVATIONS_PATH = "/_auth/observations"
 class _ObservationsEndpoint:
     """Serves the gate's own counts at OBSERVATIONS_PATH; everything else goes to the gate."""
 
-    def __init__(self, gate: ApiAuthMiddleware):
+    def __init__(self, gate: ApiAuthMiddleware, outer=None):
         self.gate = gate
+        self.outer = outer or gate
 
     async def __call__(self, scope, receive, send):
         if scope.get("type") != "http" or scope.get("path") != OBSERVATIONS_PATH:
-            return await self.gate(scope, receive, send)
+            return await self.outer(scope, receive, send)
         import json
 
         from . import keys
@@ -93,7 +130,7 @@ class _ObservationsEndpoint:
         allowed = False
         if scope.get("method") == "GET" and len(presented) == 1:
             result = self.gate._verify_key(presented[0].decode("latin-1"))
-            allowed = result.ok and result.principal in SERVICE_PRINCIPALS
+            allowed = result.ok and self.gate._key_allowed(result.principal)
         status, payload = (
             (200, {"mode": self.gate.resolver.mode(), "rows": self.gate.observations.snapshot()})
             if allowed else (401, {"detail": "service_key_required"}))

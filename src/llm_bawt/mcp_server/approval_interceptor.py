@@ -17,6 +17,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
+from llm_bawt.api_auth.mcp_oauth import current_oauth_caller
+
 from agent_bridge.approval import MCP_GATED_TOOLS, PolicyAction, evaluate
 from agent_bridge.mcp_call_context import (
     MCP_CALL_CONTEXT_KEY,
@@ -360,6 +362,9 @@ class ApprovalAwareFastMCP(MCPServer):
             name,
             received,
         )
+        # TASK-2426: a human OAuth caller has no turn; attribute the row to
+        # the introspection-verified user and client instead.
+        oauth = None if turn_context else current_oauth_caller()
         store.record_decision(
             decision=decision,
             bundle=bundle,
@@ -367,8 +372,9 @@ class ApprovalAwareFastMCP(MCPServer):
             tool_name=name,
             invocation_hash=canonical_invocation_hash(name, received),
             bot_id=turn_context.bot_id if turn_context else None,
-            user_id=turn_context.user_id if turn_context else None,
+            user_id=turn_context.user_id if turn_context else (oauth.entity_id if oauth else None),
             turn_id=turn_context.turn_id if turn_context else None,
+            source=f"mcp_oauth:{oauth.client_id}" if oauth else "mcp",
         )
         if decision.action is PolicyAction.ALLOW:
             return await super().call_tool(name, received, context)

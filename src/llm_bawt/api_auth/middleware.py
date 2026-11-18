@@ -27,6 +27,7 @@ from .mode import UNRESOLVED, ModeResolver
 logger = logging.getLogger(__name__)
 
 TURN_HEADER = b"x-llm-bawt-task-turn-context"
+PRE_AUTH_KEY = "mcp_oauth_principal"
 ALLOWED_PATHS = frozenset({
     "/health",
     "/integrations/google-home/authorize",
@@ -42,7 +43,7 @@ _LOG_INTERVAL = 60.0
 @dataclass(frozen=True)
 class Principal:
     name: str
-    kind: str  # "key", "service", "bridge", "bot"
+    kind: str  # "key", "service", "bridge", "bot", "user" (MCP OAuth)
 
 
 Checker = Callable[[dict[bytes, list[bytes]]], "Principal | None"]
@@ -118,6 +119,11 @@ class ApiAuthMiddleware:
 
     def authenticate(self, scope) -> tuple[Principal | None, str | None]:
         """(principal, refusal reason). A refusal is a bad key, never a missing one."""
+        # An outer layer that already verified the caller (TASK-2426 MCP OAuth)
+        # leaves its principal in scope state, which a client cannot set.
+        pre = (scope.get("state") or {}).get(PRE_AUTH_KEY)
+        if isinstance(pre, Principal):
+            return pre, None
         headers = _headers(scope)
         presented = headers.get(keys.HEADER.encode(), [])
         key_principal = None

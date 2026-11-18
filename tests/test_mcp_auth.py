@@ -221,3 +221,13 @@ def test_admin_view_fetches_from_the_mcp_server(monkeypatch):
 
     fallback = asyncio.run(mcp.fetch_observations(None))
     assert fallback["source"] == "in_process" and fallback["remote_error"] == "no_server_url"
+
+
+def test_exported_service_principal_named_for_mcp_is_admitted(fernet, monkeypatch):
+    # TASK-2426: a separately exported service key, opted in for :8001.
+    monkeypatch.setenv("LLM_BAWT_MCP_SERVICE_PRINCIPALS", "bawthub-web")
+    monkeypatch.setenv("LLM_BAWT_API_KEY_EXPORTS",
+                       "llm-bawt-app=/run/k/app,bawthub-web=/run/k/web")
+    gate, _ = _gate({"mcp_auth_mode": "enforce"})
+    assert _call(gate, _key("bawthub-web")) == (200, Principal("bawthub-web", "key"))
+    assert _call(gate, _key("bridge-claude-code")) == (401, "key_not_permitted")
