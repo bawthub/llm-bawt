@@ -509,14 +509,14 @@ async def test_real_mutation_still_passes_through_policy_gate(monkeypatch):
     server = CatalogFastMCP("test-denial", approval_store_provider=lambda: store)
     called = []
 
-    @server.tool(name="tasks_delete")
-    async def delete(task_id: str):
-        called.append(task_id)
+    @server.tool(name="ops_run")
+    async def delete(operation: str):
+        called.append(operation)
         return {"ok": True}
 
     monkeypatch.setattr(interceptor, "evaluate", lambda *args: SimpleNamespace(action=PolicyAction.DENY, subject="test"))
     await server.list_tools()
-    result = await server.call_tool("tasks_delete", {"task_id": "test-task"})
+    result = await server.call_tool("ops_run", {"operation": "demo"})
     assert result.structured_content["status"] == "denied"
     assert called == []
 

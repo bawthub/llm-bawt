@@ -194,7 +194,8 @@ def test_request_pagination_reports_all_matches(client, store):
     assert client.get("/v1/tool-approval-requests?limit=999&offset=-9").json()["limit"] == 200
 
 
-def test_mcp_allow_and_deny_are_audited_separately(client, store):
+def test_ungated_mcp_tools_are_neither_evaluated_nor_audited(client, store):
+    """TASK-2418: only ops_run meets approval policy on the MCP server."""
     server = ApprovalAwareFastMCP("test", approval_store_provider=lambda: store)
     executed = []
 
@@ -204,14 +205,11 @@ def test_mcp_allow_and_deny_are_audited_separately(client, store):
         return {"value": value}
 
     asyncio.run(server.call_tool("harmless", {"value": "hello"}))
-    policy = store.create({"tool_name": "harmless", "action": "deny"})
-    denied = asyncio.run(server.call_tool("harmless", {"value": "blocked"}))
-    assert denied.structured_content["status"] == "denied"
+    store.create({"tool_name": "harmless", "action": "deny"})
+    asyncio.run(server.call_tool("harmless", {"value": "still runs"}))
     response = client.get("/v1/tool-approval-decisions?limit=1&offset=0").json()
-    assert response["total"] == 2 and len(response["decisions"]) == 1
-    assert response["decisions"][0]["policy_id"] == policy.id
-    assert response["decisions"][0]["policy"]["action"] == "deny"
-    assert store.count_requests() == 0 and executed == ["hello"]
+    assert response["total"] == 0
+    assert store.count_requests() == 0 and executed == ["hello", "still runs"]
 
 
 def test_raw_gated_mcp_call_fails_before_snapshot_or_persistence(store):

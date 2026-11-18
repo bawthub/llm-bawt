@@ -567,17 +567,19 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
         legacy_keys=("PROFILE_MAINTENANCE_MODEL",),
         ui_widget="model",
     ),
-    # TASK-1704 slice B: user-chosen backup for maintenance calls whose
-    # provider hits a spending limit. Unset = no backup (failures alert only).
+    # TASK-1704 slice B / TASK-1716: user-chosen backup for maintenance calls
+    # whose provider hits a spending limit or is unreachable. Unset = no
+    # backup (failures alert only).
     "maintenance_model_fallback": SettingDefinition(
         key="maintenance_model_fallback",
         type="str",
         default=None,
         applies_to=(),  # GLOBAL-ONLY: read from the global scope; bot rows ignored.
         storage=STORAGE_RUNTIME_SETTING,
-        label="Backup job model (on spending limit)",
-        help="Used only when a background job's provider reports a spending "
-             "limit; rate limits and other errors never switch. While it is in "
+        label="Backup job model (spending limit or unreachable)",
+        help="Used when a background job's provider reports a spending limit "
+             "or can't be reached; jobs return to the primary once it is "
+             "available again. Rate limits and other errors never switch. While it is in "
              "use, maintenance data (memories, summaries, profile facts) is sent "
              "to this model's provider. Pick a model on a different provider. "
              "Unset = no backup; the failure only raises an alert.",

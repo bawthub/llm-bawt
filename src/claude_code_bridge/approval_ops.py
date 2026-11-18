@@ -19,6 +19,7 @@ from agent_bridge.approval import (
     ApprovalDecision,
     PolicyAction,
     PolicyBundle,
+    SHELL_GATED_TOOLS,
     evaluate as evaluate_policies,
 )
 from agent_bridge.mcp_call_context import (
@@ -764,6 +765,10 @@ class ClaudeApprovalMixin:
                 syntax_error = await playwright_syntax_error(tool_name, tool_input)
                 if syntax_error:
                     return self._hook_deny(syntax_error)
+                if tool_name not in SHELL_GATED_TOOLS:
+                    # TASK-2418: only shell tools meet regex rules here; ops is
+                    # gated by the MCP server. Everything else is not evaluated.
+                    return {}
                 return await self._evaluate_tool_gate_hook(
                     tool_name, tool_input, tuid,
                     request_id, session_key, seq_holder, cwd=cwd,

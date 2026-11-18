@@ -63,16 +63,16 @@ async def test_sync_tools_still_run_on_the_event_loop_thread():
 
 @pytest.mark.anyio
 async def test_policy_outcome_keeps_its_wire_form():
-    server = _server([ApprovalPolicy(id="p1", tool_name="guarded", action=PolicyAction.DENY)])
+    server = _server([ApprovalPolicy(id="p1", tool_name="ops_run", action=PolicyAction.DENY)])
     ran = []
 
-    @server.tool(name="guarded", structured_output=False)
+    @server.tool(name="ops_run", structured_output=False)
     async def guarded():
         ran.append(True)
         return "ran"
 
     async with Client(server, mode="legacy") as client:
-        result = await client.call_tool("guarded", {})
+        result = await client.call_tool("ops_run", {})
     assert ran == []
     assert result.is_error is False
     assert result.structured_content["status"] == "denied"
@@ -95,10 +95,10 @@ APPROVAL_REQUIRED = {
 async def test_policy_outcome_on_an_output_schema_tool_reaches_the_model(outcome, monkeypatch):
     # Deliberate change: 1.x failed output validation on these and the model saw
     # only "Output validation error". Now it is isError with the outcome JSON.
-    server = _server([ApprovalPolicy(id="p1", tool_name="guarded", action=PolicyAction.DENY)])
+    server = _server([ApprovalPolicy(id="p1", tool_name="ops_run", action=PolicyAction.DENY)])
     ran = []
 
-    @server.tool(name="guarded")
+    @server.tool(name="ops_run")
     async def guarded() -> str:  # str return => the tool has an output schema
         ran.append(True)
         return "ran"
@@ -114,7 +114,7 @@ async def test_policy_outcome_on_an_output_schema_tool_reaches_the_model(outcome
         monkeypatch.setattr(server, "_intercept_call", intercept)
 
     async with Client(server, mode="legacy") as client:
-        result = await client.call_tool("guarded", {})
+        result = await client.call_tool("ops_run", {})
     assert ran == []
     assert result.is_error is True
     assert result.structured_content is None

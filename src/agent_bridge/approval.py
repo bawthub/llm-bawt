@@ -135,6 +135,13 @@ _DEFAULT_FIELD_BY_TOOL = {
 # ``ops_job_status`` are deliberately NOT here — status reads stay ungated.
 _FAIL_CLOSED_TOOLS = frozenset({"ops_run"})
 
+# TASK-2418: approval has two mechanics and evaluates nothing else.
+# (1) Shell regex rules, evaluated on shell tools only by the agent hooks;
+# (2) ops operations, approved on invocation through the MCP server.
+# Every other tool runs on the honor system: neither evaluated nor recorded.
+SHELL_GATED_TOOLS = frozenset(_DEFAULT_FIELD_BY_TOOL)
+MCP_GATED_TOOLS = _FAIL_CLOSED_TOOLS
+
 # Tools whose subject is a shell command line, and therefore gets the
 # inert-data trimming below before a pattern is tested against it.
 _SHELL_TOOLS = frozenset(_DEFAULT_FIELD_BY_TOOL)

@@ -52,6 +52,12 @@ _POLICY_WRITABLE = {
 logger = logging.getLogger(__name__)
 
 
+def _default_allow(action: str, policy_id: str | None, outcome: str | None = None) -> bool:
+    """TASK-2418: an allow no rule matched is not audited. Matched rules
+    (deny, require_approval, explicit allow) and grant uses still are."""
+    return action == "allow" and not policy_id and outcome in (None, "allow")
+
+
 class ToolApprovalPolicyStore(ApprovalRequestStoreMixin):
     """DB access for approval policies + request audit log."""
 
@@ -515,6 +521,8 @@ class ToolApprovalPolicyStore(ApprovalRequestStoreMixin):
         meta = event.raw
         if meta.get("action") not in ("allow", "deny", "require_approval"):
             raise ValueError("Invalid bridge audit action")
+        if _default_allow(meta["action"], meta.get("policy_id"), meta.get("outcome")):
+            return
         key = sha256(
             f"bridge-decision:{event.run_id}:{event.event_id}".encode()
         ).hexdigest()
@@ -565,6 +573,8 @@ class ToolApprovalPolicyStore(ApprovalRequestStoreMixin):
         from agent_bridge.approval_audit import audit_subject
 
         policy = decision.policy
+        if _default_allow(decision.action.value, policy.id if policy else None):
+            return
         row = ToolApprovalDecision(
             backend=backend,
             tool_name=tool_name,

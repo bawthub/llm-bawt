@@ -17,7 +17,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
-from agent_bridge.approval import PolicyAction, evaluate
+from agent_bridge.approval import MCP_GATED_TOOLS, PolicyAction, evaluate
 from agent_bridge.mcp_call_context import (
     MCP_CALL_CONTEXT_KEY,
     McpCallContext,
@@ -338,6 +338,11 @@ class ApprovalAwareFastMCP(MCPServer):
                     invalid=True,
                     message=f"Trusted approval context is invalid: {error}. The tool was not executed.",
                 )
+
+        if name not in MCP_GATED_TOOLS:
+            # TASK-2418: only ops goes through approval; ordinary tools are
+            # neither evaluated nor recorded.
+            return await super().call_tool(name, received, context)
 
         store = self._approval_store()
         try:

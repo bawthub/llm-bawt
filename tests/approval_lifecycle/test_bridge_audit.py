@@ -44,6 +44,9 @@ def test_bridge_event_redacted_and_committed(store, command, action, policy):
     for _ in range(2):
         store.record_bridge_decision(event, bot_id="bot", session_id="thread")
     rows, total = store.list_decisions()
+    if policy is None:  # TASK-2418: a default allow (no rule matched) is not audited
+        assert total == 0
+        return
     assert total == 1
     row = rows[0]
     assert (row.action, row.policy_id) == (action, policy)

@@ -28,6 +28,7 @@ from agent_bridge.mcp_call_context import (
 )
 from agent_bridge.approval import (
     ApprovalDecision, ApprovalPolicy, MatcherType, PolicyAction, PolicyBundle,  # noqa: F401 (AST namespace)
+    SHELL_GATED_TOOLS,  # noqa: F401 (AST namespace)
     evaluate as evaluate_policies, grant_key,
 )
 from agent_bridge.events import AgentEventKind
@@ -242,6 +243,24 @@ def test_pre_tool_use_hook_gates_dangerous_bash():
     assert _hook_decision(asyncio.run(run("rm -rf /home/x"))) == "deny"  # require→deny
 
 
+def test_pre_tool_use_hook_skips_policy_for_non_shell_tools():
+    """TASK-2418: only shell tools meet regex rules; others are not evaluated."""
+    _skip_if_no_sdk()
+    b = _bridge()
+    published = []
+    b._publish_event = lambda *a, **k: published.append(k.get("kind"))  # type: ignore[assignment]
+    b._policy_bundle = PolicyBundle(version=1, etag="x", policies=[
+        ApprovalPolicy(id="d", tool_name="Write", action=PolicyAction.DENY)])
+    b._decide_approval = None  # type: ignore[assignment]  # must not be reached
+    hook = b._make_pre_tool_use_hook(request_id="r", session_key="s", seq_holder=[0])
+    result = asyncio.run(hook(
+        {"tool_name": "Write", "tool_input": {"file_path": "/tmp/x", "content": "y"}, "tool_use_id": "w"},
+        "w", {},
+    ))
+    assert result == {}
+    assert AgentEventKind.APPROVAL_DECISION not in published
+
+
 class _FakeNodeParser:
     """Stand-in for the ``node`` parse subprocess: a verdict with no spawn.
 
@@ -312,17 +331,15 @@ def test_pre_tool_use_playwright_syntax_error_is_model_visible_and_does_not_exec
     assert asyncio.run(run(tool, {"function": "() => { return 1; }"})) == {}
     assert any(e["kind"] == AgentEventKind.TOOL_EXECUTING for e in published)
     assert len(parsed) == 2 and parsed[1].returncode == 0
-    # Approval policy still gates a syntactically valid call; preflight must
-    # never turn a denial into an allow.
+    # TASK-2418: a non-shell tool is never policy-evaluated, even with a rule.
     b._policy_bundle.policies.insert(0, ApprovalPolicy(
         id="deny-browser", order=0, tool_name=tool,
         matcher_type=MatcherType.ALWAYS, action=PolicyAction.DENY,
     ))
-    assert _hook_decision(asyncio.run(run(tool, {"function": "() => 1"}))) == "deny"
+    assert asyncio.run(run(tool, {"function": "() => 1"})) == {}
     assert len(parsed) == 3
-    surrogate = asyncio.run(run(tool, {"function": "() => 1\ud800"}))
-    assert _hook_decision(surrogate) == "deny"
-    assert "Playwright JavaScript" not in surrogate["hookSpecificOutput"]["permissionDecisionReason"]
+    # The invalid-identity denial only applies to evaluated (shell) tools now.
+    assert asyncio.run(run(tool, {"function": "() => 1\ud800"})) == {}
 
 
 def test_pre_tool_use_hook_stamps_bawthub_mcp_without_bridge_gating():

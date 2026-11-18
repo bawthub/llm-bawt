@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 
-from agent_bridge.approval import PolicyAction, evaluate
+from agent_bridge.approval import MCP_GATED_TOOLS, SHELL_GATED_TOOLS, PolicyAction, evaluate
 from agent_bridge.mcp_call_context import canonical_invocation_hash
 
 log = logging.getLogger(__name__)
@@ -32,6 +32,8 @@ class NativePolicyGate:
 
     def check(self, original, normalized, *, bot_id, user_id, turn_id=None) -> str | None:
         """Return a non-executing explanation for the strongest matched action."""
+        if not {original.name, normalized.name} & (SHELL_GATED_TOOLS | MCP_GATED_TOOLS):
+            return None  # TASK-2418: only shell and ops tools are policy-evaluated
         try:
             store = self._policy_store()
             if store is None:
