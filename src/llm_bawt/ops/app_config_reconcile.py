@@ -391,7 +391,8 @@ def approval_text(spec: dict, binding: dict, prefix: str | None, *, operation: d
                f"IMAGE {image_swap['mode'].upper()}: {image_swap['from_image_id']} -> {image_swap['target_image_id']}"
                + (f" (restores the image before deploy job {image_swap['deploy_job_id']})"
                   if image_swap["deploy_job_id"] else "")
-               + f"\nCompose tag {binding['image_tag']} is not moved; local image only, never pulled.\n")
+               + f"\nCompose tag {binding['image_tag']} moves to it after a healthy swap; "
+                 "local image only, never pulled.\n")
             +
             f"Source: github.com/{commit['repository']} {commit['branch']} @ {commit['head']} "
             "(published, clean)\n"
@@ -554,6 +555,24 @@ class AppConfigReconciler(SourceGuardedReconciler):
         target = self._swap_target(old, swap)
         self._approved_image_id = target["Id"]
         self._replace(old, image, target, target["Id"], None)
+        self._move_compose_tag(target["Id"])
+
+    def _move_compose_tag(self, image_id):
+        """TASK-2422: point the service's Compose tag at the image now running,
+        so a later plain ``compose up`` neither fails on a missing tag nor
+        reverts the deploy. The swap already succeeded, so a failure here is
+        a warning, not a rollback."""
+        tag = self.snapshot["config"]["image_tag"]
+        repo, sep, name = tag.rpartition(":")
+        if not sep or "/" in name:
+            repo, name = tag, "latest"
+        try:
+            self.api.request("POST", f"/images/{image_id}/tag?" + urlencode({"repo": repo, "tag": name}))
+        except Exception as exc:  # noqa: BLE001 - the container swap stands either way
+            self.detail["warnings"].append(
+                f"Compose tag {repo}:{name} not moved to {image_id} ({type(exc).__name__}); retag it by hand")
+            return
+        self.detail["compose_tag"] = {"tag": f"{repo}:{name}", "image_id": image_id}
 
     def _verify_release(self, container_id, expect):
         """Health first; for an image swap, then the embedding probe. Raised

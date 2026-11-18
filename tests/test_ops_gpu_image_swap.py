@@ -68,8 +68,19 @@ class EmbedDocker(AppDocker):
         self.embed_body = json.dumps({"embeddings": [GOOD_VECTOR]}) if embed is None else embed
         self.embed_exit = embed_exit
         self.embed_calls = 0
+        self.tagged = []
+
+    tag_fails = False
 
     def request(self, method, path, *, body=None, headers=None, raw=False):
+        if method == "POST" and path.startswith("/images/") and "/tag?" in path:
+            self.calls.append((method, path))
+            if self.tag_fails:
+                raise RuntimeError("Docker HTTP 500: cannot tag")
+            image_id, query = path[len("/images/"):].split("/tag?")
+            q = dict(p.split("=", 1) for p in query.split("&"))
+            self.tagged.append((image_id, f"{q['repo']}:{q['tag']}"))
+            return None
         if method == "POST" and path.endswith("/exec") and "http://127.0.0.1:8684/embed" in body["Cmd"]:
             self.calls.append((method, path))
             self.exec_cmds.append(body["Cmd"])
@@ -137,12 +148,12 @@ def test_swap_snapshot_validates_and_any_disagreement_refuses():
     assert not valid_image_swap({**plain, "image_swap": good["image_swap"]})
 
 
-def test_card_names_both_images_and_says_the_tag_is_not_moved():
+def test_card_names_both_images_and_says_the_tag_moves():
     api = gpu_api()
     snap = swap_snapshot(api)
     text = approval_text(DEPLOY_SPEC, snap["config"], None, operation=OPERATION, newly_trusted=None,
                          image_swap=snap["image_swap"])
-    assert f"IMAGE DEPLOY: {APP_ID} -> {NEW_ID}" in text and "not moved" in text
+    assert f"IMAGE DEPLOY: {APP_ID} -> {NEW_ID}" in text and "moves to it after a healthy swap" in text
     assert "Unchanged image" not in text
 
 
@@ -155,6 +166,24 @@ def test_deploy_recreates_onto_the_approved_image_and_records_both_ids(tmp_path)
     assert api.by_name(APP_NAME)["Image"] == NEW_ID
     assert result["previous"]["image_id"] == APP_ID and result["deployed"]["image_id"] == NEW_ID
     assert result["image_swap"]["mode"] == "deploy" and result["phase"] == "done"
+    tag = swap_snapshot(gpu_api())["config"]["image_tag"]
+    want = tag if ":" in tag.rsplit("/", 1)[-1] else f"{tag}:latest"
+    assert api.tagged == [(NEW_ID, want)] and result["compose_tag"] == {"tag": want, "image_id": NEW_ID}
+
+
+def test_failed_tag_move_keeps_the_healthy_deploy_and_warns(tmp_path):
+    api = gpu_api()
+    api.tag_fails = True
+    result = json.loads(reconciler(api, tmp_path, swap_snapshot(api)).run())
+    assert result["phase"] == "done" and api.by_name(APP_NAME)["Image"] == NEW_ID
+    assert "compose_tag" not in result and any("not moved" in w for w in result["warnings"])
+
+
+def test_failed_health_does_not_move_the_tag(tmp_path):
+    api = gpu_api(health_exit=7)
+    with pytest.raises(DeployFailed):
+        reconciler(api, tmp_path, swap_snapshot(api)).run()
+    assert api.tagged == []
 
 
 def test_failed_health_after_deploy_restores_the_previous_image(tmp_path):
@@ -183,6 +212,7 @@ def test_rollback_restores_the_recorded_image(tmp_path):
     assert snap["config"]["image_id"] == NEW_ID and valid_app_binding(snap)
     result = json.loads(reconciler(api, tmp_path, snap).run())
     assert api.create_bodies[0]["Image"] == APP_ID and result["deployed"]["image_id"] == APP_ID
+    assert [image for image, _ref in api.tagged] == [APP_ID]
 
 
 # ── approval-time binding (OpsService) ─────────────────────────────────────
