@@ -516,6 +516,9 @@ services:
       - HF_TOKEN
       # TASK-2380: this bridge's API key (its own read-only directory volume).
       - LLM_BAWT_API_KEY_FILE=/run/llm-bawt-api-key/api-key
+      # TASK-1485: the voice client authenticates to BawtHub's internal voice
+      # API with the service token the app exports (read-only mount below).
+      - BAWTHUB_SERVICE_TOKEN_FILE=/run/bawthub-service-token/token
     extra_hosts:
       - "host.docker.internal:host-gateway"
       # The LAN host's names and address are deployment data (.env); see .env.docker.
@@ -534,6 +537,8 @@ services:
       - ${HF_HOME:-${HOME}/.cache/huggingface}:/root/.cache/huggingface
       # TASK-2380: this bridge's own API key directory, read-only.
       - api-key-bridge-local-model:/run/llm-bawt-api-key:ro
+      # TASK-1485: the app's exported BawtHub service token, read-only.
+      - bawthub-service-token:/run/bawthub-service-token:ro
     depends_on:
       redis:
         condition: service_healthy
