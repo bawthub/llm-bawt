@@ -31,6 +31,8 @@ def rig(monkeypatch):
 
     def handle(request: httpx.Request) -> httpx.Response:
         state["requests"].append(request)
+        if state.get("respond"):
+            return state["respond"](request)
         if request.method == "GET":
             return httpx.Response(200, json={"events": []} if "events" in request.url.path
                                   else {"generation": 1})
@@ -108,12 +110,10 @@ def test_hold_and_resume_use_the_trusted_bot_as_actor(rig, action, held):
     assert res["body"] == {"held": held, "actor": "fixture-public", "reason": "weekend"}
 
 
-def test_held_and_deferred_refusals_keep_their_reason(rig, monkeypatch):
-    real_client = httpx.AsyncClient
+def test_held_and_deferred_refusals_keep_their_reason(rig):
     payload = {"error": "deferred", "code": "deferred", "deferReason": "quota",
                "deferUntil": "2026-11-18T02:00:00Z", "deferRef": None}
-    monkeypatch.setattr(it.httpx, "AsyncClient", lambda **kw: real_client(
-        transport=httpx.MockTransport(lambda request: httpx.Response(429, json=payload)), **kw))
+    rig["respond"] = lambda request: httpx.Response(429, json=payload)
 
     res = _call("acquire")
 
