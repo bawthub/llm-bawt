@@ -62,6 +62,7 @@ from .working_memory import router as working_memory_router
 from .workspace import router as workspace_router
 from .campus import router as campus_router
 from .playground import router as playground_router
+from .guidance import router as guidance_router
 
 all_routers = [
     health_router,
@@ -119,6 +120,7 @@ all_routers = [
     workspace_router,
     campus_router,
     playground_router,
+    guidance_router,
     bawthub_auth_secrets_router,
     internal_connections_router,
     admin_gates_router,

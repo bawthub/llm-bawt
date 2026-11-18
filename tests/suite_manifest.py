@@ -185,6 +185,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_turn_terminal_protocol.py::TestPostgresProtocol::",
     "test_guidance_pg.py::",
     "test_guidance_run_pg.py::",
+    "test_guidance_view_pg.py::",
     "test_history_read_cursor_pg.py::",
     "test_ops_freeze_executor_pg.py::",
     "test_thread_auto_archive_pg.py::",
