@@ -19,15 +19,22 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 
 
-def _patterns(names, domains) -> tuple[tuple[str, re.Pattern[str]], ...]:
-    return (
-        *(("person's name", re.compile(rf"\b{re.escape(n)}\b", re.IGNORECASE)) for n in names),
-        *(("personal domain", re.compile(rf"\b{re.escape(d)}\b", re.IGNORECASE)) for d in domains),
+def _patterns(names, domains) -> tuple[tuple[str, ...], re.Pattern[str], tuple[str, ...]]:
+    rules = (
+        *(("person's name", rf"(?i:\b{re.escape(n)}\b)") for n in names),
+        *(("personal domain", rf"(?i:\b{re.escape(d)}\b)") for d in domains),
         # A private-network host address. Network ranges (10.0.0.0/8) are generic and allowed.
-        ("private IP", re.compile(r"\b(?:10\.\d{1,3}|192\.168|172\.(?:1[6-9]|2\d|3[01]))\.\d{1,3}\.\d{1,3}\b(?!/\d)")),
+        ("private IP", r"\b(?:10\.\d{1,3}|192\.168|172\.(?:1[6-9]|2\d|3[01]))\.\d{1,3}\.\d{1,3}\b(?!/\d)"),
         # A person's home directory. /home/bridge is the agent bridge containers' own user.
-        ("home directory", re.compile(r"/home/(?!bridge\b|<)[a-z_][a-z0-9_-]*")),
+        ("home directory", r"/home/(?!bridge\b|<)[a-z_][a-z0-9_-]*"),
     )
+    # Find candidate positions with one regex, then capture every matching rule
+    # there. Independent lookaheads retain overlapping names/domains, including
+    # rules that start at the same position; a consuming alternation loses them.
+    candidates = "|".join(pattern for _, pattern in rules)
+    captures = "".join(rf"(?=({pattern})|)" for _, pattern in rules)
+    hints = tuple(value.lower() for value in (*names, *domains)) + ("10.", "192.168.", "172.", "/home/")
+    return tuple(kind for kind, _ in rules), re.compile(rf"(?=(?:{candidates})){captures}"), hints
 
 
 def _deployment_patterns():
@@ -43,11 +50,27 @@ _TEXT_SUFFIXES = {".py", ".md", ".txt", ".yaml", ".yml", ".json", ".toml", ".sh"
 
 
 def _hits(rel: str, text: str, patterns) -> list[tuple[str, int, str, str]]:
+    kinds, pattern, hints = patterns
+    # ASCII rules also match Unicode İ/ı/ſ/K under IGNORECASE. Fold those for a
+    # conservative substring prefilter; non-ASCII rules use the regex directly.
+    if all(hint.isascii() for hint in hints):
+        lower = text.casefold().replace("ı", "i").replace("i̇", "i")
+        if not any(hint in lower for hint in hints):
+            return []
+    # Most product files have no hits: scan them in C without allocating and
+    # visiting every source line in Python. Only build line reports on a hit.
+    if pattern.search(text) is None:
+        return []
     found = []
     for lineno, line in enumerate(text.splitlines(), 1):
-        for kind, pattern in patterns:
-            for match in pattern.finditer(line):
-                found.append((rel, lineno, kind, match.group(0)))
+        hits = [
+            (rule, match.start(), kind, value)
+            for match in pattern.finditer(line)
+            for rule, (kind, value) in enumerate(zip(kinds, match.groups()))
+            if value is not None
+        ]
+        # Preserve the previous line/rule/column report order.
+        found.extend((rel, lineno, kind, value) for _, _, kind, value in sorted(hits))
     return found
 
 
@@ -81,12 +104,27 @@ def test_deployment_patterns_use_the_external_policy(monkeypatch):
     ]
 
 
+def test_scanner_retains_overlapping_rules_and_report_order():
+    patterns = _patterns(("Example", "Example Person"), ("example.org",))
+    hits = _hits("x.py", "example.org Example Person", patterns)
+    assert [(kind, match) for _, _, kind, match in hits] == [
+        ("person's name", "example"),
+        ("person's name", "Example"),
+        ("person's name", "Example Person"),
+        ("personal domain", "example.org"),
+    ]
+    # Only names/domains are case-insensitive, not the home-directory rule.
+    assert _hits("x.py", "/home/ALICE", patterns) == []
+    assert _hits("x.py", "Key", _patterns(("Key",), ()))[0][-1] == "Key"
+    assert _hits("x.py", "İſKı", _patterns(("ISKI",), ()))[0][-1] == "İſKı"
+
+
 def test_src_has_no_person_or_deployment_infrastructure():
     patterns = _deployment_patterns()
     unused = dict(ALLOWED)
     where = []
     for path in sorted(SRC.rglob("*")):
-        if not path.is_file() or path.suffix not in _TEXT_SUFFIXES or "__pycache__" in path.parts:
+        if path.suffix not in _TEXT_SUFFIXES or "__pycache__" in path.parts or not path.is_file():
             continue
         rel = path.relative_to(SRC).as_posix()
         for file, line, kind, match in _hits(rel, path.read_text(encoding="utf-8", errors="replace"), patterns):
