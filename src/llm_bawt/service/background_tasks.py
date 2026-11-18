@@ -78,6 +78,7 @@ class BackgroundTasksMixin:
         TaskType.TOOL_RESULT_GC: "_process_tool_result_gc",
         TaskType.HARNESS_VERSION_CHECK: "_process_harness_version_check",
         TaskType.PLAYGROUND_EXPIRY: "_process_playground_expiry",
+        TaskType.THREAD_AUTO_ARCHIVE: "_process_thread_auto_archive",
     }
 
     async def process_task(self, task: Task) -> TaskResult:
@@ -940,6 +941,12 @@ class BackgroundTasksMixin:
         retention_days = int(task.payload.get("retention_days", 14))
         dry_run = bool(task.payload.get("dry_run", False))
         return run_tool_result_gc(self.config, retention_days=retention_days, dry_run=dry_run)
+
+    def _process_thread_auto_archive(self, task: Task) -> dict:
+        """Archive active threads idle past the configured age (TASK-261)."""
+        from .jobs.thread_auto_archive import run_thread_auto_archive
+
+        return run_thread_auto_archive(self.config, days=int(task.payload.get("days", 30)))
 
     def _process_playground_expiry(self, task: Task) -> dict:
         """Purge Playground Trash past its retention; retry blob deletes (TASK-2195)."""

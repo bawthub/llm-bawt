@@ -22,6 +22,7 @@ class TaskType(Enum):
     TOOL_RESULT_GC = "tool_result_gc"
     HARNESS_VERSION_CHECK = "harness_version_check"
     PLAYGROUND_EXPIRY = "playground_expiry"
+    THREAD_AUTO_ARCHIVE = "thread_auto_archive"
 
 
 class TaskStatus(Enum):
@@ -292,6 +293,22 @@ def create_memory_extraction_task(
             "batch_size": batch_size,
             "model": model,
         },
+    )
+
+
+def create_thread_auto_archive_task(
+    days: int = 30,
+    bot_id: str = "system",
+    user_id: str = "system",
+    priority: int = -1,
+) -> Task:
+    """Archive active chat threads idle longer than ``days`` (TASK-261)."""
+    return Task(
+        task_type=TaskType.THREAD_AUTO_ARCHIVE,
+        bot_id=bot_id,
+        user_id=user_id,
+        priority=priority,
+        payload={"days": days},
     )
 
 

@@ -25,11 +25,14 @@ EXECUTION_MODES = (EXECUTION_PROCESS, EXECUTION_ISOLATED)
 
 # What each executor kind can run. Release orchestration never starts a worker,
 # so the field is inert there and only the default is accepted.
-EXECUTOR_MODES = {"docker": frozenset(EXECUTION_MODES), "release": frozenset({EXECUTION_PROCESS})}
+# The operator freeze (TASK-1489) is one DB transaction in the ops service.
+EXECUTOR_MODES = {"docker": frozenset(EXECUTION_MODES), "release": frozenset({EXECUTION_PROCESS}),
+                  "freeze": frozenset({EXECUTION_PROCESS})}
 
 # The column backfill for rows that predate S4, and the default for new rows.
 # A Docker job ran in its own worker container; a release job never started one.
-LEGACY_EXECUTION_MODES = {"docker": EXECUTION_ISOLATED, "release": EXECUTION_PROCESS}
+LEGACY_EXECUTION_MODES = {"docker": EXECUTION_ISOLATED, "release": EXECUTION_PROCESS,
+                          "freeze": EXECUTION_PROCESS}
 DEFAULT_EXECUTION_MODE = EXECUTION_PROCESS
 
 

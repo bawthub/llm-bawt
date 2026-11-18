@@ -14,6 +14,7 @@ import redis
 from agent_bridge.publisher import UNIFIED_EVENTS_PREFIX, UNIFIED_STREAM_MAXLEN
 
 from .executor import DispatchResult, Executor, ExecutorError, ReconcileResult, validate_spec
+from .freeze_executor import FreezeExecutor
 from .github_workflow import GitHubWorkflowError, HttpGitHubWorkflowGateway
 from .release_coordinator import ReleaseCoordinator
 from .release_spec import RELEASE_EXECUTOR_KIND
@@ -117,6 +118,8 @@ def build_ops_service(config, store: OpsStore | None = None, *,
         publisher=publisher if publisher is not None else _redis_approval_publisher(config.REDIS_URL),
     )
     service.register_executor(ReleaseExecutor(coordinator))
+    # TASK-1489: the operator freeze writes gates on the ops store's database.
+    service.register_executor(FreezeExecutor(service.store.engine))
     return service
 
 

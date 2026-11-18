@@ -31,7 +31,7 @@ import hashlib
 import json
 import math
 import re
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
 if __package__:
     from . import import_preflight
@@ -203,8 +203,8 @@ def validate_app_spec(spec: dict) -> dict:
             raise ValueError("import_preflight source_mount must be one of source_mounts")
     if "gpu" in spec and spec["gpu"] is not True:  # TASK-1844: opt-in only
         raise ValueError("gpu must be true when present")
-    if "image_swap" in spec and (spec["image_swap"] not in IMAGE_SWAP_MODES or spec.get("gpu") is not True):
-        raise ValueError("image_swap must be deploy or rollback, and only on a gpu reconcile")
+    if "image_swap" in spec and spec["image_swap"] not in IMAGE_SWAP_MODES:
+        raise ValueError("image_swap must be deploy or rollback")
     if spec["action"] != ACTION:
         raise ValueError("not an app config reconcile spec")
     validate_target_fields(spec, _PATTERNS)
@@ -551,9 +551,11 @@ class AppConfigReconciler(SourceGuardedReconciler):
             return super()._perform()
         old, image = self._prepare()
         self._verify_only(old)
-        self._before_swap()
+        # TASK-2469: bind the exact target first, so the source recheck and the
+        # import preflight run in the image being installed, before anything stops.
         target = self._swap_target(old, swap)
         self._approved_image_id = target["Id"]
+        self._before_swap()
         self._replace(old, image, target, target["Id"], None)
         self._move_compose_tag(target["Id"])
 
@@ -578,11 +580,32 @@ class AppConfigReconciler(SourceGuardedReconciler):
         """Health first; for an image swap, then the embedding probe. Raised
         inside the swap, so a failure restores the previous container."""
         health = super()._verify_release(container_id, expect)
-        if image_swap_mode(self.spec) is not None:
+        if image_swap_mode(self.spec) is None:
+            return health
+        if self.spec.get("gpu") is True:
             self._phase("embedding-probe")
             check_embed_probe(*self._exec(container_id, EMBED_PROBE_ARGV))
             health["embedding_probe"] = {"status": "ok", "dim": EMBED_PROBE_DIM}
+        else:
+            self._record_versions(container_id)
         return health
+
+    def _record_versions(self, container_id):
+        """TASK-2469: best-effort record of the harness versions the new image
+        runs (the bridge's GET /versions). Never fails the swap."""
+        parts = urlsplit(self.spec["health_url"])
+        url = urlunsplit((parts.scheme, parts.netloc, "/versions", "", ""))
+        try:
+            code, out = self._exec(container_id, ["curl", "-fsS", "--max-time", "10", url])
+            payload = json.loads(out) if code == 0 else None
+        except Exception:  # noqa: BLE001 - informational only
+            payload = None
+        if isinstance(payload, dict) and isinstance(payload.get("harness"), dict):
+            keep = {k: payload.get(k) for k in ("schema", "harness", "claude_cli")}
+            text = json.dumps(keep)
+            self.detail["versions"] = keep if len(text) <= 4096 else {"truncated": True}
+        else:
+            self.detail["versions"] = None
 
     def _swap_target(self, old, swap):
         """TASK-2299: the approved local image, re-read under the target lock.

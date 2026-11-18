@@ -118,9 +118,8 @@ def test_deploy_and_rollback_rows_are_the_gpu_reconcile_plus_one_argument():
                 validate_args(args, row["args_schema_json"], row["args_defaults_json"])
 
 
-def test_image_swap_only_on_a_gpu_spec_and_only_known_modes():
-    with pytest.raises(ValueError):
-        validate_app_spec({**SPEC, "image_swap": "deploy"})
+def test_image_swap_only_known_modes():
+    # TASK-2469: non-GPU swaps are allowed (claude-code-bridge); see test_ops_bridge_image_swap.
     with pytest.raises(ValueError):
         validate_app_spec({**SPEC, "gpu": True, "image_swap": "pull"})
 

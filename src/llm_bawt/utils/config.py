@@ -206,6 +206,7 @@ class Config(RuntimeTunables, BaseSettings):
     # --- Scheduler Settings --- #
     SCHEDULER_ENABLED: bool = Field(default=True, description="Enable background job scheduler")
     SCHEDULER_CHECK_INTERVAL_SECONDS: int = Field(default=30, description="How often to check for due jobs")
+    THREADS_AUTO_ARCHIVE_DAYS: int = Field(default=30, ge=0, description="Seed for the daily stale-thread archive job: archive active threads idle this many days (0 disables)")
     PROFILE_MAINTENANCE_INTERVAL_MINUTES: int = Field(default=60, description="Run profile summarization every N minutes")
     HISTORY_SUMMARIZATION_INTERVAL_MINUTES: int = Field(
         default=30,

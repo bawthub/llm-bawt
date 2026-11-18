@@ -50,7 +50,8 @@ from ...task_turn_context import (
     TaskTurnContextError,
     open_task_turn_context,
 )
-from ..approver_eligibility import approver_eligible, card_visible, holder_and_tags, is_ops_card
+from ..approver_eligibility import (approver_eligible, card_visible, holder_and_tags, is_ops_card,
+                                   is_user_only_card)
 from .approval_policies import _store, resolve_mcp_card
 from .bot_tags import bot_tag_store
 from .service_auth import NO_STORE, read_body
@@ -144,8 +145,13 @@ def _validated_release(row, caller: TaskTurnContext, *, ops=None, session=None):
 
 
 def _visible(row, caller: TaskTurnContext, tags) -> bool:
-    """The caller's user's card, from a non-private requester; fails closed."""
-    return card_visible(row, user_id=caller.user_id, tags=tags)
+    """The caller's user's card, from a non-private requester; fails closed.
+
+    TASK-1489: user-only cards (the freeze op) are never shown to or decidable
+    by a grant holder. Requester withdrawal doesn't use this check.
+    """
+    return (card_visible(row, user_id=caller.user_id, tags=tags)
+            and not is_user_only_card(row))
 
 
 def _card(row) -> OpsApprovalCard | None:

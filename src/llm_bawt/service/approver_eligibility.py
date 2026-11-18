@@ -21,6 +21,8 @@ first and only then render.
 """
 from __future__ import annotations
 
+import json
+
 from ..approval_models import KIND_MCP, OPS_RUN_TOOL
 from ..bot_tags import BehaviorTag, grants
 from ..bot_tags.facade import BotTags
@@ -51,13 +53,40 @@ def card_visible(row, *, user_id: str, tags, operator_request: bool = False) -> 
                      and row.bot_id not in tags.known_bots)))
 
 
+# TASK-1489: operations only the user decides. No ``approve_ops`` bot can see,
+# read or resolve their cards; the user's own approval UI is unaffected.
+USER_ONLY_OPERATIONS = frozenset({"llm-bawt.freeze"})
+
+
+def _card_slugs(row) -> set:
+    """Operation slugs a card names: its bound snapshot and its tool arguments."""
+    slugs = set()
+    for raw, path in ((getattr(row, "operations_snapshot_json", None), ("operation", "slug")),
+                      (getattr(row, "tool_arguments_json", None), ("operation",))):
+        try:
+            value = json.loads(raw or "null")
+            for key in path:
+                value = value[key]
+        except (TypeError, ValueError, KeyError, IndexError):
+            continue
+        if isinstance(value, str):
+            slugs.add(value)
+    return slugs
+
+
+def is_user_only_card(row) -> bool:
+    """An ``ops_run`` card for an operation only the user may decide."""
+    return row is not None and is_ops_card(row) and bool(_card_slugs(row) & USER_ONLY_OPERATIONS)
+
+
 def approver_eligible(*, holds: bool, tags, row, approver: str, user_id: str,
                       release_deploy_validated: bool = False, operator_request: bool = False) -> bool:
     """Whether ``approver`` may decide a card; release gates require validation.
 
     Defaults deliberately preserve the MCP-only fanout/listing contract.
     """
-    return (holds and card_visible(row, user_id=user_id, tags=tags, operator_request=operator_request)
+    return (holds and not is_user_only_card(row)
+            and card_visible(row, user_id=user_id, tags=tags, operator_request=operator_request)
             and (is_ops_card(row) or (release_deploy_validated and _release_card(row)))
             and row.bot_id != approver)
 

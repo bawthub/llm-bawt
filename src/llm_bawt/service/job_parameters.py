@@ -140,6 +140,11 @@ class ToolResultGcParameters(SystemJobParameters):
     dry_run: StrictBool = Field(default=False, title="Dry run")
 
 
+class ThreadAutoArchiveParameters(SystemJobParameters):
+    days: int = Field(default=30, strict=True, ge=0, title="Idle days before archive",
+                      description="0 disables the sweep.")
+
+
 class HarnessVersionParameters(SystemJobParameters):
     constraints_path: str = Field(default="", title="Constraints file",
                                   description="Blank uses the installed harness pins.")
@@ -174,6 +179,7 @@ class JobParameterRegistry:
         "tool_result_gc": ToolResultGcParameters,
         "harness_version_check": HarnessVersionParameters,
         "playground_expiry": SystemJobParameters,
+        "thread_auto_archive": ThreadAutoArchiveParameters,
     }
 
     @classmethod

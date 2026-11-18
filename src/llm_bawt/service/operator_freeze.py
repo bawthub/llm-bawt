@@ -148,11 +148,15 @@ def _one(conn, gate_id: int):
 
 
 def freeze(engine, *, actor: str, reason: str, scope: GateScope, ttl_seconds: int,
-           admit_user: bool = False) -> Freeze:
+           admit_user: bool = False, idempotent_owner: bool = False) -> Freeze:
     """Open ``actor``'s freeze; ``FreezeConflict`` when one is already live.
 
     ``admit_user`` (TASK-1692 "in the room"): the user's own chat still starts
     or steers turns, and bot work queues until thaw instead of being refused.
+
+    ``idempotent_owner`` (TASK-1489): the actor names one ops job, so any gate
+    it ever opened (live, thawed or lapsed) is that job's freeze and is
+    returned instead of opening another. A recovered job never replays it.
     """
     if not MIN_FREEZE_TTL_SECONDS <= ttl_seconds <= MAX_FREEZE_TTL_SECONDS:
         raise ValueError(f"ttl_seconds must be {MIN_FREEZE_TTL_SECONDS}..{MAX_FREEZE_TTL_SECONDS}")
@@ -164,6 +168,11 @@ def freeze(engine, *, actor: str, reason: str, scope: GateScope, ttl_seconds: in
         # Lock order: this owner lock, then the sorted target locks
         # (activate_hold). No other path takes the owner lock.
         conn.execute(sa_text(_OWNER_LOCK), {"owner": owner})
+        if idempotent_owner:
+            prior = conn.execute(sa_text(_FREEZE_SQL + " AND owner_id = :owner ORDER BY id LIMIT 1"),
+                                 _params(owner=owner)).mappings().first()
+            if prior is not None:
+                return Freeze.from_row(prior)
         live = live_gate_for_owner(conn, owner, fresh=True)
         if live is not None:
             raise FreezeConflict(Freeze.from_row(_one(conn, live.id)))
@@ -198,6 +207,26 @@ def thaw(engine, gate_id: int, *, actor: str, override: bool = False) -> ThawRes
     return ThawResult(freeze=frozen, released=released, override=foreign)
 
 
+@dataclass(frozen=True)
+class FreezeRecord:
+    """A freeze row with its current state, for an ops receipt (TASK-1489)."""
+    freeze: Freeze
+    owner_id: str
+    live: bool
+    released_at: datetime | None
+
+
+def freeze_record(engine, gate_id: int) -> FreezeRecord | None:
+    """Freeze ``gate_id`` as it stands now; None when it is no freeze at all."""
+    _require_postgres(engine)
+    with engine.connect() as conn:
+        row = _one(conn, gate_id)
+    if row is None:
+        return None
+    return FreezeRecord(freeze=Freeze.from_row(row), owner_id=row["owner_id"],
+                        live=bool(row["live"]), released_at=row["released_at"])
+
+
 def live_freezes(engine) -> list[Freeze]:
     """Every live freeze, oldest first (empty off PostgreSQL)."""
     if engine is None or engine.dialect.name != "postgresql":
@@ -212,6 +241,6 @@ def live_freezes(engine) -> list[Freeze]:
 
 __all__ = [
     "MAX_FREEZE_TTL_SECONDS", "MIN_FREEZE_TTL_SECONDS", "MAX_REASON_CHARS", "Freeze",
-    "FreezeConflict", "FreezeUnavailable", "NotFreezeOwner", "ThawResult",
-    "freeze", "freeze_owner", "live_freezes", "thaw", "valid_actor",
+    "FreezeConflict", "FreezeRecord", "FreezeUnavailable", "NotFreezeOwner", "ThawResult",
+    "freeze", "freeze_owner", "freeze_record", "live_freezes", "thaw", "valid_actor",
 ]

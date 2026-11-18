@@ -28,9 +28,10 @@ from .events import append_job_transition, append_job_transition_by_id
 from .container_remove import ACTION as REMOVE_ACTION, validate_remove_schema  # TASK-1439 T2c
 from .executor import validate_spec
 from .release_spec import is_release_spec
+from .freeze_spec import is_freeze_spec
 from .execution_mode import (DEFAULT_EXECUTION_MODE, EXECUTION_ISOLATED, legacy_execution_mode,
                              snapshot_execution_mode, validate_execution_mode)
-from .models import (EXECUTOR_DOCKER, EXECUTOR_RELEASE, JOB_ACCEPTED, JOB_DISPATCHING, JOB_FAILED, JOB_QUEUED,
+from .models import (EXECUTOR_DOCKER, EXECUTOR_FREEZE, EXECUTOR_RELEASE, JOB_ACCEPTED, JOB_DISPATCHING, JOB_FAILED, JOB_QUEUED,
                      JOB_QUIESCING, JOB_RUNNING, JOB_SUCCEEDED, JOB_TERMINAL_STATES, OpsJob, OpsOperation,
                      OpsOperationRevision)
 from .quiesce_settings import validate_quiesce_settings
@@ -369,8 +370,8 @@ class OpsStore:
             if type(value) is not int or not low <= value <= high:
                 raise ValueError(f"{field} must be an integer in {low}..{high}")
         schema, _ = validate_catalog(op.args_schema_json, op.args_defaults_json)
-        if op.executor_kind not in (EXECUTOR_DOCKER, EXECUTOR_RELEASE):
-            raise ValueError("executor_kind must be 'docker' or 'release'")
+        if op.executor_kind not in (EXECUTOR_DOCKER, EXECUTOR_RELEASE, EXECUTOR_FREEZE):
+            raise ValueError("executor_kind must be 'docker', 'release' or 'freeze'")
         validate_execution_mode(op.execution_mode, op.executor_kind)
         if op.target_host or op.run_as_user or op.working_directory:
             raise ValueError("Operations do not support target_host/run_as_user/working_directory; no SSH or shell runner")
@@ -394,6 +395,9 @@ class OpsStore:
         # and that spec never reaches the Docker executor.
         if (op.executor_kind == EXECUTOR_RELEASE) != is_release_spec(spec):
             raise ValueError("release_orchestrate specs require executor_kind 'release' and vice versa")
+        # TASK-1489: likewise the operator freeze and its executor.
+        if (op.executor_kind == EXECUTOR_FREEZE) != is_freeze_spec(spec):
+            raise ValueError("operator_freeze specs require executor_kind 'freeze' and vice versa")
         for key in ("container_name_from_arg", "compose_service_from_arg"):
             if key in spec and schema.get("properties", {}).get(spec[key], {}).get("type") != "string":
                 raise ValueError(f"{key} must reference a declared string argument")

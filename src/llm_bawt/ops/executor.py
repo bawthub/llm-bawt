@@ -41,6 +41,7 @@ from .image_deploy import CUTOVER_STOP_FIRST, CUTOVERS, DEPLOY_ACTION, IMAGE_ACT
 from .plan_reconcile import (ACTION as PLAN_ACTION, WORKER_CAPABILITY_LABEL as PLAN_WORKER_LABEL,
                              validate_plan_spec)
 from .release_spec import is_release_spec, validate_release_spec
+from .freeze_spec import is_freeze_spec, validate_freeze_spec
 from .restart_health import (HEALTH_KEYS as RESTART_HEALTH_KEYS, WORKER_CAPABILITY_LABEL as RESTART_HEALTH_LABEL,
                              has_health as has_restart_health, validate_health as validate_restart_health)
 from .service_identity import SPEC_PATTERNS as COMPOSE_SPEC_PATTERNS
@@ -342,6 +343,8 @@ def validate_spec(command_script: str) -> dict:
         return validate_remove_spec(spec)
     if is_release_spec(spec):
         return validate_release_spec(spec)
+    if is_freeze_spec(spec):
+        return validate_freeze_spec(spec)
     if isinstance(spec, dict) and spec.get("action") == "batch_gate":
         # TASK-1865: fixed workload; everything else comes from the trusted plan.
         if spec != {"action": "batch_gate"}:

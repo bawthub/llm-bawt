@@ -61,6 +61,8 @@ RISK_CRITICAL = "critical"
 
 EXECUTOR_DOCKER = "docker"
 EXECUTOR_RELEASE = "release"
+# TASK-1489: operator freeze/thaw in the ops service (:mod:`.freeze_executor`).
+EXECUTOR_FREEZE = "freeze"
 
 # ---------------------------------------------------------------------------
 # Job state machine
@@ -685,6 +687,7 @@ __all__ = [
     "RISK_CRITICAL",
     "EXECUTOR_DOCKER",
     "EXECUTOR_RELEASE",
+    "EXECUTOR_FREEZE",
     "JOB_QUEUED",
     "JOB_QUIESCING",
     "JOB_DISPATCHING",

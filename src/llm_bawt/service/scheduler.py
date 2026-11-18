@@ -44,6 +44,7 @@ class JobType(str, Enum):
     PLAYGROUND_EXPIRY = "playground_expiry"
     SEND_PROMPT = "send_prompt"
     IDLE_CONTEXT_RESET = "idle_context_reset"
+    THREAD_AUTO_ARCHIVE = "thread_auto_archive"
 
 
 # Wildcard jobs that skip bots tagged inactive (TASK-1440, TASK-2333).
@@ -814,7 +815,7 @@ class JobScheduler:
                 return True, None
 
             if job.job_type in (JobType.TOOL_RESULT_GC, JobType.HARNESS_VERSION_CHECK,
-                                JobType.PLAYGROUND_EXPIRY):
+                                JobType.PLAYGROUND_EXPIRY, JobType.THREAD_AUTO_ARCHIVE):
                 # Always-on for the same reason as MEDIA_GC — a cheap sweep.
                 return True, None
         except Exception as e:
@@ -852,6 +853,7 @@ class JobScheduler:
             create_profile_maintenance_task,
             create_harness_version_check_task,
             create_playground_expiry_task,
+            create_thread_auto_archive_task,
             create_tool_result_gc_task,
         )
 
@@ -906,6 +908,12 @@ class JobScheduler:
             return create_tool_result_gc_task(
                 retention_days=config["retention_days"],
                 dry_run=config["dry_run"],
+                bot_id=job.bot_id or "system",
+                user_id=config["user_id"],
+            )
+        elif job.job_type == JobType.THREAD_AUTO_ARCHIVE:
+            return create_thread_auto_archive_task(
+                days=config["days"],
                 bot_id=job.bot_id or "system",
                 user_id=config["user_id"],
             )
@@ -1122,6 +1130,30 @@ def init_default_jobs(engine, config) -> None:
                 next_run.isoformat(),
             )
 
+        # TASK-261: daily stale-thread archive, 05:00 UTC after the GC sweeps.
+        # The env value only seeds a new job; the saved job config owns it after.
+        # Seeded disabled: it archives across every bot's threads, so turning
+        # it on is a deliberate operator choice, not a side effect of a restart.
+        if not session.exec(
+            select(ScheduledJob).where(ScheduledJob.job_type == JobType.THREAD_AUTO_ARCHIVE)
+        ).first():
+            now = datetime.now(timezone.utc)
+            next_run = now.replace(hour=5, minute=0, second=0, microsecond=0)
+            if next_run <= now:
+                next_run += timedelta(days=1)
+            session.add(ScheduledJob(
+                job_type=JobType.THREAD_AUTO_ARCHIVE,
+                bot_id=SYSTEM_BOT_ID,
+                enabled=False,
+                interval_minutes=1440,
+                next_run_at=next_run,
+                config_json=json.dumps({
+                    "user_id": "system",
+                    "days": int(getattr(config, "THREADS_AUTO_ARCHIVE_DAYS", 30)),
+                }),
+            ))
+            session.commit()
+
         # TASK-2190/2195: Playground sweep. Deletes forever what has sat in
         # Trash longer than playground_trash_days and retries failed blob
         # deletes. Cheap indexed scan; every 5 min.
@@ -1157,7 +1189,8 @@ def init_default_jobs(engine, config) -> None:
                     bot_id=SYSTEM_BOT_ID,
                     enabled=config.SCHEDULER_ENABLED,
                     interval_minutes=int(
-                        getattr(config, "HARNESS_VERSION_CHECK_INTERVAL_MINUTES", 10080),
+                        # TASK-2469: daily; a few PyPI/changelog GETs and an idempotent upsert.
+                        getattr(config, "HARNESS_VERSION_CHECK_INTERVAL_MINUTES", 1440),
                     ),
                     next_run_at=next_run,
                     config_json=json.dumps({"user_id": "system", "agent_bot_id": None}),

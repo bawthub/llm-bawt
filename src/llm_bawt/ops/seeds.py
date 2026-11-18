@@ -36,6 +36,7 @@ from typing import Any
 
 from .models import (
     EXECUTOR_DOCKER,
+    EXECUTOR_FREEZE,
     RISK_CRITICAL,
     RISK_HIGH,
     RISK_LOW,
@@ -654,6 +655,49 @@ _CONFIG_SEEDS += [
 ]
 
 
+def _bridge_image_swap_seed(mode: str, slug: str, title: str, arg: dict, description: str, prefix: str) -> dict:
+    """TASK-2469: the claude-code-bridge reconcile, recreating onto a rebuilt
+    LOCAL image by ID (deploy) or back to a deploy's recorded previous image
+    (rollback). Same guards as the reconcile; the image is built beforehand
+    from published source and its pinned constraints, never by this op."""
+    base = next(s for s in _CONFIG_SEEDS if s["slug"] == "llm-bawt.reconcile-claude-code-bridge-config")
+    spec = json.loads(base["command_script"])
+    spec["image_swap"] = mode
+    name = next(iter(arg))
+    return {**base, "slug": slug, "title": title, "description": description,
+            "command_script": json.dumps(spec, ensure_ascii=False),
+            "args_schema_json": _schema(arg, [name]), "args_defaults_json": _defaults(),
+            "approval_prompt_prefix": prefix,
+            # Off until an operator enables it; holds the bridge's agent turns
+            # and resumes them durably, like the live bridge reconcile row.
+            "quiesce_enabled": True, "quiesce_timeout_seconds": 600,
+            "quiesce_scope_json": json.dumps({"backends": ["claude-code"]}, sort_keys=True)}
+
+
+_CONFIG_SEEDS += [
+    _bridge_image_swap_seed(
+        "deploy", "llm-bawt.deploy-claude-code-bridge-image", "Deploy a rebuilt image to claude-code-bridge",
+        {"image_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$",
+                      "description": "Full ID of a local llm-bawt-agent-bridge image (never pulled)"}},
+        "Recreate claude-code-bridge from its declared Compose service onto ANOTHER local image, named by ID; "
+        "the image must carry the service's image name. The bridge source is import-checked inside that image "
+        "before anything stops. Same config drift check, published-source guard and health check as the "
+        "reconcile; restores the previous container on failure and moves the Compose tag after a healthy swap. "
+        "The job record keeps the previous image ID for rollback and the harness versions the new image runs. "
+        "KILLS every agent session the bridge hosts.",
+        "Deploy a rebuilt claude-code-bridge image (KILLS ACTIVE AGENTS)"),
+    _bridge_image_swap_seed(
+        "rollback", "llm-bawt.rollback-claude-code-bridge-image", "Roll back the claude-code-bridge image",
+        {"deploy_job_id": {"type": "string", "pattern": "^[0-9a-f]{32}$",
+                           "description": "The succeeded deploy job whose previous image to restore"}},
+        "Recreate claude-code-bridge onto the previous image recorded by a succeeded image deploy job; refuses "
+        "unless the bridge still runs the image that deploy installed. The source is import-checked inside the "
+        "restored image before anything stops. Same guard and verification as the reconcile. KILLS every agent "
+        "session the bridge hosts.",
+        "Roll back the claude-code-bridge image (KILLS ACTIVE AGENTS)"),
+]
+
+
 # The env_import destinations a plan may accept losing (closed list).
 _DESTINATIONS = sorted(DESTINATION_PROBES)
 
@@ -853,6 +897,60 @@ _HOST_KEY_SEEDS: list[dict[str, Any]] = [
 ]
 
 
+# TASK-1489: the operator freeze as an ops job. Freeze cards are decided only
+# by the user (approver_eligibility.USER_ONLY_OPERATIONS); thaw reaches only a
+# freeze this operation opened, never one from the BawtHub button.
+_FREEZE_SEEDS: list[dict[str, Any]] = [
+    {
+        "slug": "llm-bawt.freeze",
+        "title": "Freeze agent bots",
+        "description": (
+            "Open an operator freeze over every agent bot: new turns are refused until the "
+            "freeze is thawed or its TTL (at most 12 hours) lapses. Running turns are not "
+            "cancelled. admit_user keeps the user's own chat working while bot work queues."
+        ),
+        "enabled": False,
+        "executor_kind": EXECUTOR_FREEZE,
+        "execution_mode": "process",
+        "target_host": "",
+        "working_directory": None,
+        "command_script": _spec(action="operator_freeze", op="freeze"),
+        "args_schema_json": _schema({
+            "reason": {"type": "string", "minLength": 1, "maxLength": 500},
+            "ttl_seconds": {"type": "integer", "minimum": 60, "maximum": 43200},
+            "admit_user": {"type": "boolean"},
+        }, required=["reason", "ttl_seconds"]),
+        "args_defaults_json": _defaults({"admit_user": False}),
+        "timeout_seconds": 60,
+        "start_delay_seconds": 0,
+        "max_output_bytes": 16384,
+        "risk_level": RISK_HIGH,
+        "approval_required": True,
+        "category": "freeze",
+        "approval_prompt_prefix": "Freeze every agent bot",
+    },
+    {
+        "slug": "llm-bawt.thaw",
+        "title": "Thaw an ops freeze",
+        "description": "Release a freeze opened by the freeze operation, by its gate id.",
+        "enabled": False,
+        "executor_kind": EXECUTOR_FREEZE,
+        "execution_mode": "process",
+        "target_host": "",
+        "working_directory": None,
+        "command_script": _spec(action="operator_freeze", op="thaw"),
+        "args_schema_json": _schema({"gate_id": {"type": "integer", "minimum": 1}}, required=["gate_id"]),
+        "args_defaults_json": _defaults(),
+        "timeout_seconds": 60,
+        "start_delay_seconds": 0,
+        "max_output_bytes": 16384,
+        "risk_level": RISK_MEDIUM,
+        "category": "freeze",
+        "approval_prompt_prefix": "Thaw an ops freeze",
+    },
+]
+
+
 SEEDS: list[dict[str, Any]] = [
     *_LLM_BAWT_SEEDS,
     *_BAWTHUB_SEEDS,
@@ -861,6 +959,7 @@ SEEDS: list[dict[str, Any]] = [
     *_PLAN_SEEDS,
     *_SEQUENCE_SEEDS,
     *_HOST_KEY_SEEDS,
+    *_FREEZE_SEEDS,
 ]
 
 

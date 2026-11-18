@@ -584,3 +584,49 @@ def test_only_the_resolver_reads_its_reason(ops):
 
     assert (mine["status"], mine["resolved_by_bot"], mine["reason"]) == (REQ_APPROVED, HOLDER, "holder reason")
     assert (theirs["status"], theirs["resolved_by_bot"], theirs["reason"]) == (REQ_APPROVED, HOLDER, None)
+
+
+# --- TASK-1489: user-only (freeze) cards ----------------------------------------
+
+FREEZE = "llm-bawt.freeze"
+
+
+def _freeze_card(ops, via):
+    if via == "snapshot":
+        snap = {**SNAPSHOT, "operation": {**SNAPSHOT["operation"], "slug": FREEZE}}
+        return ops.card(snapshot=snap)
+    return ops.card(tool_arguments={"operation": FREEZE, "args": {}})
+
+
+@pytest.mark.parametrize("via", ["snapshot", "arguments"])
+def test_a_holder_can_neither_list_read_nor_resolve_a_freeze_card(ops, via):
+    from llm_bawt.approval_models import REQ_PENDING
+
+    request_id = _freeze_card(ops, via)
+    listed = ops.listing(HOLDER)
+    assert listed.status_code == 200
+    assert request_id not in listed.text
+    read = ops.api.client.get(f"/v1/ops-approvals/{request_id}",
+                              headers={TASK_TURN_CONTEXT_HEADER: f"turn:{HOLDER}"})
+    assert read.status_code == 404
+    response = ops.resolve(HOLDER, request_id)
+    assert response.status_code == 404 and _code(response) == "not_found"
+    assert ops.store.get_request(request_id).status == REQ_PENDING
+
+
+def test_the_requester_can_still_withdraw_its_freeze_card(ops):
+    request_id = _freeze_card(ops, "arguments")
+    assert _withdraw(ops, REQUESTER, request_id).status_code == 200
+
+
+def test_a_holder_still_resolves_an_ordinary_card_beside_a_freeze_card(ops):
+    _freeze_card(ops, "snapshot")
+    request_id = ops.card()
+    assert request_id in ops.listing(HOLDER).text
+    assert ops.resolve(HOLDER, request_id).status_code == 200
+
+
+def test_an_unknown_approval_id_is_not_found(ops):
+    response = ops.api.client.get("/v1/ops-approvals/req-does-not-exist",
+                                  headers={TASK_TURN_CONTEXT_HEADER: f"turn:{HOLDER}"})
+    assert response.status_code == 404
