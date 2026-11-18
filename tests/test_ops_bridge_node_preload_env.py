@@ -31,9 +31,13 @@ def test_preload_under_a_mount_refused():
         _classify_env(dict(BAKED), {**MOUNTS, "/usr/local/libexec": True}, set())
 
 
-@pytest.mark.parametrize("name", ["NODE_PATH", "NODE_EXTRA_CA_CERTS", "NODE_ENV"])
-def test_generic_node_names_stay_refused(name):
+@pytest.mark.parametrize(("name", "code"), [
+    ("NODE_PATH", "source_env_unclassified"),
+    ("NODE_EXTRA_CA_CERTS", "source_env_unclassified"),
+    ("NODE_ENV", "source_env_unsafe"),
+])
+def test_generic_node_names_stay_refused(name, code):
     with pytest.raises(SourceStateError) as err:
         _classify_env({**BAKED, name: "x"}, MOUNTS, set())
-    assert err.value.code == "source_env_unclassified"
+    assert err.value.code == code
     assert reserved_env_name(name)  # and cannot be listed as app data either
