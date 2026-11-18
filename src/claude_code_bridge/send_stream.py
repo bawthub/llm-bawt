@@ -442,6 +442,11 @@ class ClaudeStreamMixin:
                     liveness.stop_status(msg.task_id, msg.status)
                     if liveness is not None else (msg.status, None)
                 )
+                if status == "completed":
+                    # TASK-2367: provisional until a notification settles it or
+                    # the next level frame shows the task and its children gone.
+                    ledger.background.hold_update(msg.task_id)
+                    status = "running"
                 seq += 1
                 self._publish_event(
                     request_id, session_key, seq,
@@ -456,6 +461,7 @@ class ClaudeStreamMixin:
                     },
                 )
         elif isinstance(msg, TaskNotificationMessage):
+            ledger.background.settle(msg.task_id)
             if msg.status != "completed":
                 ledger.background.discard(msg.task_id)
             elif ledger.background.defer_done(msg.task_id, msg):
@@ -482,6 +488,14 @@ class ClaudeStreamMixin:
                 seq = ClaudeStreamMixin._publish_subagent_done(
                     self, released, request_id=request_id, session_key=session_key, seq=seq,
                     ledger=ledger, liveness=liveness,
+                )
+            for task_id in ledger.background.release_updates():
+                seq += 1
+                self._publish_event(
+                    request_id, session_key, seq,
+                    kind=AgentEventKind.SUBAGENT_PROGRESS,
+                    tool_use_id=None,
+                    extra_raw={"task_id": task_id, "status": "completed"},
                 )
         return seq
 

@@ -76,3 +76,51 @@ def test_failed_or_stopped_after_held_completion_stays_final():
             (AgentEventKind.SUBAGENT_PROGRESS, "running", None),
             (AgentEventKind.SUBAGENT_DONE, status, "terminal"),
         ]
+
+
+def updated(status="completed"):
+    from claude_agent_sdk.types import TaskUpdatedMessage
+    return TaskUpdatedMessage(subtype="task_updated", data={}, task_id="agent1",
+                              patch={"status": status}, status=status)
+
+
+RUNNING = (AgentEventKind.SUBAGENT_PROGRESS, "running", None)
+
+
+def test_task_updated_completed_while_waiting_on_children_reports_running():
+    events = run(level(AGENT, SHELL), updated(), notification(), updated(), level(AGENT),
+                 notification(summary="final"))
+    assert events == [RUNNING, RUNNING, RUNNING,
+                      (AgentEventKind.SUBAGENT_DONE, "completed", "final")]
+
+
+def test_update_before_level_frame_is_never_terminal():
+    # Codex's reordering: the update lands before the frame naming the child.
+    events = run(updated(), level(AGENT, SHELL), notification(), level(AGENT),
+                 notification(summary="final"), level())
+    assert events == [RUNNING, RUNNING,
+                      (AgentEventKind.SUBAGENT_DONE, "completed", "final")]
+
+
+def test_update_only_completion_is_released_when_task_leaves_live_set():
+    events = run(level(AGENT), updated(), level(AGENT), level())
+    assert events == [RUNNING, (AgentEventKind.SUBAGENT_PROGRESS, "completed", None)]
+
+
+def test_held_update_after_failed_notification_stays_failed():
+    events = run(level(AGENT, SHELL), updated(),
+                 notification(status="failed", summary="x"), level())
+    assert events == [RUNNING, (AgentEventKind.SUBAGENT_DONE, "failed", "x")]
+
+
+def test_reordered_frames_persist_as_running_until_final_done():
+    from llm_bawt.service.worker_lifecycle_store import _advance, event_status
+
+    kinds = {AgentEventKind.SUBAGENT_PROGRESS: "subagent_progress",
+             AgentEventKind.SUBAGENT_DONE: "subagent_done"}
+    stored, history = "started", []
+    for kind, status, _ in run(updated(), level(AGENT, SHELL), notification(),
+                               level(AGENT), notification(summary="final")):
+        stored = _advance(stored, event_status(kinds[kind], status))
+        history.append(stored)
+    assert history == ["running", "running", "completed"]

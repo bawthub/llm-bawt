@@ -207,7 +207,8 @@ class HistoryManager:
             return fallback
 
     def load_history(
-        self, since_minutes: int | None = None, session_id: str | None = None
+        self, since_minutes: int | None = None, session_id: str | None = None,
+        *, fork_from: dict | None = None,
     ):
         self.messages = []
 
@@ -216,6 +217,27 @@ class HistoryManager:
         if self._db_backend and not self.user_id:
             self._warn_userless_history_load()
             return
+
+        # TASK-259: a forked thread's pool is the parent through the fork point
+        # plus the fork's own turns. If that can't be built, fall through to
+        # the fork's own thread below rather than the continuous history.
+        if fork_from and session_id and self._db_backend:
+            fork_loader = getattr(self._db_backend, "load_fork_scoped", None)
+            if callable(fork_loader):
+                try:
+                    forked = fork_loader(
+                        session_id=session_id,
+                        parent_session_id=str(fork_from.get("session_id") or ""),
+                        at_message_id=str(fork_from.get("at_message_id") or ""),
+                        user_id=self.user_id,
+                    )
+                    if forked is not None:
+                        self.messages = forked
+                        return
+                except Exception as e:
+                    logger.warning(
+                        "Fork history load failed for thread %s: %s", session_id, e,
+                    )
 
         # TASK-284 (reverted design): session threads are PROVENANCE METADATA
         # ONLY — a queryable session_id for restoring a conversation, never a

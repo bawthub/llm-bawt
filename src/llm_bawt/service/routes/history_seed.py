@@ -44,9 +44,13 @@ def cap_seed_contents(
 def build_context_seed(
     bot_id: str, model: str | None, service, session_id: str | None = None,
     *, llm_bawt=None, history_scope: str | None = None,
-    user_id: str | None = None,
+    user_id: str | None = None, fork_from: dict | None = None,
 ) -> dict:
     """Build the context-seed payload for a fresh Claude Code SDK session.
+
+    ``fork_from`` (TASK-259, with ``session_id`` = the fork) bounds the pool to
+    the parent thread through ``at_message_id`` plus the fork's own turns; see
+    ``memory.fork_history``.
 
     Extracted from the ``/v1/history/context-seed`` handler (TASK-501) so the
     app can assemble the seed IN-PROCESS at dispatch time and push it to the
@@ -93,7 +97,10 @@ def build_context_seed(
     # Load fresh so we never serve a stale in-memory transcript.
     # ``session_id`` (TASK-252): scoped seed for hydrating an explicitly
     # opened thread — pool becomes that thread's raw + rolling summaries.
-    llm_bawt.history_manager.load_history(session_id=session_id)
+    if fork_from:
+        llm_bawt.history_manager.load_history(session_id=session_id, fork_from=fork_from)
+    else:
+        llm_bawt.history_manager.load_history(session_id=session_id)
 
     # Same budget the agent path uses (base.py) — the ONE Tier-2 authority.
     # 0 => no budget (return everything). TASK-609. Capture the full
@@ -274,6 +281,19 @@ def maybe_build_session_seed(
                 bot_id, model, service, session_id=_seed_session_id or None, llm_bawt=llm_bawt,
             )
             return seed.get("messages", [])
+
+        # TASK-259: a forked thread without a provider key seeds from the
+        # parent's history through the fork point plus the fork's own turns,
+        # whatever the continuity setting and whether or not it was reopened
+        # explicitly. Ahead of the explicit branch, which would drop the
+        # parent prefix.
+        _fork = _binding.get("fork_from")
+        if not _resume_id and _thread_id and isinstance(_fork, dict):
+            seed = build_context_seed(
+                bot_id, model, service, session_id=_thread_id,
+                llm_bawt=llm_bawt, fork_from=_fork,
+            )
+            return seed.get("messages") or None
 
         # A user-opened historical thread is hydration, not cross-session
         # carry. Resume its SDK transcript when present; otherwise seed from

@@ -156,6 +156,44 @@ class _MCPShortTermManager:
         merged.sort(key=lambda m: m.timestamp or 0.0)
         return merged
 
+    def load_fork_scoped(
+        self, *, session_id: str, parent_session_id: str, at_message_id: str,
+        user_id: str | None = None,
+    ) -> list | None:
+        """A forked thread's pool (TASK-259): see ``memory.fork_history``."""
+        from llm_bawt.memory.fork_history import compose_fork_chain, forked_from_of
+        from llm_bawt.models.message import Message
+
+        if not (session_id and parent_session_id and at_message_id):
+            return None
+
+        def _msgs(rows) -> list:
+            return [
+                Message(
+                    role=r.get("role", ""), content=r.get("content", ""),
+                    timestamp=r.get("timestamp", 0.0) or 0.0, db_id=r.get("id"),
+                    session_id=r.get("session_id"),
+                    author_entity_type=(r.get("author") or {}).get("entity_type"),
+                    author_entity_id=(r.get("author") or {}).get("entity_id"),
+                )
+                for r in rows
+            ]
+
+        get = self._memory_client.get_messages
+
+        def _thread(sid: str) -> list:
+            return _msgs(get(session_id=sid, user_id=user_id))
+
+        def _fork_of(sid: str) -> dict | None:
+            return forked_from_of(self._memory_client.get_session(sid))
+
+        return compose_fork_chain(
+            _thread(session_id), _msgs(get(summaries_only=True, user_id=user_id)),
+            session_id=session_id,
+            fork_from={"session_id": parent_session_id, "at_message_id": at_message_id},
+            read_rows=_thread, fork_of=_fork_of,
+        )
+
     def get_session(self, session_id: str) -> dict | None:
         """Return one session row by id for per-thread SDK-key resolution."""
         return self._memory_client.get_session(session_id)

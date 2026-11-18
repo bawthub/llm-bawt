@@ -26,6 +26,7 @@ class BackgroundTaskSet:
         self._live: set[str] = set()
         self._children: dict[str, set[str]] = {}
         self._deferred: dict[str, Any] = {}
+        self._provisional: set[str] = set()
 
     def observe_level(self, data: Any) -> list[Any]:
         """Replace the live set; return deferred notifications now released."""
@@ -52,6 +53,29 @@ class BackgroundTaskSet:
     def discard(self, task_id: str) -> None:
         """Drop a held completion: a failed/stopped notification is final."""
         self._deferred.pop(task_id, None)
+
+    def hold_update(self, task_id: str) -> None:
+        """Hold a ``task_updated`` completed until it can be told apart.
+
+        The CLI also sends one when a subagent pauses on its own background
+        work, possibly before the level frame names the child.
+        """
+        if task_id:
+            self._provisional.add(task_id)
+
+    def settle(self, task_id: str) -> None:
+        """A notification decides the task's outcome; drop its held update."""
+        self._provisional.discard(task_id)
+
+    def release_updates(self) -> list[str]:
+        """Held updates whose task and children have left the live set."""
+        released = [
+            task_id for task_id in self._provisional
+            if task_id not in self._live and not self._children.get(task_id)
+            and task_id not in self._deferred
+        ]
+        self._provisional.difference_update(released)
+        return released
 
     def defer_done(self, task_id: str, notification: Any) -> bool:
         """Hold ``notification`` while ``task_id`` has live children."""

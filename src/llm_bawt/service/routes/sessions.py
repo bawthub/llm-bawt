@@ -97,9 +97,10 @@ class SessionTranscriptResponse(BaseModel):
 
 
 class ForkFrom(BaseModel):
-    """TASK-250: fork provenance — both fields required when forking."""
+    """TASK-250: fork provenance. TASK-259: ``session_id`` may be omitted; the
+    fork message's own thread is then the parent."""
 
-    session_id: str
+    session_id: str | None = None
     at_message_id: str
 
 
@@ -473,10 +474,21 @@ async def create_session(
         )
 
     # Validate fork provenance BEFORE rotating anything.
+    fork_parent: str | None = None
     if body.fork_from is not None:
-        await _owned_session_or_404(
-            body.fork_from.session_id, effective_bot, user_id
+        # TASK-259: the fork point must be a conversation message, of the
+        # named parent when one is given (the continuous chat view doesn't
+        # know a message's thread, so the message's own thread is the parent).
+        point = await storage.get_message_by_id(
+            bot_id=effective_bot, message_id=body.fork_from.at_message_id,
         )
+        fork_parent = (point or {}).get("session_id")
+        if (not fork_parent or point.get("role") not in ("user", "assistant")
+                or (body.fork_from.session_id and body.fork_from.session_id != fork_parent)):
+            raise HTTPException(
+                status_code=422, detail="fork_from.at_message_id is not a message of that thread",
+            )
+        await _owned_session_or_404(fork_parent, effective_bot, user_id)
 
     meta: dict = {}
     if body.title and body.title.strip():
@@ -484,8 +496,9 @@ async def create_session(
         meta["title_source"] = "user"
     if body.fork_from is not None:
         meta["forked_from"] = {
-            "session_id": body.fork_from.session_id,
-            "at_message_id": body.fork_from.at_message_id,
+            "session_id": fork_parent,
+            # The resolved id: lookup prefix-matches, the seed matches exactly.
+            "at_message_id": point.get("id") or body.fork_from.at_message_id,
         }
 
     if body.activate:

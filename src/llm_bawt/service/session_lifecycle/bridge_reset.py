@@ -281,6 +281,16 @@ class BridgeSessionResetMixin:
         if resume:
             binding["thread_resume_id"] = resume
         else:
+            # TASK-259: a forked thread with no provider key yet (first turn,
+            # model or backend switch) cold-starts from the parent's history
+            # through the fork point plus the fork's own turns.
+            forked = metadata.get("forked_from")
+            if (isinstance(forked, dict) and forked.get("session_id")
+                    and forked.get("at_message_id")):
+                binding["fork_from"] = {
+                    "session_id": str(forked["session_id"]),
+                    "at_message_id": str(forked["at_message_id"]),
+                }
             lifecycle = metadata.get("context_lifecycle")
             if isinstance(lifecycle, dict):
                 action = str(lifecycle.get("action") or "")

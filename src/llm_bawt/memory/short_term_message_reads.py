@@ -34,6 +34,63 @@ def history_owner_clause(params: dict, *, bot_id: str, user_id: str) -> str:
 class ShortTermMessageReadsMixin:
     """Message reads for ``PostgreSQLShortTermManager``."""
 
+    def load_fork_scoped(
+        self, *, session_id: str, parent_session_id: str, at_message_id: str,
+        user_id: str | None = None,
+    ) -> list | None:
+        """A forked thread's pool (TASK-259): see ``memory.fork_history``.
+
+        Both threads must belong to ``user_id``; returns None when the parent
+        or the fork message can't be found.
+        """
+        from ..models.message import Message
+        from .fork_history import compose_fork_chain, forked_from_of
+
+        owner = user_id if user_id is not None else self.user_id
+        if not (session_id and parent_session_id and at_message_id and owner):
+            return None
+
+        def _read(clauses: list[str], params: dict) -> list:
+            params = dict(params)
+            clauses = clauses + [
+                history_owner_clause(params, bot_id=self.bot_id, user_id=owner)
+            ]
+            with self._backend.engine.connect() as conn:
+                rows = conn.execute(
+                    text(f"""
+                        SELECT id, role, content, timestamp, session_id,
+                               author_entity_type, author_entity_id
+                        FROM {self._backend._messages_table_name}
+                        WHERE {' AND '.join(clauses)}
+                        ORDER BY timestamp ASC
+                    """),
+                    params,
+                ).fetchall()
+            return [
+                Message(
+                    role=r.role, content=r.content, timestamp=r.timestamp or 0.0,
+                    db_id=r.id, session_id=r.session_id,
+                    author_entity_type=r.author_entity_type,
+                    author_entity_id=r.author_entity_id,
+                )
+                for r in rows
+            ]
+
+        def _thread(sid: str) -> list:
+            return _read(["role <> 'summary'", "session_id = :sid"], {"sid": sid})
+
+        def _fork_of(sid: str) -> dict | None:
+            return forked_from_of(
+                self.get_session(sid, bot_id=self.bot_id, user_id=owner)
+            )
+
+        return compose_fork_chain(
+            _thread(session_id), _read(["role = 'summary'"], {}),
+            session_id=session_id,
+            fork_from={"session_id": parent_session_id, "at_message_id": at_message_id},
+            read_rows=_thread, fork_of=_fork_of,
+        )
+
     def load_session_scoped(
         self,
         since_minutes: int | None = None,
