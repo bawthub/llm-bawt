@@ -41,7 +41,6 @@ from .gate_history import gate_plan_key, migrate_gate_history
 from .validation import canonical_json, validate_catalog
 from .worker_slots import process_spawn_held, process_spawn_hold_available, worker_slot_free
 from .wake_on_lan import ACTION as WAKE_ACTION, validate_budget as validate_wake_budget
-from .host_key import ACTION as HOST_KEY_ACTION, validate_budget as validate_host_key_budget
 from .compose_secrets import ACTION as COMPOSE_SECRETS_ACTION
 
 logger = logging.getLogger(__name__)
@@ -376,14 +375,6 @@ class OpsStore:
             if schema.get("properties") or json.loads(op.args_defaults_json):
                 raise ValueError("wake_on_lan accepts no caller arguments")
             validate_wake_budget(spec, op.timeout_seconds)
-        if spec["action"] == HOST_KEY_ACTION:
-            # TASK-2430: the one SSH relaxation. Callers name a host record by
-            # id; host, user and key are resolved and pinned at approval.
-            props = schema.get("properties") or {}
-            if (set(props) != {"host_id"} or props["host_id"].get("type") != "integer"
-                    or schema.get("required") != ["host_id"] or json.loads(op.args_defaults_json)):
-                raise ValueError("host_key takes exactly one required integer host_id and no defaults")
-            validate_host_key_budget(op.timeout_seconds)
         if spec["action"] == COMPOSE_SECRETS_ACTION and (
                 schema.get("properties") or json.loads(op.args_defaults_json)):
             raise ValueError("compose_secrets_write accepts no caller arguments")
@@ -767,23 +758,7 @@ class OpsStore:
                     ledger, error_text or state, unknown=state in ("lost", "timed_out")))
         job = self._transition(job_id, _OPEN_STATES, values)
         self._settle_gpu_reconcile(job)
-        self._settle_host_key(job)
         return job
-
-    def _settle_host_key(self, job):
-        """TASK-2430: fold a terminal host_key job back into its host record."""
-        if job is None or job.state not in JOB_TERMINAL_STATES or not job.invocation_snapshot_json:
-            return
-        snapshot = json.loads(job.invocation_snapshot_json)
-        if (snapshot.get("spec") or {}).get("action") != HOST_KEY_ACTION:
-            return
-        from .host_access import settle
-
-        try:
-            settle(self.engine, job, snapshot)
-        except Exception:
-            # The job outcome is already recorded; the record can be re-verified.
-            logger.exception("host access record not updated for job %s", job.id)
 
     def _settle_gpu_reconcile(self, job):
         """TASK-1844: a terminal GPU-service reconcile releases its GPU handoff

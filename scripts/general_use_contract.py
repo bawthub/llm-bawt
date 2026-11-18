@@ -150,35 +150,18 @@ def policies(policy: dict) -> tuple[list[tuple[str, str, re.Pattern]], set[str]]
     return patterns, active
 
 
-def staged_paths(repo: Path) -> set[str]:
-    """Paths added, copied, modified or renamed in the index (commit-time scan)."""
-    out = git(repo, "diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z")
-    return set(out.split("\0")) - {""}
-
-
-def scan(repo: Path, policy: dict, only: set[str] | None = None) -> tuple[Counter, dict[Hit, int], int]:
+def scan(repo: Path, policy: dict) -> tuple[Counter, dict[Hit, int], int]:
     patterns, _ = policies(policy)
     hits: Counter = Counter()
     locations = {}
     scanned = 0
-    tracked = set(git(repo, "ls-files", "--cached", "-z").split("\0")) - {""}
-    for path in sorted(tracked if only is None else tracked & only):
+    for path in sorted(set(git(repo, "ls-files", "--cached", "-z").split("\0")) - {""}):
         full_scope = in_scope(path)
         if not full_scope and not path.startswith(TEST_ROOTS):
             continue
         full = repo / path
         try:
-            if only is not None:
-                # Commit time: the index blob is what will be committed, which
-                # can differ from the working copy (partial or private-index
-                # commits). A symlink's blob is its target, as readlink gives.
-                result = subprocess.run(["git", "-C", str(repo), "cat-file", "blob", f":{path}"],
-                                        capture_output=True)
-                if result.returncode:
-                    raise OSError()
-                raw = result.stdout
-            else:
-                raw = os.readlink(full).encode() if full.is_symlink() else full.read_bytes()
+            raw = os.readlink(full).encode() if full.is_symlink() else full.read_bytes()
             if b"\0" in raw:  # tracked images/assets, not source text
                 continue
             content = raw.decode("utf-8")
@@ -274,27 +257,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--denylist-file")
     parser.add_argument("--inventory", action="store_true",
                         help="print redacted candidates; never approves or rewrites a baseline")
-    parser.add_argument("--staged", action="store_true",
-                        help="commit hook: scan only staged paths and report only new hits")
     args = parser.parse_args(argv)
     repo = args.repo.resolve()
     try:
         policy = load_policy(repo, args.denylist_file)
-        only = staged_paths(repo) if args.staged else None
-        hits, locations, scanned = scan(repo, policy, only)
-        if only is not None:
-            # Baseline drift and stale entries are the full gate's job; a
-            # partial scan would read every unstaged baseline entry as stale.
-            baseline = read_baseline(args.baseline or repo / "general-use-baseline.json")
-            _, active = policies(policy)
-            subset = {hit: entry for hit, entry in baseline.items() if hit.path in only}
-            added, _, _ = check(hits, subset, active)
-            for hit, count in sorted(added.items()):
-                print(f"NEW {hit.path}:{locations[hit]} {hit.rule} +{count} [{hit.fingerprint}]")
-            if added:
-                print("General-use contract: staged change adds an operator name, personal "
-                      "domain or deployment literal; use a generic value")
-            return 1 if added else 0
+        hits, locations, scanned = scan(repo, policy)
         if args.inventory:
             print(json.dumps(inventory(hits), indent=2))
             return 0

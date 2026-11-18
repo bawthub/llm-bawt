@@ -34,7 +34,6 @@ if __package__:
     from .runtime_source import selected_runtime_spec, verify_runtime_source
     from . import sequence
     from . import wake_on_lan
-    from . import host_key
     from . import compose_secrets
     from . import import_preflight
     from .routing_reconcile import ACTION as ROUTING_ACTION, RoutingReconciler
@@ -53,7 +52,6 @@ else:  # pragma: no cover - standalone worker image
     from runtime_source import selected_runtime_spec, verify_runtime_source
     import sequence
     import wake_on_lan
-    import host_key
     import compose_secrets
     import import_preflight
     from routing_reconcile import ACTION as ROUTING_ACTION, RoutingReconciler
@@ -311,15 +309,6 @@ def execute_action(api, snapshot, job_id, *, lock_root, receipt, before_submit=N
         return wake_on_lan.run_worker(api, snapshot, job_id, receipt)
     if action == compose_secrets.ACTION:
         return compose_secrets.run_worker(api, snapshot, job_id, receipt)
-    if action == host_key.ACTION:
-        # TASK-2430: serialize writes per host record across jobs.
-        target = host_key.validate_target(snapshot.get("host_key"))
-        with open(Path(lock_root) / f"host-key-{target['host_id']}.lock", "a+") as lock:
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                raise host_key.HostKeyFailed("another host-key job holds this host") from None
-            return host_key.run_worker(api, snapshot, job_id, receipt)
     cls = action_handler(action)
     if cls is not None:
         handler = cls(api, snapshot, job_id, lock_root=lock_root)

@@ -15,13 +15,10 @@ COPY src/llm_bawt/ops/worker.py src/llm_bawt/ops/image_deploy.py src/llm_bawt/op
      src/llm_bawt/ops/dev_config_reconcile.py src/llm_bawt/ops/restart_health.py \
      src/llm_bawt/ops/health_probe.py src/llm_bawt/ops/runtime_source.py \
      src/llm_bawt/ops/sequence.py src/llm_bawt/ops/wake_on_lan.py src/llm_bawt/ops/compose_secrets.py \
-     src/llm_bawt/ops/host_key.py \
      src/llm_bawt/ops/import_preflight.py /ops/
 # TASK-2403: bridge reconcile/restart import the new source before stopping the bridge.
 LABEL llm-bawt.ops.import-preflight="1"
 LABEL llm-bawt.ops.wake-on-lan="1"
-# TASK-2430: fixed host-key verify/add/remove, exec'd in the key container.
-LABEL llm-bawt.ops.host-key="1"
 LABEL llm-bawt.ops.operation-sequence="1"
 LABEL llm-bawt.ops.runtime-source="1"
 # TASK-1800: classified restart targets, published tested SHAs, pinned dirty capture.

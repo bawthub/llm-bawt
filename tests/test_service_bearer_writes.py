@@ -45,9 +45,6 @@ PROTECTED = {
     ("POST", "/v1/ops/jobs"),
     ("POST", "/v1/ops/jobs/{job_id}/cancel"),
     ("POST", "/v1/ops/operator-jobs"),
-    ("POST", "/v1/ops/host-access"),
-    ("PATCH", "/v1/ops/host-access/{host_id}"),
-    ("DELETE", "/v1/ops/host-access/{host_id}"),
     ("PUT", "/v1/models/catalog/models/{model_key}"),
     ("DELETE", "/v1/models/catalog/models/{model_key}"),
     ("PUT", "/v1/models/catalog/access-paths/{access_key}"),
@@ -98,7 +95,7 @@ def test_protected_route_refuses_a_caller_without_the_bearer(monkeypatch, method
     monkeypatch.setattr(service_auth, "service_token_source",
                         lambda: SimpleNamespace(check=lambda header: TokenCheck.INVALID))
     url = path.format(policy_id="p", request_id="r", slug="s", job_id="j", model_key="m",
-                      access_key="a", endpoint_id="e", integration_id="unraid", provider_id="openai-api", host_id="h")
+                      access_key="a", endpoint_id="e", integration_id="unraid", provider_id="openai-api")
     response = TestClient(_app()).request(method, url)
     assert response.status_code == 401
     assert response.headers["www-authenticate"] == "Bearer"

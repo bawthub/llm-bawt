@@ -812,47 +812,6 @@ _STANDALONE_CONTAINER_SEEDS: list[dict[str, Any]] = [
 # Public seed set
 # ---------------------------------------------------------------------------
 
-# TASK-2430: the bot key's host access, driven from Settings > Host access.
-# Callers pass only a host record id; host, login and fingerprints are pinned
-# at approval. Disabled until the operator enables them with a capable worker.
-def _host_key_seed(op: str, title: str, description: str, risk: str, prefix: str) -> dict[str, Any]:
-    return {
-        "slug": f"llm-bawt.host-key-{op}",
-        "title": title,
-        "description": description,
-        "enabled": False,
-        "executor_kind": EXECUTOR_DOCKER,
-        "target_host": "",
-        "working_directory": None,
-        "command_script": _spec(action="host_key", op=op, key_container="llm-bawt-claude-code-bridge"),
-        "args_schema_json": _schema({"host_id": {"type": "integer", "minimum": 1}}, required=["host_id"]),
-        "args_defaults_json": _defaults(),
-        "timeout_seconds": 180,
-        "start_delay_seconds": 0,
-        "max_output_bytes": 16384,
-        "max_concurrent": 1,
-        "risk_level": risk,
-        "category": "host-access",
-        "approval_prompt_prefix": prefix,
-    }
-
-
-_HOST_KEY_SEEDS: list[dict[str, Any]] = [
-    _host_key_seed(
-        "verify", "Verify bot login to a host",
-        "Log in to one recorded host with the bot key, confirm it works and report what the login can do. Changes nothing on the host.",
-        RISK_LOW, "Verify bot SSH login"),
-    _host_key_seed(
-        "add", "Install the bot key on a host",
-        "Use the bot's existing login to append the bot public key to the recorded user's authorized_keys, then verify the login.",
-        RISK_HIGH, "Grant bots SSH access to a host"),
-    _host_key_seed(
-        "remove", "Remove the bot key from a host",
-        "Remove the bot public key from the recorded user's authorized_keys, then confirm the login no longer works.",
-        RISK_HIGH, "Revoke bots' SSH access to a host"),
-]
-
-
 SEEDS: list[dict[str, Any]] = [
     *_LLM_BAWT_SEEDS,
     *_BAWTHUB_SEEDS,
@@ -860,7 +819,6 @@ SEEDS: list[dict[str, Any]] = [
     *_CONFIG_SEEDS,
     *_PLAN_SEEDS,
     *_SEQUENCE_SEEDS,
-    *_HOST_KEY_SEEDS,
 ]
 
 
