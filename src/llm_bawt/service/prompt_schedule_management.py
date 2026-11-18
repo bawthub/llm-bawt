@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from uuid import NAMESPACE_URL, uuid5
 
 from fastapi import HTTPException
-from sqlalchemy import func, text
+from sqlalchemy import func, or_, text
 from sqlmodel import Session, select
 
 from .prompt_schedule_models import NONTERMINAL, PromptOccurrence, PromptSchedule
@@ -33,12 +33,9 @@ def wakeup_create_key(bot, nonce):
 
 
 def proven_wakeup_creator(owner, identifier, name):
-    """The bot that created a wake-up schedule, or None if it isn't provably one.
+    """Legacy convention, ONLY for the one-time missing-column upgrade.
 
-    The name ``wakeup:<bot>:<nonce>:`` is only a claim; the id is derived from
-    the owner and the create key, and the key from that bot and nonce, so a
-    renamed or hand-made schedule can't match the id it claims (TASK-1719).
-    Resolved once at create and persisted as ``creator_bot_id`` (TASK-1790).
+    This public UUID formula is not caller proof. Never use it for new rows.
     """
     if not (name or "").startswith(WAKEUP_PREFIX):
         return None
@@ -52,15 +49,26 @@ def proven_wakeup_creator(owner, identifier, name):
 
 
 def upgrade_prompt_schedules(conn, dialect):
-    """Additive prompt_schedules columns plus the creator backfill; idempotent."""
+    """Backfill legacy provenance only in the transaction adding its column."""
+    added_creator = False
     if dialect == "postgresql":
+        # Serialize the presence check with the additive DDL, including two
+        # overlapping startups. Only the transaction actually adding it infers.
+        conn.execute(text("LOCK TABLE prompt_schedules IN ACCESS EXCLUSIVE MODE"))
+        added_creator = not conn.execute(text(
+            "SELECT EXISTS (SELECT 1 FROM pg_attribute "
+            "WHERE attrelid='prompt_schedules'::regclass "
+            "AND attname='creator_bot_id' AND NOT attisdropped)"
+        )).scalar_one()
         conn.execute(text("ALTER TABLE prompt_schedules ADD COLUMN IF NOT EXISTS target_mode VARCHAR NOT NULL DEFAULT 'specific'"))
         conn.execute(text("ALTER TABLE prompt_schedules ADD COLUMN IF NOT EXISTS candidate_bot_ids JSON"))
         conn.execute(text("ALTER TABLE prompt_schedules ADD COLUMN IF NOT EXISTS creator_bot_id VARCHAR"))
         conn.execute(text("ALTER TABLE prompt_schedules ADD COLUMN IF NOT EXISTS task_id VARCHAR"))
         conn.execute(text("ALTER TABLE prompt_schedules ADD COLUMN IF NOT EXISTS task_owner_bot_id VARCHAR"))
-    # Wake-ups created before TASK-1790 carry their creator only in the name.
-    # A row whose name no longer proves it stays NULL (user-authored).
+    if not added_creator:
+        return
+    # Only pre-column wake-ups use this legacy convention. Repeated startup
+    # must not promote new unsigned rows with publicly reproducible names/IDs.
     rows = conn.execute(text(
         "SELECT job_id, owner_user_id, name FROM prompt_schedules "
         "WHERE creator_bot_id IS NULL AND name LIKE 'wakeup:%'")).all()
@@ -118,10 +126,14 @@ class PromptManagement:
                                 .order_by(PromptOccurrence.created_at.desc()).limit(1)).first()
             return schedule_view(job, schedule, run_view(*last) if last else None)
 
-    def list(self, owner, *, bot_id=None, lifecycle=None, search=None, limit=50, offset=0):
+    def list(self, owner, *, bot_id=None, lifecycle=None, search=None, wakeup_bot_id=None, limit=50, offset=0):
         conditions = [PromptSchedule.owner_user_id == owner]
         if bot_id:
             conditions.append(ScheduledJob.bot_id == bot_id)
+        if wakeup_bot_id:
+            conditions.extend([PromptSchedule.creator_bot_id.is_not(None),
+                               or_(PromptSchedule.creator_bot_id == wakeup_bot_id,
+                                   ScheduledJob.bot_id == wakeup_bot_id)])
         if lifecycle:
             conditions.append(PromptSchedule.lifecycle == lifecycle)
         if search:
@@ -140,7 +152,7 @@ class PromptManagement:
                 latest = {occ.job_id: run_view(occ, run) for occ, run in runs}
             return {"schedules": [schedule_view(job, schedule, latest.get(job.id)) for job, schedule in rows], "total_count": total}
 
-    def create(self, owner, data):
+    def create(self, owner, data, *, creator_bot_id=None):
         payload = data.model_dump(mode="json", exclude={"idempotency_key"})
         digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
         identifier = schedule_identifier(owner, data.idempotency_key)
@@ -150,7 +162,8 @@ class PromptManagement:
                 session.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": f"prompt-owner:{owner}"})
             existing = session.get(PromptSchedule, identifier)
             if existing:
-                if existing.owner_user_id != owner or existing.create_request_hash != digest:
+                if (existing.owner_user_id != owner or existing.create_request_hash != digest
+                        or existing.creator_bot_id != creator_bot_id):
                     raise HTTPException(409, "Idempotency key already used for another request")
                 return schedule_view(session.get(ScheduledJob, identifier), existing)
             count = session.exec(select(func.count()).select_from(PromptSchedule).where(
@@ -167,7 +180,7 @@ class PromptManagement:
             session.flush()
             fields = {key: value for key, value in payload.items() if key not in {"bot_id", "enabled", "timing"}}
             schedule = PromptSchedule(job_id=identifier, owner_user_id=owner, timing_json=payload["timing"],
-                                      creator_bot_id=proven_wakeup_creator(owner, identifier, data.name),
+                                      creator_bot_id=creator_bot_id,
                                       lifecycle="active" if data.enabled else "paused", create_request_hash=digest, **fields)
             session.add(schedule)
             session.flush()

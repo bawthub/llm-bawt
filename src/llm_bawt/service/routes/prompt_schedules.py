@@ -7,8 +7,12 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
+from llm_bawt.bot_access import BotAccessError
+from llm_bawt.bot_access.service import SERVICE_HEADER, open_service_capability
+
 from ..dependencies import get_profile_manager, get_service
 from ..prompt_capabilities import resolve_prompt_target
+from ..prompt_schedule_identity import CREATE_PURPOSE, create_invocation
 from ..prompt_schedule_management import PromptManagement
 from ..prompt_timing import PromptTiming, resolve_local
 
@@ -113,6 +117,25 @@ def owner(user):
     return value
 
 
+async def create_creator(request: Request, user: str = Query(...)) -> str | None:
+    """Only verified internal caller proof sets provenance; UI creates stay NULL."""
+    tokens = request.headers.getlist(SERVICE_HEADER)
+    if not tokens:
+        return None
+    if len(tokens) != 1 or not tokens[0].strip():
+        raise HTTPException(403, "Invalid schedule creator proof")
+    try:
+        # Use the actual parsed HTTP JSON, not a model_dump with defaults or
+        # coerced values: the MCP service signs exactly the body it sends.
+        caller = open_service_capability(
+            tokens[0], CREATE_PURPOSE, create_invocation(owner(user), await request.json()))
+        if not caller.user_id or caller.user_id != owner(user):
+            raise BotAccessError("caller_unavailable")
+    except BotAccessError:
+        raise HTTPException(403, "Invalid schedule creator proof") from None
+    return caller.bot_id
+
+
 def management():
     service = get_service()
     return PromptManagement(get_profile_manager(service.config).engine)
@@ -172,16 +195,17 @@ def local_time(body: LocalTime, user: str = Query(...)):
 @router.get("")
 def list_schedules(user: str = Query(...), bot_id: str | None = None, lifecycle: str | None = None,
                    search: str | None = Query(None, max_length=200), limit: int = Query(50, ge=1, le=100),
-                   offset: int = Query(0, ge=0)):
-    return management().list(owner(user), bot_id=bot_id, lifecycle=lifecycle, search=search, limit=limit, offset=offset)
+                   offset: int = Query(0, ge=0), wakeup_bot_id: str | None = Query(None, min_length=1, max_length=128)):
+    return management().list(owner(user), bot_id=bot_id, lifecycle=lifecycle, search=search,
+                             wakeup_bot_id=wakeup_bot_id, limit=limit, offset=offset)
 
 
 @router.post("", status_code=201)
-def create(body: CreateSchedule, user: str = Query(...)):
+def create(body: CreateSchedule, user: str = Query(...), creator_bot_id: str | None = Depends(create_creator)):
     user = owner(user)
     validate_target(body.bot_id, body.requested_model, user,
                     body.target_mode, body.candidate_bot_ids)
-    return management().create(user, body)
+    return management().create(user, body, creator_bot_id=creator_bot_id)
 
 
 @router.get("/{identifier}")

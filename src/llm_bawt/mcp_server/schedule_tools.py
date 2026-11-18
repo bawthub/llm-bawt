@@ -133,18 +133,18 @@ def _target_refusal(target: str, caller_bot: str) -> str | None:
 
 
 async def _request(method: str, path: str, user: str, body: dict | None = None,
-                   params: dict | None = None):
+                   params: dict | None = None, *, headers: dict | None = None):
     import httpx
 
     async with httpx.AsyncClient() as client:
         return await client.request(method, f"{_APP_BASE_URL}{path}", json=body, timeout=_TIMEOUT_S,
-                                    params={"user": user, **(params or {})})
+                                    params={"user": user, **(params or {})}, headers=headers)
 
 
 async def _call(method: str, path: str, user: str, body: dict | None = None,
-                params: dict | None = None, *, unknown: str) -> tuple[Any, str | None]:
+                params: dict | None = None, *, unknown: str, headers: dict | None = None) -> tuple[Any, str | None]:
     try:
-        response = await _request(method, path, user, body, params)
+        response = await _request(method, path, user, body, params, headers=headers)
     except Exception:
         logger.exception("schedule_wakeup call failed: %s %s", method, path)
         return None, _error("unavailable", unknown)
@@ -159,11 +159,7 @@ async def _call(method: str, path: str, user: str, body: dict | None = None,
 
 
 def _creator(schedule: dict) -> str | None:
-    """The bot that created this wake-up, or None if it isn't provably one.
-
-    The server proves it once at create (``proven_wakeup_creator``) and
-    persists it; the user-editable name is never consulted here (TASK-1790).
-    """
+    """Persisted server-verified creator; never infer from editable names/IDs."""
     return schedule.get("creator_bot_id") or None
 
 
@@ -231,7 +227,7 @@ async def schedule_wakeup(
 
     if action == "list":
         payload, error = await _call("GET", "/v1/prompt-schedules", user,
-                                     params={"search": WAKEUP_PREFIX, "lifecycle": "active", "limit": 100},
+                                     params={"wakeup_bot_id": bot, "lifecycle": "active", "limit": 100},
                                      unknown="the schedule list is unavailable; try again")
         if error:
             return error
@@ -274,6 +270,8 @@ async def schedule_wakeup(
         existing, _ = await _call("GET", f"/v1/prompt-schedules/{schedule_identifier(user, key)}", user,
                                   unknown="")
         if existing is not None:
+            if _creator(existing) != bot:
+                return _error("rejected", "Idempotency key already used by another creator", status_code=409)
             return _dump({**_summary(existing), "duplicate": True})
     header = f"[Scheduled wake-up from {bot}" + (f", {task}" if task else "") + "]"
     name = f"{WAKEUP_PREFIX}{bot}:{nonce}:{(label or task or 'wake-up').strip()}"[:120]
@@ -287,6 +285,10 @@ async def schedule_wakeup(
         "missed_policy": "run_latest", "misfire_grace_seconds": _MISFIRE_GRACE_S,
         "idempotency_key": key,
     }
-    payload, error = await _call("POST", "/v1/prompt-schedules", user, body,
+    from llm_bawt.bot_access.service import SERVICE_HEADER, ServicePrincipal
+    from llm_bawt.service.prompt_schedule_identity import CREATE_PURPOSE, create_invocation
+
+    proof = ServicePrincipal(bot, user).mint(CREATE_PURPOSE, create_invocation(user, body))
+    payload, error = await _call("POST", "/v1/prompt-schedules", user, body, headers={SERVICE_HEADER: proof},
                                  unknown="the create's outcome is unknown; check action=list")
     return error or _dump(_summary(payload))

@@ -167,6 +167,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_tool_execution_tracking_pg.py::",
     "test_tool_result_nul_pg.py::",
     "test_scheduled_run_notice_pg.py::",
+    "test_prompt_schedule_creator_pg.py::",
     "test_commit_wake_pg.py::",
     "test_state_events_pg.py::",
     "test_utility_usage_pg.py::",

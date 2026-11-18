@@ -6,11 +6,15 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
+from cryptography.fernet import Fernet
 
 from llm_bawt.bot_access import BotAccessError
+from llm_bawt.bot_access import service as service_codec
+from llm_bawt.bot_access.service import SERVICE_HEADER, open_service_capability
 from llm_bawt.bot_tags import BehaviorTag
 from llm_bawt.mcp_server import bot_access_identity, schedule_tools
-from llm_bawt.service.prompt_schedule_management import proven_wakeup_creator, schedule_identifier
+from llm_bawt.service.prompt_schedule_identity import CREATE_PURPOSE, create_invocation
+from llm_bawt.service.prompt_schedule_management import schedule_identifier
 
 NOW = datetime(2026, 10, 29, 15, 0, tzinfo=timezone.utc)
 
@@ -39,6 +43,8 @@ class Response:
 
 @pytest.fixture
 def rig(monkeypatch):
+    signer = Fernet(Fernet.generate_key())
+    monkeypatch.setattr(service_codec, "_get_fernet", lambda: signer)
     state = SimpleNamespace(caller=SimpleNamespace(bot_id="byte", user_id="owner"), tags=Tags(),
                             calls=[], schedules={})
 
@@ -48,14 +54,14 @@ def rig(monkeypatch):
             raise state.caller
         return state.caller
 
-    async def request(method, path, user, body=None, params=None):
+    async def request(method, path, user, body=None, params=None, *, headers=None):
         state.calls.append((method, path, user, body, params))
         if method == "POST":
-            # The real API derives the id from owner + create key, and proves
-            # the creator from that id once (PromptManagement.create).
+            caller = open_service_capability(headers[SERVICE_HEADER], CREATE_PURPOSE, create_invocation(user, body))
+            assert caller.user_id == user
             identifier = schedule_identifier(user, body["idempotency_key"])
             row = {"id": identifier, "owner_user_id": user,
-                   "creator_bot_id": proven_wakeup_creator(user, identifier, body["name"]),
+                   "creator_bot_id": caller.bot_id,
                    "bot_id": body["bot_id"], "name": body["name"],
                    "description": body["description"], "timing": body["timing"],
                    "next_run_at": "x", "lifecycle": "active"}
@@ -64,7 +70,11 @@ def rig(monkeypatch):
             state.schedules[row["id"]] = row
             return Response(201, row)
         if method == "GET" and path == "/v1/prompt-schedules":
-            return Response(200, {"schedules": list(state.schedules.values())})
+            bot = params["wakeup_bot_id"]
+            assert "search" not in params
+            return Response(200, {"schedules": [s for s in state.schedules.values()
+                if s.get("creator_bot_id") and bot in {s["creator_bot_id"], s["bot_id"]}
+                and s["lifecycle"] == params["lifecycle"]]})
         identifier = path.rsplit("/", 1)[-1]
         if identifier not in state.schedules:
             return Response(404, {"detail": "Schedule not found"})
@@ -117,7 +127,7 @@ async def test_create_uses_signed_owner_and_callback_defaults(rig):
     assert body["task_id"] == "TASK-1713"
     assert body["prompt"].startswith("[Scheduled wake-up from byte, TASK-1713]\n\n")
     assert out["id"] in rig.schedules
-    # TASK-1790: the tool's create key is what proves the creator on the server.
+    # TASK-1730: only invocation-bound signed caller proof sets the creator.
     assert rig.schedules[out["id"]]["creator_bot_id"] == "byte"
 
 
@@ -191,6 +201,7 @@ async def test_list_and_cancel_see_only_own_or_targeting_wakeups(rig):
     for_me = result(await schedule_tools.schedule_wakeup(message="a", in_minutes=5, target_bot_id="byte"))["id"]
     rig.caller = SimpleNamespace(bot_id="byte", user_id="owner")
     mine = result(await schedule_tools.schedule_wakeup(message="a", in_minutes=5, target_bot_id="al"))["id"]
+    rig.schedules[mine]["name"] = "A completely renamed real wake-up"
     listed = result(await schedule_tools.schedule_wakeup(action="list"))
     assert sorted(w["id"] for w in listed["wakeups"]) == sorted([for_me, mine])
 
@@ -274,6 +285,22 @@ async def test_no_current_turn_task_leaves_the_wakeup_untagged(rig):
 
 def test_current_turn_task_fails_closed_without_a_turn():
     assert schedule_tools.current_turn_task() is None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("creator", [None, "al"])
+async def test_duplicate_shortcut_refuses_unsigned_or_other_creator_row(rig, creator):
+    import hashlib
+    from llm_bawt.service.prompt_schedule_management import wakeup_create_key
+
+    nonce = hashlib.sha256(b"predictable").hexdigest()[:16]
+    identifier = schedule_identifier("owner", wakeup_create_key("byte", nonce))
+    rig.schedules[identifier] = {"id": identifier, "creator_bot_id": creator, "bot_id": "byte",
+                                 "name": f"wakeup:byte:{nonce}:forged", "lifecycle": "active"}
+    out = result(await schedule_tools.schedule_wakeup(message="real", in_minutes=5, idempotency_key="predictable"))
+    assert out["error"] == "rejected" and out["status_code"] == 409
+    assert not any(c[0] == "POST" for c in rig.calls)
+    assert rig.schedules[identifier]["creator_bot_id"] == creator
 
 
 @pytest.mark.anyio
