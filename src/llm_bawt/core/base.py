@@ -17,7 +17,7 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from rich.console import Console
+from ..shared.rich_safe import SafeConsole as Console  # never raises (TASK-2434)
 
 from ..clients import LLMClient
 from ..tools import get_tools_list, query_with_tools

@@ -5,7 +5,7 @@ Simple abstract base for OpenAI-compatible API clients.
 
 from __future__ import annotations
 
-from rich.console import Console
+from ..shared.rich_safe import SafeConsole as Console  # never raises (TASK-2434)
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.align import Align

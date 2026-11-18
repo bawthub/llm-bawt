@@ -52,9 +52,10 @@ class LogConfig:
             verbose: Enable INFO level logs with Rich rendering.
             debug: Enable DEBUG spam (overrides verbose).
         """
-        from rich.logging import RichHandler
-
         from . import logfmt
+        # Markup off: logged text is rendered literally and a bad record can
+        # never raise into the caller (TASK-2434).
+        from .rich_safe import SafeRichHandler as RichHandler
 
         if not logfmt.is_tty():
             # Containers: the standard logfmt line (TASK-2225). --debug keeps
@@ -139,9 +140,9 @@ class LogConfig:
                 show_time=False,
                 show_level=False,
                 rich_tracebacks=True,
-                markup=True,
+                markup=False,
             )
-            handler.setFormatter(_PrefixFormatter(markup=True))
+            handler.setFormatter(_PrefixFormatter())
             handler.setLevel(console_level)
             root.addHandler(handler)
             root.setLevel(root_level)
@@ -157,9 +158,9 @@ class LogConfig:
                 show_time=False,
                 show_level=False,
                 rich_tracebacks=True,
-                markup=True,
+                markup=False,
             )
-            handler.setFormatter(_PrefixFormatter(markup=True))
+            handler.setFormatter(_PrefixFormatter())
             root.addHandler(handler)
             root.setLevel(root_level)
             logging.getLogger("llm_bawt").setLevel(logging.INFO)
@@ -172,8 +173,8 @@ class LogConfig:
             show_time=False,
             show_level=False,
             rich_tracebacks=True,
-            markup=True,
+            markup=False,
         )
-        handler.setFormatter(_PrefixFormatter(markup=True))
+        handler.setFormatter(_PrefixFormatter())
         root.addHandler(handler)
         root.setLevel(root_level)

@@ -8,7 +8,7 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
-from rich.console import Console
+from ..shared.rich_safe import SafeConsole as Console  # never raises (TASK-2434)
 
 from ..clients import LLMClient, GrokClient
 from ..clients.openai_client import OpenAIClient

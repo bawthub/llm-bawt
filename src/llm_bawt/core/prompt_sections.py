@@ -9,7 +9,7 @@ orchestrator stays under the monolith gate as new sections are added.
 
 import logging
 
-from rich.console import Console
+from ..shared.rich_safe import SafeConsole as Console  # never raises (TASK-2434)
 
 from ..tools import get_tools_prompt
 from .prompt_builder import GLOBAL_SYSTEM_PROMPT, PromptBuilder, SectionPosition

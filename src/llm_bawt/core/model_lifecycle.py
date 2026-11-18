@@ -12,7 +12,7 @@ import logging
 import threading
 from typing import TYPE_CHECKING, Any
 
-from rich.console import Console
+from ..shared.rich_safe import SafeConsole as Console  # never raises (TASK-2434)
 
 from ..utils.config import Config
 

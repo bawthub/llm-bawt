@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ..profiles import ProfileManager
     from ..integrations.web_fetch.client import WebFetchClient
-from rich.console import Console
+from ..shared.rich_safe import SafeConsole as Console  # never raises (TASK-2434)
 from ..bots import Bot, BotManager
 from ..clients import LLMClient
 from ..runtime_settings import RuntimeSettingsResolver

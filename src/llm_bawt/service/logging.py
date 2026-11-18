@@ -37,11 +37,12 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
 
+import functools
 from logging.handlers import RotatingFileHandler
 from rich.console import Console
-from rich.logging import RichHandler
 
 from ..shared import logfmt as _logfmt
+from ..shared.rich_safe import SafeConsole, SafeRichHandler, escape
 from rich.panel import Panel
 from rich.table import Table
 from rich.theme import Theme
@@ -115,7 +116,9 @@ def get_console() -> Console:
         # force_terminal=True ensures Rich renders markup even when backgrounded
         # Off a TTY the console's decorative prints (panels, prompt previews)
         # are suppressed; everything worth keeping goes through logging.
-        _console = Console(
+        # SafeConsole: a quiet console renders nothing, and a print can never
+        # raise into a turn (TASK-2434).
+        _console = SafeConsole(
             theme=SERVICE_THEME, stderr=True, force_terminal=True,
             quiet=not _logfmt.is_tty(),
         )
@@ -174,8 +177,11 @@ def setup_service_logging(verbose: bool = False, debug: bool = False) -> None:
             if record.args:
                 record.msg = record.msg % record.args
                 record.args = ()
-            # Use plain text prefix - escape [ for Rich markup
-            record.msg = f"\\[{log_prefix}] {record.msg}"
+            # Escape the prefix's [ only for records rendered as markup.
+            prefix = f"[{log_prefix}]"
+            if getattr(record, "markup", False):
+                prefix = escape(prefix)
+            record.msg = f"{prefix} {record.msg}"
             return True
 
     def _add_debug_file_handler() -> None:
@@ -211,7 +217,9 @@ def setup_service_logging(verbose: bool = False, debug: bool = False) -> None:
     logging.basicConfig(
         level=root_level,
         format="%(message)s",
-        handlers=[RichHandler(
+        # Markup is opt-in per record (extra={"markup": True}); everything
+        # else renders literally, so logged text can't restyle or fail.
+        handlers=[SafeRichHandler(
             console=console,
             show_path=False,
             show_time=True,
@@ -220,7 +228,6 @@ def setup_service_logging(verbose: bool = False, debug: bool = False) -> None:
             show_level=False,
             rich_tracebacks=True,
             tracebacks_show_locals=verbose,
-            markup=True,
         )],
         force=True,
     )
@@ -304,11 +311,39 @@ class RequestContext:
         return (time.time() - self.start_time) * 1000
 
 
+_MARKUP = {"markup": True}
+
+
+def _never_raise(method):
+    """Diagnostic logging must never fail the request or turn it describes."""
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        try:
+            return method(self, *args, **kwargs)
+        except Exception as exc:
+            try:
+                self._logger.debug(
+                    "log %s failed: %s", method.__name__, type(exc).__name__,
+                    extra={"markup": False},
+                )
+            except Exception:
+                pass
+            return None
+
+    return wrapper
+
+
 class ServiceLogger:
     """
     Rich-formatted logger for the llm-service.
 
     Provides structured logging methods for common service events.
+
+    Untrusted text (messages, prompts, tool output, request fields, errors)
+    is either printed with ``markup=False`` or passed through ``escape()``
+    before it joins a markup string (TASK-2434). Structured methods are
+    wrapped in ``_never_raise``.
     """
 
     def __init__(self, name: str):
@@ -372,22 +407,23 @@ class ServiceLogger:
 
         self._console.print("[dim]Service shutting down...[/dim]")
 
+    @_never_raise
     def api_request(self, ctx: RequestContext, payload: dict[str, Any] | None = None) -> None:
         """Log an incoming API request."""
-        req_id = f"[request_id]\\[{ctx.request_id}][/request_id]"
-        method = f"[api.method]{ctx.method}[/api.method]"
-        path = f"[api.path]{ctx.path}[/api.path]"
+        req_id = f"[request_id]{escape(f'[{ctx.request_id}]')}[/request_id]"
+        method = f"[api.method]{escape(str(ctx.method))}[/api.method]"
+        path = f"[api.path]{escape(str(ctx.path))}[/api.path]"
 
         parts = [req_id, method, path]
 
         if ctx.model:
-            parts.append(f"model=[model.name]{ctx.model}[/model.name]")
+            parts.append(f"model=[model.name]{escape(str(ctx.model))}[/model.name]")
         if ctx.bot_id:
-            parts.append(f"bot=[bot.name]{ctx.bot_id}[/bot.name]")
+            parts.append(f"bot=[bot.name]{escape(str(ctx.bot_id))}[/bot.name]")
         if ctx.stream:
             parts.append("[dim]streaming[/dim]")
 
-        self._logger.info(" ".join(parts))
+        self._logger.info(" ".join(parts), extra=_MARKUP)
 
         # Verbose: show compact incoming summary
         if _verbose and payload:
@@ -418,7 +454,7 @@ class ServiceLogger:
                 
                 self._console.print(f"  [bold green]← Client[/bold green] | {len(messages)} msg(s)")
                 if user_prompt:
-                    self._console.print(f"  [green]prompt:[/green] {user_prompt}")
+                    self._console.print(f"  [green]prompt:[/green] {escape(user_prompt)}")
 
         # Debug: dump request payload (with image data redacted)
         if _debug and payload:
@@ -428,9 +464,10 @@ class ServiceLogger:
             except Exception:
                 self._logger.debug("Request payload: (unserializable)")
 
+    @_never_raise
     def api_response(self, ctx: RequestContext, status: int = 200, tokens: int | None = None) -> None:
         """Log an API response."""
-        req_id = f"[request_id]\\[{ctx.request_id}][/request_id]"
+        req_id = f"[request_id]{escape(f'[{ctx.request_id}]')}[/request_id]"
         elapsed = f"[timing]{ctx.elapsed_ms:.0f}ms[/timing]"
 
         if status < 400:
@@ -443,16 +480,20 @@ class ServiceLogger:
         if tokens:
             parts.append(f"[dim]{tokens} tokens[/dim]")
 
-        self._logger.info(" ".join(parts))
+        self._logger.info(" ".join(parts), extra=_MARKUP)
 
+    @_never_raise
     def api_error(self, ctx: RequestContext, error: str, status: int = 500) -> None:
         """Log an API error."""
-        req_id = f"[request_id]\\[{ctx.request_id}][/request_id]"
+        req_id = f"[request_id]{escape(f'[{ctx.request_id}]')}[/request_id]"
         status_str = f"[api.status.error]{status}[/api.status.error]"
         elapsed = f"[timing]{ctx.elapsed_ms:.0f}ms[/timing]"
 
-        self._logger.error(f"{req_id} {status_str} {elapsed} {error}")
+        self._logger.error(
+            f"{req_id} {status_str} {elapsed} {escape(str(error))}", extra=_MARKUP,
+        )
 
+    @_never_raise
     def model_loading(self, model_alias: str, model_type: str, cached: bool = False) -> None:
         """Log model loading event - deduped to avoid repeated messages."""
         global _model_loading_announced
@@ -463,15 +504,19 @@ class ServiceLogger:
             return
         _model_loading_announced.add(cache_key)
         
+        alias = escape(str(model_alias))
         if cached:
             self._logger.info(
-                f"{ICONS['model']} [model.name]{model_alias}[/model.name] [muted](cached)[/muted]"
+                f"{ICONS['model']} [model.name]{alias}[/model.name] [muted](cached)[/muted]",
+                extra=_MARKUP,
             )
         else:
             self._logger.info(
-                f"{ICONS['loading']} [model.name]{model_alias}[/model.name] [muted]loading...[/muted]"
+                f"{ICONS['loading']} [model.name]{alias}[/model.name] [muted]loading...[/muted]",
+                extra=_MARKUP,
             )
 
+    @_never_raise
     def model_loaded(self, model_alias: str, model_type: str, load_time_ms: float) -> None:
         """Log model loaded successfully - deduped to avoid repeated messages."""
         global _model_loading_announced
@@ -487,7 +532,9 @@ class ServiceLogger:
         _model_loading_announced.discard(cache_key)
         
         self._logger.info(
-            f"{ICONS['done']} [model.name]{model_alias}[/model.name] [success]ready[/success] [timing]{load_time_ms:.0f}ms[/timing]"
+            f"{ICONS['done']} [model.name]{escape(str(model_alias))}[/model.name] "
+            f"[success]ready[/success] [timing]{load_time_ms:.0f}ms[/timing]",
+            extra=_MARKUP,
         )
 
     def model_error(self, model_alias: str, error: str) -> None:
@@ -529,6 +576,7 @@ class ServiceLogger:
         else:
             self._logger.warning(line)
 
+    @_never_raise
     def _log_result_item(self, item: Any, index: int | None, condensed: bool = False) -> None:
         """Log a single result item - one line per item.
         
@@ -538,7 +586,7 @@ class ServiceLogger:
             condensed: If True, truncate long content (for history)
         """
         if not isinstance(item, dict):
-            self._console.print(f"    {item}")
+            self._console.print(f"    {item}", markup=False)
             return
         
         prefix = f"    [dim][{index}][/dim] " if index is not None else "    "
@@ -551,7 +599,9 @@ class ServiceLogger:
             if condensed and len(content) > 120:
                 content = content[:120] + "..."
             role_color = "green" if role == "user" else "blue" if role == "assistant" else "yellow"
-            self._console.print(f"{prefix}[{role_color}]{role}[/{role_color}]: {content}")
+            self._console.print(
+                f"{prefix}[{role_color}]{escape(str(role))}[/{role_color}]: {escape(str(content))}"
+            )
         elif "content" in item:
             # Memory format - one line with metadata at end
             content = item.get("content", "")
@@ -567,26 +617,27 @@ class ServiceLogger:
                 meta_parts.append(f"imp={importance}")
             if relevance:
                 meta_parts.append(f"rel={relevance:.2f}" if isinstance(relevance, float) else f"rel={relevance}")
-            meta_str = f" [dim]({', '.join(meta_parts)})[/dim]" if meta_parts else ""
-            
-            self._console.print(f"{prefix}{content}{meta_str}")
+            meta_str = f" [dim]({escape(', '.join(meta_parts))})[/dim]" if meta_parts else ""
+
+            self._console.print(f"{prefix}{escape(str(content))}{meta_str}")
         else:
             # Generic - one line JSON
             import json
             try:
-                self._console.print(f"{prefix}{json.dumps(item, default=str)}")
+                self._console.print(f"{prefix}{escape(json.dumps(item, default=str))}")
             except Exception:
-                self._console.print(f"{prefix}{item}")
+                self._console.print(f"{prefix}{escape(str(item))}")
 
+    @_never_raise
     def memory_operation(self, operation: str, bot_id: str, count: int | None = None, details: str | None = None) -> None:
         """Log memory operations (retrieval, storage, extraction)."""
-        parts = [f"{ICONS['memory']} [memory]{operation}[/memory]"]
+        parts = [f"{ICONS['memory']} [memory]{escape(str(operation))}[/memory]"]
         if count is not None:
             parts.append(f"[muted]({count} items)[/muted]")
         if details:
-            parts.append(f"[muted]{details}[/muted]")
+            parts.append(f"[muted]{escape(str(details))}[/muted]")
 
-        self._logger.info(" ".join(parts))
+        self._logger.info(" ".join(parts), extra=_MARKUP)
 
     def task_submitted(self, task_id: str, task_type: str, bot_id: str, payload: dict | None = None) -> None:
         """Log background task submission with context - single line."""
@@ -601,16 +652,23 @@ class ServiceLogger:
         """Log background task failure."""
         self.error("%s %s failed %.0fms: %s", ICONS['error'], task_type, elapsed_ms, error)
 
+    @_never_raise
     def cache_hit(self, cache_type: str, key: str) -> None:
         """Log cache hit (verbose only)."""
         if _verbose:
-            self._logger.debug(f"[dim]cache hit: {cache_type} [{key}][/dim]")
+            self._logger.debug(
+                f"[dim]{escape(f'cache hit: {cache_type} [{key}]')}[/dim]", extra=_MARKUP,
+            )
 
+    @_never_raise
     def cache_miss(self, cache_type: str, key: str) -> None:
         """Log cache miss (verbose only)."""
         if _verbose:
-            self._logger.debug(f"[dim]cache miss: {cache_type} [{key}][/dim]")
+            self._logger.debug(
+                f"[dim]{escape(f'cache miss: {cache_type} [{key}]')}[/dim]", extra=_MARKUP,
+            )
 
+    @_never_raise
     def tool_result(self, tool_name: str, result: str, truncate_at: int = 500) -> None:
         """Log tool execution result (verbose only).
         
@@ -636,17 +694,21 @@ class ServiceLogger:
         
         # Format nicely
         lines = display_result.strip().split('\n')
+        name = escape(str(tool_name))
         if len(lines) == 1:
             # Single line - show inline
-            console.print(f"  [tool]→ {tool_name}[/tool]: {display_result}{'...' if truncated else ''}")
+            console.print(
+                f"  [tool]→ {name}[/tool]: {escape(display_result)}{'...' if truncated else ''}"
+            )
         else:
             # Multi-line - show in a panel
-            console.print(f"  [tool]→ {tool_name} result:[/tool]")
+            console.print(f"  [tool]→ {name} result:[/tool]")
             for line in lines:
-                console.print(f"    {line}")
+                console.print(f"    {line}", markup=False)
             if truncated:
                 console.print(f"    [dim]... ({len(result) - truncate_at} more chars)[/dim]")
 
+    @_never_raise
     def llm_context(self, messages: list, label: str = "LLM Context") -> None:
         """
         Log a summary of messages being sent to the LLM (verbose only).
@@ -732,10 +794,12 @@ class ServiceLogger:
             
             # Truncate long messages
             display_content = content[:300] + "..." if len(content) > 300 else content
-            self._console.print(f"[{role_color}]── {role.upper()} ──[/{role_color}]")
-            self._console.print(display_content)
+            self._console.print(f"[{role_color}]── {escape(str(role).upper())} ──[/{role_color}]")
+            # Message text is untrusted: never parse it as markup (TASK-2434).
+            self._console.print(display_content, markup=False)
         self._console.print(f"[dim]{'─' * 60}[/dim]")
 
+    @_never_raise
     def llm_response(self, response: str, tokens: int | None = None, elapsed_ms: float | None = None) -> None:
         """Log a summary of the LLM response (verbose only)."""
         if not _verbose:
