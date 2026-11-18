@@ -205,7 +205,8 @@ def test_ungated_mcp_tools_are_neither_evaluated_nor_audited(client, store):
         return {"value": value}
 
     asyncio.run(server.call_tool("harmless", {"value": "hello"}))
-    store.create({"tool_name": "harmless", "action": "deny"})
+    with pytest.raises(ValueError, match="not policy-evaluated"):  # TASK-2419
+        store.create({"tool_name": "harmless", "action": "deny"})
     asyncio.run(server.call_tool("harmless", {"value": "still runs"}))
     response = client.get("/v1/tool-approval-decisions?limit=1&offset=0").json()
     assert response["total"] == 0

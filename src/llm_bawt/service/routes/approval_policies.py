@@ -192,7 +192,7 @@ def policy_status():
         "database_available": available, "bundle_etag": etag, "default_action": "allow",
         "coverage": [
             {"backend": "mcp", "enforcement": "server", "scope": "first-party bawthub tools", "configured": True},
-            {"backend": "claude-code", "enforcement": "bridge_hooks", "scope": "native tools and external MCP", "configured": None},
+            {"backend": "claude-code", "enforcement": "bridge_hooks", "scope": "shell tools (Bash, BashOutput, Shell)", "configured": None},
             {"backend": "codex", "enforcement": "unsupported", "configured": None},
             {"backend": "direct", "enforcement": "unsupported", "configured": None},
         ],

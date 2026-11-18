@@ -61,3 +61,11 @@ if [ -z "$owner" ] || [ "$branch" = "$canonical" ] ||
     printf '  worktree: %s  owner: %s  task: %s  branch: %s\n' "$worktree" "${owner:-unknown}" "${worktree_task:-legacy}" "${branch:-detached}" >&2
     exit 1
 fi
+
+# TASK-2441: the gate's general-use scan, limited to staged paths so it stays
+# fast; it catches an operator name or personal domain before handoff.
+top=$(git rev-parse --show-toplevel)
+if ! python3 "$top/scripts/general_use_contract.py" --repo "$top" --staged; then
+    printf '%s\n' '✗ pre-commit: general-use scan refused the staged change (see NEW lines above).' >&2
+    exit 1
+fi

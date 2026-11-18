@@ -25,7 +25,6 @@ from typing import Callable, TYPE_CHECKING
 from agent_bridge.content_provenance import external_source, provenance_envelope, write_kind
 from agent_bridge.mcp_call_context import canonical_invocation_hash
 
-from .approval import NativePolicyGate
 from .parser import ToolCall, format_tool_result, tool_result_is_error
 from .taint import (
     EXTERNAL_CONTENT_TAG,
@@ -129,7 +128,6 @@ class ToolExecutor:
         trigger_message_id: str | None = None,
         turn_id: str | None = None,
         content_store=None,
-        policy_gate=None,
     ):
         """Initialize the executor.
 
@@ -165,7 +163,6 @@ class ToolExecutor:
         self.trigger_message_id = trigger_message_id
         self.turn_id = turn_id
         self._content_store = content_store
-        self._policy_gate = policy_gate if policy_gate is not None else NativePolicyGate(config)
         self.external_content_seen = False
         # Get max tool calls from config (0 = unlimited)
         self._max_tool_calls = getattr(config, 'MAX_TOOL_CALLS_PER_TURN', self.DEFAULT_MAX_TOOL_CALLS) if config else self.DEFAULT_MAX_TOOL_CALLS
@@ -310,12 +307,6 @@ class ToolExecutor:
         result: str
         source = external_source(normalized_call.name, native=True)
         try:
-            policy_hold = self._policy_gate.check(
-                tool_call, normalized_call, bot_id=self.bot_id,
-                user_id=self.user_id, turn_id=self.turn_id or self.trigger_message_id,
-            )
-            if policy_hold:
-                return format_tool_result(normalized_call.name, None, error=policy_hold)
             content_hold = self._admit_content(normalized_call, source)
             if content_hold:
                 return format_tool_result(normalized_call.name, None, error=content_hold)

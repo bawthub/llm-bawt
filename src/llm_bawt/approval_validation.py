@@ -4,7 +4,13 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from agent_bridge.approval import ApprovalPolicy, MatcherType, PolicyAction, Severity
+from agent_bridge.approval import (
+    MCP_GATED_TOOLS, SHELL_GATED_TOOLS, ApprovalPolicy, MatcherType, PolicyAction, Severity, _tool_tail,
+)
+
+# TASK-2419: only shell tools and ops_run are ever evaluated, so a rule naming
+# any other tool could never fire. "*" still means both mechanics.
+_POLICY_TOOL_NAMES = SHELL_GATED_TOOLS | MCP_GATED_TOOLS
 
 
 def validate_policy(data: dict[str, Any]) -> dict[str, Any]:
@@ -32,6 +38,9 @@ def validate_policy(data: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"{key} must be a string of at most {maximum} characters without NUL")
         if key in ("tool_name", "backend_scope") and not value.strip():
             raise ValueError(f"{key} cannot be blank")
+        if key == "tool_name" and value.strip() != "*" and _tool_tail(value.strip()) not in _POLICY_TOOL_NAMES:
+            allowed = ", ".join(sorted(_POLICY_TOOL_NAMES))
+            raise ValueError(f"tool_name must be * or one of {allowed}; other tools are not policy-evaluated")
         out[key] = value
     category = out.get("category")
     if category is not None and (not isinstance(category, str) or len(category) > 64 or "\x00" in category):

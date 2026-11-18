@@ -20,6 +20,8 @@ import re
 CONTROL_PORT = 8651
 PREPARE_PATH = "/v1/ops/prepare"
 EXECUTORS_PATH = "/v1/ops/executors"
+#: TASK-2430: the bot public key for Settings > Host access (read-only).
+BOT_KEY_PATH = "/v1/ops/bot-key"
 #: How long the server lets one request's work run before answering 504.
 SERVER_BUDGET_SECONDS = 20.0
 #: The client waits past the server budget, so a slow success or the server's

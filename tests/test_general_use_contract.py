@@ -226,6 +226,37 @@ class ContractTests(unittest.TestCase):
         baseline = guard.inventory(guard.scan(self.repo, policy(bot_slugs=["sample-bot"]))[0])
         self.assertNotIn("sample-bot", json.dumps(baseline))
 
+    def test_staged_scans_only_staged_paths_and_ignores_stale(self):
+        self.private.write_text(serialized(policy(operator_identities=["sample-person"])))
+        self.tracked("docs/old.md", "sample-person\n")
+        self.baseline(guard.scan(self.repo, guard.load_policy(self.repo, str(self.private)))[0])
+        self.tracked("general-use-baseline.json", (self.repo / "general-use-baseline.json").read_text())
+        subprocess.run(["git", "-C", str(self.repo), "-c", "user.name=t", "-c", "user.email=t@example.com",
+                        "commit", "-qm", "base"], check=True)
+        args = ["--repo", str(self.repo), "--denylist-file", str(self.private), "--staged"]
+
+        def run():
+            out = io.StringIO()
+            with patch.dict(os.environ, {}, clear=True), redirect_stdout(out), redirect_stderr(io.StringIO()):
+                return guard.main(args), out.getvalue()
+
+        # Clean staged file passes; the baselined literal elsewhere is not rescanned.
+        self.tracked("docs/clean.md", "generic operator\n")
+        self.assertEqual(run()[0], 0)
+        # A staged denylisted literal is refused with path:line, redacted.
+        self.tracked("tests/test_new.py", "x = 'sample-person'\n")
+        code, out = run()
+        self.assertEqual(code, 1)
+        self.assertIn("NEW tests/test_new.py:1 operator_identities", out)
+        self.assertNotIn("sample-person", out)
+        # The index decides, not the working copy: forbidden staged + clean
+        # worktree is refused; clean staged + forbidden worktree passes.
+        (self.repo / "tests/test_new.py").write_text("x = 'generic'\n")
+        self.assertEqual(run()[0], 1)
+        self.tracked("tests/test_new.py", "x = 'generic'\n")
+        (self.repo / "tests/test_new.py").write_text("x = 'sample-person'\n")
+        self.assertEqual(run()[0], 0)
+
     def test_private_fingerprints_are_keyed_not_dictionary_hashes(self):
         self.tracked("docs/note.md", "sample-bot\n")
         first = guard.scan(self.repo, policy(bot_slugs=["sample-bot"]))[0]

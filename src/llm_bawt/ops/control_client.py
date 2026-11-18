@@ -15,7 +15,7 @@ import time
 
 import httpx
 
-from .control_protocol import (CLIENT_TIMEOUT_SECONDS, CODE_PATTERN,EXECUTORS_PATH, PREPARE_PATH, PROTOCOL_FIELD, PROTOCOL_VERSION,
+from .control_protocol import (CLIENT_TIMEOUT_SECONDS, BOT_KEY_PATH, CODE_PATTERN, EXECUTORS_PATH, PREPARE_PATH, PROTOCOL_FIELD, PROTOCOL_VERSION,
                                REFUSAL_STATUSES, control_token)
 from .service import OpsDispatchError, OpsService
 from .validation import canonical_json
@@ -63,6 +63,12 @@ class OpsControlClient:
                 for kind, reason in readiness.items()):
             raise _unavailable("the response carries no executor readiness")
         return readiness
+
+    def bot_public_key(self) -> dict:
+        key = self._call("GET", BOT_KEY_PATH, None).get("bot_key")
+        if not isinstance(key, dict) or not isinstance(key.get("public_key"), str):
+            raise _unavailable("the response carries no bot key")
+        return key
 
     def _call(self, method: str, path: str, payload) -> dict:
         try:

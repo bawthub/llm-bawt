@@ -1,26 +1,17 @@
-"""Native policy and content checks execute before any backend mutation."""
+"""Native content checks execute before any backend mutation."""
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 from sqlalchemy import create_engine, select
 
-from agent_bridge.approval import ApprovalPolicy, PolicyAction, PolicyBundle
 from llm_bawt.content_provenance import ContentProvenanceStore, ContentTurn, _writes
-from llm_bawt.tools.approval import NativePolicyGate
 from llm_bawt.tools.executor import ToolExecutor
 from llm_bawt.tools.parser import ToolCall, tool_result_is_error
 
 
 def call(name, **args):
     return ToolCall(name=name, arguments=args, raw_text="")
-
-
-def policy_store(*policies):
-    return SimpleNamespace(
-        compile_bundle=lambda: PolicyBundle(1, "fixture", list(policies)),
-        record_decision=Mock(),
-    )
 
 
 @pytest.fixture
@@ -35,77 +26,6 @@ def executor(store=None, **kwargs):
         user_id="owner", bot_id="reader", trigger_message_id="trigger",
         turn_id="turn", content_store=store, **kwargs,
     )
-
-
-@pytest.mark.parametrize("action,held", [
-    (PolicyAction.ALLOW, False), (PolicyAction.DENY, True),
-    (PolicyAction.REQUIRE_APPROVAL, True),
-])
-def test_native_policy_actions_precede_all_handlers(action, held):
-    rules = policy_store(ApprovalPolicy("rule", tool_name="Bash", action=action))
-    ex = executor(policy_gate=NativePolicyGate(store=rules))
-    handler = Mock(return_value="ok")
-    ex._handlers["Bash"] = handler
-    result = ex.execute(call("Bash", command="true"))
-    assert tool_result_is_error(result) is held
-    assert handler.call_count == (0 if held else 1)
-    audit = rules.record_decision.call_args.kwargs
-    assert audit["backend"] == "native" and audit["turn_id"] == "turn"
-    assert len(audit["invocation_hash"]) == 64
-    if action == PolicyAction.REQUIRE_APPROVAL:
-        assert "no card" in result and "Nothing was executed" in result
-
-
-def test_unmatched_policy_and_bridge_only_policy_do_not_hold_native():
-    rules = policy_store(ApprovalPolicy(
-        "bridge-only", backend_scope="claude-code", tool_name="Bash",
-        action=PolicyAction.DENY,
-    ))
-    ex = executor(policy_gate=NativePolicyGate(store=rules))
-    ex._handlers["Bash"] = Mock(return_value="ok")
-    assert not tool_result_is_error(ex.execute(call("Bash", command="true")))
-
-
-@pytest.mark.parametrize("name,handler_name,args", [
-    ("store_memory", "memory", {"content": "x"}), ("memory", "memory", {"action": "search"}),
-    ("time", "time", {}),
-])
-def test_ungated_native_tools_are_neither_evaluated_nor_recorded(name, handler_name, args):
-    """TASK-2418: only shell and ops tools meet approval policy."""
-    rules = policy_store(ApprovalPolicy("rule", tool_name=name, action=PolicyAction.DENY))
-    rules.compile_bundle = Mock(side_effect=AssertionError("must not evaluate"))
-    ex = executor(policy_gate=NativePolicyGate(store=rules))
-    handler = Mock(return_value="ok")
-    ex._handlers[handler_name] = handler
-    assert not tool_result_is_error(ex.execute(call(name, **args)))
-    handler.assert_called_once()
-    rules.record_decision.assert_not_called()
-
-
-@pytest.mark.parametrize("failure", ["compile", "audit"])
-def test_policy_or_audit_failure_never_invokes_handler(failure):
-    rules = policy_store()
-    if failure == "compile":
-        rules.compile_bundle = Mock(side_effect=RuntimeError("not logged"))
-    else:
-        rules.record_decision.side_effect = RuntimeError("not logged")
-    ex = executor(policy_gate=NativePolicyGate(store=rules))
-    handler = Mock()
-    ex._handlers["Bash"] = handler
-    assert "policies are unavailable" in ex.execute(call("Bash", command="true"))
-    handler.assert_not_called()
-
-
-def test_ha_native_tools_are_not_policy_evaluated():
-    ha = SimpleNamespace(is_ha_tool=lambda name: True, call_tool=Mock(return_value="done"))
-    rules = policy_store(ApprovalPolicy(
-        "rule", tool_name="HassTurnOn", action=PolicyAction.REQUIRE_APPROVAL,
-    ))
-    result = executor(ha_native_client=ha, policy_gate=NativePolicyGate(store=rules)).execute(
-        call("HassTurnOn", domain=["light"]),
-    )
-    assert "Held:" not in result
-    rules.record_decision.assert_not_called()
 
 
 @pytest.mark.parametrize("name,args", [

@@ -55,6 +55,7 @@ from .tagged_config_reconcile import (ACTION as TAGGED_CONFIG_ACTION, TAGGED_GUA
 from .validation import canonical_json
 from . import sequence
 from . import wake_on_lan
+from . import host_key
 from . import compose_secrets
 from . import import_preflight
 from .compose_render import COMPOSE_SECRETS_RENDER_LABEL, OVERLAY_RENDER_LABEL
@@ -95,6 +96,8 @@ def spec_capability_labels(spec: dict) -> tuple[str, ...]:
     labels = []
     if spec.get("action") == wake_on_lan.ACTION:
         labels.append(wake_on_lan.WORKER_CAPABILITY_LABEL)
+    if spec.get("action") == host_key.ACTION:
+        labels.append(host_key.WORKER_CAPABILITY_LABEL)
     if spec.get("action") == compose_secrets.ACTION:
         labels.append(compose_secrets.WORKER_CAPABILITY_LABEL)
     if "compose_secrets" in (spec.get("compose_config") or {}):
@@ -175,6 +178,14 @@ class Executor(ABC):
     def inspect_target_health(self, spec: dict) -> str:
         """Live health of the fixed target after a worker's verified swap."""
         raise ExecutorError(f"{self.kind()} executor cannot inspect deploy target health")
+
+    def host_key_fingerprint(self, spec: dict) -> str:
+        """Fingerprint of the bot public key a host_key job would use; read-only."""
+        raise ExecutorError(f"{self.kind()} executor cannot read bot keys")
+
+    def host_key_public_key(self, spec: dict) -> str:
+        """The bot public key line a host_key job would install; read-only."""
+        raise ExecutorError(f"{self.kind()} executor cannot read bot keys")
 
     def routing_approval(self, spec: dict) -> dict:
         """Public routing delta plus a private-config fingerprint; read-only."""
@@ -307,6 +318,8 @@ def validate_spec(command_script: str) -> dict:
         raise ValueError("command_script must be a Docker JSON spec") from exc
     if isinstance(spec, dict) and spec.get("action") == wake_on_lan.ACTION:
         return wake_on_lan.validate_spec(spec)
+    if isinstance(spec, dict) and spec.get("action") == host_key.ACTION:
+        return host_key.validate_spec(spec)
     if isinstance(spec, dict) and spec.get("action") == compose_secrets.ACTION:
         return compose_secrets.validate_spec(spec)
     if isinstance(spec, dict) and spec.get("action") == ROUTING_ACTION:
@@ -720,7 +733,32 @@ class DockerExecutor(Executor):
         except RemoveRefused as exc:
             raise ConfigCheckError(exc.code, str(exc)) from exc
 
+    def host_key_fingerprint(self, spec):
+        """SHA256 fingerprint of the key container's bot public key; read-only."""
+        return host_key.fingerprint(host_key.parse_public_key(self.host_key_public_key(spec))[1])
+
+    def host_key_public_key(self, spec):
+        """The key container's validated bot public key line; read-only."""
+        try:
+            result = self.client.containers.get(spec["key_container"]).exec_run(
+                ["cat", "--", host_key.KEY_PATH + ".pub"], stdout=True, stderr=False)
+        except Exception as exc:
+            raise ExecutorError("cannot read the bot public key") from exc
+        if result.exit_code != 0:
+            raise ExecutorError("the key container has no bot public key")
+        try:
+            kind, blob = host_key.parse_public_key(result.output.decode(errors="replace"))[:2]
+        except ValueError as exc:
+            raise ExecutorError(str(exc)) from exc
+        return f"{kind} {blob}"
+
     def check_target(self, spec, args):
+        if spec.get("action") == host_key.ACTION:
+            host_key.validate_spec(spec)
+            if set(args or {}) != {"host_id"}:
+                raise ExecutorError("host_key takes exactly host_id")
+            self.check_spec_capabilities(spec)
+            return
         if spec.get("action") == wake_on_lan.ACTION:
             wake_on_lan.validate_spec(spec)
             if args:
@@ -859,6 +897,12 @@ class DockerExecutor(Executor):
         if action == wake_on_lan.ACTION:
             try:
                 wake_on_lan.validate_budget(snapshot["spec"], snapshot["execution"]["timeout_seconds"])
+            except ValueError as exc:
+                raise ExecutorError(str(exc)) from exc
+        if action == host_key.ACTION:
+            try:
+                host_key.validate_budget(snapshot["execution"]["timeout_seconds"])
+                host_key.validate_target(snapshot.get("host_key"))
             except ValueError as exc:
                 raise ExecutorError(str(exc)) from exc
         if action == ROUTING_ACTION:

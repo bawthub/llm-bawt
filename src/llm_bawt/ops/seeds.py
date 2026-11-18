@@ -465,16 +465,16 @@ _CONFIG_SEEDS: list[dict[str, Any]] = [{
         source_repository="bawthub/llm-bawt", source_branch="master", source_mounts=["/app/src"],
         # Destinations are the product's own Compose file's container paths.
         data_mounts=["/app/.logs", "/app/models", "/root/.config/llm-bawt", "/root/.cache/huggingface",
-                     "/root/.cache/llm-bawt/models", "/run/llm-bawt-api-key"],
+                     "/root/.cache/llm-bawt/models", "/run/bawthub-service-token", "/run/llm-bawt-api-key"],
         # The service's own Compose environment names (never values).
-        env_names=["FLASHINFER_CUDA_ARCH_LIST", "HF_HUB_DISABLE_PROGRESS_BARS", "HF_HUB_DISABLE_XET", "HF_TOKEN",
+        env_names=["BAWTHUB_SERVICE_TOKEN_FILE", "FLASHINFER_CUDA_ARCH_LIST", "HF_HUB_DISABLE_PROGRESS_BARS", "HF_HUB_DISABLE_XET", "HF_TOKEN",
                    "LLAMA_CPP_N_GPU_LAYERS", "LLM_BAWT_API_KEY_FILE", "LLM_BAWT_API_URL", "LLM_BAWT_DEFAULT_MODEL_ALIAS",
                    "LLM_BAWT_DEFAULT_USER", "LLM_BAWT_LLAMA_CPP_FLASH_ATTN", "LLM_BAWT_LLAMA_CPP_N_BATCH",
                    "LLM_BAWT_LLAMA_CPP_N_CTX", "LLM_BAWT_LLAMA_CPP_N_GPU_LAYERS", "LLM_BAWT_LOG_DIR",
                    "LLM_BAWT_LOG_PREFIX", "LLM_BAWT_MODEL_CACHE_DIR", "LLM_BAWT_POSTGRES_DATABASE",
                    "LLM_BAWT_POSTGRES_HOST", "LLM_BAWT_POSTGRES_PASSWORD", "LLM_BAWT_POSTGRES_PORT",
                    "LLM_BAWT_POSTGRES_USER", "LLM_BAWT_REDIS_URL", "LLM_BAWT_SERVICE_HOST",
-                   "LOCAL_MODEL_BACKEND_NAME", "LOCAL_MODEL_BRIDGE_EMBED_PORT", "LOCAL_MODEL_BRIDGE_HEALTH_PORT",
+                   "LLM_BAWT_VOICE_BACKEND_ORIGINS", "LOCAL_MODEL_BACKEND_NAME", "LOCAL_MODEL_BRIDGE_EMBED_PORT", "LOCAL_MODEL_BRIDGE_HEALTH_PORT",
                    "LOCAL_MODEL_BRIDGE_LOG_LEVEL", "LOCAL_MODEL_BRIDGE_REQUEST_TIMEOUT", "LOCAL_MODEL_EMBED_DEVICE",
                    "LOCAL_MODEL_VIDEO_PORT", "PGSSLMODE", "POSTGRES_DATABASE", "POSTGRES_HOST", "POSTGRES_PASSWORD",
                    "POSTGRES_PORT", "POSTGRES_USER", "PYTORCH_CUDA_ALLOC_CONF", "REDIS_URL",
@@ -812,6 +812,47 @@ _STANDALONE_CONTAINER_SEEDS: list[dict[str, Any]] = [
 # Public seed set
 # ---------------------------------------------------------------------------
 
+# TASK-2430: the bot key's host access, driven from Settings > Host access.
+# Callers pass only a host record id; host, login and fingerprints are pinned
+# at approval. Disabled until the operator enables them with a capable worker.
+def _host_key_seed(op: str, title: str, description: str, risk: str, prefix: str) -> dict[str, Any]:
+    return {
+        "slug": f"llm-bawt.host-key-{op}",
+        "title": title,
+        "description": description,
+        "enabled": False,
+        "executor_kind": EXECUTOR_DOCKER,
+        "target_host": "",
+        "working_directory": None,
+        "command_script": _spec(action="host_key", op=op, key_container="llm-bawt-claude-code-bridge"),
+        "args_schema_json": _schema({"host_id": {"type": "integer", "minimum": 1}}, required=["host_id"]),
+        "args_defaults_json": _defaults(),
+        "timeout_seconds": 180,
+        "start_delay_seconds": 0,
+        "max_output_bytes": 16384,
+        "max_concurrent": 1,
+        "risk_level": risk,
+        "category": "host-access",
+        "approval_prompt_prefix": prefix,
+    }
+
+
+_HOST_KEY_SEEDS: list[dict[str, Any]] = [
+    _host_key_seed(
+        "verify", "Verify bot login to a host",
+        "Log in to one recorded host with the bot key, confirm it works and report what the login can do. Changes nothing on the host.",
+        RISK_LOW, "Verify bot SSH login"),
+    _host_key_seed(
+        "add", "Install the bot key on a host",
+        "Use the bot's existing login to append the bot public key to the recorded user's authorized_keys, then verify the login.",
+        RISK_HIGH, "Grant bots SSH access to a host"),
+    _host_key_seed(
+        "remove", "Remove the bot key from a host",
+        "Remove the bot public key from the recorded user's authorized_keys, then confirm the login no longer works.",
+        RISK_HIGH, "Revoke bots' SSH access to a host"),
+]
+
+
 SEEDS: list[dict[str, Any]] = [
     *_LLM_BAWT_SEEDS,
     *_BAWTHUB_SEEDS,
@@ -819,6 +860,7 @@ SEEDS: list[dict[str, Any]] = [
     *_CONFIG_SEEDS,
     *_PLAN_SEEDS,
     *_SEQUENCE_SEEDS,
+    *_HOST_KEY_SEEDS,
 ]
 
 
