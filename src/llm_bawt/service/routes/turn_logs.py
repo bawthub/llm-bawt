@@ -11,10 +11,15 @@ from fastapi.routing import APIRoute
 from pydantic import BaseModel, Field, field_validator
 from fastapi.responses import Response
 from sqlalchemy import func
+from sqlalchemy.exc import SQLAlchemyError
 from sqlmodel import Session, select
+
+from llm_bawt.bot_tags.facade import TagPolicyUnavailable
+from llm_bawt.bot_tags.vocabulary import TAG_SLUG
 
 from ..dependencies import get_service, get_tool_approval_policy_store, get_turn_log_store
 from ..context_trend import load_context_trend
+from ..turn_duration_stats import load_turn_duration_stats
 from ..schemas import (
     RecentBotTurn,
     RecentByBotsResponse,
@@ -331,6 +336,30 @@ def _response_tail(response_text: str) -> str | None:
     if 0 < pp < len(tail) - _TAIL_MIN:
         tail = tail[pp + 2:]
     return tail
+
+
+@router.get("/v1/turn-logs/duration-stats", tags=["Debug"])
+def turn_duration_stats(
+    days: int = Query(7, ge=1, le=7),
+    tag: str | None = Query(None, pattern=TAG_SLUG.pattern, description="Current catalog tag"),
+    bot_id: str | None = Query(None, min_length=1, max_length=64),
+    user_id: str | None = Query(None, min_length=1, max_length=128),
+):
+    """Per-bot and pooled per-tag p50/p95/max turn duration, in milliseconds."""
+    store = get_turn_log_store()
+    if store.engine is None:
+        raise HTTPException(status_code=503, detail="Turn logs DB unavailable")
+    try:
+        return load_turn_duration_stats(
+            store.engine, days=days, tag=tag, bot_id=bot_id, user_id=user_id,
+        )
+    except TagPolicyUnavailable as exc:
+        raise HTTPException(status_code=503, detail="Bot tags unavailable") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except SQLAlchemyError as exc:
+        log.warning("Turn duration stats unavailable: %s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Turn duration stats unavailable") from exc
 
 
 @router.get("/v1/turn-logs/context-trend", tags=["Debug"])
