@@ -15,6 +15,11 @@ from .turn_stream_context import TurnStreamContext
 
 log = get_service_logger(__name__)
 
+# An elapsed-time budget stops new tool work; it cannot safely undo an
+# already-running tool. The final text-only synthesis is a separate last pass.
+TOOL_LOOP_BUDGET_SECONDS = 60.0
+HA_TOOL_LOOP_BUDGET_SECONDS = 20.0
+
 
 class NativeToolStream:
     """Per-turn native-tool iteration using the worker's shared context."""
@@ -69,22 +74,40 @@ class NativeToolStream:
         def native_stream_with_tool_loop():
             """Stream with native tool support, handling tool calls inline."""
             import json as _json
-            from ..tools.parser import ToolCall, strip_tool_result_tags, tool_result_is_error
+            from ..tools.parser import (
+                ToolCall, format_tool_result, strip_tool_result_tags, tool_result_is_error,
+            )
 
             current_msgs = list(messages)
             max_iterations = 3 if llm_bawt._ha_mode else 5
-            has_executed_tools = False
+            budget = HA_TOOL_LOOP_BUDGET_SECONDS if llm_bawt._ha_mode else TOOL_LOOP_BUDGET_SECONDS
+            deadline = time.monotonic() + budget
+            limit_reason = None
 
-            for iteration in range(max_iterations):
+            for iteration in range(max_iterations + 1):
                 if cancel_event.is_set():
                     return
-                # After first tool execution, keep tools_schema
-                # but force tool_choice="none" so the model
-                # generates a text response.  Dropping the schema
-                # entirely causes some providers (xAI) to ignore
-                # function_call_output items and return nothing.
+                if iteration >= max_iterations:
+                    limit_reason = "tool-round limit"
+                elif time.monotonic() >= deadline:
+                    limit_reason = "tool time budget"
+                final_pass = limit_reason is not None
+                if final_pass:
+                    log.warning(f"Tool loop: {limit_reason} reached; final text synthesis")
+                    current_msgs.append(Msg(
+                        role="system",
+                        content=(
+                            f"The {limit_reason} has been reached. No more tools may run. "
+                            "Give a final answer using only the results already available. "
+                            "Clearly state any unfinished work; do not promise another tool call "
+                            "or claim an action succeeded without a successful result."
+                        ),
+                    ))
+                # Keep the schema even for final synthesis: xAI can ignore
+                # function_call_output when its schema disappears. Keeping it
+                # does not require forcing text after every successful round.
                 current_tools = tools_schema
-                current_tool_choice = "none" if has_executed_tools else "auto"
+                current_tool_choice = "none" if final_pass else "auto"
 
                 # TASK-216: stream text tokens immediately instead
                 # of buffering until we know whether a tool will
@@ -103,6 +126,7 @@ class NativeToolStream:
                 # text shows up alongside the tool result, which
                 # is acceptable.
 
+                emitted_text = False
                 for item in llm_bawt.client.stream_with_tools(
                     current_msgs,
                     tools_schema=current_tools,
@@ -113,6 +137,7 @@ class NativeToolStream:
                         return
                     if isinstance(item, str):
                         # Stream immediately — no buffering.
+                        emitted_text = emitted_text or bool(item.strip())
                         yield item
                     elif isinstance(item, dict) and "tool_calls" in item:
                         tool_calls = item["tool_calls"]
@@ -120,6 +145,14 @@ class NativeToolStream:
                         if not tool_calls:
                             # Empty tool_calls list — treat as pure text response.
                             # Text was already streamed above; nothing more to flush.
+                            if final_pass and not emitted_text:
+                                yield "I reached the tool limit before completing the request."
+                            return
+                        if final_pass:
+                            # A provider ignoring tool_choice must never run an
+                            # extra tool after either limit.
+                            if not emitted_text:
+                                yield "I reached the tool limit before completing the request."
                             return
 
                         # TASK-215: trigger_animation interception removed.
@@ -171,7 +204,16 @@ class NativeToolStream:
                             })
 
                             tool_call_obj = ToolCall(name=name, arguments=args, raw_text="")
-                            raw_result = executor.execute(tool_call_obj)
+                            if time.monotonic() >= deadline:
+                                limit_reason = "tool time budget"
+                                raw_result = format_tool_result(
+                                    name, None, error=(
+                                        "Not executed: the tool time budget expired "
+                                        "before this call could start."
+                                    ),
+                                )
+                            else:
+                                raw_result = executor.execute(tool_call_obj)
                             # Read the status before stripping its wrapper tag.
                             is_error = tool_result_is_error(raw_result)
                             # Strip <tool_result> XML tags — native tool path
@@ -209,8 +251,6 @@ class NativeToolStream:
                                 "iteration": iteration + 1,
                             })
 
-                        has_executed_tools = True
-
                         # Signal finish_reason: "tool_calls" to consumer
                         put_queue_item_threadsafe(
                             loop,
@@ -244,13 +284,16 @@ class NativeToolStream:
                                 tool_call_id=tr["tool_call_id"],
                             ))
 
-                        # Ground the synthesis pass on tool results.
-                        # Without this, stale history summaries (e.g.
-                        # "assistant lacks live access") can override
-                        # the actual retrieved data in the model's response.
+                        # Ground the next decision on results without forcing
+                        # an answer before dependent tool work is complete.
                         current_msgs.append(Msg(
                             role="system",
-                            content="You have retrieved live data using tools above. Answer the user's question directly and confidently using those results. Do not claim to lack live access.",
+                            content=(
+                                "Use the tool results above. Call additional tools if needed "
+                                "to complete the request, or answer when you have enough "
+                                "information. Do not claim that an action succeeded unless "
+                                "its tool result confirms success."
+                            ),
                         ))
 
                         # Continue to next iteration (will stream the follow-up)
@@ -265,8 +308,11 @@ class NativeToolStream:
                     # (pure content response). TASK-216: tokens
                     # were already yielded inline above, so
                     # nothing left to flush.
+                    if final_pass and not emitted_text:
+                        yield "I reached the tool limit before completing the request."
                     return
 
-            log.warning(f"Tool loop: max iterations ({max_iterations}) reached")
+                if final_pass:
+                    return
 
         return native_stream_with_tool_loop()
