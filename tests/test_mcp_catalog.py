@@ -2,6 +2,7 @@
 
 import json
 from copy import deepcopy
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -560,3 +561,13 @@ def test_every_tool_points_at_a_published_skill_reference():
     used = {tool_reference(name) for name in TOOL_SUMMARIES}
     # No pointer to an unpublished page, and no published page left unused.
     assert used == PUBLISHED_REFERENCES
+
+
+def test_published_references_ship_in_the_tenant_skills_bundle():
+    # The vendored product skills (tenant-skills/) are what public CI and the
+    # tenant images carry, so every cited page must exist there too.
+    bundle = Path(__file__).resolve().parents[1] / "tenant-skills"
+    manifest = json.loads((bundle / "BUNDLE.json").read_text())
+    assert "bawthub-mcp" in manifest["skills"]
+    missing = sorted(p for p in PUBLISHED_REFERENCES if not (bundle / p).is_file())
+    assert not missing, f"cited by MCP tools but absent from tenant-skills: {missing}"
