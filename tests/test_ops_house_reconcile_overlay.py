@@ -199,6 +199,76 @@ def test_an_undeclared_external_compose_file_is_refused():
     assert "source_compose_outside" in str(caught.value)
 
 
+# ── the house runtime: fresh tmpfs, pnpm store, preview env ─────────────────
+
+TMPFS = {"/tmp": "size=512m,mode=1777", "/home/bridge/.cache": "size=512m,exec",
+         "/home/bridge/.config": "size=16m", "/home/bridge/.codex": "size=64m", "/home/bridge/.npm": "size=256m"}
+HOUSE_ENV = {"PYTHONPYCACHEPREFIX": "/tmp/llm-bawt-pycache", "npm_config_store_dir": "/home/bridge/dev/.pnpm-store",
+             "NODE_ENV": "production", "PORT": "3000", "VITE_IN_DOCKER": "1"}
+
+
+def _house_plan(env=None, *, tmpfs=None, mounts=None, image_volumes=None, data=None, names=("PORT", "VITE_IN_DOCKER")):
+    tmpfs = TMPFS if tmpfs is None else tmpfs
+    spec = {"compose_config": _config(), "source_mounts": [], "env_names": list(names),
+            "data_mounts": sorted(tmpfs) + list(mounts or {}) if data is None else data}
+    desired = {"mounts": dict(mounts or {}), "env": dict(HOUSE_ENV if env is None else env), "tmpfs": dict(tmpfs)}
+    image = {"Config": {"Env": [], "Volumes": dict.fromkeys(image_volumes or [], {})}}
+    return source_plan(spec, {"project_dir": PROJECT, "compose_files": BASE}, {"Mounts": []}, image, desired)
+
+
+def _refusals(**kw):
+    with pytest.raises(SourceStateError) as caught:
+        _house_plan(**kw)
+    return str(caught.value)
+
+
+def test_the_house_runtime_passes_with_its_tmpfs_listed_as_data():
+    plan = _house_plan()
+    assert plan["bytecode_ok"] is True
+    assert set(TMPFS) <= set(plan["classification"]["data_mounts"])
+    assert plan["classification"]["opaque_env"] == ["PORT", "VITE_IN_DOCKER"]
+
+
+def test_an_unlisted_tmpfs_is_still_unclassified():
+    assert "source_mount_unclassified" in _refusals(data=[])
+
+
+@pytest.mark.parametrize("prefix", ["/tmp/llm-bawt-pycache", "/tmp"])
+def test_a_bytecode_prefix_in_a_fresh_tmpfs_is_safe(prefix):
+    assert _house_plan({**HOUSE_ENV, "PYTHONPYCACHEPREFIX": prefix})["bytecode_ok"] is True
+
+
+@pytest.mark.parametrize("case", ["no-tmpfs", "bind-inside", "volume-at-tmp", "image-volume", "holds-tmpfs", "relative"])
+def test_a_bytecode_prefix_refuses_unless_only_a_fresh_tmpfs_holds_it(case):
+    bind = {"type": "bind", "source": f"{PROJECT}/x", "read_only": False}
+    kw = {"no-tmpfs": {"tmpfs": {k: v for k, v in TMPFS.items() if k != "/tmp"}, "mounts": {"/tmp": bind}},
+          "bind-inside": {"mounts": {"/tmp/llm-bawt-pycache/x": bind}},
+          "volume-at-tmp": {"mounts": {"/tmp": {"type": "volume", "source": "v"}}},
+          "image-volume": {"image_volumes": ["/tmp"]},
+          "holds-tmpfs": {"env": {**HOUSE_ENV, "PYTHONPYCACHEPREFIX": "/home/bridge"}},
+          "relative": {"env": {**HOUSE_ENV, "PYTHONPYCACHEPREFIX": "/tmp/../app/src"}}}[case]
+    assert "source_bytecode_unsafe" in _refusals(**kw)
+
+
+@pytest.mark.parametrize("name,value", [("npm_config_store_dir", "/home/bridge/dev/elsewhere"),
+                                        ("NODE_ENV", "--require=/tmp/x.js"), ("NODE_ENV", "")])
+def test_house_product_variables_take_only_their_fixed_values(name, value):
+    assert "source_env_unsafe" in _refusals(env={**HOUSE_ENV, name: value})
+
+
+@pytest.mark.parametrize("name", ["npm_config_script_shell", "node_env", "path"])
+def test_other_lower_case_names_stay_unsafe(name):
+    assert "source_env_unsafe" in _refusals(env={**HOUSE_ENV, name: "x"})
+
+
+@pytest.mark.parametrize("names", [["NODE_ENV"], ["npm_config_store_dir"]])
+def test_house_product_variables_cannot_be_listed_as_opaque(names):
+    from llm_bawt.ops.source_state import validate_source_spec
+    with pytest.raises(ValueError):
+        validate_source_spec({"compose_config": _config(), "source_repository": "o/r", "source_branch": "main",
+                              "source_mounts": ["/app/src"], "data_mounts": [], "env_names": names})
+
+
 # ── house guard and reservation ─────────────────────────────────────────────
 
 APP_SPEC = {"action": "reconcile_app_config", "container_name": "llm-bawt-house-h3",

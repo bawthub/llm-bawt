@@ -257,6 +257,13 @@ def _resolve_media_store(config: Any):
     return MediaStore(db=db)
 
 
+def _reap_response_audio(engine, *, dry_run: bool) -> int:
+    from llm_bawt.media.response_audio import reap_orphans
+
+    with engine.connect() as conn, conn.begin():
+        return reap_orphans(conn, dry_run=dry_run)
+
+
 def breaker_limit(collectable: int) -> int:
     return max(BREAKER_MIN, int(collectable * BREAKER_FRACTION))
 
@@ -300,6 +307,14 @@ def run_media_gc(
         raise RuntimeError("media_gc requires a Postgres engine; config has no DB credentials")
 
     deadline = clock() + sweep_budget_s
+
+    # TASK-1115: drop saved-reply audio whose message is gone, so its asset
+    # loses its last reference before the sweep below reads references.
+    try:
+        reaped_response_audio = _reap_response_audio(engine, dry_run=dry_run)
+    except DBAPIError as e:
+        return _aborted(f"response audio reap failed: {safe_error_text(e)}", dry_run=dry_run)
+
     try:
         with engine.connect() as conn, conn.begin():
             local_ids, local_columns = collect_local_references(conn, deadline=deadline, clock=clock)
@@ -346,6 +361,7 @@ def run_media_gc(
         "bawthub_columns": refs.bawthub_columns,
         "referenced_count": len(refs.ids),
         "errors": [],
+        "reaped_response_audio": reaped_response_audio,
     }
     if include_candidates:
         result["candidates"] = [

@@ -511,6 +511,23 @@ def _load_window_via_sql(
     return _hydrate_window_authors(raw_rows, bot_id), has_older, has_newer
 
 
+def _hydrate_response_audio_for_page(page_messages: list[dict], owner_user_id: str | None) -> dict[str, dict]:
+    """Saved reply audio per assistant message (TASK-1115). One query; nonfatal."""
+    ids = [str(m["id"]) for m in page_messages if m.get("id") and m.get("role") == "assistant"]
+    if not ids or not owner_user_id:
+        return {}
+    try:
+        from ...media.response_audio import get_response_audio_store, public_view
+
+        store = get_response_audio_store()
+        if store is None:
+            return {}
+        return {mid: public_view(row) for mid, row in store.get_many_for_messages(ids, owner_user_id).items()}
+    except Exception as e:
+        log.warning("Response audio hydration failed: %s", e)
+        return {}
+
+
 def _build_history_response(
     service,
     effective_bot_id: str,
@@ -551,6 +568,7 @@ def _build_history_response(
     resumptions_by_id = hydrate_resumptions_for_page(
         service, effective_bot_id, page_messages, origin_user_id
     )
+    response_audio_by_id = _hydrate_response_audio_for_page(page_messages, origin_user_id)
     history_messages = []
     for msg in page_messages:
         message_id = str(msg.get("id") or "")
@@ -574,6 +592,7 @@ def _build_history_response(
             scheduler=scheduler_by_id.get(message_id) if msg.get("role") == "user" else None,
             approval_notice=notices_by_id.get(message_id) if msg.get("role") == "user" else None,
             session_resumption=resumptions_by_id.get(message_id) if msg.get("role") == "user" else None,
+            response_audio=response_audio_by_id.get(message_id) if msg.get("role") == "assistant" else None,
         ))
 
     oldest_timestamp = history_messages[0].timestamp if history_messages else None

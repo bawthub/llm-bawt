@@ -80,8 +80,44 @@ def test_harness_continuation_has_structural_metadata_without_changing_legacy_op
     assert json.loads(metadata) == {"kind": kind, "tool_name": "Bash"}
 
 
-def test_preview_explains_structural_ops_fallback():
-    from llm_bawt.service.routes.approval_policies import PolicyPreview, preview_policy
-    result = preview_policy(PolicyPreview(backend="mcp", tool_name="ops_run", tool_input={}, policies=[]))
-    assert result["action"] == "require_approval"
-    assert result["reason"] == "No matching policy; default require_approval"
+@pytest.mark.parametrize("required,action", [(True, "require_approval"), (None, "require_approval"), (False, "allow")])
+def test_preview_explains_catalog_owned_ops_approval(monkeypatch, required, action):
+    from types import SimpleNamespace
+
+    from llm_bawt.ops.approval_prompt import DEFAULT_PROMPT
+    from llm_bawt.service.routes import approval_policies, ops
+
+    operation = SimpleNamespace(
+        enabled=True, soft_deleted_at=None, approval_required=required,
+        risk_level="medium", args_schema_json="{}", approval_prompt_prefix=None,
+    )
+    looked_up = []
+
+    def lookup(slug):
+        looked_up.append(slug)
+        return operation
+
+    monkeypatch.setattr(ops, "_service", lambda: SimpleNamespace(
+        store=SimpleNamespace(get_operation_by_slug=lookup)))
+    monkeypatch.setattr(approval_policies, "_store", lambda: pytest.fail("ops preview read legacy policies"))
+    result = approval_policies.preview_policy(approval_policies.PolicyPreview(
+        backend="mcp", tool_name="ops_run",
+        tool_input={"operation": "fixture.restart"}, policies=[]))
+    assert looked_up == ["fixture.restart"]
+    assert result["action"] == action
+    assert result["policy_id"] is None
+    assert result["prompt"] == DEFAULT_PROMPT
+    assert result["reason"] == "Operation catalog approval setting; target-specific safety guards still apply"
+
+
+def test_ops_preview_rejects_missing_operation_before_catalog_lookup(monkeypatch):
+    from fastapi import HTTPException
+
+    from llm_bawt.service.routes import approval_policies, ops
+
+    monkeypatch.setattr(ops, "_service", lambda: pytest.fail("invalid preview read catalog"))
+    with pytest.raises(HTTPException) as error:
+        approval_policies.preview_policy(approval_policies.PolicyPreview(
+            backend="mcp", tool_name="ops_run", tool_input={}, policies=[]))
+    assert error.value.status_code == 422
+    assert error.value.detail == "Invalid ops_run arguments"

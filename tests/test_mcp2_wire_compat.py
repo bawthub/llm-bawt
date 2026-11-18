@@ -62,7 +62,7 @@ async def test_sync_tools_still_run_on_the_event_loop_thread():
 
 
 @pytest.mark.anyio
-async def test_policy_outcome_keeps_its_wire_form():
+async def test_catalog_context_refusal_keeps_its_wire_form():
     server = _server([ApprovalPolicy(id="p1", tool_name="ops_run", action=PolicyAction.DENY)])
     ran = []
 
@@ -75,8 +75,11 @@ async def test_policy_outcome_keeps_its_wire_form():
         result = await client.call_tool("ops_run", {})
     assert ran == []
     assert result.is_error is False
-    assert result.structured_content["status"] == "denied"
-    # Indented as 1.x wrote it; the catalog's compaction leaves policy outcomes alone.
+    assert result.structured_content["status"] == "approval_context_missing"
+    assert result.structured_content["tool"] == "ops_run"
+    assert result.structured_content["is_error"] is True
+    # Even a legacy DENY row cannot replace catalog admission. The refusal
+    # remains indented as 1.x wrote it and is not compacted by the catalog.
     assert result.content[0].text == json.dumps(result.structured_content, indent=2)
 
 
@@ -106,11 +109,17 @@ async def test_policy_outcome_on_an_output_schema_tool_reaches_the_model(outcome
     if outcome == "approval_context_missing":
         # A caller context without a turn capability: the real interceptor path.
         monkeypatch.setattr(approval_interceptor, "current_mcp_request_context", lambda: {"x": 1})
-    elif outcome == "approval_required":
-        # Creating a real card needs a trusted turn and a store; the wire
-        # conversion of the dict the interceptor returns is what is pinned here.
+    else:
+        # Pin the protocol conversion independently of admission ownership.
+        # Catalog refusal/context and real card creation are covered by the
+        # admission/interceptor suites; no retired policy evaluator is invoked.
         async def intercept(*args, **kwargs):
-            return dict(APPROVAL_REQUIRED)
+            if outcome == "approval_required":
+                return dict(APPROVAL_REQUIRED)
+            return {
+                "status": "denied", "tool": "ops_run", "is_error": True,
+                "message": "The operation was not executed.",
+            }
         monkeypatch.setattr(server, "_intercept_call", intercept)
 
     async with Client(server, mode="legacy") as client:
@@ -120,4 +129,8 @@ async def test_policy_outcome_on_an_output_schema_tool_reaches_the_model(outcome
     assert result.structured_content is None
     payload = json.loads(result.content[0].text)
     assert payload["status"] == outcome
+    if outcome == "approval_required":
+        assert payload == APPROVAL_REQUIRED
+    elif outcome == "approval_context_missing":
+        assert payload["tool"] == "ops_run" and payload["is_error"] is True
     assert result.content[0].text == json.dumps(payload, indent=2)

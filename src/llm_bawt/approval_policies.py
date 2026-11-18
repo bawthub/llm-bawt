@@ -7,4 +7,4 @@ from agent_bridge.approval import PolicyBundle as PolicyBundle, compute_etag as 
 from .approval_models import *  # noqa: F403
 from .approval_models import _new_id, _utcnow, _as_aware_utc  # noqa: F401
 from .approval_policy_store import ToolApprovalPolicyStore as ToolApprovalPolicyStore
-from .approval_defaults import _DEFAULT_POLICIES, _OPS_DEFAULT_POLICIES  # noqa: F401
+from .approval_defaults import _DEFAULT_POLICIES, _STABLE_SHELL_DEFAULT_POLICIES  # noqa: F401

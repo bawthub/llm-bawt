@@ -6,9 +6,9 @@ name: Tenant app image
 # latest. Master pushes build nothing; a tenant install or upgrade dispatches
 # this for the SHA it needs and pins the digests the run reports.
 #
-# Three tenant images come from this repo: the CPU app, the agent bridge
-# every tenant runs for its first agent (TASK-1293), and the ops job worker
-# (TASK-2128). The bridge image is built
+# Four tenant images come from this repo: the CPU app, the agent bridge
+# every tenant runs for its first agent (TASK-1293), the ops job worker
+# (TASK-2128) and the CPU embed sidecar (TASK-2448). The bridge image is built
 # with Bitwarden's public server as its vault default: Dockerfile.agent-bridge
 # defaults to the operator's own vault, which a tenant must never point at.
 on:
@@ -35,7 +35,7 @@ jobs:
       fail-fast: false
       matrix:
         arch: [amd64, arm64]
-        image: [app, agent-bridge, ops-worker]
+        image: [app, agent-bridge, ops-worker, embed]
         include:
           - image: app
             dockerfile: Dockerfile.app-cpu
@@ -49,6 +49,10 @@ jobs:
             dockerfile: docker/Dockerfile.ops-worker
             # Dockerfile.ops-worker wants a verified tag or repo@sha256 digest.
             build-args: OPS_PYTHON_BASE=python:3.12-slim@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b
+          # TASK-2448: CPU MiniLM embed sidecar for tenants without echo's GPU.
+          - image: embed
+            dockerfile: Dockerfile.embed-cpu
+            build-args: ""
     steps:
       - uses: actions/checkout@v5
         with:
@@ -98,7 +102,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: [app, agent-bridge, ops-worker]
+        image: [app, agent-bridge, ops-worker, embed]
     steps:
       - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4

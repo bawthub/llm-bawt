@@ -14,12 +14,12 @@ Bounded so a stuck Docker read can't pile up work:
   headers (an absolute deadline, so trickling can't renew it) and 5s more for
   its body;
 * the work runs on its own thread under a wall budget (default 20s). Past it
-  the caller gets 504 ``ops_timeout``. Prepare is read-only, so the abandoned
-  call has no side effects; its slot frees only when it really returns, which
-  keeps the bound real.
+  the caller gets 504 ``ops_timeout``. Prepare is read-only; request can commit
+  an approval after the timeout, so that outcome remains unknown to the caller.
+  The slot frees only when the work really returns, keeping the bound real.
 
-The wire contract (routes, statuses, codes, protocol field, headers) is the
-one ``control_client`` already speaks; this host changed none of it.
+The request route extends the existing authenticated control contract; it
+creates approval rows, never executes operations.
 """
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ from fastapi.responses import Response
 import uvicorn
 
 from .control_protocol import (BOT_KEY_PATH, CONTROL_PORT, EXECUTORS_PATH, MAX_BODY_BYTES, PREPARE_PATH, PROTOCOL_FIELD,
-                               PROTOCOL_VERSION, SERVER_BUDGET_SECONDS, control_token, refusal_status,
+                               PROTOCOL_VERSION, REQUEST_PATH, SERVER_BUDGET_SECONDS, control_token, refusal_status,
                                token_matches)
 from .health_http import _HealthProtocol
 from .service import OpsDispatchError
@@ -49,7 +49,7 @@ DEFAULT_BUDGET_SECONDS = SERVER_BUDGET_SECONDS
 READ_TIMEOUT_SECONDS = 5.0
 RETRY_AFTER_SECONDS = 2
 CONNECTION_LIMIT = 32
-ROUTES = {PREPARE_PATH: "POST", EXECUTORS_PATH: "GET", BOT_KEY_PATH: "GET"}
+ROUTES = {PREPARE_PATH: "POST", REQUEST_PATH: "POST", EXECUTORS_PATH: "GET", BOT_KEY_PATH: "GET"}
 
 
 def control_concurrency() -> int:
@@ -110,6 +110,13 @@ def create_control_app(control: "OpsControlServer") -> FastAPI:
     @app.get(BOT_KEY_PATH)
     async def bot_key():
         return await control.run_bounded(lambda: {"bot_key": control.service().bot_public_key()})
+
+    @app.post(REQUEST_PATH)
+    async def request_invocation(request: Request):
+        body = await read_json(request)
+        if isinstance(body, Response):
+            return body
+        return await control.run_bounded(lambda: control.service().request_invocation(body))
 
     return app
 

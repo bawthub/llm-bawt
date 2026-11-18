@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -46,6 +47,9 @@ class FakeStore:
     def record_decision(self, **kwargs):
         self.decision = kwargs
 
+    def get_request(self, request_id):
+        return next((row for row, _ in self.rows if row.id == request_id), None)
+
     def record_mcp_request(self, **kwargs):
         with_created = kwargs.pop("with_created", False)
         self.order.append("persist")
@@ -67,6 +71,10 @@ class FakeStore:
             session_key=kwargs.get("session_key"),
             backend=kwargs["backend"],
             continuation_capable=kwargs["continuation_capable"],
+            invocation_hash=kwargs["invocation_hash"],
+            caller_context_json=kwargs["caller_context_json"],
+            tool_arguments_json=json.dumps(kwargs["tool_arguments"]),
+            operations_snapshot_json=json.dumps(kwargs["operations_snapshot"]),
         )
         self.rows.append((row, kwargs))
         return (row, True) if with_created else row
@@ -81,19 +89,31 @@ def _policy(action: PolicyAction):
     )
 
 
-def _server(store, order, executed):
+def _server(store, order, executed, *, approval_required=True):
+    from llm_bawt.ops.service import OpsService
+
     async def publish(_payload):
         order.append("publish")
 
+    ops = object.__new__(OpsService)
+    ops.admission_only = False
+    ops.approval_store = store
+    operation = SimpleNamespace(enabled=True, soft_deleted_at=None,
+                                approval_required=approval_required,
+                                slug="fixture.restart", title="Restart fixture")
+    ops.store = SimpleNamespace(get_operation_by_slug=lambda slug: operation)
+    ops.prepare_invocation = lambda operation, args: {
+        "operation": {"slug": operation, "version": 1, "risk_level": "medium"},
+        "spec": {"action": "restart", "container_name": "fixture"},
+        "resolved_args": args, "execution": {"timeout_seconds": 60, "execution_mode": "process"},
+    }
     mcp = ApprovalAwareFastMCP(
         "test",
         approval_store_provider=lambda: store,
         approval_publisher=publish,
-        operations_preparer=lambda operation, args: {
-            "operation_slug": operation,
-            "args": args,
-        },
+        operations_requester=ops.request_invocation,
     )
+    mcp._test_ops = ops
 
     @mcp.tool(name="ops_run")
     async def ops_run(operation: str, args: dict | None = None):
@@ -119,8 +139,11 @@ def _stamped_args(capability):
 
 @pytest.fixture
 def capability(monkeypatch):
+    from llm_bawt.ops import invocation_attestation
+
     fernet = Fernet(Fernet.generate_key())
     monkeypatch.setattr(turn_codec, "_get_fernet", lambda: fernet)
+    monkeypatch.setattr(invocation_attestation, "control_token", lambda: "synthetic-control-token")
     return turn_codec.mint_task_turn_context(**_turn_values())
 
 
@@ -149,11 +172,11 @@ def _call_codex(mcp, capability, args, *, request_id="rpc-42", envelope=None):
         task_association.reset_current_task_turn_capability(capability_binding)
 
 
-def test_allow_strips_reserved_context_before_binding_and_executes(capability):
+def test_catalog_free_strips_reserved_context_before_binding_and_executes(capability):
     order, executed = [], []
     store = FakeStore(_policy(PolicyAction.ALLOW), order)
     result = _call(
-        _server(store, order, executed), capability, _stamped_args(capability)
+        _server(store, order, executed, approval_required=False), capability, _stamped_args(capability)
     )
     assert executed == [("llm-bawt.restart-app", {})]
     assert store.rows == []
@@ -161,15 +184,17 @@ def test_allow_strips_reserved_context_before_binding_and_executes(capability):
     assert '"ran": "llm-bawt.restart-app"' in result.content[0].text
 
 
-def test_deny_never_executes_or_persists(capability):
+@pytest.mark.parametrize("action", [PolicyAction.ALLOW, PolicyAction.DENY])
+def test_ops_policy_cannot_override_required_catalog_approval(capability, action):
     order, executed = [], []
-    store = FakeStore(_policy(PolicyAction.DENY), order)
+    store = FakeStore(_policy(action), order)
     result = _call(
         _server(store, order, executed), capability, _stamped_args(capability)
     )
-    assert result.structured_content["status"] == "denied"
+    assert result.structured_content["status"] == "approval_required"
     assert executed == []
-    assert store.rows == []
+    assert len(store.rows) == 1
+    assert not hasattr(store, "decision")
 
 
 def test_require_commits_before_publish_and_returns_pending(capability):
@@ -202,7 +227,7 @@ def test_singleton_projects_committed_superseded_cards_before_publishing_new_car
     mcp = _server(store, order, executed)
     approved = snapshot()
     approved["execution"]["timeout_seconds"] = 300
-    mcp._operations_preparer = lambda operation, args: approved
+    mcp._test_ops.prepare_invocation = lambda operation, args: approved
     previous = SimpleNamespace(id="old-card", resolution_message="Superseded by new-card",
                                resolved_by="system:singleton_replaced")
     monkeypatch.setattr(approval_ops_supersede, "superseded_by", lambda _store, _id: [previous])
@@ -231,7 +256,7 @@ def test_ops_run_schema_violation_files_no_card(capability, clean):
     order, executed, prepared = [], [], []
     store = FakeStore(_policy(PolicyAction.REQUIRE_APPROVAL), order)
     mcp = _server(store, order, executed)
-    mcp._operations_preparer = lambda operation, args: prepared.append(operation) or {}
+    mcp._test_ops.prepare_invocation = lambda operation, args: prepared.append(operation) or {}
     stamp = mint_mcp_call_context(
         capability=capability, tool_name="ops_run", tool_input=clean,
         tool_use_id="toolu_bad", agent_request_id="req_bad",
@@ -255,7 +280,7 @@ def test_handoff_only_operation_files_no_card(capability, action):
     order, executed = [], []
     store = FakeStore(_policy(PolicyAction.REQUIRE_APPROVAL), order)
     mcp = _server(store, order, executed)
-    mcp._operations_preparer = lambda operation, args: {
+    mcp._test_ops.prepare_invocation = lambda operation, args: {
         "spec": {"action": action, "compose_project": "bawthub", "compose_service": "tts"},
         "resolved_args": {}}
     result = _call(mcp, capability, _stamped_args(capability))
@@ -270,7 +295,8 @@ def test_routing_approval_displays_exact_target_image_and_delta(capability):
     store = FakeStore(_policy(PolicyAction.REQUIRE_APPROVAL), order)
     mcp = _server(store, order, executed)
     approved = snapshot(RoutingDocker())
-    mcp._operations_preparer = lambda operation, args: approved
+    approved["operation"] = {"slug": "bawthub.reconcile-prod-routing", "risk_level": "high"}
+    mcp._test_ops.prepare_invocation = lambda operation, args: approved
     clean = {"operation": "bawthub.reconcile-prod-routing", "args": {}}
     stamp = mint_mcp_call_context(
         capability=capability, tool_name="ops_run", tool_input=clean,
@@ -292,7 +318,8 @@ def test_config_approval_displays_names_mounts_and_enum_values_only(capability):
     store = FakeStore(_policy(PolicyAction.REQUIRE_APPROVAL), order)
     mcp = _server(store, order, executed)
     approved = snapshot(ConfigDocker(compose=DRIFTED))
-    mcp._operations_preparer = lambda operation, args: approved
+    approved["operation"] = {"slug": "bawthub.reconcile-prod-config", "risk_level": "high"}
+    mcp._test_ops.prepare_invocation = lambda operation, args: approved
     clean = {"operation": "bawthub.reconcile-prod-config", "args": {}}
     stamp = mint_mcp_call_context(
         capability=capability, tool_name="ops_run", tool_input=clean,
@@ -330,7 +357,7 @@ def test_codex_require_persists_routable_context_once_per_protocol_call(capabili
     retry = _call_codex(mcp, capability, clean).structured_content
 
     assert first["approval_request_id"] == retry["approval_request_id"]
-    assert order == ["persist", "publish", "persist"]
+    assert order == ["persist", "publish"]
     assert len(store.rows) == 1
     _, persisted = store.rows[0]
     assert persisted["backend"] == "codex"
@@ -393,13 +420,13 @@ def test_codex_context_missing_capability_or_invalid_turn_executes_nothing(capab
     assert store.rows == []
 
 
-def test_raw_mcp_non_gated_call_remains_allowed_but_gated_call_fails_closed():
+def test_raw_mcp_ops_call_fails_closed_even_with_legacy_allow_policy():
     clean = {"operation": "llm-bawt.restart-app"}
     order, executed = [], []
     allowed = _server(FakeStore(_policy(PolicyAction.ALLOW), order), order, executed)
     result = asyncio.run(allowed.call_tool("ops_run", clean))
-    assert executed == [("llm-bawt.restart-app", {})]
-    assert len(result.content) == 1
+    assert result.structured_content["status"] == "approval_context_missing"
+    assert executed == []
 
     order, executed = [], []
     gated_store = FakeStore(_policy(PolicyAction.REQUIRE_APPROVAL), order)

@@ -78,7 +78,7 @@ _OP_WRITABLE = {"slug", "title", "description", "enabled", "executor_kind", "tar
                 "args_defaults_json", "timeout_seconds", "start_delay_seconds", "max_output_bytes",
                 "max_concurrent", "risk_level", "category", "approval_prompt_prefix",
                 "quiesce_enabled", "quiesce_timeout_seconds", "quiesce_scope_json",
-                "execution_mode", "execution_tag", "notify_bell"}
+                "execution_mode", "execution_tag", "notify_bell", "approval_required"}
 _ACTIVE_CLAIMED = (JOB_DISPATCHING, JOB_ACCEPTED, JOB_RUNNING)
 # Non-terminal states a terminal write may leave (QUIESCING: TASK-1233).
 _OPEN_STATES = (JOB_QUEUED, JOB_QUIESCING, *_ACTIVE_CLAIMED)
@@ -271,7 +271,8 @@ class OpsStore:
                           ("caller_actor", "VARCHAR(128)"), *_JOB_QUIESCE_COLUMNS,
                           *_JOB_WORKER_SLOT_COLUMNS, ("sequence_json", "TEXT"))),
             ("ops_operations", (*_OP_QUIESCE_COLUMNS, ("execution_tag", "VARCHAR(64)"),
-                                ("notify_bell", "BOOLEAN NOT NULL DEFAULT false"))),
+                                ("notify_bell", "BOOLEAN NOT NULL DEFAULT false"),
+                                ("approval_required", "BOOLEAN NOT NULL DEFAULT true"))),
         ):
             existing = {c["name"] for c in inspect(conn).get_columns(table)}
             for name, kind in columns:
@@ -354,6 +355,8 @@ class OpsStore:
             raise ValueError("enabled must be boolean")
         if type(op.notify_bell) is not bool:
             raise ValueError("notify_bell must be boolean")
+        if type(op.approval_required) is not bool:
+            raise ValueError("approval_required must be boolean")
         from ..bot_tags.vocabulary import TAG_SLUG
         if op.execution_tag is not None and (
                 not isinstance(op.execution_tag, str) or not TAG_SLUG.fullmatch(op.execution_tag)):

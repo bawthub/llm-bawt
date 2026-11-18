@@ -164,6 +164,7 @@ def patched_orphan_finder(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(media_gc, "collect_local_references", fake_collect)
     monkeypatch.setattr(media_gc, "fetch_bawthub_references", fake_fetch)
     monkeypatch.setattr(media_gc, "_count_collectable", lambda conn: state["collectable"])
+    monkeypatch.setattr(media_gc, "_reap_response_audio", lambda engine, dry_run: 0)
     monkeypatch.setattr(media_gc, "get_shared_engine", fake_engine, raising=False)
     # ``run_media_gc`` does ``from llm_bawt.utils.db import get_shared_engine``
     # late, so we have to patch the source module too.

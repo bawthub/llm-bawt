@@ -1,25 +1,22 @@
-"""Approval-aware FastMCP dispatch for the first-party BawtHub server.
+"""Catalog approval dispatch for the first-party BawtHub server.
 
-Every registered tool passes through the shared pure policy evaluator. Claude
-turns carry a signed reserved input field that binds the exact SDK tool-use id,
+Ops requests are attested by the app and handed to ops for catalog evaluation
+and durable card creation. Turns carry a signed reserved input field that binds the exact SDK tool-use id,
 name, and original arguments to the opaque server-minted turn capability. The
 field is stripped before FastMCP schema validation/function binding.
 """
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import functools
-import hashlib
 import inspect
 import json
 import logging
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
-from llm_bawt.api_auth.mcp_oauth import current_oauth_caller
-
-from agent_bridge.approval import MCP_GATED_TOOLS, PolicyAction, evaluate
 from agent_bridge.mcp_call_context import (
     MCP_CALL_CONTEXT_KEY,
     McpCallContext,
@@ -33,11 +30,6 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.shared.exceptions import MCPError
 from mcp.types import CallToolResult, TextContent
 
-from ..approval_policies import (
-    ApprovalDuplicatePending,
-    ApprovalPersistError,
-    ApprovalStoreUnavailable,
-)
 from ..task_turn_context import (
     TaskTurnContext,
     TaskTurnContextError,
@@ -52,11 +44,6 @@ logger = logging.getLogger(__name__)
 
 PolicyProvider = Callable[[], Any]
 ApprovalPublisher = Callable[[dict[str, Any]], Awaitable[None] | None]
-
-
-def _approval_request_id(call_context: McpCallContext) -> str:
-    identity = f"{call_context.backend}\0{call_context.tool_use_id}\0{call_context.invocation_hash}"
-    return "mcp-appr-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:40]
 
 
 def _approval_context_error(
@@ -165,20 +152,20 @@ def policy_result(result: Any, *, has_output_schema: bool = False) -> Any:
 
 
 class ApprovalAwareFastMCP(MCPServer):
-    """MCP server whose ``call_tool`` performs app-owned policy interception."""
+    """MCP server whose ``call_tool`` routes verified ops invocations to ops."""
 
     def __init__(
         self,
         *args,
         approval_store_provider: PolicyProvider | None = None,
         approval_publisher: ApprovalPublisher | None = None,
-        operations_preparer: Callable[[str, dict], dict] | None = None,
+        operations_requester: Callable[[dict], dict] | None = None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
         self._approval_store_provider = approval_store_provider
         self._approval_publisher = approval_publisher
-        self._operations_preparer = operations_preparer
+        self._operations_requester = operations_requester
         self._tools_registered = False
 
     def add_tool(self, fn, name=None, *args, **kwargs):
@@ -341,51 +328,9 @@ class ApprovalAwareFastMCP(MCPServer):
                     message=f"Trusted approval context is invalid: {error}. The tool was not executed.",
                 )
 
-        if name not in MCP_GATED_TOOLS:
-            # TASK-2418: only ops goes through approval; ordinary tools are
-            # neither evaluated nor recorded.
+        if name != "ops_run":
+            # Ordinary tools are neither policy-evaluated nor recorded.
             return await super().call_tool(name, received, context)
-
-        store = self._approval_store()
-        try:
-            bundle = store.compile_bundle()
-        except ApprovalStoreUnavailable:
-            return {
-                "status": "policy_unavailable",
-                "tool": name,
-                "is_error": True,
-                "message": "Approval policy source unavailable; tool was not executed.",
-            }
-        decision = evaluate(
-            bundle.policies,
-            call_context.backend if call_context else "mcp",
-            name,
-            received,
-        )
-        # TASK-2426: a human OAuth caller has no turn; attribute the row to
-        # the introspection-verified user and client instead.
-        oauth = None if turn_context else current_oauth_caller()
-        store.record_decision(
-            decision=decision,
-            bundle=bundle,
-            backend=call_context.backend if call_context else "mcp",
-            tool_name=name,
-            invocation_hash=canonical_invocation_hash(name, received),
-            bot_id=turn_context.bot_id if turn_context else None,
-            user_id=turn_context.user_id if turn_context else (oauth.entity_id if oauth else None),
-            turn_id=turn_context.turn_id if turn_context else None,
-            source=f"mcp_oauth:{oauth.client_id}" if oauth else "mcp",
-        )
-        if decision.action is PolicyAction.ALLOW:
-            return await super().call_tool(name, received, context)
-        if decision.action is PolicyAction.DENY:
-            return {
-                "status": "denied",
-                "tool": name,
-                "subject": decision.subject,
-                "message": "This MCP call is blocked by policy. Do not retry it.",
-                "is_error": True,
-            }
 
         if call_context is None or turn_context is None:
             return _approval_context_error(
@@ -414,7 +359,6 @@ class ApprovalAwareFastMCP(MCPServer):
                     ),
                 }
 
-        request_id = _approval_request_id(call_context)
         invocation_hash = canonical_invocation_hash(name, received)
         caller_context = {
             "session_id": turn_context.session_id,
@@ -428,206 +372,51 @@ class ApprovalAwareFastMCP(MCPServer):
             "backend": call_context.backend,
             "tool_use_id": call_context.tool_use_id,
         }
+        from ..ops.invocation_attestation import mint
+        from ..ops.service import OpsDispatchError
+
         try:
-            operations_snapshot = None
-            if name == "ops_run":
-                prepare = self._operations_preparer
-                if prepare is None:
-                    from .ops_tools import _get_ops_service
+            envelope = mint(received, caller_context, invocation_hash)
+            requester = self._operations_requester
+            if requester is None:
+                from .ops_tools import _get_ops_service
 
-                    prepare = _get_ops_service().prepare_invocation
-                operations_snapshot = prepare(
-                    received.get("operation", ""), received.get("args") or {}
-                )
-                if not isinstance(operations_snapshot, dict):
-                    raise ValueError("Operation preparer must return a snapshot object")
-                from ..ops.gpu_guard import snapshot_handoff_only
+                requester = _get_ops_service().request_invocation
+            outcome = await asyncio.to_thread(requester, envelope)
+        except OpsDispatchError as error:
+            return {"status": error.code, "tool": name, "is_error": True, "message": str(error)}
+        except Exception:
+            logger.exception("Ops invocation handoff unavailable")
+            return {"status": "ops_request_unknown", "tool": name, "is_error": True,
+                    "message": "The ops request outcome is unknown. An approval may exist; "
+                               "do not retry automatically or create a new intent."}
+        if outcome["status"] == "catalog_allow":
+            return await super().call_tool(name, received, context)
+        if outcome["status"] != "approval_required":
+            return outcome
 
-                service = snapshot_handoff_only(operations_snapshot)
-                if service is not None:
-                    # TASK-1707: an approval could never run it, so file no card.
-                    return {
-                        "status": "gpu_handoff_required",
-                        "tool": name,
-                        "is_error": True,
-                        "message": (
-                            f"This operation starts, restarts or stops the GPU voice service "
-                            f"{service!r}. Only a GPU handoff can run it, so no approval was "
-                            "created. Do not retry; ask the user to use the voice/video switch "
-                            "or the TTS page's Restart button."
-                        ),
-                    }
-            approval_prompt = decision.prompt
-            if name == "ops_run" and operations_snapshot and operations_snapshot.get("release_source"):
-                source = operations_snapshot["release_source"]
-                spec = operations_snapshot["spec"]
-                approval_prompt = (
-                    f"{decision.prompt or 'Authorize BawtHub release and production deployment?'}\n"
-                    f"Source: {spec['github_repository']}@{source['expected_sha']}\n"
-                    f"Target: {spec['deploy_operation']} (currently {source.get('expected_current_image_id', 'unknown')})\n"
-                    "Deploys only if the build, release identity and production baseline verify. "
-                    "Unknown or changed outcomes stop for inspection; rollback remains separate."
-                ) if source.get("deploy_authorization") == "after_verified_build" else (
-                    f"{decision.prompt or 'Authorize remote BawtHub release build?'}\n"
-                    f"BawtHub {spec['github_repository']}@{source['expected_sha']}\n"
-                    "Production deployment requires a separate approval."
-                )
-            if name == "ops_run" and operations_snapshot and operations_snapshot.get("routing"):
-                routing = operations_snapshot["routing"]
-                spec = operations_snapshot["spec"]
-                approval_prompt = (
-                    f"{decision.prompt or 'Authorize same-image routing repair?'}\n"
-                    f"Target: {spec['container_name']} ({routing['container_id']})\n"
-                    f"Unchanged image: {routing['image_ref']}\n"
-                    f"Configuration fingerprint: {routing['config_hash']}\n"
-                    f"Before: {routing['before_rule']}\nAfter: {routing['after_rule']}\n"
-                    "No build, pull, environment, mount or permission changes. "
-                    "Verifies the hostname-routed health report; restores the previous container "
-                    "if verification fails. Changed target/configuration cancels execution."
-                )
-            if name == "ops_run" and operations_snapshot and operations_snapshot.get("host_key"):
-                from ..ops import host_key  # TASK-2430: the frozen SSH destination and key
+        if outcome.get("created"):
+            if outcome.get("singleton"):
+                from ..approval_ops_supersede import superseded_by
+                from ..service.routes.approval_policies import resolve_mcp_card
 
-                approval_prompt = host_key.approval_text(
-                    operations_snapshot["spec"], operations_snapshot["host_key"], decision.prompt
-                )
-            if name == "ops_run" and operations_snapshot and operations_snapshot.get("remove"):
-                from ..ops import container_remove  # TASK-1439 T2c: one stopped orphan
-
-                approval_prompt = container_remove.approval_text(operations_snapshot["remove"], decision.prompt)
-            if name == "ops_run" and operations_snapshot and operations_snapshot.get("config"):
-                from ..ops import (  # TASK-1518, TASK-1474, TASK-1476, TASK-1649
-                    app_config_reconcile,
-                    config_reconcile,
-                    dev_config_reconcile,
-                    tagged_config_reconcile,
-                )
-
-                if operations_snapshot["spec"].get("action") == app_config_reconcile.ACTION:
-                    approval_prompt = app_config_reconcile.snapshot_approval_text(
-                        operations_snapshot, decision.prompt
-                    )
-                elif operations_snapshot["spec"].get("action") == tagged_config_reconcile.ACTION:
-                    approval_prompt = tagged_config_reconcile.approval_text(
-                        operations_snapshot["spec"], operations_snapshot["config"], decision.prompt
-                    )
-                elif operations_snapshot["spec"].get("action") == dev_config_reconcile.ACTION:
-                    approval_prompt = dev_config_reconcile.approval_text(
-                        operations_snapshot["spec"], operations_snapshot["config"], decision.prompt
-                    )
-                else:
-                    approval_prompt = config_reconcile.approval_text(
-                        operations_snapshot["spec"], operations_snapshot["config"], decision.prompt
-                    )
-            if name == "ops_run" and operations_snapshot and operations_snapshot.get("plan"):
-                from ..ops import plan_approval  # TASK-1476
-
-                approval_prompt = plan_approval.approval_text(operations_snapshot, decision.prompt)
-            if name == "ops_run" and operations_snapshot and operations_snapshot.get("sequence"):
-                from ..ops import sequence_approval
-
-                approval_prompt = sequence_approval.approval_text(operations_snapshot, decision.prompt)
-            if name == "ops_run" and operations_snapshot:
-                from ..ops import execution_mode  # TASK-1169 S4
-                from ..ops.operation_revision import with_safety_lines
-
-                approval_prompt = execution_mode.with_card_lines(approval_prompt, operations_snapshot)
-                approval_prompt = with_safety_lines(approval_prompt, operations_snapshot)
-            row, created = store.record_mcp_request(
-                request_id=request_id,
-                tool_use_id=call_context.tool_use_id,
-                mcp_server="bawthub",
-                bot_id=turn_context.bot_id,
-                user_id=turn_context.user_id,
-                turn_id=turn_context.turn_id,
-                backend=call_context.backend,
-                tool_name=name,
-                tool_arguments=received,
-                subject=decision.subject,
-                grant_key=decision.grant_key,
-                policy_id=getattr(decision.policy, "id", None),
-                severity=decision.severity.value,
-                prompt=approval_prompt,
-                invocation_hash=invocation_hash,
-                operations_snapshot=operations_snapshot,
-                caller_context_json=json.dumps(
-                    caller_context, ensure_ascii=False, sort_keys=True
-                ),
-                continuation_capable=True,
-                trigger_message_id=turn_context.trigger_message_id,
-                session_key=call_context.session_key,
-                with_created=True,
-            )
-        except ApprovalDuplicatePending as duplicate:
-            return {
-                "status": "approval_pending",
-                "approval_request_id": duplicate.existing_request_id,
-                "tool": name,
-                "is_error": True,
-                "message": (
-                    "An identical request is already awaiting approval; the call "
-                    "was not executed and no new approval was created. Wait for "
-                    "its result instead of re-sending."
-                ),
-            }
-        except ApprovalPersistError as error:
-            logger.error("Could not persist MCP approval for %s: %s", name, error)
-            return {
-                "status": "approval_persist_failed",
-                "tool": name,
-                "message": (
-                    "The approval request could not be saved, so the tool was not "
-                    "executed. Do not retry automatically."
-                ),
-                "is_error": True,
-            }
-
-        if created:
-            if name == "ops_run":
-                from ..approval_ops_supersede import singleton_target, superseded_by
-
-                if singleton_target(operations_snapshot) is not None:
-                    # Project already-committed terminal results through the
-                    # normal resolver: no approval/grant or tool execution.
-                    # The durable outbox repairs history after an app crash.
-                    from ..service.routes.approval_policies import resolve_mcp_card
-
-                    try:
-                        for previous in superseded_by(store, row.id):
-                            await resolve_mcp_card(
-                                store, previous, outcome="deny",
-                                message=previous.resolution_message, resolved_by=previous.resolved_by,
-                            )
-                    except Exception:
-                        logger.exception("Could not project superseded ops cards for %s", row.id)
-            await self._publish_approval_required(
-                {
-                    "_type": "tool_approval_required",
-                    "request_id": row.id,
-                    "tool_use_id": row.tool_use_id,
-                    "turn_id": row.turn_id,
-                    "trigger_message_id": row.trigger_message_id,
-                    "bot_id": row.bot_id,
-                    "user_id": row.user_id,
-                    "tool_name": row.tool_name,
-                    "arguments": received,
-                    "subject": row.subject,
-                    "label": decision.label,
-                    "prompt": row.prompt,
-                    "severity": row.severity,
-                    "policy_id": row.policy_id,
-                    "session_key": row.session_key or "",
-                    "provider": row.backend,
-                    "request_kind": "mcp",
-                    "continuation_capable": bool(row.continuation_capable),
-                }
-            )
+                store = self._approval_store()
+                try:
+                    for previous in superseded_by(store, outcome["approval_request_id"]):
+                        await resolve_mcp_card(
+                            store, previous, outcome="deny",
+                            message=previous.resolution_message, resolved_by=previous.resolved_by,
+                        )
+                except Exception:
+                    logger.exception("Could not project superseded ops cards for %s",
+                                     outcome["approval_request_id"])
+            await self._publish_approval_required(outcome["card"])
         return {
             "status": "approval_required",
-            "approval_request_id": row.id,
+            "approval_request_id": outcome["approval_request_id"],
             "tool": name,
-            "subject": row.subject,
-            "continuation_capable": bool(row.continuation_capable),
+            "subject": outcome["subject"],
+            "continuation_capable": outcome["continuation_capable"],
             "message": (
                 "Approval is required. The call was not executed. Do not retry or "
                 "re-issue this tool; wait for the persisted approval result."

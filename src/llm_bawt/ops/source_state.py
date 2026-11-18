@@ -20,7 +20,8 @@ network, read-only bind of the project directory, ``noexec`` scratch tmpfs):
    no tracked change anywhere in the repository;
 4. no untracked or ignored file lives under a source path, except
    ``__pycache__`` while Python is told to keep bytecode elsewhere
-   (``PYTHONPYCACHEPREFIX`` outside every mount);
+   (``PYTHONPYCACHEPREFIX`` outside every mount, or inside a tmpfs the
+   recreated container gets new and empty);
 5. ``HEAD`` holds only regular files under each source path (no symlink,
    no gitlink) and at least one;
 6. every one of those files, and every Compose file, hashed RAW
@@ -90,6 +91,10 @@ _NV_REQUIRE = re.compile(r"[A-Za-z0-9._,<>= -]{1,4096}")
 BRIDGE_NODE_PRELOAD = "/usr/local/libexec/bridge-node-check-preload.cjs"
 BRIDGE_NODE_OPTIONS = f"--require={BRIDGE_NODE_PRELOAD}"
 BRIDGE_UV_CACHE_DIR = "/home/bridge/dev/.uv-cache"
+BRIDGE_PNPM_STORE = "/home/bridge/dev/.pnpm-store"
+# TASK-2406: product variables whose names npm/pnpm define in lower case.
+# Each is matched exactly; no other lower-case name is a plain variable here.
+LOWERCASE_PRODUCT_ENV = frozenset({"npm_config_store_dir"})
 RESERVED_ENV = frozenset({
     "ENV", "BASH_ENV", "SHELLOPTS", "BASHOPTS", "IFS", "CDPATH", "GLOBIGNORE", "PS1", "PS2", "PS3", "PS4",
     "PROMPT_COMMAND", "HOME", "PATH", "SHELL", "TMPDIR", "TERMINFO", "TERMINFO_DIRS", "HOSTALIASES",
@@ -105,6 +110,20 @@ RESERVED_PREFIXES = ("BASH_", "LD_", "DYLD_", "PYTHON", "UV_", "GIT_", "GCONV_",
 def _outside(path: str, mounts) -> bool:
     """``path`` is clean and neither on, under nor holding a mount."""
     return _clean_path(path) and not any(_within(path, d) or _within(d, path) for d in mounts)
+
+
+def _in_fresh_tmpfs(path: str, mounts, fresh) -> bool:
+    """``path`` is clean and on or under exactly one mount, which is a tmpfs
+    the recreated container gets new and empty (TASK-2406).
+
+    A read-only container (an agent house) has no writable layer, so its
+    bytecode prefix lives on a tmpfs. Like the writable layer that
+    :func:`_outside` trusts, that tmpfs holds nothing when the new process
+    starts, so no forged ``.pyc`` can be waiting in it. Any other mount on,
+    under or holding the path still refuses."""
+    related = [d for d in mounts if _within(path, d) or _within(d, path)]
+    return (_clean_path(path) and len(related) == 1 and related[0] in fresh
+            and _within(path, related[0]))
 
 
 def _path_list(value: str, mounts) -> bool:
@@ -166,6 +185,13 @@ PRODUCT_ENV = {
     # already write, so it adds no write surface. Any other value is refused.
     "UV_CACHE_DIR": lambda v, _m: v == BRIDGE_UV_CACHE_DIR,
     "UV_LINK_MODE": lambda v, _m: v == "clone",
+    # TASK-2406 (agent house): pnpm's shared store, the same rule as
+    # UV_CACHE_DIR: exactly this path on the bridge's writable dev mount.
+    "npm_config_store_dir": lambda v, _m: v == BRIDGE_PNPM_STORE,
+    # TASK-2406: the house preview's mode flag. A closed set of plain words;
+    # it selects library behaviour, never a file to load. Other NODE_* names
+    # stay refused.
+    "NODE_ENV": lambda v, _m: v in ("development", "production", "test"),
     "HOSTNAME": lambda v, _m: bool(_HOSTNAME.fullmatch(v)),
     "LANG": _locale,
     "TZ": lambda v, _m: bool(_TZ.fullmatch(v)),
@@ -342,7 +368,11 @@ def source_plan(spec: dict, source: dict, container: dict, image: dict, desired:
     # destination -> is a read-only data mount after the recreate
     mounts = {d: d in data and (desired["mounts"].get(d) or {}).get("read_only") is True
               for d in destinations if d}
-    opaque, prefix_ok = _env_refusals(env, mounts, set(spec["env_names"]), found)
+    # A tmpfs the recreated container declares (not also a bind, volume or
+    # image VOLUME there) starts empty (TASK-2406).
+    image_volumes = set((image.get("Config") or {}).get("Volumes") or {})
+    fresh = {d for d in desired.get("tmpfs") or {} if d not in desired["mounts"] and d not in image_volumes}
+    opaque, prefix_ok = _env_refusals(env, mounts, set(spec["env_names"]), found, fresh)
     # TASK-2406: a declared deployment overlay is outside the repository, so
     # git cannot vouch for it. Only the in-project files are git-checked; the
     # overlay's effect is bound by the approval's rendered/desired hashes.
@@ -371,11 +401,15 @@ def _classify_env(env: dict, mounts: dict, opaque_names: set) -> list:
     return opaque
 
 
-def _env_refusals(env: dict, mounts: dict, opaque_names: set, found: list) -> tuple[list, bool]:
+def _env_refusals(env: dict, mounts: dict, opaque_names: set, found: list,
+                  fresh_tmpfs=frozenset()) -> tuple[list, bool]:
     """``(the opaque names present, sorted; whether the bytecode prefix is
     safe)``. Appends a refusal to ``found`` for each class of unclassified or
-    unsafe name (see :data:`PRODUCT_ENV`). Names are reported, never values."""
-    unsafe = sorted(name for name, value in env.items() if not ENV_NAME.fullmatch(name)
+    unsafe name (see :data:`PRODUCT_ENV`). Names are reported, never values.
+    ``fresh_tmpfs`` names the tmpfs destinations the recreated container gets
+    new (see :func:`_in_fresh_tmpfs`)."""
+    unsafe = sorted(name for name, value in env.items()
+                    if not (ENV_NAME.fullmatch(name) or name in LOWERCASE_PRODUCT_ENV)
                     or not isinstance(value, str) or value.lstrip().startswith(_FUNCTION_VALUE))
     if unsafe:
         found.append(SourceStateError("source_env_unsafe", unsafe, detail="not a plain variable"))
@@ -384,13 +418,17 @@ def _env_refusals(env: dict, mounts: dict, opaque_names: set, found: list) -> tu
     # exists under source (TASK-1474 r1 B1): a set prefix must be safe. Unset,
     # Python uses __pycache__ next to the source, which the checker refuses.
     prefix = env.get(PYCACHE_PREFIX)
-    prefix_ok = PYCACHE_PREFIX not in unsafe and (prefix is None or _outside(prefix, mounts))
+    prefix_ok = PYCACHE_PREFIX not in unsafe and (
+        prefix is None or _outside(prefix, mounts) or _in_fresh_tmpfs(prefix, mounts, fresh_tmpfs))
     if not prefix_ok and PYCACHE_PREFIX not in unsafe:
         found.append(SourceStateError("source_bytecode_unsafe", [PYCACHE_PREFIX],
-                                      detail="not an absolute path outside every mount"))
-    # A validator only ever sees a plain string value: unsafe names are refused above.
+                                      detail="not an absolute path outside every mount or in a fresh tmpfs"))
+    # A validator only ever sees a plain string value: unsafe names are refused
+    # above. The bytecode prefix was judged just above (its table rule alone
+    # would refuse a fresh tmpfs).
     bad = sorted(name for name, value in env.items()
-                 if name in PRODUCT_ENV and name not in unsafe and not PRODUCT_ENV[name](value, mounts))
+                 if name in PRODUCT_ENV and name not in unsafe and name != PYCACHE_PREFIX
+                 and not PRODUCT_ENV[name](value, mounts))
     if bad:
         found.append(SourceStateError("source_env_unsafe", bad, detail="value not allowed for this runtime variable"))
     unclassified = sorted(name for name in env if name not in PRODUCT_ENV and name not in opaque_names)

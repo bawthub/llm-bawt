@@ -306,12 +306,15 @@ async def test_service_principal_never_bypasses_approval_and_raw_arguments_bind(
     from agent_bridge.approval import ApprovalPolicy, MatcherType, PolicyAction
     from tests.test_mcp_approval_interceptor import FakeStore
 
-    # TASK-2418: only ops_run is approval-gated; a service principal gets no bypass there.
+    # Neither a historical policy nor a service envelope supplies the trusted
+    # agent turn required by catalog-owned ops admission.
     calls = []
     for action in (PolicyAction.ALLOW, PolicyAction.DENY, PolicyAction.REQUIRE_APPROVAL):
         policy = ApprovalPolicy(id="p", tool_name="ops_run", matcher_type=MatcherType.ALWAYS, action=action)
         store = FakeStore(policy, [])
-        server = CatalogFastMCP("test", bot_policy_resolver=Resolver(), approval_store_provider=lambda: store)
+        server = CatalogFastMCP(
+            "test", bot_policy_resolver=Resolver(), approval_store_provider=lambda: store,
+            operations_requester=lambda envelope: pytest.fail("service principal reached ops admission"))
 
         async def handler(operation: str, args: dict | None = None, idempotency_key: str = "k") -> str:
             calls.append((operation, args, idempotency_key))
@@ -319,17 +322,21 @@ async def test_service_principal_never_bypasses_approval_and_raw_arguments_bind(
 
         server.add_tool(handler, name="ops_run")
         arguments = {"operation": "noop"}  # default expansion must not break hash
-        token = _service_capability.set(ServicePrincipal("private_fixture", "user_a").mint("ops_run", arguments))
+        credential = ServicePrincipal("private_fixture", "user_a").mint("ops_run", arguments)
+        token = _service_capability.set(credential)
         try:
             result = await server.call_tool("ops_run", arguments)
-            if action is PolicyAction.DENY:
-                assert json.loads(result.content[0].text)["status"] == "denied"
-            elif action is PolicyAction.REQUIRE_APPROVAL:
-                assert json.loads(result.content[0].text)["status"] == "approval_context_missing"
+            assert json.loads(result.content[0].text)["status"] == "approval_context_missing"
             assert not store.rows
+            assert not hasattr(store, "decision")
+            # Catalog admission refuses before consulting service identity.
+            # The service envelope itself still binds the unexpanded raw call.
+            with pytest.raises(BotAccessError, match="caller_unavailable"):
+                service_codec.open_service_capability(
+                    credential, "ops_run", {**arguments, "args": {"changed": True}})
         finally:
             _service_capability.reset(token)
-    assert calls == [("noop", None, "k")]
+    assert calls == []
 
 
 @pytest.mark.asyncio
@@ -354,6 +361,10 @@ async def test_non_ops_tools_skip_approval_policies_for_service_principal(signer
         try:
             await server.call_tool("messages_get", arguments)
             assert not store.rows
+            # On the service execution path, omitted defaults do not break the
+            # exact raw hash, but an explicit caller change is refused.
+            with pytest.raises(BotAccessError, match="caller_unavailable"):
+                await server.call_tool("messages_get", {**arguments, "limit": 4})
         finally:
             _service_capability.reset(token)
     assert calls == [("private_fixture", 3)] * 2
@@ -374,8 +385,9 @@ async def test_runtime_conversation_proof_keeps_service_approval_semantics(signe
     for action in (PolicyAction.ALLOW, PolicyAction.DENY, PolicyAction.REQUIRE_APPROVAL):
         policy = ApprovalPolicy(id="p", tool_name="ops_run", matcher_type=MatcherType.ALWAYS, action=action)
         store = FakeStore(policy, [])
-        server = CatalogFastMCP("runtime-approval", bot_policy_resolver=Resolver(),
-                                approval_store_provider=lambda: store)
+        server = CatalogFastMCP(
+            "runtime-approval", bot_policy_resolver=Resolver(), approval_store_provider=lambda: store,
+            operations_requester=lambda envelope: pytest.fail("conversation proof reached ops admission"))
 
         async def handler(operation: str, args: dict | None = None):
             calls.append(operation)
@@ -387,14 +399,12 @@ async def test_runtime_conversation_proof_keeps_service_approval_semantics(signe
         binding = _service_capability.set(credential)
         try:
             result = await server.call_tool("ops_run", arguments)
-            if action is PolicyAction.DENY:
-                assert json.loads(result.content[0].text)["status"] == "denied"
-            elif action is PolicyAction.REQUIRE_APPROVAL:
-                assert json.loads(result.content[0].text)["status"] == "approval_context_missing"
+            assert json.loads(result.content[0].text)["status"] == "approval_context_missing"
             assert not store.rows
+            assert not hasattr(store, "decision")
         finally:
             _service_capability.reset(binding)
-    assert calls == ["noop"]  # only ALLOW executes
+    assert calls == []  # embedded conversation proof is not agent-turn authority
 
 
 @pytest.mark.asyncio

@@ -185,26 +185,31 @@ def test_active_answer_without_a_client_is_invalid():
     assert _call(layer, gate, _bearer("t"))[0] == 401
 
 
-def test_gated_tool_audit_is_attributed_to_the_oauth_user_and_client(monkeypatch):
-    from types import SimpleNamespace as NS
-    from unittest.mock import AsyncMock
+def test_oauth_identity_does_not_supply_ops_turn_authority(monkeypatch):
+    from unittest.mock import AsyncMock, Mock
 
     from llm_bawt.api_auth import mcp_oauth
     from llm_bawt.mcp_server import approval_interceptor as ai
 
-    rows = []
-    store = NS(compile_bundle=lambda: NS(policies=[]), record_decision=lambda **kw: rows.append(kw))
     server = object.__new__(ai.ApprovalAwareFastMCP)
-    server._approval_store_provider = lambda: store
-    monkeypatch.setattr(ai, "evaluate", lambda *a: NS(action=ai.PolicyAction.ALLOW))
-    monkeypatch.setattr(ai.MCPServer, "call_tool", AsyncMock(return_value={}))
+    server._approval_store_provider = Mock()
+    server._operations_requester = Mock()
+    downstream = AsyncMock(return_value={})
+    monkeypatch.setattr(ai.MCPServer, "call_tool", downstream)
     token = mcp_oauth._oauth_caller.set(OAuthCaller("owner", "c1"))
     try:
-        asyncio.run(server._intercept_call("ops_run", {"operation": "x"}, None))
+        result = asyncio.run(server._intercept_call("ops_run", {"operation": "x"}, None))
+        assert result["status"] == "approval_context_missing"
+        assert result["is_error"] is True
+        downstream.assert_not_awaited()
+        server._operations_requester.assert_not_called()
+        server._approval_store_provider.assert_not_called()
+
+        assert asyncio.run(server._intercept_call("tasks_board", {}, None)) == {}
+        downstream.assert_awaited_once_with("tasks_board", {}, None)
+        server._approval_store_provider.assert_not_called()
     finally:
         mcp_oauth._oauth_caller.reset(token)
-    assert rows[0]["user_id"] == "owner" and rows[0]["bot_id"] is None
-    assert rows[0]["source"] == "mcp_oauth:c1"
 
 
 def test_service_principals_need_a_matching_key_export():

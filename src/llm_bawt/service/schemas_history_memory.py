@@ -93,6 +93,8 @@ class HistoryMessage(BaseModel):
     scheduler: ScheduledMessageOrigin | None = None
     approval_notice: ApproverNotice | None = None
     session_resumption: SessionResumption | None = None
+    # TASK-1115: saved spoken-reply audio for assistant rows (status, duration).
+    response_audio: dict | None = None
 
 class HistoryResponse(BaseModel):
     """Response for conversation history.

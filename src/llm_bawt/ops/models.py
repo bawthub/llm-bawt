@@ -192,8 +192,13 @@ class OpsOperation(SQLModel, table=True):
     category: str | None = Field(
         default=None, sa_column=Column(String(64), nullable=True, index=True)
     )
-    # Informational — a prefix the approval-policy UI can suggest / preview.
-    # Actual gating enforcement stays in ``tool_approval_policies``.
+    # Catalog-owned agent approval; independent of informational risk levels.
+    # Existing operations retain the former catch-all's required approval.
+    approval_required: bool = Field(
+        default=True,
+        sa_column=Column(Boolean, nullable=False, server_default="true"),
+    )
+    # The catalog's prompt, enriched with the frozen invocation's safety lines.
     approval_prompt_prefix: str | None = Field(
         default=None, sa_column=Column(Text, nullable=True)
     )
@@ -278,6 +283,7 @@ class OpsOperation(SQLModel, table=True):
             "max_concurrent": self.max_concurrent,
             "risk_level": self.risk_level,
             "category": self.category,
+            "approval_required": self.approval_required is not False,
             "approval_prompt_prefix": self.approval_prompt_prefix,
             "execution_tag": self.execution_tag,
             "version": int(self.version or 1),

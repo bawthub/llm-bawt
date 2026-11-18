@@ -37,6 +37,7 @@ NON_HISTORY_TOOLS = frozenset({
     "home_audio_devices", "home_audio_enqueue", "home_audio_status", "home_audio_cancel",
     "notify_user", "notifications_list", "schedule_wakeup", "playground_send",
     "x_search", "x_counts", "web_search", "bots_list_available",
+    "monitors_list", "monitors_upsert", "monitors_mute", "monitors_test",
     "ops_approvals_list", "ops_approvals_get", "ops_approval_resolve", "ops_approval_withdraw", "browser_check_session",
     "usage_utility_rollup",  # TASK-1538: aggregate counts, no bot or content
 })

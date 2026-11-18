@@ -38,7 +38,7 @@ TABLE_NAME = "media_assets"
 # Allowed values for media_assets.source. Stored as a CHECK constraint so
 # typos in producer code surface as a DB error instead of silently writing
 # garbage that the GC job can't reason about.
-ALLOWED_SOURCES = ("chat_upload", "tool_generated", "agent_attachment")
+ALLOWED_SOURCES = ("chat_upload", "tool_generated", "agent_attachment", "tts_response")
 
 # Allowed values for media_assets.kind (TASK-847). Canonical list lives with
 # the strategy registry; mirrored here so the DB layer validates without
@@ -66,7 +66,7 @@ CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     expires_at          TIMESTAMPTZ,
     CONSTRAINT media_assets_source_check
-        CHECK (source IN ('chat_upload', 'tool_generated', 'agent_attachment'))
+        CHECK (source IN ('chat_upload', 'tool_generated', 'agent_attachment', 'tts_response'))
 )
 """
 
@@ -83,6 +83,23 @@ ALTER_TABLE_SQL = [
     f"CREATE UNIQUE INDEX IF NOT EXISTS idx_media_assets_immutable_sha ON {TABLE_NAME}(sha256) WHERE storage_key IS NULL",
     f"ALTER TABLE {TABLE_NAME} DROP CONSTRAINT IF EXISTS media_assets_sha256_key",
     f"CREATE UNIQUE INDEX IF NOT EXISTS idx_media_assets_storage_key ON {TABLE_NAME}(storage_key)",
+    # TASK-1115: saved spoken replies. Replace the source CHECK only when an
+    # existing install still has the older list, so boots don't relock it.
+    f"""
+    DO $$
+    BEGIN
+        IF EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conname = 'media_assets_source_check'
+              AND conrelid = '{TABLE_NAME}'::regclass
+              AND pg_get_constraintdef(oid) NOT LIKE '%tts_response%'
+        ) THEN
+            ALTER TABLE {TABLE_NAME} DROP CONSTRAINT media_assets_source_check;
+            ALTER TABLE {TABLE_NAME} ADD CONSTRAINT media_assets_source_check
+                CHECK (source IN ('chat_upload', 'tool_generated', 'agent_attachment', 'tts_response'));
+        END IF;
+    END $$
+    """,
 ]
 
 # Listing assets for a given user, newest-first, is the dominant access
@@ -407,7 +424,7 @@ class MediaAsset(SQLModel, table=True):
     height: Optional[int] = Field(default=None)
     kind: str = Field(default="image", description="image | file (TASK-847)")
     filename: Optional[str] = Field(default=None)
-    source: str = Field(description="chat_upload | tool_generated | agent_attachment")
+    source: str = Field(description="chat_upload | tool_generated | agent_attachment | tts_response")
     owner_user_id: Optional[str] = Field(default=None, index=True)
     created_at: datetime = Field(
         sa_column=Column(DateTime(timezone=True), nullable=False, server_default=text("NOW()")),

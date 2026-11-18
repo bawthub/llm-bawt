@@ -100,6 +100,7 @@ def _direct_ops_run(service, monkeypatch, **arguments):
 # ---- M4: one ops_run contract for both paths -------------------------------
 
 def test_admitted_receipt_matches_direct_tool_receipt(system, monkeypatch):
+    system.store.update_operation("demo", {"approval_required": False})
     direct = _direct_ops_run(system.service, monkeypatch, operation="demo", args={},
                              idempotency_key="direct-key")
     row = _approved(system, arguments={"operation": "demo", "args": {}, "idempotency_key": " admitted-key "})

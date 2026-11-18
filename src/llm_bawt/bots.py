@@ -586,27 +586,127 @@ def strip_emotes(text: str) -> str:
     """
     if not text:
         return text
+    for stage in _EMOTE_STAGES:
+        text = stage.pattern.sub('', text)
+    return _normalize_emote_whitespace(text)
 
-    # Remove *action* patterns (asterisk-wrapped)
-    # Matches: *smiles warmly*, *pauses*, etc.
-    text = re.sub(r'(?<!\*)\*(?=\S)[^*\r\n]*\S\*(?!\*)', '', text)
 
-    # Remove ::action:: patterns (colon-wrapped, less common)
-    text = re.sub(r'(?<!\S)::(?=\S)[^:\r\n]*\S::', '', text)
-
-    # Remove standalone (action) patterns (parentheses on their own)
-    # Only remove if it's the whole line or at sentence boundaries
-    # Be careful not to remove legitimate parenthetical content
-    text = re.sub(r'^\s*\([^)]+\)\s*$', '', text, flags=re.MULTILINE)
-
-    # Normalize multiple spaces/newlines
+def _normalize_emote_whitespace(text: str) -> str:
     text = re.sub(r'[ \t]+', ' ', text)
     text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
 
-    # Strip leading/trailing whitespace
-    text = text.strip()
 
-    return text
+# ---------------------------------------------------------------------------
+# Emote patterns. ``strip_emotes`` (complete text) and ``StreamingEmoteFilter``
+# (incremental text) both apply exactly these stages in this order, so the
+# streamed result always concatenates to ``strip_emotes`` of the full text.
+#
+# Each stage pairs its regex with a ``pending`` function that returns the
+# earliest index whose match decision still depends on text that has not
+# arrived yet (``len(text)`` when everything seen so far is decided).
+# ---------------------------------------------------------------------------
+
+# *smiles warmly*, *pauses* — single-line, not part of ** runs.
+_EMOTE_STAR_RE = re.compile(r'(?<!\*)\*(?=\S)[^*\r\n]*\S\*(?!\*)')
+# ::waves:: — single-line, opener at start or after whitespace (spares std::vector).
+_EMOTE_COLON_RE = re.compile(r'(?<!\S)::(?=\S)[^:\r\n]*\S::')
+# A line holding only "(action)". ``\s`` and ``[^)]`` can cross newlines.
+_EMOTE_PAREN_LINE_RE = re.compile(r'^\s*\([^)]+\)\s*$', re.MULTILINE)
+
+_STAR_STOP_RE = re.compile(r'[*\r\n]')
+_COLON_STOP_RE = re.compile(r'[:\r\n]')
+_NON_SPACE_RE = re.compile(r'\S')
+
+
+def _pending_star(text: str) -> int:
+    k = 0
+    while (i := text.find('*', k)) != -1:
+        # A match from i ends at the next '*' and then looks one char past it;
+        # a line break or another char settles it sooner.
+        stop = _STAR_STOP_RE.search(text, i + 1)
+        if stop is None or (text[stop.start()] == '*' and stop.start() + 1 >= len(text)):
+            return i
+        m = _EMOTE_STAR_RE.match(text, i)
+        k = m.end() if m else i + 1
+    return len(text)
+
+
+def _pending_colon(text: str) -> int:
+    k = 0
+    while (i := text.find('::', k)) != -1:
+        if i > 0 and not text[i - 1].isspace():
+            k = i + 1  # (?<!\S) fails whatever follows
+            continue
+        # A match from i reads to the first ':' after the opener plus the two
+        # chars after it (``\S::`` may end on that colon or just before it).
+        stop = _COLON_STOP_RE.search(text, i + 2)
+        if stop is None or (text[stop.start()] == ':' and stop.start() + 2 >= len(text)):
+            return i
+        m = _EMOTE_COLON_RE.match(text, i)
+        k = m.end() if m else i + 1
+    # A trailing ':' that could still become an opener.
+    n = len(text)
+    if n > k and text.endswith(':') and (n == 1 or text[-2].isspace()):
+        return n - 1
+    return n
+
+
+def _next_line_start(text: str, pos: int) -> int:
+    if pos == 0 or text[pos - 1] == '\n':
+        return pos
+    nl = text.find('\n', pos)
+    return -1 if nl == -1 else nl + 1
+
+
+def _pending_paren(text: str) -> int:
+    n = len(text)
+    p = 0
+    while 0 <= p < n:
+        q = _NON_SPACE_RE.search(text, p)
+        if q is None:
+            return p  # only whitespace so far; a '(' may follow
+        if text[q.start()] == '(':
+            close = text.find(')', q.start() + 1)
+            if close == -1:
+                return p
+            # ``\s*$`` after ')' is settled by the next non-space char.
+            if _NON_SPACE_RE.search(text, close + 1) is None:
+                return p
+            m = _EMOTE_PAREN_LINE_RE.match(text, p)
+            if m:
+                p = _next_line_start(text, m.end())
+                continue
+        p = _next_line_start(text, p + 1)
+    return n
+
+
+@dataclass(frozen=True)
+class _EmoteStage:
+    pattern: re.Pattern
+    pending: Any  # Callable[[str], int]
+
+
+_EMOTE_STAGES = (
+    _EmoteStage(_EMOTE_STAR_RE, _pending_star),
+    _EmoteStage(_EMOTE_COLON_RE, _pending_colon),
+    _EmoteStage(_EMOTE_PAREN_LINE_RE, _pending_paren),
+)
+
+
+def _strip_emotes_settled(text: str) -> str:
+    """``strip_emotes`` of the part of ``text`` that later text cannot change.
+
+    Each stage strips only up to its first undecided position (with trailing
+    whitespace held back, since ``\\s*$`` and normalization depend on what
+    follows), and the next stage sees that settled output as its own
+    still-growing input. The result is always a prefix of ``strip_emotes`` of
+    any continuation of ``text``.
+    """
+    for stage in _EMOTE_STAGES:
+        settled = text[: stage.pending(text)].rstrip()
+        text = stage.pattern.sub('', settled)
+    return _normalize_emote_whitespace(text)
 
 
 def scrub_for_tts(text: str) -> str:
@@ -769,10 +869,13 @@ class StreamingTTSScrubber:
 
 
 class StreamingEmoteFilter:
-    """Buffer-based filter for stripping *emotes* from streaming text.
+    """Incremental ``strip_emotes`` for streaming text.
 
-    Handles cases where emote markers span chunk boundaries by buffering
-    text between asterisks until we know if it's an emote or not.
+    The concatenation of every ``process`` result plus ``flush`` equals
+    ``strip_emotes`` of the full text, for any chunking. Text is released once
+    no emote rule can still change it; a possible emote (an unclosed ``*``,
+    a ``::`` opener, a line starting with ``(``) and trailing whitespace are
+    held until they resolve or the stream ends.
 
     Usage:
         filter = StreamingEmoteFilter()
@@ -787,55 +890,32 @@ class StreamingEmoteFilter:
     """
 
     def __init__(self):
-        self.buffer = ""
-        self.in_emote = False
+        self._raw = ""
+        self._emitted = ""
+        self._stalled = False
+
+    def _release(self, clean: str) -> str:
+        if not clean.startswith(self._emitted):
+            # Unreachable by construction; never emit text a later chunk
+            # would contradict.
+            logger.warning("StreamingEmoteFilter: settled text diverged; holding until flush")
+            self._stalled = True
+            return ""
+        delta = clean[len(self._emitted):]
+        self._emitted = clean
+        return delta
 
     def process(self, chunk: str) -> str:
-        """Process a chunk and return filtered text.
-
-        Returns text that is safe to emit. May buffer text that could
-        be part of an emote until we know for sure.
-        """
-        result = []
-
-        for char in chunk:
-            if char == '*':
-                if self.in_emote:
-                    # End of emote - discard buffered content
-                    self.buffer = ""
-                    self.in_emote = False
-                else:
-                    # Start of potential emote
-                    # First, emit any buffered content
-                    if self.buffer:
-                        result.append(self.buffer)
-                        self.buffer = ""
-                    self.in_emote = True
-            elif self.in_emote:
-                # Inside potential emote - buffer it
-                self.buffer += char
-                # If the emote gets too long (>100 chars) it's probably not an emote
-                if len(self.buffer) > 100:
-                    # Not an emote - emit the asterisk and buffer
-                    result.append('*')
-                    result.append(self.buffer)
-                    self.buffer = ""
-                    self.in_emote = False
-            else:
-                # Normal character outside emote
-                result.append(char)
-
-        return ''.join(result)
+        """Add a chunk; return newly settled clean text (possibly empty)."""
+        if not chunk:
+            return ""
+        self._raw += chunk
+        if self._stalled:
+            return ""
+        return self._release(_strip_emotes_settled(self._raw))
 
     def flush(self) -> str:
-        """Flush any remaining buffered content.
-
-        Call this when the stream ends to get any remaining text.
-        """
-        if self.in_emote and self.buffer:
-            # Stream ended mid-emote - emit what we have
-            result = '*' + self.buffer
-            self.buffer = ""
-            self.in_emote = False
-            return result
-        return ""
+        """End of stream: return the rest of ``strip_emotes(full_text)``."""
+        clean = strip_emotes(self._raw)
+        self._stalled = False
+        return self._release(clean)

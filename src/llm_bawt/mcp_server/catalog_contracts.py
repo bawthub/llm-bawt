@@ -97,6 +97,10 @@ TOOL_SUMMARIES: dict[str, str] = {
     "steps_add": f"Append titled steps (default PLAN/PENDING). Status: {_STEP_STATUS_GUIDE}.",
     "steps_set": f"Atomically replace ENTIRE checklist, deleting old steps; title required; [] needs clear=true. Status: {_STEP_STATUS_GUIDE}.",
     "steps_reorder": "Reorder existing steps, preserving IDs/outputs. Use the full nonempty unique step_ids list; foreign IDs ignored, omitted indices unchanged (ties possible).",
+    "monitors_list": "List BawtHub monitors with config and current verdict.",
+    "monitors_upsert": "Create a monitor, or patch one by id or slug; config replaces the whole object.",
+    "monitors_mute": "Mute a monitor's alerts for N minutes (0 unmutes); recovery notices still send.",
+    "monitors_test": "Run checks now and return one monitor's fresh verdict.",
     "projects_list": "List compact projects with task counts; projects_get returns full context and tasks.",
     "projects_get": "Read project context and tasks by project ID (cuid).",
     "projects_get_context": "Read only the project's name and instruction briefing, without its task list.",
@@ -163,7 +167,7 @@ REFERENCE_GROUPS: dict[str, tuple[str, ...]] = {
     "tasks": ("tasks_", "steps_", "projects_", "activity_", "initiative_"),
     "memory-history": ("memory_", "messages_", "context_", "facts_", "system_", "profile", "working_memory_", "tool_calls"),
     "sessions-delivery": ("sessions_", "bots_", "agent_", "self_", "schedule_"),
-    "ops-media": ("ops_", "media_", "generate_", "web_", "x_", "speech_", "home_audio_", "notify_", "notifications_", "browser_", "attachment_", "usage_", "playground_"),
+    "ops-media": ("ops_", "monitors_", "media_", "generate_", "web_", "x_", "speech_", "home_audio_", "notify_", "notifications_", "browser_", "attachment_", "usage_", "playground_"),
 }
 
 

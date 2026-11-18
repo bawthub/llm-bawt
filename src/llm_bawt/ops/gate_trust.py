@@ -206,6 +206,10 @@ def create_trusted_gate_job(store: OpsStore, *, operation_slug: str, plan: dict,
     if (not operation.enabled or operation.soft_deleted_at is not None
             or operation.quiesce_enabled or operation.execution_tag is None):
         raise ValueError("gate operation is disabled, quiescing or has no configured execution grant")
+    # This path creates no approval binding. The store's catalog revision lock
+    # fences this explicit-free decision through insertion, including flag edits.
+    if operation.approval_required is not False:
+        raise GateTrustError("approval_required")
     with store.engine.connect() as conn:
         environment = _configured_environment(conn, workload)
     snapshot = gate_claim_snapshot(operation, workload, turn_token=turn_token)

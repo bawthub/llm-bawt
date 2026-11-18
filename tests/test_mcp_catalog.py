@@ -3,7 +3,6 @@
 import json
 from copy import deepcopy
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 import tiktoken
@@ -209,7 +208,8 @@ async def test_catalog_token_budgets():
     # TASK-2279: messages_forget, one owner-scoped select/ignore/memory delete (+31): 5,136.
     # TASK-434: steps_reorder adds a bounded typed adapter and preservation/
     # partial-order caveats. Measured descriptions: 5,158.
-    assert sum(descriptions) <= 5158, f"Descriptions grew to {sum(descriptions)} tokens"
+    # TASK-1712: monitors_list/upsert/mute/test over BawtHub monitors (+115): 5,273.
+    assert sum(descriptions) <= 5273, f"Descriptions grew to {sum(descriptions)} tokens"
     definitions = [{"name": f"mcp__bawthub__{t.name}", "description": t.description or "", "input_schema": t.input_schema} for t in tools]
     total = len(encoder.encode(json.dumps(definitions, ensure_ascii=False, separators=(",", ":"))))
     # TASK-900: explicit X search adds ~160 tokens; measured catalog 11,239.
@@ -346,7 +346,9 @@ async def test_catalog_token_budgets():
     # TASK-894: initiative_state hold/resume actions plus defer, resolved_ref
     # and reason args, with the held(423)/deferred(429) stop contract in-band
     # so a woken run parks instead of retrying. Measured 19,438 (+68).
-    assert total <= 19438, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-1712: monitors_list/upsert/mute/test, BawtHub monitor read, edit,
+    # mute and fresh check through its health API. Measured 19,733 (+295).
+    assert total <= 19733, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 
@@ -505,23 +507,60 @@ async def test_unknown_tools_remain_discoverable_and_callables_unchanged():
 
 
 @pytest.mark.anyio
-async def test_real_mutation_still_passes_through_policy_gate(monkeypatch):
-    import llm_bawt.mcp_server.approval_interceptor as interceptor
-    from agent_bridge.approval import PolicyAction
+@pytest.mark.parametrize("trusted", [False, True])
+async def test_real_mutation_still_passes_through_catalog_admission(monkeypatch, trusted):
+    from uuid import uuid4
 
-    store = SimpleNamespace(compile_bundle=lambda: SimpleNamespace(policies=[]), record_decision=lambda **kw: None)
-    server = CatalogFastMCP("test-denial", approval_store_provider=lambda: store)
-    called = []
+    from cryptography.fernet import Fernet
+
+    from agent_bridge.mcp_call_context import MCP_CALL_CONTEXT_KEY, mint_mcp_call_context
+    from llm_bawt import task_turn_context as turn_codec
+    from llm_bawt.mcp_server import task_association
+    from llm_bawt.ops import invocation_attestation
+    from llm_bawt.ops.service import OpsDispatchError
+
+    signer = Fernet(Fernet.generate_key())
+    monkeypatch.setattr(turn_codec, "_get_fernet", lambda: signer)
+    monkeypatch.setattr(invocation_attestation, "control_token", lambda: "synthetic-control-token")
+    capability = turn_codec.mint_task_turn_context(
+        session_id=str(uuid4()), turn_id="turn-" + uuid4().hex,
+        trigger_message_id=str(uuid4()), bot_id="fixture_bot", user_id="fixture_user")
+    called, requested = [], []
+    arguments = {"operation": "fixture.unavailable", "args": {}, "idempotency_key": "fixture-key"}
+
+    def request(envelope):
+        invocation = invocation_attestation.verify(envelope)
+        assert invocation.arguments == arguments
+        assert invocation.caller.bot_id == "fixture_bot"
+        assert invocation.caller.user_id == "fixture_user"
+        assert invocation.caller.tool_use_id == "fixture-tool-use"
+        requested.append(invocation)
+        raise OpsDispatchError("operation_not_found", "Catalog operation unavailable")
+
+    server = CatalogFastMCP(
+        "test-denial", operations_requester=request,
+        approval_store_provider=lambda: pytest.fail("ops call read legacy policies"))
 
     @server.tool(name="ops_run")
-    async def delete(operation: str):
+    async def delete(operation: str, args: dict, idempotency_key: str):
         called.append(operation)
         return {"ok": True}
 
-    monkeypatch.setattr(interceptor, "evaluate", lambda *args: SimpleNamespace(action=PolicyAction.DENY, subject="test"))
     await server.list_tools()
-    result = await server.call_tool("ops_run", {"operation": "demo"})
-    assert result.structured_content["status"] == "denied"
+    received = dict(arguments)
+    if trusted:
+        received[MCP_CALL_CONTEXT_KEY] = mint_mcp_call_context(
+            capability=capability, tool_name="ops_run", tool_input=arguments,
+            tool_use_id="fixture-tool-use", agent_request_id="fixture-request",
+            session_key="fixture-session", backend="claude-code")
+    binding = task_association.set_current_task_turn_capability(capability if trusted else None)
+    try:
+        result = await server.call_tool("ops_run", received)
+    finally:
+        task_association.reset_current_task_turn_capability(binding)
+    assert result.structured_content["status"] == (
+        "operation_not_found" if trusted else "approval_context_missing")
+    assert len(requested) == int(trusted)
     assert called == []
 
 

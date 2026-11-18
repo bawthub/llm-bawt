@@ -73,7 +73,7 @@ def rig(private_app_pg, monkeypatch):
 
     def operation(**changes):
         op = first.create_operation(_op_data(**{"slug": "test.gate-" + uuid.uuid4().hex,
-            "execution_tag": role, **changes}))
+            "execution_tag": role, "approval_required": False, **changes}))
         slugs.append(op.slug)
         return op
 

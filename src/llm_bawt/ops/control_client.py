@@ -15,7 +15,7 @@ import time
 
 import httpx
 
-from .control_protocol import (CLIENT_TIMEOUT_SECONDS, BOT_KEY_PATH, CODE_PATTERN, EXECUTORS_PATH, PREPARE_PATH, PROTOCOL_FIELD, PROTOCOL_VERSION,
+from .control_protocol import (CLIENT_TIMEOUT_SECONDS, BOT_KEY_PATH, CODE_PATTERN, EXECUTORS_PATH, PREPARE_PATH, PROTOCOL_FIELD, PROTOCOL_VERSION, REQUEST_PATH,
                                REFUSAL_STATUSES, control_token)
 from .service import OpsDispatchError, OpsService
 from .validation import canonical_json
@@ -28,7 +28,11 @@ BUSY_RETRY_SECONDS = 2.0
 UNAVAILABLE = "ops_unavailable"
 
 
-def _unavailable(detail: str) -> OpsDispatchError:
+def _unavailable(detail: str, *, write=False) -> OpsDispatchError:
+    if write:
+        return OpsDispatchError("ops_request_unknown",
+                                f"The ops request outcome is unknown: {detail}. An approval may exist; "
+                                "do not create a new intent or retry automatically.")
     return OpsDispatchError(UNAVAILABLE, f"ops_unavailable: the ops service could not prepare this: {detail}; "
                                          "nothing was created")
 
@@ -56,6 +60,14 @@ class OpsControlClient:
         body = self._call("POST", PREPARE_PATH, {"operation": operation_slug, "args": args})
         return _verified_snapshot(body.get("snapshot"))
 
+    def request_invocation(self, envelope: dict) -> dict:
+        result = self._call("POST", REQUEST_PATH, envelope, write=True)
+        if result.get("status") not in {"catalog_allow", "approval_required", "approval_pending"}:
+            raise _unavailable("the response carries no durable invocation outcome", write=True)
+        if result["status"] != "catalog_allow" and not isinstance(result.get("approval_request_id"), str):
+            raise _unavailable("the response carries no request identity", write=True)
+        return result
+
     def executor_readiness(self) -> dict[str, str | None]:
         readiness = self._call("GET", EXECUTORS_PATH, None).get("executors")
         if not isinstance(readiness, dict) or not all(
@@ -70,7 +82,7 @@ class OpsControlClient:
             raise _unavailable("the response carries no bot key")
         return key
 
-    def _call(self, method: str, path: str, payload) -> dict:
+    def _call(self, method: str, path: str, payload, *, write=False) -> dict:
         try:
             token = self._token_source()
         except Exception as exc:  # noqa: BLE001 - an unusable key means no call
@@ -86,14 +98,14 @@ class OpsControlClient:
             except httpx.ConnectError as exc:
                 if attempt == 1:
                     continue
-                raise _unavailable(f"cannot connect ({type(exc).__name__})") from exc
+                raise _unavailable(f"cannot connect ({type(exc).__name__})", write=write) from exc
             except httpx.HTTPError as exc:
-                raise _unavailable(f"the request failed ({type(exc).__name__})") from exc
+                raise _unavailable(f"the request failed ({type(exc).__name__})", write=write) from exc
             body = self._protocol_body(response)
             if response.status_code == 503 and body is not None and body.get("code") == "ops_busy" and attempt == 1:
                 self._sleep(BUSY_RETRY_SECONDS)
                 continue
-            return self._result(response, body)
+            return self._result(response, body, write=write)
         raise AssertionError("unreachable")  # pragma: no cover
 
     @staticmethod
@@ -107,9 +119,9 @@ class OpsControlClient:
         return body
 
     @staticmethod
-    def _result(response, body) -> dict:
+    def _result(response, body, *, write=False) -> dict:
         if body is None:
-            raise _unavailable(f"HTTP {response.status_code} is not an ops control response")
+            raise _unavailable(f"HTTP {response.status_code} is not an ops control response", write=write)
         if response.status_code == 200:
             return body
         refusal = body.get("refusal")
@@ -118,7 +130,7 @@ class OpsControlClient:
                 and isinstance(refusal.get("message"), str)):
             raise OpsDispatchError(refusal["code"], refusal["message"])
         code = body.get("code") if isinstance(body.get("code"), str) else "unknown"
-        raise _unavailable(f"HTTP {response.status_code} {code}")
+        raise _unavailable(f"HTTP {response.status_code} {code}", write=write)
 
 
 def build_admission_ops_service(config, store) -> OpsService:
