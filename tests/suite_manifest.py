@@ -182,6 +182,10 @@ PG_ACCEPTANCE_SUITES = (
     "test_terminal_history.py::TestPostgresTerminalHistory::",
     "test_terminal_reservation_protocol.py::TestPostgresReservationHandoff::",
     "test_turn_terminal_protocol.py::TestPostgresProtocol::",
+    "test_guidance_pg.py::",
+    "test_history_read_cursor_pg.py::",
+    "test_ops_freeze_executor_pg.py::",
+    "test_thread_auto_archive_pg.py::",
 )
 
 PG_SELECTORS = tuple("tests/" + suite.removesuffix("::") for suite in PG_ACCEPTANCE_SUITES)
