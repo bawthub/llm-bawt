@@ -942,7 +942,6 @@ from . import schedule_tools as _schedule_tools  # noqa: F401, E402
 # ---------------------------------------------------------------------------
 
 from . import ops_tools as _ops_tools  # noqa: F401, E402
-from . import monitor_tools as _monitor_tools  # noqa: F401, E402
 
 # ---------------------------------------------------------------------------
 # Web search tool (local Brave/Reddit/Tavily fan-out — replaces the Anthropic

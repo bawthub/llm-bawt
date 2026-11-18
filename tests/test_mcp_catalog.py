@@ -209,8 +209,7 @@ async def test_catalog_token_budgets():
     # TASK-2279: messages_forget, one owner-scoped select/ignore/memory delete (+31): 5,136.
     # TASK-434: steps_reorder adds a bounded typed adapter and preservation/
     # partial-order caveats. Measured descriptions: 5,158.
-    # TASK-1712: monitors_list/upsert/mute/test over BawtHub monitors (+115): 5,273.
-    assert sum(descriptions) <= 5273, f"Descriptions grew to {sum(descriptions)} tokens"
+    assert sum(descriptions) <= 5158, f"Descriptions grew to {sum(descriptions)} tokens"
     definitions = [{"name": f"mcp__bawthub__{t.name}", "description": t.description or "", "input_schema": t.input_schema} for t in tools]
     total = len(encoder.encode(json.dumps(definitions, ensure_ascii=False, separators=(",", ":"))))
     # TASK-900: explicit X search adds ~160 tokens; measured catalog 11,239.
@@ -347,9 +346,7 @@ async def test_catalog_token_budgets():
     # TASK-894: initiative_state hold/resume actions plus defer, resolved_ref
     # and reason args, with the held(423)/deferred(429) stop contract in-band
     # so a woken run parks instead of retrying. Measured 19,438 (+68).
-    # TASK-1712: monitors_list/upsert/mute/test, BawtHub monitor read, edit,
-    # mute and fresh check through its health API. Measured 19,733 (+295).
-    assert total <= 19733, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    assert total <= 19438, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 
