@@ -153,5 +153,40 @@ def test_changes_classifies_rewords_retirements_and_new_evidence():
         {"id": "b", "statement": "y", "status": "superseded", "evidence": [ev1]},
         {"id": "c", "statement": "z", "status": "active", "evidence": [ev1, ev2]},
         {"id": "d", "statement": "same", "status": "active", "evidence": [ev1]}]}
-    kinds = {c["id"]: c["kind"] for c in gv.changes(json.dumps(base), json.dumps(new))}
-    assert kinds == {"a": "reworded", "b": "retired", "c": "evidence_added"}
+    ch = {c["id"]: c for c in gv.changes(json.dumps(base), json.dumps(new))}
+    assert {k: c["kind"] for k, c in ch.items()} == {
+        "a": "reworded", "b": "retired", "c": "evidence_changed"}
+    assert [(r["message_id"], r["new"]) for r in ch["c"]["evidence"]] == [("1", False), ("2", True)]
+
+
+def test_citation_only_removal_is_shown(rig, client):  # noqa: F811
+    a, b = rig.msg("I prefer short answers"), rig.msg("Really, keep it short")
+    rig.approve(rig.propose(rig.doc(rig.pref("p1", [a, b]))))
+    pid = rig.propose(rig.doc(rig.pref("p1", [a])))
+    ch = client.get("/v1/guidance", params={"user_id": rig.user}).json()["pending"][0]
+    assert ch["id"] == pid
+    (c,) = ch["changes"]
+    assert c["kind"] == "evidence_changed"
+    assert [e["message_id"] for e in c["removed_evidence"]] == [b["message_id"]]
+    assert c["removed_evidence"][0]["text"] == "Really, keep it short"
+
+
+def test_rewrite_shows_retained_citations(rig, client):  # noqa: F811
+    a, b = rig.msg("I prefer short answers"), rig.msg("Lists help me")
+    rig.approve(rig.propose(rig.doc(rig.pref("p1", [a]))))
+    rig.propose(rig.doc(rig.pref("p1", [a, b], statement="short answers, in lists")))
+    (c,) = client.get("/v1/guidance", params={"user_id": rig.user}).json()["pending"][0]["changes"]
+    assert c["kind"] == "reworded"
+    assert [(e["message_id"], e["new"]) for e in c["evidence"]] == [
+        (a["message_id"], False), (b["message_id"], True)]
+    assert c["removed_evidence"] == []
+
+
+def test_unnamed_differences_are_reported_as_changed():
+    import json
+    ev = [{"bot_id": "b", "message_id": "1"}]
+    p = {"id": "a", "statement": "x", "status": "active", "evidence": ev}
+    base = {"v": 1, "mandate": "", "preferences": [p]}
+    new = {"v": 1, "mandate": "", "preferences": [dict(p, first_seen_ts=5.0)]}
+    (c,) = gv.changes(json.dumps(base), json.dumps(new))
+    assert c["kind"] == "changed"

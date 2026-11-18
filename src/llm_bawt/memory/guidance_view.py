@@ -37,26 +37,45 @@ def _prefs(body: str | None) -> dict[str, dict[str, Any]]:
 
 
 def changes(base_body: str | None, proposed_body: str) -> list[dict[str, Any]]:
-    """Per-preference changes from base to proposed, in proposed order."""
+    """Every per-preference difference from base to proposed; none is omitted.
+
+    ``evidence`` is the proposed preference's complete citation list, each
+    marked ``new`` when the base did not cite it; ``removed_evidence`` lists
+    citations the base had and the proposal drops. A difference that fits no
+    named kind is reported as ``changed`` so approval never hides a mutation.
+    """
     base, new = _prefs(base_body), _prefs(proposed_body)
     out = []
     for pid, p in new.items():
         old = base.get(pid)
-        added_refs = [r for r in p.get("evidence", [])
-                      if not old or r not in old.get("evidence", [])]
+        if old == p:
+            continue
+        old_refs = old.get("evidence", []) if old else []
+        refs = p.get("evidence", [])
+        removed = [r for r in old_refs if r not in refs]
         if old is None:
             kind = "added"
         elif old.get("status") == "active" and p.get("status") == "superseded":
             kind = "retired"
         elif old.get("statement") != p.get("statement"):
             kind = "reworded"
-        elif added_refs:
-            kind = "evidence_added"
+        elif {k: v for k, v in old.items() if k != "evidence"} == \
+                {k: v for k, v in p.items() if k != "evidence"}:
+            kind = "evidence_changed"
         else:
-            continue
+            kind = "changed"
         out.append({"id": pid, "kind": kind,
                     "before": old and old.get("statement"), "after": p.get("statement"),
-                    "superseded_by": p.get("superseded_by"), "evidence": added_refs})
+                    "status_before": old and old.get("status"), "status_after": p.get("status"),
+                    "superseded_by": p.get("superseded_by"),
+                    "evidence": [dict(r, new=r not in old_refs) for r in refs],
+                    "removed_evidence": removed})
+    for pid, old in base.items():
+        if pid not in new:
+            out.append({"id": pid, "kind": "removed", "before": old.get("statement"),
+                        "after": None, "status_before": old.get("status"), "status_after": None,
+                        "superseded_by": None, "evidence": [],
+                        "removed_evidence": old.get("evidence", [])})
     return out
 
 
@@ -89,8 +108,10 @@ def _proposal(conn, p: Mapping[str, Any], *, user_id: str, protected: Sequence[s
     ch = changes(base_body, p["proposed_body"])
     if with_excerpts:
         for c in ch:
-            c["evidence"] = [excerpt(conn, user_id=user_id, ref=r, protected=protected)
-                             for r in c["evidence"]]
+            c["evidence"] = [dict(excerpt(conn, user_id=user_id, ref=r, protected=protected),
+                                  new=r.get("new", False)) for r in c["evidence"]]
+            c["removed_evidence"] = [excerpt(conn, user_id=user_id, ref=r, protected=protected)
+                                     for r in c["removed_evidence"]]
     return {"id": p["id"], "status": p["status"], "reason": p["reason"],
             "proposed_by": p["proposed_by"], "created_at": p["created_at"],
             "decided_by": p["decided_by"], "decided_at": p["decided_at"],
