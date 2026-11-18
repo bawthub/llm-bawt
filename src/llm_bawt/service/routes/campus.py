@@ -23,6 +23,12 @@ serves now (:mod:`agent_bridge.house_preview`; null when none is running,
 ``"unknown"`` when Redis can't be read), and ``mansion.preview_host`` is the
 pool's ``mansion_origin``, the shared dev site. ``house_preview_changed``
 frames keep ``preview`` current.
+
+Harness versions (TASK-2470): ``harness.slots`` lists what each house and the
+mansion run (:mod:`llm_bawt.harness_versions`; null when Redis can't be read)
+and ``harness.latest`` the newest checked releases (null when the database
+can't be read). ``harness_versions_changed`` and ``harness_latest_changed``
+frames keep them current.
 """
 
 from __future__ import annotations
@@ -142,6 +148,7 @@ async def campus_snapshot():
 
     from ...bot_location import resolve_locations
     from ...campus_events import SEQ_KEY, version_of, visibility
+    from ...harness_versions import read_all, read_latest
     from ...house_watcher import LEASE_RE, read_previews
     from ..dependencies import get_bot_profile_store, get_service
 
@@ -151,6 +158,7 @@ async def campus_snapshot():
     seq: int | None = None
     leases: dict[str, set[str]] | None = None
     previews: dict[str, dict] | None = None
+    harness_slots: list[dict] | None = None
     try:
         client = aioredis.from_url(service.config.REDIS_URL, decode_responses=True,
                                    socket_timeout=2.0, socket_connect_timeout=2.0)
@@ -177,6 +185,10 @@ async def campus_snapshot():
                 previews = await read_previews(client)
             except Exception:
                 log.warning("campus: preview read failed", exc_info=True)
+            try:
+                harness_slots = list((await read_all(client)).values())
+            except Exception:
+                log.warning("campus: harness versions read failed", exc_info=True)
         routes = await resolve_locations(rows, client.get if client is not None else None)
         turns = await asyncio.to_thread(_turns, store.engine, [r.slug for r in rows])
         active = await _active(client, rows, turns)
@@ -195,6 +207,11 @@ async def campus_snapshot():
             else:
                 hidden[row.house] = hidden.get(row.house, 0) + 1
     pool = configured_pool()
+    try:
+        latest = await asyncio.to_thread(read_latest, store.engine)
+    except Exception:
+        log.warning("campus: harness latest unavailable", exc_info=True)
+        latest = None
     return {
         "seq": seq, "ts": ts, "pool_configured": pool is not None,
         "mansion": {"preview_host": mansion_origin()},
@@ -202,4 +219,9 @@ async def campus_snapshot():
                   "pinned": bool(row.house_pinned), "route": routes[row.slug],
                   "active": active[row.slug], "version": version_of(row)} for row in rows],
         "houses": house_rows(pool, leases, watched, tenants, hidden, previews),
+        "harness": {"slots": harness_slots, "latest": latest,
+                    # What the app's ChatGPT model discovery declares; Campus
+                    # flags it when it differs from the running codex CLI.
+                    "declared": {"codex_client_version":
+                                 getattr(service.config, "CODEX_CLIENT_VERSION", None)}},
     }

@@ -95,6 +95,7 @@ class CodexCommandMixin(CodexAppServerMixin):
         while True:
             try:
                 results = await reader.read(count=1, block=5000)
+                await self._house_slot.listener_ok(async_redis, reader.recreations)
                 if not results:
                     continue
 
@@ -143,6 +144,7 @@ class CodexCommandMixin(CodexAppServerMixin):
                 await async_redis.aclose()
                 raise
             except Exception:
+                self._house_slot.listener_failed()
                 logger.exception("Command listener error")
                 await asyncio.sleep(2)
 

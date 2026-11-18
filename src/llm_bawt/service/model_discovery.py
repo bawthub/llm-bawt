@@ -7,6 +7,7 @@ credential and response handling belongs here rather than in the models route.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -300,6 +301,48 @@ class ClaudeSubscriptionDiscoveryProvider(ModelDiscoveryProvider):
 CHATGPT_CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 
 
+MANSION_VERSIONS_PATTERN = "agent:mansion:versions:*"
+CODEX_CLI_PACKAGE = "openai-codex-cli-bin"
+
+
+def _version_key(version: str) -> tuple[int, ...] | None:
+    try:
+        return tuple(int(part) for part in version.split("."))
+    except (AttributeError, ValueError):
+        return None
+
+
+def published_codex_cli_version(config: Config | None = None) -> str | None:
+    """Highest codex CLI version the live bridges report (TASK-2472).
+
+    Each bridge publishes its installed harness under
+    ``agent:mansion:versions:<backend>`` (TASK-2470). Declaring that version
+    keeps discovery from drifting behind the CLI the bots actually run.
+    Returns ``None`` when nothing is published or Redis is unavailable, so
+    the caller falls back to ``CODEX_CLIENT_VERSION``.
+    """
+    try:
+        from ..campus_events import _redis
+
+        client = _redis(config)
+        if client is None:
+            return None
+        best: tuple[tuple[int, ...], str] | None = None
+        for key in client.scan_iter(match=MANSION_VERSIONS_PATTERN, count=100):
+            try:
+                record = json.loads(client.get(key) or "")
+                version = record["versions"]["harness"][CODEX_CLI_PACKAGE]
+            except (ValueError, TypeError, KeyError):
+                continue
+            parsed = _version_key(version)
+            if parsed and (best is None or parsed > best[0]):
+                best = (parsed, version)
+        return best[1] if best else None
+    except Exception:
+        logger.debug("published codex CLI version unavailable", exc_info=True)
+        return None
+
+
 class ChatGPTSubscriptionDiscoveryProvider(ModelDiscoveryProvider):
     """ChatGPT-subscription catalog from the app's own token (TASK-1296 D2).
 
@@ -328,7 +371,8 @@ class ChatGPTSubscriptionDiscoveryProvider(ModelDiscoveryProvider):
                 status_code=503,
             )
         client_version = (
-            getattr(self._config, "CODEX_CLIENT_VERSION", None)
+            published_codex_cli_version(self._config)
+            or getattr(self._config, "CODEX_CLIENT_VERSION", None)
             or CHATGPT_MODELS_CLIENT_VERSION
         )
         url, params, headers = chatgpt_models_request(

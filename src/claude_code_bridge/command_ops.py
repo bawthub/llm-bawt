@@ -121,6 +121,7 @@ class ClaudeCommandMixin:
         while True:
             try:
                 results = await reader.read(count=1, block=5000)
+                await self._house_slot.listener_ok(async_redis, reader.recreations)
                 self._command_ready = True
                 if not results:
                     continue
@@ -187,6 +188,7 @@ class ClaudeCommandMixin:
                 raise
             except Exception:
                 self._command_ready = False
+                self._house_slot.listener_failed()
                 logger.exception("Command listener error")
                 await asyncio.sleep(2)
 

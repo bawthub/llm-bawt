@@ -92,6 +92,15 @@ _PUBLIC_COLUMNS = (
     "media_asset_id, duration_ms, size_bytes, error, created_at, updated_at"
 )
 
+# Reader projection: a recording whose upload lease ran out will never be
+# finalized (the producer died or its upload failed), so readers see it as
+# failed instead of "saving" forever. The row itself is left for the reaper.
+_READ_COLUMNS = _PUBLIC_COLUMNS.replace(
+    "status, ",
+    "CASE WHEN status = 'recording' AND lease_expires_at < NOW() THEN 'failed' "
+    "ELSE status END AS status, ",
+)
+
 
 class ResponseAudioConflict(RuntimeError):
     """The request contradicts the row's state (foreign lease, other message)."""
@@ -144,7 +153,7 @@ class ResponseAudioStore:
         with self.engine.connect() as conn:
             row = conn.execute(
                 text(
-                    f"SELECT {_PUBLIC_COLUMNS} FROM {TABLE_NAME} r "
+                    f"SELECT {_READ_COLUMNS} FROM {TABLE_NAME} r "
                     f"WHERE assistant_message_id = :m AND owner_user_id = :o AND {_LIVE_MESSAGE}"
                 ),
                 {"m": assistant_message_id, "o": owner_user_id},
@@ -157,7 +166,7 @@ class ResponseAudioStore:
         with self.engine.connect() as conn:
             rows = conn.execute(
                 text(
-                    f"SELECT {_PUBLIC_COLUMNS} FROM {TABLE_NAME} r "
+                    f"SELECT {_READ_COLUMNS} FROM {TABLE_NAME} r "
                     f"WHERE assistant_message_id = ANY(:ids) AND owner_user_id = :o AND {_LIVE_MESSAGE}"
                 ),
                 {"ids": list(message_ids), "o": owner_user_id},

@@ -17,6 +17,11 @@ The same subscription covers ``agent:house:<H>:preview`` (TASK-2131), which a
 house bridge sets only when its preview changes, deletes when it stops and
 lets expire when the house dies: each sends ``house_preview_changed``.
 
+Harness versions (TASK-2470): ``agent:house:<H>:versions:<backend>`` and
+``agent:mansion:versions:<backend>`` changes, and every lease change, re-read
+that slot through :func:`llm_bawt.harness_versions.read_one` and send
+``harness_versions_changed`` when its row changed.
+
 Keyspace events are fire-and-forget, so each (re)subscribe reads the leases
 once and emits whatever changed while nobody listened. The watcher turns on the
 keyspace flags it needs (``K$gx``) and keeps any already configured.
@@ -180,6 +185,51 @@ class HouseWatcher:
         self.states = HouseStates()
         #: house -> its preview value; a house with none is absent.
         self.previews: dict[str, dict] = {}
+        #: (slot, backend) -> its harness_versions row.
+        self.harness: dict[tuple[str, str], dict] = {}
+
+    def _set_harness(self, slot: tuple[str, str], row: dict | None) -> list[dict]:
+        """``row`` None: the slot left the keyspace entirely (reseed only)."""
+        if row is None:
+            if slot not in self.harness:
+                return []
+            self.harness.pop(slot)
+            return [{"slot": slot[0], "backend": slot[1], "status": "unknown",
+                     "versions": None, "started_at": None}]
+        if self.harness.get(slot) == row:
+            return []
+        self.harness[slot] = row
+        return [row]
+
+    def reseed_harness(self, found: dict[tuple[str, str], dict]) -> list[dict]:
+        out: list[dict] = []
+        for slot in sorted(set(self.harness) - set(found)):
+            out += self._set_harness(slot, None)
+        for slot, row in sorted(found.items()):
+            out += self._set_harness(slot, row)
+        return out
+
+    async def _read_harness(self, client: Any) -> dict | None:
+        """None on failure: version rows are display-only, so a failed read
+        keeps the baseline and never holds up lease or preview reconciliation."""
+        from .harness_versions import read_all
+
+        try:
+            return await read_all(client)
+        except Exception:
+            log.warning("harness versions read failed on resubscribe", exc_info=True)
+            return None
+
+    async def _emit_harness(self, rows: list[dict]) -> None:
+        if not rows:
+            return
+        from .campus_events import publish_frames
+        from .harness_versions import row_frame
+
+        try:
+            await asyncio.to_thread(publish_frames, [row_frame(r) for r in rows], self.config)
+        except Exception:
+            log.warning("house watcher harness emit failed", exc_info=True)
 
     def _set_preview(self, house: str, value: dict | None) -> list[tuple[str, dict | None]]:
         if self.previews.get(house) == value:
@@ -242,6 +292,16 @@ class HouseWatcher:
 
     async def handle(self, client: Any, channel: str, op: str) -> None:
         key = channel.split(":", 1)[1] if channel.startswith("__keyspace@") else channel
+        from .harness_versions import read_one, slot_of_key
+
+        slot = slot_of_key(key)
+        if slot is not None and op in ("set", "del", "expired"):
+            try:
+                await self._emit_harness(self._set_harness(slot, await read_one(client, *slot)))
+            except Exception:
+                log.warning("harness versions read failed for %s", key, exc_info=True)
+            if not LEASE_RE.match(key):
+                return
         preview = PREVIEW_RE.match(key)
         if preview:
             house = preview.group(1)
@@ -310,7 +370,9 @@ class HouseWatcher:
             try:
                 db = client.connection_pool.connection_kwargs.get("db", 0)
                 await pubsub.psubscribe(f"__keyspace@{db}__:agent:house:*:lease:*",
-                                        f"__keyspace@{db}__:agent:house:*:preview")
+                                        f"__keyspace@{db}__:agent:house:*:preview",
+                                        f"__keyspace@{db}__:agent:house:*:versions:*",
+                                        f"__keyspace@{db}__:agent:mansion:versions:*")
                 async for message in pubsub.listen():
                     kind = message.get("type")
                     if kind == "psubscribe":
@@ -318,19 +380,23 @@ class HouseWatcher:
                         # own resubscribe after a reconnect: re-apply the flags
                         # (a restarted Redis loses them) and re-read the leases.
                         await self._ensure_flags(client)
-                        # Two patterns: two confirmations per (re)subscribe.
+                        # One confirmation per pattern on every (re)subscribe.
                         # The second rereads nothing new, so it emits nothing.
                         # Read everything before touching either baseline: a
                         # failed read must leave both intact so the next
                         # subscription still reports what changed.
                         leases = await self._read_leases(client)
                         current_previews = await read_previews(client)
+                        current_harness = await self._read_harness(client)
                         transitions = self.states.reseed(leases)
                         previews = self.reseed_previews(current_previews)
+                        harness = ([] if current_harness is None
+                                   else self.reseed_harness(current_harness))
                         # The first read only learns the pool; later ones report changes.
                         if not first:
                             await self._emit(transitions)
                             await self._emit_previews(previews)
+                            await self._emit_harness(harness)
                         first = False
                     elif kind == "pmessage":
                         await self.handle(client, message["channel"], message["data"])

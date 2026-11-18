@@ -128,6 +128,20 @@ def test_deleted_reply_audio_is_hidden_without_gc(store, engine):
     assert store.get_many_for_messages(["m-del"], OWNER) == {}
 
 
+def test_readers_report_an_expired_recording_as_failed(store, engine):
+    """TASK-2464: an upload that never arrived must not read as saving forever."""
+    _reserve(store, msg="m-stuck")
+    _message(engine, "m-stuck")
+    assert store.get_for_message("m-stuck", OWNER)["status"] == "recording"
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE response_audio SET lease_expires_at = NOW() - interval '1 second'"))
+    row = store.get_for_message("m-stuck", OWNER)
+    assert row["status"] == "failed" and ra.public_view(row)["available"] is False
+    assert store.get_many_for_messages(["m-stuck"], OWNER)["m-stuck"]["status"] == "failed"
+    with engine.connect() as conn:  # projection only; the stored row is unchanged
+        assert conn.execute(text("SELECT status FROM response_audio")).scalar_one() == "recording"
+
+
 def test_binding_before_commit_survives_gc(store, engine):
     res = _reserve(store, msg="m-late")
     with engine.begin() as conn:

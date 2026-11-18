@@ -219,13 +219,19 @@ class HouseSlot:
         return bool(self.house)
 
     async def start(self, redis: Any) -> None:
-        if not self.is_house or self._task is not None:
+        if not self.is_house:
+            # Called again after a listener restart, so this also republishes
+            # after a Redis reconnect.
+            await self._publish_versions(redis)
+            return
+        if self._task is not None:
             return
         self._redis = redis
         self.epoch = str(await redis.incr(epoch_key(self.house, self.backend)))
         await redis.set(lease_key(self.house, self.backend), self.epoch, ex=LEASE_TTL_S)
         await redis.delete(fallback_notice_key(self.house, self.backend))
         logger.info("house %s/%s lease held, epoch %s", self.house, self.backend, self.epoch)
+        await self._publish_versions(redis)
         self._task = asyncio.create_task(self._heartbeat())
         # TASK-2135: the house serves its occupant's preview (or a page saying
         # why there is none) from its own startup, so a restart brings it back.
@@ -234,6 +240,35 @@ class HouseSlot:
             from .house_preview_supervisor import PreviewSupervisor
             self._supervisor = PreviewSupervisor(self.house, redis)
             self._supervisor.start()
+
+    def listener_failed(self) -> None:
+        """The command listener hit an error (often Redis going away)."""
+        self._versions_stale = True
+
+    async def listener_ok(self, redis: Any, recreations: int = 0) -> None:
+        """After a successful read: republish the mansion report once if the
+        listener failed since, or the reader recreated a vanished consumer
+        group (Redis restarted on a retained connection and lost the key).
+        Houses need nothing here: every heartbeat republishes."""
+        if recreations != getattr(self, "_seen_recreations", 0):
+            self._seen_recreations = recreations
+            self._versions_stale = True
+        if getattr(self, "_versions_stale", False):
+            self._versions_stale = False
+            if not self.is_house:
+                await self._publish_versions(redis)
+
+    async def _publish_versions(self, redis: Any) -> None:
+        """Best-effort harness report (TASK-2470); never blocks the lease."""
+        from . import versions
+        try:
+            if self.is_house:
+                await versions.publish_house(redis, self.house, self.backend, self.epoch,
+                                             LEASE_TTL_S)
+            else:
+                await versions.publish_mansion(redis, self.backend)
+        except Exception:
+            logger.warning("harness versions publish failed", exc_info=True)
 
     def admit(self, fields: dict) -> bool:
         """False for a send routed under an older epoch (fenced, never run)."""
@@ -278,6 +313,7 @@ class HouseSlot:
         if not self.recycling:
             # A recycling house released its lease and must not take it back.
             await self._redis.set(key, self.epoch, ex=LEASE_TTL_S)
+            await self._publish_versions(self._redis)
             await self._publish_preview()
         now = time.monotonic()
         for (session_key, request_id), seen in list(self._turns.items()):

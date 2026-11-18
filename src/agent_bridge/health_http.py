@@ -26,6 +26,12 @@ def health_app(
             payload["command_consumer"] = bool(consumer_ready())
         return JSONResponse(payload, status_code=200 if all(payload.values()) else 503)
 
+    @app.get("/versions")
+    async def versions():
+        # Cached at first use; never a subprocess per request (TASK-2470).
+        from .versions import current
+        return await current()
+
     if models is not None:
         @app.get("/models")
         async def model_list():

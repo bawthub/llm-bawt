@@ -144,8 +144,12 @@ def visibility(config: Any = None):
     return lambda slug: snapshot.excluded_reason(slug) is None
 
 
+#: TASK-2470: see :mod:`llm_bawt.harness_versions` (no tenant data).
+HARNESS_VERSIONS_CHANGED = "harness_versions_changed"
+HARNESS_LATEST_CHANGED = "harness_latest_changed"
 CAMPUS_FRAME_TYPES = frozenset({BOT_LOCATION_CHANGED, HOUSE_STATE_CHANGED,
-                                HOUSE_PREVIEW_CHANGED})
+                                HOUSE_PREVIEW_CHANGED, HARNESS_VERSIONS_CHANGED,
+                                HARNESS_LATEST_CHANGED})
 
 
 def redact_for_delivery(frame: dict, shown) -> dict | None:

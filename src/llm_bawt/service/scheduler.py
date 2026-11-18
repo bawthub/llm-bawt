@@ -511,6 +511,11 @@ class JobScheduler:
         
         await loop.run_in_executor(None, update_run)
         self._runs_changed()
+        if job.job_type == JobType.HARNESS_VERSION_CHECK and status == JobStatus.SUCCESS:
+            # TASK-2470: only after the run committed, so a reader sees it.
+            from ..harness_versions import publish_latest
+            await loop.run_in_executor(None, publish_latest, self.engine,
+                                       getattr(self, "config", None))
         logger.debug(f"Job {job.job_type} completed with status {status}")
 
     def _runs_changed(self) -> None:
