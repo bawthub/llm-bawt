@@ -66,6 +66,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_background_spend_pg.py::",
     "test_system_prompt_pin_pg.py::",
     "test_bot_session_state_pg.py::",
+    "test_shared_memory_schema_startup_pg.py::",
     "test_runtime_switch_pointer_pg.py::",
     "test_new_session_receipt_pg.py::",
     "test_new_session_receipt_review_pg.py::",
