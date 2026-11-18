@@ -23,6 +23,10 @@ class NextcloudBot:
     secret: str
     conversation_token: str
     enabled: bool = True
+    # Application user this room's mapping belongs to (enforced in a later slice).
+    user_id: Optional[str] = None
+    # Nextcloud user ID allowed in this room; required whenever user_id is set.
+    actor_id: Optional[str] = None
 
     @property
     def name(self) -> str:
@@ -59,6 +63,8 @@ class NextcloudBotConfig:
                     secret=nc_config.get('secret', ''),
                     conversation_token=nc_config.get('conversation_token'),
                     enabled=nc_config.get('enabled', True),
+                    user_id=nc_config.get('user_id'),
+                    actor_id=nc_config.get('actor_id'),
                 )
         return bots
 
@@ -117,13 +123,21 @@ class NextcloudBotConfig:
         """
         return remove_user_bot_section(llm_bawt_bot, 'nextcloud')
 
+    @staticmethod
+    def _with_secret(bot: Optional[NextcloudBot]) -> Optional[NextcloudBot]:
+        """Resolve the signing secret for one bot: encrypted record, else legacy plaintext."""
+        if bot is not None:
+            from .signing import resolve_secret
+            bot.secret = resolve_secret(bot.llm_bawt_bot, bot.secret)
+        return bot
+
     def get_bot_by_conversation(self, token: str) -> Optional[NextcloudBot]:
         """Get bot config by conversation token."""
         for bot in self.bots.values():
             if bot.enabled and bot.conversation_token == token:
-                return bot
+                return self._with_secret(bot)
         return None
 
     def get_bot(self, llm_bawt_bot: str) -> Optional[NextcloudBot]:
         """Get bot config by llm-bawt bot ID."""
-        return self.bots.get(llm_bawt_bot)
+        return self._with_secret(self.bots.get(llm_bawt_bot))

@@ -110,13 +110,15 @@ class NextcloudSetup:
     def status(self) -> dict:
         rec = self.store.load(INTEGRATION_ID)
         connected = bool(rec and rec.status == "connected" and rec.secret.get("app_password"))
+        bindings = self.bindings.list() if self.bindings else []
         return {
             "instance_url": rec.meta.get("instance_url") if rec else getattr(self.config, "NEXTCLOUD_URL", None),
             "account": {"id": rec.account, "display_name": rec.meta.get("display_name", rec.account)} if connected else None,
             "account_connected": connected,
             "provisioning": self.provisioning(),
-            "bindings": self.bindings.list() if self.bindings else [],
-            "delivery_verified": False,
+            "bindings": bindings,
+            # True only with authenticated inbound and confirmed outbound for some room.
+            "delivery_verified": any(b.get("state") == "verified" for b in bindings),
         }
 
     def descriptor(self) -> dict:
@@ -124,7 +126,7 @@ class NextcloudSetup:
         return {**DEFINITION, "configured": status["account_connected"],
                 "connection": {"provider": INTEGRATION_ID, "status": "connected" if status["account_connected"] else "disconnected",
                                "connected": status["account_connected"], "account": (status["account"] or {}).get("id"),
-                               "auth_method": "nextcloud_login_v2", "meta": {"delivery_verified": False}},
+                               "auth_method": "nextcloud_login_v2", "meta": {"delivery_verified": status["delivery_verified"]}},
                 "provisioning": status["provisioning"]}
 
     def _client(self):
@@ -273,6 +275,37 @@ class NextcloudSetup:
             return urlunsplit((p.scheme, p.hostname + (f":{p.port}" if p.port else ""), p.path, "", ""))
         except (ValueError, TypeError):
             return ""
+
+    def disconnect_binding(self, bot_id: str) -> dict:
+        """Stop local routing first, then try to disable the bot in the room and report that honestly."""
+        local = self.bindings.disconnect(bot_id)
+        room, nc_bot = local.pop("room_token", None), local.pop("nextcloud_bot_id", None)
+        manual = (f"occ talk:bot:remove {nc_bot} {room}" if room and nc_bot else None)
+        rec = self.store.load(INTEGRATION_ID)
+        if not (room and isinstance(nc_bot, int)):
+            return {**local, "remote_disabled": False, "remote_status": "not_applicable"}
+        if not rec or rec.status != "connected" or not rec.secret.get("app_password"):
+            return {**local, "remote_disabled": False, "remote_status": "not_attempted",
+                    "remote_message": "No Nextcloud account is connected.",
+                    "manual_command": manual}
+        try:
+            instance = self._instance(rec.meta["instance_url"])
+            with self._client() as http:
+                response = http.delete(f"{instance}/ocs/v2.php/apps/spreed/api/v1/bot/{room}/{nc_bot}",
+                                       auth=(rec.secret["login_name"], rec.secret["app_password"]),
+                                       headers={"OCS-APIRequest": "true", "Accept": "application/json"},
+                                       params={"format": "json"})
+            status = response.status_code
+        except (httpx.HTTPError, SetupError, KeyError, ValueError, TypeError):
+            status = None
+        if status in (200, 404):  # 404: the bot is already absent from the room
+            return {**local, "remote_disabled": True, "remote_status": "disabled"}
+        reason = ("Nextcloud was unreachable." if status is None else
+                  "This account must be a moderator of the room." if status in (401, 403) else
+                  "Nextcloud refused the request.")
+        return {**local, "remote_disabled": False, "remote_status": "failed",
+                "remote_message": reason,
+                "manual_command": manual}
 
     def disconnect(self) -> dict:
         self.store.delete(f"pending:{INTEGRATION_ID}")

@@ -307,7 +307,8 @@ def test_binding_blocked_honestly_and_disconnect_only_clears_local_mapping(setup
     with pytest.raises(SetupError, match="provisioning_unavailable"):
         bindings.connect("test-bot", "room123", 12, "test-user")
     assert len(bindings.list()) == 1
-    assert bindings.disconnect("test-bot") == {"disconnected": True, "remote_rooms_preserved": True}
+    assert bindings.disconnect("test-bot") == {"disconnected": True, "remote_rooms_preserved": True,
+                                               "room_token": "room123", "nextcloud_bot_id": 12}
     assert bindings.list() == []
     assert reloads == [True]
     assert set(tags["engines"]) == {engine}

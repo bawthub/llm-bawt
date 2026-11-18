@@ -54,11 +54,14 @@ OPS_CATALOG = "ops_catalog"
 PLAYGROUND = "playground"
 #: TASK-1184: a utility-model call recorded a usage row (inside or outside a turn).
 UTILITY_USAGE = "utility_usage"
+#: TASK-1085: a Nextcloud Talk binding or its delivery health moved
+#: (reconnect, disconnect, webhook/outbox health notes).
+NEXTCLOUD_TALK = "nextcloud_talk"
 
 #: Every topic a browser may receive. Closed: the client ignores anything else.
 TOPICS = frozenset({OPS_JOBS, OPS_RELEASES, GPU, QUEUE_HOLD, APPROVAL_POLICIES, MEDIA, SCHEDULES,
                     MAINTENANCE_JOBS, DELIVERIES, NOTIFICATIONS, FREEZE, OPS_CATALOG, PLAYGROUND,
-                    UTILITY_USAGE})
+                    UTILITY_USAGE, NEXTCLOUD_TALK})
 
 #: Bursts of commits inside this window produce one fingerprint pass.
 MIN_INTERVAL_SECONDS = 1.0
@@ -100,6 +103,12 @@ _FINGERPRINTS: dict[str, str] = {
     ),
     # Append-only; the primary key index answers this without a scan.
     UTILITY_USAGE: "SELECT max(id) FROM utility_usage",
+    NEXTCLOUD_TALK: (
+        "SELECT (SELECT md5(coalesce(string_agg(key || ':' || value_json, ',' ORDER BY key), ''))"
+        "  FROM runtime_settings WHERE scope_type = 'global' AND key LIKE 'nextcloud_talk_health:%'),"
+        " (SELECT md5(coalesce(string_agg(slug || ':' || nextcloud_config::text, ',' ORDER BY slug), ''))"
+        "  FROM bot_profiles WHERE nextcloud_config IS NOT NULL)"
+    ),
 }
 
 
@@ -250,5 +259,5 @@ async def run_state_watcher(service: Any, engine: Any) -> None:
 
 
 __all__ = ["APPROVAL_POLICIES", "EVENT_TYPE", "FREEZE", "GPU", "MAINTENANCE_JOBS", "MEDIA", "NOTIFICATIONS", "OPS_CATALOG", "OPS_JOBS",
-           "OPS_RELEASES", "PLAYGROUND", "QUEUE_HOLD", "SCHEDULES", "UTILITY_USAGE", "StateWatcher", "TOPICS", "mark", "nudge", "publish_state_changed",
+           "OPS_RELEASES", "PLAYGROUND", "QUEUE_HOLD", "SCHEDULES", "UTILITY_USAGE", "NEXTCLOUD_TALK", "StateWatcher", "TOPICS", "mark", "nudge", "publish_state_changed",
            "read_fingerprints", "run_state_watcher", "state_changed_event", "watcher_of"]

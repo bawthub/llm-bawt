@@ -6,7 +6,7 @@ import logging
 import secrets
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
@@ -15,6 +15,7 @@ from fastapi import Request, HTTPException
 from ...bot_types import durable_agent_backend
 from ...service.delivery_reply import QUEUED_RECEIPT, is_accepted_receipt
 from .manager import get_nextcloud_manager
+from . import signing as talk_signing
 
 log = logging.getLogger(__name__)
 
@@ -40,15 +41,34 @@ async def send_nextcloud_message(
     message: str,
     secret: str,
     reply_to: Optional[int] = None,
+    bot_id: Optional[str] = None,
 ) -> bool:
     """Send a Talk message; True only on confirmed success."""
     outcome = await send_nextcloud_message_outcome(
-        nextcloud_url, conversation_token, message, secret, reply_to=reply_to
+        nextcloud_url, conversation_token, message, secret, reply_to=reply_to, bot_id=bot_id
     )
     return outcome == "sent"
 
 
 async def send_nextcloud_message_outcome(
+    nextcloud_url: str,
+    conversation_token: str,
+    message: str,
+    secret: str,
+    reply_to: Optional[int] = None,
+    bot_id: Optional[str] = None,
+) -> str:
+    """Send a Talk message and, with ``bot_id``, record that binding's outbound health."""
+    outcome = await _send_outcome(nextcloud_url, conversation_token, message, secret, reply_to)
+    if bot_id and outcome in ("sent", "failed"):
+        import asyncio
+        stamp = datetime.now(timezone.utc).isoformat()
+        await asyncio.to_thread(talk_signing.note_health, bot_id, conversation_token, secret,
+                                **({"outbound_at": stamp} if outcome == "sent" else {"outbound_failed_at": stamp}))
+    return outcome
+
+
+async def _send_outcome(
     nextcloud_url: str,
     conversation_token: str,
     message: str,
@@ -152,20 +172,22 @@ async def handle_nextcloud_webhook(request: Request) -> dict:
     manager = get_nextcloud_manager()
     bot_config = manager.get_bot_by_conversation(conversation_token)
 
-    if not bot_config:
-        log.warning(f"No bot configured for conversation {conversation_token}")
-        log.info("=" * 80)
-        return {"status": "no_bot_configured", "conversation": conversation_token}
-
-    log.info(f"Routing to bot: {bot_config.llm_bawt_bot}")
-
-    # Verify signature with this bot's secret
-    if not verify_nextcloud_signature(signature, random, body, bot_config.secret):
+    authenticated = bool(bot_config) and verify_nextcloud_signature(signature, random, body, bot_config.secret)
+    if not authenticated:
+        # A callback signed by a pending (not yet verified) secret proves the
+        # inbound path for setup. It is recorded and never starts a model turn.
+        import asyncio
+        pending_bot = await asyncio.to_thread(talk_signing.match_pending, conversation_token, signature, random, body)
+        if pending_bot:
+            log.info(f"Pending Talk verification callback for {pending_bot}")
+            return {"status": "verification_received", "bot": pending_bot}
+        if not bot_config:
+            log.warning(f"No bot configured for conversation {conversation_token}")
+            return {"status": "no_bot_configured", "conversation": conversation_token}
         log.error(f"Invalid signature for bot {bot_config.llm_bawt_bot}")
-        log.info("=" * 80)
         raise HTTPException(status_code=401, detail="Invalid signature")
 
-    log.info("✓ Signature verified")
+    log.info(f"✓ Signature verified; routing to bot: {bot_config.llm_bawt_bot}")
 
     # Extract message info
     msg_type = payload.get('type', 'unknown')
@@ -188,8 +210,22 @@ async def handle_nextcloud_webhook(request: Request) -> dict:
     if not backend_ok:
         log.error("Nextcloud backend header does not match NEXTCLOUD_URL")
         raise HTTPException(status_code=403, detail="Unknown Nextcloud backend")
+    import asyncio
+    await asyncio.to_thread(talk_signing.note_health, bot_config.llm_bawt_bot,
+                            conversation_token, bot_config.secret,
+                            inbound_at=datetime.now(timezone.utc).isoformat())
+    # A binding with a mapped identity admits only its Nextcloud user, as the
+    # configured application user; the remote actor string never becomes one.
+    mapped_user = getattr(bot_config, "user_id", None)
+    if mapped_user:
+        mapped_actor = getattr(bot_config, "actor_id", None)
+        actor_type = payload.get('actor', {}).get('type')
+        if not mapped_actor or user_id != mapped_actor or actor_type not in (None, "Person", "users"):
+            log.warning("Ignoring Talk message from an actor not mapped to this room")
+            return {"status": "actor_not_mapped"}
+        user_id = mapped_user
     allowed_actors = {a.strip() for a in (app_config.NEXTCLOUD_ALLOWED_ACTORS or "").split(",") if a.strip()}
-    if allowed_actors and user_id not in allowed_actors:
+    if allowed_actors and not mapped_user and user_id not in allowed_actors:
         log.warning("Ignoring Nextcloud message from non-allowlisted actor")
         return {"status": "actor_not_allowed"}
 
@@ -285,7 +321,7 @@ async def handle_nextcloud_webhook(request: Request) -> dict:
                         nextcloud_url=backend.rstrip('/'),
                         conversation_token=conversation_token,
                         message=f"Your request was accepted (reference {source_id}); I'll reply here when it finishes.",
-                        secret=bot_config.secret, reply_to=reply_to,
+                        secret=bot_config.secret, reply_to=reply_to, bot_id=bot_config.llm_bawt_bot,
                     )
                 if state == "PENDING":
                     dispatcher.wake(bot_config.llm_bawt_bot)
@@ -310,6 +346,7 @@ async def handle_nextcloud_webhook(request: Request) -> dict:
                     message=llm_response,
                     secret=bot_config.secret,
                     reply_to=reply_to,
+                    bot_id=bot_config.llm_bawt_bot,
                 )
                 if outcome != "sent":
                     # Never replay: an "unknown" send may already be visible.

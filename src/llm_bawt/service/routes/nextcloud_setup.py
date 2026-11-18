@@ -2,7 +2,7 @@
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from llm_bawt.integrations.nextcloud.setup import NextcloudSetup, SetupError, LOGIN_TTL
 from llm_bawt.integrations.nextcloud.setup_bindings import NextcloudBindings
@@ -38,6 +38,31 @@ class BindingBody(BaseModel):
     room_token: str = Field(min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9]+$")
     nextcloud_bot_id: int = Field(gt=0)
     user_id: str = Field(min_length=1, max_length=128)
+
+
+class ReconnectBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    room_token: str = Field(min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9]+$")
+    nextcloud_bot_id: int = Field(gt=0)
+    user_id: str = Field(min_length=1, max_length=128)
+    actor_id: str = Field(min_length=1, max_length=128)
+    # No length constraints here: Pydantic echoes the raw input in 422 errors
+    # even for SecretStr. NextcloudBindings.reconnect bounds the length.
+    secret: SecretStr
+
+
+class BootstrapBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    room_token: str = Field(min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9]+$")
+    user_id: str = Field(min_length=1, max_length=128)
+    actor_id: str = Field(min_length=1, max_length=128)
+    webhook_url: str = Field(min_length=1, max_length=2048)
+    bot_name: str = Field(min_length=1, max_length=64, pattern=r"^[\w .-]+$")
+
+
+class BootstrapCompleteBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    nextcloud_bot_id: int = Field(gt=0)
 
 
 @router.get("/status")
@@ -79,9 +104,27 @@ async def connect_binding(body: BindingBody):
     return await call(manager().bindings.connect, body.bot_id, body.room_token, body.nextcloud_bot_id, body.user_id)
 
 
+@router.post("/bindings/{bot_id}/reconnect")
+async def reconnect_binding(bot_id: str, body: ReconnectBody):
+    return await call(manager().bindings.reconnect, bot_id, body.room_token, body.nextcloud_bot_id,
+                      body.user_id, body.secret.get_secret_value(), body.actor_id)
+
+
+@router.post("/bindings/{bot_id}/bootstrap")
+async def bootstrap_binding(bot_id: str, body: BootstrapBody):
+    # The one intentional reveal of a generated secret: no-store via call().
+    return await call(manager().bindings.bootstrap, bot_id, body.room_token, body.user_id,
+                      body.webhook_url, body.bot_name, body.actor_id)
+
+
+@router.post("/bindings/{bot_id}/bootstrap/complete")
+async def complete_bootstrap(bot_id: str, body: BootstrapCompleteBody):
+    return await call(manager().bindings.complete_bootstrap, bot_id, body.nextcloud_bot_id)
+
+
 @router.delete("/bindings/{bot_id}")
 async def disconnect_binding(bot_id: str):
-    return await call(manager().bindings.disconnect, bot_id)
+    return await call(manager().disconnect_binding, bot_id)
 
 
 @router.delete("/account")

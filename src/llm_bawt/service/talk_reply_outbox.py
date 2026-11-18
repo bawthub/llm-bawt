@@ -172,7 +172,7 @@ class TalkReplyOutbox:
                         nextcloud_url=subscription.backend,
                         conversation_token=subscription.conversation_token,
                         message=answer, secret=bot_config.secret,
-                        reply_to=subscription.reply_to,
+                        reply_to=subscription.reply_to, bot_id=subscription.bot_id,
                     )
                 except Exception as exc:
                     logger.exception("Talk outbound result uncertain for %s", subscription.message_id)

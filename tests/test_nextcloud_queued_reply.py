@@ -28,6 +28,8 @@ def talk(monkeypatch):
     monkeypatch.setattr(app_config, "NEXTCLOUD_URL", "https://talk.example")
     monkeypatch.setattr(app_config, "NEXTCLOUD_ALLOWED_ACTORS", None)
     monkeypatch.setattr(webhook, "verify_nextcloud_signature", lambda *args: True)
+    monkeypatch.setattr(webhook.talk_signing, "note_health", lambda *a, **k: None)
+    monkeypatch.setattr(webhook.talk_signing, "match_pending", lambda *a: None)
     monkeypatch.setattr(webhook, "get_nextcloud_manager", lambda: SimpleNamespace(
         get_bot_by_conversation=lambda token: SimpleNamespace(llm_bawt_bot="nova", secret="secret")
     ))
