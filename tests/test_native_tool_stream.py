@@ -134,6 +134,10 @@ def test_round_limit_runs_one_final_text_synthesis(rig, ha_mode, limit):
 
 
 def test_dependent_second_round_receives_results_then_answers(rig):
+    rig.executor.execute.side_effect = [
+        "<tool_result>72 degrees</tool_result>",
+        "<tool_result>Search used 72 degrees</tool_result>",
+    ]
     requests = []
     def stream(messages, **kwargs):
         requests.append((list(messages), kwargs))
@@ -144,7 +148,7 @@ def test_dependent_second_round_receives_results_then_answers(rig):
             assert messages[-2].content == "72 degrees"
             return iter([tool_result('{"room":"72 degrees"}')])
         assert [message.content for message in messages if message.role == "tool"] == [
-            "72 degrees", "72 degrees",
+            "72 degrees", "Search used 72 degrees",
         ]
         return iter(["Completed"])
     rig.client.stream_with_tools.side_effect = stream
@@ -155,6 +159,12 @@ def test_dependent_second_round_receives_results_then_answers(rig):
     ]
     assert [kwargs["tool_choice"] for _, kwargs in requests] == ["auto"] * 3
     assert [event["iteration"] for event in rig.events] == [1, 1, 2, 2]
+    assert rig.ctx.tool_context_holder == [
+        "[GetLiveContext]\n72 degrees\n\n[GetLiveContext]\nSearch used 72 degrees",
+    ]
+    assert [call["result"] for call in rig.ctx.tool_call_details_holder] == [
+        "72 degrees", "Search used 72 degrees",
+    ]
 
 
 def test_elapsed_budget_prevents_next_round_and_synthesizes(rig, monkeypatch):

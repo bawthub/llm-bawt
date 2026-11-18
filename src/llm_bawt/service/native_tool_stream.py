@@ -258,10 +258,13 @@ class NativeToolStream:
                             {"_type": "tool_calls_finish"},
                         )
 
-                        # Store tool context
-                        tool_context_holder[0] = "\n\n".join(
+                        # Retain every round for the persisted tool-results history.
+                        round_context = "\n\n".join(
                             f"[{tc['function']['name']}]\n{tr['content']}"
                             for tc, tr in zip(real_tool_calls, tool_results)
+                        )
+                        tool_context_holder[0] = "\n\n".join(
+                            part for part in (tool_context_holder[0], round_context) if part
                         )
 
                         # Build continuation messages — empty content so the
