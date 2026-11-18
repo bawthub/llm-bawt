@@ -47,7 +47,7 @@ _KEYS = frozenset({"action", "op", "key_container"})
 _CONTAINER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 _HOST = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,62})(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}))*")
 _USER = re.compile(r"[a-z_][a-z0-9_-]{0,31}")
-_PUBKEY = re.compile(r"(ssh-ed25519) ([A-Za-z0-9+/]{68})(?: [A-Za-z0-9@._-]{1,64})?")
+_PUBKEY = re.compile(r"(ssh-ed25519) ([A-Za-z0-9+/]{68})(?: [A-Za-z0-9@._-]{1,64}){0,8}")
 _FINGERPRINT = re.compile(r"SHA256:[A-Za-z0-9+/]{43}")
 _HOSTKEY_TYPES = ("ssh-ed25519", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384",
                   "ecdsa-sha2-nistp521", "rsa-sha2-512", "rsa-sha2-256", "ssh-rsa")

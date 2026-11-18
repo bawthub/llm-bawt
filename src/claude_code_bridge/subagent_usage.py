@@ -10,6 +10,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+from .background_tasks import BackgroundTaskSet
+
 
 class SubagentUsage:
     """Request-local ledger. Never sum progress snapshots or infer missing usage."""
@@ -23,6 +25,8 @@ class SubagentUsage:
         # TASK-1148 R2: durable task → original-spawn lookup (the CLI session
         # transcript) for agents spawned in an earlier turn or bridge process.
         self._spawn_lookup = spawn_lookup
+        # TASK-2367: live background tasks, to hold a paused subagent's done.
+        self.background = BackgroundTaskSet()
         self._single_agent_spawns: set[str] = set()  # Agent spawns found in the transcript
         self._responses: dict[str, dict[str, dict[str, int]]] = {}
         self._tasks: dict[str, dict[str, str]] = {}

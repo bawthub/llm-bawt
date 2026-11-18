@@ -16,6 +16,7 @@ from decimal import Decimal
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 from llm_bawt.service.turn_logs import TurnLogStore
 from llm_bawt.service.usage.balance import (
@@ -93,6 +94,40 @@ def _ledger(rig, turn_id):
     with rig[0].engine.connect() as conn:
         return conn.execute(text("SELECT provider, access_path_key, cost_usd FROM api_balance_ledger"
                                  " WHERE turn_id=:t"), {"t": turn_id}).first()
+
+
+def test_zero_is_a_known_balance_and_clear_restores_unset(rig):
+    balances = rig[1]
+    assert balances.read(PROVIDER) is None
+    balances.set_anchor(PROVIDER, Decimal("0"))
+    row = balances.read(PROVIDER)
+    assert row.anchor_usd == 0 and row.spent_usd == 0
+    balance, reason = anchored_balance(row, None)
+    assert reason is None and balance.amount_usd == 0 and balance.remaining_usd == 0
+    assert balances.clear(PROVIDER) and balances.read(PROVIDER) is None
+    assert anchored_balance(None, None)[0] is None
+
+
+def test_existing_positive_constraint_upgrades_without_rewriting_balances(rig):
+    store, balances, _bot = rig
+    balances.set_anchor(PROVIDER, Decimal("12.50"))
+    _turn(rig, _usage("1.25"))
+    before = balances.read(PROVIDER)
+    with store.engine.begin() as conn:
+        conn.execute(text("ALTER TABLE api_balances DROP CONSTRAINT api_balances_anchor_usd_nonnegative"))
+        conn.execute(text("ALTER TABLE api_balances ADD CONSTRAINT api_balances_anchor_usd_check"
+                          " CHECK (anchor_usd > 0)"))
+    with pytest.raises(IntegrityError):
+        balances.set_anchor(PROVIDER, Decimal("0"))
+    with store.engine.begin() as conn:
+        bootstrap_balance_schema(conn)
+        bootstrap_balance_schema(conn)  # Repeated startup is safe.
+    assert balances.read(PROVIDER) == before
+    balances.set_anchor(PROVIDER, Decimal("0"))
+    assert balances.read(PROVIDER).anchor_usd == 0
+    with pytest.raises(IntegrityError):
+        balances.set_anchor(PROVIDER, Decimal("-0.01"))
+    assert balances.read(PROVIDER).anchor_usd == 0
 
 
 def test_finalize_charges_once_and_a_revision_charges_only_the_difference(rig):

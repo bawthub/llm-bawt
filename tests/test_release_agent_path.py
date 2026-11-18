@@ -3,7 +3,7 @@ import re
 
 import pytest
 
-from llm_bawt.approval_defaults import _OPS_DEFAULT_POLICIES
+from llm_bawt.approval_defaults import _STABLE_SHELL_DEFAULT_POLICIES
 
 
 @pytest.mark.parametrize("command", [
@@ -18,7 +18,7 @@ from llm_bawt.approval_defaults import _OPS_DEFAULT_POLICIES
     "docker compose up -d --build frontend-prod",
 ])
 def test_seeded_agent_release_mutations_are_denied(command):
-    rules = [p for p in _OPS_DEFAULT_POLICIES if p["tool_name"] == "Bash"]
+    rules = _STABLE_SHELL_DEFAULT_POLICIES
     assert any(re.search(rule["pattern"], command) for rule in rules), command
     assert all(rule["action"] == "deny" for rule in rules)
 
@@ -31,5 +31,5 @@ def test_seeded_agent_release_mutations_are_denied(command):
     'make mode-status',
 ])
 def test_seeded_guards_do_not_match_read_only_commands(command):
-    rules = [p for p in _OPS_DEFAULT_POLICIES if p["tool_name"] == "Bash"]
+    rules = _STABLE_SHELL_DEFAULT_POLICIES
     assert not any(re.search(rule["pattern"], command) for rule in rules), command

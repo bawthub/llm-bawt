@@ -68,8 +68,12 @@ def test_target_rejects_bad_user_and_keys():
 def test_public_key_parsing_ignores_comment_and_checks_blob():
     assert hk.parse_public_key(KEY + "\n") == ("ssh-ed25519", BLOB)
     assert hk.parse_public_key(f"ssh-ed25519 {BLOB}") == ("ssh-ed25519", BLOB)
+    # A multi-word comment (as ssh-keygen -C "agents@host TASK-1" writes) is fine.
+    assert hk.parse_public_key(f"ssh-ed25519 {BLOB} agents@host TASK-1\n") == ("ssh-ed25519", BLOB)
     with pytest.raises(ValueError):
         hk.parse_public_key(f"ssh-ed25519 {BLOB} evil'quote")
+    with pytest.raises(ValueError):
+        hk.parse_public_key(f"ssh-ed25519 {BLOB} two  spaces")
     rsa_named = base64.b64encode(b"\x00\x00\x00\x07ssh-rsa" + b"\x00" * 40).decode()
     with pytest.raises(ValueError):
         hk.parse_public_key(f"ssh-ed25519 {rsa_named[:68]}")
@@ -289,3 +293,15 @@ def test_approval_text_names_frozen_destination_and_key():
     first = hk.approval_text({"action": "host_key", "op": "verify", "key_container": "b"},
                              _target(known_host_keys=[]), "Verify?")
     assert first.startswith("Verify?") and "first use" in first
+
+
+def test_catalog_approval_keeps_frozen_host_key_details():
+    from llm_bawt.ops.approval_prompt import approval_text
+
+    snapshot = _snapshot("remove", port=2222)
+    snapshot["operation"] = {"approval_prompt_prefix": "Remove this bot key?"}
+    text = approval_text(snapshot)
+    assert text.startswith("Remove this bot key?")
+    assert "deploy@box.example:2222" in text
+    assert hk.fingerprint(BLOB) in text and "pinned host key" in text
+    assert "other keys kept" in text

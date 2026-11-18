@@ -126,8 +126,8 @@ async def set_balance_endpoint(provider: str, request: BalanceAnchorRequest) -> 
     except (InvalidOperation, TypeError, ValueError):
         amount = Decimal("NaN")
     if isinstance(raw, bool) or not isinstance(raw, (int, float, str)) or not amount.is_finite() \
-            or amount <= 0 or amount >= MAX_BALANCE_USD:
-        raise HTTPException(status_code=400, detail="API balance must be a positive USD amount")
+            or amount < 0 or amount >= MAX_BALANCE_USD:
+        raise HTTPException(status_code=400, detail="API balance must be a non-negative USD amount")
     await asyncio.to_thread(set_balance, provider, amount)
     return await _provider_report(provider)
 

@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from mcp.types import CallToolResult
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import SQLAlchemyError
-from agent_bridge.approval import evaluate
+from agent_bridge.approval import _tool_tail, derive_subject, evaluate
 from ...approval_validation import candidate_policy
 from ...approval_mcp_store import _SENTINEL_IDENTITIES
 from ...agent_backends.agent_bridge import get_agent_subscriber
@@ -166,6 +166,25 @@ class PolicyPreview(BaseModel):
 
 @router.post("/v1/tool-approval-policies/preview", tags=["Approval Policies"])
 def preview_policy(body: PolicyPreview):
+    if _tool_tail(body.tool_name) == "ops_run":
+        from ...ops.approval_prompt import DEFAULT_PROMPT
+        from ...ops.approved_admission import ops_run_arguments_valid
+        from ...ops.service import display_args
+        from .ops import _service
+
+        if not ops_run_arguments_valid(body.tool_input):
+            raise HTTPException(status_code=422, detail="Invalid ops_run arguments")
+        operation = _service().store.get_operation_by_slug(body.tool_input["operation"])
+        if operation is None or not operation.enabled or operation.soft_deleted_at is not None:
+            return {"action": "deny", "severity": "medium", "policy_id": None,
+                    "subject": body.tool_input["operation"], "reason": "Catalog operation unavailable"}
+        shown = {**body.tool_input, "args": display_args(body.tool_input.get("args") or {},
+                                                       operation.args_schema_json)}
+        return {"action": "require_approval" if operation.approval_required is not False else "allow",
+                "severity": operation.risk_level, "policy_id": None,
+                "subject": derive_subject("ops_run", shown, None),
+                "prompt": operation.approval_prompt_prefix or DEFAULT_PROMPT,
+                "reason": "Operation catalog approval setting; target-specific safety guards still apply"}
     try:
         policies = (_store().compile_bundle().policies if body.policies is None else
                     [candidate_policy(item, index) for index, item in enumerate(body.policies)])

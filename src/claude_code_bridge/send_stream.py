@@ -42,6 +42,7 @@ from claude_agent_sdk.types import (
 
 from claude_code_bridge.tool_events import normalize_tool_result
 
+from .background_tasks import LEVEL_SUBTYPE
 from .context_env import compact_window_env, prompt_cache_ttl_env, proxy_context_window_env
 from .native_auth import LegacyNativeRoute, NativeAuthRoute
 from .proxy.request_context import (
@@ -455,30 +456,64 @@ class ClaudeStreamMixin:
                     },
                 )
         elif isinstance(msg, TaskNotificationMessage):
-            seq += 1
-            usage = msg.usage if isinstance(msg.usage, dict) else {}
-            # TASK-1148: a bridge liveness stop is a timeout, not a user stop.
-            status, failure = (
-                liveness.stop_status(msg.task_id, msg.status, msg.tool_use_id)
-                if liveness is not None else (msg.status, None)
+            if msg.status != "completed":
+                ledger.background.discard(msg.task_id)
+            elif ledger.background.defer_done(msg.task_id, msg):
+                # TASK-2367: paused on its own background work, not finished.
+                seq += 1
+                logger.info(
+                    "Sub-agent waiting on background work: task_id=%s tool_use_id=%s",
+                    msg.task_id, msg.tool_use_id,
+                )
+                self._publish_event(
+                    request_id, session_key, seq,
+                    kind=AgentEventKind.SUBAGENT_PROGRESS,
+                    tool_use_id=msg.tool_use_id,
+                    extra_raw={"task_id": msg.task_id, "status": "running"},
+                )
+                return seq
+            # Called through the class: test emitters supply only _publish_event.
+            seq = ClaudeStreamMixin._publish_subagent_done(
+                self, msg, request_id=request_id, session_key=session_key, seq=seq,
+                ledger=ledger, liveness=liveness,
             )
-            logger.info(
-                "Sub-agent done: task_id=%s status=%s tool_use_id=%s",
-                msg.task_id, status, msg.tool_use_id,
-            )
-            self._publish_event(
-                request_id, session_key, seq,
-                kind=AgentEventKind.SUBAGENT_DONE,
-                tool_use_id=msg.tool_use_id,
-                text=getattr(msg, "summary", "") or "",
-                extra_raw={
-                    "task_id": msg.task_id,
-                    "status": status,
-                    "output_file": getattr(msg, "output_file", ""),
-                    "usage": ledger.for_event(msg.tool_use_id, usage, terminal=True),
-                    **({"failure": failure} if failure else {}),
-                },
-            )
+        elif getattr(msg, "subtype", None) == LEVEL_SUBTYPE:
+            for released in ledger.background.observe_level(getattr(msg, "data", None)):
+                seq = ClaudeStreamMixin._publish_subagent_done(
+                    self, released, request_id=request_id, session_key=session_key, seq=seq,
+                    ledger=ledger, liveness=liveness,
+                )
+        return seq
+
+    def _publish_subagent_done(
+        self, msg, *, request_id: str, session_key: str, seq: int,
+        ledger: SubagentUsage, liveness: WorkerLiveness | None,
+    ) -> int:
+        """Publish one SUBAGENT_DONE for ``msg`` (a TaskNotificationMessage)."""
+        seq += 1
+        usage = msg.usage if isinstance(msg.usage, dict) else {}
+        # TASK-1148: a bridge liveness stop is a timeout, not a user stop.
+        status, failure = (
+            liveness.stop_status(msg.task_id, msg.status, msg.tool_use_id)
+            if liveness is not None else (msg.status, None)
+        )
+        logger.info(
+            "Sub-agent done: task_id=%s status=%s tool_use_id=%s",
+            msg.task_id, status, msg.tool_use_id,
+        )
+        self._publish_event(
+            request_id, session_key, seq,
+            kind=AgentEventKind.SUBAGENT_DONE,
+            tool_use_id=msg.tool_use_id,
+            text=getattr(msg, "summary", "") or "",
+            extra_raw={
+                "task_id": msg.task_id,
+                "status": status,
+                "output_file": getattr(msg, "output_file", ""),
+                "usage": ledger.for_event(msg.tool_use_id, usage, terminal=True),
+                **({"failure": failure} if failure else {}),
+            },
+        )
         return seq
 
     @staticmethod

@@ -100,6 +100,42 @@ An already-awake run verifies admission, helper lifecycle and health, but is
 not evidence that a sleeping target's firmware/NIC accepts WOL; retain that
 acceptance until a naturally sleeping target can be woken.
 
+### Catalog-owned invocation approval
+
+`ops_operations.approval_required` is the approval authority, independently of
+`risk_level`. It defaults to **true**, including pre-upgrade rows. Only an
+explicit boolean false permits the ordinary direct path. The operation's
+`approval_prompt_prefix` supplies the card prompt; an empty prefix uses the
+generic operator-operation question. Prepared target/release details and
+execution/quiesce settings are appended as before.
+
+The app verifies the original signed caller context and sends a short-lived,
+domain-separated invocation attestation to the existing authenticated ops
+control listener (`POST /v1/ops/request`). Ops verifies it using its existing
+scoped control secret; it never opens turn capabilities or receives the app
+master key. Ops prepares and persists the existing MCP approval row with no
+policy ID, and the app publishes only that committed card. Resolution, frozen
+snapshot admission and terminal continuation retain their existing ownership.
+No request-route call executes an operation.
+
+A lost write response means **an approval may exist**, not that nothing was
+created. Do not automatically reissue a new intent. An exact request retry is a
+read of its durable row, even after catalog edits. Legacy direct HTTP/MCP
+admission independently requires a frozen false setting and pins its version
+under the job-insertion lock. Internal approved/release paths retain their
+existing authority; an existing idempotency key still returns its original job.
+
+Upgrade ops before the app so the new listener is available at activation.
+Keep old `ops_run` policy rows until catalog coverage and the live card path
+are verified; they are no longer runtime authority after the app upgrade.
+Compare every previously required policy, catch-all and no-match case against
+the catalog, preserving required approval regardless of risk. Translate only
+previously reviewed allow exceptions explicitly; never enable a disabled
+operation as part of migration. Then delete exactly the inventoried obsolete
+rows through the policy API, preserving their revision tombstones. New ops
+policies are rejected and default seeding contains only shell policies, so
+retirement does not resurrect them. Older outstanding cards remain resolvable.
+
 ### Catalog revision changes (TASK-1411)
 
 An approval binds the operation ID, version and script hash. Editing that row

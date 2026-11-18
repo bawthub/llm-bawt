@@ -78,16 +78,38 @@ def bootstrap_balance_schema(conn) -> None:
     conn.execute(text("""
         CREATE TABLE IF NOT EXISTS api_balances (
             provider VARCHAR(64) PRIMARY KEY,
-            anchor_usd NUMERIC(18, 8) NOT NULL CHECK (anchor_usd > 0),
+            anchor_usd NUMERIC(18, 8) NOT NULL
+                CONSTRAINT api_balances_anchor_usd_nonnegative CHECK (anchor_usd >= 0),
             anchor_at TIMESTAMPTZ NOT NULL,
             spent_usd NUMERIC(18, 8) NOT NULL DEFAULT 0,
             unpriced_turns INTEGER NOT NULL DEFAULT 0,
             updated_at TIMESTAMPTZ NOT NULL
         )
     """))
+    _upgrade_anchor_constraint(conn)
     if ledger_is_new:
         backfill_ledger(conn)
     _migrate_legacy_anchors(conn)
+
+
+def _upgrade_anchor_constraint(conn) -> None:
+    """Relax the managed positive-only check transactionally; preserve all rows.
+
+    The caller's SchemaBootstrapGuard holds the cross-process schema lock.
+    Install the replacement before dropping the old check, and perform no
+    ALTER on an already-upgraded table.
+    """
+    names = set(conn.execute(text(
+        "SELECT conname FROM pg_constraint"
+        " WHERE conrelid = 'api_balances'::regclass AND contype = 'c'"
+    )).scalars())
+    if "api_balances_anchor_usd_nonnegative" not in names:
+        conn.execute(text(
+            "ALTER TABLE api_balances ADD CONSTRAINT api_balances_anchor_usd_nonnegative"
+            " CHECK (anchor_usd >= 0)"
+        ))
+    if "api_balances_anchor_usd_check" in names:
+        conn.execute(text("ALTER TABLE api_balances DROP CONSTRAINT api_balances_anchor_usd_check"))
 
 
 def balance_adapter_for_path(key: Any):

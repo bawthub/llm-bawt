@@ -98,7 +98,11 @@ def test_exposed_delivery_transport_preserves_command_or_labels(
             assert is_compact_command(prompt)
         else:
             note, delivered_body = prompt.split("\n\n", 1)
-            assert json.loads(note)["source"] == "fleet-delivery"
+            envelope = json.loads(note)
+            assert envelope["source"] == "fleet-delivery"
+            assert envelope["coordination"] is True
+            assert "untrusted_content" not in envelope
+            assert envelope["data"]["sender_bot_ids"] == ["fixture-sender"]
             assert delivered_body == body
         target = ContentTurn("caid", "operator", request.inter_bot_turn_id, request.user_message_id)
         assert store.seen(target)

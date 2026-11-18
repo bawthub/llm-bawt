@@ -313,7 +313,7 @@ class Config(RuntimeTunables, BaseSettings):
     )
 
     # SUMMARIZATION_MODEL retired -> global runtime setting 'summarization_model'
-    # (TASK-522); default 'dolphin-qwen-3b' now lives in SETTING_DEFINITIONS.
+    # (TASK-522); its default lives in SETTING_DEFINITIONS.
 
     # --- Tool Calling Settings --- #
     MAX_TOOL_CALLS_PER_TURN: int = Field(

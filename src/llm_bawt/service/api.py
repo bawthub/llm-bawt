@@ -108,6 +108,16 @@ async def lifespan(app):
     config.install_model_catalog(normalized_catalog)
     log.info("Loaded %d normalized model endpoints", len(normalized_catalog))
 
+    # TASK-2449: read-only GETs never provision schema, so a fresh install
+    # must have the shared memory tables (messages parents, sessions) before
+    # its first bot page loads.
+    try:
+        from ..memory.postgresql import provision_shared_memory_schema
+        provision_shared_memory_schema(config)
+        log.info("shared memory schema ready")
+    except Exception as e:
+        log.warning("Failed to initialise shared memory schema: %s", e)
+
     # Ensure media_generations table exists
     try:
         get_media_generation_store(config)

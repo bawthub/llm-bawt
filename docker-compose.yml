@@ -127,7 +127,7 @@ services:
       - LLM_BAWT_POSTGRES_PASSWORD
       - LLM_BAWT_POSTGRES_DATABASE
       # TASK-2379: libpq sslmode (unset = libpq default "prefer").
-      - PGSSLMODE
+      - PGSSLMODE=${PGSSLMODE:-prefer}
       # Root key (TASK-2386): injected at creation from the root-only secrets
       # volume (ops compose_secrets or scripts/compose-secrets); never in .env.
       - LLM_BAWT_SECRET_KEY
@@ -495,7 +495,7 @@ services:
       - LLM_BAWT_POSTGRES_PASSWORD
       - LLM_BAWT_POSTGRES_DATABASE
       # TASK-2379: libpq sslmode (unset = libpq default "prefer").
-      - PGSSLMODE
+      - PGSSLMODE=${PGSSLMODE:-prefer}
       - LLM_BAWT_DEFAULT_USER
       - LLM_BAWT_DEFAULT_MODEL_ALIAS
       - LLM_BAWT_MODEL_CACHE_DIR

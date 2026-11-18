@@ -83,3 +83,4 @@ class TurnStreamContext:
     # Preserve worker text/control/tool order through asynchronous Redis writes.
     publish_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     stream_text_offset: int = 0
+    tool_start_persist_failures: int = 0

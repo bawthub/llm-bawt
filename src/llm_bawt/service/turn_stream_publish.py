@@ -67,7 +67,19 @@ class TurnStreamPublishMixin:
         """
         if event_dict.get("_type") == "tool_event":
             if event_dict.get("event") == "tool_start":
-                event_dict = _tool_event_coordinator.start(event_dict)
+                try:
+                    event_dict = _tool_event_coordinator.start(event_dict)
+                except Exception:
+                    # Timeline storage is best-effort, not tool admission.
+                    # Keep the original live event available for legacy recovery;
+                    # a successful end write can also create the missing row.
+                    ctx.tool_start_persist_failures += 1
+                    log.warning(
+                        "Tool start persistence failed turn=%s call=%s failures=%d; "
+                        "continuing execution",
+                        ctx.turn_log_id, event_dict.get("call_id"),
+                        ctx.tool_start_persist_failures, exc_info=True,
+                    )
             elif event_dict.get("event") == "tool_end":
                 event_dict = _tool_event_coordinator.end(event_dict)
             elif event_dict.get("event") == "tool_executing":

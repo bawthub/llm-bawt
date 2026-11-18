@@ -346,7 +346,7 @@ def anchors(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("amount", ["157.25", 157, 0.5])
+@pytest.mark.parametrize("amount", ["157.25", 157, 0.5, 0, "0", "0.00"])
 async def test_put_balance_anchors_the_amount_and_returns_the_report(anchors, amount):
     snap = await usage_routes.set_balance_endpoint(
         "anthropic_api", usage_routes.BalanceAnchorRequest(amount_usd=amount))
@@ -355,8 +355,9 @@ async def test_put_balance_anchors_the_amount_and_returns_the_report(anchors, am
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("amount", [0, -1, "NaN", "Infinity", True, None, "abc", [5], {"v": 1}, 10**9])
-async def test_put_balance_rejects_non_positive_non_finite_or_absurd_amounts(anchors, amount):
+@pytest.mark.parametrize("amount", [-1, "-0.01", "", " ", "NaN", "Infinity", "-Infinity",
+                                    True, None, "abc", [5], {"v": 1}, 10**9])
+async def test_put_balance_rejects_negative_blank_non_finite_or_absurd_amounts(anchors, amount):
     with pytest.raises(HTTPException) as err:
         await usage_routes.set_balance_endpoint(
             "anthropic_api", usage_routes.BalanceAnchorRequest(amount_usd=amount))

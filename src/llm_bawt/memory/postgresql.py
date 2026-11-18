@@ -430,6 +430,25 @@ class PostgreSQLMemoryBackend(
         The parents are created with the full current schema; runtime
         bootstrap does not migrate legacy shard tables.
         """
+        self.provision_shared_schema(self.engine, self.embedding_dim)
+
+        def bootstrap_partitions(conn) -> None:
+            ensure_bot_partitions(conn, self.bot_id_sanitized)
+
+        self._schema_guard.run(
+            self.engine,
+            ("memory-partitions", self.bot_id_sanitized),
+            bootstrap_partitions,
+        )
+
+    @classmethod
+    def provision_shared_schema(cls, engine: Any, embedding_dim: int) -> None:
+        """Provision bot-independent memory schema (parents, sessions).
+
+        Needs no bot identity: app startup calls it so read-only paths on a
+        fresh install find ``sessions`` and the parents before any bot has
+        written (TASK-2449). Bot partitions stay lazy.
+        """
         def bootstrap_shared(conn) -> None:
             conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
             conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
@@ -437,7 +456,7 @@ class PostgreSQLMemoryBackend(
                 conn.dialect.name == "postgresql" and
                 conn.execute(text("SELECT to_regclass('public.messages') IS NULL")).scalar_one()
             )
-            ensure_parent_tables(conn, self.embedding_dim)
+            ensure_parent_tables(conn, embedding_dim)
             sessions_was_new = (
                 conn.dialect.name == "postgresql" and
                 conn.execute(text("SELECT to_regclass('public.sessions') IS NULL")).scalar_one()
@@ -518,25 +537,28 @@ class PostgreSQLMemoryBackend(
             from ..bot_session_state import BotSessionState
             BotSessionState.ensure_schema(conn)
 
-        self._schema_guard.run(
-            self.engine,
-            ("memory-shared", self.embedding_dim),
+        cls._schema_guard.run(
+            engine,
+            ("memory-shared", embedding_dim),
             bootstrap_shared,
-        )
-
-        def bootstrap_partitions(conn) -> None:
-            ensure_bot_partitions(conn, self.bot_id_sanitized)
-
-        self._schema_guard.run(
-            self.engine,
-            ("memory-partitions", self.bot_id_sanitized),
-            bootstrap_partitions,
         )
 
     @classmethod
     def get_short_term_manager(cls, config: Any, bot_id: str = "") -> "PostgreSQLShortTermManager":
         """Factory method to get a short-term memory manager."""
         return PostgreSQLShortTermManager(config, bot_id)
+
+
+def provision_shared_memory_schema(config: Any) -> None:
+    """App-startup entry: shared memory schema with no bot identity (TASK-2449)."""
+    from ..utils.db import get_shared_engine
+
+    engine = get_shared_engine(config)
+    if engine is None:
+        raise RuntimeError("shared memory schema requires Postgres credentials")
+    PostgreSQLMemoryBackend.provision_shared_schema(
+        engine, int(getattr(config, "MEMORY_EMBEDDING_DIM", 384))
+    )
 
 
 # Compatibility export: existing callers import this class from postgresql.py.

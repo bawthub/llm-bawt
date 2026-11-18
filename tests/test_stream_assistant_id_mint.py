@@ -16,7 +16,7 @@ __all__ = ["_isolate"]
 
 
 @pytest.mark.parametrize("supplied", [None, "11111111-2222-3333-4444-555555555555"])
-@pytest.mark.parametrize("content_note", [None, '{"untrusted_content":true,"source":"fleet-delivery"}'])
+@pytest.mark.parametrize("content_note", [None, '{"source":"fleet-delivery","coordination":true}'])
 def test_stream_turn_events_and_row_share_one_assistant_id(monkeypatch, supplied, content_note):
     from llm_bawt.service import chat_streaming
     from llm_bawt.service.turn_stream_finalize import TurnStreamFinalizer

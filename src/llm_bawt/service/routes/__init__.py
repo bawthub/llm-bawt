@@ -49,6 +49,7 @@ from .workspace_provenance import router as workspace_provenance_router
 from .inter_bot_deliveries import router as inter_bot_deliveries_router
 from .bridge_inbox import router as bridge_inbox_router
 from .queue_hold import router as queue_hold_router
+from .bot_availability import router as bot_availability_router
 from .agent_context import router as agent_context_router
 from .usage import router as usage_router
 # TASK-214: avatar_animations CRUD moved to bawthub Prisma.
@@ -80,6 +81,7 @@ all_routers = [
     inter_bot_deliveries_router,
     bridge_inbox_router,
     queue_hold_router,
+    bot_availability_router,
     agent_context_router,
     usage_router,
     jobs_router,

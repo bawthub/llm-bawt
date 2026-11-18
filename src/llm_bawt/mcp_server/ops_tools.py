@@ -209,6 +209,7 @@ async def ops_run(
             operation_slug=operation,
             args={} if args is None else args,
             idempotency_key=idem,
+            require_catalog_free=True,
             **provenance,
         )
     except OpsDispatchError as exc:

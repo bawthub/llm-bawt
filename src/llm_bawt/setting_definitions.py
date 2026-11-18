@@ -508,16 +508,17 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
     # site is JOB-SPECIFIC FIRST, then the shared maintenance_model fallback:
     #     <job>_model -> maintenance_model
     # so each job's own picker actually controls that job, and maintenance_model
-    # is the single "default for all jobs" knob. The terminal default lives on
-    # maintenance_model. Its default is a local model alias that a fresh tenant
-    # may not define, so set maintenance_model when provisioning.
+    # is the single "default for all jobs" knob. It defaults to unset: a fresh
+    # tenant's catalog has no fixed alias, and every caller treats None as its
+    # designed fallback (heuristics / "unconfigured") instead of failing on a
+    # missing model (TASK-2449). Set it in Settings to enable model-backed jobs.
     # These retire the env/config vars SUMMARIZATION_MODEL / EXTRACTION_MODEL /
     # MAINTENANCE_MODEL / PROFILE_MAINTENANCE_MODEL (option (a): keep the shared
     # maintenance knob).
     "maintenance_model": SettingDefinition(
         key="maintenance_model",
         type="str",
-        default="dolphin-qwen-3b",
+        default="",
         applies_to=(),  # GLOBAL-ONLY: read from the global scope; bot rows ignored.
         storage=STORAGE_RUNTIME_SETTING,
         label="Default job model (all jobs)",
