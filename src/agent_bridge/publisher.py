@@ -1,7 +1,7 @@
 """Redis Streams publisher for agent bridge events.
 
-Events are published to a Redis Stream keyed by session:
-    agent:events:{session_key}
+Run events are published to per-run streams:
+    agent:run:{request_id}
 
 History-persist commands are published to:
     agent:history
@@ -39,7 +39,6 @@ def _bridge_commands_stream(mansion: str) -> str:
     return f"{mansion}:house:{house}"
 
 # Stream names
-EVENTS_STREAM_PREFIX = "agent:events:"
 HISTORY_STREAM = "agent:history"
 # TASK-2077: a bridge process started with BAWT_HOUSE=<H> reads, acks and
 # claims only its house stream, so every bridge reader site follows this one
@@ -56,8 +55,6 @@ SYSTEM_EVENTS_PREFIX = "system_events:"
 # Shared bot-configuration notifications (no user-specific data in payloads).
 GLOBAL_CONFIG_STREAM = f"{UNIFIED_EVENTS_PREFIX}system:__config__"
 
-# Keep last 10k events per session stream (auto-trimmed)
-STREAM_MAXLEN = 10_000
 # Unified event streams are smaller — tool events + lifecycle only
 UNIFIED_STREAM_MAXLEN = 5_000
 # Run response streams are shorter-lived. This is a runaway BACKSTOP, not a
@@ -109,27 +106,6 @@ class RedisPublisher:
         if event.provider is None and self._default_provider is not None:
             event.provider = self._default_provider
         return event
-
-    def publish_event(self, event: AgentEvent) -> str | None:
-        """Publish an event to the session's Redis Stream. Returns the stream ID."""
-        if not self._connected:
-            return None
-        stream_key = f"{EVENTS_STREAM_PREFIX}{event.session_key}"
-        self._stamp_provider(event)
-        try:
-            data = event.to_dict()
-            # Redis Streams fields must be flat str->str
-            fields = {"payload": json.dumps(data, ensure_ascii=False, default=str)}
-            stream_id = self._redis.xadd(
-                stream_key,
-                fields,
-                maxlen=STREAM_MAXLEN,
-                approximate=True,
-            )
-            return stream_id
-        except Exception:
-            logger.exception("Failed to publish event to Redis stream %s", stream_key)
-            return None
 
     def publish_run_event(self, request_id: str, event: AgentEvent) -> str | None:
         """Publish an event to a per-run response stream for the requesting client."""

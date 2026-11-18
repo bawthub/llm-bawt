@@ -10,6 +10,8 @@ import pytest
 
 HOOK = Path(__file__).resolve().parents[1] / ".githooks" / "pre-commit"
 POST_CHECKOUT = HOOK.with_name("post-checkout")
+SCAN_PASS = "import sys\nsys.exit(0)\n"
+SCAN_REFUSE = "import sys\nprint('NEW scan-hit')\nsys.exit(1)\n"
 
 
 def git(where: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -33,7 +35,11 @@ def repo(tmp_path: Path) -> tuple[Path, Path]:
     hooks = shared / ".githooks"
     hooks.mkdir()
     shutil.copy2(HOOK, hooks / "pre-commit")
-    git(shared, "add", ".githooks/pre-commit")
+    # The hook runs the general-use scan (TASK-2441); its own suite covers the
+    # scanner, so these path-guard fixtures use a pass-through stand-in.
+    (shared / "scripts").mkdir()
+    (shared / "scripts" / "general_use_contract.py").write_text(SCAN_PASS)
+    git(shared, "add", ".githooks/pre-commit", "scripts/general_use_contract.py")
     git(shared, "commit", "-qm", "seed hook before activation")
     git(shared, "config", "core.hooksPath", ".githooks")
     linked = tmp_path / ".wt-service-al"
@@ -68,6 +74,16 @@ def test_owner_task_worktree_commits_and_other_owner_is_refused(repo: tuple[Path
     assert "own task branch" in result.stderr
     assert git(linked, "rev-parse", "HEAD").stdout.strip() == original
     assert git(shared, "branch", "--show-current").stdout.strip() == "master"
+
+
+def test_owner_commit_is_refused_when_general_use_scan_refuses(repo: tuple[Path, Path]) -> None:
+    _, linked = repo
+    (linked / "scripts" / "general_use_contract.py").write_text(SCAN_REFUSE)
+    original = git(linked, "rev-parse", "HEAD").stdout.strip()
+    result = git(linked, "commit", "--allow-empty", "-m", "TASK-2441 scan hit", check=False)
+    assert result.returncode != 0
+    assert "general-use scan refused" in result.stderr
+    assert git(linked, "rev-parse", "HEAD").stdout.strip() == original
 
 
 def test_linked_worktree_refuses_canonical_and_detached_commits(repo: tuple[Path, Path]) -> None:

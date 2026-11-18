@@ -479,7 +479,8 @@ services:
       # container's bind address). From inside a bridge the service is reachable
       # at the compose service name `app`.
       - LLM_BAWT_SERVICE_HOST=app
-      - REDIS_URL=${LLM_BAWT_REDIS_URL:-redis://redis:6379/0}
+      # TASK-2439: Redis comes only from LLM_BAWT_REDIS_URL below; a REDIS_URL
+      # copy would repeat the secret, which the ops reconcile refuses.
       # TASK-2235: see the app; the video server's voice-park check sends it.
       - LLM_BAWT_VOICE_BACKEND_ORIGINS
       # -- From .env (TASK-1476) --

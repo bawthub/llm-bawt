@@ -4,7 +4,8 @@ Usage:
     python -m local_model_bridge
 
 Environment:
-    REDIS_URL                          — Redis connection (default redis://localhost:6379/0)
+    LLM_BAWT_REDIS_URL                 — Redis connection; falls back to REDIS_URL,
+                                         then redis://localhost:6379/0
     LLM_BAWT_API_URL                   — main app base URL for /v1/models calls
     LOCAL_MODEL_BACKEND_NAME           — backend filter on commands stream (default 'local')
     LOCAL_MODEL_BRIDGE_HEALTH_PORT     — TCP port for /health (default 8683)
@@ -126,10 +127,12 @@ def main() -> None:
     logger = logging.getLogger("local_model_bridge")
 
     backend_name = os.getenv("LOCAL_MODEL_BACKEND_NAME", "local")
-    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    # LLM_BAWT_REDIS_URL carries the Redis password; the ops renderer refuses a
+    # secret repeated under a second name, so Compose passes only this one.
+    redis_url = os.getenv("LLM_BAWT_REDIS_URL") or os.getenv("REDIS_URL", "redis://localhost:6379/0")
     publisher = RedisPublisher(redis_url, default_provider=backend_name)
     if not publisher.connected:
-        logger.error("Cannot connect to Redis at %s", redis_url)
+        logger.error("Cannot connect to Redis at %s", redis_url.rsplit("@", 1)[-1])
         sys.exit(1)
 
     bridge = LocalModelBridge(

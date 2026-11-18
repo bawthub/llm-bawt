@@ -485,6 +485,12 @@ class ApprovalAwareFastMCP(MCPServer):
                     "Verifies the hostname-routed health report; restores the previous container "
                     "if verification fails. Changed target/configuration cancels execution."
                 )
+            if name == "ops_run" and operations_snapshot and operations_snapshot.get("host_key"):
+                from ..ops import host_key  # TASK-2430: the frozen SSH destination and key
+
+                approval_prompt = host_key.approval_text(
+                    operations_snapshot["spec"], operations_snapshot["host_key"], decision.prompt
+                )
             if name == "ops_run" and operations_snapshot and operations_snapshot.get("remove"):
                 from ..ops import container_remove  # TASK-1439 T2c: one stopped orphan
 

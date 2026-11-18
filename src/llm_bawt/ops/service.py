@@ -18,7 +18,7 @@ from .tagged_config_reconcile import ACTION as TAGGED_CONFIG_ACTION, valid_tagge
 from .plan_reconcile import ACTION as PLAN_ACTION, valid_plan_snapshot
 from .container_remove import ACTION as REMOVE_ACTION, valid_remove_binding  # TASK-1439 T2c
 from .runtime_source import valid_runtime_binding
-from . import sequence
+from . import host_key, sequence
 from .executor import (ConfigCheckError, DockerExecutor, Executor, ExecutorError, QuiesceFenceUnsupported,
                        validate_spec)
 from .execution_mode import snapshot_execution_mode
@@ -202,6 +202,25 @@ class OpsService:
     def executors(self):
         """Registered executors by kind (read-only copy, for health reporting)."""
         return dict(self._executors)
+
+    def bot_public_key(self) -> dict:
+        """TASK-2430: the bot public key host_key jobs install, read through
+        the catalog's host_key spec; from the ops service when admission-only."""
+        if self.admission_only:
+            return self.preparer.bot_public_key()
+        for op in self.store.list_operations(include_disabled=True):
+            try:
+                spec = json.loads(op.command_script or "{}")
+            except ValueError:
+                continue
+            if isinstance(spec, dict) and spec.get("action") == host_key.ACTION:
+                executor = self._resolve_executor(op.executor_kind)
+                try:
+                    line = executor.host_key_public_key(spec)
+                except ExecutorError as exc:
+                    raise OpsDispatchError("bot_key_unavailable", str(exc)) from exc
+                return {"public_key": line, "fingerprint": host_key.fingerprint(line.split()[1])}
+        raise OpsDispatchError("bot_key_unavailable", "no host access operation is in the catalog")
 
     def executor_readiness(self) -> dict[str, str | None]:
         """Each executor kind's readiness reason (``None`` when ready), from
@@ -425,6 +444,16 @@ class OpsService:
                 raise OpsDispatchError("plan_invalid", (
                     "the service plan does not validate: targets must share one Compose project, distinct "
                     "containers, depend only on earlier targets, and the records target must be the app"))
+        elif spec["action"] == host_key.ACTION:
+            # TASK-2430: pin the host record and the bot key fingerprint now;
+            # dispatch re-resolves the record and the worker rechecks the key.
+            from . import host_access
+            try:
+                executor.check_target(spec, merged)
+                snapshot["host_key"] = host_access.pin(self.store.engine, merged.get("host_id"),
+                                                       executor.host_key_fingerprint(spec), spec["op"])
+            except (ValueError, ExecutorError) as exc:
+                raise OpsDispatchError("target_unavailable", str(exc)) from exc
         elif spec["action"] == REMOVE_ACTION:
             # TASK-1439 T2c: the approver sees the one stopped container and the
             # project render proving no service claims it; the worker re-checks.
@@ -548,6 +577,11 @@ class OpsService:
                 raise ValueError("sequence binding on a non-sequence operation")
             if not valid_routing_binding(detached):
                 raise ValueError("snapshot routing binding mismatch")
+            if detached["spec"].get("action") == host_key.ACTION:
+                from . import host_access
+                host_access.check_pin(self.store.engine, detached.get("host_key"))
+            elif "host_key" in detached:
+                raise ValueError("host_key binding on another operation")
             if not valid_remove_binding(detached):
                 raise ValueError("snapshot removal binding mismatch")
             if not valid_runtime_binding(detached):

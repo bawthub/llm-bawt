@@ -34,7 +34,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import Response
 import uvicorn
 
-from .control_protocol import (CONTROL_PORT, EXECUTORS_PATH, MAX_BODY_BYTES, PREPARE_PATH, PROTOCOL_FIELD,
+from .control_protocol import (BOT_KEY_PATH, CONTROL_PORT, EXECUTORS_PATH, MAX_BODY_BYTES, PREPARE_PATH, PROTOCOL_FIELD,
                                PROTOCOL_VERSION, SERVER_BUDGET_SECONDS, control_token, refusal_status,
                                token_matches)
 from .health_http import _HealthProtocol
@@ -49,7 +49,7 @@ DEFAULT_BUDGET_SECONDS = SERVER_BUDGET_SECONDS
 READ_TIMEOUT_SECONDS = 5.0
 RETRY_AFTER_SECONDS = 2
 CONNECTION_LIMIT = 32
-ROUTES = {PREPARE_PATH: "POST", EXECUTORS_PATH: "GET"}
+ROUTES = {PREPARE_PATH: "POST", EXECUTORS_PATH: "GET", BOT_KEY_PATH: "GET"}
 
 
 def control_concurrency() -> int:
@@ -106,6 +106,10 @@ def create_control_app(control: "OpsControlServer") -> FastAPI:
     @app.get(EXECUTORS_PATH)
     async def executors():
         return await control.run_bounded(lambda: {"executors": control.service().executor_readiness()})
+
+    @app.get(BOT_KEY_PATH)
+    async def bot_key():
+        return await control.run_bounded(lambda: {"bot_key": control.service().bot_public_key()})
 
     return app
 

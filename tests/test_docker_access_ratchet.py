@@ -69,6 +69,7 @@ OPS_ADAPTER = {
     "llm_bawt/ops/health_collector.py": ({"import docker"}, "samples container state for /v1/health"),
     "llm_bawt/ops/worker.py": ({"daemon socket", "engine api"}, "the one-shot worker's daemon connection"),
     "llm_bawt/ops/wake_on_lan.py": ({"engine api"}, "worker-side fixed-target wake helper create/start/remove"),
+    "llm_bawt/ops/host_key.py": ({"engine api"}, "TASK-2430 worker-side fixed SSH exec in the existing bridge"),
     "llm_bawt/ops/compose_secrets.py": ({"engine api"},
                                         "TASK-2386 worker-side sealed helper filling the root-only secrets volume"),
     "llm_bawt/ops/sealed_container.py": ({"engine api"}, "worker-side sealed container create/start/exec"),

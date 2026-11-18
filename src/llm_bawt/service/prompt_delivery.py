@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import uuid
@@ -17,9 +18,30 @@ from .prompt_delivery_state import gate_reason, receipt, schedule_author, transi
 from .prompt_schedule_models import NONTERMINAL, PromptOccurrence, PromptSchedule
 from .prompt_schedule_store import PromptScheduleStore
 from .scheduler import ScheduledJob, JobRun
+from .wakeup_failure import FAILED_STATES, failed_notice, recipients
 from .wakeup_staleness import skipped_notice, wakeup_stale_reason
 
 logger = logging.getLogger(__name__)
+
+
+def _notifies_after_commit(method):
+    """Send the failure notices a method's transaction queued, once it commits.
+
+    Every ``_finish`` call runs inside the method's own ``session.begin()``
+    block, so a normal return means that transaction committed. An exception
+    means it rolled back, and its queued notices are dropped with it.
+    """
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        self._failed_pending = []
+        try:
+            result = method(self, *args, **kwargs)
+        except BaseException:
+            self._failed_pending = []
+            raise
+        self._notify_failed()
+        return result
+    return wrapper
 
 
 class PromptDeliveryWorker:
@@ -28,6 +50,8 @@ class PromptDeliveryWorker:
         self.service = service
         self.store = PromptScheduleStore(engine)
         self._last_retention = None
+        self._notices = []
+        self._failed_pending = []
 
     async def sweep(self):
         dispatcher = getattr(self.service, "_inter_bot_dispatcher", None)
@@ -85,6 +109,7 @@ class PromptDeliveryWorker:
                 self._enqueue_error(occurrence.run_id, str(exc), now)
         return records + self._notices
 
+    @_notifies_after_commit
     def _enqueue(self, run_id, prepared, dispatcher, now):
         snapshot, session_id, model, job_id, key = prepared
         sender = scheduler_sender_id(snapshot["owner_user_id"])
@@ -132,8 +157,8 @@ class PromptDeliveryWorker:
                     transition(session, *rows, reason[0], now, error=reason[1])
                     return None
                 if not model or not session_id:
-                    transition(session, *rows, "failed", now,
-                               error="Prepared occurrence lost its bound model or session")
+                    self._finish(session, rows, "failed", now,
+                                 error="Prepared occurrence lost its bound model or session")
                     return None
                 record, _ = dispatcher.store.enqueue(
                     sender_bot_id=sender,
@@ -196,6 +221,61 @@ class PromptDeliveryWorker:
         )
         self._notices.append(record)
 
+    def _finish(self, session, rows, state, now, *, error=None, evidence=None):
+        """Make an occurrence terminal; a failed wake-up also tells its bots.
+
+        The notices are only queued here and sent by ``_notify_failed`` after
+        this transaction commits (see ``_notifies_after_commit``).
+        """
+        transition(session, *rows, state, now, error=error, evidence=evidence)
+        if state in FAILED_STATES:
+            occurrence = rows[2]
+            self._failed_pending.append(
+                (occurrence.run_id, dict(occurrence.snapshot_json or {}), state, error))
+
+    def _notify_failed(self):
+        """One system notice per recipient for each committed failure (TASK-2436).
+
+        Each notice is its own transaction, after the failure has committed.
+        Enqueue takes the recipient's admission lock, and that lock is held
+        until commit, so sending several notices in one transaction (or in the
+        occurrence's own, after its row locks) would collect several bots' locks
+        in an order another failure could reverse, and deadlock. One lock per
+        transaction cannot. The key per occurrence and recipient keeps a
+        replayed notice single. A notice that fails is logged and not retried;
+        the occurrence stays terminal either way.
+        """
+        from ..bot_identities import SYSTEM_BOT_ID
+        from ..message_authorship import AuthorReference
+
+        pending, self._failed_pending = self._failed_pending, []
+        dispatcher = (getattr(self, "_dispatcher", None)
+                      or getattr(self.service, "_inter_bot_dispatcher", None))
+        if dispatcher is None:
+            return
+        for run_id, snapshot, state, error in pending:
+            for target in recipients(snapshot):
+                message = failed_notice(snapshot, run_id, state, error, target)
+                try:
+                    record, _ = dispatcher.store.enqueue(
+                        sender_bot_id=SYSTEM_BOT_ID, target_bot_id=target, message=message,
+                        author=AuthorReference.bot(SYSTEM_BOT_ID),
+                        idempotency_key=f"wakeup-failed:{run_id}:{target}",
+                        message_kind="WAKEUP_FAILED", task_id=snapshot.get("task_id"),
+                        on_gate="hold",
+                        metadata={"prompt_schedule_failed": {"occurrence_id": run_id}},
+                        payload={
+                            "bot_id": target, "user": snapshot["owner_user_id"], "session_id": None,
+                            "messages": [{"role": "user", "content": message}],
+                            "prefer_steer": False, "reply_mode": "async",
+                            "extract_memory": False, "augment_memory": False, "stream": True,
+                        },
+                    )
+                    self._notices.append(record)
+                except Exception:
+                    logger.warning("Wake-up failure notice to %s failed for run %s",
+                                   target, run_id, exc_info=True)
+
     def _rows(self, session, run_id):
         job_id = session.exec(select(PromptOccurrence.job_id).where(
             PromptOccurrence.run_id == run_id)).first()
@@ -242,6 +322,7 @@ class PromptDeliveryWorker:
         reason = "Persistent schedule context was replaced because its previous thread is no longer an available automation thread."
         return str(uuid.uuid4()), reason
 
+    @_notifies_after_commit
     def _prepare(self, run_id, now, stale=None):
         from ..memory.postgresql_short_term import PostgreSQLShortTermManager
 
@@ -273,8 +354,8 @@ class PromptDeliveryWorker:
                     requested_model=snapshot.get("model"), scope="schedule",
                 ))
                 if not preview["selected_bot_id"]:
-                    transition(session, *rows, "failed", now,
-                               error="No opted-in compatible bots for automatic occurrence")
+                    self._finish(session, rows, "failed", now,
+                                 error="No opted-in compatible bots for automatic occurrence")
                     return None
                 snapshot["bot_id"] = preview["selected_bot_id"]
                 snapshot["selection_reason"] = preview["reason"]
@@ -318,7 +399,7 @@ class PromptDeliveryWorker:
                                           "title_source": "automation", "prompt_scope": scope},
                     )
                 except ValueError as exc:
-                    transition(session, *rows, "failed", now, error=str(exc))
+                    self._finish(session, rows, "failed", now, error=str(exc))
                     return None
                 occurrence.session_id = session_id
                 if not snapshot["clear_context"]:
@@ -354,6 +435,7 @@ class PromptDeliveryWorker:
         row = session.connection().execute(text(query), {"id": delivery_id}).mappings().first()
         return DeliveryRecord.from_mapping(row) if row else None
 
+    @_notifies_after_commit
     def _reconcile(self, run_id, now):
         with Session(self.engine) as session, session.begin():
             rows = self._rows(session, run_id)
@@ -364,7 +446,7 @@ class PromptDeliveryWorker:
                 return None
             record = self._locked_delivery(session, occurrence.delivery_id)
             if record is None:
-                transition(session, *rows, "unknown", now, error="Persisted delivery receipt is missing; not replayed")
+                self._finish(session, rows, "unknown", now, error="Persisted delivery receipt is missing; not replayed")
                 return None
             state, error = self._delivery_state(record)
             if record.status == "QUEUED" and record.transport_accepted_at is None:
@@ -395,7 +477,7 @@ class PromptDeliveryWorker:
                     # An optional context receipt must never prevent the
                     # canonical occurrence/run from reaching its terminal state.
                     logger.warning("Completion notice failed for run %s", run_id, exc_info=True)
-            transition(session, *rows, state, now, error=error, evidence=self._evidence(record))
+            self._finish(session, rows, state, now, error=error, evidence=self._evidence(record))
             return record
 
     def _delivery_state(self, record):

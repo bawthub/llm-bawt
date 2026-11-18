@@ -85,7 +85,6 @@ NULL-`user_id` rows leaked (~503) and are reaped by the migration step.
 | Cluster | Tables |
 |---|---|
 | **Memory** | `memories` (pgvector, partitioned by `bot_id`), `forgotten_messages` (soft-deleted bubbles, partitioned), `entity_profiles`, `entity_profile_attributes`, `user_profiles` |
-| **Agent execution** | `agent_runs`, `agent_events`, `agent_session_state` |
 | **Approvals** | `tool_approval_policies` (rules), `tool_approval_requests` (audit), `chat_pending_questions` |
 | **Config / models** | `bot_profiles`, `runtime_settings`, `prompt_templates` (+`prompt_template_versions`), `models`, `model_endpoints`, `access_paths`, `model_definitions`, `model_definitions_compat` |
 | **Jobs** | `scheduled_jobs` → `job_runs` |

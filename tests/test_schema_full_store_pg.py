@@ -48,7 +48,8 @@ def test_pristine_full_store_catalog(full_store_db, tmp_path):
     # + TASK-502's turn_egress_requests (EgressCaptureStore via TurnLogStore).
     # + TASK-2396's house_retirements (BotProfileStore bootstraps it).
     # + TASK-2383's turn exposure, lineage and write-admission receipts.
-    assert len(relations) == 72, sorted(relations)
+    # - TASK-1624's retired agent_runs, agent_events and agent_session_state.
+    assert len(relations) == 69, sorted(relations)
     assert "memory_ownership_activations" in {key.split(".")[-1] for key in relations}
     assert {"system_events", "system_gates", "gate_members", "gate_escalations", "bot_tag_catalog", "bot_profile_tags",
             "api_balance_ledger", "api_balances", "llm_response_records", "worker_lifecycle_records", "utility_usage",
@@ -62,7 +63,8 @@ def test_pristine_full_store_catalog(full_store_db, tmp_path):
     output_dir.mkdir(parents=True, exist_ok=True)
     catalog_tool["write_snapshot"](output_dir / "pristine-full-store.jsonl", lines, metadata)
     # utility_usage is nested in the existing TurnLogStore step, not a new step.
-    assert len(json.loads((output_dir / "pristine-full-store.jsonl.meta.json").read_text())["bootstrap_manifest"]) == 22
+    # TASK-1624 removed the agent_bridge.store step (22 -> 21).
+    assert len(json.loads((output_dir / "pristine-full-store.jsonl.meta.json").read_text())["bootstrap_manifest"]) == 21
 
 
 def test_upgrade_synthetic_legacy_converges(full_store_db, tmp_path, monkeypatch):
@@ -92,14 +94,6 @@ def test_upgrade_synthetic_legacy_converges(full_store_db, tmp_path, monkeypatch
         for column, width in (("tool_use_id", 128), ("parent_tool_use_id", 128),
                               ("approval_request_id", 128), ("approval_status", 24)):
             conn.exec_driver_sql(f"ALTER TABLE public.tool_call_records ALTER COLUMN {column} TYPE varchar({width})")
-        for table, old, new in (
-            ("agent_runs", "agent_runs_pkey", "openclaw_runs_pkey"),
-            ("agent_events", "agent_events_pkey", "openclaw_events_pkey"),
-            ("agent_events", "agent_events_event_dedupe_key_key", "openclaw_events_event_dedupe_key_key"),
-            ("agent_session_state", "agent_session_state_pkey", "openclaw_session_state_pkey"),
-        ):
-            conn.exec_driver_sql(f"ALTER TABLE public.{table} RENAME CONSTRAINT {old} TO {new}")
-        conn.exec_driver_sql("ALTER SEQUENCE public.agent_events_id_seq RENAME TO openclaw_events_id_seq")
         for index in ("ix_bot_profiles_endpoint_id", "ix_bot_profiles_prompt_override_id",
                       "ix_entity_profiles_email", "ix_tool_call_records_tool_use_id", "ix_turn_logs_ended_at"):
             conn.exec_driver_sql(f"DROP INDEX public.{index}")

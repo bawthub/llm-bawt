@@ -174,6 +174,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_utility_usage_pg.py::",
     "test_playground_pg.py::",
     "test_media_gc_pg.py::",
+    "test_wakeup_failure_notice_pg.py::",
     "test_terminal_delivery_guards.py::",
     "test_terminal_history.py::TestPostgresTerminalHistory::",
     "test_terminal_reservation_protocol.py::TestPostgresReservationHandoff::",

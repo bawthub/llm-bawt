@@ -202,20 +202,9 @@ swap; do not assume an aborted concurrent build rolled back completely.
 
 ## Historical names; FK/index already present
 
-After equivalence/collision checks, rename the four existing constraints,
-which renames their backing indexes; **do not duplicate unique indexes**:
-
-```sql
-ALTER TABLE public.agent_runs RENAME CONSTRAINT openclaw_runs_pkey TO agent_runs_pkey;
-ALTER TABLE public.agent_events RENAME CONSTRAINT openclaw_events_pkey TO agent_events_pkey;
-ALTER TABLE public.agent_events RENAME CONSTRAINT openclaw_events_event_dedupe_key_key TO agent_events_event_dedupe_key_key;
-ALTER TABLE public.agent_session_state RENAME CONSTRAINT openclaw_session_state_pkey TO agent_session_state_pkey;
-ALTER SEQUENCE public.openclaw_events_id_seq RENAME TO agent_events_id_seq;
-```
-
-Sequence rename preserves OID/OWNED BY/grants/current value; inspect the
-`agent_events.id` regclass default afterwards and never reset/recreate it.
-The existing `idx_sessions_one_active_per_bot_user` is already unique with
+The former `agent_runs`, `agent_events` and `agent_session_state` constraint
+renames are obsolete: TASK-1624 retired those tables (OpenClaw-only, no
+reader or writer after TASK-1439). The existing `idx_sessions_one_active_per_bot_user` is already unique with
 `NULLS NOT DISTINCT WHERE status='active'`: source creates it on new databases,
 so **do not** build it again. Existing live `messages.fk_messages_session` is
 validated NO ACTION, NOT DEFERRABLE; existing live

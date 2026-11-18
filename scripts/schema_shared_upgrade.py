@@ -19,14 +19,6 @@ MISSING_INDEXES = (
     ("ix_tool_call_records_tool_use_id", "tool_call_records", "tool_use_id"),
     ("ix_turn_logs_ended_at", "turn_logs", "ended_at"),
 )
-CONSTRAINT_RENAMES = (
-    ("agent_runs", "openclaw_runs_pkey", "agent_runs_pkey", "PRIMARY KEY (run_id)"),
-    ("agent_events", "openclaw_events_pkey", "agent_events_pkey", "PRIMARY KEY (id)"),
-    ("agent_events", "openclaw_events_event_dedupe_key_key",
-     "agent_events_event_dedupe_key_key", "UNIQUE (event_dedupe_key)"),
-    ("agent_session_state", "openclaw_session_state_pkey", "agent_session_state_pkey",
-     "PRIMARY KEY (session_key)"),
-)
 WIDTHS = (("tool_use_id", 128), ("parent_tool_use_id", 128),
           ("approval_request_id", 128), ("approval_status", 24))
 FLAGS = (("tts_mode", "false"), ("include_summaries", "true"),
@@ -66,8 +58,8 @@ def _preflight(conn, expected_db: str) -> None:
     db, owner, version = conn.execute(text("SELECT current_database(),current_user,current_setting('server_version_num')")).one()
     _require(db == expected_db and db.endswith("_test") and int(version) >= 160000,
              "actual database identity or PostgreSQL 16+ mismatch")
-    for table in ("bot_profiles", "chat_pending_questions", "tool_call_records", "agent_events",
-                  "agent_runs", "agent_session_state", "entity_profiles", "turn_logs", "inter_bot_deliveries"):
+    for table in ("bot_profiles", "chat_pending_questions", "tool_call_records",
+                  "entity_profiles", "turn_logs", "inter_bot_deliveries"):
         relation = conn.execute(text("""
             SELECT relkind, pg_get_userbyid(relowner) FROM pg_class
             WHERE oid=to_regclass(:table)
@@ -94,27 +86,9 @@ def _preflight(conn, expected_db: str) -> None:
              and "target_bot_id, ordinal" in old[1] and "'QUEUED'" in old[1]
              and "'DISPATCHING'" in old[1] and "'STEERING'" not in old[1],
              "old dispatch index definition, owner or validity changed")
-    for name in ("ix_inter_bot_delivery_dispatch_next", "ix_inter_bot_delivery_dispatch_previous",
-                 "agent_events_id_seq"):
+    for name in ("ix_inter_bot_delivery_dispatch_next", "ix_inter_bot_delivery_dispatch_previous"):
         _require(conn.execute(text("SELECT to_regclass(:name)"), {"name": f"public.{name}"}).scalar_one() is None,
                  f"replacement name {name} already occupied")
-    for table, old_name, new_name, definition in CONSTRAINT_RENAMES:
-        row = conn.execute(text("""
-            SELECT pg_get_constraintdef(co.oid,true), co.convalidated,
-                   x.indisvalid, x.indisready
-            FROM pg_constraint co JOIN pg_class t ON t.oid=co.conrelid
-            JOIN pg_namespace n ON n.oid=t.relnamespace
-            JOIN pg_index x ON x.indexrelid=co.conindid
-            WHERE n.nspname='public' AND t.relname=:table AND co.conname=:name
-        """), {"table": table, "name": old_name}).one_or_none()
-        _require(row == (definition, True, True, True), f"{table}.{old_name} changed")
-        _require(conn.execute(text("""
-            SELECT count(*) FROM pg_constraint WHERE conrelid=to_regclass(:table) AND conname=:name
-        """), {"table": f"public.{table}", "name": new_name}).scalar_one() == 0,
-                 f"{table}.{new_name} already exists")
-        _require(_index(conn, new_name) is None, f"index {new_name} already exists")
-    _require(conn.execute(text("SELECT pg_get_serial_sequence('public.agent_events','id')")).scalar_one()
-             == "public.openclaw_events_id_seq", "event sequence ownership changed")
 
 
 def _bounded(conn) -> None:
@@ -184,8 +158,3 @@ def upgrade_shared_schema(engine: Engine, *, expected_db: str) -> None:
         conn.exec_driver_sql("ALTER INDEX public.ix_inter_bot_delivery_dispatch RENAME TO ix_inter_bot_delivery_dispatch_previous")
         conn.exec_driver_sql("ALTER INDEX public.ix_inter_bot_delivery_dispatch_next RENAME TO ix_inter_bot_delivery_dispatch")
     _concurrent(engine, "DROP INDEX CONCURRENTLY public.ix_inter_bot_delivery_dispatch_previous")
-    with engine.begin() as conn:
-        _bounded(conn)
-        for table, old, new, _ in CONSTRAINT_RENAMES:
-            conn.exec_driver_sql(f"ALTER TABLE public.{table} RENAME CONSTRAINT {old} TO {new}")
-        conn.exec_driver_sql("ALTER SEQUENCE public.openclaw_events_id_seq RENAME TO agent_events_id_seq")
