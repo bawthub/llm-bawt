@@ -607,11 +607,10 @@ def test_chatgpt_subscription_discovery_pins_client_version_from_config(monkeypa
     _codex_token(monkeypatch)
     monkeypatch.setattr("llm_bawt.service.model_discovery.httpx.get", fake_get)
 
-    from agent_bridge.chatgpt_models import CHATGPT_MODELS_CLIENT_VERSION
-
     monkeypatch.delenv("LLM_BAWT_CODEX_CLIENT_VERSION", raising=False)
     discover_models("codex", Config(_env_file=None))
-    assert observed["params"] == {"client_version": CHATGPT_MODELS_CLIENT_VERSION}
+    # TASK-2468: .163 silently hid the 6.2 models; match the upgraded CLI.
+    assert observed["params"] == {"client_version": "0.170.0"}
 
     monkeypatch.setenv("LLM_BAWT_CODEX_CLIENT_VERSION", "0.200.0")
     discover_models("codex", Config(_env_file=None))
