@@ -135,7 +135,8 @@ def resolve_media_root() -> Path:
     env_root = os.environ.get("LLM_BAWT_MEDIA_ROOT")
     return Path(env_root) if env_root else DEFAULT_MEDIA_ROOT
 
-ALLOWED_SOURCES = ("chat_upload", "tool_generated", "agent_attachment")
+# Must match the media_assets source CHECK constraint (media/assets.py).
+ALLOWED_SOURCES = ("chat_upload", "tool_generated", "agent_attachment", "tts_response")
 
 Variant = Literal["original", "thumb", "preview"]
 

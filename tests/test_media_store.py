@@ -24,6 +24,7 @@ import pytest
 from PIL import Image
 
 from llm_bawt.media.store import (
+    ALLOWED_SOURCES,
     MAX_LONG_EDGE,
     MediaAssetNotFound,
     MediaStore,
@@ -329,6 +330,16 @@ def test_invalid_source_rejected(store: MediaStore) -> None:
     raw = _png_bytes(100, 100)
     with pytest.raises(ValueError):
         store.upload(raw, "image/png", "garbage_source", owner_user_id="user-1")
+
+
+def test_tts_response_source_accepted(store: MediaStore) -> None:
+    """Saved reply audio (response-audio route) uploads with source tts_response."""
+    import llm_bawt.media.assets as assets
+
+    assert set(assets.ALLOWED_SOURCES) == set(ALLOWED_SOURCES)
+    wav = b"RIFF" + (36).to_bytes(4, "little") + b"WAVEfmt " + b"\x00" * 24 + b"data" + b"\x00" * 4
+    asset = store.upload(wav, "audio/wav", "tts_response", "user-1", filename="reply.wav", kind="file")
+    assert asset.source == "tts_response"
 
 
 # ---------------------------------------------------------------------------
