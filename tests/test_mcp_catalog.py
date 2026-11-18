@@ -343,7 +343,10 @@ async def test_catalog_token_budgets():
     # a deferred Blocker remains OPEN. No description warnings were removed.
     # TASK-434: steps_reorder(task_id, step_ids: list[str], bot_id), using
     # existing endpoint and flat/deferred tool surface. Measured 19,370.
-    assert total <= 19370, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-894: initiative_state hold/resume actions plus defer, resolved_ref
+    # and reason args, with the held(423)/deferred(429) stop contract in-band
+    # so a woken run parks instead of retrying. Measured 19,438 (+68).
+    assert total <= 19438, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 
