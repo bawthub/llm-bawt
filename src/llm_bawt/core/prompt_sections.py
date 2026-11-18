@@ -10,6 +10,7 @@ orchestrator stays under the monolith gate as new sections are added.
 import logging
 
 from ..shared.rich_safe import SafeConsole as Console  # never raises (TASK-2434)
+from ..shared.rich_safe import escape
 
 from ..tools import get_tools_prompt
 from .prompt_builder import GLOBAL_SYSTEM_PROMPT, PromptBuilder, SectionPosition
@@ -37,8 +38,9 @@ class PromptSectionsMixin:
                         metadata={"source": "profile_db:user", "gate": "db_available & profile"},
                     )
                     if self.verbose:
-                        console.print(f"[dim]─── User Profile ({self.user_id}) ───[/dim]")
-                        console.print(f"[cyan]{user_context}[/cyan]")
+                        # Profile text is untrusted: escape it (TASK-2434).
+                        console.print(f"[dim]─── User Profile ({escape(str(self.user_id))}) ───[/dim]")
+                        console.print(f"[cyan]{escape(str(user_context))}[/cyan]")
                         console.print(f"[dim]{'─' * 30}[/dim]")
             except Exception as e:
                 logger.warning(f"Failed to load user profile: {e}")
@@ -56,8 +58,8 @@ class PromptSectionsMixin:
                         metadata={"source": "profile_db:bot", "gate": "db_available & profile"},
                     )
                     if self.verbose:
-                        console.print(f"[dim]─── Bot Profile ({self.bot_id}) ───[/dim]")
-                        console.print(f"[magenta]{bot_context}[/magenta]")
+                        console.print(f"[dim]─── Bot Profile ({escape(str(self.bot_id))}) ───[/dim]")
+                        console.print(f"[magenta]{escape(str(bot_context))}[/magenta]")
                         console.print(f"[dim]{'─' * 30}[/dim]")
             except Exception as e:
                 logger.warning(f"Failed to load bot profile: {e}")

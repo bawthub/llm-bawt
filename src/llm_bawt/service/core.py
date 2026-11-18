@@ -9,6 +9,7 @@ import time
 from typing import TYPE_CHECKING
 
 from ..shared.rich_safe import SafeConsole as Console  # never raises (TASK-2434)
+from ..shared.rich_safe import escape
 
 from ..clients import LLMClient, GrokClient
 from ..clients.openai_client import OpenAIClient
@@ -329,7 +330,7 @@ class ServiceLLMBawt(BaseLLMBawt):
             else:
                 logger.exception(f"Failed to initialize memory: {e}")
             if self.verbose:
-                console.print(f"[yellow]Warning:[/yellow] Memory client failed: {e}")
+                console.print(f"[yellow]Warning:[/yellow] Memory client failed: {escape(str(e))}")
 
     def _refresh_history_if_stale(self) -> None:
         """Refresh history from DB only when cache is stale."""

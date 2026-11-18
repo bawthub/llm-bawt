@@ -18,6 +18,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from ..shared.rich_safe import SafeConsole as Console  # never raises (TASK-2434)
+from ..shared.rich_safe import escape
 
 from ..clients import LLMClient
 from ..tools import get_tools_list, query_with_tools
@@ -78,8 +79,8 @@ class BaseLLMBawt(OrchestratorInitializationMixin, PromptSectionsMixin, ABC):
             if row is not None and row.category == PERSONA_CATEGORY and (row.body or "").strip():
                 if self.verbose:
                     console.print(
-                        f"[dim]─── Persona override: {row.title or row.key} "
-                        f"(id={override_id}) ───[/dim]"
+                        f"[dim]─── Persona override: {escape(str(row.title or row.key))} "
+                        f"(id={escape(str(override_id))}) ───[/dim]"
                     )
                 return row.body
             logger.warning(
@@ -311,7 +312,7 @@ class BaseLLMBawt(OrchestratorInitializationMixin, PromptSectionsMixin, ABC):
             self.history_manager.remove_last_message_if_partial("assistant")
             return ""
         except Exception as e:
-            console.print(f"[bold red]Error during query:[/bold red] {e}")
+            console.print(f"[bold red]Error during query:[/bold red] {escape(str(e))}")
             logger.exception(f"Error during query: {e}")
             self.history_manager.remove_last_message_if_partial("assistant")
             return ""

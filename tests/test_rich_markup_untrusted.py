@@ -177,3 +177,53 @@ def test_turn_worker_preview_call_survives_token(verbose_logger, monkeypatch):
     monkeypatch.setattr(worker_log, "_console", console)
     worker_log.llm_context(_messages(_message(CLOSING)))
     worker_log.llm_context(_messages(_message(STYLED)))
+
+
+CONCEAL = "[conceal]" + "hidden" + "[/conceal]"
+
+
+def _plain_console(monkeypatch, module):
+    console = SafeConsole(file=io.StringIO(), force_terminal=False, width=400)
+    monkeypatch.setattr(module, "console", console)
+    return console
+
+
+@pytest.mark.parametrize("token", [STYLED, CONCEAL])
+def test_profile_previews_print_profile_text_literally(monkeypatch, token):
+    """Valid tags parse without error, so they must be escaped, not just survived."""
+    from llm_bawt.core import prompt_sections
+    from llm_bawt.core.prompt_builder import PromptBuilder
+
+    console = _plain_console(monkeypatch, prompt_sections)
+    profiles = NS(
+        get_user_profile_summary=lambda user_id, curated=False: "likes " + token,
+        get_bot_profile_summary=lambda bot_id: "tends " + token,
+    )
+    owner = NS(
+        _db_available=True, profile_manager=profiles, verbose=True,
+        user_id="nick" + token, bot_id="byte" + token,
+        _resolve_setting=lambda _key, default=None: default,
+    )
+    builder = PromptBuilder()
+    prompt_sections.PromptSectionsMixin._sec_user_context(owner, builder, "")
+    prompt_sections.PromptSectionsMixin._sec_bot_traits(owner, builder, "")
+    out = console.file.getvalue()
+    for literal in ("likes " + token, "tends " + token, "nick" + token, "byte" + token):
+        assert literal in out
+    # The prompt itself still carries the profile text unchanged.
+    assert ("likes " + token) in builder.build()
+
+
+def test_persona_title_prints_literally(monkeypatch):
+    from llm_bawt.core import base as core_base
+    import llm_bawt.prompt_registry as registry
+
+    console = _plain_console(monkeypatch, core_base)
+    row = NS(category=registry.PERSONA_CATEGORY, title="Persona " + CONCEAL,
+             key="k", body="persona body")
+    monkeypatch.setattr(registry, "PromptTemplateStore",
+                        lambda _config: NS(get_by_id=lambda _id: row))
+    owner = NS(bot=NS(prompt_override_id=7, system_prompt="base"), config=None,
+               verbose=True, bot_id="byte")
+    assert core_base.BaseLLMBawt._resolve_base_prompt(owner) == "persona body"
+    assert ("Persona " + CONCEAL) in console.file.getvalue()

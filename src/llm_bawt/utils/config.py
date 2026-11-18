@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from ..shared.rich_safe import SafeConsole as Console  # never raises (TASK-2434)
+from ..shared.rich_safe import escape
 
 from agent_bridge.chatgpt_models import CHATGPT_MODELS_CLIENT_VERSION
 
@@ -631,7 +632,7 @@ def set_config_value(key: str, value: str, config: Config) -> bool:
     env_var_name = f"{config.model_config['env_prefix']}{key_upper}"
     valid_keys = {k.upper() for k in Config.model_fields.keys()}
     if key_upper not in valid_keys:
-        console.print(f"[bold red]Error:[/bold red] Invalid configuration key '{key}'. Valid keys are: {', '.join(sorted(Config.model_fields.keys()))}")
+        console.print(f"[bold red]Error:[/bold red] Invalid configuration key '{escape(str(key))}'. Valid keys are: {', '.join(sorted(Config.model_fields.keys()))}")
         return False
 
     lines = []
@@ -641,7 +642,7 @@ def set_config_value(key: str, value: str, config: Config) -> bool:
             with open(dotenv_path, 'r', encoding='utf-8') as f:
                 lines = f.readlines()
     except IOError as e:
-        console.print(f"[bold red]Error reading {dotenv_path}:[/bold red] {e}")
+        console.print(f"[bold red]Error reading {escape(str(dotenv_path))}:[/bold red] {escape(str(e))}")
         return False
     new_line = f"{env_var_name}={value}\n"
     updated_lines = []
@@ -663,7 +664,7 @@ def set_config_value(key: str, value: str, config: Config) -> bool:
             f.writelines(updated_lines)
         return True
     except IOError as e:
-        console.print(f"[bold red]Error writing to {dotenv_path}:[/bold red] {e}")
+        console.print(f"[bold red]Error writing to {escape(str(dotenv_path))}:[/bold red] {escape(str(e))}")
         return False
 
 

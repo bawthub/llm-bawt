@@ -6,6 +6,7 @@ Simple abstract base for OpenAI-compatible API clients.
 from __future__ import annotations
 
 from ..shared.rich_safe import SafeConsole as Console  # never raises (TASK-2434)
+from ..shared.rich_safe import escape
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.align import Align
@@ -157,7 +158,7 @@ class LLMClient(ABC):
     def _print_user_message(self, content: str):
         """Default implementation for printing user messages."""
         self.console.print()
-        self.console.print(f"[bold blue]User:[/bold blue] {content}")
+        self.console.print(f"[bold blue]User:[/bold blue] {escape(str(content))}")
 
     def _print_assistant_message(self, content: str, panel_title: str | None = None, panel_border_style: str = "green", second_part: str | None = None, is_service: bool = False):
         """Prints assistant message. First part in panel, optional second part below."""
