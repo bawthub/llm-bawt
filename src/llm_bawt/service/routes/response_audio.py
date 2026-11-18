@@ -2,7 +2,7 @@
 
 Producer routes (service token only) let the speech backend reserve a turn,
 bind its assistant message and upload the finished WAV. Reader routes are
-owner-scoped by ``X-Entity-Id`` and serve the audio with single-range
+owner-scoped by the ``user_id`` query field and serve the audio with single-range
 support (``Range``/``If-Range``, 206/416) plus ``HEAD`` and ``If-None-Match``
 so a browser ``<audio>`` element can seek natively.
 
@@ -18,7 +18,7 @@ import logging
 import re
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
@@ -53,10 +53,15 @@ def _audio_store() -> ResponseAudioStore:
     return store
 
 
-def _entity(x_entity_id: Optional[str]) -> str:
-    if not x_entity_id or not x_entity_id.strip():
-        raise HTTPException(status_code=401, detail="X-Entity-Id header is required")
-    return x_entity_id.strip()
+#: The owner travels as the ``user_id`` query field so BawtHub's generic
+#: proxy, which binds declared user carriers, fills it with the signed-in user.
+_OWNER_QUERY = Query(description="Owner user id; BawtHub's proxy sets it to the request's user")
+
+
+def _entity(user_id: Optional[str]) -> str:
+    if not user_id or not user_id.strip():
+        raise HTTPException(status_code=401, detail="user_id is required")
+    return user_id.strip()
 
 
 def _publish(row: dict) -> None:
@@ -193,9 +198,9 @@ async def fail(turn_id: str, request: Request):
 @router.get("/v1/media/response-audio")
 async def lookup(
     message_ids: str = Query(description="Comma-separated assistant message ids"),
-    x_entity_id: Optional[str] = Header(default=None, alias="X-Entity-Id"),
+    user_id: str = _OWNER_QUERY,
 ):
-    owner = _entity(x_entity_id)
+    owner = _entity(user_id)
     ids = [i for i in (s.strip() for s in message_ids.split(",")) if i]
     if len(ids) > MAX_LOOKUP_IDS:
         raise HTTPException(status_code=400, detail=f"at most {MAX_LOOKUP_IDS} ids")
@@ -231,9 +236,9 @@ def parse_range(header: Optional[str], size: int) -> tuple[int, int] | None | st
 async def serve(
     assistant_message_id: str,
     request: Request,
-    x_entity_id: Optional[str] = Header(default=None, alias="X-Entity-Id"),
+    user_id: str = _OWNER_QUERY,
 ):
-    owner = _entity(x_entity_id)
+    owner = _entity(user_id)
     row = await run_in_threadpool(_audio_store().get_for_message, assistant_message_id, owner)
     if row is None or not public_view(row)["available"]:
         raise HTTPException(status_code=404, detail="No saved audio for this reply")

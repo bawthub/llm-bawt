@@ -237,32 +237,33 @@ def test_full_flow_with_ranges(client, engine):
     assert client.put(url, content=wav, headers=SVC).status_code == 200, "repeat upload is idempotent"
     assert [e["status"] for e in client.events] == ["recording", "finalized", "finalized"]
 
-    me = {"X-Entity-Id": OWNER}
-    full = client.get("/v1/media/response-audio/m1", headers=me)
+    me = {}
+    full = client.get(f"/v1/media/response-audio/m1?user_id={OWNER}", headers=me)
     assert full.status_code == 200 and full.content == wav
     assert full.headers["accept-ranges"] == "bytes"
     etag = full.headers["etag"]
 
-    part = client.get("/v1/media/response-audio/m1", headers={**me, "Range": "bytes=4-11"})
+    part = client.get(f"/v1/media/response-audio/m1?user_id={OWNER}", headers={**me, "Range": "bytes=4-11"})
     assert part.status_code == 206 and part.content == wav[4:12]
     assert part.headers["content-range"] == f"bytes 4-11/{len(wav)}"
 
-    head = client.head("/v1/media/response-audio/m1", headers={**me, "Range": "bytes=0-"})
+    head = client.head(f"/v1/media/response-audio/m1?user_id={OWNER}", headers={**me, "Range": "bytes=0-"})
     assert head.status_code == 206 and head.headers["content-length"] == str(len(wav)) and head.content == b""
 
-    bad = client.get("/v1/media/response-audio/m1", headers={**me, "Range": f"bytes={len(wav)}-"})
+    bad = client.get(f"/v1/media/response-audio/m1?user_id={OWNER}", headers={**me, "Range": f"bytes={len(wav)}-"})
     assert bad.status_code == 416 and bad.headers["content-range"] == f"bytes */{len(wav)}"
 
-    stale = client.get("/v1/media/response-audio/m1", headers={**me, "Range": "bytes=0-3", "If-Range": '"old"'})
+    stale = client.get(f"/v1/media/response-audio/m1?user_id={OWNER}", headers={**me, "Range": "bytes=0-3", "If-Range": '"old"'})
     assert stale.status_code == 200 and stale.content == wav
-    fresh = client.get("/v1/media/response-audio/m1", headers={**me, "Range": "bytes=0-3", "If-Range": etag})
+    fresh = client.get(f"/v1/media/response-audio/m1?user_id={OWNER}", headers={**me, "Range": "bytes=0-3", "If-Range": etag})
     assert fresh.status_code == 206
-    assert client.get("/v1/media/response-audio/m1", headers={**me, "If-None-Match": etag}).status_code == 304
+    assert client.get(f"/v1/media/response-audio/m1?user_id={OWNER}", headers={**me, "If-None-Match": etag}).status_code == 304
 
-    assert client.get("/v1/media/response-audio/m1", headers={"X-Entity-Id": OTHER}).status_code == 404
-    assert client.get("/v1/media/response-audio/m1").status_code == 401
+    assert client.get(f"/v1/media/response-audio/m1?user_id={OTHER}").status_code == 404
+    assert client.get("/v1/media/response-audio/m1").status_code == 422
+    assert client.get("/v1/media/response-audio/m1?user_id=%20").status_code == 401
 
-    look = client.get("/v1/media/response-audio?message_ids=m1,nope", headers=me).json()["items"]
+    look = client.get(f"/v1/media/response-audio?message_ids=m1,nope&user_id={OWNER}", headers=me).json()["items"]
     assert set(look) == {"m1"} and look["m1"]["duration_ms"] == 2
 
 
@@ -288,3 +289,20 @@ def test_history_page_hydrates_assistant_rows_only(store, engine, monkeypatch):
     assert set(out) == {"m-a"} and out["m-a"]["status"] == "partial" and out["m-a"]["available"]
     assert history_pages._hydrate_response_audio_for_page(page, OTHER) == {}
     assert history_pages._hydrate_response_audio_for_page(page, None) == {}
+
+
+def test_reader_owner_is_a_declared_query_field():
+    """BawtHub's proxy binds only declared user carriers (query/body/path).
+
+    A header-only owner was never filled, so every browser read got 401.
+    """
+    from llm_bawt.service.routes import response_audio as route
+
+    app = FastAPI()
+    app.include_router(route.router)
+    paths = app.openapi()["paths"]
+    for path, method in (("/v1/media/response-audio", "get"),
+                         ("/v1/media/response-audio/{assistant_message_id}", "get"),
+                         ("/v1/media/response-audio/{assistant_message_id}", "head")):
+        params = {(p["name"], p["in"]) for p in paths[path][method].get("parameters", [])}
+        assert ("user_id", "query") in params, (path, method, params)
