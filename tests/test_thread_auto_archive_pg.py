@@ -6,6 +6,7 @@ import pytest
 from sqlalchemy import create_engine, text
 
 from llm_bawt.service.jobs.thread_auto_archive import run_thread_auto_archive
+from tests.pg_lock_wait import wait_blocked_by
 from tests.private_postgres import private_url
 
 pytestmark = pytest.mark.integration
@@ -91,19 +92,6 @@ def test_archives_only_active_threads_idle_past_cutoff(db):
     assert run_thread_auto_archive(object(), days=30)["archived"] == 0
 
 
-def _wait_for_sweep_lock(engine, sweep):
-    deadline = time.monotonic() + 8
-    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as observer:
-        while not observer.execute(text("""
-            SELECT EXISTS (SELECT 1 FROM pg_stat_activity
-                           WHERE datname = current_database() AND wait_event_type = 'Lock'
-                             AND query LIKE '%FOR UPDATE%')
-        """)).scalar_one():
-            assert not sweep.done(), "sweep finished without waiting on the thread lock"
-            assert time.monotonic() < deadline, "sweep never waited on the thread lock"
-            time.sleep(0.02)
-
-
 def _new_message_sql():
     return text("INSERT INTO messages VALUES ('incoming', 'bot-a', 'race', 'user', "
                 "EXTRACT(EPOCH FROM NOW()))")
@@ -116,10 +104,11 @@ def test_message_committed_while_sweep_waits_keeps_thread_active(db):
     holder = db.connect()
     tx = holder.begin()
     holder.execute(text("UPDATE sessions SET session_metadata = '{}'::jsonb WHERE id = 'race'"))
+    holder_pid = holder.execute(text("SELECT pg_backend_pid()")).scalar_one()
     pool = ThreadPoolExecutor(max_workers=1)
     try:
         sweep = pool.submit(run_thread_auto_archive, object(), days=30)
-        _wait_for_sweep_lock(db, sweep)
+        wait_blocked_by(db, holder_pid, sweep, timeout=8)
         with db.begin() as writer:
             writer.execute(_new_message_sql())
         tx.commit()
@@ -139,10 +128,11 @@ def test_in_flight_message_insert_blocks_sweep_until_commit(db):
     writer = db.connect()
     tx = writer.begin()
     writer.execute(_new_message_sql())
+    writer_pid = writer.execute(text("SELECT pg_backend_pid()")).scalar_one()
     pool = ThreadPoolExecutor(max_workers=1)
     try:
         sweep = pool.submit(run_thread_auto_archive, object(), days=30)
-        _wait_for_sweep_lock(db, sweep)
+        wait_blocked_by(db, writer_pid, sweep, timeout=8)
         tx.commit()
         assert sweep.result(timeout=8)["archived"] == 0
         assert status(db, "race")[0] == "active"
