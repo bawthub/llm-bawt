@@ -4,7 +4,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
-from llm_bawt.integrations.connections import IntegrationConnections, IntegrationError, REGISTRY
+from llm_bawt.integrations.connections import IntegrationConnections, IntegrationError, OAUTH, REGISTRY
 from llm_bawt.integrations.credential_integrations import CREDENTIAL_INTEGRATIONS, CredentialIntegrations
 from ..dependencies import get_service
 from .service_auth import require_service_token
@@ -18,9 +18,40 @@ COOKIE_PATH = "/api/chat/proxy/v1/integrations"
 
 def manager(integration_id: str) -> IntegrationConnections:
     # These handlers implement Google contracts, not the Nextcloud adapter.
-    if integration_id != "google-keep":
+    if integration_id not in OAUTH:
         raise HTTPException(404, "Unknown integration")
     return IntegrationConnections(get_service().config)
+
+
+async def _publish_google_tasks(integration_id: str) -> None:
+    if integration_id == "google-tasks":
+        from .. import state_events
+        await state_events.publish_state_changed(get_service(), [state_events.GOOGLE_TASKS])
+
+
+@router.post("/google-tasks/sync", dependencies=_SERVICE)
+async def google_tasks_sync_now():
+    """Sync now: one run over every enabled source (shares the scheduled run lease)."""
+    from llm_bawt.integrations.google_tasks_sync import run_once
+    try:
+        return await run_once(get_service())
+    except IntegrationError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/google-tasks/changed", dependencies=_SERVICE)
+async def google_tasks_changed():
+    """BawtHub committed a source config or import change: refresh open panels."""
+    await _publish_google_tasks("google-tasks")
+    return {"ok": True}
+
+
+@router.get("/google-tasks/lists")
+async def google_tasks_lists():
+    """The connected account's task lists, for the BawtHub panel (read only)."""
+    from llm_bawt.integrations.google_tasks_sync import GoogleTasksSync
+    sync = GoogleTasksSync(IntegrationConnections(get_service().config))
+    return {"lists": await call(sync.task_lists)}
 
 
 class ClientConfig(BaseModel):
@@ -136,6 +167,7 @@ async def callback(integration_id: str, request: Request, state: str = "", code:
         return_to = await run_in_threadpool(service.finish, integration_id, state,
                                            request.cookies.get(COOKIE, ""), code, error)
         location = f"{return_to}?integration_result=connected"
+        await _publish_google_tasks(integration_id)
     except IntegrationError as exc:
         location = f"/tools/settings/integrations?integration_error={exc}"
     response = RedirectResponse(location, status_code=303,
@@ -148,7 +180,9 @@ async def callback(integration_id: str, request: Request, state: str = "", code:
 async def disconnect(integration_id: str):
     if integration_id in CREDENTIAL_INTEGRATIONS:
         return {"disconnected": await call(credential_manager(integration_id).disconnect, integration_id)}
-    return {"disconnected": await call(manager(integration_id).disconnect, integration_id)}
+    disconnected = await call(manager(integration_id).disconnect, integration_id)
+    await _publish_google_tasks(integration_id)
+    return {"disconnected": disconnected}
 
 
 # ── Keep notes management (TASK-908) ─────────────────────────────────────────

@@ -235,7 +235,12 @@ def consume(engine: Any, *, bot_id: str, user_id: str, excluded_bot_ids: Sequenc
             result = {"status": "dry_run" if dry_run else "advanced", "bot_id": slug,
                       "user_id": user_id, "cursor_before": list(prev) if prev[0] is not None else None,
                       "cursor_after": list(new) if new[0] is not None else None,
-                      "coverage": coverage, "report": summary}
+                      "coverage": coverage, "report": summary,
+                      # Classified rows of this page, for an in-process caller
+                      # (the guidance run); never written to the cursor row.
+                      "rows": [{"bot_id": slug, "message_id": r["id"], "ts": r["timestamp"],
+                                "content": r["content"], "classification": classify(r)}
+                               for r in rows]}
             if dry_run:
                 conn.rollback()
                 return result

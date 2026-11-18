@@ -239,11 +239,23 @@ _INSERT_PROPOSAL = text(f"""
     RETURNING id
 """).bindparams(bindparam("ev", type_=JSONB))
 
+_ANY_BASE = object()
+
+
+class BaseMoved(Exception):
+    """The guidance is no longer the version the draft was written against."""
+
 
 def propose(engine, *, user_id: str, new_doc: Mapping[str, Any], reason: str,
             proposed_by: str, excluded_bot_ids: Sequence[str],
+            expected_base_row_id: Any = _ANY_BASE,
             _rollback_row: int | None = None) -> int:
     """Validate and record a pending proposal against the current exact version.
+
+    ``expected_base_row_id`` is the version row a draft was written against
+    (None = no version yet). When given, the proposal is refused with
+    :class:`BaseMoved` unless the current version is exactly that row, checked
+    in the inserting transaction, so a draft is never recorded on a newer base.
 
     ``_rollback_row`` is set only by :func:`rollback_to`: the body is an exact
     earlier version the user already approved, so the forward-only preference
@@ -255,6 +267,9 @@ def propose(engine, *, user_id: str, new_doc: Mapping[str, Any], reason: str,
     new = validate_doc(json.loads(json.dumps(new_doc)))
     with engine.begin() as conn:
         cur = current_version(conn, user_id)
+        if expected_base_row_id is not _ANY_BASE and (cur and cur["row_id"]) != expected_base_row_id:
+            raise BaseMoved(f"guidance moved from row {expected_base_row_id} "
+                            f"to {cur and cur['row_id']}")
         base = validate_doc(_load(cur and cur["body"]))
         if new["mandate"] != base["mandate"]:
             raise ValueError("the mandate is the user's; a proposal cannot change it")

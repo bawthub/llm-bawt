@@ -57,11 +57,14 @@ UTILITY_USAGE = "utility_usage"
 #: TASK-1085: a Nextcloud Talk binding or its delivery health moved
 #: (reconnect, disconnect, webhook/outbox health notes).
 NEXTCLOUD_TALK = "nextcloud_talk"
+#: TASK-905: the Google Tasks connection changed or a sync run imported or
+#: updated tasks (published directly by the app, its only writer).
+GOOGLE_TASKS = "google_tasks"
 
 #: Every topic a browser may receive. Closed: the client ignores anything else.
 TOPICS = frozenset({OPS_JOBS, OPS_RELEASES, GPU, QUEUE_HOLD, APPROVAL_POLICIES, MEDIA, SCHEDULES,
                     MAINTENANCE_JOBS, DELIVERIES, NOTIFICATIONS, FREEZE, OPS_CATALOG, PLAYGROUND,
-                    UTILITY_USAGE, NEXTCLOUD_TALK})
+                    UTILITY_USAGE, NEXTCLOUD_TALK, GOOGLE_TASKS})
 
 #: Bursts of commits inside this window produce one fingerprint pass.
 MIN_INTERVAL_SECONDS = 1.0

@@ -457,6 +457,10 @@ async def lifespan(app):
     from .usage.codex_oauth import proactive_refresh_loop as _codex_loop
     service._codex_refresh_task = asyncio.create_task(_codex_loop())
 
+    # TASK-905: Google Tasks has no push API; poll enabled lists every 10 minutes.
+    from ..integrations.google_tasks_sync import run_scheduler as _google_tasks_loop
+    service._google_tasks_sync_task = asyncio.create_task(_google_tasks_loop(service))
+
     # TASK-2105 S3: the one provider probe kept on a timer (a switched-off
     # Ollama server has no event); it publishes only when reachability flips.
     import threading
@@ -520,6 +524,7 @@ BACKGROUND_TASK_ATTRIBUTES = (
     "_bridge_down_alert_task",
     "_claude_refresh_task",
     "_codex_refresh_task",
+    "_google_tasks_sync_task",
 )
 
 

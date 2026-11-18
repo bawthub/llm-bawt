@@ -11,13 +11,16 @@ import json
 import logging
 import re
 import secrets
+import threading
 import time
+from contextlib import contextmanager, nullcontext
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from urllib.parse import urlencode, urlsplit
 
 import httpx
-from sqlalchemy import delete, update
+from sqlalchemy import delete, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
@@ -29,7 +32,16 @@ from llm_bawt.service.providers import crypto
 from llm_bawt.service.providers.base import ConnectionRecord, CredentialStore
 
 KEEP_SCOPE = "https://www.googleapis.com/auth/keep"
-CALLBACK_PATH = "/api/chat/proxy/v1/integrations/google-keep/callback"
+TASKS_SCOPE = "https://www.googleapis.com/auth/tasks.readonly"
+TASKS_LISTS_URL = "https://tasks.googleapis.com/tasks/v1/users/@me/lists"
+IDENTITY_SCOPES = ["openid", "https://www.googleapis.com/auth/userinfo.email"]
+
+
+def callback_path(integration_id: str) -> str:
+    return f"/api/chat/proxy/v1/integrations/{integration_id}/callback"
+
+
+CALLBACK_PATH = callback_path("google-keep")
 RETURN_PATHS = {"/tools/settings/integrations", "/setup"}
 REGISTRY = {
     "nextcloud-talk": {
@@ -49,17 +61,42 @@ REGISTRY = {
         "capabilities": {"read_notes": True, "create_notes": True, "delete_notes": True, "edit_existing_notes": False},
         "limitations": "The official Keep API cannot edit existing notes or add, remove, or check items in an existing checklist. Connection setup does not import or modify notes.",
         "requirements": "Workspace domains only. Enable Keep API in the service account's Cloud project and authorize its numeric client ID for the Keep scope through Workspace domain-wide delegation. The configured Workspace user must have Keep enabled and API entitlement. This credential has domain-wide authority within its granted scopes; BawtHub pins use to the configured user.",
-        "admin_scopes": [KEEP_SCOPE, "openid", "https://www.googleapis.com/auth/userinfo.email"],
+        "admin_scopes": [KEEP_SCOPE, *IDENTITY_SCOPES],
         "setup_url": "https://developers.google.com/workspace/keep/api/guides",
     },
+    "google-tasks": {
+        "id": "google-tasks", "label": "Google Tasks", "auth_method": "oauth_web",
+        "supported_account_types": ["google"],
+        "description": "Import tasks from selected Google Tasks lists (including ones Google Assistant creates) as BawtHub tasks.",
+        "scopes": [TASKS_SCOPE],
+        "capabilities": {"read_tasks": True, "write_tasks": False},
+        "limitations": "Read-only. Google Tasks has no push notifications, so BawtHub checks enabled lists every 10 minutes or on Sync now.",
+        "requirements": "Enable the Google Tasks API in the OAuth client's Cloud project, then approve read-only Tasks access with the account whose lists you want to import.",
+        "admin_scopes": [TASKS_SCOPE, *IDENTITY_SCOPES],
+        "setup_url": "https://developers.google.com/workspace/tasks/overview",
+    },
 }
+# Per-integration browser OAuth contract: the scope a grant must include, the
+# read that proves it works, and the prefix for bounded probe error codes.
+OAUTH = {
+    "google-keep": {"required_scope": KEEP_SCOPE, "probe_url": "https://keep.googleapis.com/v1/notes",
+                    "probe_params": {"pageSize": 1}, "error_prefix": "keep", "read_only": False},
+    "google-tasks": {"required_scope": TASKS_SCOPE, "probe_url": TASKS_LISTS_URL,
+                     "probe_params": {"maxResults": 1}, "error_prefix": "tasks", "read_only": True,
+                     # tasks.readonly is user-consentable, so forcing consent always
+                     # returns a refresh token, including after disconnect or token loss.
+                     "prompt": "consent select_account", "bawthub_connection": True},
+}
+
+
+FINALIZE_SECONDS = 120
 
 
 class IntegrationError(Exception):
     """A bounded, public error code; never includes an upstream body or token."""
 
 
-def keep_failure_code(response: httpx.Response) -> str:
+def keep_failure_code(response: httpx.Response, prefix: str = "keep") -> str:
     """Classify Google's structured errors without exposing upstream text or secrets."""
     reasons: set[str] = set()
     message = ""
@@ -77,23 +114,23 @@ def keep_failure_code(response: httpx.Response) -> str:
     except ValueError:
         pass
     if reasons & {"SERVICE_DISABLED", "accessNotConfigured"}:
-        code = "keep_api_disabled"
+        code = f"{prefix}_api_disabled"
     elif reasons & {"ACCESS_TOKEN_SCOPE_INSUFFICIENT", "insufficientPermissions"}:
-        code = "keep_scope_insufficient"
+        code = f"{prefix}_scope_insufficient"
     elif reasons & {"ORG_RESTRICTION_VIOLATION", "SECURITY_POLICY_VIOLATED", "ORG_POLICY_VIOLATION"}:
-        code = "keep_organization_policy_denied"
+        code = f"{prefix}_organization_policy_denied"
     elif response.status_code == 401:
-        code = "keep_token_rejected"
+        code = f"{prefix}_token_rejected"
     elif response.status_code == 403 and (
         "not available for your account" in message or "not enabled for this user" in message
     ):
-        code = "keep_account_unavailable"
+        code = f"{prefix}_account_unavailable"
     elif response.status_code == 429:
-        code = "keep_rate_limited"
+        code = f"{prefix}_rate_limited"
     else:
-        code = "keep_access_denied" if response.status_code == 403 else "keep_verification_failed"
+        code = f"{prefix}_access_denied" if response.status_code == 403 else f"{prefix}_verification_failed"
     # Only our bounded code and HTTP status are logged, never Google's response body.
-    logging.getLogger(__name__).warning("Keep verification failed: http_status=%s code=%s", response.status_code, code)
+    logging.getLogger(__name__).warning("%s verification failed: http_status=%s code=%s", prefix, response.status_code, code)
     return code
 
 
@@ -113,9 +150,35 @@ class RowSnapshot:
         return self.row_id is not None
 
 
+_LOCAL_LIFECYCLE_LOCKS: dict[str, threading.Lock] = {}
+
+
 class IntegrationStore(CredentialStore):
     def _key(self, provider: str) -> str:
         return f"integration_connection:{provider}"
+
+    @contextmanager
+    def lifecycle(self, integration_id: str) -> Iterator[None]:
+        """Serialize one integration's lifecycle across workers.
+
+        start, configure, disconnect and a callback's finalize/notify/commit all
+        run under this lock, so the finalizing check and the write it guards are
+        atomic with respect to each other. PostgreSQL uses a transaction-scoped
+        advisory lock on a dedicated connection; other engines (tests) fall back
+        to a process lock.
+        """
+        if not self.available:
+            yield
+            return
+        engine = self._store.engine
+        if engine.dialect.name == "postgresql":
+            with engine.connect() as conn, conn.begin():
+                conn.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"),
+                             {"k": f"integration-lifecycle:{integration_id}"})
+                yield
+        else:
+            with _LOCAL_LIFECYCLE_LOCKS.setdefault(integration_id, threading.Lock()):
+                yield
 
     def _where(self, provider: str):
         return (RuntimeSetting.scope_type == "global", RuntimeSetting.scope_id == "*",
@@ -202,6 +265,50 @@ class IntegrationStore(CredentialStore):
             pending["claim"] = claimed
             return pending
 
+    def finalize_claim(self, integration_id: str, claim: str) -> str:
+        """Promote an exchanging claim to finalizing before an external side effect.
+
+        While finalizing, start, configure and disconnect refuse (``finalizing``),
+        so nothing can replace this flow between the BawtHub notification and
+        the local commit.
+        """
+        payload = json.loads(claim)
+        payload["status"] = "finalizing"
+        payload["finalizing_at"] = time.time()
+        promoted = json.dumps(payload)
+        with Session(self._store.engine) as session:
+            result = session.execute(update(RuntimeSetting).where(
+                RuntimeSetting.scope_type == "global", RuntimeSetting.scope_id == "*",
+                RuntimeSetting.key == self._key(f"pending:{integration_id}"), RuntimeSetting.value_json == claim,
+            ).values(value_json=promoted))
+            if result.rowcount != 1:
+                raise IntegrationError("invalid_state")
+            session.commit()
+        return promoted
+
+    def release_claim(self, integration_id: str, claim: str) -> None:
+        """Drop this flow's own claim (a failed finalization); a newer flow is untouched."""
+        with Session(self._store.engine) as session:
+            session.execute(delete(RuntimeSetting).where(
+                RuntimeSetting.scope_type == "global", RuntimeSetting.scope_id == "*",
+                RuntimeSetting.key == self._key(f"pending:{integration_id}"), RuntimeSetting.value_json == claim,
+            ))
+            session.commit()
+
+    def finalizing(self, integration_id: str) -> bool:
+        """True while a callback owns the final step (bounded: a crashed one expires)."""
+        if not self.available:
+            return False
+        with Session(self._store.engine) as session:
+            row = session.exec(select(RuntimeSetting).where(
+                RuntimeSetting.scope_type == "global", RuntimeSetting.scope_id == "*",
+                RuntimeSetting.key == self._key(f"pending:{integration_id}"),
+            )).first()
+        if row is None:
+            return False
+        payload = json.loads(row.value_json)
+        return payload.get("status") == "finalizing" and payload.get("finalizing_at", 0) > time.time() - FINALIZE_SECONDS
+
     def commit_connection(self, integration_id: str, claim: str, record: ConnectionRecord, *, provisional: bool = False) -> None:
         """Commit only while this callback still owns the pending flow.
 
@@ -244,18 +351,36 @@ def digest(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
-def validate_redirect(uri: str) -> str:
+def validate_redirect(uri: str, integration_id: str = "google-keep") -> str:
     parsed = urlsplit(uri)
     if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
-            or parsed.query or parsed.fragment or parsed.path != CALLBACK_PATH):
+            or parsed.query or parsed.fragment or parsed.path != callback_path(integration_id)):
         raise IntegrationError("invalid_redirect_uri")
     return uri
 
 
 class IntegrationConnections:
-    def __init__(self, config, *, store=None, client_factory=httpx.Client):
+    def __init__(self, config, *, store=None, client_factory=httpx.Client, record_connection=None):
         self.store = store if store is not None else IntegrationStore(config)
         self.client_factory = client_factory
+        # Google Tasks: BawtHub fences import runs by connection generation, so
+        # it hears about connect, disconnect and account change first.
+        self.record_connection = record_connection or record_bawthub_connection
+
+    def _lifecycle(self, integration_id: str):
+        """The cross-worker lifecycle lock for BawtHub-fenced integrations (Keep is unchanged)."""
+        if OAUTH.get(integration_id, {}).get("bawthub_connection") and hasattr(self.store, "lifecycle"):
+            return self.store.lifecycle(integration_id)
+        return nullcontext()
+
+    def _fenced(self, integration_id: str) -> None:
+        """Lifecycle changes wait while a callback finalizes a BawtHub-fenced connection."""
+        if OAUTH.get(integration_id, {}).get("bawthub_connection") and self.store.finalizing(integration_id):
+            raise IntegrationError("connection_in_progress")
+
+    def _notify_bawthub(self, integration_id: str, subject: str | None) -> None:
+        if OAUTH.get(integration_id, {}).get("bawthub_connection"):
+            self.record_connection(subject)
 
     def descriptor(self, integration_id: str) -> dict:
         definition = REGISTRY[integration_id]
@@ -274,7 +399,8 @@ class IntegrationConnections:
             "workspace_admin_scopes": [KEEP_SCOPE],
             "has_unverified_credentials": self.store.load(f"unverified:{integration_id}") is not None,
             "reauthorization_required": bool(connection and connection.status == "connected"
-                and KEEP_SCOPE not in connection.meta.get("scopes", [])),
+                and OAUTH.get(integration_id, {"required_scope": KEEP_SCOPE})["required_scope"]
+                not in connection.meta.get("scopes", [])),
             "client": {
                 "client_id": client.meta.get("client_id", "") if client else "",
                 "redirect_uri": client.meta.get("redirect_uri", "") if client else "",
@@ -427,7 +553,14 @@ class IntegrationConnections:
         return self.descriptor(integration_id)
 
     def configure(self, integration_id: str, client_id: str, client_secret: str | None, redirect_uri: str):
-        redirect_uri = validate_redirect(redirect_uri)
+        if integration_id not in OAUTH:
+            raise IntegrationError("unsupported_integration")
+        with self._lifecycle(integration_id):
+            return self._configure(integration_id, client_id, client_secret, redirect_uri)
+
+    def _configure(self, integration_id: str, client_id: str, client_secret: str | None, redirect_uri: str):
+        self._fenced(integration_id)
+        redirect_uri = validate_redirect(redirect_uri, integration_id)
         if not client_id.endswith(".apps.googleusercontent.com"):
             raise IntegrationError("invalid_client_id")
         previous = self.store.load(f"client:{integration_id}")
@@ -448,10 +581,15 @@ class IntegrationConnections:
     def start(self, integration_id: str, return_to: str, origin: str) -> dict:
         if return_to not in RETURN_PATHS:
             raise IntegrationError("invalid_return_path")
+        with self._lifecycle(integration_id):
+            return self._start(integration_id, return_to, origin)
+
+    def _start(self, integration_id: str, return_to: str, origin: str) -> dict:
+        self._fenced(integration_id)
         client = self.store.load(f"client:{integration_id}")
         if not client or not client.secret.get("client_secret"):
             raise IntegrationError("client_not_configured")
-        uri = validate_redirect(client.meta["redirect_uri"])
+        uri = validate_redirect(client.meta["redirect_uri"], integration_id)
         parsed = urlsplit(uri)
         if origin != f"{parsed.scheme}://{parsed.netloc}":
             raise IntegrationError("callback_origin_mismatch")
@@ -466,17 +604,20 @@ class IntegrationConnections:
             },
         ))
         # Keep scopes cannot be shown on Google's user-consent screen. Never
-        # force consent, including when recovering a missing offline token.
+        # force consent (kept for every integration; Google still issues a
+        # refresh token on first grant and refresh reuse covers later ones), including when recovering a missing offline token.
         # Live acceptance: forcing consent returned invalid_scope (TASK-906).
         params = {
             "client_id": client.meta["client_id"], "redirect_uri": uri,
             "response_type": "code", "scope": " ".join(REGISTRY[integration_id]["admin_scopes"]),
-            "access_type": "offline", "prompt": "select_account", "state": state,
+            "access_type": "offline", "prompt": OAUTH[integration_id].get("prompt", "select_account"), "state": state,
             "code_challenge": challenge, "code_challenge_method": "S256",
         }
         return {"authorization_url": "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode(params), "browser": browser}
 
     def finish(self, integration_id: str, state: str, browser: str, code: str, error: str) -> str:
+        oauth = OAUTH[integration_id]
+        required = oauth["required_scope"]
         pending = self.store.consume_state(integration_id, state, browser)
         if error:
             raise IntegrationError("google_scope_not_authorized" if error == "invalid_scope" else "authorization_denied")
@@ -498,8 +639,8 @@ class IntegrationConnections:
                 expires_in = int(token.get("expires_in", 3600))
                 if expires_in <= 0:
                     raise IntegrationError("token_exchange_failed")
-                if KEEP_SCOPE not in token.get("scope", "").split():
-                    raise IntegrationError("missing_keep_scope")
+                if required not in token.get("scope", "").split():
+                    raise IntegrationError(f"missing_{oauth['error_prefix']}_scope")
                 if not token.get("access_token"):
                     raise IntegrationError("token_exchange_failed")
                 headers = {"Authorization": f"Bearer {token['access_token']}"}
@@ -517,15 +658,15 @@ class IntegrationConnections:
                     if (not refresh_token and previous
                             and previous.meta.get("client_id") == pending["client_id"]
                             and previous.meta.get("google_subject") == user["sub"]
-                            and KEEP_SCOPE in previous.meta.get("scopes", [])):
+                            and required in previous.meta.get("scopes", [])):
                         refresh_token = previous.secret.get("refresh_token")
-                # Probe even without offline access: don't hide the original Keep denial.
+                # Probe even without offline access: don't hide the original denial.
                 # Retain OAuth credentials separately if verification fails, never as connected.
                 failure = None
                 try:
-                    probe = http.get("https://keep.googleapis.com/v1/notes", params={"pageSize": 1}, headers=headers)
+                    probe = http.get(oauth["probe_url"], params=oauth["probe_params"], headers=headers)
                     if probe.status_code != 200:
-                        failure = keep_failure_code(probe)
+                        failure = keep_failure_code(probe, oauth["error_prefix"])
                 except httpx.HTTPError:
                     failure = "google_unavailable"
                 if failure or not refresh_token:
@@ -541,19 +682,105 @@ class IntegrationConnections:
                     raise IntegrationError(failure or "offline_access_required")
         except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
             raise IntegrationError("google_unavailable") from exc
-        self.store.commit_connection(integration_id, pending["claim"], ConnectionRecord(
+        # Finalize, notify and commit under the lifecycle lock: a start, configure or
+        # disconnect either completed before (and replaced the claim, so the
+        # finalize CAS fails here) or waits until this commit lands.
+        with self._lifecycle(integration_id):
+            self._finalize(integration_id, pending, oauth, user, token, expires_in, refresh_token)
+        return pending["return_to"]
+
+    def _finalize(self, integration_id, pending, oauth, user, token, expires_in, refresh_token) -> None:
+        claim = pending["claim"]
+        if oauth.get("bawthub_connection"):
+            # Own the final step before telling BawtHub: a newer start, configure or
+            # disconnect now refuses until this commit lands or the claim is released.
+            claim = self.store.finalize_claim(integration_id, claim)
+            try:
+                self._notify_bawthub(integration_id, user["sub"])
+            except Exception:
+                # An ambiguous bump may have landed: restore BawtHub to the local truth.
+                current = self.store.load(integration_id)
+                restore = current.meta.get("google_subject") if current and current.status == "connected" else None
+                try:
+                    self.record_connection(restore)
+                except Exception:
+                    pass  # runs still refuse a subject mismatch; the next connect heals it
+                self.store.release_claim(integration_id, claim)
+                raise
+        self.store.commit_connection(integration_id, claim, ConnectionRecord(
             provider=integration_id, status="connected", auth_method="oauth_redirect",
             account=user["email"],
             meta={"google_subject": user["sub"], "scopes": token["scope"].split(),
                   "client_id": pending["client_id"], "verified_at": time.time(),
                   "expires_at": time.time() + expires_in,
-                  "read_only": False},
+                  "read_only": oauth["read_only"]},
             secret={"access_token": token["access_token"], "refresh_token": refresh_token},
         ))
-        return pending["return_to"]
 
     def disconnect(self, integration_id: str) -> bool:
+        with self._lifecycle(integration_id):
+            return self._disconnect(integration_id)
+
+    def _disconnect(self, integration_id: str) -> bool:
+        self._fenced(integration_id)
+        self._notify_bawthub(integration_id, None)  # fence import runs first
         self.store.delete(f"pending:{integration_id}")
         removed_unverified = self.store.delete(f"unverified:{integration_id}")
         removed_workspace = self.store.delete(f"workspace:{integration_id}")
         return self.store.delete(integration_id) or removed_unverified or removed_workspace
+
+
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+
+
+def access_token(manager: IntegrationConnections, integration_id: str, http: httpx.Client) -> tuple[str, str]:
+    """A live access token and the Google subject for a connected browser-OAuth integration.
+
+    Refreshes with the stored refresh token near expiry. The write is
+    compare-and-set; a concurrent refresher's token is equally valid, so a lost
+    race simply reloads.
+    """
+    snap = manager.store.snapshot(integration_id)
+    record = snap.record
+    if not record or record.status != "connected" or record.auth_method != "oauth_redirect":
+        raise IntegrationError("not_connected")
+    subject = record.meta.get("google_subject")
+    if record.secret.get("access_token") and record.meta.get("expires_at", 0) > time.time() + 60:
+        return record.secret["access_token"], subject
+    client = manager.store.load(f"client:{integration_id}")
+    refresh = record.secret.get("refresh_token")
+    if not client or not refresh or client.meta.get("client_id") != record.meta.get("client_id"):
+        raise IntegrationError("reauthorization_required")
+    response = http.post(GOOGLE_TOKEN_URL, data={
+        "client_id": client.meta["client_id"], "client_secret": client.secret["client_secret"],
+        "refresh_token": refresh, "grant_type": "refresh_token",
+    })
+    if response.status_code in (400, 401):
+        raise IntegrationError("reauthorization_required")  # revoked or expired grant
+    if response.status_code != 200:
+        raise IntegrationError("google_unavailable")
+    token = response.json()
+    if not isinstance(token, dict) or not token.get("access_token"):
+        raise IntegrationError("google_unavailable")
+    record.secret = {**record.secret, "access_token": token["access_token"]}
+    record.meta = {**record.meta, "expires_at": time.time() + int(token.get("expires_in", 3600))}
+    if not manager.store.replace(integration_id, snap, record):
+        logging.getLogger(__name__).info("%s token refresh raced; keeping the fresh token in memory", integration_id)
+    return token["access_token"], subject
+
+
+GOOGLE_TASKS_CONNECTION_PATH = "/internal/integrations/google-tasks/connection"
+
+
+def record_bawthub_connection(subject: str | None) -> None:
+    """Tell BawtHub the Google Tasks account changed; bounded error if it can't hear."""
+    from llm_bawt.bawthub_auth import service_auth
+    from llm_bawt.integrations.notify_bell import bell_base_url
+    try:
+        with httpx.Client(base_url=bell_base_url(), timeout=10, auth=service_auth()) as http:
+            response = http.post(GOOGLE_TASKS_CONNECTION_PATH, json={"subject": subject})
+    except httpx.HTTPError as exc:
+        raise IntegrationError("bawthub_unavailable") from exc
+    if not response.is_success:
+        logging.getLogger(__name__).warning("BawtHub connection record failed: http_status=%s", response.status_code)
+        raise IntegrationError("bawthub_unavailable")
