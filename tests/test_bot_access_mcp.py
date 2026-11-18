@@ -306,8 +306,40 @@ async def test_service_principal_never_bypasses_approval_and_raw_arguments_bind(
     from agent_bridge.approval import ApprovalPolicy, MatcherType, PolicyAction
     from tests.test_mcp_approval_interceptor import FakeStore
 
+    # TASK-2418: only ops_run is approval-gated; a service principal gets no bypass there.
     calls = []
     for action in (PolicyAction.ALLOW, PolicyAction.DENY, PolicyAction.REQUIRE_APPROVAL):
+        policy = ApprovalPolicy(id="p", tool_name="ops_run", matcher_type=MatcherType.ALWAYS, action=action)
+        store = FakeStore(policy, [])
+        server = CatalogFastMCP("test", bot_policy_resolver=Resolver(), approval_store_provider=lambda: store)
+
+        async def handler(operation: str, args: dict | None = None, idempotency_key: str = "k") -> str:
+            calls.append((operation, args, idempotency_key))
+            return "ok"
+
+        server.add_tool(handler, name="ops_run")
+        arguments = {"operation": "noop"}  # default expansion must not break hash
+        token = _service_capability.set(ServicePrincipal("private_fixture", "user_a").mint("ops_run", arguments))
+        try:
+            result = await server.call_tool("ops_run", arguments)
+            if action is PolicyAction.DENY:
+                assert json.loads(result.content[0].text)["status"] == "denied"
+            elif action is PolicyAction.REQUIRE_APPROVAL:
+                assert json.loads(result.content[0].text)["status"] == "approval_context_missing"
+            assert not store.rows
+        finally:
+            _service_capability.reset(token)
+    assert calls == [("noop", None, "k")]
+
+
+@pytest.mark.asyncio
+async def test_non_ops_tools_skip_approval_policies_for_service_principal(signer):
+    from agent_bridge.approval import ApprovalPolicy, MatcherType, PolicyAction
+    from tests.test_mcp_approval_interceptor import FakeStore
+
+    # TASK-2418: ordinary tools are neither evaluated nor recorded, even under DENY/REQUIRE rules.
+    calls = []
+    for action in (PolicyAction.DENY, PolicyAction.REQUIRE_APPROVAL):
         policy = ApprovalPolicy(id="p", tool_name="messages_get", matcher_type=MatcherType.ALWAYS, action=action)
         store = FakeStore(policy, [])
         server = CatalogFastMCP("test", bot_policy_resolver=Resolver(), approval_store_provider=lambda: store)
@@ -317,18 +349,14 @@ async def test_service_principal_never_bypasses_approval_and_raw_arguments_bind(
             return "ok"
 
         server.add_tool(handler, name="messages_get")
-        arguments = {"bot_id": "private_fixture"}  # default expansion must not break hash
+        arguments = {"bot_id": "private_fixture"}
         token = _service_capability.set(ServicePrincipal("private_fixture", "user_a").mint("messages_get", arguments))
         try:
-            result = await server.call_tool("messages_get", arguments)
-            if action is PolicyAction.DENY:
-                assert json.loads(result.content[0].text)["status"] == "denied"
-            elif action is PolicyAction.REQUIRE_APPROVAL:
-                assert json.loads(result.content[0].text)["status"] == "approval_context_missing"
+            await server.call_tool("messages_get", arguments)
             assert not store.rows
         finally:
             _service_capability.reset(token)
-    assert calls == [("private_fixture", 3)]
+    assert calls == [("private_fixture", 3)] * 2
 
 
 @pytest.mark.asyncio
@@ -337,28 +365,28 @@ async def test_runtime_conversation_proof_keeps_service_approval_semantics(signe
     from tests.test_mcp_approval_interceptor import FakeStore
 
     session_id = str(uuid.uuid4())
-    arguments = {"bot_id": "private_fixture", "user_id": "user_a", "session_id": session_id}
+    arguments = {"operation": "noop", "args": {"session_id": session_id}}
     proof = turn_codec.mint_task_turn_context(
         session_id=session_id, turn_id="turn-" + uuid.uuid4().hex,
         trigger_message_id=str(uuid.uuid4()), bot_id="private_fixture", user_id="user_a",
     )
     calls = []
     for action in (PolicyAction.ALLOW, PolicyAction.DENY, PolicyAction.REQUIRE_APPROVAL):
-        policy = ApprovalPolicy(id="p", tool_name="messages_add", matcher_type=MatcherType.ALWAYS, action=action)
+        policy = ApprovalPolicy(id="p", tool_name="ops_run", matcher_type=MatcherType.ALWAYS, action=action)
         store = FakeStore(policy, [])
         server = CatalogFastMCP("runtime-approval", bot_policy_resolver=Resolver(),
                                 approval_store_provider=lambda: store)
 
-        async def handler(bot_id: str, user_id: str, session_id: str):
-            calls.append(current_bot_access().caller.kind)
+        async def handler(operation: str, args: dict | None = None):
+            calls.append(operation)
             return "ok"
 
-        server.add_tool(handler, name="messages_add")
+        server.add_tool(handler, name="ops_run")
         with service_codec.bind_service_turn(proof):
-            credential = ServicePrincipal("private_fixture", "user_a").mint("messages_add", arguments)
+            credential = ServicePrincipal("private_fixture", "user_a").mint("ops_run", arguments)
         binding = _service_capability.set(credential)
         try:
-            result = await server.call_tool("messages_add", arguments)
+            result = await server.call_tool("ops_run", arguments)
             if action is PolicyAction.DENY:
                 assert json.loads(result.content[0].text)["status"] == "denied"
             elif action is PolicyAction.REQUIRE_APPROVAL:
@@ -366,7 +394,7 @@ async def test_runtime_conversation_proof_keeps_service_approval_semantics(signe
             assert not store.rows
         finally:
             _service_capability.reset(binding)
-    assert calls == ["service"]
+    assert calls == ["noop"]  # only ALLOW executes
 
 
 @pytest.mark.asyncio
