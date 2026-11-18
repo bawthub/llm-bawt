@@ -604,9 +604,12 @@ _CONFIG_SEEDS: list[dict[str, Any]] = [{
     }
     for bridge, port, data_mounts, env_names in (
         ("claude-code-bridge", 8681,
-         ["/app/.logs", "/home/bridge/dev", "/home/bridge/.claude", "/home/bridge/.claude.json",
-          "/home/bridge/.ssh", "/etc/ssh/ssh_config", "/opt/agent-skills/bin", "/run/llm-bawt-bridge-tokens",
-          "/run/llm-bawt-api-key"],
+         # ${HOME}/dev is the identical-path workspace view (TASK-1275), resolved
+         # from the row's interpolation_env HOME; bawthub-git is the read-only
+         # bridge git identity (TASK-1985).
+         ["/app/.logs", "/home/bridge/dev", "${HOME}/dev", "/home/bridge/.claude", "/home/bridge/.claude.json",
+          "/home/bridge/.config/bawthub-git", "/home/bridge/.ssh", "/etc/ssh/ssh_config", "/opt/agent-skills/bin",
+          "/run/llm-bawt-bridge-tokens", "/run/llm-bawt-api-key"],
          ["ANTHROPIC_API_KEY", "BAWT_WT_DEV_ROOT", "BRIDGE_BROKER_TOKEN_FILE", "BRIDGE_GIT_CREDENTIAL_TOKEN_FILE",
           "BRIDGE_VAULT_TOKEN_FILE", "CLAUDE_CODE_BAWTHUB_MCP_URL", "CLAUDE_CODE_BRIDGE_LOG_LEVEL", "CLAUDE_CODE_CRAWL4AI_MCP_URL",
           "CLAUDE_CODE_CWD", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_PERMISSION_MODE",

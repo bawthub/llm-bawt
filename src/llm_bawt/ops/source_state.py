@@ -281,12 +281,33 @@ def valid_branch(branch) -> bool:
             and not any(part.startswith(".") for part in branch.split("/")))
 
 
+HOME_PREFIX = "${HOME}/"
+# Stands in for an undeclared HOME so a seed still validates; a mount it names
+# matches no real destination, so the plan refuses it as unclassified.
+_UNSET_HOME = "/nonexistent-home"
+
+
+def resolved_data_mounts(spec: dict) -> list:
+    """TASK-2469: ``data_mounts`` with a leading ``${HOME}/`` replaced by the
+    row's declared ``compose_config.interpolation_env.HOME``, the same value
+    Compose interpolates (for an identical-path ``${HOME}/dev`` mount)."""
+    value = spec["data_mounts"]
+    if not isinstance(value, list):
+        return value
+    config = spec.get("compose_config")
+    env = config.get("interpolation_env") if isinstance(config, dict) else None
+    home = env.get("HOME") if isinstance(env, dict) else None
+    home = home if _clean_path(home) else _UNSET_HOME
+    return [home + "/" + p[len(HOME_PREFIX):] if isinstance(p, str) and p.startswith(HOME_PREFIX) else p
+            for p in value]
+
+
 def validate_source_spec(spec: dict) -> None:
     """The source fields of an app spec; raises ValueError."""
     validate_compose_source_spec(spec)
     lists = {}
     for key in ("source_mounts", "data_mounts"):
-        value = spec[key]
+        value = resolved_data_mounts(spec) if key == "data_mounts" else spec[key]
         if (not isinstance(value, list) or len(value) > MAX_MOUNTS or len(set(value)) != len(value)
                 or not all(_clean_path(p) for p in value)):
             raise ValueError(f"{key} must be distinct absolute normalised container paths")
@@ -334,7 +355,7 @@ def source_plan(spec: dict, source: dict, container: dict, image: dict, desired:
     The sealed source check never runs on a refused plan. Values are never
     reported, only names."""
     found = []
-    sources, data = spec["source_mounts"], spec["data_mounts"]
+    sources, data = spec["source_mounts"], resolved_data_mounts(spec)
     destinations = _mount_destinations(container, image, desired)
     shadowed = [d for d in destinations if d not in sources
                 and any(_within(posixpath.normpath(d or "/"), s) for s in sources)]
@@ -674,7 +695,7 @@ def valid_classification(spec: dict, value) -> bool:
     return (isinstance(value, dict) and set(value) == {"source_mounts", "data_mounts", "opaque_env"}
             and value["source_mounts"] == sorted(spec["source_mounts"])
             and isinstance(value["data_mounts"], list) and value["data_mounts"] == sorted(set(value["data_mounts"]))
-            and set(value["data_mounts"]) <= set(spec["data_mounts"])
+            and set(value["data_mounts"]) <= set(resolved_data_mounts(spec))
             and isinstance(value["opaque_env"], list) and value["opaque_env"] == sorted(set(value["opaque_env"]))
             and set(value["opaque_env"]) <= set(spec["env_names"]))
 
