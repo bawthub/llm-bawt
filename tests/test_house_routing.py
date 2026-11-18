@@ -22,6 +22,7 @@ from agent_bridge.houses import (
 from agent_bridge.publisher import MANSION_COMMANDS_STREAM
 from agent_bridge.run_contract import REFUSED
 from agent_bridge.subscriber import RedisSubscriber
+from agent_bridge.versions import mansion_versions_key
 
 MANSION = MANSION_COMMANDS_STREAM
 H1 = "agent:commands:house:h1"
@@ -244,7 +245,10 @@ def test_mansion_slot_is_inert():
         assert slot.admit({"request_id": "r"})
         assert await gate_send(slot, {"request_id": "r", "session_key": "s"}, "1-0", redis,
                                group="g", publisher=Done())
-        assert redis.kv == {} and redis.acks == []
+        # The mansion holds no lease or fence state; its only key is the
+        # harness-versions report (no TTL, not routing state).
+        assert set(redis.kv) == {mansion_versions_key("claude-code")}
+        assert redis.acks == []
     run(go())
 
 
