@@ -83,7 +83,6 @@ from .prompt_default_loaders import (
     load_ops_quiesce_request,
     load_ops_quiesce_resume,
     load_ops_quiesce_resume_blocked,
-    load_schedule_wakeup_failed,
     load_schedule_wakeup_skipped,
     load_profile_consolidation,
     load_profile_curation,
@@ -863,20 +862,6 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
             "bot's own ops_quiesce_ack note is appended. It must tell the bot to pick "
             "its work up again and not to re-run the operation. Used verbatim; a blank "
             "body falls back to the seed. Target-bot overrides supported."
-        )},
-    ),
-    "schedule.wakeup_failed": PromptDefinition(
-        key="schedule.wakeup_failed",
-        title="Wake-up Failed Notice",
-        category="agent_execution",
-        loader=load_schedule_wakeup_failed,
-        metadata={"notes": (
-            "TASK-2436: prefix of the system delivery sent to the target, creator "
-            "and task owner bots when a bot-created wake-up ends failed or unknown. "
-            "JSON with the state, error, schedule, task, occurrence and a prompt "
-            "excerpt is appended. It must say the wake-up was not retried and tell "
-            "the bot to resume or reschedule work the prompt still carries. Used "
-            "verbatim; a blank body falls back to the seed. Target-bot overrides supported."
         )},
     ),
     "schedule.wakeup_skipped": PromptDefinition(

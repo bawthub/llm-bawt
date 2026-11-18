@@ -89,24 +89,22 @@ def wakeup_stale_reason(snapshot: dict, kind: str) -> str | None:
     return stale_reason(snapshot, fetch_task(str(snapshot["task_id"])))
 
 
-def notice_body(key: str, default: str, bot_id: str | None) -> str:
-    """A registered notice prefix for one bot; the seed when unavailable."""
-    try:
-        from ..prompt_registry import get_prompt_resolver
-
-        resolved = get_prompt_resolver().resolve(key, scope_type="bot", scope_id=bot_id)
-        if resolved and (resolved.body or "").strip():
-            return resolved.body
-    except Exception as error:  # a registry failure must not drop the notice
-        logger.warning("Prompt %s resolve failed, using seed: %s", key, error)
-    return default
-
-
 def skipped_notice(snapshot: dict, run_id: str, reason: str) -> str:
     """The notice body for the creator of a skipped wake-up."""
     import json
 
-    body = notice_body(SKIPPED_NOTICE_KEY, DEFAULT_SKIPPED_NOTICE, snapshot.get("creator_bot_id"))
+    body = DEFAULT_SKIPPED_NOTICE
+    creator = snapshot.get("creator_bot_id")
+    try:
+        from ..prompt_registry import get_prompt_resolver
+
+        resolved = get_prompt_resolver().resolve(
+            SKIPPED_NOTICE_KEY, scope_type="bot", scope_id=creator,
+        )
+        if resolved and (resolved.body or "").strip():
+            body = resolved.body
+    except Exception as error:  # a registry failure must not drop the notice
+        logger.warning("Prompt %s resolve failed, using seed: %s", SKIPPED_NOTICE_KEY, error)
     facts = {
         "reason": reason,
         "task_id": snapshot.get("task_id"),

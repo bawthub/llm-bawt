@@ -5,7 +5,6 @@ The transport store shim persists receipts but never calls a bot or Redis.
 """
 import asyncio
 import json
-from contextlib import nullcontext
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -51,11 +50,7 @@ class LocalDeliveryStore:
         self.last_task_id = kwargs.get("task_id")
         if self.failure == "before":
             raise RuntimeError("injected before enqueue")
-        # System notices join the caller's transaction, as production enqueue
-        # does; the schedule outbox keeps its own commit so the "after" fault
-        # still models a committed enqueue.
-        joined = kwargs.get("message_kind") and kwargs.get("connection") is not None
-        with (nullcontext(kwargs["connection"]) if joined else self.engine.begin()) as conn:
+        with self.engine.begin() as conn:
             row = conn.execute(text("SELECT * FROM inter_bot_deliveries WHERE idempotency_key=:key"),
                                {"key": kwargs["idempotency_key"]}).mappings().first()
             if row:
@@ -74,10 +69,6 @@ class LocalDeliveryStore:
                  idempotency_key,user_message_id,turn_id,payload_json,metadata_json)
                 VALUES (:id,:sender,:author_type,:owner,:target,:message,:key,:message_id,
                         :turn_id,:payload,:meta)"""), values)
-            if joined:
-                return DeliveryRecord.from_mapping(conn.execute(text(
-                    "SELECT * FROM inter_bot_deliveries WHERE id=:id"), {"id": delivery_id}
-                ).mappings().first()), False
         if self.failure == "after":
             raise RuntimeError("injected after committed enqueue")
         return self.get(delivery_id), False
@@ -144,19 +135,17 @@ def rig(tmp_path, monkeypatch):
     engine.dispose()
 
 
-def reserve(rig, *, clear=True, once=False, now=NOW, grace=3600, creator=None, task=None,
-            task_owner=None):
+def reserve(rig, *, clear=True, once=False, now=NOW, grace=3600, creator=None, task=None):
     timing = (PromptTiming(kind="once", once_at=now + timedelta(seconds=1)) if once else
               PromptTiming(kind="interval", interval_seconds=60, anchor_at=now + timedelta(seconds=1)))
     job = rig.worker.store.create(owner=OWNER, bot_id=BOT, name="Automation", prompt="Literal saved prompt",
                                   now=now, timing=timing, clear_context=clear,
                                   requested_model="second", misfire_grace_seconds=grace)
-    if creator or task or task_owner:
+    if creator or task:
         with Session(rig.engine) as session:
             row = session.get(PromptSchedule, job)
             row.creator_bot_id = creator
             row.task_id = task
-            row.task_owner_bot_id = task_owner
             session.add(row)
             session.commit()
     run = rig.worker.store.reserve_due(now + timedelta(seconds=1))[0]
@@ -224,144 +213,6 @@ def test_stale_wakeup_skips_at_fire_time_with_its_reason(rig, monkeypatch, reaso
 def occurrence(rig, run):
     with Session(rig.engine) as session:
         return session.get(PromptOccurrence, run)
-
-
-def failed_notices(rig):
-    with rig.engine.connect() as conn:
-        return conn.execute(text(
-            "SELECT target_bot_id, sender_bot_id, message, idempotency_key FROM inter_bot_deliveries"
-            " WHERE idempotency_key LIKE 'wakeup-failed:%' ORDER BY target_bot_id"
-        )).mappings().all()
-
-
-def end_wakeup(rig, run, record, outcome):
-    """Drive one enqueued occurrence to a terminal state the way production does."""
-    if outcome == "failed":
-        rig.turns[record.turn_id] = SimpleNamespace(
-            ended_at=NOW, status="error", error_text="Turn failed before start: " + "x" * 600,
-            response_text="", model=None)
-        rig.delivery.update(record.id, status="FAILED")
-    elif outcome == "unknown":
-        with rig.engine.begin() as conn:
-            conn.execute(text("DELETE FROM inter_bot_deliveries WHERE id=:id"), {"id": record.id})
-    elif outcome == "succeeded":
-        rig.turns[record.turn_id] = SimpleNamespace(
-            ended_at=NOW, status="ok", error_text=None, response_text="done", model="second")
-        rig.delivery.update(record.id, status="DELIVERED", transport_accepted_at=NOW.isoformat())
-    else:
-        with Session(rig.engine) as session:
-            row = session.get(JobRun, run)
-            row.result_json = json.dumps({**receipt(row), "cancel_requested": True})
-            session.add(row)
-            session.commit()
-    rig.worker._reconcile(run, NOW)
-    assert occurrence(rig, run).state == outcome
-
-
-@pytest.mark.parametrize("outcome", ["failed", "unknown"])
-def test_failed_wakeup_notifies_its_bots_once_not_retried(rig, outcome):
-    """TASK-2436: a failed wake-up wakes its bots now, not on some later turn."""
-    _, run = reserve(rig, once=True, creator=BOT, task="TASK-9", task_owner="task-owner-bot")
-    end_wakeup(rig, run, enqueue(rig, run), outcome)
-    notices = failed_notices(rig)
-    assert [(n["target_bot_id"], n["sender_bot_id"]) for n in notices] == [
-        (BOT, "system"), ("task-owner-bot", "system")]
-    assert {n["idempotency_key"] for n in notices} == {
-        f"wakeup-failed:{run}:{BOT}", f"wakeup-failed:{run}:task-owner-bot"}
-    head, facts = notices[0]["message"].split("\n", 1)[0], json.loads(notices[0]["message"].rsplit("\n", 1)[1])
-    assert "not a retry" in head
-    assert facts["state"] == outcome and facts["task_id"] == "TASK-9" and facts["retried"] is False
-    assert facts["prompt_excerpt"] == "Literal saved prompt" and facts["occurrence_id"] == run
-    assert len(facts["error"]) <= 300 and facts["error"]
-    assert rig.delivery.last_task_id == "TASK-9"
-    # Replayed reconcile and later sweeps neither resend nor re-enqueue the wake-up.
-    rig.worker._reconcile(run, NOW)
-    rig.worker._sweep(rig.dispatcher)
-    assert len(failed_notices(rig)) == 2
-    with rig.engine.connect() as conn:
-        assert conn.execute(text(
-            "SELECT count(*) FROM inter_bot_deliveries WHERE idempotency_key LIKE 'schedule:%'"
-        )).scalar() == (0 if outcome == "unknown" else 1)
-
-
-@pytest.mark.parametrize("outcome", ["succeeded", "cancelled"])
-def test_succeeded_or_cancelled_wakeup_sends_no_failure_notice(rig, outcome):
-    _, run = reserve(rig, once=True, creator=BOT, task="TASK-9", task_owner="task-owner-bot")
-    end_wakeup(rig, run, enqueue(rig, run), outcome)
-    assert failed_notices(rig) == []
-
-
-def test_failed_user_schedule_sends_no_wakeup_notice(rig):
-    """A schedule no bot created is not a bot's wake signal."""
-    _, run = reserve(rig, once=True)
-    end_wakeup(rig, run, enqueue(rig, run), "failed")
-    assert failed_notices(rig) == []
-
-
-def test_failure_before_enqueue_notifies(rig, monkeypatch):
-    """A wake-up that fails during preparation is reported the same way."""
-    import llm_bawt.bots as bots
-    from llm_bawt.service import prompt_delivery
-
-    monkeypatch.setattr(prompt_delivery, "wakeup_stale_reason", lambda *a: None)
-    _, run = reserve(rig, once=True, creator=BOT, task="TASK-9")
-    monkeypatch.setattr(bots.BotManager, "get_bot", lambda *a: None)
-    rig.worker._sweep(rig.dispatcher)
-    assert occurrence(rig, run).state == "failed"
-    assert [n["target_bot_id"] for n in failed_notices(rig)] == [BOT]
-
-
-def test_notice_fault_still_records_the_failure(rig, monkeypatch):
-    _, run = reserve(rig, once=True, creator=BOT, task="TASK-9")
-    record = enqueue(rig, run)
-    original = rig.delivery.enqueue
-
-    def broken(**kwargs):
-        if kwargs["idempotency_key"].startswith("wakeup-failed:"):
-            raise RuntimeError("injected notice fault")
-        return original(**kwargs)
-
-    monkeypatch.setattr(rig.delivery, "enqueue", broken)
-    end_wakeup(rig, run, record, "failed")
-    assert failed_notices(rig) == []
-    assert occurrence(rig, run).state == "failed"
-
-
-def test_notices_are_sent_after_the_failure_commits(rig, monkeypatch):
-    """Each notice is its own transaction, after the failure is durable.
-
-    Enqueue holds the recipient's admission lock to commit; sending several
-    inside one transaction could deadlock against a reciprocal failure.
-    """
-    _, run = reserve(rig, once=True, creator=BOT, task="TASK-9", task_owner="task-owner-bot")
-    record = enqueue(rig, run)
-    original = rig.delivery.enqueue
-    seen = []
-
-    def watched(**kwargs):
-        if kwargs["idempotency_key"].startswith("wakeup-failed:"):
-            seen.append((kwargs["target_bot_id"], kwargs.get("connection"),
-                         occurrence(rig, run).state))
-        return original(**kwargs)
-
-    monkeypatch.setattr(rig.delivery, "enqueue", watched)
-    end_wakeup(rig, run, record, "failed")
-    assert seen == [(BOT, None, "failed"), ("task-owner-bot", None, "failed")]
-
-
-def test_one_notice_fault_keeps_the_other_recipients(rig, monkeypatch):
-    _, run = reserve(rig, once=True, creator=BOT, task="TASK-9", task_owner="task-owner-bot")
-    record = enqueue(rig, run)
-    original = rig.delivery.enqueue
-
-    def broken(**kwargs):
-        if kwargs["idempotency_key"] == f"wakeup-failed:{run}:{BOT}":
-            raise RuntimeError("injected notice fault")
-        return original(**kwargs)
-
-    monkeypatch.setattr(rig.delivery, "enqueue", broken)
-    end_wakeup(rig, run, record, "failed")
-    assert [n["target_bot_id"] for n in failed_notices(rig)] == ["task-owner-bot"]
 
 
 def mutate(rig, job, run, *, lifecycle=None, cancel=False):

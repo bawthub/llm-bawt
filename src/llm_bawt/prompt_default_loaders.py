@@ -249,12 +249,6 @@ def load_ops_quiesce_resume() -> str:
     return DEFAULT_RESUME
 
 
-def load_schedule_wakeup_failed() -> str:
-    from .service.wakeup_failure import DEFAULT_FAILED_NOTICE
-
-    return DEFAULT_FAILED_NOTICE
-
-
 def load_schedule_wakeup_skipped() -> str:
     from .service.wakeup_staleness import DEFAULT_SKIPPED_NOTICE
 
