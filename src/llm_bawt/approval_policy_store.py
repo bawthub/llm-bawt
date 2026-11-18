@@ -31,7 +31,7 @@ from .utils.config import Config, has_database_credentials
 from .utils.schema import SchemaBootstrapGuard
 
 from .approval_request_store import ApprovalRequestStoreMixin
-from .approval_defaults import _DEFAULT_POLICIES, _STABLE_SHELL_DEFAULT_POLICIES
+from .approval_defaults import _DEFAULT_POLICIES, _OPS_DEFAULT_POLICIES
 
 # Fields a caller may set on create/update. Anything else is ignored.
 _POLICY_WRITABLE = {
@@ -429,7 +429,7 @@ class ToolApprovalPolicyStore(ApprovalRequestStoreMixin):
 
         The legacy Bash rules retain their original whole-table-empty bootstrap
         behavior to avoid duplicating random-id seeds in existing databases.
-        Stable shell rules use stable ids and are inserted independently, so a
+        TASK-639 ops rules use stable ids and are inserted independently, so a
         newly introduced default appears on upgrade while an existing (possibly
         operator-edited or disabled) row is preserved byte-for-byte.
         """
@@ -444,7 +444,7 @@ class ToolApprovalPolicyStore(ApprovalRequestStoreMixin):
             for default in _DEFAULT_POLICIES:
                 self.create(default, actor="seed")
                 seeded += 1
-        for default in _STABLE_SHELL_DEFAULT_POLICIES:
+        for default in _OPS_DEFAULT_POLICIES:
             policy_id = str(default["id"])
             if self.get(policy_id) is not None or self.list_revisions(policy_id):
                 continue

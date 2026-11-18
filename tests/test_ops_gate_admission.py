@@ -27,7 +27,7 @@ def admission(monkeypatch):
     values = dict(session_id=str(uuid.uuid4()), turn_id="turn-" + uuid.uuid4().hex,
         trigger_message_id=str(uuid.uuid4()), bot_id="fixture-gate", user_id="fixture-user")
     store = _store()
-    operation = store.create_operation(_op_data(execution_tag="fixture_gate", approval_required=False))
+    operation = store.create_operation(_op_data(execution_tag="fixture_gate"))
     plan = GatePlan("llm-bawt", "a" * 40)
     defaults = dict(operation_slug=operation.slug, plan=plan.to_dict(),
         turn_token=codec.mint_task_turn_context(**values), idempotency_key="fixture-key")

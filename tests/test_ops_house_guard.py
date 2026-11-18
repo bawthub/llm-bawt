@@ -8,6 +8,7 @@ from sqlalchemy import text
 from sqlalchemy.pool import StaticPool
 from sqlmodel import create_engine
 
+from llm_bawt.approval_defaults import _OPS_DEFAULT_POLICIES
 from llm_bawt.ops import JOB_FAILED, OpsDispatchError, OpsService
 from llm_bawt.ops.executor import validate_spec
 from llm_bawt.ops.house_guard import HouseOccupancyUnverifiable, house_targets, read_occupancy
@@ -54,12 +55,12 @@ def test_an_ambiguous_container_name_yields_every_reading():
     assert house_targets(named, {}) == ("dev-house-h1", "h1")
 
 
-def test_seed_shape_and_catalog_approval_default():
+def test_seed_shape_and_approval_policy():
     assert SEED["enabled"] is False and SPEC["compose_service_from_arg"] == "house"
     assert SPEC["health_url"] == "http://127.0.0.1:8681/health"
     assert _args(house="house-h1") == {"house": "house-h1", "override_occupied": False}
-    assert SEED.get("approval_required", True) is True
-    assert SEED["approval_prompt_prefix"]
+    policy = next(p for p in _OPS_DEFAULT_POLICIES if p["id"] == "seed-ops-run-house-restart")
+    assert policy["action"] == "require_approval" and policy["pattern"] == "operation=llm-bawt.restart-house "
     assert DISPATCH_ERROR_STATUS["house_occupied"] == 409
 
 

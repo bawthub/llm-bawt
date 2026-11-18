@@ -67,7 +67,6 @@ class OperationUpsert(BaseModel):
     max_concurrent: int | None = None
     risk_level: str | None = None
     category: str | None = None
-    approval_required: bool | None = Field(default=None, strict=True)
     approval_prompt_prefix: str | None = None
     # TASK-1233 quiesce settings; the store validates them with the whole row.
     quiesce_enabled: bool | None = None
@@ -386,7 +385,6 @@ def dispatch_job(body: DispatchRequest):
             caller_turn_id=body.caller_turn_id,
             caller_session_key=body.caller_session_key,
             caller_backend="http-operator",
-            require_catalog_free=True,
         )
     except OpsDispatchError as exc:
         status = DISPATCH_ERROR_STATUS.get(exc.code, 500)

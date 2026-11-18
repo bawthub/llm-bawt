@@ -174,7 +174,6 @@ class OpsService:
         args)`` builds snapshots in the ops process, and the ops reconciler
         dispatches and reconciles every job this service creates."""
         self.store = store
-        self.approval_store = None
         # Only the reconciler process drives quiesce jobs (TASK-1233); every
         # other OpsService just reports them.
         self.quiesce_driver = quiesce_driver
@@ -347,28 +346,6 @@ class OpsService:
                 return None
             return previous if isinstance(previous, dict) else None
         return None
-
-    def request_invocation(self, envelope: dict) -> dict:
-        """The ops process creates cards; admission-only callers never fall back."""
-        if self.admission_only:
-            return self.preparer.request_invocation(envelope)
-        from ..approval_policies import ApprovalDuplicatePending, ApprovalPersistError
-        from .approval_request import request_invocation
-        from .invocation_attestation import AttestationError
-
-        if self.approval_store is None:
-            raise OpsDispatchError("approval_unavailable", "ops approval persistence is unavailable")
-        try:
-            return request_invocation(self, self.approval_store, envelope)
-        except AttestationError as exc:
-            raise OpsDispatchError("approval_context_invalid", str(exc)) from exc
-        except ApprovalDuplicatePending as exc:
-            return {"status": "approval_pending", "approval_request_id": exc.existing_request_id,
-                    "tool": "ops_run", "is_error": True,
-                    "message": "An identical request awaits approval; wait for its result, do not resend."}
-        except ApprovalPersistError as exc:
-            raise OpsDispatchError("approval_persist_failed",
-                                   "Could not persist the ops approval; do not retry automatically") from exc
 
     def prepare_invocation(self, operation_slug: str, args: dict | None) -> dict:
         """Trusted approval integration: persist this JSON BEFORE asking approval.
@@ -662,7 +639,7 @@ class OpsService:
                      idempotency_key: str | None = None, approved_snapshot: dict | None = None,
                      caller_actor=None, caller_bot_id=None, caller_user_id=None, caller_turn_id=None,
                      caller_session_key=None, caller_backend=None, approval_request_id=None,
-                     create_fence=None, caller_session_id=None, require_catalog_free=False) -> dict:
+                     create_fence=None, caller_session_id=None) -> dict:
         """Create (or, for a known key, read) a job. ``create_fence`` guards only
         creation; see ``OpsStore.create_job``. A key replay stays a plain read.
         ``caller_session_id`` (from the caller's signed turn capability) lets a
@@ -696,8 +673,6 @@ class OpsService:
             # source check for a caller that can never run it.
             raise OpsDispatchError("approval_required", APPROVAL_REQUIRED)
         snapshot = snapshot or self.prepare_invocation(operation_slug, supplied)
-        if require_catalog_free and snapshot["operation"].get("approval_required", True) is not False:
-            raise OpsDispatchError("approval_required", "This catalog operation requires an approval card")
         # TASK-2100: a house container action is card-only too, so its
         # occupancy override is always an approver's explicit choice.
         house_only = bool(house_targets(snapshot["spec"], snapshot["resolved_args"]))

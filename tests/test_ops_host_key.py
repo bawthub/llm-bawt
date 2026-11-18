@@ -293,15 +293,3 @@ def test_approval_text_names_frozen_destination_and_key():
     first = hk.approval_text({"action": "host_key", "op": "verify", "key_container": "b"},
                              _target(known_host_keys=[]), "Verify?")
     assert first.startswith("Verify?") and "first use" in first
-
-
-def test_catalog_approval_keeps_frozen_host_key_details():
-    from llm_bawt.ops.approval_prompt import approval_text
-
-    snapshot = _snapshot("remove", port=2222)
-    snapshot["operation"] = {"approval_prompt_prefix": "Remove this bot key?"}
-    text = approval_text(snapshot)
-    assert text.startswith("Remove this bot key?")
-    assert "deploy@box.example:2222" in text
-    assert hk.fingerprint(BLOB) in text and "pinned host key" in text
-    assert "other keys kept" in text

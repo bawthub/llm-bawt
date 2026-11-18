@@ -138,28 +138,43 @@ def test_postgres_migration_terminalizes_orphans_before_enforcing_constraint():
 # ---- default policy seeding ------------------------------------------------
 
 
-def test_seed_defaults_only_adds_shell_rules_and_is_idempotent():
+def test_seed_defaults_adds_ops_rules_and_is_idempotent():
     store = _store()
-    assert store.seed_defaults() == 8  # six starter rules plus two stable shell denials
+    assert store.seed_defaults() == 20  # six legacy Bash rules + fourteen stable ops/agent rules
     assert store.seed_defaults() == 0
-    assert all(row.tool_name == "Bash" for row in store.list_all())
-    assert store.get("seed-agent-deny-local-prod-build") is not None
-    assert store.get("seed-agent-deny-direct-prod-container-mutation") is not None
+    rows = store.list_all()
+    ops_rows = [row for row in rows if row.tool_name == "ops_run"]
+    assert [row.id for row in ops_rows] == [
+        "seed-ops-run-bridge-restart",
+        "seed-ops-run-redis-restart",
+        "seed-ops-run-bawthub-deploy-prod-image",
+        "seed-ops-run-bawthub-rollback-prod-image",
+        "seed-ops-run-bawthub-release-prod",
+        "seed-ops-run-bawthub-reconcile-prod-routing",
+        "seed-ops-run-bawthub-reconcile-prod-config",
+        "seed-ops-run-bawthub-deploy-pocket-tts",
+        "seed-ops-run-bawthub-rollback-pocket-tts",
+        "seed-ops-run-bawthub-reconcile-pocket-tts-config",
+        "seed-ops-run-house-restart",
+        "seed-ops-run-require-approval",
+    ]
+    deploy_rules = {row.id: row for row in ops_rows if "prod-image" in row.id}
+    assert all(row.action == "require_approval" and row.matcher_type == "prefix" for row in deploy_rules.values())
+    assert deploy_rules["seed-ops-run-bawthub-rollback-prod-image"].severity == "critical"
+    assert ops_rows[-1].matcher_type == "always"
+    assert ops_rows[-1].action == "require_approval"
 
 
-def test_seed_defaults_preserves_legacy_ops_rule_until_explicit_retirement():
-    from llm_bawt.approval_models import ToolApprovalPolicy
-
+def test_seed_defaults_preserves_operator_edited_ops_rule():
     store = _store()
-    # Represent a pre-upgrade row; new authoring cannot create ops policies.
-    with Session(store.engine) as session:
-        session.add(ToolApprovalPolicy(
-            id="seed-ops-run-require-approval", tool_name="ops_run",
-            enabled=False, approval_prompt="Operator changed this",
-            version=2, updated_by="operator",
-        ))
-        session.commit()
-    assert store.seed_defaults() == 2  # stable shell denials, not ops replacements
+    store.seed_defaults()
+    edited = store.update(
+        "seed-ops-run-require-approval",
+        {"enabled": False, "approval_prompt": "Operator changed this"},
+        actor="operator",
+    )
+    assert edited is not None
+    assert store.seed_defaults() == 0
     preserved = store.get("seed-ops-run-require-approval")
     assert preserved is not None
     assert preserved.enabled is False
@@ -168,12 +183,14 @@ def test_seed_defaults_preserves_legacy_ops_rule_until_explicit_retirement():
     assert preserved.updated_by == "operator"
 
 
-def test_seed_defaults_does_not_reintroduce_ops_rules_into_existing_policy_table():
+def test_seed_defaults_adds_missing_ops_rule_to_existing_policy_table():
     store = _store()
     store.create({"tool_name": "Bash", "matcher_type": "always"}, actor="operator")
-    assert store.seed_defaults() == 2
-    assert all(row.tool_name != "ops_run" for row in store.list_all())
-    assert len(store.list_all()) == 3
+    assert store.seed_defaults() == 14
+    assert store.get("seed-ops-run-require-approval") is not None
+    assert store.get("seed-ops-run-bawthub-reconcile-prod-routing") is not None
+    assert store.get("seed-ops-run-bawthub-reconcile-prod-config") is not None
+    assert len(store.list_all()) == 15
 
 
 # ---- record_mcp_request ----------------------------------------------------

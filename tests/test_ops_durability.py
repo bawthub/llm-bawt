@@ -237,8 +237,7 @@ def test_empty_schema_is_closed_and_nested_array_values_checked():
 
 def test_mcp_dispatch_does_not_block_loop_and_uses_fresh_keys(system, monkeypatch):
     from llm_bawt.mcp_server import ops_tools
-    store, service, executor, op = system
-    op = store.update_operation(op.id, {"approval_required": False})
+    _, service, executor, op = system
     monkeypatch.setattr(ops_tools, "_get_ops_service", lambda: service)
     original = executor.dispatch
     def slow(**kwargs):
@@ -292,7 +291,6 @@ def test_http_pagination_attribution_and_conflict(system, monkeypatch):
     from fastapi.testclient import TestClient
     from llm_bawt.service.routes import ops as routes
     store, service, _, op = system
-    op = store.update_operation(op.id, {"approval_required": False})
     monkeypatch.setattr(routes, "_store", lambda: store)
     monkeypatch.setattr(routes, "_service", lambda: service)
     app = FastAPI()
@@ -314,7 +312,7 @@ def test_http_pagination_attribution_and_conflict(system, monkeypatch):
         assert response == {"operations": [], "total": 1, "limit": 1, "offset": 3}
         conflict = client.post("/v1/ops/jobs", json={"operation": op.slug, "args": {"name": "other"}, "idempotency_key": "http"})
         assert conflict.status_code == 409
-        assert client.get(f"/v1/ops/operations/{op.slug}/revisions").json()["total"] == 2
+        assert client.get(f"/v1/ops/operations/{op.slug}/revisions").json()["total"] == 1
 
 
 def test_http_live_jobs_retains_short_outcome_beyond_idle_poll(system, monkeypatch):
@@ -357,15 +355,14 @@ def ops_gate(system, monkeypatch):
 
     store, service, executor, op = system
     approvals = ToolApprovalPolicyStore(None, engine=store.engine)
-    service.approval_store = approvals
+    approvals.create({"tool_name": "ops_run", "action": "require_approval"})
     registry.ensure_tools_registered()
     monkeypatch.setattr(ops_tools, "_get_ops_service", lambda: service)
     monkeypatch.setattr(registry.mcp, "_approval_store_provider", lambda: approvals)
     monkeypatch.setattr(registry.mcp, "_approval_publisher", lambda payload: None)
-    # Use the production requester and catalog snapshot, not policy evaluation.
-    monkeypatch.setattr(registry.mcp, "_operations_requester", None)
-    from llm_bawt.ops import invocation_attestation
-    monkeypatch.setattr(invocation_attestation, "control_token", lambda: "fixture-control")
+    # Deliberately use the production preparer lookup, not a mock inventing its
+    # positional/keyword signature or the snapshot format.
+    monkeypatch.setattr(registry.mcp, "_operations_preparer", None)
     fernet = Fernet(Fernet.generate_key())
     monkeypatch.setattr(codec, "_get_fernet", lambda: fernet)
     import uuid

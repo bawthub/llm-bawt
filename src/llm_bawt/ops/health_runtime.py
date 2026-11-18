@@ -36,7 +36,6 @@ def build_full_service():
     # FastAPI dependency wiring (TASK-1220).
     approvals = ToolApprovalPolicyStore(config, engine=store.engine)
     service = build_ops_service(config, store, approvals=lambda: approvals)
-    service.approval_store = approvals
     # Quiesce jobs are driven only here, never by the app (TASK-1233).
     from .quiesce import build_quiesce_driver
     service.quiesce_driver = build_quiesce_driver(store.engine)

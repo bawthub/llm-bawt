@@ -177,9 +177,9 @@ def test_category_length_is_validated_on_update_and_preview(client, store):
 
 def test_deleted_seed_is_not_resurrected(store):
     store.seed_defaults()
-    assert store.delete("seed-agent-deny-local-prod-build")
+    assert store.delete("seed-ops-run-require-approval")
     assert store.seed_defaults() == 0
-    assert store.get("seed-agent-deny-local-prod-build") is None
+    assert store.get("seed-ops-run-require-approval") is None
 
 
 def test_request_pagination_reports_all_matches(client, store):
@@ -214,10 +214,12 @@ def test_ungated_mcp_tools_are_neither_evaluated_nor_audited(client, store):
 
 
 def test_raw_gated_mcp_call_fails_before_snapshot_or_persistence(store):
+    store.create({"tool_name": "ops_run"})
+    snapshot = {"operation_slug": "demo", "rendered_command": "original", "version": 1}
     prepared = []
     server = ApprovalAwareFastMCP("test", approval_store_provider=lambda: store,
         approval_publisher=lambda payload: None,
-        operations_requester=lambda envelope: prepared.append(envelope) or {})
+        operations_preparer=lambda operation, args: prepared.append((operation, args)) or snapshot)
     result = asyncio.run(server.call_tool("ops_run", {"operation": "demo", "args": {}}))
     assert result.structured_content["status"] == "approval_context_missing"
     assert prepared == []

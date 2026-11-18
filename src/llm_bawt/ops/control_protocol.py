@@ -19,7 +19,6 @@ import re
 #: The product's own internal control port (compose-internal, never published).
 CONTROL_PORT = 8651
 PREPARE_PATH = "/v1/ops/prepare"
-REQUEST_PATH = "/v1/ops/request"
 EXECUTORS_PATH = "/v1/ops/executors"
 #: TASK-2430: the bot public key for Settings > Host access (read-only).
 BOT_KEY_PATH = "/v1/ops/bot-key"

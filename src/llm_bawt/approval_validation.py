@@ -5,11 +5,12 @@ import re
 from typing import Any
 
 from agent_bridge.approval import (
-    SHELL_GATED_TOOLS, ApprovalPolicy, MatcherType, PolicyAction, Severity, _tool_tail,
+    MCP_GATED_TOOLS, SHELL_GATED_TOOLS, ApprovalPolicy, MatcherType, PolicyAction, Severity, _tool_tail,
 )
 
-# Ops approval belongs to its catalog; wildcard policies cover shell tools only.
-_POLICY_TOOL_NAMES = SHELL_GATED_TOOLS
+# TASK-2419: only shell tools and ops_run are ever evaluated, so a rule naming
+# any other tool could never fire. "*" still means both mechanics.
+_POLICY_TOOL_NAMES = SHELL_GATED_TOOLS | MCP_GATED_TOOLS
 
 
 def validate_policy(data: dict[str, Any]) -> dict[str, Any]:
