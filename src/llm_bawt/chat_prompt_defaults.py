@@ -68,6 +68,17 @@ MODEL_SWITCH_NOTICE = (
     "block is out of date: report `{model}` if asked which model you are.]"
 )
 
+# Appended to an agent turn when the transcript lacks the current list of the
+# bot's assigned task cards: a new session, a compaction, or a changed list
+# (TASK-2432). {cards} is one line per card; {fleet} is a coordinator's fleet
+# line with a leading newline, or empty.
+ASSIGNED_CARDS = (
+    "[Your assigned task cards, live from the board:\n"
+    "{cards}{fleet}\n"
+    "If a WAITING card's release event has already happened, resume it or hand it "
+    "back; hold at most one executable card.]"
+)
+
 SCHEDULED_RUN_NOTICE = """<scheduled-run-notice>
 These scheduled runs finished in your isolated automation sessions. They may
 appear inline in the user's chat but were not part of this main SDK transcript.

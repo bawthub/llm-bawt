@@ -28,6 +28,7 @@ from .chat_prompt_defaults import (
     TURN_CUTOFF_NOTICE,
     ROOM_FREEZE_NOTICE,
     MODEL_SWITCH_NOTICE,
+    ASSIGNED_CARDS,
     SCHEDULED_RUN_NOTICE,
     TTS_OUTPUT_INSTRUCTIONS,
 )
@@ -497,6 +498,23 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
                 "new system prompt on resume, so the pinned <runtime-context> "
                 "model is stale until the next session boundary. {model} is the "
                 "current model id. Resolved per bot at dispatch. TASK-1956."
+            ),
+        },
+    ),
+    "agents.assigned_cards": PromptDefinition(
+        key="agents.assigned_cards",
+        title="Agent Assigned Cards",
+        category="agent_execution",
+        required_vars=("cards", "fleet"),
+        loader=lambda: ASSIGNED_CARDS,
+        metadata={
+            "notes": (
+                "Appended to an agent turn's user message (never the pinned system "
+                "prompt) when the session lacks the bot's current open-card list: a "
+                "new session, a compaction, or a changed list. {cards} is one line per "
+                "card (ID, status with WAITING kind, title), IN_PROGRESS first, capped. "
+                "{fleet} is empty, or for coordinators a leading newline and one fleet "
+                "line. Resolved per bot at dispatch. TASK-2432."
             ),
         },
     ),

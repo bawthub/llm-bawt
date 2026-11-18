@@ -11,6 +11,7 @@ from __future__ import annotations
 import time
 
 from ..inter_bot_reply_channel import append_request_reply_channel_note
+from ..assigned_cards_notice import apply_assigned_cards
 from ..model_switch_notice import apply_model_switch_notice
 from ..media.serializers import build_agent_image_manifest
 from .chat_stream_worker import consume_stream_chunks, put_queue_item_threadsafe
@@ -281,6 +282,8 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                 messages = working_memory.after_pin(messages, system_prompt_pin)
                 # TASK-1956: a kept pin may name the model from before a switch.
                 messages = apply_model_switch_notice(ctx, llm_bawt.client, messages, system_prompt_pin)
+                # TASK-2432: the bot's open cards, when this session lacks the current list.
+                messages = apply_assigned_cards(ctx, messages, system_prompt_pin)
 
             from .scheduled_run_notice import ScheduledRunNotices
 
