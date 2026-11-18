@@ -41,8 +41,8 @@ def _client():
         import redis.asyncio as redis
 
         url = (
-            os.getenv("REDIS_URL")
-            or os.getenv("LLM_BAWT_REDIS_URL")
+            os.getenv("LLM_BAWT_REDIS_URL")
+            or os.getenv("REDIS_URL")
             or "redis://redis:6379/0"
         )
         _redis = redis.from_url(

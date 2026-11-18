@@ -4,7 +4,7 @@ Usage:
     python -m codex_bridge
 
 Environment:
-    REDIS_URL                       — Redis connection (default redis://localhost:6379/0)
+    LLM_BAWT_REDIS_URL              — Redis connection; falls back to REDIS_URL, then redis://localhost:6379/0
     LLM_BAWT_API_URL                — main app base URL for /v1/bots calls
     CODEX_AUTH_PATH                 — auth.json path (default /home/bridge/.codex/auth.json)
     CODEX_HOME                      — exported as CODEX_HOME for the SDK (default /home/bridge/.codex)
@@ -202,13 +202,14 @@ def main() -> None:
         codex_home=Path(codex_home),
     )
 
-    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    # LLM_BAWT_REDIS_URL carries the Redis password (see claude_code_bridge).
+    redis_url = os.getenv("LLM_BAWT_REDIS_URL") or os.getenv("REDIS_URL", "redis://localhost:6379/0")
     publisher = RedisPublisher(
         redis_url,
         default_provider=os.getenv("CODEX_BACKEND_NAME", "codex"),
     )
     if not publisher.connected:
-        logger.error("Cannot connect to Redis at %s", redis_url)
+        logger.error("Cannot connect to Redis at %s", redis_url.rsplit("@", 1)[-1])
         sys.exit(1)
 
     bridge = CodexBridge(

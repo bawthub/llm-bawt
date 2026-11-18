@@ -58,12 +58,14 @@ def main() -> None:
 
     bootstrap_claude_home()
 
-    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    # LLM_BAWT_REDIS_URL carries the Redis password; the ops renderer refuses a
+    # secret repeated under a second name, so Compose passes only this one.
+    redis_url = os.getenv("LLM_BAWT_REDIS_URL") or os.getenv("REDIS_URL", "redis://localhost:6379/0")
     # One name for event provider, RPC reply identity and command filtering.
     backend_name = os.getenv("CLAUDE_CODE_BACKEND_NAME", "claude-code")
     publisher = RedisPublisher(redis_url, default_provider=backend_name)
     if not publisher.connected:
-        logger.error("Cannot connect to Redis at %s", redis_url)
+        logger.error("Cannot connect to Redis at %s", redis_url.rsplit("@", 1)[-1])
         sys.exit(1)
 
     # Check for OAuth token (broker endpoint or legacy file). The

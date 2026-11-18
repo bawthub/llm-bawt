@@ -327,7 +327,9 @@ services:
       # the editable `llm` CLI (installed via uv tool in Dockerfile.agent-bridge)
       # talk to the API without a flag override.
       - LLM_BAWT_SERVICE_HOST=app
-      - REDIS_URL=${LLM_BAWT_REDIS_URL:-redis://redis:6379/0}
+      # TASK-2406: Redis comes only from LLM_BAWT_REDIS_URL below (as TASK-2439
+      # did for the local bridge); a REDIS_URL copy repeats the secret, which the
+      # ops reconcile refuses for this bridge and every house that extends it.
       # TASK-636: CODEX_AUTH_PATH removed — the proxy adapter fetches tokens
       # from the app's broker endpoint (GET /v1/providers/openai_chatgpt/token).
       # Z.AI (Zhipu GLM) — native Anthropic Messages API passthrough.
