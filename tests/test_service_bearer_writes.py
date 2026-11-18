@@ -59,6 +59,8 @@ PROTECTED = {
     ("PUT", "/v1/integrations/{integration_id}/credentials"),
     ("PUT", "/v1/integrations/{integration_id}/client"),
     ("DELETE", "/v1/integrations/{integration_id}"),
+    ("POST", "/v1/integrations/google-tasks/changed"),
+    ("POST", "/v1/integrations/google-tasks/sync"),
     ("POST", "/v1/providers/{provider_id}/connect/api-key"),
     ("POST", "/v1/providers/{provider_id}/connect/endpoint"),
     ("DELETE", "/v1/providers/{provider_id}"),

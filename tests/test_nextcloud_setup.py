@@ -372,7 +372,7 @@ def test_shared_list_uses_nextcloud_descriptor_not_google_fields(setup, monkeypa
     app.dependency_overrides[require_service_token] = lambda: None  # BawtHub's bearer (TASK-2370)
     app.include_router(integrations.router)
     descriptors = TestClient(app).get("/v1/integrations").json()["integrations"]
-    assert {item["id"] for item in descriptors} == {"google-keep", "nextcloud-talk", *CREDENTIAL_INTEGRATIONS}
+    assert {item["id"] for item in descriptors} == {"google-keep", "google-tasks", "nextcloud-talk", *CREDENTIAL_INTEGRATIONS}
     assert all(item["auth_method"] == "credentials" for item in descriptors if item["id"] in CREDENTIAL_INTEGRATIONS)
     descriptor = next(item for item in descriptors if item["id"] == "nextcloud-talk")
     assert descriptor["auth_method"] == "nextcloud_login_v2"
