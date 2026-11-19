@@ -85,6 +85,52 @@ def access_path_snapshot(catalog: Any, model_ref: str | None) -> dict[str, Any] 
     }
 
 
+def catalog_turn_cost(usage: dict[str, Any], catalog: Any, model_ref: str | None) -> float | None:
+    """API-equivalent turn cost from the serving endpoint's catalog rates, or None.
+
+    Prices only the bridge's per-request sums in ``turn_request_totals``
+    (``input_tokens`` includes cached tokens; ``output_tokens`` is measured
+    per request, so interrupted turns count every request). Top-level counts
+    are never mixed in: on interrupted turns they cover one request only.
+    Catalog rates are the standard (short-context) tier, so a turn whose
+    largest request exceeds the model's pricing threshold stays unpriced.
+    Missing rates or totals stay unpriced, never $0.
+    """
+    totals = usage.get("turn_request_totals")
+    endpoint_by_ref = getattr(catalog, "endpoint_by_ref", None)
+    endpoint = endpoint_by_ref(model_ref) if callable(endpoint_by_ref) else None
+    pricing = getattr(endpoint, "pricing", None)
+    if not isinstance(totals, dict) or not pricing:
+        return None
+    if "output_tokens" not in totals or "max_request_input_tokens" not in totals:
+        return None
+    if totals.get("unmeasured_requests") != 0:  # absent or >0: some request's usage is unknown
+        return None
+    from ..model_catalog import effective_pricing_threshold
+    from .usage.background_spend import catalog_cost
+
+    try:
+        cache_read = int(totals.get("cache_read_tokens") or 0)
+        cache_write = int(totals.get("cache_creation_tokens") or 0)
+        fresh = int(totals.get("input_tokens") or 0) - cache_read - cache_write
+        output = int(totals["output_tokens"])
+        peak = int(totals["max_request_input_tokens"])
+    except (TypeError, ValueError):
+        return None
+    if fresh < 0:
+        return None
+    threshold = effective_pricing_threshold(getattr(endpoint.model, "pricing_threshold", None))
+    if threshold is not None and peak > threshold:
+        return None
+    cost = catalog_cost({
+        "input_tokens": fresh,
+        "cache_read_tokens": cache_read,
+        "cache_write_tokens": cache_write,
+        "output_tokens": output,
+    }, dict(pricing))
+    return float(cost) if cost is not None else None
+
+
 def encode_token_usage(
     token_usage: dict | None,
     *,
@@ -103,6 +149,10 @@ def encode_token_usage(
         snapshot = access_path_snapshot(catalog, model_ref)
         if snapshot is not None:
             token_usage = {**token_usage, "access_path": snapshot}
+    if token_usage.get("total_cost_usd") is None:
+        priced = catalog_turn_cost(token_usage, catalog, model_ref)
+        if priced is not None:
+            token_usage = {**token_usage, "total_cost_usd": priced, "cost_source": "catalog_pricing"}
     return json.dumps(classify_turn_cost(token_usage), ensure_ascii=False, default=str)
 
 

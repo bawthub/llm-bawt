@@ -50,6 +50,9 @@ CONTEXT_BREAKDOWN_UNAVAILABLE = "unavailable"
 # Anthropic-shaped per-request usage fields summed into turn totals.
 _REQUEST_USAGE_KEYS = (
     "input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens",
+    # TASK-2503: message_delta output is cumulative per request, so the latest
+    # value is that request's measured output even if the turn is interrupted.
+    "output_tokens",
 )
 
 
@@ -112,6 +115,8 @@ class LiveUsagePublisher:
     # TASK-2343: Anthropic message id per main-thread request, for the
     # resident-reasoning sidecar.
     _main_message_ids: dict[int, str] = field(default_factory=dict)
+    # TASK-2503: requests whose terminal message_delta usage arrived.
+    _terminal_requests: set[int] = field(default_factory=set)
 
     def observe_stream_event(self, event: dict, source: str | None = None) -> None:
         """Track each upstream request: message_start opens one, deltas update it.
@@ -138,7 +143,12 @@ class LiveUsagePublisher:
                 self._main_message_ids[len(self.request_usages) - 1] = message["id"]
             self._merge_request_usage(source, message.get("usage") if isinstance(message, dict) else None)
         elif kind == "message_delta":
-            self._merge_request_usage(source, event.get("usage"))
+            usage = event.get("usage")
+            self._merge_request_usage(source, usage)
+            index = self._open_requests.get(source)
+            if index is not None and isinstance(usage, dict) and "output_tokens" in usage:
+                # The terminal usage delta: this request's counts are final.
+                self._terminal_requests.add(index)
 
     def _merge_request_usage(self, source: str | None, usage: object) -> None:
         # Same merge as the SDK: a later non-zero value replaces an earlier one.
@@ -172,13 +182,27 @@ class LiveUsagePublisher:
         }
 
     def request_totals(self) -> dict | None:
-        """Sum of every upstream request's input so far; None before the first."""
+        """Sum of every upstream request's usage so far; None before the first.
+
+        ``max_request_input_tokens`` is the largest single request's input
+        (fresh + cached), which decides a provider's long-context price tier.
+        """
         if not self.request_usages:
             return None
         fresh = sum(u.get("input_tokens", 0) for u in self.request_usages)
         cache_read = sum(u.get("cache_read_input_tokens", 0) for u in self.request_usages)
         cache_create = sum(u.get("cache_creation_input_tokens", 0) for u in self.request_usages)
         return {
+            # A request cancelled before its terminal usage delta has unknown
+            # final counts (GPT proxy starts are zero placeholders; native
+            # starts carry input but output=1), so the sums are a lower bound.
+            "unmeasured_requests": len(self.request_usages) - len(self._terminal_requests),
+            "output_tokens": sum(u.get("output_tokens", 0) for u in self.request_usages),
+            "max_request_input_tokens": max(
+                u.get("input_tokens", 0) + u.get("cache_read_input_tokens", 0)
+                + u.get("cache_creation_input_tokens", 0)
+                for u in self.request_usages
+            ),
             "requests": len(self.request_usages),
             "input_tokens": fresh + cache_read + cache_create,
             "cache_read_tokens": cache_read,

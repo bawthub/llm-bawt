@@ -219,6 +219,9 @@ def test_request_totals_sum_every_upstream_request_not_only_the_last() -> None:
         "cache_read_tokens": 128_640,
         "cache_creation_tokens": 0,
         "requests_with_cache_read": 1,
+        "unmeasured_requests": 0,
+        "output_tokens": 15,
+        "max_request_input_tokens": 18_235 + 128_640,
     }
     usage = publisher.with_totals({"input_tokens": 18_235, "cache_read_tokens": 128_640})
     assert usage["input_tokens"] == 18_235  # final-request context is untouched
@@ -243,6 +246,9 @@ def test_request_totals_keep_native_start_usage_and_route_interleaved_subagents(
         "cache_read_tokens": 9_000,
         "cache_creation_tokens": 500,
         "requests_with_cache_read": 1,
+        "unmeasured_requests": 0,
+        "output_tokens": 10,
+        "max_request_input_tokens": 10 + 9_000 + 500,
     }
 
 
@@ -278,4 +284,5 @@ def test_with_totals_keeps_totals_without_inventing_final_request_usage() -> Non
     assert publisher.with_totals(None) == {"turn_request_totals": {
         "requests": 1, "input_tokens": 50, "cache_read_tokens": 0,
         "cache_creation_tokens": 0, "requests_with_cache_read": 0,
+        "unmeasured_requests": 1, "output_tokens": 0, "max_request_input_tokens": 50,
     }}

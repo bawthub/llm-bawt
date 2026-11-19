@@ -255,6 +255,7 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                     message_id=trigger_message_id,
                     attachments=attachments_to_persist or None,
                     context_suffix=agent_context_suffix,
+                    context_prefix=getattr(ctx, "content_note", None),
                     author=user_author,
                     **({
                         "history_write_session_id": ctx.terminal_history_session_id,

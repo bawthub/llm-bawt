@@ -67,9 +67,9 @@ def test_stream_turn_events_and_row_share_one_assistant_id(monkeypatch, supplied
 
     asyncio.run(run())
 
-    assert llm.prepare_messages_for_query.call_args.args[0] == (
-        f"{content_note}\n\nhi" if content_note else "hi"
-    )
+    # TASK-2502: clean body to history/turn_start; marker as outbound prefix.
+    assert llm.prepare_messages_for_query.call_args.args[0] == "hi"
+    assert llm.prepare_messages_for_query.call_args.kwargs["context_prefix"] == content_note
     persisted = service._persist_turn_log.call_args.kwargs["assistant_message_id"]
     if supplied:
         assert persisted == supplied
@@ -78,3 +78,4 @@ def test_stream_turn_events_and_row_share_one_assistant_id(monkeypatch, supplied
     assert finalized_ids == [persisted]
     starts = [c.args[-1] for c in published.call_args_list if c.args and c.args[-1].get("_type") == "turn_start"]
     assert starts and all(event["assistant_message_id"] == persisted for event in starts)
+    assert all(event["content"] == "hi" for event in starts)

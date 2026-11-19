@@ -351,14 +351,22 @@ class BaseLLMBawt(OrchestratorInitializationMixin, PromptSectionsMixin, ABC):
 
         return describe_effective_config(self, prompt)
 
-    def _build_context_messages(self, prompt: str, context_suffix: str | None = None) -> list[Message]:
+    def _build_context_messages(
+        self, prompt: str, context_suffix: str | None = None,
+        context_prefix: str | None = None,
+    ) -> list[Message]:
         """Build messages list with system prompt, memory context, and history.
 
         ``context_suffix`` (TASK-391) is per-turn text appended to the OUTBOUND
         user message only — it is model-visible but never persisted (the caller
         already stored the clean ``prompt``). Used for the agent attachment
         manifest; see ``prepare_messages_for_query``.
+
+        ``context_prefix`` (TASK-2502) is the per-turn fleet-delivery lineage
+        marker. Like the suffix it rides the outbound user message only, placed
+        directly before the user text, so display and history stay clean.
         """
+        outbound_prompt = f"{context_prefix}\n\n{prompt}" if context_prefix else prompt
         messages = []
 
         # Assemble the per-turn system-prompt builder. Extracted into one method
@@ -425,7 +433,7 @@ class BaseLLMBawt(OrchestratorInitializationMixin, PromptSectionsMixin, ABC):
         # bridges consume them via a literal startswith("/new") check before
         # the agent ever sees them.
         if self.model_definition.get("type") in ("agent_backend", "claude-code"):
-            user_content = prompt
+            user_content = outbound_prompt
             # Per-turn prefixes that ride on the user message (kept off the cached
             # system prefix). Anything mode-dependent or session-configurable is
             # stamped per-turn here.
@@ -471,7 +479,7 @@ class BaseLLMBawt(OrchestratorInitializationMixin, PromptSectionsMixin, ABC):
 
                 if prefix_parts:
                     combined = "\n\n".join(prefix_parts)
-                    user_content = f"{combined}\n\n---\n\n{prompt}"
+                    user_content = f"{combined}\n\n---\n\n{outbound_prompt}"
                     if self.debug:
                         applied_repr = ", ".join(
                             f"{key}(len={n}, src={src})" for key, n, src in applied_keys
@@ -538,6 +546,17 @@ class BaseLLMBawt(OrchestratorInitializationMixin, PromptSectionsMixin, ABC):
                 max_tokens=max_context_tokens,
             )
             messages.extend(payload.inline_history)
+
+        # TASK-2502: lineage marker on the OUTBOUND copy only (same copy rule
+        # as the response-style directive below).
+        if context_prefix:
+            for i in range(len(messages) - 1, -1, -1):
+                if messages[i].role == "user":
+                    messages[i] = Message(
+                        role="user",
+                        content=f"{context_prefix}\n\n{messages[i].content or ''}",
+                    )
+                    break
 
         # TASK-288: stamp the inline response-style directive onto the OUTBOUND
         # COPY of the latest user message. We replace the list entry with a new

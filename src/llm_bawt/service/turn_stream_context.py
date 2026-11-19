@@ -67,6 +67,8 @@ class TurnStreamContext:
     thread_binding: Any = None
     bridge_reset_action: str | None = None
     bridge_prompt: str | None = None
+    # TASK-2502: model-only fleet-delivery lineage marker (outbound prefix).
+    content_note: str | None = None
     chat_reset: Any = None
     # HTTP selected-thread authority stays on this turn, never cached clients.
     selected_history: Any = None

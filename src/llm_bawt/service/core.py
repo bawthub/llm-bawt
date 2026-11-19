@@ -548,6 +548,7 @@ class ServiceLLMBawt(BaseLLMBawt):
         context_suffix: str | None = None,
         author=None,
         history_write_session_id: str | None = None,
+        context_prefix: str | None = None,
     ) -> list[Message]:
         """Prepare messages for query including history and memory context.
 
@@ -615,7 +616,9 @@ class ServiceLLMBawt(BaseLLMBawt):
         # Build context with system prompt, memory, and history. context_suffix
         # (e.g. the TASK-391 attachment manifest) rides the OUTBOUND user
         # message only — the clean ``prompt`` was already persisted above.
-        messages = self._build_context_messages(prompt, context_suffix=context_suffix)
+        messages = self._build_context_messages(
+            prompt, context_suffix=context_suffix, context_prefix=context_prefix,
+        )
 
         # TASK-225 LLM-boundary inlining: ``user_attachments`` is the
         # in-memory ``{mimeType, content=naked-b64}`` contract produced by

@@ -214,8 +214,8 @@ class ChatNonStreamMixin:
             inherit_admitted_request, self, request,
             ContentTurn(bot_id, user_id, turn_log_id, trigger_message_id),
         )
-        if content_note:
-            user_prompt = f"{content_note}\n\n{user_prompt}"
+        # TASK-2502: the lineage marker is model-only (outbound context_prefix);
+        # user_prompt stays the clean body for turn_start, history and logs.
         if is_agent_backend:
             from .turn_task_attribution import stamp_turn_task
             await stamp_turn_task(
@@ -578,6 +578,7 @@ class ChatNonStreamMixin:
                                 append_request_reply_channel_note(self, request, None)
                                 if _is_agent else None
                             ),
+                            context_prefix=content_note,
                             **({
                                 "history_write_session_id": resolved_session_id,
                             } if terminal_scope.follower is not None else {}),

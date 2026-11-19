@@ -92,18 +92,21 @@ def test_exposed_delivery_transport_preserves_command_or_labels(
 
     try:
         asyncio.run(run())
-        prompt = llm.prepare_messages_for_query.call_args.args[0]
+        call = llm.prepare_messages_for_query.call_args
+        prompt = call.args[0]
+        # TASK-2502: the persisted/displayed body is always clean.
+        assert prompt == body
+        note = call.kwargs.get("context_prefix")
         if maintenance:
-            assert prompt == body
+            assert note is None
             assert is_compact_command(prompt)
         else:
-            note, delivered_body = prompt.split("\n\n", 1)
             envelope = json.loads(note)
             assert envelope["source"] == "fleet-delivery"
             assert envelope["coordination"] is True
             assert "untrusted_content" not in envelope
+            assert "rule" not in envelope["data"]
             assert envelope["data"]["sender_bot_ids"] == ["fixture-sender"]
-            assert delivered_body == body
         target = ContentTurn("caid", "operator", request.inter_bot_turn_id, request.user_message_id)
         assert store.seen(target)
         assert not store.admit(
