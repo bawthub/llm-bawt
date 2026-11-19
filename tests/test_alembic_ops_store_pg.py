@@ -25,6 +25,8 @@ from llm_bawt.utils import alembic_state
 
 pytestmark = [pytest.mark.integration]
 
+HEAD = "0003_working_memory"
+
 OWNED_TABLES = ("ops_operations", "ops_jobs", "ops_operation_revisions", "ops_bell_outbox",
                 "ops_release_runs", "ops_release_events", "quiesce_run_sightings", "ops_host_access")
 
@@ -109,7 +111,7 @@ def test_alembic_path_matches_runtime_schema(make_db):
 
     migrated = make_db()
     stamp(migrated, "0001_baseline")
-    assert alembic_state.upgrade_on_startup(migrated) == "0002_ops_store"
+    assert alembic_state.upgrade_on_startup(migrated) == HEAD
     assert set(OWNED_TABLES) <= set(inspect(migrated).get_table_names())
 
     assert owned_schema(migrated) == expected
@@ -272,7 +274,7 @@ def test_two_concurrent_starters_upgrade_once(make_db, private_pg):  # noqa: F81
         for t in threads:
             t.join(60)
     second.dispose()
-    assert results == ["0002_ops_store", "0002_ops_store"]
+    assert results == [HEAD, HEAD]
     assert len(upgrades) == 1
 
 
@@ -296,4 +298,4 @@ def test_failed_upgrade_rolls_back_and_releases_lock(make_db):
         got = conn.execute(text("SELECT pg_try_advisory_lock(hashtext('llm-bawt-runtime-schema'))")).scalar()
         assert got is True
         conn.execute(text("SELECT pg_advisory_unlock(hashtext('llm-bawt-runtime-schema'))"))
-    assert alembic_state.upgrade_on_startup(engine) == "0002_ops_store"
+    assert alembic_state.upgrade_on_startup(engine) == HEAD

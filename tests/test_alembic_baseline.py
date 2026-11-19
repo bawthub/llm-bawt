@@ -37,7 +37,7 @@ def _statements(sql: str) -> list[str]:
 
 def test_single_baseline_head() -> None:
     script = ScriptDirectory.from_config(_config())
-    assert script.get_heads() == ["0002_ops_store"]
+    assert script.get_heads() == ["0003_working_memory"]
     base = script.get_revision("0001_baseline")
     assert base.down_revision is None
 

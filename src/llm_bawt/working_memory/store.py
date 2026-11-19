@@ -174,6 +174,17 @@ _EXTERNAL_CHANGES = text(
 
 _schema_guard = SchemaBootstrapGuard()
 
+# Alembic revision that owns this family's DDL on stamped databases (TASK-631).
+WORKING_MEMORY_SCHEMA_REVISION = "0003_working_memory"
+
+
+def bootstrap_working_memory_schema(conn: Connection) -> None:
+    """Idempotent DDL for the working memory tables; shared by the runtime path and 0003."""
+    ensure_relations(conn, _RELATIONS)
+    ensure_columns(conn, "working_memory_items", _TASK_COLUMNS)
+    ensure_columns(conn, "working_memory_task_suppressions", _SUPPRESSION_COLUMNS)
+    ensure_relations(conn, _TASK_RELATIONS)
+
 
 @contextmanager
 def _storage_errors():
@@ -334,13 +345,11 @@ class WorkingMemoryStore:
         self.engine = engine
 
     def ensure_schema(self) -> None:
-        def bootstrap(conn: Connection) -> None:
-            ensure_relations(conn, _RELATIONS)
-            ensure_columns(conn, "working_memory_items", _TASK_COLUMNS)
-            ensure_columns(conn, "working_memory_task_suppressions", _SUPPRESSION_COLUMNS)
-            ensure_relations(conn, _TASK_RELATIONS)
+        from ..utils.alembic_state import owns
 
-        _schema_guard.run(self.engine, "working-memory", bootstrap)
+        if owns(self.engine, WORKING_MEMORY_SCHEMA_REVISION):
+            return  # TASK-631: revision 0003_working_memory owns this DDL
+        _schema_guard.run(self.engine, "working-memory", bootstrap_working_memory_schema)
 
     # -- reads --------------------------------------------------------------
 
