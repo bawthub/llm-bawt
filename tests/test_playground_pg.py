@@ -61,7 +61,7 @@ def test_columns_are_added_to_an_old_table_with_rows_intact(pg):
             " ('pg_old0000000001', 'u', 'vex', 'old unread', 'text', 'text/plain', 1, 'a', now(), NULL),"
             " ('pg_old0000000002', 'u', 'vex', 'old read', 'text', 'text/plain', 1, 'b', now(), now())"))
     with engine.begin() as conn:
-        store_module._bootstrap(conn)
+        store_module.bootstrap_playground_schema(conn)
     store = PlaygroundStore(engine)
     states = {r["id"]: public_view(r)["status"] for r in store.list("u")}
     assert states == {"pg_old0000000001": "unopened", "pg_old0000000002": "opened"}

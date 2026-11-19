@@ -146,7 +146,11 @@ def _add_columns(conn) -> None:
                               else f"ALTER TABLE {TABLE_NAME} ADD COLUMN {name} TIMESTAMP"))
 
 
-def _bootstrap(conn) -> None:
+PLAYGROUND_SCHEMA_REVISION = "0005_playground"
+
+
+def bootstrap_playground_schema(conn) -> None:
+    """Idempotent DDL shared by runtime compatibility mode and revision 0005."""
     metadata.create_all(conn, checkfirst=True)
     _add_columns(conn)
 
@@ -168,7 +172,10 @@ class PlaygroundStore:
 
     def __init__(self, engine: Engine):
         self.engine = engine
-        self._schema_guard.run(engine, "playground-artifacts-v2", _bootstrap)
+        from ..utils.alembic_state import owns
+
+        if not owns(engine, PLAYGROUND_SCHEMA_REVISION):
+            self._schema_guard.run(engine, "playground-artifacts-v2", bootstrap_playground_schema)
 
     # -- write ---------------------------------------------------------------
 
