@@ -141,13 +141,25 @@ def test_child_tool_does_not_end_step_but_first_root_tool_does():
     assert step.accept(_tool(19)) == (True, "one two")
 
 
-@pytest.mark.parametrize("boundary", [_tool, _complete])
 @pytest.mark.parametrize("text", ["", " \n\t"])
-def test_zero_or_whitespace_only_step_is_unavailable(boundary, text):
+def test_zero_or_whitespace_only_step_is_unavailable(text):
     step = _step()
     step.accept(_started())
     step.accept(_delta(text))
-    assert step.accept(boundary(12 + len(text))) == (True, None)
+    assert step.accept(_complete(12 + len(text))) == (True, None)
+
+
+@pytest.mark.parametrize("text", ["", " \n\t"])
+def test_tool_before_any_spoken_text_keeps_the_step_open(text):
+    """TASK-2428: agents run a tool before answering; speak the answer after it."""
+    step = _step()
+    step.accept(_started())
+    step.accept(_delta(text))
+    end = 12 + len(text)
+    assert step.accept(_tool(end)) == (False, None)
+    assert step.accept(_tool(end)) == (False, None)
+    assert step.accept(_delta("answer", end)) == (False, None)
+    assert step.accept(_complete(end + 6)) == (True, "answer")
 
 
 @pytest.mark.parametrize("status", ["cancelled", "error", "failed", None])

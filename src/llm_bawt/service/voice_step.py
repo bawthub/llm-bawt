@@ -59,7 +59,13 @@ class VoiceStep:
                 return True, None  # Lost tail delta, even if earlier text was valid.
             if kind == "turn_complete" and event.get("status") not in {"ok", "completed"}:
                 return True, None
-            return True, "".join(self.parts).strip() or None
+            text = "".join(self.parts).strip()
+            if not text and kind == "tool_event":
+                # TASK-2428: an agent usually runs a tool before it answers.
+                # A tool start before any spoken text is not the step's end;
+                # keep reading until the answer's text reaches a boundary.
+                return False, None
+            return True, text or None
         if kind == "turn_complete":
             return True, None  # Finished without a consumption barrier.
         if kind != "text_delta" or self.offset is None:
