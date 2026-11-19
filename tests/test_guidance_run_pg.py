@@ -277,3 +277,16 @@ def test_no_evidence_rows_advance_with_no_change(rig):
     out = _run(rig)
     assert out["evidence"] == 0 and out["proposal"]["status"] == "no_change"
     assert _receipts(rig) == ["committed"] and _proposals(rig) == 0
+
+
+def test_shape_drops_unknown_keys_and_keeps_required_ones_strict():
+    out = gr._shape({"preferences": [
+        {"id": "p", "statement": "s", "status": "active", "confidence": 0.9,
+         "superseded_by": None, "evidence": [{"bot_id": "b", "message_id": "m", "quote": "x"}]},
+        {"id": "q", "statement": "t", "evidence": []}], "reason": "r"})
+    assert out["preferences"][0] == {"id": "p", "statement": "s", "status": "active",
+                                     "evidence": [{"bot_id": "b", "message_id": "m"}]}
+    with pytest.raises(ValueError):  # missing status is not invented
+        g.validate_doc({"v": 1, "mandate": "", "preferences": out["preferences"]})
+    with pytest.raises(ValueError):
+        gr._shape({"preferences": ["text"]})
