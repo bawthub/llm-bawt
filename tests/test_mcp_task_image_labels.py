@@ -72,6 +72,21 @@ def test_caption_alone_relabels_an_attached_image(monkeypatch: pytest.MonkeyPatc
     assert result["updated"] == ["imageLabelsSet"]
 
 
+def test_a_caption_labels_a_legacy_entry_as_it_is_stored(monkeypatch: pytest.MonkeyPatch, assets: dict) -> None:
+    legacy = f"https://dev.bawthub.com/api/chat/uploads/{ID}"
+    api = LabelTasks(monkeypatch, [legacy, STORED_OTHER])
+
+    _run(task_tools.update_task("TASK-9", image_captions={legacy: "Phone, dev"}))
+    _run(task_tools.update_task("TASK-9", image_captions={ID: "Desktop, dev"}))
+    # Re-adding the upload stores it canonically (the legacy spelling goes), so its caption follows.
+    _run(task_tools.update_task("TASK-9", add_image_urls=[ID], image_role="result", image_captions={legacy: "Round 2"}))
+
+    assert api.patches[0] == {"imageLabelsSet": {legacy: {"caption": "Phone, dev"}}}
+    assert api.patches[1] == {"imageLabelsSet": {legacy: {"caption": "Desktop, dev"}}}
+    assert api.patches[2]["imageUrlsRemove"] == [legacy]
+    assert api.patches[2]["imageLabelsSet"] == {STORED: {"role": "result", "caption": "Round 2"}}
+
+
 def test_a_removed_image_gets_no_role(monkeypatch: pytest.MonkeyPatch, assets: dict) -> None:
     api = LabelTasks(monkeypatch, [])
 

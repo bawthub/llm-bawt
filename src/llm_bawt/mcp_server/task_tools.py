@@ -26,6 +26,7 @@ from .task_images import (
     LABELS_UNSUPPORTED as IMAGE_LABELS_UNSUPPORTED,
     UNSUPPORTED as IMAGE_EDIT_UNSUPPORTED,
     ImageRefError,
+    current_image_urls,
     image_edit,
     image_label_set,
     linked_turn_images,
@@ -632,28 +633,31 @@ async def update_task(
         body["fallbackAgentBotId"] = bot_id
 
     turn_urls, turn_error = await linked_turn_images(associate_current_turn, attach_turn_images)
-    edit = None
-    if add_image_urls or remove_image_urls or turn_urls:
-        try:
-            edit = await image_edit(lambda ref: _api_get(f"/tasks/{ref}"), task_id,
-                                    add_image_urls, remove_image_urls, turn_urls)
-        except ImageRefError as error:
-            return {"error": str(error)}
-        except httpx.HTTPStatusError as error:
-            return _http_error(error)
-        if edit is not None:
-            body.update(edit.body())
-
-    # TASK-2494: roles and captions name stored entries; BawtHub applies them
-    # under the row lock, after this PATCH's own adds and removes.
     if image_role is not None and not add_image_urls:
         return {"error": "image_role labels add_image_urls; name the images to label there"}
+    reads: dict[str, Any] = {}
+
+    async def read_once(ref: str) -> Any:
+        if ref not in reads:
+            reads[ref] = await _api_get(f"/tasks/{ref}")
+        return reads[ref]
+
+    edit = None
     try:
+        if add_image_urls or remove_image_urls or turn_urls:
+            edit = await image_edit(read_once, task_id, add_image_urls, remove_image_urls, turn_urls)
+            if edit is not None:
+                body.update(edit.body())
+        # TASK-2494: roles and captions name the exact stored entries; BawtHub
+        # applies them under the row lock, after this PATCH's adds and removes.
         dropped = set(stored_urls(remove_image_urls or []))
         role_urls = [url for url in stored_urls(add_image_urls or []) if url not in dropped]
-        labels = image_label_set(role_urls, image_role, image_captions)
+        current = current_image_urls(await read_once(task_id)) if image_captions else []
+        labels = image_label_set(role_urls, image_role, image_captions, current)
     except ImageRefError as error:
         return {"error": str(error)}
+    except httpx.HTTPStatusError as error:
+        return _http_error(error)
     if labels:
         body["imageLabelsSet"] = labels
     if replace_current_results:

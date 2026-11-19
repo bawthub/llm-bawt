@@ -251,21 +251,38 @@ LABELS_UNSUPPORTED = "BawtHub doesn't support image roles or captions yet; they 
 
 
 def image_label_set(role_urls: Iterable[str], role: str | None,
-                    captions: dict[Any, Any] | None) -> dict[str, dict[str, str]]:
+                    captions: dict[Any, Any] | None, current: Iterable[str] = ()) -> dict[str, dict[str, str]]:
     """BawtHub's ``imageLabelsSet``: ``role`` for each stored URL in ``role_urls``,
     plus ``captions`` keyed by any reference to an image on the task.
 
-    Keys are stored URLs, the exact ``imageUrls`` entries BawtHub labels. An
-    empty caption clears it. Raises ImageRefError for a bad role or caption.
+    Keys are the exact ``imageUrls`` entries BawtHub labels. ``role_urls`` are
+    this edit's adds, stored in canonical form. A caption for an image already
+    on the task (``current``, an earlier read) uses the entry as it is stored,
+    so a legacy absolute spelling is labelled in place, not unlinked. An empty
+    caption clears it. Raises ImageRefError for a bad role or caption.
     """
     if role is not None and role not in IMAGE_ROLES:
         raise ImageRefError(f"image_role must be one of {', '.join(IMAGE_ROLES)}")
-    labels: dict[str, dict[str, str]] = {url: {"role": role} for url in role_urls} if role else {}
+    adding = list(role_urls)
+    labels: dict[str, dict[str, str]] = {url: {"role": role} for url in adding} if role else {}
+    current = list(current)
     for ref, caption in (captions or {}).items():
         if not isinstance(caption, str) or len(caption.strip()) > MAX_IMAGE_CAPTION:
             raise ImageRefError(f"caption for {ref!r} must be text of at most {MAX_IMAGE_CAPTION} characters")
-        labels.setdefault(parse_image_ref(ref)[1], {})["caption"] = caption.strip()
+        labels.setdefault(_label_key(ref, adding, current), {})["caption"] = caption.strip()
     return labels
+
+
+def _label_key(ref: Any, adding: list[str], current: list[str]) -> str:
+    """The ``imageUrls`` entry a caption reference names."""
+    exact = ref.strip() if isinstance(ref, str) else ref
+    if exact in current:
+        # An upload this edit re-adds is stored canonically; its old spelling goes.
+        return _key(exact) if _key(exact) in adding else exact
+    key = parse_image_ref(ref)[1]
+    if key in adding:
+        return key
+    return next((url for url in current if _key(url) == key), key)
 
 
 def stored_urls(refs: Iterable[Any]) -> list[str]:
@@ -278,6 +295,10 @@ def _image_urls(task: Any) -> list[str]:
     if not isinstance(urls, list):
         raise ImageRefError("the task API returned no imageUrls for this task")
     return [url for url in urls if isinstance(url, str)]
+
+
+#: A task read's image list, for callers that resolve references against it.
+current_image_urls = _image_urls
 
 
 def _unique(urls: Iterable[str]) -> list[str]:
