@@ -400,7 +400,32 @@ class InterBotDeliveryStore:
                 ORDER BY first_ordinal
                 LIMIT :limit
             """), {"limit": limit}).all()
+            # TASK-1308: now() is the transaction time, so it is the exact
+            # cutoff the scan above used, empty result included.
+            scan_at = conn.execute(sa_text("SELECT now()")).scalar_one()
+        self.last_scan_at = scan_at
         return [row[0] for row in rows]
+
+    #: TASK-1308: DB time of the last successful eligibility scan. Only a scan
+    #: moves it; deadline queries never do.
+    last_scan_at: datetime | None = None
+
+    def next_due_after(self, watermark: datetime) -> tuple[datetime | None, datetime]:
+        """``(earliest QUEUED available_at after watermark, DB now)``.
+
+        Read only. A row that became due since the last scan is still found
+        (the scan never saw it ripe), while a row already ripe at the last
+        scan but unclaimable is excluded, so it can't shorten the wait again.
+        """
+        if self.engine is None:
+            raise RuntimeError("delivery store has no engine")
+        with self.engine.connect() as conn:
+            row = conn.execute(sa_text("""
+                SELECT min(available_at), now()
+                FROM inter_bot_deliveries
+                WHERE status='QUEUED' AND available_at > :watermark
+            """), {"watermark": watermark}).one()
+        return row[0], row[1]
 
     @staticmethod
     def _explicit_stop_requested(conn, turn_id: str) -> bool:

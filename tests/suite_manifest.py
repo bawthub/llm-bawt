@@ -98,6 +98,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_bot_live_state_pg.py::",
     "test_turn_task_pg.py::",
     "test_delivery_queue_health_pg.py::",
+    "test_inter_bot_delivery_next_due_pg.py::",
     "test_user_stop_hold_pg.py::",
     "test_send_now_pg.py::",
     "test_room_freeze_pg.py::",

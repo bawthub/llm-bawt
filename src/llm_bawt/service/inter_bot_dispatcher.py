@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 from typing import Any
 
@@ -19,6 +20,7 @@ from .dispatcher_leadership import (
     close_quietly,
     probe_within,
 )
+from .inter_bot_delivery_log import log_delivery_event
 from .inter_bot_dispatcher_recovery import StartupCheck, StartupRecoveryRunner
 from .inter_bot_dispatcher_steer import (
     APP_RUN_NOT_READY,
@@ -32,6 +34,18 @@ from .schemas import ChatCompletionRequest
 from .turn_logs import DeliveryTargetBusy
 
 logger = logging.getLogger(__name__)
+
+#: TASK-1308: shortest wait before a pass for a just-due retry.
+MIN_DEADLINE_WAIT_S = 0.05
+
+
+def next_wait_seconds(due, db_now, elapsed: float, interval: float) -> float:
+    """Seconds to wait for the next pass: until ``due`` (both DB-clock times,
+    less the time already spent asking), floored and capped at ``interval``."""
+    if due is None:
+        return interval
+    remaining = (due - db_now).total_seconds() - elapsed
+    return min(interval, max(MIN_DEADLINE_WAIT_S, remaining))
 
 # TASK-2191: once the app has durably settled a delivery, its run streams no
 # longer back any reattach or recovery, so they keep one day instead of the
@@ -373,10 +387,9 @@ class InterBotDeliveryDispatcher:
         self._wake_event.set()
         consecutive_failures = 0
         while not self._stop_event.is_set():
+            timeout = await self._next_wait_seconds()
             try:
-                await asyncio.wait_for(
-                    self._wake_event.wait(), timeout=self.recovery_interval_seconds
-                )
+                await asyncio.wait_for(self._wake_event.wait(), timeout=timeout)
             except asyncio.TimeoutError:
                 pass
             self._wake_event.clear()
@@ -415,6 +428,26 @@ class InterBotDeliveryDispatcher:
         await asyncio.gather(
             *self._target_tasks.values(), *self._dispatch_tasks, return_exceptions=True
         )
+
+    @staticmethod
+    async def _off_loop(fn, *args):
+        return await asyncio.to_thread(fn, *args)
+
+    async def _next_wait_seconds(self) -> float:
+        """TASK-1308: sleep until the next delayed retry is due, capped at the
+        recovery interval. Falls back to the interval on any doubt."""
+        interval = self.recovery_interval_seconds
+        probe = getattr(self.store, "next_due_after", None)
+        watermark = getattr(self.store, "last_scan_at", None)
+        if probe is None or watermark is None:
+            return interval
+        started = time.monotonic()
+        try:
+            due, db_now = await self._off_loop(probe, watermark)
+        except Exception:
+            logger.warning("next delivery deadline query failed; waiting %.1fs", interval, exc_info=True)
+            return interval
+        return next_wait_seconds(due, db_now, time.monotonic() - started, interval)
 
     def _schedule_eligible_targets(self) -> None:
         subscriber = getattr(self.service, "_redis_subscriber", None)
@@ -1029,6 +1062,9 @@ class InterBotDeliveryDispatcher:
         return isinstance(status_code, int) and 400 <= status_code < 500 and status_code not in (408, 409, 425, 429)
 
     async def _emit(self, record: DeliveryRecord) -> None:
+        # TASK-1308: logged before the Redis checks, so a missing or failing
+        # subscriber can't drop it.
+        log_delivery_event(record)
         subscriber = getattr(self.service, "_redis_subscriber", None)
         if subscriber is None:
             return
