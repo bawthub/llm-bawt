@@ -45,6 +45,7 @@ class JobType(str, Enum):
     SEND_PROMPT = "send_prompt"
     IDLE_CONTEXT_RESET = "idle_context_reset"
     THREAD_AUTO_ARCHIVE = "thread_auto_archive"
+    GUIDANCE_RUN = "guidance_run"
 
 
 # Wildcard jobs that skip bots tagged inactive (TASK-1440, TASK-2333).
@@ -820,7 +821,8 @@ class JobScheduler:
                 return True, None
 
             if job.job_type in (JobType.TOOL_RESULT_GC, JobType.HARNESS_VERSION_CHECK,
-                                JobType.PLAYGROUND_EXPIRY, JobType.THREAD_AUTO_ARCHIVE):
+                                JobType.PLAYGROUND_EXPIRY, JobType.THREAD_AUTO_ARCHIVE,
+                                JobType.GUIDANCE_RUN):
                 # Always-on for the same reason as MEDIA_GC — a cheap sweep.
                 return True, None
         except Exception as e:
@@ -860,6 +862,7 @@ class JobScheduler:
             create_playground_expiry_task,
             create_thread_auto_archive_task,
             create_tool_result_gc_task,
+            create_guidance_run_task,
         )
 
         if job.job_type == JobType.PROFILE_MAINTENANCE:
@@ -926,6 +929,15 @@ class JobScheduler:
             return create_playground_expiry_task(
                 bot_id=job.bot_id or "system",
                 user_id=config["user_id"],
+            )
+        elif job.job_type == JobType.GUIDANCE_RUN:
+            # One explicit bot/person pair per row; never a wildcard (TASK-893).
+            if job.bot_id in ("", WILDCARD_BOT_ID) or not config["user_id"].strip():
+                return None
+            return create_guidance_run_task(
+                bot_id=job.bot_id,
+                user_id=config["user_id"],
+                max_evidence=config["max_evidence"],
             )
         elif job.job_type == JobType.HARNESS_VERSION_CHECK:
             return create_harness_version_check_task(

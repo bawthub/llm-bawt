@@ -145,6 +145,13 @@ class ThreadAutoArchiveParameters(SystemJobParameters):
                       description="0 disables the sweep.")
 
 
+class GuidanceRunParameters(JobParameters):
+    user_id: str = Field(default="", title="Person",
+                         description="Whose guidance is drafted from their own history with this bot. "
+                                     "Blank never runs.")
+    max_evidence: int = Field(default=200, strict=True, ge=1, le=500, title="Evidence per run")
+
+
 class HarnessVersionParameters(SystemJobParameters):
     constraints_path: str = Field(default="", title="Constraints file",
                                   description="Blank uses the installed harness pins.")
@@ -180,6 +187,7 @@ class JobParameterRegistry:
         "harness_version_check": HarnessVersionParameters,
         "playground_expiry": SystemJobParameters,
         "thread_auto_archive": ThreadAutoArchiveParameters,
+        "guidance_run": GuidanceRunParameters,
     }
 
     @classmethod

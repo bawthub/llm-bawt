@@ -79,6 +79,7 @@ class BackgroundTasksMixin:
         TaskType.HARNESS_VERSION_CHECK: "_process_harness_version_check",
         TaskType.PLAYGROUND_EXPIRY: "_process_playground_expiry",
         TaskType.THREAD_AUTO_ARCHIVE: "_process_thread_auto_archive",
+        TaskType.GUIDANCE_RUN: "_process_guidance_run",
     }
 
     async def process_task(self, task: Task) -> TaskResult:
@@ -947,6 +948,44 @@ class BackgroundTasksMixin:
         from .jobs.thread_auto_archive import run_thread_auto_archive
 
         return run_thread_auto_archive(self.config, days=int(task.payload.get("days", 30)))
+
+    def _process_guidance_run(self, task: Task) -> dict:
+        """One committing guidance run for the job's bot/person pair (TASK-893).
+
+        Records at most a pending proposal; the cursor advances only in the
+        same transaction as a successful draft or no-change outcome."""
+        from llm_bawt.approval_mcp_store import _SENTINEL_IDENTITIES
+        from llm_bawt.approval_models import BOT_RESOLVER_PREFIX
+        from llm_bawt.memory import guidance, guidance_run
+        from llm_bawt.memory.history_read_cursor import ensure_schema
+        from llm_bawt.utils.db import get_shared_engine
+
+        user_id = (task.user_id or "").strip()
+        if (not user_id or user_id.lower() in {*_SENTINEL_IDENTITIES, "system"}
+                or user_id.lower().startswith(BOT_RESOLVER_PREFIX)):
+            raise ValueError("guidance_run needs a person's user_id")
+        engine = get_shared_engine(self.config)
+        if engine is None:
+            raise RuntimeError("guidance_store_unavailable")
+        with engine.begin() as conn:
+            ensure_schema(conn)
+            guidance.ensure_schema(conn)
+        result = dict(guidance_run.run_pair(
+            engine, bot_id=task.bot_id, user_id=user_id,
+            max_evidence=int(task.payload.get("max_evidence", 200)),
+            dry_run=False, proposed_by="guidance-schedule",
+        ))
+        proposal = result.get("proposal") or {}
+        status = proposal.get("status")
+        if status == "pending":
+            # Same topic the operator route publishes; thread-safe mark + nudge.
+            from . import state_events
+            state_events.mark(self, state_events.GUIDANCE)
+        elif status in ("invalid_draft", "rejected", "aborted"):
+            # Nothing committed and the cursor did not move: report it as a failure.
+            result["error"] = (f"guidance draft {status}: "
+                               f"{proposal.get('error') or proposal.get('reason') or 'no detail'}")[:500]
+        return result
 
     def _process_playground_expiry(self, task: Task) -> dict:
         """Purge Playground Trash past its retention; retry blob deletes (TASK-2195)."""

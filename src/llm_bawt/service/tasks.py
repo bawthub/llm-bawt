@@ -23,6 +23,7 @@ class TaskType(Enum):
     HARNESS_VERSION_CHECK = "harness_version_check"
     PLAYGROUND_EXPIRY = "playground_expiry"
     THREAD_AUTO_ARCHIVE = "thread_auto_archive"
+    GUIDANCE_RUN = "guidance_run"
 
 
 class TaskStatus(Enum):
@@ -324,4 +325,18 @@ def create_playground_expiry_task(
         user_id=user_id,
         priority=priority,
         payload={},
+    )
+
+
+def create_guidance_run_task(bot_id: str, user_id: str, max_evidence: int = 200,
+                             priority: int = -1) -> Task:
+    """Draft one pending guidance proposal for a bot/person pair (TASK-893).
+
+    Nothing is applied: the proposal waits for the person's decision."""
+    return Task(
+        task_type=TaskType.GUIDANCE_RUN,
+        bot_id=bot_id,
+        user_id=user_id,
+        priority=priority,
+        payload={"max_evidence": max_evidence},
     )

@@ -18,7 +18,8 @@ records it as a pending proposal for the user to decide. Nothing is applied.
 Dry-run (the default) reads one page, writes nothing and drafts nothing.
 Committing runs execute in the app process through the operator route
 ``POST /v1/guidance/runs`` so the drafter keeps the bounded utility path;
-``python -m`` is dry-run only. No scheduler calls this module.
+``python -m`` is dry-run only. The ``guidance_run`` scheduled job (one
+explicit bot/person row, never a wildcard) also commits through ``run_pair``.
 """
 from __future__ import annotations
 
