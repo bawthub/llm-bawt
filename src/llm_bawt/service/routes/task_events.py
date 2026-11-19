@@ -1,10 +1,10 @@
-"""TASK-1396/1402: relay BawtHub's committed task and project writes to open UIs.
+"""Relay BawtHub's committed task, project, health and auth-settings writes.
 
 BawtHub owns task and project state and calls these after its outermost
 transaction commits. The events go out on the existing global unified stream,
 the same one ``bot_profile_changed`` uses, so every open window invalidates
-its task views. They are deliberately narrow: two closed event types, row ids
-only, no content, one route each. There is no generic publish endpoint. The
+its affected views. These are closed event types with narrow payloads, one
+route each. There is no generic publish endpoint. The
 LAN/compose network boundary is the auth for ``/v1/*``
 (``reference/security-model.md``).
 """
@@ -127,3 +127,20 @@ class HealthChangedEvent(BaseModel):
 async def publish_health_changed(event: HealthChangedEvent):
     """Tell open UIs the system health verdict changed. Best-effort, like task-changed."""
     return await _publish(event.to_event(), "health")
+
+
+class AuthSettingsChangedEvent(BaseModel):
+    """Content-free invalidation; never carry credentials or provider metadata."""
+
+    model_config = _CLOSED
+
+    type: Literal["auth_settings_changed"] = Field(alias="_type")
+
+    def to_event(self) -> dict:
+        return {"_type": "auth_settings_changed"}
+
+
+@router.post("/v1/events/auth-settings-changed", status_code=status.HTTP_202_ACCEPTED, tags=["Events"])
+async def publish_auth_settings_changed(event: AuthSettingsChangedEvent):
+    """Relay a committed sign-in configuration change on the existing stream."""
+    return await _publish(event.to_event(), "auth settings")

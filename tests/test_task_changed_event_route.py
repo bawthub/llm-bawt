@@ -23,6 +23,7 @@ from llm_bawt.service.routes import all_routers, task_events
 TASK_URL = "/v1/events/task-changed"
 PROJECT_URL = "/v1/events/project-changed"
 HEALTH_URL = "/v1/events/health-changed"
+AUTH_URL = "/v1/events/auth-settings-changed"
 IDS = ["cmvmvxyf300150mlfzf90b7u6", "cmvmjoyo800gx0mnt925jw6gz"]
 
 # (url, _type, id field, model, 503 noun)
@@ -125,7 +126,7 @@ def test_any_other_shape_is_refused_and_nothing_is_published(
 
 def test_there_is_no_generic_publish_route() -> None:
     paths = {route.path for router in all_routers for route in router.routes}
-    assert {path for path in paths if path.startswith("/v1/events")} == {TASK_URL, PROJECT_URL, HEALTH_URL}
+    assert {path for path in paths if path.startswith("/v1/events")} == {TASK_URL, PROJECT_URL, HEALTH_URL, AUTH_URL}
 
 
 @pytest.mark.parametrize(("url", "kind", "field", "model", "noun"), ROUTES)
@@ -156,3 +157,29 @@ def test_health_changed_refuses_other_shapes(monkeypatch: pytest.MonkeyPatch, bo
     subscriber = _subscriber()
     assert _client(monkeypatch, subscriber).post(HEALTH_URL, json=body).status_code == 422
     subscriber.publish_global_config_event.assert_not_awaited()
+
+
+def test_auth_settings_changed_publishes_no_content(monkeypatch: pytest.MonkeyPatch) -> None:
+    subscriber = _subscriber()
+    response = _client(monkeypatch, subscriber).post(AUTH_URL, json={"_type": "auth_settings_changed"})
+    assert response.status_code == 202
+    subscriber.publish_global_config_event.assert_awaited_once_with({"_type": "auth_settings_changed"})
+
+
+@pytest.mark.parametrize("body", [
+    {},
+    {"_type": "task_changed"},
+    {"type": "auth_settings_changed"},
+    {"_type": "auth_settings_changed", "secret": "must-not-be-published"},
+    {"_type": "auth_settings_changed", "providers": []},
+])
+def test_auth_settings_changed_refuses_other_shapes(monkeypatch: pytest.MonkeyPatch, body: dict) -> None:
+    subscriber = _subscriber()
+    assert _client(monkeypatch, subscriber).post(AUTH_URL, json=body).status_code == 422
+    subscriber.publish_global_config_event.assert_not_awaited()
+
+
+@pytest.mark.parametrize("subscriber", [None, _subscriber(stream_id=None)])
+def test_auth_settings_changed_unavailable_stream(monkeypatch: pytest.MonkeyPatch, subscriber: object | None) -> None:
+    response = _client(monkeypatch, subscriber).post(AUTH_URL, json={"_type": "auth_settings_changed"})
+    assert response.status_code == 503
