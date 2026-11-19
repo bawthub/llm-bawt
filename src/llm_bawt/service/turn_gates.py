@@ -188,13 +188,22 @@ class GateSpec:
 _schema_guard = SchemaBootstrapGuard()
 
 
+GATE_SCHEMA_REVISION = "0004_gates"
+
+
 def ensure_gate_schema(engine) -> None:
-    """Create ``system_gates`` and ``gate_members`` once per engine (PostgreSQL only)."""
-    if _is_postgres(engine):
-        _schema_guard.run(engine, "system-gates", _bootstrap)
+    """Create the gate tables once per engine (PostgreSQL only)."""
+    if not _is_postgres(engine):
+        return
+    from ..utils.alembic_state import owns
+
+    if owns(engine, GATE_SCHEMA_REVISION):
+        return  # TASK-631: revision 0004_gates owns this DDL
+    _schema_guard.run(engine, "system-gates", bootstrap_gate_schema)
 
 
-def _bootstrap(conn) -> None:
+def bootstrap_gate_schema(conn) -> None:
+    """Idempotent DDL for the gate tables; shared by the runtime path and 0004."""
     ensure_relations(conn, _GATE_RELATIONS)
     ensure_columns(conn, "system_gates", _GATE_ADDED_COLUMNS)
     ensure_columns(conn, "gate_members", _MEMBER_ADDED_COLUMNS)

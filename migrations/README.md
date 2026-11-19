@@ -1,12 +1,15 @@
 # Schema migrations (Alembic)
 
-Status: **partial ownership (TASK-631 slice 3).** Head is `0003_working_memory`.
+Status: **partial ownership (TASK-631 slice 4).** Head is `0004_gates`.
 `0001_baseline` performs no DDL. `0002_ops_store` owns the ops store family
 (`ops_operations`, `ops_jobs`, `ops_operation_revisions`, `ops_bell_outbox`,
 `ops_release_runs`, `ops_release_events`, `quiesce_run_sightings`, `ops_host_access`).
 `0003_working_memory` owns the working memory family (`working_memory_namespaces`,
 `working_memory_items`, `working_memory_task_suppressions`,
 `working_memory_task_purge_audit`, `working_memory_changes`); it has no data transitions.
+`0004_gates` owns the gate family (`system_gates`, `gate_members`, `gate_escalations`,
+`ops_resume_notices`); its one contract step drops the retired `gate_members`
+control-pump columns only where they still exist, as the runtime bootstrap does.
 Every other table is still created and altered by the runtime bootstrap (`ensure_*`
 and `create_all` units guarded by `utils/schema.SchemaBootstrapGuard`).
 
@@ -24,7 +27,7 @@ advisory lock:
   app refuses to start rather than guess.
 
 So **stamping `0001_baseline` activates migrations**: the next app start applies
-every later revision up to head. A database already stamped (dev is at `0002`)
+every later revision up to head. A database already stamped (dev is at `0003`)
 needs no new stamp: its next app start on a release that ships a new revision
 applies it. On a database the runtime has already bootstrapped this is a no-op
 (the revision calls the same idempotent bootstraps), and its one-time data transitions
@@ -35,7 +38,7 @@ What this slice does NOT provide:
 - **Parity.** `target_metadata` is None, so autogenerate is off. The SQLModel
   metadata covers only part of the schema; diffing it would propose dropping real tables.
 - **Full reconstruction.** `alembic upgrade head` on an empty database creates only
-  the eight ops-family and five working-memory tables; every other table still needs the runtime bootstrap.
+  the eight ops-family, five working-memory and four gate tables; every other table still needs the runtime bootstrap.
 - **Drift detection.** That comes in a later slice, along with schema reconstruction
   and retiring runtime DDL.
 

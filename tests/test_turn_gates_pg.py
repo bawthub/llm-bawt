@@ -768,7 +768,7 @@ def test_bootstrap_on_a_migrated_schema_waits_on_no_open_transaction(gated, hold
         _GATE_RELATIONS,
         _MEMBER_ADDED_COLUMNS,
         _MEMBER_RETIRED_COLUMNS,
-        _bootstrap,
+        bootstrap_gate_schema,
     )
     from llm_bawt.utils.schema import SchemaBootstrapGuard, drop_columns, ensure_columns, ensure_relations
 
@@ -780,7 +780,7 @@ def test_bootstrap_on_a_migrated_schema_waits_on_no_open_transaction(gated, hold
 
     def bootstrap(conn):
         conn.execute(sa_text("SET LOCAL lock_timeout = '300ms'"))
-        _bootstrap(conn)
+        bootstrap_gate_schema(conn)
 
     with engine.connect() as holder:
         txn = holder.begin()
@@ -873,7 +873,7 @@ def _member_columns(conn):
 @pytest.mark.integration
 def test_bootstrap_contracts_a_pre_s4_roster_and_keeps_its_rows(gated):
     """TASK-1431 S4: a table still carrying the B3 pump's six columns loses them; rows survive."""
-    from llm_bawt.service.turn_gates import _MEMBER_RETIRED_COLUMNS, _bootstrap
+    from llm_bawt.service.turn_gates import _MEMBER_RETIRED_COLUMNS, bootstrap_gate_schema
 
     store, bot = gated.store, gated.bot()
     turn = _open(store, bot)
@@ -889,7 +889,7 @@ def test_bootstrap_contracts_a_pre_s4_roster_and_keeps_its_rows(gated):
                 " ADD COLUMN control_attempts INTEGER NOT NULL DEFAULT 0,"
                 " ADD COLUMN control_next_attempt_at TIMESTAMPTZ,"
                 " ADD COLUMN control_generation INTEGER"))
-            _bootstrap(conn)
+            bootstrap_gate_schema(conn)
             assert not set(_MEMBER_RETIRED_COLUMNS) & _member_columns(conn)
             assert conn.execute(sa_text(
                 "SELECT control_state FROM gate_members WHERE gate_id=:g AND turn_id=:t"),

@@ -25,7 +25,7 @@ from llm_bawt.utils import alembic_state
 
 pytestmark = [pytest.mark.integration]
 
-HEAD = "0003_working_memory"
+HEAD = "0004_gates"
 
 OWNED_TABLES = ("ops_operations", "ops_jobs", "ops_operation_revisions", "ops_bell_outbox",
                 "ops_release_runs", "ops_release_events", "quiesce_run_sightings", "ops_host_access")
