@@ -87,6 +87,34 @@ def test_guard_skips_owned_ddl_only_when_stamped(make_db, monkeypatch):
     assert calls == []
 
 
+def test_blocked_contract_step_fails_upgrade_and_retries_next_start(make_db):
+    # A legacy table still carries a retired column and a reader holds it past
+    # drop_columns' lock timeout: 0004 must not commit, so the next start retries.
+    engine = make_db()
+    turn_gates.ensure_gate_schema(engine)
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE gate_members ADD COLUMN control_generation INTEGER"))
+    stamp(engine, "0003_working_memory")
+
+    reader = engine.connect()
+    txn = reader.begin()
+    reader.execute(text("SELECT count(*) FROM gate_members"))  # ACCESS SHARE until rollback
+    try:
+        with pytest.raises(Exception, match="retired gate_members columns"):
+            alembic_state.upgrade_on_startup(engine)
+    finally:
+        txn.rollback()
+        reader.close()
+    with engine.connect() as conn:
+        assert alembic_state.read_revision(conn) == "0003_working_memory"
+
+    assert alembic_state.upgrade_on_startup(engine) == HEAD
+    with engine.connect() as conn:
+        cols = {r[0] for r in conn.execute(text(
+            "SELECT column_name FROM information_schema.columns WHERE table_name='gate_members'"))}
+    assert "control_generation" not in cols
+
+
 def test_partially_upgraded_db_still_runs_runtime_ddl(make_db):
     # Stamped at 0003 but not yet upgraded: 0004 does not own the DDL yet.
     engine = make_db()

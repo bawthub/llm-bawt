@@ -30,9 +30,18 @@ depends_on = None
 def upgrade() -> None:
     if context.is_offline_mode():
         raise RuntimeError("0004_gates inspects the live catalog; run it online, not with --sql")
-    from llm_bawt.service.turn_gates import bootstrap_gate_schema
+    from sqlalchemy import inspect
 
-    bootstrap_gate_schema(op.get_bind())
+    from llm_bawt.service.turn_gates import _MEMBER_RETIRED_COLUMNS, bootstrap_gate_schema
+
+    conn = op.get_bind()
+    bootstrap_gate_schema(conn)
+    # The runtime contract step skips on a lock timeout and retries at the next
+    # start. Once 0004 owns the DDL that retry never runs, so the upgrade must not
+    # commit with retired columns left: fail and roll back, the next start retries.
+    left = {c["name"] for c in inspect(conn).get_columns("gate_members")} & set(_MEMBER_RETIRED_COLUMNS)
+    if left:
+        raise RuntimeError(f"0004_gates: retired gate_members columns still present {sorted(left)}; retry the upgrade")
 
 
 def downgrade() -> None:
