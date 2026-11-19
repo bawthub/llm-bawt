@@ -48,6 +48,9 @@ RUN uv sync --locked --no-dev --no-install-project \
 # dependency set above is already cached.
 COPY src/ ./src/
 COPY server.sh ./
+# Alembic config + revisions (TASK-631); run `alembic ...` from /app.
+COPY alembic.ini ./
+COPY migrations/ ./migrations/
 RUN chmod +x server.sh
 RUN uv sync --locked --no-dev --extra mcp --extra service --extra search
 

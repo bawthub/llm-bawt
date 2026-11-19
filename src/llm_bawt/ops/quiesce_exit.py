@@ -107,7 +107,17 @@ def ensure_sighting_schema(engine) -> None:
     """Create the gate tables, ``bridge_run_accepts`` and ``quiesce_run_sightings`` once per engine."""
     ensure_gate_schema(engine)
     ensure_accept_schema(engine)
-    _schema_guard.run(engine, "quiesce-run-sightings", lambda conn: ensure_relations(conn, _SIGHTING_RELATIONS))
+    from ..utils.alembic_state import owns
+    from .schema_revision import OPS_SCHEMA_REVISION
+
+    if owns(engine, OPS_SCHEMA_REVISION):
+        return  # TASK-631: revision 0002_ops_store owns the sightings DDL
+    _schema_guard.run(engine, "quiesce-run-sightings", bootstrap_sighting_schema)
+
+
+def bootstrap_sighting_schema(conn) -> None:
+    """``quiesce_run_sightings`` DDL. Runtime bootstrap or revision 0002."""
+    ensure_relations(conn, _SIGHTING_RELATIONS)
 
 
 @dataclass(frozen=True)

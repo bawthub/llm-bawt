@@ -70,11 +70,19 @@ class HostAccessError(ValueError):
     pass
 
 
+def bootstrap_host_access_schema(conn) -> None:
+    """``ops_host_access`` DDL (TASK-2430). Runtime bootstrap or revision 0002."""
+    SQLModel.metadata.create_all(bind=conn, tables=[OpsHostAccess.__table__])
+
+
 def ensure_schema(engine) -> None:
-    def bootstrap(conn):
-        SQLModel.metadata.create_all(bind=conn, tables=[OpsHostAccess.__table__])
+    from ..utils.alembic_state import owns
+    from .schema_revision import OPS_SCHEMA_REVISION
+
+    if owns(engine, OPS_SCHEMA_REVISION):
+        return  # TASK-631: revision 0002_ops_store owns this DDL
     if "ops_host_access" not in inspect(engine).get_table_names():
-        _guard.run(engine, "ops-host-access-task2430-v1", bootstrap)
+        _guard.run(engine, "ops-host-access-task2430-v1", bootstrap_host_access_schema)
 
 
 def _validate_destination(fields: dict) -> dict:

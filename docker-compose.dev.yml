@@ -16,6 +16,9 @@ services:
       # Mount source code for live development
       - ./src:/app/src
       - ./server.sh:/app/server.sh
+      # Alembic config + revisions (TASK-631)
+      - ./alembic.ini:/app/alembic.ini:ro
+      - ./migrations:/app/migrations:ro
       # Harness pins read by the weekly version check (TASK-1975)
       - ./docker/agent-bridge-constraints.txt:/app/docker/agent-bridge-constraints.txt:ro
       # Config, logs, models (mirrors base compose)

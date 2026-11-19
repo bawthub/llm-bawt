@@ -22,6 +22,8 @@ from sqlmodel import Session, SQLModel, select
 from ..service.commit_wake import notify_in_transaction
 from ..system_events import SystemEventEmitter
 from ..utils.config import Config, has_database_credentials
+from ..utils.alembic_state import owns
+from .schema_revision import OPS_SCHEMA_REVISION
 from ..utils.schema import SchemaBootstrapGuard
 from .bell import OpsBellOutbox
 from .events import append_job_transition, append_job_transition_by_id
@@ -249,12 +251,15 @@ class OpsStore:
     def _ensure_tables_exist(self):
         if self.engine is None:
             return
-        def bootstrap(conn):
-            SQLModel.metadata.create_all(bind=conn, tables=[OpsOperation.__table__, OpsJob.__table__, OpsOperationRevision.__table__,
-                                                            OpsBellOutbox.__table__])
-            self._migrate_add_columns(conn)
-            # Pre-existing rows have only their current revision available.
-            # Never invent historical revisions that were not recorded.
+        if not owns(self.engine, OPS_SCHEMA_REVISION):
+            # Unstamped DB: runtime DDL stays authoritative (TASK-631).
+            self._schema_guard.run(self.engine, "ops-store-task861-v1", bootstrap_ops_store_schema)
+
+        def repair(conn):
+            # Ongoing repair, not a one-time migration, so it runs on stamped DBs
+            # too. Pre-existing rows have only their current revision available.
+            # Never invent historical revisions that were not recorded. Runs
+            # under the schema guard's advisory lock, as it always has.
             with Session(bind=conn) as session:
                 for op in session.exec(select(OpsOperation)).all():
                     existing = session.exec(select(OpsOperationRevision.id).where(
@@ -263,9 +268,10 @@ class OpsStore:
                         self._record_revision(session, op)
                 session.flush()
                 session.commit()  # join the bootstrap connection transaction
-        self._schema_guard.run(self.engine, "ops-store-task861-v1", bootstrap)
+        self._schema_guard.run(self.engine, "ops-store-revision-repair-v1", repair)
 
-    def _migrate_add_columns(self, conn):
+    @staticmethod
+    def _migrate_add_columns(conn):
         clause = " IF NOT EXISTS" if conn.dialect.name == "postgresql" else ""
         for table, columns in (
             ("ops_jobs", (("invocation_snapshot_json", "TEXT"), ("request_payload_json", "TEXT"),
@@ -279,7 +285,7 @@ class OpsStore:
             for name, kind in columns:
                 if name not in existing:
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN{clause} {name} {kind}"))
-        self._migrate_execution_mode(conn, clause)
+        OpsStore._migrate_execution_mode(conn, clause)
         migrate_gate_history(conn)
 
     @staticmethod
@@ -889,3 +895,15 @@ class OpsStore:
             if limit is not None:
                 query = query.limit(limit)
             return list(session.exec(query).all())
+
+
+def bootstrap_ops_store_schema(conn):
+    """The ops store's DDL and one-time column migrations (TASK-861/1169/1484).
+
+    Runtime bootstrap on unstamped databases, and revision 0002_ops_store on
+    stamped ones. Idempotent; each data transition runs only when its column is
+    added, so existing admin choices are never rewritten.
+    """
+    SQLModel.metadata.create_all(bind=conn, tables=[OpsOperation.__table__, OpsJob.__table__,
+                                                    OpsOperationRevision.__table__, OpsBellOutbox.__table__])
+    OpsStore._migrate_add_columns(conn)

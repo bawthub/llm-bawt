@@ -42,6 +42,17 @@ async def lifespan(app):
     process_started_at = datetime.now(timezone.utc)
     config = Config()
 
+    # TASK-631: upgrade a stamped database to the Alembic head before any secret
+    # export or store construction. An unstamped database is left alone, and
+    # its runtime bootstraps stay authoritative. An invalid state or a failed
+    # migration stops startup instead of serving on a half-applied schema.
+    from ..utils.alembic_state import upgrade_on_startup
+    from ..utils.config import has_database_credentials
+    from ..utils.db import get_shared_engine
+
+    if has_database_credentials(config):
+        upgrade_on_startup(get_shared_engine(config))
+
     # TASK-2386: the master key never resets while encrypted records exist;
     # crypto's default guard enforces that for every entry point, this one too.
 

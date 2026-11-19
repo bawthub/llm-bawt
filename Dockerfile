@@ -73,6 +73,9 @@ RUN uv pip install 'diffusers==0.40.0' 'ftfy>=6.0' 'imageio>=2.30' 'imageio-ffmp
 COPY src/ ./src/
 COPY server.sh ./
 COPY docker/agent-bridge-constraints.txt ./docker/
+# Alembic config + revisions (TASK-631); run `alembic ...` from /app.
+COPY alembic.ini ./
+COPY migrations/ ./migrations/
 RUN chmod +x server.sh
 
 # Install the project itself (fast since deps + llama-cpp + vllm are cached)
@@ -115,6 +118,8 @@ COPY --from=base /app/pyproject.toml /app/pyproject.toml
 COPY --from=base /app/setup.cfg /app/setup.cfg
 COPY --from=base /app/server.sh /app/server.sh
 COPY --from=base /app/docker/agent-bridge-constraints.txt /app/docker/agent-bridge-constraints.txt
+COPY --from=base /app/alembic.ini /app/alembic.ini
+COPY --from=base /app/migrations /app/migrations
 
 # Create necessary directories
 RUN mkdir -p /app/.run /app/.logs /root/.config/llm-bawt

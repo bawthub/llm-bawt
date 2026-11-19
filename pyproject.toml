@@ -22,6 +22,8 @@ dependencies = [
     "sqlmodel>=0.0.31",
     "psycopg2-binary>=2.9.0",
     "pgvector>=0.3.0",
+    # Versioned schema migrations (TASK-631). CLI-only: nothing imports it at runtime.
+    "alembic>=1.13",
     # TUI
     "textual>=0.52.0",
     "textual-dev>=1.5.0",

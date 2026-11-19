@@ -397,6 +397,24 @@ test-paid: ## Refuse paid calls until isolated target/credentials are wired
 	$(TEST_RUNNER) paid
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# SCHEMA MIGRATIONS (Alembic, TASK-631) — read migrations/README.md first
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+.PHONY: migrate migrate-current migrate-stamp-baseline migrate-schema-snapshot
+
+migrate-current: ## Show the database's Alembic revision (read-only)
+	alembic current
+
+migrate-stamp-baseline: ## Mark a runtime-bootstrapped DB as 0001_baseline (writes alembic_version only)
+	alembic stamp 0001_baseline
+
+migrate: ## Apply pending Alembic revisions (no-op at 0001_baseline)
+	alembic upgrade head
+
+migrate-schema-snapshot: ## Regenerate migrations/baseline_schema.sql (PGHOST/PGUSER/PGDATABASE + PGPASSFILE)
+	scripts/alembic_schema_snapshot.sh migrations/baseline_schema.sql
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # CLEAN
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 

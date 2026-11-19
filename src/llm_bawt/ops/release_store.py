@@ -89,19 +89,12 @@ class ReleaseStore:
             self._ensure_tables_exist()
 
     def _ensure_tables_exist(self) -> None:
-        def bootstrap(conn):
-            SQLModel.metadata.create_all(
-                bind=conn,
-                tables=[ReleaseRun.__table__, ReleaseEvent.__table__],
-            )
-            # llm-bawt release tagging was removed; drop its columns from
-            # databases created before that. Historical values remain in each
-            # run's plan/receipt JSON and events.
-            existing = {col["name"] for col in inspect(conn).get_columns(ReleaseRun.__tablename__)}
-            for column in sorted(_REMOVED_COLUMNS & existing):
-                conn.execute(text(f"ALTER TABLE {ReleaseRun.__tablename__} DROP COLUMN {column}"))
+        from ..utils.alembic_state import owns
+        from .schema_revision import OPS_SCHEMA_REVISION
 
-        self._schema_guard.run(self.engine, "ops-release-store-task1030-v3", bootstrap)
+        if owns(self.engine, OPS_SCHEMA_REVISION):
+            return  # TASK-631: revision 0002_ops_store owns this DDL
+        self._schema_guard.run(self.engine, "ops-release-store-task1030-v3", bootstrap_release_schema)
 
     def _require(self) -> None:
         if self.engine is None:
@@ -441,3 +434,14 @@ class ReleaseStore:
 
 
 __all__ = ["ReleaseStore", "ReleaseStoreUnavailable"]
+
+
+def bootstrap_release_schema(conn) -> None:
+    """Release run/event tables (TASK-1030). Runtime bootstrap or revision 0002."""
+    SQLModel.metadata.create_all(bind=conn, tables=[ReleaseRun.__table__, ReleaseEvent.__table__])
+    # llm-bawt release tagging was removed; drop its columns from databases
+    # created before that. Historical values remain in each run's plan/receipt
+    # JSON and events.
+    existing = {col["name"] for col in inspect(conn).get_columns(ReleaseRun.__tablename__)}
+    for column in sorted(_REMOVED_COLUMNS & existing):
+        conn.execute(text(f"ALTER TABLE {ReleaseRun.__tablename__} DROP COLUMN {column}"))

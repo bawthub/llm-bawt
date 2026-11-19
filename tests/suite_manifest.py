@@ -120,6 +120,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_bridge_inbox_api_pg.py::",
     "test_delivery_audit_pg.py::",
     "test_ops_quiesce_pg.py::",
+    "test_alembic_ops_store_pg.py::",
     "test_ops_gate_receipt_pg.py::",
     "test_ops_preflight_deadline_pg.py::",
     "test_ops_competing_dispatch_pg.py::",
