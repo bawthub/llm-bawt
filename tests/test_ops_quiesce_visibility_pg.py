@@ -22,7 +22,7 @@ from sqlalchemy import text
 from llm_bawt.ops.models import JOB_CANCELLED, JOB_DISPATCHING, JOB_QUIESCING, _iso_utc
 from llm_bawt.ops.quiesce import cancel_quiesce_job
 from llm_bawt.ops.quiesce_status import attach_members, live_holds
-from llm_bawt.service.turn_gates import _bootstrap
+from llm_bawt.service.turn_gates import bootstrap_gate_schema
 from tests.pg_lock_wait import wait_blocked_by
 from tests.test_ops_quiesce_pg import _as_caller, _receipt_deliveries, rig  # noqa: F401  (fixture)
 
@@ -78,7 +78,7 @@ def test_the_column_migration_never_stamps_pre_existing_rows(rig):
             conn.execute(text("ALTER TABLE gate_members DROP COLUMN control_changed_at"))
             conn.execute(text("UPDATE gate_members SET created_at = now() - interval '1 day'"
                               " WHERE turn_id=:t"), {"t": turn_id})
-            _bootstrap(conn)  # the production DDL, against a row that pre-dates the column
+            bootstrap_gate_schema(conn)  # shared migration/runtime DDL against a pre-existing row
             old = conn.execute(text("SELECT control_changed_at, created_at FROM gate_members"
                                     " WHERE turn_id=:t"), {"t": turn_id}).one()
             assert old[0] is None
