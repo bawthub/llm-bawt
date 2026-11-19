@@ -63,6 +63,30 @@ def get_utility_usage(
         return {"days": days, "rows": rollup(conn, days=days)}
 
 
+def tool_waste_report(conn, days: int) -> dict[str, Any]:
+    """Protected bots are resolved first; an empty set fails closed."""
+    from llm_bawt.memory.guidance_run import resolve_protected
+
+    from ..usage import tool_waste
+
+    protected = resolve_protected(conn)
+    if not protected:
+        raise HTTPException(status_code=503, detail="protected bots unresolved")
+    return {"days": days, **tool_waste.report(conn, days=days, protected=protected)}
+
+
+@router.get("/v1/usage/tool-waste", tags=["Usage"])
+def get_tool_waste(
+    days: int = Query(7, ge=1, le=30, description="Days back from now."),
+) -> dict[str, Any]:
+    """Per-bot tool-result totals and top 20 tool x bot exposure rows (TASK-1614). Aggregates only."""
+    engine = get_service()._turn_log_store.engine
+    if engine is None or engine.dialect.name != "postgresql":
+        raise HTTPException(status_code=503, detail="Tool waste needs the PostgreSQL store")
+    with engine.connect() as conn:
+        return tool_waste_report(conn, days)
+
+
 @router.get("/v1/usage", tags=["Usage"])
 async def get_usage_endpoint(
     provider: str | None = Query(None, description="Canonical usage provider id."),
