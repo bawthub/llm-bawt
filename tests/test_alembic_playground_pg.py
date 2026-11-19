@@ -48,10 +48,11 @@ def rows(engine):
 def test_alembic_path_matches_runtime_schema(make_db):
     runtime = make_db()
     store.PlaygroundStore(runtime)
+    expected = schema(runtime)  # make_db resets the same physical DB on its next call.
     migrated = make_db()
     stamp(migrated, "0004_gates")
     assert alembic_state.upgrade_on_startup(migrated) == HEAD
-    assert schema(migrated) == schema(runtime)
+    assert schema(migrated) == expected
 
 
 def test_upgrade_preserves_bootstrapped_schema_and_rows_without_ddl(make_db):
