@@ -52,6 +52,9 @@ class _PromptProbe:
     def _sec_client_context(self, builder: PromptBuilder, prompt: str) -> None:
         return None
 
+    def _sec_user_guidance(self, builder: PromptBuilder, prompt: str) -> None:
+        return None
+
     def _sec_cold_start_memory(self, builder: PromptBuilder, prompt: str) -> None:
         return None
 

@@ -54,6 +54,10 @@ PROMPT_MANIFEST: tuple[SectionSpec, ...] = (
     SectionSpec("bot_traits", STABLE, "_sec_bot_traits"),
     SectionSpec("base_prompt", STABLE, "_sec_base_prompt"),
     # --- per-turn (rides the copy) ---
+    # TASK-893: approved guidance. Shares USER_CONTEXT's position and is added
+    # after the stable sections, so it renders immediately after user_context.
+    # Per turn so a cached owner sees approvals; same version -> same bytes.
+    SectionSpec("user_guidance", PER_TURN, "_sec_user_guidance"),
     # TASK-1495: registry-backed (chat.global_recall_guidance), so it is resolved
     # per turn like agent_global_prompt; a registry edit reaches the next prompt
     # pin without a bot rebuild. Same body -> same bytes, so the cache holds.

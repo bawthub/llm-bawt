@@ -45,6 +45,32 @@ class PromptSectionsMixin:
             except Exception as e:
                 logger.warning(f"Failed to load user profile: {e}")
 
+    def _sec_user_guidance(self, builder: PromptBuilder, prompt: str) -> None:
+        """TASK-893: the user's approved guidance, per turn so an approval,
+        gate change or protection change reaches a reused owner's next turn.
+        Dormant unless ``guidance_prompt_feed`` is on; fails closed."""
+        try:
+            if not (self._db_available and self.bot.requires_memory):
+                return
+            from ..memory import guidance_feed
+            if self._resolve_setting(guidance_feed.SETTING, False) is not True:
+                return
+            from ..utils.db import get_shared_engine
+            rendered = guidance_feed.load(get_shared_engine(self.config),
+                                          bot_id=self.bot_id, user_id=self.user_id)
+        except Exception:
+            logger.warning("user guidance unavailable; section skipped", exc_info=True)
+            return
+        if rendered.body:
+            builder.add_section(
+                "user_guidance",
+                rendered.body,
+                position=SectionPosition.USER_CONTEXT,
+                metadata={"source": "registry:guidance.preferences",
+                          "gate": f"{guidance_feed.SETTING} & requires_memory & unprotected",
+                          "provenance": rendered.provenance},
+            )
+
     def _sec_bot_traits(self, builder: PromptBuilder, prompt: str) -> None:
         """Section 2: Bot personality traits."""
         if self._db_available and self.profile_manager:

@@ -184,6 +184,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_terminal_reservation_protocol.py::TestPostgresReservationHandoff::",
     "test_turn_terminal_protocol.py::TestPostgresProtocol::",
     "test_guidance_pg.py::",
+    "test_guidance_feed_pg.py::",
     "test_guidance_run_pg.py::",
     "test_guidance_view_pg.py::",
     "test_history_read_cursor_pg.py::",

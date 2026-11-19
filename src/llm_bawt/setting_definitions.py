@@ -556,6 +556,18 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
         help="Render \"About the User\" from the curated profile attributes instead "
              "of the legacy stored summary.",
     ),
+    # TASK-893: feed the user's approved guidance into this bot's prompt.
+    # Dormant by default; enabling is a separate activation decision.
+    "guidance_prompt_feed": SettingDefinition(
+        key="guidance_prompt_feed",
+        type="bool",
+        default=False,
+        applies_to=BOT_TYPES_ALL,
+        storage=STORAGE_RUNTIME_SETTING,
+        label="Approved guidance in prompt",
+        help="Add the user's approved guidance (standing instructions and active "
+             "preferences) to this bot's prompt. Protected bots never receive it.",
+    ),
     "profile_maintenance_model": SettingDefinition(
         key="profile_maintenance_model",
         type="str",
