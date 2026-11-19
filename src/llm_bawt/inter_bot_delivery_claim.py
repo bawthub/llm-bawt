@@ -332,6 +332,7 @@ class DeliveryClaim:
                         lease_expires_at=now() + (:lease * interval '1 second'),
                         claim_token=:claim_token, claim_owner=:claim_owner,
                         target_turn_id=:target_turn_id, delivery_mode=:delivery_mode,
+                        kind=CASE WHEN :status='STEERING' THEN 'ADDITION' ELSE 'START' END,
                         metadata_json=metadata_json || CAST(:inbox_merge AS jsonb),
                         next_retry_at=NULL, last_error=NULL, updated_at=now()
                     WHERE id=:id AND status='QUEUED'
@@ -349,6 +350,13 @@ class DeliveryClaim:
                     ),
                 }).mappings().first()
                 DeliveryTransitionEvents.stage(conn, row)
+                if row is not None:
+                    from .delivery import events
+                    from .delivery.state import EventKind
+
+                    # TASK-2480: per-attempt evidence starts at the claim.
+                    events.record(conn, row["id"], int(row.get("attempt_no") or 1), EventKind.CLAIMED,
+                                  {"mode": row.get("delivery_mode"), "turn_id": row.get("target_turn_id")})
                 break
         return DeliveryRecord.from_mapping(row) if row else None
 

@@ -204,6 +204,13 @@ class _Store:
         self.row.status = "DELIVERED"
         return self.row
 
+    def park_accepted_steer(self, _id, token):
+        # TASK-2480: accepted, claim released, STEERING until STARTED.
+        assert token == self.row.claim_token
+        self.row.claim_token = None
+        self.row.parked = True
+        return self.row
+
     def fail_claim(self, _id, token, error):
         self.row.status, self.row.last_error = "FAILED", error
         return self.row
@@ -266,7 +273,7 @@ def test_a_steer_racing_target_registration_is_delivered_into_that_target(monkey
 
     row = _steer_until_settled(dispatcher)
 
-    assert row.status == "DELIVERED"
+    assert row.status == "STEERING" and row.parked  # TASK-2480: DELIVERED waits for STARTED
     assert "steer_rejected" not in dispatcher.store.modes
     assert bridge.calls == [(TARGET, BASE_ID), (TARGET, f"{BASE_ID}_g1"),
                             (TARGET, f"{BASE_ID}_g2"), (TARGET, f"{BASE_ID}_g3")]
@@ -303,7 +310,7 @@ def test_a_definitive_rejection_advances_so_the_next_target_is_never_refused_by_
     assert row.attempt_count == 0
 
     row = _steer_once(dispatcher, target_turn_id="turn-newer")
-    assert row.status == "DELIVERED"
+    assert row.status == "STEERING" and row.parked  # TASK-2480: DELIVERED waits for STARTED
     assert bridge.calls[-1] == ("turn-newer", f"{BASE_ID}_g1")
 
 
@@ -340,7 +347,7 @@ def test_an_accepted_but_unpersisted_steer_replays_the_accepted_id(monkeypatch):
     assert row.status == "QUEUED" and row.delivery_mode == "steer"
     row = _steer_once(dispatcher)
 
-    assert row.status == "DELIVERED"
+    assert row.status == "STEERING" and row.parked  # TASK-2480: DELIVERED waits for STARTED
     assert bridge.request_ids == [BASE_ID] + [f"{BASE_ID}_g1"] * 3
     assert row.metadata["steer_generation"] == 1
 
@@ -351,7 +358,7 @@ def test_a_timeout_replays_the_same_generation(monkeypatch):
     dispatcher = _dispatcher(monkeypatch, bridge)
     _steer_once(dispatcher)
     row = _steer_once(dispatcher)
-    assert row.status == "DELIVERED"
+    assert row.status == "STEERING" and row.parked  # TASK-2480: DELIVERED waits for STARTED
     assert bridge.request_ids == [BASE_ID, BASE_ID]
     assert "steer_generation" not in row.metadata
 

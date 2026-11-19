@@ -189,5 +189,28 @@ def bootstrap_delivery_schema(conn) -> None:
         ON inter_bot_deliveries (updated_at, ordinal)
         WHERE status = 'FAILED' AND metadata_json->>'restart_retry_pending' = 'true'
     """))
+    # TASK-2480 (MDv2 C1): additive per-attempt evidence. Old rows get
+    # outcome='legacy' and are never reinterpreted. Only the run that adds the
+    # column marks them; later boots never relabel rows created after it.
+    first_c1_boot = conn.execute(sa_text("""
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema=current_schema() AND table_name='inter_bot_deliveries'
+          AND column_name='outcome'
+    """)).first() is None
+    for ddl in (
+        "ADD COLUMN IF NOT EXISTS kind VARCHAR(16)",
+        "ADD COLUMN IF NOT EXISTS attempt_no INTEGER NOT NULL DEFAULT 1",
+        "ADD COLUMN IF NOT EXISTS outcome VARCHAR(24)",
+        "ADD COLUMN IF NOT EXISTS resent_from_id VARCHAR(96)",
+    ):
+        conn.execute(sa_text(f"ALTER TABLE inter_bot_deliveries {ddl}"))
+    if first_c1_boot:
+        conn.execute(sa_text("""
+            UPDATE inter_bot_deliveries SET outcome='legacy'
+            WHERE status IN ('DELIVERED','FAILED','CANCELLED')
+        """))
+    from .delivery.events import ensure_delivery_events_schema
+
+    ensure_delivery_events_schema(conn)
     ensure_control_lane_schema(conn)  # TASK-1431 control lane
     ensure_batch_schema(conn)  # TASK-1252 idle inbox batches

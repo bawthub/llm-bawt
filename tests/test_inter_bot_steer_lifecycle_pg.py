@@ -59,7 +59,9 @@ def _delivered(life):
     steering = _claim(life)
     assert steering.id == life.second.id and steering.status == STEERING
     row = _steer(life, steering)
-    assert row.status == DELIVERED and row.delivery_mode == "steer"
+    # TASK-2480: accepted is not delivered; it waits STEERING (claim released).
+    assert row.status == STEERING and row.delivery_mode == "steer"
+    assert row.claim_token is None
     return row
 
 
@@ -109,11 +111,13 @@ def test_a_replayed_stale_or_foreign_event_changes_nothing(life):
 
 
 def test_a_started_command_is_never_reopened(life):
+    """TASK-2480: a later not-run proof is an evidence conflict, never a reopen."""
     row = _delivered(life)
     assert _apply(life, row, "started") == STARTED
-    assert _apply(life, row, "cancelled", proof="cli_terminal") == IGNORED
+    assert _apply(life, row, "cancelled", proof="cli_terminal") == "conflict"
     kept = life.store.get(row.id)
-    assert kept.status == DELIVERED and kept.metadata["steer_started"] == {"generation": 0}
+    assert kept.status == "FAILED" and kept.metadata["steer_started"] == {"generation": 0}
+    assert kept.last_error == "outcome_unknown: evidence_conflict"
     assert life.announced == []
 
 
@@ -124,23 +128,32 @@ def test_an_unproven_or_non_terminal_state_changes_nothing(life, state, proof):
     row = _delivered(life)
     assert _apply(life, row, state, proof=proof) == IGNORED
     kept = life.store.get(row.id)
-    assert kept.status == DELIVERED and kept.metadata == row.metadata
+    assert kept.status == STEERING and kept.metadata == row.metadata
 
 
-def test_an_uncertain_outcome_is_fenced_and_never_resent(life):
+def test_an_uncertain_accepted_steer_is_resent_once_with_a_note(life):
+    """TASK-2480: an accepted steer that may have run is never left DELIVERED.
+
+    It fails visibly and gets exactly one system resend carrying the
+    interruption note, linked to it; a repeat of the event changes nothing.
+    """
     row = _delivered(life)
     assert _apply(life, row, "uncertain", proof="barrier_timeout") == UNCERTAIN
     kept = life.store.get(row.id)
-    assert kept.status == DELIVERED and kept.delivery_mode == "steer"
+    assert kept.status == "FAILED" and kept.delivered_at is None
     assert kept.metadata["steer_uncertain"] == {"generation": 0, "reason": "barrier_timeout"}
-    assert kept.metadata.get("steer_generation", 0) == 0
-    assert life.announced == []  # never re-queued or woken
-    # ...but the sender is told: the row's event and receipt carry the marker.
     [published] = life.lifecycles
-    assert published.id == row.id and published.status == DELIVERED
-    assert steer_uncertain(published) == {"generation": 0, "reason": "barrier_timeout"}
-    assert kept.to_api()["steer_uncertain"] == {"generation": 0, "reason": "barrier_timeout"}
-    assert life.store.get(life.first.id).to_api()["steer_uncertain"] is None
+    assert published.id == row.id and published.status == "FAILED"
+    [child] = life.announced
+    child = life.store.get(child.id)
+    assert child.status == QUEUED and child.metadata["restart_retry_of"] == row.id
+    assert child.author.entity_id == "system"
+    with life.store.engine.connect() as conn:
+        assert conn.execute(sa_text(
+            "SELECT resent_from_id FROM inter_bot_deliveries WHERE id=:id"
+        ), {"id": child.id}).scalar_one() == row.id
+    assert _apply(life, row, "uncertain", proof="barrier_timeout") == IGNORED  # settled
+    assert len(life.announced) == 1
 
 
 def test_every_committed_change_advances_the_rows_revision(life):
@@ -159,11 +172,20 @@ def test_every_committed_change_advances_the_rows_revision(life):
     assert published.to_api()["revision"] == published.revision
 
 
-def test_an_uncertain_marker_stops_counting_once_the_command_starts(life):
+def test_a_start_after_uncertain_disposal_is_a_visible_conflict(life):
+    """TASK-2480: disposed of as uncertain (resent), then it turns out to have run."""
     row = _delivered(life)
     assert _apply(life, row, "uncertain", proof="teardown") == UNCERTAIN
     assert _apply(life, row, "started") == STARTED
-    assert steer_uncertain(life.store.get(row.id)) is None
+    kept = life.store.get(row.id)
+    assert kept.status == "FAILED" and kept.last_error == "outcome_unknown: evidence_conflict"
+
+
+def test_an_uncertain_marker_stops_counting_once_a_claimed_command_starts(life):
+    steering = _claim(life)
+    assert _apply(life, steering, "uncertain", proof="teardown") == UNCERTAIN
+    assert _apply(life, steering, "started") == STARTED
+    assert steer_uncertain(life.store.get(steering.id)) is None
 
 
 def test_user_origin_and_turn_mode_rows_are_untouched(life):
@@ -173,7 +195,7 @@ def test_user_origin_and_turn_mode_rows_are_untouched(life):
     assert turn_row.status == DISPATCHING and turn_row.delivery_mode == "turn"
     assert _apply(life, turn_row, "cancelled", proof="sweep_receipt") == IGNORED
     assert life.store.get(life.first.id).metadata == turn_row.metadata
-    assert life.store.get(row.id).status == DELIVERED
+    assert life.store.get(row.id).status == STEERING
 
 
 # ── a rejection that lands while the claim is still STEERING ─────────────────
@@ -255,11 +277,12 @@ def test_lease_recovery_settles_a_pending_rejection_at_the_next_generation(life)
     _assert_reopened(recovered[0], attempts=steering.attempt_count - 1)
 
 
-def test_a_start_after_a_pending_rejection_drops_it_and_the_claim_delivers(life):
+def test_a_start_after_a_pending_rejection_is_a_conflict_when_the_claim_settles(life):
+    """TASK-2480: both proofs for one attempt -> UNKNOWN, neither success nor reopen."""
     steering = _pending(life)
     assert _apply(life, steering, "started") == STARTED
     row = _steer(life, steering)
-    assert row.status == DELIVERED
+    assert row.status == "FAILED" and row.last_error == "outcome_unknown: evidence_conflict"
     assert row.metadata.get("steer_rejected_pending") is None
     assert row.metadata["steer_started"] == {"generation": 0}
 

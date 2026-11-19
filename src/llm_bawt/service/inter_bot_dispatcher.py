@@ -33,6 +33,37 @@ from .inter_bot_dispatcher_steer import (
 from .schemas import ChatCompletionRequest
 from .turn_logs import DeliveryTargetBusy
 
+
+def is_execution_frame(chunk: Any) -> bool:
+    """TASK-2480: does this SSE chunk prove the model is executing the turn?
+
+    Only a completion delta carrying output (text, reasoning or a tool call)
+    counts. SSE comments (the early ``: connected`` keepalive), service
+    warnings (an in-band setup failure), role-only deltas, bare stop frames
+    and ``[DONE]`` do not.
+    """
+    import json
+
+    if not isinstance(chunk, str):
+        return False
+    for line in chunk.splitlines():
+        if not line.startswith("data:"):
+            continue
+        body = line[5:].strip()
+        if not body or body == "[DONE]":
+            continue
+        try:
+            event = json.loads(body)
+        except ValueError:
+            continue
+        if not isinstance(event, dict) or event.get("object") != "chat.completion.chunk":
+            continue
+        for choice in event.get("choices") or []:
+            delta = (choice or {}).get("delta") or {}
+            if any(value for key, value in delta.items() if key != "role"):
+                return True
+    return False
+
 logger = logging.getLogger(__name__)
 
 #: TASK-1308: shortest wait before a pass for a just-due retry.
@@ -589,7 +620,15 @@ class InterBotDeliveryDispatcher:
             )
             if response.ok:
                 self.store.mark_transport_accepted(record.id, claim_token)
-            if response.ok and response.persisted:
+            if response.ok and response.persisted and control is None:
+                # TASK-2480: accepted is not delivered. The row waits STEERING
+                # (claim released) until the command's own ``started``.
+                parked = await asyncio.to_thread(
+                    self.store.park_accepted_steer, record.id, claim_token,
+                )
+                if parked:
+                    await self._emit(parked)
+            elif response.ok and response.persisted:
                 delivered = self.store.mark_delivered(
                     record.id,
                     claim_token,
@@ -755,7 +794,17 @@ class InterBotDeliveryDispatcher:
             request._internal_inter_bot_delivery_ids = batch_delivery_ids
             if not self.store.mark_transport_accepted(record.id, claim_token):
                 return
+            started = False
             async for _chunk in self.service.chat_completion_stream(request):
+                if not started and is_execution_frame(_chunk):
+                    # TASK-2480: first execution frame = the START attempt RAN.
+                    # The early ": connected" keepalive and setup-failure
+                    # error events precede inference and prove nothing.
+                    started = True
+                    try:
+                        await asyncio.to_thread(self.store.note_start_started, record.id, claim_token)
+                    except Exception:
+                        logger.exception("could not record STARTED for delivery %s", record.id)
                 # Durable fallback has no originating HTTP consumer. Draining the
                 # canonical generator starts/joins TurnStreamWorker; live text,
                 # reasoning, tools, offsets, persistence, and turn_complete are

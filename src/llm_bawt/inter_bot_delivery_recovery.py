@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from typing import Any, Mapping
 
 from sqlalchemy import text as sa_text
 from sqlalchemy.engine import Connection
@@ -15,11 +16,38 @@ from .inter_bot_delivery_claim import QUEUED
 from .inter_bot_delivery_ledger import DeliveryTransitionEvents
 from .inter_bot_delivery_record import DeliveryRecord
 from .inter_bot_inbox_claim import INBOX, inbox_marker
-from .inter_bot_delivery_steer_fence import pending_rejection, rejection_error, rejection_merge
+from .inter_bot_delivery_steer_fence import (
+    has_conflict, pending_rejection, steer_started,
+)
 
 # TASK-1258: set on a turn delivery that lease recovery FAILED after its turn
 # ended, until restart_retry_recovered decides whether to restart-retry it.
 RESTART_RETRY_PENDING = "restart_retry_pending"
+
+
+def _stamp_start_terminal(conn: Connection, row) -> Mapping[str, Any] | None:
+    """TASK-2480: crash recovery applies the same terminal rule as the live path.
+
+    A START with STARTED evidence gets DONE/outcome done if its turn ended ok,
+    otherwise UNCERTAIN/outcome unknown; the restart-retry sweep that follows
+    turns that into the one noted resend or a visible UNKNOWN.
+    """
+    from .delivery.events import kinds_for, record_event
+    from .delivery.state import EventKind
+
+    if EventKind.STARTED not in kinds_for(conn, row["id"], int(row.get("attempt_no") or 1)):
+        return None
+    if row["status"] == "DELIVERED":
+        record_event(conn, row, EventKind.DONE, {"via": "lease_recovery"})
+        outcome = "done"
+    elif row["status"] == "FAILED":
+        record_event(conn, row, EventKind.UNCERTAIN, {"via": "lease_recovery"})
+        outcome = "unknown"
+    else:
+        return None
+    return conn.execute(sa_text(
+        "UPDATE inter_bot_deliveries SET outcome=:outcome WHERE id=:id RETURNING *"
+    ), {"id": row["id"], "outcome": outcome}).mappings().first()
 
 
 class DeliveryLeaseRecovery:
@@ -149,6 +177,14 @@ class DeliveryLeaseRecovery:
                             recovered.append(ambiguous)
                         continue
                 user_stopped = is_turn and store._explicit_stop_requested(conn, row["turn_id"])
+                if has_conflict(row) and not user_stopped:
+                    # TASK-2480: STARTED and a not-run proof for one attempt
+                    # (this claim's, or an earlier rejected one that ran).
+                    from .inter_bot_delivery_steer_fence import fail_conflict
+                    settled = fail_conflict(conn, row, "lease_expired_with_conflict")
+                    if settled is not None:
+                        recovered.append(settled)
+                    continue
                 if user_stopped:
                     settlement, reason_code = store._stopped_turn_settlement(conn, row["turn_id"])
                     assignments = (f"{settlement}, claim_token=NULL, claim_owner=NULL, "
@@ -167,25 +203,22 @@ class DeliveryLeaseRecovery:
                         "status='FAILED', claim_token=NULL, claim_owner=NULL, lease_expires_at=NULL, last_error=COALESCE(last_error, 'target turn ended unsuccessfully'), "
                         f"metadata_json=COALESCE(metadata_json, '{{}}'::jsonb) || '{{\"{RESTART_RETRY_PENDING}\": true}}'::jsonb"
                     )
+                elif not is_turn and steer_started(row):
+                    # TASK-2480: its own STARTED committed before the claim
+                    # settled (app lost between). STARTED is the delivery
+                    # proof and is never re-queued.
+                    assignments = ("status='DELIVERED', delivered_at=COALESCE(delivered_at, now()), "
+                                   "kind='ADDITION', claim_token=NULL, claim_owner=NULL, "
+                                   "lease_expires_at=NULL, next_retry_at=NULL, last_error=NULL")
                 elif not is_turn and (proof := pending_rejection(row)) is not None:
                     # TASK-1300: this claim's command is proven not to have run;
                     # leave its target at k+1 instead of replaying the frozen k.
-                    metadata = row.get("metadata_json") or {}
-                    updated = conn.execute(sa_text("""
-                        UPDATE inter_bot_deliveries SET status='QUEUED',
-                            delivery_mode='steer_rejected', transport_accepted_at=NULL,
-                            claim_token=NULL, claim_owner=NULL, lease_expires_at=NULL,
-                            available_at=now(), next_retry_at=now(),
-                            attempt_count=GREATEST(attempt_count - 1, 0), last_error=:error,
-                            metadata_json=metadata_json || CAST(:merge AS jsonb), updated_at=now()
-                        WHERE id=:id RETURNING *
-                    """), {
-                        "id": row["id"],
-                        "error": rejection_error(proof, int(metadata.get("steer_generation") or 0)),
-                        "merge": json.dumps(rejection_merge(metadata, proof)),
-                    }).mappings().one()
-                    DeliveryTransitionEvents.stage(conn, updated, reason_code="steer_rejected")
-                    recovered.append(DeliveryRecord.from_mapping(updated))
+                    # TASK-2480: the same reopen as the lifecycle path, so the
+                    # NOT_RUN attempt budget applies here too.
+                    from .inter_bot_delivery_steer_fence import SteerLifecycleFence
+                    settled = SteerLifecycleFence.reopen_claimed(conn, row, proof)
+                    if settled is not None:
+                        recovered.append(settled)
                     continue
                 elif (
                     row.get("transport_accepted_at") is not None
@@ -203,6 +236,8 @@ class DeliveryLeaseRecovery:
                 ), {"id": row["id"], "error": EXPIRED_ACCEPTED_ERROR}).mappings().one()
                 if expired:
                     settle_expired_accepted(conn, updated)
+                if is_turn and not user_stopped and row.get("turn_ended_at") is not None:
+                    updated = _stamp_start_terminal(conn, updated) or updated
                 DeliveryTransitionEvents.stage(conn, updated, reason_code=reason_code if user_stopped else "lease_recovery")
                 if user_stopped:
                     # TASK-1232 P4: a user Stop ends the turn too. Settling only
@@ -237,6 +272,9 @@ class DeliveryLeaseRecovery:
         # sweep finishes pending ones, including those an earlier sweep left.
         from .inter_bot_delivery_retry import restart_retry_recovered
         recovered.extend(restart_retry_recovered(store))
+        # TASK-2480: accepted steers whose run ended without their STARTED.
+        from .delivery.recovery import settle_ended_parked
+        recovered.extend(settle_ended_parked(store))
         return recovered
 
     @staticmethod

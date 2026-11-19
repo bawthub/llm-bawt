@@ -34,10 +34,15 @@ from .service.dispatcher_leadership import (
 from .service.approval_fanout import ensure_fanout_schema
 from .service.delivery_cancel_notice import ensure_cancel_notice_schema
 from .service.turn_gates import ensure_gate_schema
+from .delivery.events import kinds_for, record_event
+from .delivery.state import EventKind
 from .inter_bot_delivery_query import DeliveryListFilter, parse_statuses
 from .inter_bot_delivery_ledger import DeliveryTransitionEvents
 from .inter_bot_delivery_record import DeliveryRecord
-from .inter_bot_delivery_steer_fence import pending_rejection, rejection_error, rejection_merge
+from .inter_bot_delivery_steer_fence import (
+    fail_conflict, fail_not_run_exhausted, has_conflict, not_run_exhausted, pending_rejection,
+    record_not_run, rejection_error, rejection_merge,
+)
 from .inter_bot_delivery_user import resolve_delivery_user
 from .inter_bot_inbox_claim import INBOX, InboxRunBinding, inbox_marker
 from .utils.config import Config
@@ -531,7 +536,22 @@ class InterBotDeliveryStore:
                 SET transport_accepted_at=COALESCE(transport_accepted_at, now()), updated_at=now()
                 WHERE id=:id AND status IN ('STEERING','DISPATCHING') AND claim_token=:claim_token
             """), {"id": delivery_id, "claim_token": claim_token})
+            if result.rowcount:
+                record_event(conn, row, EventKind.ACCEPTED, {"turn_id": row.get("target_turn_id")})
         return bool(result.rowcount)
+
+    def note_start_started(self, delivery_id: str, claim_token: str) -> bool:
+        """TASK-2480: a START's run produced its first frame; its attempt RAN."""
+        if self.engine is None or not claim_token:
+            return False
+        with self.engine.begin() as conn:
+            row = conn.execute(sa_text("""
+                SELECT * FROM inter_bot_deliveries
+                WHERE id=:id AND status='DISPATCHING' AND claim_token=:claim_token
+            """), {"id": delivery_id, "claim_token": claim_token}).mappings().first()
+            if row is None:
+                return False
+            return record_event(conn, row, EventKind.STARTED, {"turn_id": row.get("turn_id")})
 
     def renew_lease(
         self, delivery_id: str, claim_token: str, *, lease_seconds: int = 300
@@ -549,6 +569,12 @@ class InterBotDeliveryStore:
                 "lease": max(60, lease_seconds),
             })
         return bool(result.rowcount)
+
+    def park_accepted_steer(self, delivery_id: str, claim_token: str) -> DeliveryRecord | None:
+        """TASK-2480: an accepted bot steer waits STEERING for its STARTED."""
+        from .inter_bot_delivery_steer_fence import SteerLifecycleFence
+
+        return SteerLifecycleFence(self).park_accepted(delivery_id, claim_token)
 
     def mark_delivered(
         self,
@@ -581,12 +607,20 @@ class InterBotDeliveryStore:
             if inbox_marker(claim) is not None:
                 # Dedicated inbox ack must prove acceptance AND persistence.
                 return None
-            if claim["status"] == "STEERING" and pending_rejection(claim) is not None:
+            if claim["status"] == "DISPATCHING" and has_conflict(claim):
+                # TASK-2480: an earlier rejected attempt turned out to have run.
+                return fail_conflict(conn, claim, "completed_with_conflict")
+            if claim["status"] == "STEERING" and (
+                    pending_rejection(claim) is not None or has_conflict(claim)):
                 return self.requeue_claim(conn, delivery_id, claim_token, "", delay_seconds=1)
+            if claim["status"] == "DISPATCHING":
+                # TASK-2480: the START ran to completion; one terminal per attempt.
+                record_event(conn, claim, EventKind.DONE, {"chars": response_chars})
             row = conn.execute(sa_text("""
                 UPDATE inter_bot_deliveries SET
                     status='DELIVERED', delivered_at=now(), lease_expires_at=NULL,
                     claim_token=NULL, claim_owner=NULL, next_retry_at=NULL, last_error=NULL,
+                    outcome=CASE WHEN status='DISPATCHING' THEN 'done' ELSE outcome END,
                     response_model=:model, response_chars=:chars, updated_at=now()
                 WHERE id=:id AND status IN ('STEERING','DISPATCHING') AND claim_token=:claim_token
                 RETURNING *
@@ -656,6 +690,9 @@ class InterBotDeliveryStore:
             SELECT * FROM inter_bot_deliveries
             WHERE id=:id AND status='STEERING' AND claim_token=:claim_token FOR UPDATE
         """), values).mappings().first()
+        if steering is not None:
+            if has_conflict(steering):
+                return fail_conflict(conn, steering, "settled_with_conflict")
         proof = pending_rejection(steering) if steering is not None else None
         marker = inbox_marker(steering) if steering is not None else None
         if marker is not None:
@@ -670,9 +707,13 @@ class InterBotDeliveryStore:
             # TASK-1300: this claim's own command is proven not to have run, so
             # whatever the caller saw, the row leaves its target at k+1 rather
             # than replaying the frozen k.
+            # TASK-2480: NOT_RUN at max attempts is FAILED, never re-queued.
+            if not_run_exhausted(steering):
+                return fail_not_run_exhausted(conn, steering, proof)
+            record_not_run(conn, steering, proof)
             metadata = steering.get("metadata_json") or {}
             clear_delivery_mode, reject_steer_target, refund_attempt = False, True, True
-            metadata_merge = {**dict(metadata_merge or {}), **rejection_merge(metadata, proof)}
+            metadata_merge = {**dict(metadata_merge or {}), **rejection_merge(metadata, proof, steering)}
             values["metadata_merge"] = json.dumps(metadata_merge)
             values["error"] = rejection_error(proof, int(metadata.get("steer_generation") or 0))
         claim = conn.execute(sa_text("""
@@ -711,6 +752,7 @@ class InterBotDeliveryStore:
         )
         steer_rejected = (
             ", delivery_mode='steer_rejected', transport_accepted_at=NULL"
+            + (", attempt_no=attempt_no + 1" if proof is not None else "")
             if reject_steer_target else ""
         )
         attempt_refund = ", attempt_count=GREATEST(attempt_count - 1, 0)" if refund_attempt else ""
@@ -808,6 +850,20 @@ class InterBotDeliveryStore:
                 "error": error[:4000],
             }).mappings().first()
             DeliveryTransitionEvents.stage(conn, row)
+            if row and has_conflict(row):
+                # TASK-2480: conflict precedence holds on failure settlement
+                # too: visible UNKNOWN, and no automatic resend (see retry).
+                failed = fail_conflict(conn, row, "failed_with_conflict")
+                row = conn.execute(sa_text(
+                    "SELECT * FROM inter_bot_deliveries WHERE id=:id"
+                ), {"id": failed.id}).mappings().first() if failed else row
+            elif row and EventKind.STARTED in kinds_for(conn, row["id"], int(row.get("attempt_no") or 1)):
+                # TASK-2480: it started and did not finish -> UNCERTAIN, shown as
+                # UNKNOWN unless the §4.4 resend (restart retry) replaces it.
+                record_event(conn, row, EventKind.UNCERTAIN, {"error": error[:200]})
+                row = conn.execute(sa_text(
+                    "UPDATE inter_bot_deliveries SET outcome='unknown' WHERE id=:id RETURNING *"
+                ), {"id": row["id"]}).mappings().first()
             if row:
                 from .service.turn_terminal_reservations import interrupt_protocol_reservation
                 interrupt_protocol_reservation(conn, row["turn_id"], status="error",

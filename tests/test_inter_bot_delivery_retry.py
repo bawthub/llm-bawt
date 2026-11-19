@@ -482,11 +482,22 @@ class _Subscriber:
         self.events.append((bot_id, user_id, event))
 
 
-def _dispatch_aborted_turn(store, record):
-    """Run the real ``_dispatch`` for a claimed delivery whose turn ended aborted."""
+_CONTENT_FRAME = ('data: {"object": "chat.completion.chunk", '
+                  '"choices": [{"index": 0, "delta": {"content": "hi"}}]}\n\n')
+
+
+def _dispatch_aborted_turn(store, record, *, executed=False):
+    """Run the real ``_dispatch`` for a claimed delivery whose turn ended aborted.
+
+    ``executed``: the stream carried an output delta (TASK-2480 STARTED);
+    otherwise only the pre-execution keepalive and the stop marker.
+    """
     from llm_bawt.service.inter_bot_dispatcher import InterBotDeliveryDispatcher
 
     async def stream(_request):
+        yield ": connected\n\n"
+        if executed:
+            yield _CONTENT_FRAME
         yield "data: [DONE]\n\n"
 
     turn = SimpleNamespace(status="aborted", ended_at=datetime.now(timezone.utc),
@@ -518,10 +529,26 @@ def test_dispatcher_restart_retries_a_host_shutdown_abort(delivery, turn_cleanup
     assert store.get(original.id).metadata[RESTART_RETRY_OUTCOME]["child_delivery_id"] == child_id
 
 
+def test_a_started_plain_abort_is_resent_once(delivery, turn_cleanup):
+    """TASK-2480 §4.4: the run produced frames (STARTED) and ended unfinished
+    without a user Stop, so its outcome is uncertain: one noted resend."""
+    store, slug = delivery
+    original = submit(store, slug)
+    end_turn(store, original, audit={})
+    _claimed(store, original)
+
+    events = _dispatch_aborted_turn(store, original, executed=True)
+
+    [child_id] = _children(store, original.id)
+    assert [(e["delivery_id"], e["status"]) for e in events] == [
+        (original.id, "FAILED"), (child_id, "QUEUED")]
+
+
 @pytest.mark.parametrize("audit, status", [
     ({**SHUTDOWN, "abort_request": {"source": "chat_stop"}}, "CANCELLED"),
+    # Only the ": connected" keepalive arrived: nothing executed, no resend.
     ({}, "FAILED"),
-], ids=["user-stop", "plain-abort"])
+], ids=["user-stop", "plain-abort-before-execution"])
 def test_dispatcher_never_restart_retries_other_aborts(delivery, turn_cleanup, audit, status):
     store, slug = delivery
     original = submit(store, slug)

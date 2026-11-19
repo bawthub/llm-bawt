@@ -62,16 +62,18 @@ class _Fence:
         self.calls.append(("reopen", *args))
         return self.reopen
 
-    def mark_steer_uncertain(self, *args):
+    child = None
+
+    def settle_uncertain_steer(self, *args):
         self.calls.append(("uncertain", *args))
-        return self.uncertain
+        return self.uncertain, self.child
 
 
 @pytest.fixture
 def fence(monkeypatch):
     _Fence.calls = []
     _Fence.reopen, _Fence.started = (REOPENED, SimpleNamespace(id=DELIVERY)), True
-    _Fence.uncertain = SimpleNamespace(id=DELIVERY)
+    _Fence.uncertain, _Fence.child = SimpleNamespace(id=DELIVERY), None
     monkeypatch.setattr(lifecycle, "SteerLifecycleFence", _Fence)
     return _Fence
 
@@ -133,6 +135,14 @@ def test_an_uncertain_outcome_is_fenced_and_published_to_the_sender(fence, dispa
     assert _apply(dispatcher, _payload("uncertain")) == IGNORED
     assert fence.calls[-1] == ("uncertain", DELIVERY, 2, TURN, "uncertain")
     assert len(dispatcher.lifecycles) == 1
+
+
+def test_an_uncertain_accepted_steer_announces_its_noted_resend(fence, dispatcher):
+    """TASK-2480: recovery's one annotated resend is admitted and woken."""
+    fence.child = SimpleNamespace(id="delivery-child")
+    assert _apply(dispatcher, _payload("uncertain", proof="release_unstarted")) == lifecycle.UNCERTAIN
+    assert [r.id for r in dispatcher.lifecycles] == [DELIVERY]
+    assert [r.id for r in dispatcher.announced] == ["delivery-child"]
 
 
 def test_a_published_delivery_event_carries_the_rows_revision():

@@ -18,12 +18,21 @@ from .inter_bot_delivery_ledger import DeliveryTransitionEvents
 # A DISPATCHING row whose fallback turn the target accepted and has not ended:
 # already delivered in order, so it neither heads the queue nor fences a jump.
 _ACCEPTED_OPEN_DISPATCH = """
-    d.status='DISPATCHING'
+    ((d.status='DISPATCHING'
     AND d.transport_accepted_at IS NOT NULL
     AND EXISTS (
         SELECT 1 FROM turn_logs t
         WHERE t.id=d.turn_id AND t.ended_at IS NULL
-    )
+    ))
+    -- TASK-2480: an accepted bot steer waits STEERING (claim released) for
+    -- its STARTED; like an accepted dispatch it no longer holds the head
+    -- while the run it was steered into is open.
+    OR (d.status='STEERING' AND d.kind='ADDITION' AND d.claim_token IS NULL
+    AND d.transport_accepted_at IS NOT NULL
+    AND EXISTS (
+        SELECT 1 FROM turn_logs t
+        WHERE t.id=d.target_turn_id AND t.ended_at IS NULL
+    )))
 """
 
 

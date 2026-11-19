@@ -354,11 +354,39 @@ def retry_failed_delivery(
     return _retry(store, delivery_id, MANUAL_RETRY)
 
 
+def started_then_torn_down(conn, delivery_id: str, turn: Any) -> bool:
+    """TASK-2480 §4.4: a START that reported STARTED and ended unfinished, no Stop.
+
+    Its outcome is UNCERTAIN, so it gets the same one noted resend as a host
+    shutdown. Only rows with recorded STARTED evidence qualify; legacy rows
+    and turns that never started are unchanged.
+    """
+    view = _RowView(turn)
+    if view.status not in ("aborted", "error") or view.ended_at is None:
+        return False
+    raw = view.request_json
+    try:
+        request = json.loads(raw) if isinstance(raw, str) and raw else raw
+    except (TypeError, ValueError):
+        return False
+    if isinstance(request, Mapping) and request.get("abort_request"):
+        return False  # a user Stop is never resent
+    return conn.execute(sa_text("""
+        SELECT 1 FROM delivery_events WHERE delivery_id=:id AND kind='STARTED' LIMIT 1
+    """), {"id": delivery_id}).first() is not None
+
+
+def _resend_cause(conn, delivery_id: str, turn_id: str | None) -> bool:
+    turn = _turn_row(conn, turn_id)
+    return (restart_abort_cause(_RowView(turn)) == HOST_SHUTDOWN
+            or started_then_torn_down(conn, delivery_id, turn))
+
+
 def _killed_by_host_shutdown(conn, original: DeliveryRecord, payload: dict[str, Any]) -> bool:
     # A standalone reset or a /new follow-up must never run a second time.
     if payload.get("inter_bot_reset_only") or payload.get("inter_bot_typed_follow_up"):
         return False
-    return restart_abort_cause(_RowView(_turn_row(conn, original.turn_id))) == HOST_SHUTDOWN
+    return _resend_cause(conn, original.id, original.turn_id)
 
 
 class _RowView:
@@ -433,6 +461,13 @@ def _restart_retry_failed(
     """
     stamped = None
     child, outcome, shutdown = None, None, False
+    from .inter_bot_delivery_steer_fence import has_conflict
+    current = conn.execute(sa_text(
+        "SELECT * FROM inter_bot_deliveries WHERE id=:id"
+    ), {"id": delivery_id}).mappings().first()
+    if current is not None and has_conflict(current):
+        # TASK-2480: an evidence conflict is visible UNKNOWN, never auto-resent.
+        return None, None
     try:
         # Every read and write that can fail stays inside the SAVEPOINT,
         # so the outer transaction (the FAILED write) is always usable.
@@ -440,8 +475,7 @@ def _restart_retry_failed(
         # turn row: a refusal from ``_retry`` (e.g. a session reset) says
         # nothing about why the turn ended (review 1231B DESIGN r2 C1).
         with conn.begin_nested():
-            shutdown = restart_abort_cause(
-                _RowView(_turn_row(conn, turn_id))) == HOST_SHUTDOWN
+            shutdown = _resend_cause(conn, delivery_id, turn_id)
             result = (restart_retry_delivery(store, delivery_id, connection=conn)
                       if shutdown else None)
         if result is not None:
@@ -475,7 +509,29 @@ def _restart_retry_failed(
     if conn.dialect.name == "postgresql":
         from .inter_bot_batch import settle_retry
         child = settle_retry(conn, delivery_id, shutdown=shutdown, child=child)
+        stamped = _stamp_uncertain_outcome(conn, delivery_id, child) or stamped
     return stamped, child
+
+
+def _stamp_uncertain_outcome(conn: Connection, delivery_id: str, child: DeliveryRecord | None
+                             ) -> DeliveryRecord | None:
+    """TASK-2480: a started-then-failed START is a noted resend or a visible UNKNOWN."""
+    if child is not None:
+        conn.execute(sa_text(
+            "UPDATE inter_bot_deliveries SET resent_from_id=:orig WHERE id=:id AND resent_from_id IS NULL"
+        ), {"orig": delivery_id, "id": child.id})
+        row = conn.execute(sa_text("""
+            UPDATE inter_bot_deliveries SET outcome='resent'
+            WHERE id=:id AND outcome='unknown' RETURNING *
+        """), {"id": delivery_id}).mappings().first()
+    else:
+        row = conn.execute(sa_text("""
+            UPDATE inter_bot_deliveries
+            SET last_error='outcome_unknown: ' || COALESCE(last_error, 'run ended unfinished')
+            WHERE id=:id AND outcome='unknown' AND COALESCE(last_error, '') NOT LIKE 'outcome_unknown: %'
+            RETURNING *
+        """), {"id": delivery_id}).mappings().first()
+    return DeliveryRecord.from_mapping(row) if row else None
 
 
 _PENDING_BATCH = 50

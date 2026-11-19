@@ -93,26 +93,38 @@ def apply_bot_steer_lifecycle(
     state, proof = payload.get("state"), payload.get("proof")
     fence = SteerLifecycleFence(dispatcher.store)
     if state in LIFECYCLE_STARTED:
-        return STARTED if fence.note_steer_started(delivery_id, generation, target_turn_id) else IGNORED
+        started = fence.note_steer_started(delivery_id, generation, target_turn_id)
+        if not started:
+            return IGNORED
+        if started is not True:
+            # TASK-2480: STARTED settled the accepted steer DELIVERED.
+            dispatcher.announce_lifecycle(started)
+        return STARTED
     if state in LIFECYCLE_REJECTED and proof in NOT_RUN_PROOFS:
         outcome, record = fence.reopen_rejected_steer(delivery_id, generation, target_turn_id, str(proof))
         logger.info(
             "delivery %s steer generation %s %s (%s): %s",
             delivery_id, generation, state, proof, outcome,
         )
-        if outcome == REOPENED and record is not None:
+        status = getattr(record, "status", None)
+        if record is not None and outcome == REOPENED and status in (None, "QUEUED"):
             # QUEUED again: publish that lifecycle, then wake the dispatcher.
             dispatcher.announce_admitted(record)
+        elif record is not None and status in ("FAILED", "CANCELLED"):
+            # TASK-2480: attempts exhausted, or an evidence conflict.
+            dispatcher.announce_lifecycle(record)
         return outcome
     if state == LIFECYCLE_UNCERTAIN:
-        marked = fence.mark_steer_uncertain(
+        # TASK-2480: an accepted steer becomes a noted resend or UNKNOWN
+        # (delivery/recovery); one still settling its claim keeps the marker.
+        marked, child = fence.settle_uncertain_steer(
             delivery_id, generation, target_turn_id, str(proof or LIFECYCLE_UNCERTAIN),
         )
         if marked is None:
             return IGNORED
-        # The row stays DELIVERED; this event is what tells the sender and the
-        # relay receipt that the message may not have run.
         dispatcher.announce_lifecycle(marked)
+        if child is not None:
+            dispatcher.announce_admitted(child)
         return UNCERTAIN
     return IGNORED
 

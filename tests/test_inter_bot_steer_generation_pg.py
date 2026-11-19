@@ -90,7 +90,8 @@ def test_a_steer_into_a_fallback_turn_before_it_registers_waits_on_that_turn(rig
         again = _claim(rig)
         assert again.id == rig.second.id and again.target_turn_id == rig.first.turn_id
         row = _steer(rig, again)
-    assert row.status == DELIVERED
+    # TASK-2480: accepted waits STEERING for STARTED, claim released.
+    assert row.status == STEERING and row.claim_token is None
     base = SteerGeneration.of(steering).request_id
     assert rig.bridge.request_ids == [base, f"{base}_g1", f"{base}_g2"]
     assert row.attempt_count == 1
