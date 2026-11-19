@@ -94,6 +94,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_turn_admission_pg.py::",
     "test_inter_bot_steer_generation_pg.py::",
     "test_inter_bot_steer_lifecycle_pg.py::",
+    "test_delivery_recovery_pg.py::",
     "test_turn_gates_pg.py::",
     "test_bot_live_state_pg.py::",
     "test_turn_task_pg.py::",
