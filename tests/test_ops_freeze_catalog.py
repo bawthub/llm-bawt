@@ -67,3 +67,13 @@ def test_freeze_spec_needs_the_freeze_executor():
     store = object.__new__(OpsStore)
     with pytest.raises(ValueError, match="operator_freeze"):
         OpsStore._validate_op(OpsOperation(**OpsStore._clean_op(store, seed)))
+
+
+@pytest.mark.parametrize("op", ["freeze", "thaw"])
+def test_freeze_rows_pass_the_gpu_guard(op):
+    """A freeze touches no container, so creating its job never asks Docker."""
+    from llm_bawt.ops.gpu_guard import gpu_voice_target
+
+    spec = {"action": "operator_freeze", "op": op}
+    assert gpu_voice_target(spec, {}, executor=None) is None
+    assert gpu_voice_target(spec, {}, executor=None, live=True) is None
