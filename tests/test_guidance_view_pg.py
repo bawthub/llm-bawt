@@ -190,3 +190,41 @@ def test_unnamed_differences_are_reported_as_changed():
     new = {"v": 1, "mandate": "", "preferences": [dict(p, first_seen_ts=5.0)]}
     (c,) = gv.changes(json.dumps(base), json.dumps(new))
     assert c["kind"] == "changed"
+
+
+# -- operator run route (slice 7a) ---------------------------------------------
+
+def test_run_route_previews_then_commits_a_pending_proposal(rig, client, monkeypatch):  # noqa: F811
+    from llm_bawt.memory import guidance_run as gr
+
+    ev = rig.msg("I prefer short answers")
+
+    def drafter(base, evidence):
+        return {"preferences": [{"id": "p1", "statement": "short answers", "status": "active",
+                                 "evidence": [{"bot_id": ev["bot_id"],
+                                               "message_id": ev["message_id"]}]}],
+                "reason": "stated"}
+    monkeypatch.setattr(gr, "draft_with_utility", drafter)
+    pre = client.post("/v1/guidance/runs", json={"user_id": rig.user, "bot_id": rig.bot})
+    assert pre.status_code == 200 and pre.json()["status"] == "preview_only"
+    r = client.post("/v1/guidance/runs",
+                    json={"user_id": rig.user, "bot_id": rig.bot, "commit": True})
+    assert r.status_code == 200 and r.json()["proposal"]["status"] == "pending"
+    body = client.get("/v1/guidance", params={"user_id": rig.user}).json()
+    assert len(body["pending"]) == 1
+
+
+@pytest.mark.parametrize("payload,code", [
+    ({"user_id": "unknown", "bot_id": "x", "commit": True}, 403),
+    ({"user_id": "bot:snark", "bot_id": "x", "commit": True}, 403),
+    ({"user_id": "u", "bot_id": "x", "commit": True, "extra": 1}, 422),
+    ({"user_id": "u", "bot_id": "x", "max_evidence": 0}, 422),
+])
+def test_run_route_refuses_bots_sentinels_and_bad_bodies(client, payload, code):
+    assert client.post("/v1/guidance/runs", json=payload).status_code == code
+
+
+def test_run_route_refuses_a_protected_bot(rig, client):  # noqa: F811
+    r = client.post("/v1/guidance/runs",
+                    json={"user_id": rig.user, "bot_id": rig.prot, "commit": True})
+    assert r.status_code == 409

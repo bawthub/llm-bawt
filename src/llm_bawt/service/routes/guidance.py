@@ -3,7 +3,8 @@
 BawtHub's server is the only caller (service token). It refuses bots and
 scheduled jobs and binds ``user_id`` to the signed-in person; the decider is
 always that ``user_id``, never a body field. ``guidance.decide`` additionally
-refuses bot identities and stale bases. Nothing here runs history or drafts.
+refuses bot identities and stale bases. Only the operator run route reads
+history and drafts, for the signed-in person's own guidance.
 """
 from __future__ import annotations
 
@@ -46,6 +47,47 @@ class DecideRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     user_id: str
     approve: bool
+
+
+class RunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    user_id: str
+    bot_id: str
+    commit: bool = False
+    max_evidence: int = 200
+
+
+@router.post("/v1/guidance/runs")
+async def run_guidance(body: RunRequest):
+    """Operator-only: one guidance run for the signed-in person's own history on
+    one bot, in-process so the drafter keeps the bounded utility path. Records
+    at most a pending proposal; nothing is applied and nothing is scheduled."""
+    from llm_bawt.memory import guidance_run
+
+    user_id = _person(body.user_id)
+    if not 1 <= body.max_evidence <= 500:
+        raise HTTPException(422, "max_evidence must be 1..500")
+
+    def run():
+        engine = _engine()
+        with engine.begin() as conn:
+            from llm_bawt.memory.history_read_cursor import ensure_schema
+            ensure_schema(conn)
+            guidance.ensure_schema(conn)
+        try:
+            return guidance_run.run_pair(engine, bot_id=body.bot_id, user_id=user_id,
+                                         max_evidence=body.max_evidence,
+                                         dry_run=not body.commit, proposed_by="guidance-run")
+        except ValueError as e:
+            raise HTTPException(409, str(e)) from e
+
+    result = await run_in_threadpool(run)
+    if (result.get("proposal") or {}).get("status") == "pending":
+        try:
+            await state_events.publish_state_changed(get_service(), [state_events.GUIDANCE])
+        except Exception:
+            logger.warning("guidance state_changed publish failed", exc_info=True)
+    return result
 
 
 @router.get("/v1/guidance")

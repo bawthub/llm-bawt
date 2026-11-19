@@ -93,7 +93,7 @@ def test_capacity_caps_the_page_so_no_candidate_is_skipped(rig):
         "preferences": b["preferences"], "reason": "none"})
     assert out2["evidence"] == 3 and _cursor(rig) == ids[4]
     assert out2["proposal"]["status"] == "no_change"
-    assert _receipts(rig) == ["committed"] * 3
+    assert _receipts(rig) == ["committed"] * 2  # one receipt per atomic run
 
 
 def test_dry_run_writes_nothing(rig):
@@ -103,7 +103,7 @@ def test_dry_run_writes_nothing(rig):
     assert _cursor(rig) is None and _receipts(rig) == []
 
 
-def test_base_moved_during_drafting_is_reported_without_touching_receipts(rig):
+def test_base_moved_during_drafting_commits_nothing(rig):
     seed = rig.msg("I like lists", ts=0.5)
     rig.msg(ts=1.0)
 
@@ -112,8 +112,8 @@ def test_base_moved_during_drafting_is_reported_without_touching_receipts(rig):
         return _adds()(base, evidence)
 
     out = _run(rig, drafter=racing)
-    assert out["proposal"]["status"] == "base_moved"
-    assert _receipts(rig) == ["committed"]
+    assert out["proposal"] == {"status": "aborted", "reason": "guidance_moved", "dropped": []}
+    assert _receipts(rig) == [] and _cursor(rig) is None
 
 
 def test_citations_outside_offered_evidence_are_dropped(rig):
@@ -134,7 +134,7 @@ def test_untrusted_draft_is_reported_not_raised(rig):
     rig.msg()
     out = _run(rig, drafter=lambda b, e: {"preferences": "nope"})
     assert out["proposal"]["status"] == "invalid_draft"
-    assert _receipts(rig) == ["committed"]
+    assert _receipts(rig) == [] and _cursor(rig) is None  # evidence not consumed
 
 
 def test_expected_base_is_checked_in_propose(rig):
@@ -181,3 +181,99 @@ def test_supersession_and_offered_additions_survive():
     for draft in ok:
         doc, dropped = gr._constrain(base, {"preferences": [draft]}, OFFERED)
         assert doc["preferences"] == [draft] and not dropped
+
+
+# -- atomic final transaction (slice 7a) -----------------------------------------
+
+def _proposals(rig):
+    with rig.engine.connect() as c:
+        if c.execute(text("SELECT to_regclass('guidance_proposals')")).scalar() is None:
+            return 0
+        return c.execute(text("SELECT count(*) FROM guidance_proposals WHERE user_id=:u"),
+                         {"u": rig.user}).scalar_one()
+
+
+def test_drafter_failure_leaves_evidence_unconsumed_then_rerun_succeeds(rig):
+    ids = [rig.msg(f"I prefer thing {i}", ts=float(i + 1))["message_id"] for i in range(3)]
+
+    def boom(base, evidence):
+        raise RuntimeError("Service not initialized")
+
+    out = _run(rig, drafter=boom)
+    assert out["proposal"]["status"] == "invalid_draft"
+    assert _cursor(rig) is None and _receipts(rig) == [] and _proposals(rig) == 0
+    out = _run(rig)
+    assert out["proposal"]["status"] == "pending" and out["evidence"] == 3
+    assert _cursor(rig) == ids[2] and _receipts(rig) == ["committed"] and _proposals(rig) == 1
+
+
+@pytest.mark.parametrize("stage", ["after_read", "after_draft", "before_commit", "at_commit"])
+def test_crash_at_any_stage_commits_nothing(rig, stage):
+    rig.msg()
+
+    def fault(at):
+        if at == stage:
+            raise KeyboardInterrupt(at)
+
+    with pytest.raises(KeyboardInterrupt):
+        _run(rig, _fault=fault)
+    assert _cursor(rig) is None and _receipts(rig) == [] and _proposals(rig) == 0
+
+
+def test_cursor_moved_by_another_run_aborts(rig):
+    from llm_bawt.memory import history_read_cursor as hrc
+    rig.msg(ts=1.0)
+    other = rig.msg("unrelated", ts=0.5)["message_id"]
+
+    def racing(base, evidence):
+        hrc.reset_cursor(rig.engine, bot_id=rig.bot, user_id=rig.user,
+                         excluded_bot_ids=[rig.prot], to=(0.5, other))
+        return _adds()(base, evidence)
+
+    out = _run(rig, drafter=racing)
+    assert out["proposal"]["reason"] == "cursor_moved"
+    assert _receipts(rig) == [] and _proposals(rig) == 0 and _cursor(rig) == other
+
+
+def test_newly_protected_bot_aborts(rig):
+    rig.msg()
+
+    def protect(base, evidence):
+        with rig.engine.begin() as conn:
+            catalog.assign(conn, rig.bot, ["private"], "test")
+        return _adds()(base, evidence)
+
+    out = _run(rig, drafter=protect)
+    assert out["proposal"]["status"] == "aborted"
+    assert _cursor(rig) is None and _receipts(rig) == [] and _proposals(rig) == 0
+
+
+def test_row_appearing_inside_the_window_aborts(rig):
+    rig.msg(ts=1.0)
+    rig.msg("later", ts=3.0)
+
+    def insert_inside(base, evidence):
+        rig.msg("sneaky", ts=2.0)
+        return _adds()(base, evidence)
+
+    out = _run(rig, drafter=insert_inside)
+    assert out["proposal"]["reason"] == "window_changed"
+    assert _cursor(rig) is None and _receipts(rig) == []
+
+
+def test_truncated_window_with_shared_boundary_timestamp_replays_exactly(rig):
+    ids = sorted(rig.msg(f"I prefer item {i}", ts=5.0)["message_id"] for i in range(4))
+    out = _run(rig, max_evidence=2, page_limit=1)
+    assert out["evidence"] == 2 and out["stop"] == "capacity"
+    assert out["proposal"]["status"] == "pending"
+    assert _cursor(rig) == ids[1]  # inclusive upper keyset, same timestamp
+    out = _run(rig, max_evidence=10, page_limit=3, drafter=lambda b, e: {
+        "preferences": b["preferences"], "reason": "none"})
+    assert out["evidence"] == 2 and _cursor(rig) == ids[3]
+
+
+def test_no_evidence_rows_advance_with_no_change(rig):
+    rig.msg("/new", ts=1.0)  # a typed command is never evidence
+    out = _run(rig)
+    assert out["evidence"] == 0 and out["proposal"]["status"] == "no_change"
+    assert _receipts(rig) == ["committed"] and _proposals(rig) == 0

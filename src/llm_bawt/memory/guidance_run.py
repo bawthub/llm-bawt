@@ -8,21 +8,23 @@ records it as a pending proposal for the user to decide. Nothing is applied.
   ``inactive``, or not admitted to global search) plus operator extras, and
   passed whole to the partition check, so a target sharing a protected bot's
   storage partition is refused before any history SQL.
-* Every page is capped by remaining evidence capacity, so the cursor only
-  commits rows that were actually offered to the drafter.
-* Each committed page has its own run receipt. All pages must pin the same
-  guidance version; the draft is written against that version and the proposal
-  is refused if the guidance moved before it is recorded. Drafting or proposal
-  failures are reported separately and never alter committed page receipts.
+* Reading and drafting write nothing. One final transaction re-checks the
+  cursor, guidance version and protection, replays the exact window read
+  (lower-exclusive cursor, inclusive upper keyset) and then records the
+  pending proposal or a no-change outcome, one receipt and the cursor advance
+  together. Any failure, including a drafter error, commits nothing.
 * Changed preferences may cite only evidence offered in this run.
 
 Dry-run (the default) reads one page, writes nothing and drafts nothing.
-No scheduler, tool or route calls this module; ``python -m`` is operator-only.
+Committing runs execute in the app process through the operator route
+``POST /v1/guidance/runs`` so the drafter keeps the bounded utility path;
+``python -m`` is dry-run only. No scheduler calls this module.
 """
 from __future__ import annotations
 
 import json
 import re
+import time
 from typing import Any, Callable, Mapping, Sequence
 
 from sqlalchemy import text
@@ -30,6 +32,7 @@ from sqlalchemy import text
 from ..bot_tags.facade import BehaviorTag, sql_allowed
 from . import guidance
 from .history_classification import HIGH, HUMAN, MEDIUM, _partitions
+from . import history_read_cursor as hrc
 from .history_read_cursor import consume
 
 Drafter = Callable[[Mapping[str, Any], Sequence[Mapping[str, Any]]], Mapping[str, Any]]
@@ -106,7 +109,8 @@ def _constrain(base: Mapping[str, Any], draft: Mapping[str, Any],
 def run_pair(engine, *, bot_id: str, user_id: str, drafter: Drafter | None = None,
              extra_protected: Sequence[str] = (), max_evidence: int = 200,
              page_limit: int = 500, until: float | None = None, dry_run: bool = True,
-             proposed_by: str = "guidance-run") -> dict[str, Any]:
+             proposed_by: str = "guidance-run", _fault: Callable[[str], None] | None = None
+             ) -> dict[str, Any]:
     if max_evidence < 1 or page_limit < 1:
         raise ValueError("max_evidence and page_limit must be positive")
     protected = _authorize(engine, bot_id, extra_protected)
@@ -116,73 +120,119 @@ def run_pair(engine, *, bot_id: str, user_id: str, drafter: Drafter | None = Non
         return {"status": "preview_only", "pages": [_page_view(page)],
                 "evidence": len(_evidence(page)), "proposal": None}
 
-    pages, evidence, base_row, stop = [], [], guidance._ANY_BASE, None
-    base_body = None
-    while len(evidence) < max_evidence:
-        handle = guidance.begin_run(engine, bot_id=bot_id, user_id=user_id,
-                                    excluded_bot_ids=protected)
-        if base_row is guidance._ANY_BASE:
-            base_row, base_body = handle["guidance_version_row_id"], handle["body"]
-        elif handle["guidance_version_row_id"] != base_row:
-            with engine.begin() as conn:
-                guidance.finish_run(conn, handle=handle, status="failed",
-                                    before=None, after=None, consumed=None)
-            stop = "guidance_moved"
-            break
-        page = consume(engine, bot_id=bot_id, user_id=user_id, excluded_bot_ids=protected,
-                       until=until, limit=min(page_limit, max_evidence - len(evidence)),
-                       dry_run=False, run=handle)
-        pages.append(_page_view(page))
-        if page["status"] == "conflict":
-            stop = "cursor_conflict"
-            break
-        evidence.extend(_evidence(page))
-        if not page["coverage"]["truncated"]:
-            break
-    else:
-        stop = "capacity"
+    return _run_atomic(engine, bot_id=bot_id, user_id=user_id, protected=protected,
+                       extra_protected=extra_protected, drafter=drafter or draft_with_utility,
+                       max_evidence=max_evidence, page_limit=page_limit,
+                       until=time.time() if until is None else until,
+                       proposed_by=proposed_by, _fault=_fault)
 
-    result = {"status": "read", "stop": stop, "pages": pages,
-              "evidence": len(evidence), "base_version_row_id": base_row, "proposal": None}
-    if stop in ("guidance_moved", "cursor_conflict") or not evidence:
-        result["proposal"] = {"status": "skipped",
-                              "reason": stop or "no human preference evidence"}
+
+def _fail(_fault, stage: str) -> None:
+    if _fault is not None:
+        _fault(stage)
+
+
+def _run_atomic(engine, *, bot_id, user_id, protected, extra_protected, drafter, max_evidence,
+                page_limit, until, proposed_by, _fault) -> dict[str, Any]:
+    """Read and draft write nothing; one final transaction commits it all or nothing."""
+    slug = hrc._pair(bot_id, protected)[1]
+    # 1. Non-committing read of an exact window (C0, H], ephemeral after key.
+    with engine.connect() as conn:
+        c0 = hrc.read_cursor(conn, bot_id=bot_id, user_id=user_id, excluded_bot_ids=protected)
+        b0 = guidance.current_version(conn, user_id)
+        after, rows, evidence, truncated = c0, [], [], False
+        while len(evidence) < max_evidence:
+            page = hrc.fetch_after(conn, bot_id=bot_id, user_id=user_id,
+                                   excluded_bot_ids=protected, after=after, until=until,
+                                   limit=min(page_limit, max_evidence - len(evidence)))
+            got = hrc.classified(page["rows"], slug)
+            rows.extend(got)
+            evidence.extend(_evidence({"rows": got}))
+            truncated = page["truncated"]
+            if not page["last"] or not truncated:
+                break
+            after = page["last"]
+        conn.rollback()
+    if not rows:
+        return {"status": "read", "stop": "no_rows", "evidence": 0, "proposal": None,
+                "cursor_before": c0, "base_version_row_id": b0 and b0["row_id"]}
+    upto = (rows[-1]["ts"], rows[-1]["message_id"])
+    result = {"status": "read", "stop": "capacity" if truncated else None, "evidence": len(evidence),
+              "rows_read": len(rows), "cursor_before": list(c0) if c0 else None,
+              "cursor_after": list(upto), "base_version_row_id": b0 and b0["row_id"]}
+    _fail(_fault, "after_read")
+
+    # 2. Draft outside any transaction.
+    base = guidance.validate_doc(guidance._load(b0 and b0["body"]))
+    doc, dropped = base, []
+    if evidence:
+        offered = {(e["bot_id"], e["message_id"]) for e in evidence}
+        try:
+            draft = drafter(base, evidence)
+            doc = guidance.validate_doc({"v": guidance.SCHEMA_VERSION, "mandate": base["mandate"],
+                                         "preferences": list(draft["preferences"])})
+            doc, dropped = _constrain(base, doc, offered)
+            reason = str(draft.get("reason") or "").strip() or "history review"
+        except Exception as exc:  # the drafter is untrusted output; nothing was written
+            result["proposal"] = {"status": "invalid_draft",
+                                  "error": f"{type(exc).__name__}: {exc}"[:500]}
+            return result
+    _fail(_fault, "after_draft")
+    changed = guidance.canonical(doc) != guidance.canonical(base)
+
+    # 3. One short transaction: verify, propose or record no_change, receipt, cursor.
+    try:
+        with engine.begin() as conn:
+            guidance.lock_key(conn, user_id)
+            now_protected = resolve_protected(conn, extra_protected)
+            if not now_protected or slug in now_protected:
+                raise _Abort("bot is now protected")
+            cur = guidance.current_version(conn, user_id)
+            if (cur and cur["row_id"]) != (b0 and b0["row_id"]):
+                raise _Abort("guidance_moved")
+            replay = hrc.classified(hrc.replay_window(
+                conn, bot_id=bot_id, user_id=user_id, excluded_bot_ids=now_protected,
+                after=c0, upto=upto), slug)
+            if [r["message_id"] for r in replay] != [r["message_id"] for r in rows] or [
+                    e["message_id"] for e in _evidence({"rows": replay})] != [
+                    e["message_id"] for e in evidence]:
+                raise _Abort("window_changed")
+            pid = None
+            if changed:
+                pid = guidance.propose_in(conn, user_id=user_id, new_doc=doc, reason=reason,
+                                          proposed_by=proposed_by,
+                                          excluded_bot_ids=now_protected,
+                                          expected_base_row_id=b0 and b0["row_id"])
+            _fail(_fault, "before_commit")
+            rid = guidance.record_run_in(conn, bot_id=slug, user_id=user_id, version=b0,
+                                         before=c0, after=upto, consumed=len(rows))
+            coverage = {"window": {"after": list(c0) if c0 else None, "upto": list(upto)},
+                        "rows_read": len(rows), "evidence": len(evidence),
+                        "excluded_bots": sorted(now_protected),
+                        "guidance": {"receipt_id": rid, "version_row_id": b0 and b0["row_id"]}}
+            if not hrc.advance_in(conn, bot_id=bot_id, user_id=user_id,
+                                  excluded_bot_ids=now_protected, expected=c0, to=upto,
+                                  rows_read=len(rows), coverage=coverage):
+                raise _Abort("cursor_moved")
+            _fail(_fault, "at_commit")
+    except _Abort as a:
+        result["proposal"] = {"status": "aborted", "reason": str(a), "dropped": dropped}
         return result
-    result["proposal"] = _propose(engine, user_id=user_id, base_row=base_row,
-                                  base_body=base_body, evidence=evidence,
-                                  drafter=drafter or draft_with_utility,
-                                  protected=protected, proposed_by=proposed_by)
+    except (guidance.BaseMoved, ValueError) as exc:
+        result["proposal"] = {"status": "rejected", "error": str(exc)[:500], "dropped": dropped}
+        return result
+    result["receipt_id"] = rid
+    result["proposal"] = ({"status": "pending", "proposal_id": pid, "dropped": dropped}
+                          if changed else {"status": "no_change", "dropped": dropped})
     return result
+
+
+class _Abort(Exception):
+    """A final-transaction check failed; everything rolls back."""
 
 
 def _page_view(page: Mapping[str, Any]) -> dict[str, Any]:
     return {k: page.get(k) for k in ("status", "cursor_before", "cursor_after", "coverage")}
-
-
-def _propose(engine, *, user_id, base_row, base_body, evidence, drafter, protected,
-             proposed_by) -> dict[str, Any]:
-    """Separate from page receipts: nothing here touches a committed receipt."""
-    base = guidance.validate_doc(guidance._load(base_body))
-    offered = {(e["bot_id"], e["message_id"]) for e in evidence}
-    try:
-        draft = drafter(base, evidence)
-        doc = guidance.validate_doc({"v": guidance.SCHEMA_VERSION, "mandate": base["mandate"],
-                                     "preferences": list(draft["preferences"])})
-        doc, dropped = _constrain(base, doc, offered)
-        reason = str(draft.get("reason") or "").strip() or "history review"
-    except Exception as exc:  # the drafter is untrusted output
-        return {"status": "invalid_draft", "error": f"{type(exc).__name__}: {exc}"[:500]}
-    if guidance.canonical(doc) == guidance.canonical(base):
-        return {"status": "no_change", "dropped": dropped}
-    try:
-        pid = guidance.propose(engine, user_id=user_id, new_doc=doc, reason=reason,
-                               proposed_by=proposed_by, excluded_bot_ids=protected,
-                               expected_base_row_id=base_row)
-    except guidance.BaseMoved as exc:
-        return {"status": "base_moved", "error": str(exc), "dropped": dropped}
-    except ValueError as exc:
-        return {"status": "rejected", "error": str(exc)[:500], "dropped": dropped}
-    return {"status": "pending", "proposal_id": pid, "dropped": dropped}
 
 
 # -- utility drafter -------------------------------------------------------------
@@ -224,12 +274,13 @@ def draft_with_utility(base: Mapping[str, Any], evidence: Sequence[Mapping[str, 
 def main(argv: Sequence[str] | None = None) -> int:
     import argparse
 
-    ap = argparse.ArgumentParser(description="Operator-only guidance run (dormant).")
+    ap = argparse.ArgumentParser(
+        description="Operator-only guidance dry run; commits run in the app via "
+                    "POST /v1/guidance/runs.")
     ap.add_argument("--bot", required=True)
     ap.add_argument("--user", required=True)
     ap.add_argument("--protect", action="append", default=[], help="extra protected bot")
     ap.add_argument("--max-evidence", type=int, default=200)
-    ap.add_argument("--commit", action="store_true", help="advance the cursor and propose")
     a = ap.parse_args(argv)
     from ..utils.config import Config
     from ..utils.db import get_shared_engine
@@ -242,7 +293,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ensure_schema(conn)
         guidance.ensure_schema(conn)
     out = run_pair(engine, bot_id=a.bot, user_id=a.user, extra_protected=a.protect,
-                   max_evidence=a.max_evidence, dry_run=not a.commit)
+                   max_evidence=a.max_evidence, dry_run=True)
     print(json.dumps(out, default=str, indent=1))
     return 0
 

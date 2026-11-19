@@ -264,38 +264,52 @@ def propose(engine, *, user_id: str, new_doc: Mapping[str, Any], reason: str,
     user_id = _user(user_id)
     if not reason or not reason.strip():
         raise ValueError("a proposal needs a reason")
-    new = validate_doc(json.loads(json.dumps(new_doc)))
     with engine.begin() as conn:
-        cur = current_version(conn, user_id)
-        if expected_base_row_id is not _ANY_BASE and (cur and cur["row_id"]) != expected_base_row_id:
-            raise BaseMoved(f"guidance moved from row {expected_base_row_id} "
-                            f"to {cur and cur['row_id']}")
-        base = validate_doc(_load(cur and cur["body"]))
-        if new["mandate"] != base["mandate"]:
-            raise ValueError("the mandate is the user's; a proposal cannot change it")
-        if _rollback_row is not None:
-            if canonical(new) == canonical(base):
-                raise ValueError("rollback target equals the current guidance")
-            evidence = [{"rollback_of_version_row_id": _rollback_row}]
-        else:
-            changed = _changed_prefs(base, new)
-            if not changed:
-                raise ValueError("proposal changes no preference")
-            refs = []
-            for p in changed:
-                if p["status"] == "active" and not p["evidence"]:
-                    raise ValueError(f"preference {p['id']} cites no evidence")
-                refs.extend(p["evidence"])
-            evidence = resolve_evidence(conn, user_id=user_id, refs=refs,
-                                        excluded_bot_ids=excluded_bot_ids)
-        body = canonical(new)
-        diff = "".join(difflib.unified_diff(
-            canonical(base).splitlines(True), body.splitlines(True), "base", "proposed"))
-        return conn.execute(_INSERT_PROPOSAL, {
-            "user_id": user_id, "key": guidance_key(user_id),
-            "bv": cur and cur["version"], "brow": cur and cur["row_id"],
-            "body": body, "diff": diff, "reason": reason.strip(),
-            "ev": evidence, "by": proposed_by}).scalar_one()
+        return propose_in(conn, user_id=user_id, new_doc=new_doc, reason=reason,
+                          proposed_by=proposed_by, excluded_bot_ids=excluded_bot_ids,
+                          expected_base_row_id=expected_base_row_id,
+                          _rollback_row=_rollback_row)
+
+
+def propose_in(conn, *, user_id: str, new_doc: Mapping[str, Any], reason: str,
+               proposed_by: str, excluded_bot_ids: Sequence[str],
+               expected_base_row_id: Any = _ANY_BASE,
+               _rollback_row: int | None = None) -> int:
+    """:func:`propose` inside the caller's transaction (the caller commits)."""
+    user_id = _user(user_id)
+    if not reason or not reason.strip():
+        raise ValueError("a proposal needs a reason")
+    new = validate_doc(json.loads(json.dumps(new_doc)))
+    cur = current_version(conn, user_id)
+    if expected_base_row_id is not _ANY_BASE and (cur and cur["row_id"]) != expected_base_row_id:
+        raise BaseMoved(f"guidance moved from row {expected_base_row_id} "
+                        f"to {cur and cur['row_id']}")
+    base = validate_doc(_load(cur and cur["body"]))
+    if new["mandate"] != base["mandate"]:
+        raise ValueError("the mandate is the user's; a proposal cannot change it")
+    if _rollback_row is not None:
+        if canonical(new) == canonical(base):
+            raise ValueError("rollback target equals the current guidance")
+        evidence = [{"rollback_of_version_row_id": _rollback_row}]
+    else:
+        changed = _changed_prefs(base, new)
+        if not changed:
+            raise ValueError("proposal changes no preference")
+        refs = []
+        for p in changed:
+            if p["status"] == "active" and not p["evidence"]:
+                raise ValueError(f"preference {p['id']} cites no evidence")
+            refs.extend(p["evidence"])
+        evidence = resolve_evidence(conn, user_id=user_id, refs=refs,
+                                    excluded_bot_ids=excluded_bot_ids)
+    body = canonical(new)
+    diff = "".join(difflib.unified_diff(
+        canonical(base).splitlines(True), body.splitlines(True), "base", "proposed"))
+    return conn.execute(_INSERT_PROPOSAL, {
+        "user_id": user_id, "key": guidance_key(user_id),
+        "bv": cur and cur["version"], "brow": cur and cur["row_id"],
+        "body": body, "diff": diff, "reason": reason.strip(),
+        "ev": evidence, "by": proposed_by}).scalar_one()
 
 
 class Stale(Exception):
@@ -397,6 +411,27 @@ def begin_run(engine, *, bot_id: str, user_id: str,
             "guidance_version": cur and cur["version"],
             "guidance_version_row_id": cur and cur["row_id"],
             "body": cur and cur["body"], "sha256": cur and cur["sha256"]}
+
+
+def lock_key(conn, user_id: str) -> None:
+    """Serialize with :func:`decide` on this user's guidance (same advisory key)."""
+    conn.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": guidance_key(user_id)})
+
+
+def record_run_in(conn, *, bot_id: str, user_id: str, version: Mapping[str, Any] | None,
+                  before: Sequence | None, after: Sequence, consumed: int) -> int:
+    """One committed receipt for an atomic run, written in the caller's transaction."""
+    return conn.execute(text(f"""
+        INSERT INTO {RECEIPTS} (bot_id, user_id, guidance_key, guidance_version,
+            guidance_version_row_id, body_sha256, cursor_before_ts, cursor_before_id,
+            cursor_after_ts, cursor_after_id, consumed_count, status, finished_at)
+        VALUES (:b, :u, :k, :v, :row, :sha, :bts, :bid, :ats, :aid, :n, 'committed', now())
+        RETURNING id
+    """), {"b": bot_id, "u": user_id, "k": guidance_key(user_id),
+           "v": version and version["version"], "row": version and version["row_id"],
+           "sha": version and version["sha256"], "bts": before and before[0],
+           "bid": before and before[1], "ats": after[0], "aid": after[1],
+           "n": consumed}).scalar_one()
 
 
 _FINISH = text(f"""

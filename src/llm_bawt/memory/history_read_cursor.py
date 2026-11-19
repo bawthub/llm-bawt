@@ -112,6 +112,15 @@ _CAS = text(f"""
 
 _NEG_INF = float("-inf")
 
+# Exact replay of an already-read window: lower-exclusive cursor, inclusive
+# upper keyset (TASK-893). Same row shape and order as _PAGE.
+_WINDOW = text(_PAGE.text.replace(
+    "AND m.timestamp < :until", "AND (m.timestamp, m.id) <= (:upto_ts, :upto_id)").replace(
+    "LIMIT :limit", ""))
+
+_LOCK = text(f"""SELECT cursor_ts, cursor_message_id FROM {CURSOR_TABLE}
+                 WHERE bot_id = :slug AND user_id = :user_id FOR UPDATE""")
+
 
 def _pair(bot_id: str, excluded_bot_ids: Sequence[str]) -> tuple[str, str]:
     """(partition, canonical slug) for exactly one authorized bot; refuses before SQL."""
@@ -161,6 +170,57 @@ def fetch_after(conn: Any, *, bot_id: str, user_id: str, excluded_bot_ids: Seque
         unattributed = conn.execute(_UNATTRIBUTED_WINDOW, {**params, "until": until}).scalar_one()
     return {"rows": ordered, "last": last, "truncated": truncated,
             "unattributed_partition_rows": int(unattributed)}
+
+
+def read_cursor(conn: Any, *, bot_id: str, user_id: str,
+                excluded_bot_ids: Sequence[str]) -> tuple[float, str] | None:
+    """The pair's persisted cursor (None = start), without moving it."""
+    _part, slug = _pair(bot_id, excluded_bot_ids)
+    cur = conn.execute(_READ, {"slug": slug, "user_id": _user(user_id)}).mappings().first()
+    return None if cur is None or cur["cursor_ts"] is None else (
+        cur["cursor_ts"], cur["cursor_message_id"])
+
+
+def classified(rows: Sequence[Mapping[str, Any]], slug: str) -> list[dict[str, Any]]:
+    """Rows from fetch_after/replay_window in consume's classified shape."""
+    return [{"bot_id": slug, "message_id": r["id"], "ts": r["timestamp"],
+             "content": r["content"], "classification": classify(r)}
+            for r in _parse_meta([dict(r) for r in rows])]
+
+
+def replay_window(conn: Any, *, bot_id: str, user_id: str, excluded_bot_ids: Sequence[str],
+                  after: tuple[float, str] | None, upto: tuple[float, str]) -> list[dict[str, Any]]:
+    """Every pair row with after < (ts, id) <= upto, in page order."""
+    part, slug = _pair(bot_id, excluded_bot_ids)
+    after_ts, after_id = after if after is not None else (_NEG_INF, "")
+    rows: dict[str, dict[str, Any]] = {}
+    for r in conn.execute(_WINDOW, {"part": part, "slug": slug, "user_id": _user(user_id),
+                                    "after_ts": after_ts, "after_id": after_id,
+                                    "upto_ts": upto[0], "upto_id": upto[1]}).mappings():
+        rows.setdefault(r["id"], dict(r, bot_id=slug))
+    return list(rows.values())
+
+
+def advance_in(conn: Any, *, bot_id: str, user_id: str, excluded_bot_ids: Sequence[str],
+               expected: tuple[float, str] | None, to: tuple[float, str], rows_read: int,
+               coverage: Mapping[str, Any]) -> bool:
+    """Inside the caller's transaction: lock the pair's cursor, require it equals
+    ``expected`` and move it to ``to``. Returns False (nothing written) if it moved.
+    The caller owns commit and rollback."""
+    _part, slug = _pair(bot_id, excluded_bot_ids)
+    user_id = _user(user_id)
+    cur = conn.execute(_LOCK, {"slug": slug, "user_id": user_id}).mappings().first()
+    vals = {"slug": slug, "user_id": user_id, "ts": to[0], "mid": to[1], "n": rows_read,
+            "cov": dict(coverage)}
+    if cur is None:
+        if expected is not None:
+            return False
+        return conn.execute(_INSERT, vals).first() is not None
+    now = None if cur["cursor_ts"] is None else (cur["cursor_ts"], cur["cursor_message_id"])
+    if now != (tuple(expected) if expected is not None else None):
+        return False
+    prev_ts, prev_mid = cur["cursor_ts"], cur["cursor_message_id"]
+    return conn.execute(_CAS, {**vals, "prev_ts": prev_ts, "prev_mid": prev_mid}).first() is not None
 
 
 def _parse_meta(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

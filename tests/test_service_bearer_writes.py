@@ -69,6 +69,7 @@ PROTECTED = {
     ("POST", "/v1/providers/github/repos"),
     ("GET", "/v1/guidance"),
     ("POST", "/v1/guidance/proposals/{proposal_id}/decide"),
+    ("POST", "/v1/guidance/runs"),
 }
 
 
