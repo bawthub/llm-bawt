@@ -153,5 +153,9 @@ def test_turn_request_totals_span_a_fresh_retry_and_survive_an_error_without_usa
         assert errors[0].token_usage == {"turn_request_totals": {
             "requests": 2, "input_tokens": 18_200, "cache_read_tokens": 18_000,
             "cache_creation_tokens": 0, "requests_with_cache_read": 2,
+            # Both requests crashed before terminal usage; retain measured
+            # inputs without claiming either request's final usage is known.
+            "unmeasured_requests": 2, "output_tokens": 0,
+            "max_request_input_tokens": 9_100,
         }}
     asyncio.run(run())
