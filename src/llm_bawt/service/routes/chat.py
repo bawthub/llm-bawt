@@ -368,6 +368,12 @@ async def steer_active_turn(
     attempts = 1 if steer_request_id else 8
     session_id = await asyncio.to_thread(require_steer_session, service, request, turn)
     if steer_request_id is None:
+        # A streaming row is visible before bind_agent_bridge pins its request.
+        # Never send an untargeted composer RPC or mistake its first binding for
+        # a replacement run on retry. Nothing was dispatched: normal admission
+        # can reuse this message's identity and wait behind the starting turn.
+        if not turn.agent_request_id:
+            raise HTTPException(status_code=409, detail="no_active_run")
         # TASK-1412: a composer steer never passes the user's own queued send.
         from ..steer_order import QUEUED_SEND_AHEAD, queued_send_ahead
         if await asyncio.to_thread(

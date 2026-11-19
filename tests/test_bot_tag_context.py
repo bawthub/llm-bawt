@@ -68,6 +68,40 @@ def test_input_order_never_changes_the_bytes():
     assert _render(roles=list(reversed(_ROLES)), bots=list(reversed(_BOTS))) == _render()
 
 
+@pytest.mark.parametrize("description", ["", " ", "\n\t"])
+def test_empty_description_keeps_the_existing_roster_bytes(description):
+    bots = [replace(bot, description=description) for bot in _BOTS]
+    assert _render(bots=bots).bot_roster == _render().bot_roster
+
+
+def test_descriptions_append_without_changing_sort_order_or_other_facts():
+    bots = [replace(bot, description="  A careful reviewer. They check the details.  ")
+            if bot.slug == "fixture-two" else bot for bot in _BOTS]
+    rendered = _render(bots=bots)
+    assert rendered.bot_roster == (
+        _render().bot_roster + "; description: A careful reviewer. They check the details.")
+    assert _render(bots=list(reversed(bots))) == rendered
+    assert rendered.own_tag_instructions == _render().own_tag_instructions
+    assert rendered.tag_catalog == _render().tag_catalog
+
+
+def test_description_is_literal_text_not_a_template_or_truncated():
+    description = "They review {bot_roster}.\n" + "Details. " * 100
+    bot = replace(_BOTS[0], description=description)
+    assert _render(bots=[bot]).bot_roster.endswith("; description: " + " ".join(description.split()))
+    assert bot.description == description
+
+
+@pytest.mark.parametrize("separator", ["\n", "\r\n", "\t", "  "])
+def test_multiline_description_stays_on_its_own_roster_line(separator):
+    bots = [replace(bot, description=f"She builds interfaces.{separator}She likes clear feedback.")
+            if bot.slug == "fixture-one" else bot for bot in _BOTS]
+    lines = _render(bots=bots).bot_roster.splitlines()
+    assert len(lines) == len(_BOTS)
+    assert lines[0].endswith("; description: She builds interfaces. She likes clear feedback.")
+    assert "\n".join(lines[1:]) == "\n".join(_render().bot_roster.splitlines()[1:])
+
+
 def test_a_bot_with_no_role_tags_gets_none_for_its_own_instructions():
     assert _render(own=("private",)).own_tag_instructions == "none"
 

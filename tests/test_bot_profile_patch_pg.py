@@ -26,6 +26,22 @@ pytestmark = pytest.mark.integration
 BOT = "fixture-bot"
 
 
+@pytest.mark.parametrize("description", [
+    "They review carefully. They prefer focused changes.",
+    "She builds interfaces.\nShe likes clear feedback.",
+    "",
+])
+def test_description_saves_and_reloads_without_changing_the_prompt(api, description):  # noqa: F811
+    before = api.client.get(f"/v1/bots/{BOT}/profile").json()
+    saved = api.patch(BOT, description=description)
+    assert saved.status_code == 200, saved.text
+    reloaded = api.client.get(f"/v1/bots/{BOT}/profile")
+    assert reloaded.status_code == 200
+    assert saved.json()["description"] == reloaded.json()["description"] == description
+    assert reloaded.json()["system_prompt"] == before["system_prompt"]
+    assert api.store.get(BOT).description == description
+
+
 def _changes(api, slug=BOT):  # noqa: F811
     with api.rig.engine.connect() as conn:
         return [dict(row) for row in conn.execute(text(

@@ -211,6 +211,31 @@ def test_delivery_inheritance_precedes_bridge_rpc_and_failure_blocks_it(rig, mon
         rig.sub.send_steer.assert_awaited_once()
 
 
+@pytest.mark.parametrize("bind_during_preparation", [False, True])
+def test_provisional_composer_target_never_sends_an_untargeted_rpc(rig, monkeypatch, bind_during_preparation):
+    rig.turn.agent_request_id = None
+    rig.turn.agent_backend = None
+    if bind_during_preparation:
+        def bind(*_a, **_kw):
+            rig.turn.agent_request_id = "req-A"
+            rig.turn.agent_backend = "claude-code"
+            return {}
+        monkeypatch.setattr(chat, "_steer_framing", bind)
+    with pytest.raises(HTTPException) as caught:
+        run(rig)
+    assert (caught.value.status_code, caught.value.detail) == (409, "no_active_run")
+    rig.sub.send_steer.assert_not_awaited()
+    rig.memory.add_message.assert_not_called()
+
+
+def test_unbound_target_still_validates_conversation_before_safe_refusal(rig):
+    rig.turn.agent_request_id = None
+    with pytest.raises(HTTPException) as caught:
+        run(rig, session_id="other-thread")
+    assert (caught.value.status_code, caught.value.detail) == (409, "session_mismatch")
+    rig.sub.send_steer.assert_not_awaited()
+
+
 def test_no_active_retry_revalidates_original_target_before_second_rpc(rig, monkeypatch):
     async def ended(**_):
         rig.turn.ended_at, rig.turn.status = "ended", "ok"

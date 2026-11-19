@@ -117,6 +117,14 @@ def test_discovery_lists_only_public_and_quiet_bots_with_their_tags(policy):
                                      "location": None, "detail": "full"}
 
 
+def test_full_discovery_preserves_the_existing_description_reader(policy):
+    description = "She builds interfaces. She likes clear feedback."
+    policy["profiles"] = [_profile("fixture-public", description=description)]
+    listed = asyncio.run(tools.list_available_bots(include_state=False, detail="full"))
+    assert len(listed) == 1
+    assert listed[0]["description"] == description
+
+
 def test_state_is_read_once_for_the_visible_bots_only(policy):
     listed = asyncio.run(tools.list_available_bots(detail="full"))
 

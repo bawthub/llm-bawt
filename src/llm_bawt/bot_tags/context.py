@@ -5,8 +5,8 @@ variables with facts:
 
 - ``own_tag_instructions``: the instructions of each role tag this bot carries,
   or the tag's description when it has none;
-- ``bot_roster``: every visible agent bot with its tags, endpoint ref and
-  provider;
+- ``bot_roster``: every visible agent bot with its tags, endpoint ref,
+  provider and optional description;
 - ``tag_catalog``: each role tag's slug, name, description and capabilities.
 
 Nothing here interprets a tag or capability, and nothing volatile (quota, live
@@ -36,6 +36,7 @@ class RosterBot:
     tags: tuple[str, ...]
     endpoint_ref: str | None
     provider: str | None
+    description: str = ""
 
 
 @dataclass(frozen=True)
@@ -83,6 +84,7 @@ def render_tag_context(
     roster = [
         f"- {bot.slug}: tags {', '.join(sorted(bot.tags)) or NONE}; "
         f"endpoint {bot.endpoint_ref or UNKNOWN}; provider {bot.provider or UNKNOWN}"
+        + (f"; description: {' '.join(bot.description.split())}" if bot.description.strip() else "")
         for bot in sorted(bots, key=lambda b: b.slug)
     ]
     catalog = []
@@ -126,6 +128,7 @@ def load_tag_context(
         RosterBot(
             slug=row.slug,
             tags=tuple(sorted(snapshot.tags.get(row.slug, ()))),
+            description=row.description or "",
             **_endpoint_facts(model_catalog, row.endpoint_id),
         )
         for row in profiles

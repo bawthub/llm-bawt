@@ -403,7 +403,8 @@ def test_tag_context_facts_list_visible_agent_bots_and_this_bots_instructions(ta
     for slug, extra in (("fixture-chat", {"bot_type": "chat", "agent_backend": None}),
                         ("fixture-hidden", {}), ("fixture-off", {}), ("fixture-plain", {})):
         upsert(tags.store, slug, **({"bot_type": "agent", "agent_backend": "claude-code"} | extra))
-    upsert(tags.store, "fixture-bot", bot_type="agent", agent_backend="claude-code")
+    upsert(tags.store, "fixture-bot", bot_type="agent", agent_backend="claude-code",
+           description="They review\ncarefully.")
     tags.patch("fixture-hidden", tags=["private"])
     tags.patch("fixture-off", tags=["inactive", "fixture_role"])
     tags.patch("fixture-bot", tags=["fixture_role"])
@@ -414,7 +415,8 @@ def test_tag_context_facts_list_visible_agent_bots_and_this_bots_instructions(ta
                                "fixture-bot", bodies.get, profiles=tags.store.list_all())
 
     assert context.bot_roster == (
-        "- fixture-bot: tags fixture_role; endpoint unknown; provider unknown\n"
+        "- fixture-bot: tags fixture_role; endpoint unknown; provider unknown"
+        "; description: They review carefully.\n"
         "- fixture-plain: tags none; endpoint unknown; provider unknown")
     assert context.own_tag_instructions == "### Fixture Role (`fixture_role`)\nReview carefully."
     assert context.tag_catalog == "- `fixture_role` (Fixture Role): capabilities review"
