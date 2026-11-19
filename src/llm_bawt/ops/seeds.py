@@ -409,7 +409,8 @@ _CONFIG_SEEDS: list[dict[str, Any]] = [{
         # mount is named here as source or data; anything else refuses.
         # Destinations are the product's own Compose files' container paths.
         source_repository="bawthub/llm-bawt", source_branch="master",
-        source_mounts=["/app/src", "/app/server.sh"],
+        # TASK-631: Alembic config and revisions are checkout source too.
+        source_mounts=["/app/src", "/app/server.sh", "/app/alembic.ini", "/app/migrations"],
         data_mounts=["/app/.logs", "/app/models", "/app/storage", "/root/.config/llm-bawt",
                      "/root/.cache/huggingface", "/root/.cache/llm-bawt/models", "/var/lib/llm-bawt/media",
                      "/var/lib/llm-bawt-ops", "/var/run/docker.sock", "/home/bridge/dev/agent-skills",

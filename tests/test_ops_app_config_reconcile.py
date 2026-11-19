@@ -56,9 +56,9 @@ OPS_VOLUME = "/var/lib/llm-bawt-ops"
 
 
 def plan(*opaque, data=(OPS_VOLUME,), bytecode_ok=False):
-    return {"paths": ["server.sh", "src"], "compose_files": ["docker-compose.yml", "docker-compose.dev.yml"],
+    return {"paths": ["alembic.ini", "migrations", "server.sh", "src"], "compose_files": ["docker-compose.yml", "docker-compose.dev.yml"],
             "bytecode_ok": bytecode_ok,
-            "classification": {"source_mounts": ["/app/server.sh", "/app/src"], "data_mounts": list(data),
+            "classification": {"source_mounts": ["/app/alembic.ini", "/app/migrations", "/app/server.sh", "/app/src"], "data_mounts": list(data),
                                "opaque_env": sorted(opaque or ["LLM_BAWT_SERVICE_PORT"])}}
 
 
@@ -103,7 +103,8 @@ def app_compose(**service):
             "environment": {"LLM_BAWT_SERVICE_PORT": "8642"}, "networks": {"default": None},
             "ports": [dict(PORT)], "restart": "unless-stopped", "stdin_open": True, "tty": True,
             "volumes": [_bind_mount("src"), _bind_mount("server.sh"),
-                        {"type": "volume", "source": "receipts", "target": OPS_VOLUME, "volume": {}}]}
+                        {"type": "volume", "source": "receipts", "target": OPS_VOLUME, "volume": {}},
+                        _bind_mount("alembic.ini"), _bind_mount("migrations")]}
     body.update(service)
     return {"name": "llm-bawt", "services": {"app": body}, "networks": {"default": {"name": "llm-bawt_default"}},
             "volumes": {"receipts": {"name": "llm-bawt_receipts"}}}
@@ -140,7 +141,9 @@ class AppDocker(FakeDocker):
                                   "com.docker.compose.project.config_files": ",".join(APP_FILES),
                                   "org.opencontainers.image.title": "llm-bawt"}},
             "HostConfig": {"RestartPolicy": {"Name": "unless-stopped"},
-                           "Binds": [f"{APP_DIR}/src:/app/src:rw", f"{APP_DIR}/server.sh:/app/server.sh:rw"],
+                           "Binds": [f"{APP_DIR}/src:/app/src:rw", f"{APP_DIR}/server.sh:/app/server.sh:rw",
+                                     f"{APP_DIR}/alembic.ini:/app/alembic.ini:rw",
+                                     f"{APP_DIR}/migrations:/app/migrations:rw"],
                            "Mounts": [{"Type": "volume", "Source": "llm-bawt_receipts", "Target": OPS_VOLUME,
                                        "ReadOnly": False}],
                            "PortBindings": {"8642/tcp": [{"HostIp": "", "HostPort": "8642"}]}},
@@ -532,7 +535,8 @@ def test_drift_is_reconciled_and_values_stay_private(tmp_path):
     body = api.create_bodies[0]
     assert f"XAI_API_KEY={SECRET}" in body["Env"] and body["Cmd"] == CMD
     assert body["Labels"]["com.docker.compose.config-hash"] == CONFIG_HASH
-    assert body["HostConfig"]["Binds"] == [f"{APP_DIR}/server.sh:/app/server.sh:rw", f"{APP_DIR}/src:/app/src:rw",
+    assert body["HostConfig"]["Binds"] == [f"{APP_DIR}/alembic.ini:/app/alembic.ini:rw", f"{APP_DIR}/migrations:/app/migrations:rw",
+                                           f"{APP_DIR}/server.sh:/app/server.sh:rw", f"{APP_DIR}/src:/app/src:rw",
                                            f"llm-bawt_receipts:{OPS_VOLUME}:rw"]
     assert body["NetworkingConfig"]["EndpointsConfig"]["llm-bawt_default"]["Aliases"] == [APP_NAME, "app"]
     assert SECRET not in output and SECRET not in json.dumps(snap)
@@ -829,7 +833,7 @@ def test_an_unlisted_name_refuses_whatever_its_value(source, where, names):
 
 def test_listed_app_data_names_are_opaque_and_their_values_unchecked(source):
     bound = binding(_env_api("compose", {"XAI_API_KEY": f"{OPS_VOLUME}/{SECRET}", "NEW": "() x"}), checker=source)
-    assert bound["classification"] == {"source_mounts": ["/app/server.sh", "/app/src"],
+    assert bound["classification"] == {"source_mounts": ["/app/alembic.ini", "/app/migrations", "/app/server.sh", "/app/src"],
                                        "data_mounts": [OPS_VOLUME],
                                        "opaque_env": ["LLM_BAWT_SERVICE_PORT", "NEW", "XAI_API_KEY"]}
     assert SECRET not in json.dumps(bound)
@@ -862,7 +866,7 @@ def test_a_first_run_card_lists_everything_it_trusts():
         "Run llm-bawt.reconcile-app-config?",
         "FIRST RUN: every mount and environment name below is newly trusted.",
         "Catalog revision: v7, updated 2026-10-27T01:02:03+00:00 by catalog-editor (self-reported)",
-        "Source mounts (verified against the commit): /app/server.sh, /app/src",
+        "Source mounts (verified against the commit): /app/alembic.ini, /app/migrations, /app/server.sh, /app/src",
         f"Data mounts (unchecked, writable): {OPS_VOLUME}",
         "Opaque env (2 names, values never shown or checked): LLM_BAWT_SERVICE_PORT, XAI_API_KEY"]
     assert SECRET not in text
@@ -897,7 +901,7 @@ def test_an_env_names_edit_and_a_source_to_data_move_are_newly_trusted():
     assert newly == {"source_mounts": [], "data_mounts": [], "opaque_env": ["XAI_API_KEY"]}
     assert card(now, newly=newly).splitlines()[1] == "NEWLY TRUSTED since the last successful run: opaque env XAI_API_KEY"
     # A catalog edit that turns a source mount into an unchecked data mount.
-    moved_spec = {**SPEC, "source_mounts": ["/app/src"], "data_mounts": [*SPEC["data_mounts"], "/app/server.sh"]}
+    moved_spec = {**SPEC, "source_mounts": ["/app/alembic.ini", "/app/migrations", "/app/src"], "data_mounts": [*SPEC["data_mounts"], "/app/server.sh"]}
     moved = binding(AppDocker(), moved_spec)["classification"]
     newly = newly_trusted(moved, earlier)
     assert newly == {"source_mounts": [], "data_mounts": ["/app/server.sh"], "opaque_env": []}

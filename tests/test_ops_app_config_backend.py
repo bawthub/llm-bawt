@@ -289,7 +289,7 @@ def test_the_frontend_profile_still_refuses_build_and_its_own_pull_policies_are_
 
 # ── change 1: security_opt ──────────────────────────────────────────────────
 
-APP_DESIRED_GOLDEN = "08b892521b207cfa0de3e6a0198862d3a3f6612d2839f3e9d76996ca01e6d09c"
+APP_DESIRED_GOLDEN = "76f58cfaaab6f0b751d992b602efd3ac5d08dd9dbbc788ad65b638571bb1340f"
 
 
 def test_the_app_desired_config_is_byte_identical_without_the_new_keys():
