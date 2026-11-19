@@ -49,12 +49,13 @@ def test_pristine_full_store_catalog(full_store_db, tmp_path):
     # + TASK-2396's house_retirements (BotProfileStore bootstraps it).
     # + TASK-2383's turn exposure, lineage and write-admission receipts.
     # - TASK-1624's retired agent_runs, agent_events and agent_session_state.
-    assert len(relations) == 69, sorted(relations)
+    # + TASK-2480's delivery_events (InterBotDeliveryStore bootstraps it).
+    assert len(relations) == 70, sorted(relations)
     assert "memory_ownership_activations" in {key.split(".")[-1] for key in relations}
     assert {"system_events", "system_gates", "gate_members", "gate_escalations", "bot_tag_catalog", "bot_profile_tags",
             "api_balance_ledger", "api_balances", "llm_response_records", "worker_lifecycle_records", "utility_usage",
             "bot_profile_changes", "bot_slug_aliases", "approval_approver_fanout", "session_resumption_receipts", "turn_egress_requests",
-            "house_retirements",
+            "house_retirements", "delivery_events",
             "agent_content_turns", "agent_content_lineage", "agent_content_write_decisions"} <= {key.split(".")[-1] for key in relations}
     assert not any("schema_full_fixture" in key for _, key in catalog)
     assert catalog_tool["compare"](catalog, catalog) == []

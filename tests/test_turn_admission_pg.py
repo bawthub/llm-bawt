@@ -286,7 +286,10 @@ def test_voice_steers_next_past_same_authors_typed_wait_without_changing_author(
     assert sent.priority == "next" and sent.turn_id == rig.turn_id
     assert sent.session_id == rig.session_id and sent.message_id == request.user_message_id
     assert steer.await_args.kwargs["author"] == AuthorReference.user(rig.user)
-    assert deliveries.get(voice.delivery_id).status == "DELIVERED"
+    # C1: persistence accepts the steer; only its own STARTED proves delivery.
+    parked = deliveries.get(voice.delivery_id)
+    assert parked.status == "STEERING" and parked.claim_token is None
+    assert parked.delivered_at is None
 
 
 @pytest.mark.integration
