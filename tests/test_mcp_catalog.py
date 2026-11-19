@@ -348,7 +348,10 @@ async def test_catalog_token_budgets():
     # so a woken run parks instead of retrying. Measured 19,438 (+68).
     # TASK-1712: monitors_list/upsert/mute/test, BawtHub monitor read, edit,
     # mute and fresh check through its health API. Measured 19,733 (+295).
-    assert total <= 19733, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-2494: image_role, image_captions and replace_current_results on
+    # tasks_update/tasks_create, so acceptance shots supersede by round
+    # instead of piling up unlabelled. Measured 19,859 (+126).
+    assert total <= 19859, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 

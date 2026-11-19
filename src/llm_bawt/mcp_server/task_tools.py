@@ -23,12 +23,15 @@ from .task_board_state import (
     _patch_error,
 )
 from .task_images import (
+    LABELS_UNSUPPORTED as IMAGE_LABELS_UNSUPPORTED,
     UNSUPPORTED as IMAGE_EDIT_UNSUPPORTED,
     ImageRefError,
     image_edit,
+    image_label_set,
     linked_turn_images,
     newly_added,
     resolve_image_refs,
+    stored_urls,
 )
 from .task_step_types import (
     BLOCKED_DEFINITION,
@@ -58,6 +61,9 @@ from .task_api import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: TASK-2494: what an image on the card is for (task_images.IMAGE_ROLES).
+ImageRole = Literal["requirement", "result", "history"]
 
 # TASK-1555: lookup defaults sized for "find the one task to open", not a dump.
 TASKS_LIST_DEFAULT_LIMIT = 10
@@ -453,6 +459,9 @@ async def update_task(
     add_image_urls: list[str] | None = None,
     remove_image_urls: list[str] | None = None,
     attach_turn_images: bool = True,
+    image_role: ImageRole | None = None,
+    image_captions: dict[str, str] | None = None,
+    replace_current_results: bool = False,
 ) -> dict:
     """Update a task's fields. Only provided fields are changed.
 
@@ -557,6 +566,18 @@ async def update_task(
         attach_turn_images: With associate_current_turn, also attach the
                   images on the message that started this turn (default True;
                   listed in turnImagesAttached). False opts out.
+        image_role: What add_image_urls are for: "requirement" (spec,
+                  reference, bug capture), "result" (current acceptance
+                  evidence) or "history". Naming an attached image relabels it.
+                  Unlabelled images show as Unsorted.
+        image_captions: Short caption per image ref, saying what and state:
+                  e.g. "Task card, phone 390px, dev" or "Menu open, desktop,
+                  house preview". Never call a preview dev acceptance.
+                  "" clears.
+        replace_current_results: Start a new acceptance round: current
+                  results not labelled "result" in this call move to History.
+                  Nothing is removed. Without it, a new result joins the
+                  current set.
 
     Returns:
         Compact updated task summary, or error dict. Use tasks_get for full detail.
@@ -623,6 +644,21 @@ async def update_task(
         if edit is not None:
             body.update(edit.body())
 
+    # TASK-2494: roles and captions name stored entries; BawtHub applies them
+    # under the row lock, after this PATCH's own adds and removes.
+    if image_role is not None and not add_image_urls:
+        return {"error": "image_role labels add_image_urls; name the images to label there"}
+    try:
+        dropped = set(stored_urls(remove_image_urls or []))
+        role_urls = [url for url in stored_urls(add_image_urls or []) if url not in dropped]
+        labels = image_label_set(role_urls, image_role, image_captions)
+    except ImageRefError as error:
+        return {"error": str(error)}
+    if labels:
+        body["imageLabelsSet"] = labels
+    if replace_current_results:
+        body["replaceResults"] = True
+
     if not body:
         if associate_current_turn:
             return _turn_images(await associate_task_to_current_turn(task_id), [], turn_error)
@@ -644,6 +680,9 @@ async def update_task(
             if not images_landed:
                 unconfirmed.append(IMAGE_EDIT_UNSUPPORTED)
                 skipped |= {"imageUrlsAdd", "imageUrlsRemove"}
+            if ("imageLabelsSet" in body or "replaceResults" in body) and "imageLabels" not in updated:
+                unconfirmed.append(IMAGE_LABELS_UNSUPPORTED)
+                skipped |= {"imageLabelsSet", "replaceResults"}
             turn_attached = [url for url in turn_urls if url in edit.fresh] if edit and images_landed else []
             if unconfirmed:
                 # An older BawtHub ignores the unknown field but applies the
@@ -914,6 +953,8 @@ async def create_task(
     waiting_reason: str | None = None,
     image_urls: list[str] | None = None,
     attach_turn_images: bool = True,
+    image_role: ImageRole = "requirement",
+    image_captions: dict[str, str] | None = None,
     check_links: list[CheckLinkInput] | None = None,
 ) -> dict:
     """Create a new agent task.
@@ -957,6 +998,9 @@ async def create_task(
         attach_turn_images: With associate_current_turn, also attach the
                     images on the message that started this turn (default
                     True; listed in turnImagesAttached). False opts out.
+        image_role: Role of the attached images (default "requirement");
+                    as in tasks_update.
+        image_captions: Caption per image ref, as in tasks_update.
         check_links: As in tasks_update; required for a REVIEW create.
 
     Returns:
@@ -1000,6 +1044,17 @@ async def create_task(
     turn_attached = newly_added(turn_urls, explicit)
     if explicit or turn_attached:
         body["imageUrls"] = [*explicit, *turn_attached]
+        try:
+            labels = image_label_set(body["imageUrls"], image_role, image_captions)
+        except ImageRefError as error:
+            return {"error": str(error)}
+        # BawtHub refuses a label for an image the task doesn't get.
+        unknown = [url for url in labels if url not in body["imageUrls"]]
+        if unknown:
+            return {"error": f"image_captions name images not attached: {unknown}"}
+        body["imageLabelsSet"] = labels
+    elif image_captions:
+        return {"error": "image_captions name images; attach them with image_urls"}
 
     try:
         created = await _api_post("/tasks", json=body, headers=_headers(bot_id))

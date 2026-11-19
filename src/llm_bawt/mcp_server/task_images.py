@@ -242,6 +242,37 @@ async def image_edit(read_task, task_id: str, add_refs: list[Any] | None,
     return plan_image_edit(current, add, remove_refs or [])
 
 
+#: What an image is for on the card (TASK-2494); an image without one is Unsorted.
+IMAGE_ROLES = ("requirement", "result", "history")
+#: BawtHub's caption limit.
+MAX_IMAGE_CAPTION = 200
+#: Said when the PATCH came back without labels: a BawtHub release older than TASK-2494.
+LABELS_UNSUPPORTED = "BawtHub doesn't support image roles or captions yet; they were not changed"
+
+
+def image_label_set(role_urls: Iterable[str], role: str | None,
+                    captions: dict[Any, Any] | None) -> dict[str, dict[str, str]]:
+    """BawtHub's ``imageLabelsSet``: ``role`` for each stored URL in ``role_urls``,
+    plus ``captions`` keyed by any reference to an image on the task.
+
+    Keys are stored URLs, the exact ``imageUrls`` entries BawtHub labels. An
+    empty caption clears it. Raises ImageRefError for a bad role or caption.
+    """
+    if role is not None and role not in IMAGE_ROLES:
+        raise ImageRefError(f"image_role must be one of {', '.join(IMAGE_ROLES)}")
+    labels: dict[str, dict[str, str]] = {url: {"role": role} for url in role_urls} if role else {}
+    for ref, caption in (captions or {}).items():
+        if not isinstance(caption, str) or len(caption.strip()) > MAX_IMAGE_CAPTION:
+            raise ImageRefError(f"caption for {ref!r} must be text of at most {MAX_IMAGE_CAPTION} characters")
+        labels.setdefault(parse_image_ref(ref)[1], {})["caption"] = caption.strip()
+    return labels
+
+
+def stored_urls(refs: Iterable[Any]) -> list[str]:
+    """The stored URL each reference names, in order; a non-upload entry stays as given."""
+    return _unique(_key(ref.strip()) for ref in refs if isinstance(ref, str) and ref.strip())
+
+
 def _image_urls(task: Any) -> list[str]:
     urls = task.get("imageUrls") if isinstance(task, dict) else None
     if not isinstance(urls, list):
