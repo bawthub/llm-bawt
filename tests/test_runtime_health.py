@@ -97,7 +97,7 @@ def delivery_host():
             created_at TIMESTAMP, updated_at TIMESTAMP,
             available_at TIMESTAMP, lease_expires_at TIMESTAMP,
             lane TEXT DEFAULT 'normal', transport_accepted_at TIMESTAMP,
-            delivery_mode TEXT)"""))
+            delivery_mode TEXT, kind TEXT, claim_token TEXT, target_turn_id TEXT)"""))
         conn.execute(text("""CREATE TABLE turn_logs (
             id TEXT, bot_id TEXT, status TEXT, agent_session_key TEXT,
             agent_request_id TEXT, agent_backend TEXT, agent_steer_caps TEXT, user_id TEXT,
