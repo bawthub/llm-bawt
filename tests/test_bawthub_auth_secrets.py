@@ -145,6 +145,7 @@ def test_oidc_secret_upserts(client):
 @pytest.mark.parametrize("name", [
     "", "sessions-secret", "session-secret/x", "oidc", "oidc/", "oidc/Authelia",
     "oidc/a/b", "oidc/-x", "oidc/" + "a" * 64, "OIDC/x",
+    "monitor", "monitor/", "monitor/A", "monitor/a/b", "monitor/-x", "monitor/" + "a" * 64,
 ])
 def test_unknown_names_are_404_with_a_valid_token(client, name):
     assert not valid_secret_name(name)
@@ -219,3 +220,14 @@ def test_secrets_are_not_in_runtime_settings(store):
         tables = set(conn.execute(text(
             "SELECT name FROM sqlite_master WHERE type='table'")).scalars())
     assert "runtime_settings" not in tables
+
+
+def test_monitor_credentials_upsert_and_read_back(client):
+    """TASK-2458: monitor/<name> holds a probe credential; a rotate replaces it."""
+    assert valid_secret_name("monitor/ha-recorder")
+    first = client.put(f"{URL}/monitor/ha-recorder", headers=AUTH, json={"value": "one"})
+    assert (first.status_code, first.json()) == (200, {"name": "monitor/ha-recorder", "created": True})
+    second = client.put(f"{URL}/monitor/ha-recorder", headers=AUTH, json={"value": "two"})
+    assert (second.status_code, second.json()) == (200, {"name": "monitor/ha-recorder", "created": False})
+    assert client.get(f"{URL}/monitor/ha-recorder", headers=AUTH).json()["value"] == "two"
+    assert client.get(f"{URL}/monitor/ha-recorder").status_code == 401

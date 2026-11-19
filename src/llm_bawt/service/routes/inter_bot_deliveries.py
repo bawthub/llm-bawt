@@ -76,6 +76,15 @@ async def create_delivery_batch(body: BatchDeliveryCreate, request: Request = No
     return _respond(*await _sender().submit(body, request))
 
 
+# Registered above /{delivery_id}, or "queues" would match as an id.
+@router.get("/v1/inter-bot-deliveries/queues", tags=["Inter-Bot Deliveries"])
+def delivery_queue_view():
+    """Per-agent-bot queue snapshot: waiting, in flight, open turn, failures."""
+    from ...inter_bot_delivery_queue_view import delivery_queues
+
+    return delivery_queues(_dispatcher().store.engine)
+
+
 @router.get("/v1/inter-bot-deliveries/{delivery_id}", tags=["Inter-Bot Deliveries"])
 def get_delivery(delivery_id: str):
     record = _dispatcher().store.get(delivery_id)

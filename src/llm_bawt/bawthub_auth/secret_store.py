@@ -25,6 +25,8 @@ from llm_bawt.utils.schema import SchemaBootstrapGuard
 
 SESSION_SECRET = "session-secret"
 _OIDC_NAME = re.compile(r"oidc/[a-z0-9][a-z0-9_-]{0,62}")
+# TASK-2458: credentials BawtHub monitors send to the services they probe.
+_MONITOR_NAME = re.compile(r"monitor/[a-z0-9][a-z0-9_-]{0,62}")
 MAX_VALUE_CHARS = 8192
 # ON CONFLICT DO NOTHING is the create-if-absent fence; both dialects have it.
 _UPSERT_DIALECTS = {"postgresql": postgresql, "sqlite": sqlite}
@@ -44,12 +46,14 @@ class SecretUnreadable(Exception):
 
 
 def valid_secret_name(name: str) -> bool:
-    """Only ``session-secret`` and ``oidc/<providerId>`` exist."""
-    return name == SESSION_SECRET or _OIDC_NAME.fullmatch(name) is not None
+    """Only ``session-secret``, ``oidc/<providerId>`` and ``monitor/<name>`` exist."""
+    return (name == SESSION_SECRET or _OIDC_NAME.fullmatch(name) is not None
+            or _MONITOR_NAME.fullmatch(name) is not None)
 
 
 def is_create_only(name: str) -> bool:
-    """``session-secret`` is written once (create-if-absent); OIDC ones upsert."""
+    """``session-secret`` is written once (create-if-absent); OIDC and monitor
+    credentials upsert, so a rotated token replaces the old one in place."""
     return name == SESSION_SECRET
 
 
