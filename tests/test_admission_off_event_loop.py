@@ -202,13 +202,13 @@ def test_anyio_level_cancellation_drains_without_spinning(monkeypatch):
     assert seen == [("lease", True)]
 
 
-def test_stream_disconnect_during_legacy_persist_settles_the_row(monkeypatch):
+def test_stream_disconnect_during_legacy_persist_closes_the_open_row(monkeypatch):
+    # A legacy save returns no lease; the real scope must still close the row
+    # it wrote (through the store's open-row-only close), never launching.
     service, collect = _stream(monkeypatch, claim=None)
-    gate = Gate(result=None)  # legacy admission returns no lease
+    gate = Gate(result=None)
     service._persist_turn_log = gate
-    service._update_turn_log = Mock()
-    order: list = []
-    _record_scope(monkeypatch, order)
+    service._turn_log_store = Mock()
 
     async def main():
         task = asyncio.create_task(collect())
@@ -220,8 +220,47 @@ def test_stream_disconnect_during_legacy_persist_settles_the_row(monkeypatch):
             await task
 
     asyncio.run(main())
-    settle = [c for c in service._update_turn_log.call_args_list
-              if c.kwargs.get("status") == "cancelled"]
-    assert len(settle) == 1 and settle[0].kwargs["end_reason"] == "aborted"
-    assert "abandoned" not in order
+    close = service._turn_log_store.abandon_open_legacy_turn
+    close.assert_called_once()
+    assert close.call_args.args[0].startswith("turn-")
+    service._get_llm_bawt.return_value.execute_llm_query.assert_not_called()
+
+
+def test_anyio_disconnect_during_new_prep_settles_the_admitted_row(monkeypatch):
+    # Starlette cancels a disconnected request via an AnyIO scope. A /new prep
+    # still running then must settle the already-admitted row, not just delay.
+    import anyio
+
+    service, collect = _stream(monkeypatch, claim=None)
+    lease = SimpleNamespace(assistant_message_id=None)
+    service._persist_turn_log = lambda **_k: lease
+    gate = Gate(result=None)
+    execution = "llm_bawt.service.session_lifecycle.execution.NewSessionExecution"
+    monkeypatch.setattr(f"{execution}.prepare_chat", gate)  # chat bots
+    monkeypatch.setattr(f"{execution}.prepare_agent", gate)  # agent bots
+    monkeypatch.setattr("llm_bawt.service.agent_new_rotation.prepare_delivery_new_binding",
+                        lambda *a, thread_binding=None, **k: (thread_binding, None))
+    monkeypatch.setattr(type(service), "_resolve_active_thread_binding",
+                        lambda *_a, **_k: None, raising=False)
+    order: list = []
+    _record_scope(monkeypatch, order)
+
+    async def main():
+        async with anyio.create_task_group() as tg:
+            scopes = []
+
+            async def request():
+                with anyio.CancelScope() as scope:
+                    scopes.append(scope)
+                    await collect()
+
+            tg.start_soon(request)
+            await gate.wait_entered()
+            scopes[0].cancel()
+            await _spin()
+            assert order == [("admitted", lease)]  # prep still owns the request
+            gate.release.set()
+
+    anyio.run(main)
+    assert order == [("admitted", lease), "abandoned", "closed"]
     service._get_llm_bawt.return_value.execute_llm_query.assert_not_called()

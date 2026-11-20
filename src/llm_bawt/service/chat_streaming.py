@@ -77,6 +77,11 @@ class ChatStreamingMixin(BridgeSessionResetMixin):
         try:
             async for event in stream:
                 yield event
+        except (asyncio.CancelledError, GeneratorExit):
+            # TASK-2541: a disconnect before launch (persist or /new prep)
+            # settles the admitted row instead of leaving it open.
+            await finish_in_thread(terminal_scope.abandon_unlaunched)
+            raise
         except Exception as exc:
             terminal_scope.fail_setup(safe_error_text(exc, "Turn setup failed"))
             raise
@@ -372,15 +377,7 @@ class ChatStreamingMixin(BridgeSessionResetMixin):
         )
         if abandoned:
             # TASK-2541: the caller left while the turn row was being written.
-            # Settle it as cancelled and never launch; request cleanup then
-            # closes any follower.
-            if terminal_scope.follower is not None:
-                await finish_in_thread(terminal_scope.abandon_unlaunched)
-            else:  # legacy admission: no lease, settle the row directly
-                await finish_in_thread(
-                    self._update_turn_log, turn_id=turn_log_id, status="cancelled",
-                    response_text="", end_reason="aborted",
-                )
+            # Never launch; the outer cleanup settles the now-owned row.
             raise asyncio.CancelledError()
         from ..content_provenance import ContentTurn
         from .content_lineage import inherit_admitted_request
