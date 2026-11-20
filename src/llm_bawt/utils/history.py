@@ -142,6 +142,22 @@ class ContextBudgetError(RuntimeError):
     """
 
 
+def raw_history_cap(budget: int, history_tokens: int) -> int:
+    """Raw-history token cap the assembler applies for ``budget`` (TASK-2395).
+
+    Mirrors ``get_context_messages``: ``history_tokens`` bounded by the
+    physical budget, or the whole budget when ``history_tokens`` <= 0. A
+    bounded read sized by this cap returns everything the fill can use.
+    """
+    return budget if history_tokens <= 0 else min(history_tokens, budget)
+
+
+# Cold-start memory priming fires at len(messages) <= 3 once the new prompt is
+# appended, so a history of 4+ rows can never trigger it. Bounded reads
+# return at least this many full-read rows when they exist.
+COLD_START_ROWS = 4
+
+
 class HistoryManager:
     messages: list[Message] = []
     client: LLMClient
@@ -309,6 +325,8 @@ class HistoryManager:
                 # An empty bounded result is indistinguishable from a swallowed
                 # failure (the MCP path returns [] on error), so confirm it with
                 # the full read; for a truly empty history that read is cheap.
+                # The window itself keeps cold-start parity: it returns at
+                # least COLD_START_ROWS full-read rows when they exist.
                 if bounded:
                     self.messages = bounded
                 else:

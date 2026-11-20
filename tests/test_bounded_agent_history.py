@@ -86,6 +86,14 @@ def test_agent_turn_reads_a_bounded_window():
     assert backend.calls == [("window", BUDGET, 3, "user_a")]
 
 
+def test_agent_window_uses_history_tokens_when_below_budget(monkeypatch):
+    monkeypatch.setitem(SETTINGS, "history_tokens", 1000)
+    bawt, backend = _bawt()
+    assert bawt.history_window() == (1000, 3)
+    _new_command(bawt)
+    assert backend.calls == [("window", 1000, 3, "user_a")]
+
+
 def test_non_agent_turn_keeps_the_full_read():
     bawt, backend = _bawt(kind="openai")
     bawt._refresh_history_if_stale()

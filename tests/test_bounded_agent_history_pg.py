@@ -18,7 +18,7 @@ from llm_bawt.memory.postgresql import (
     PostgreSQLShortTermManager,
     partition_name,
 )
-from llm_bawt.utils.history import HistoryManager
+from llm_bawt.utils.history import HistoryManager, raw_history_cap
 from tests.pg_isolation import require_test_db_config
 
 pytestmark = pytest.mark.integration
@@ -105,15 +105,44 @@ def test_window_seed_matches_full_read(snapshot, budget, scope):
     full = _history(snapshot)
     full.load_history()
     bounded = _history(snapshot)
-    bounded.load_history(window=(budget, SETTINGS["summary_count"]))
+    cap = raw_history_cap(budget, SETTINGS["history_tokens"])
+    bounded.load_history(window=(cap, SETTINGS["summary_count"]))
 
     assert _seed(bounded, budget, *scope) == _seed(full, budget, *scope)
-    # Bounded means bounded: a small budget reads a small slice. Uncounted
-    # system rows inside the span (a third of this fixture) ride along.
+    # Seed delivery drops system rows, so the window never reads them.
+    assert not any(m.role == "system" for m in bounded.messages)
+    # Bounded means bounded: a small budget reads a small slice.
     if budget <= 200:
         assert len(bounded.messages) < len(full.messages) // 4
     elif budget <= 2000:
-        assert len(bounded.messages) < len(full.messages) // 2
+        assert len(bounded.messages) < len(full.messages) // 3
+
+
+@pytest.mark.parametrize("history_tokens", [300, 1500, 5000])
+def test_history_tokens_far_below_budget_bounds_the_read(snapshot, history_tokens):
+    # Live failure: a 1M-window agent with history_tokens=20000 passed the
+    # physical budget, so the read barely shrank. The cap is history_tokens.
+    settings = {**SETTINGS, "history_tokens": history_tokens}
+    budget = 900000
+    full = _history(snapshot, settings)
+    full.load_history()
+    bounded = _history(snapshot, settings)
+    bounded.load_history(window=(raw_history_cap(budget, history_tokens), 3))
+
+    for scope in [(True, True), (True, False), (False, True)]:
+        assert _seed(bounded, budget, *scope) == _seed(full, budget, *scope)
+    assert len(bounded.messages) < len(full.messages) // 2
+
+
+def test_newest_turn_floor_is_read_past_a_tiny_cap(snapshot):
+    # history_tokens smaller than the newest turn: the assembler floors the
+    # whole turn in, so the window must read back to its user row.
+    settings = {**SETTINGS, "history_tokens": 1}
+    full = _history(snapshot, settings)
+    full.load_history()
+    bounded = _history(snapshot, settings)
+    bounded.load_history(window=(raw_history_cap(200000, 1), 3))
+    assert _seed(bounded, 200000) == _seed(full, 200000)
 
 
 def test_window_matches_full_order_for_the_rows_it_returns(snapshot):
@@ -158,7 +187,93 @@ def test_small_history_counts_match_for_cold_start(private_app_pg):
         full.load_history()
         bounded = _history(manager)
         bounded.load_history(window=(10, 3))
-        assert len(bounded.messages) == len(full.messages) == 3
+        # Cold-start priming checks len(messages) <= 3 after the new prompt
+        # is appended; the bounded read must land on the same side.
+        assert len(full.messages) == 3
+        assert len(bounded.messages) == 3
+        assert {m.db_id for m in full.messages if m.role != "system"} <= {
+            m.db_id for m in bounded.messages}
+        for hm in (full, bounded):
+            hm.add_message("user", "next prompt")
+        assert (len(bounded.messages) <= 3) == (len(full.messages) <= 3)
+    finally:
+        with manager._backend.engine.begin() as conn:
+            for p in PARENT_TABLES:
+                conn.execute(text(f"DROP TABLE IF EXISTS {partition_name(p, bot)}"))
+            conn.execute(text("DELETE FROM sessions WHERE bot_id=:bot"), {"bot": bot})
+
+
+@pytest.mark.parametrize("rows,summary_count", [
+    ([("summary", 5), ("user", 10), ("assistant", 11)], 0),
+    ([("summary", 5), ("summary", 6), ("user", 10)], 1),
+    ([("user", 10), ("assistant", 11), ("system", 12)], 3),
+])
+def test_cold_start_priming_count_matches_full_read(private_app_pg, rows, summary_count):
+    # Codex review: the window's summary/system caps must not move the
+    # cold-start priming gate (len(messages) <= 3 after the prompt is appended).
+    config = require_test_db_config()
+    bot = "_t2395c_" + uuid.uuid4().hex[:12]
+    manager = PostgreSQLShortTermManager(config, bot_id=bot)
+    sid = manager.get_or_create_active_session(bot_id=bot, user_id="user_a")
+    table = manager._backend._messages_table_name
+    try:
+        with manager._backend.engine.begin() as conn:
+            for role, ts in rows:
+                conn.execute(text(f"""INSERT INTO {table}
+                    (id, bot_id, role, content, timestamp, session_id, summarized,
+                     author_entity_type, author_entity_id)
+                    VALUES (:id, :bot, :role, :content, :ts, :sid, false, 'bot', :bot)"""),
+                    {"id": str(uuid.uuid4()), "bot": bot, "role": role,
+                     "content": f"{role} {ts}", "ts": ts, "sid": sid})
+        settings = {**SETTINGS, "summary_count": summary_count}
+        full = _history(manager, settings)
+        full.load_history()
+        bounded = _history(manager, settings)
+        bounded.load_history(window=(10, summary_count))
+        assert len(full.messages) == 3
+        for hm in (full, bounded):
+            hm.messages.append(hm.messages[-1])  # stand-in for the new prompt
+        assert (len(bounded.messages) <= 3) == (len(full.messages) <= 3)
+    finally:
+        with manager._backend.engine.begin() as conn:
+            for p in PARENT_TABLES:
+                conn.execute(text(f"DROP TABLE IF EXISTS {partition_name(p, bot)}"))
+            conn.execute(text("DELETE FROM sessions WHERE bot_id=:bot"), {"bot": bot})
+
+
+def test_sparse_window_over_large_omitted_pool_stays_bounded(private_app_pg, monkeypatch):
+    # Codex review: two recent raw rows over many omitted summaries must keep
+    # the old (no priming) decision without falling back to the full read.
+    config = require_test_db_config()
+    bot = "_t2395s_" + uuid.uuid4().hex[:12]
+    manager = PostgreSQLShortTermManager(config, bot_id=bot)
+    sid = manager.get_or_create_active_session(bot_id=bot, user_id="user_a")
+    table = manager._backend._messages_table_name
+    rows = [("summary", float(i)) for i in range(300)]
+    rows += [("system", 400.0), ("user", 500.0), ("assistant", 501.0)]
+    try:
+        with manager._backend.engine.begin() as conn:
+            for role, ts in rows:
+                conn.execute(text(f"""INSERT INTO {table}
+                    (id, bot_id, role, content, timestamp, session_id, summarized,
+                     author_entity_type, author_entity_id)
+                    VALUES (:id, :bot, :role, :content, :ts, :sid, false, 'bot', :bot)"""),
+                    {"id": str(uuid.uuid4()), "bot": bot, "role": role,
+                     "content": f"{role} {ts}", "ts": ts, "sid": sid})
+        settings = {**SETTINGS, "summary_count": 0}
+        full_ids = {m.db_id for m in manager.get_messages(user_id="user_a")}
+
+        def no_full_read(*a, **k):
+            raise AssertionError("full read taken for a sparse window")
+
+        monkeypatch.setattr(manager, "get_messages", no_full_read)
+        bounded = _history(manager, settings)
+        bounded.load_history(window=(10, 0))
+        assert len(bounded.messages) == 4
+        assert {m.db_id for m in bounded.messages} <= full_ids
+        assert [m.role for m in bounded.messages][-2:] == ["user", "assistant"]
+        bounded.messages.append(bounded.messages[-1])  # the new prompt
+        assert len(bounded.messages) > 3  # full read: 303 rows, no priming
     finally:
         with manager._backend.engine.begin() as conn:
             for p in PARENT_TABLES:
