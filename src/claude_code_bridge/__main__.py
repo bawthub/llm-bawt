@@ -57,6 +57,9 @@ def main() -> None:
     logger = logging.getLogger("claude_code_bridge")
 
     bootstrap_claude_home()
+    from agent_bridge.ssh_identity import ensure_ssh_identity  # TASK-2520
+
+    ensure_ssh_identity()
 
     # LLM_BAWT_REDIS_URL carries the Redis password; the ops renderer refuses a
     # secret repeated under a second name, so Compose passes only this one.

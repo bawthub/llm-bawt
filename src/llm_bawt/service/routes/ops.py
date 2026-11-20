@@ -483,3 +483,20 @@ def delete_host_access(host_id: int):
     if not host_access.delete_host(_store().engine, host_id):
         raise HTTPException(404, "host record not found")
     return {"deleted": host_id}
+
+
+class HostKeyConfirm(BaseModel):
+    model_config = {"extra": "forbid", "strict": True}
+    fingerprints: list[str] = Field(..., min_length=1, max_length=8)
+
+
+@router.post("/v1/ops/host-access/{host_id}/confirm-host-key", tags=["Ops"], dependencies=_SERVICE)
+def confirm_host_access_key(host_id: int, body: HostKeyConfirm):
+    """TASK-2520: pin the scanned host keys the operator confirmed by fingerprint."""
+    from ...ops import host_access
+    try:
+        return host_access.confirm_host_keys(_store().engine, host_id, body.fingerprints)
+    except KeyError as exc:
+        raise HTTPException(404, "host record not found") from exc
+    except host_access.HostAccessError as exc:
+        raise HTTPException(400, str(exc)) from exc

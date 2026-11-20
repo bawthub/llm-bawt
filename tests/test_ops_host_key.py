@@ -90,12 +90,50 @@ def test_argv_forces_identity_and_strict_pinned_trust():
     assert argv[-3:] == ["--", "box.example", "cmd"]
 
 
-def test_first_use_only_for_verify():
+def test_no_login_without_pinned_host_key():
+    # TASK-2520: no trust on first use; the operator confirms a scanned key.
     target = _target(known_host_keys=[])
-    assert "StrictHostKeyChecking=accept-new" in hk.ssh_argv(target, "verify", "c", "/tmp/j")
-    for op in ("add", "remove"):
+    for op in ("verify", "add", "remove"):
         with pytest.raises(ValueError):
             hk.ssh_argv(target, op, "c", "/tmp/j")
+    assert "StrictHostKeyChecking=yes" in hk.ssh_argv(_target(), "verify", "c", "/tmp/j")
+
+
+def test_keyscan_argv_and_parse():
+    argv = hk.keyscan_argv(_target(port=2222))
+    assert argv[4:] == ["ssh-keyscan", "-T", "10", "-p", "2222", "-t", "ed25519,ecdsa,rsa", "--", "box.example"]
+    out = f"# box.example:2222 SSH-2.0\n[box.example]:2222 ssh-ed25519 {OTHER}\nbad line\n"
+    assert hk.parse_keyscan(out) == [f"ssh-ed25519 {OTHER}"]
+
+
+def test_trust_files_pin_host_block():
+    stem, known, conf = hk.trust_files(_target(port=2222))
+    assert stem == "host-1"
+    assert known == f"[box.example]:2222 ssh-ed25519 {OTHER}\n"
+    for line in ("Host bawthub-host-1", "HostName box.example", "Port 2222", "User deploy", "IdentitiesOnly yes",
+                 "StrictHostKeyChecking yes", f"UserKnownHostsFile {hk.TRUST_DIR}/host-1.known_hosts"):
+        assert line in conf
+
+
+def test_two_records_for_one_host_get_distinct_aliases():
+    first = hk.trust_files(_target(port=2222))[2]
+    second = hk.trust_files({**_target(port=22), "host_id": 2})[2]
+    assert "Host bawthub-host-1" in first and "Host bawthub-host-2" in second
+
+
+def test_install_trust_script_prepends_include_once(tmp_path):
+    d = tmp_path / ".ssh" / "bawthub"
+    (tmp_path / ".ssh").mkdir()
+    (tmp_path / ".ssh" / "config").write_text("Host other\n    User x\n")
+    for _ in range(2):
+        proc = subprocess.run(["sh", "-c", hk._INSTALL_TRUST, "sh", str(d), "K\n", "host-1", "C\n"],
+                              capture_output=True, text=True, check=False)
+        assert proc.returncode == 0 and "HK_TRUST=installed" in proc.stdout, proc.stderr
+    config = (tmp_path / ".ssh" / "config").read_text().splitlines()
+    assert config == [f"Include {d}/*.conf", "Host other", "    User x"]
+    assert (d / "host-1.known_hosts").read_text() == "K\n" and (d / "host-1.conf").read_text() == "C\n"
+    proc = subprocess.run(["sh", "-c", hk._REMOVE_TRUST, "sh", str(d), "host-1"], capture_output=True, text=True)
+    assert "HK_TRUST=removed" in proc.stdout and not list(d.iterdir())
 
 
 def test_known_hosts_lines_use_port_form():
@@ -214,12 +252,26 @@ def test_worker_refuses_changed_bot_key():
     assert not any(c[2] and c[2].get("Cmd", [""])[0] == "timeout" for c in api.calls)
 
 
-def test_worker_verify_learns_first_use_host_keys():
-    _api, receipt, _out = _run_worker("verify", [(0, "HK_USER=deploy\nHK_GROUPS=deploy,docker\n"
-                                                    "HK_SUDO_N=0\nHK_DOCKER=1\nHK_DONE=verify\n", "")],
-                                      known_host_keys=[])
-    assert receipt["host_key"]["learned_host_keys"] == [f"ssh-ed25519 {OTHER}"]
+def test_worker_verify_installs_bot_ssh_trust():
+    api, receipt, _out = _run_worker("verify", [(0, "HK_USER=deploy\nHK_GROUPS=deploy,docker\n"
+                                                   "HK_SUDO_N=0\nHK_DOCKER=1\nHK_DONE=verify\n", "")])
     assert receipt["host_key"]["docker"] is True
+    # The stub's sh exec prints no acknowledgement: reported, not fatal.
+    assert receipt["host_key"]["bot_ssh_config"] == "not_writable"
+    assert any(c[2] and c[2].get("Cmd", [""])[:3] == ["sh", "-c", hk._INSTALL_TRUST] for c in api.calls)
+
+
+def test_worker_scan_returns_fingerprints_without_login():
+    api, receipt, out = _run_worker("scan", [(0, f"box.example ssh-ed25519 {OTHER}\n", "")], known_host_keys=[])
+    scanned = receipt["host_key"]["scanned_host_keys"]
+    assert scanned == [{"key": f"ssh-ed25519 {OTHER}", "fingerprint": hk.fingerprint(OTHER)}]
+    assert out.startswith("host keys scanned: ") and api.side_effect_started is False
+    assert not any(c[2] and "ssh" in c[2].get("Cmd", []) for c in api.calls)
+
+
+def test_worker_scan_without_keys_fails():
+    with pytest.raises(hk.HostKeyFailed):
+        _run_worker("scan", [(1, "", "connect to host box.example port 22: Connection refused")])
 
 
 def test_worker_remove_requires_ack_and_corroborates():
@@ -290,9 +342,9 @@ def test_worker_remove_inconclusive_corroboration_is_unknown():
 def test_approval_text_names_frozen_destination_and_key():
     text = hk.approval_text({"action": "host_key", "op": "remove", "key_container": "b"}, _target(port=2222), None)
     assert "deploy@box.example:2222" in text and hk.fingerprint(BLOB) in text and "pinned host key" in text
-    first = hk.approval_text({"action": "host_key", "op": "verify", "key_container": "b"},
-                             _target(known_host_keys=[]), "Verify?")
-    assert first.startswith("Verify?") and "first use" in first
+    scan = hk.approval_text({"action": "host_key", "op": "scan", "key_container": "b"},
+                            _target(known_host_keys=[]), "Scan?")
+    assert scan.startswith("Scan?") and "box.example:22" in scan and "No login" in scan
 
 
 def test_catalog_approval_keeps_frozen_host_key_details():

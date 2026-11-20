@@ -1,7 +1,9 @@
 """Owner-managed host records for the host_key action (TASK-2430).
 
 A record names one SSH destination (host, port, login user) and holds the
-host keys learned on first verify. Callers of the ops action pass only the
+host keys the operator pinned: a ``scan`` job reads the offered keys, and
+``confirm_host_keys`` pins those whose fingerprints the operator confirmed
+(TASK-2520). Nothing is trusted on first use. Callers of the ops action pass only the
 record id; ``pin`` resolves it at approval, ``check_pin`` re-resolves it at
 dispatch, and ``settle`` folds a finished job back into the record.
 
@@ -21,7 +23,7 @@ from ..utils.schema import SchemaBootstrapGuard
 from . import host_key
 
 _LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}")
-_PREFIXES = ("host login verified: ", "bot key present on host: ", "bot key removed from host: ")
+_PREFIXES = ("host keys scanned: ", "host login verified: ", "bot key present on host: ", "bot key removed from host: ")
 _guard = SchemaBootstrapGuard()
 
 
@@ -45,7 +47,7 @@ class OpsHostAccess(SQLModel, table=True):
     port: int = 22
     login_user: str = Field(max_length=32)
     known_host_keys_json: str = Field(default="[]", sa_column=Column(Text, nullable=False))
-    # unverified | verified | login_failed | key_present | key_removed | unknown
+    # unverified | scanned | trusted | verified | login_failed | key_present | key_removed | unknown
     status: str = Field(default="unverified", max_length=32)
     passwordless_sudo: bool | None = None
     last_op: str | None = Field(default=None, max_length=16)
@@ -148,6 +150,8 @@ def update_host(engine, host_id: int, fields: dict) -> dict:
         if moved:
             # A new destination is a new trust decision.
             row.known_host_keys_json, row.status, row.passwordless_sudo = "[]", "unverified", None
+            # Drop the old destination's scan too: it must never be confirmable here.
+            row.last_op = row.last_job_id = row.last_result_json = None
         row.updated_at = _utcnow()
         session.add(row)
         session.commit()
@@ -174,8 +178,8 @@ def pin(engine, host_id: object, key_fingerprint: str, op: str) -> dict:
     if row is None:
         raise HostAccessError(f"no host record {host_id}")
     keys = json.loads(row.known_host_keys_json)
-    if op != "verify" and not keys:
-        raise HostAccessError("verify this host first; its host key is not pinned yet")
+    if op != "scan" and not keys:
+        raise HostAccessError("pin this host's key first: scan it and confirm the fingerprint")
     return host_key.validate_target({"host_id": row.id, "host": row.host, "port": row.port,
                                      "login_user": row.login_user, "key_fingerprint": key_fingerprint,
                                      "known_host_keys": keys})
@@ -217,22 +221,59 @@ def settle(engine, job, snapshot: dict) -> None:
         row.last_op, row.last_job_id, row.last_checked_at = op, job.id, _utcnow()
         if job.state == "succeeded" and result:
             row.last_result_json = json.dumps(result, sort_keys=True)
-            if op == "verify":
+            if op == "scan":
+                # Offered, not trusted: the operator confirms a fingerprint.
+                row.status = "scanned" if row.status in ("unverified", "scanned", "login_failed") else row.status
+            elif op == "verify":
                 row.status = "verified"
                 sudo = result.get("passwordless_sudo_probe")
                 row.passwordless_sudo = sudo if isinstance(sudo, bool) else None
-                learned = result.get("learned_host_keys")
-                if learned and json.loads(row.known_host_keys_json) == []:
-                    try:
-                        row.known_host_keys_json = json.dumps(host_key.validate_host_keys(learned))
-                    except ValueError:
-                        pass
             else:
                 row.status = "key_present" if op == "add" else "key_removed"
         else:
             row.last_result_json = json.dumps({"state": job.state, "error": (job.error_text or "")[:500]})
             row.status = "login_failed" if op == "verify" and job.state == "failed" else (
+                row.status if op == "scan" else
                 row.status if job.state == "failed" else "unknown")
         row.updated_at = _utcnow()
         session.add(row)
         session.commit()
+
+
+def confirm_host_keys(engine, host_id: int, fingerprints: object) -> dict:
+    """Pin the scanned host keys whose fingerprints the operator confirmed.
+
+    Only keys from this record's latest successful scan can be pinned, and
+    every confirmed fingerprint must name one of them. Replaces earlier pins.
+    """
+    ensure_schema(engine)
+    # Exactly one: the operator checks one key's fingerprint on the host, and
+    # only that key is trusted (never the other algorithms the scan offered).
+    if (not isinstance(fingerprints, list) or len(fingerprints) != 1
+            or any(not isinstance(f, str) or not host_key._FINGERPRINT.fullmatch(f) for f in fingerprints)):
+        raise HostAccessError("confirm exactly one SHA256 host key fingerprint, the one you checked on the host")
+    with Session(engine) as session:
+        row = session.get(OpsHostAccess, host_id)
+        if row is None:
+            raise KeyError(host_id)
+        last = json.loads(row.last_result_json) if row.last_result_json else {}
+        scanned = last.get("scanned_host_keys") if row.last_op == "scan" else None
+        if not isinstance(scanned, list) or not scanned:
+            raise HostAccessError("scan this host first; there are no offered keys to confirm")
+        by_fp = {}
+        for entry in scanned:
+            key = entry.get("key") if isinstance(entry, dict) else None
+            try:
+                host_key.validate_host_keys([key])
+            except ValueError:
+                continue
+            by_fp[host_key.host_key_fingerprint(key)] = key
+        missing = [f for f in fingerprints if f not in by_fp]
+        if missing:
+            raise HostAccessError("a confirmed fingerprint is not among the scanned host keys; scan again")
+        row.known_host_keys_json = json.dumps(list(dict.fromkeys(by_fp[f] for f in fingerprints)))
+        row.status, row.passwordless_sudo, row.updated_at = "trusted", None, _utcnow()
+        session.add(row)
+        session.commit()
+        session.refresh(row)
+        return row.to_api()

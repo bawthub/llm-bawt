@@ -32,6 +32,7 @@ fails unless the service answers healthy afterwards.
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 from .models import (
@@ -862,17 +863,28 @@ _STANDALONE_CONTAINER_SEEDS: list[dict[str, Any]] = [
 
 # TASK-2430: the bot key's host access, driven from Settings > Host access.
 # Callers pass only a host record id; host, login and fingerprints are pinned
-# at approval. Disabled until the operator enables them with a capable worker.
+# at approval. Disabled until the operator enables them with a capable worker,
+# except on an installation that names its bridge container (TASK-2520):
+# LLM_BAWT_HOST_ACCESS_KEY_CONTAINER, set by the tenant ops overlay.
+_LEGACY_KEY_CONTAINER = "llm-bawt-claude-code-bridge"
+
+
+def _host_access_key_container() -> str | None:
+    name = (os.environ.get("LLM_BAWT_HOST_ACCESS_KEY_CONTAINER") or "").strip()
+    return name or None
+
+
 def _host_key_seed(op: str, title: str, description: str, risk: str, prefix: str) -> dict[str, Any]:
     return {
         "slug": f"llm-bawt.host-key-{op}",
         "title": title,
         "description": description,
-        "enabled": False,
+        "enabled": _host_access_key_container() is not None,
         "executor_kind": EXECUTOR_DOCKER,
         "target_host": "",
         "working_directory": None,
-        "command_script": _spec(action="host_key", op=op, key_container="llm-bawt-claude-code-bridge"),
+        "command_script": _spec(action="host_key", op=op,
+                                key_container=_host_access_key_container() or _LEGACY_KEY_CONTAINER),
         "args_schema_json": _schema({"host_id": {"type": "integer", "minimum": 1}}, required=["host_id"]),
         "args_defaults_json": _defaults(),
         "timeout_seconds": 180,
@@ -886,6 +898,11 @@ def _host_key_seed(op: str, title: str, description: str, risk: str, prefix: str
 
 
 _HOST_KEY_SEEDS: list[dict[str, Any]] = [
+    _host_key_seed(
+        "scan", "Read a host's SSH key",
+        "Read the SSH host keys a recorded host offers, without logging in, so the operator can confirm "
+        "the fingerprint before the bots trust it. Changes nothing.",
+        RISK_LOW, "Read host SSH key"),
     _host_key_seed(
         "verify", "Verify bot login to a host",
         "Log in to one recorded host with the bot key, confirm it works and report what the login can do. Changes nothing on the host.",
@@ -981,7 +998,29 @@ def seed_all(store) -> tuple[list[str], list[str]]:
             skipped.append(seed["slug"])
         else:
             inserted.append(seed["slug"])
+    _adopt_host_key_container(store)
     return inserted, skipped
+
+
+def _adopt_host_key_container(store) -> None:
+    """TASK-2520: host-key rows an installation seeded before it named its
+    bridge container still point at the legacy name, disabled. Repoint and
+    enable exactly those untouched rows; any operator-edited row is kept."""
+    name = _host_access_key_container()
+    if name is None:
+        return
+    for seed in _HOST_KEY_SEEDS:
+        row = store.get_operation_by_slug(seed["slug"])
+        # Only never-edited seed rows (version 1); any operator edit is kept.
+        if row is None or row.enabled or row.soft_deleted_at is not None or row.version != 1:
+            continue
+        try:
+            spec = json.loads(row.command_script or "{}")
+        except ValueError:
+            continue
+        if spec.get("action") == "host_key" and spec.get("key_container") == _LEGACY_KEY_CONTAINER:
+            store.update_operation(row.slug, {"enabled": True, "command_script": seed["command_script"]},
+                                   actor="system-seed", expect_version=1)
 
 
 __all__ = ["SEEDS", "seed_all"]

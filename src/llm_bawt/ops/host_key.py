@@ -13,11 +13,15 @@ Boundary:
 - SSH runs inside the container that already holds the key (docker exec), with
   that identity forced: no config file, agent, multiplexing, other default
   keys or non-key authentication.
-- Host trust is persisted by the caller in the host record, not in the key
-  container's read-only ~/.ssh. A per-job known_hosts file is written to the
-  container's /tmp; with pinned host keys checking is strict and a changed key
-  is refused. A host with no pinned key is first use: verify may accept it and
-  returns the learned keys for the caller to persist; add/remove refuse it.
+- Host trust is persisted by the caller in the host record. ``scan`` only
+  reads the host's offered keys (ssh-keyscan, no login) and returns them with
+  fingerprints; the operator confirms a fingerprint before the record pins it
+  (TASK-2520). Every login op needs pinned keys and checks them strictly via a
+  per-job known_hosts file in the container's /tmp; a changed key is refused.
+- After a successful verify, the pinned keys and a Host block are written into
+  the key container's ~/.ssh/bawthub/ (included from ~/.ssh/config) so bots'
+  own ``ssh <host>`` works; remove deletes them. A read-only ~/.ssh is
+  reported, not an error.
 - ``timeout -k`` bounds the exec inside the container, independent of the ops
   worker's own lifetime.
 - Remove succeeds only on the remote script's positive acknowledgement after
@@ -35,7 +39,7 @@ from urllib.parse import quote
 
 ACTION = "host_key"
 WORKER_CAPABILITY_LABEL = "llm-bawt.ops.host-key"
-OPS = ("verify", "add", "remove")
+OPS = ("scan", "verify", "add", "remove")
 OUTPUT_LIMIT = 8192
 CONNECT_TIMEOUT_SECONDS = 10
 EXEC_TIMEOUT_SECONDS = 45
@@ -70,7 +74,7 @@ def validate_spec(spec: dict) -> dict:
     if not isinstance(spec, dict) or set(spec) != _KEYS or spec.get("action") != ACTION:
         raise ValueError("host_key requires exactly action, op and key_container")
     if spec["op"] not in OPS:
-        raise ValueError("host_key op must be verify, add or remove")
+        raise ValueError("host_key op must be scan, verify, add or remove")
     if not isinstance(spec["key_container"], str) or not _CONTAINER.fullmatch(spec["key_container"]):
         raise ValueError("key_container must be a container name")
     return spec
@@ -193,19 +197,26 @@ def remote_command(op: str, algorithm: str, blob: str) -> str:
     return REMOTE[op].replace("__ALG__", algorithm).replace("__BLOB__", blob)
 
 
-_APPROVAL_VERB = {"verify": "Check that the bots can log in to",
+_APPROVAL_VERB = {"scan": "Read the SSH host key offered by",
+                  "verify": "Check that the bots can log in to",
                   "add": "Install the bots' SSH key for",
                   "remove": "Remove the bots' SSH key from"}
 
 
 def approval_text(spec: dict, target: dict, prompt: str | None) -> str:
     """Approval card text from the frozen snapshot, not caller arguments."""
-    trust = (f"pinned host key ({len(target['known_host_keys'])})" if target["known_host_keys"]
-             else "first use: the host's key is learned and pinned by this check")
+    if spec["op"] == "scan":
+        return "\n".join([prompt or "Run a host-key operation?",
+                          f"{_APPROVAL_VERB['scan']} {target['host']}:{target['port']}",
+                          "No login is attempted and nothing is changed. You confirm the "
+                          "fingerprint in Settings > Host access before it is trusted."])
+    trust = f"pinned host key ({len(target['known_host_keys'])})"
     lines = [prompt or "Run a host-key operation?",
              f"{_APPROVAL_VERB[spec['op']]} {target['login_user']}@{target['host']}:{target['port']}",
              f"Bot key: {target['key_fingerprint']}", f"Host trust: {trust}"]
-    if spec["op"] == "remove":
+    if spec["op"] == "verify":
+        lines.append("Also lets the bots' own ssh reach this host with the pinned key.")
+    elif spec["op"] == "remove":
         lines.append("Removes only entries for this key (other keys kept, backup made); "
                      "succeeds only when a fresh login with the key is then refused.")
     elif spec["op"] == "add":
@@ -220,11 +231,31 @@ def known_hosts_text(target: dict) -> str:
     return "".join(f"{host} {key}\n" for key in target["known_host_keys"])
 
 
+def host_key_fingerprint(key: str) -> str:
+    """SHA256 fingerprint of a '<type> <base64>' host key."""
+    return fingerprint(key.split()[1])
+
+
+def keyscan_argv(target: dict) -> list[str]:
+    """Fixed argv: read the host's offered keys; no login, no identity."""
+    return ["timeout", "-k", str(KILL_AFTER_SECONDS), str(EXEC_TIMEOUT_SECONDS),
+            "ssh-keyscan", "-T", str(CONNECT_TIMEOUT_SECONDS), "-p", str(target["port"]),
+            "-t", "ed25519,ecdsa,rsa", "--", target["host"]]
+
+
+def parse_keyscan(stdout: str) -> list[str]:
+    keys = []
+    for line in stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 3 and not line.startswith("#") and _HOSTKEY.fullmatch(f"{parts[1]} {parts[2]}"):
+            keys.append(f"{parts[1]} {parts[2]}")
+    return list(dict.fromkeys(keys))[:8]
+
+
 def ssh_argv(target: dict, op: str, command: str, job_dir: str) -> list[str]:
     """Fixed argv. Forces the one identity and fresh public-key authentication."""
-    first_use = not target["known_host_keys"]
-    if first_use and op != "verify":
-        raise ValueError("add/remove need a pinned host key; verify the host first")
+    if not target["known_host_keys"]:
+        raise ValueError("pin the host key first: scan the host and confirm its fingerprint")
     return [
         "timeout", "-k", str(KILL_AFTER_SECONDS), str(EXEC_TIMEOUT_SECONDS),
         "ssh", "-F", "none", "-n", "-T",
@@ -238,7 +269,7 @@ def ssh_argv(target: dict, op: str, command: str, job_dir: str) -> list[str]:
         "-o", f"ConnectTimeout={CONNECT_TIMEOUT_SECONDS}",
         "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2",
         "-o", f"UserKnownHostsFile={job_dir}/known_hosts", "-o", "GlobalKnownHostsFile=none",
-        "-o", "StrictHostKeyChecking=" + ("accept-new" if first_use else "yes"),
+        "-o", "StrictHostKeyChecking=yes",
         "-o", "UpdateHostKeys=no", "-o", "LogLevel=ERROR",
         "-p", str(target["port"]), "-l", target["login_user"], "--", target["host"], command,
     ]
@@ -325,13 +356,49 @@ def _ssh(api, container, target, op, command, job_dir, *, demux):
     return _exec(api, container, ssh_argv(target, op, command, job_dir), demux=demux)
 
 
-def learned_host_keys(api, container: str, job_dir: str, *, demux) -> list[str]:
-    keys = []
-    for line in read_file(api, container, f"{job_dir}/known_hosts", demux=demux).splitlines():
-        parts = line.split()
-        if len(parts) >= 3 and _HOSTKEY.fullmatch(f"{parts[1]} {parts[2]}"):
-            keys.append(f"{parts[1]} {parts[2]}")
-    return list(dict.fromkeys(keys))[:8]
+# Bot-visible trust (TASK-2520): fixed scripts; content and paths arrive as
+# positional arguments. ~/.ssh/config gains one Include line, prepended so it
+# applies before any Host block; nothing else in it is touched.
+TRUST_DIR = "/home/bridge/.ssh/bawthub"
+_INSTALL_TRUST = (
+    'set -eu; umask 077; d="$1"; mkdir -p "$d"; '
+    'printf %s "$2" > "$d/$3.known_hosts.tmp"; mv -f "$d/$3.known_hosts.tmp" "$d/$3.known_hosts"; '
+    'printf %s "$4" > "$d/$3.conf.tmp"; mv -f "$d/$3.conf.tmp" "$d/$3.conf"; '
+    'c="$d/../config"; inc="Include $d/*.conf"; '
+    'if ! { [ -e "$c" ] && grep -qxF "$inc" "$c"; }; then '
+    't="$c.bawthub-tmp"; { printf "%s\n" "$inc"; [ -e "$c" ] && cat "$c"; true; } > "$t"; mv -f "$t" "$c"; fi; '
+    'echo HK_TRUST=installed'
+)
+_REMOVE_TRUST = 'set -eu; rm -f -- "$1/$2.known_hosts" "$1/$2.conf"; echo HK_TRUST=removed'
+
+
+def ssh_alias(target: dict) -> str:
+    """Per-record Host alias: two records for one host never shadow each other."""
+    return f"bawthub-host-{target['host_id']}"
+
+
+def trust_files(target: dict) -> tuple[str, str, str]:
+    """(file stem, known_hosts text, Host block) for one pinned host record."""
+    stem = f"host-{target['host_id']}"
+    conf = (f"# Settings > Host access record {target['host_id']} (managed; do not edit)\n"
+            f"Host {ssh_alias(target)}\n"
+            f"    HostName {target['host']}\n    Port {target['port']}\n    User {target['login_user']}\n"
+            f"    IdentityFile {KEY_PATH}\n    IdentitiesOnly yes\n"
+            f"    StrictHostKeyChecking yes\n    UserKnownHostsFile {TRUST_DIR}/{stem}.known_hosts\n")
+    return stem, known_hosts_text(target), conf
+
+
+def install_trust(api, container: str, target: dict, *, demux) -> str:
+    stem, known, conf = trust_files(target)
+    code, out, _e = _exec(api, container, ["sh", "-c", _INSTALL_TRUST, "sh", TRUST_DIR, known, stem, conf],
+                          demux=demux)
+    return "installed" if code == 0 and "HK_TRUST=installed" in out else "not_writable"
+
+
+def remove_trust(api, container: str, target: dict, *, demux) -> str:
+    stem = trust_files(target)[0]
+    code, out, _e = _exec(api, container, ["sh", "-c", _REMOVE_TRUST, "sh", TRUST_DIR, stem], demux=demux)
+    return "removed" if code == 0 and "HK_TRUST=removed" in out else "not_writable"
 
 
 def run_worker(api, snapshot: dict, job_id: str, receipt: dict, *, demux=None) -> str:
@@ -354,7 +421,15 @@ def run_worker(api, snapshot: dict, job_id: str, receipt: dict, *, demux=None) -
     result = {"op": op, "host_id": target["host_id"], "key_fingerprint": actual}
     receipt["host_key"] = result
     try:
-        api.side_effect_started = op != "verify"
+        api.side_effect_started = op in ("add", "remove")
+        if op == "scan":
+            code, out, err = _exec(api, container, keyscan_argv(target), demux=demux)
+            keys = parse_keyscan(out)
+            if not keys:
+                result["reason"] = "timeout" if code in (124, 137) else classify_failure(code, err or "timed out")
+                raise HostKeyFailed(f"host key scan failed: {result['reason']}")
+            result["scanned_host_keys"] = [{"key": k, "fingerprint": host_key_fingerprint(k)} for k in keys]
+            return "host keys scanned: " + json.dumps(result, sort_keys=True)
         code, out, err = _ssh(api, container, target, op, remote_command(op, algorithm, blob), job_dir, demux=demux)
         markers = parse_markers(out)
         if op == "verify":
@@ -363,8 +438,7 @@ def run_worker(api, snapshot: dict, job_id: str, receipt: dict, *, demux=None) -
                 result["login_ok"] = False
                 raise HostKeyFailed(f"login check failed: {result['reason']}")
             result.update(login_ok=True, **verify_fields(markers))
-            if not target["known_host_keys"]:
-                result["learned_host_keys"] = learned_host_keys(api, container, job_dir, demux=demux)
+            result["bot_ssh_config"] = install_trust(api, container, target, demux=demux)
             return "host login verified: " + json.dumps(result, sort_keys=True)
         if op == "add":
             if code != 0 or markers.get("HK_DONE") != "add" or markers.get("HK_ADD") not in ("added", "present"):
@@ -388,6 +462,7 @@ def run_worker(api, snapshot: dict, job_id: str, receipt: dict, *, demux=None) -
         # Corroborate with a fresh login; only a key-specific refusal counts.
         code2, _out2, err2 = _ssh(api, container, target, "verify", remote_command("verify", algorithm, blob),
                                   job_dir, demux=demux)
+        result["bot_ssh_config"] = remove_trust(api, container, target, demux=demux)
         result["corroboration"] = ("login_refused" if code2 != 0 and classify_failure(code2, err2) == "key_refused"
                                    else "login_still_works" if code2 == 0
                                    else "inconclusive:" + classify_failure(code2, err2))

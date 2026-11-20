@@ -154,11 +154,14 @@ RUN groupadd -g "${BRIDGE_GID}" bridge \
 #               bind-mounted auth.json and config.toml.
 #   ~/dev     - agent workspace (shared read-only with the frontend /repos viewer).
 #   ~/.claude - Claude Code bridge state (sessions, settings, skills symlink).
+#   ~/.ssh    - the installation's host-access identity and pinned host trust
+#               (TASK-2520; mode 700, the bridge generates the key at start).
 # A NAMED volume seeds itself from the image path on first mount, so these must
 # exist with bridge:bridge ownership at build time or the tenant stack comes up
 # with root-owned, unwritable dirs.
-RUN mkdir -p /home/bridge/.codex /home/bridge/dev /home/bridge/.claude \
-    && chown bridge:bridge /home/bridge/.codex /home/bridge/dev /home/bridge/.claude
+RUN mkdir -p /home/bridge/.codex /home/bridge/dev /home/bridge/.claude /home/bridge/.ssh \
+    && chown bridge:bridge /home/bridge/.codex /home/bridge/dev /home/bridge/.claude /home/bridge/.ssh \
+    && chmod 700 /home/bridge/.ssh
 
 # TASK-835: provider-connect git credential helper, baked instead of
 # hand-installed. It used to be `docker exec`'d into a running container by
