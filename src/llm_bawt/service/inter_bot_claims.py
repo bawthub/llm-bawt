@@ -43,6 +43,11 @@ def validate_inter_bot_claim(service: Any, request: Any):
         record = dispatcher.store.get(delivery_id)
         if record is None:
             raise ValueError("inter-bot delivery claim disappeared")
+        from ..message_authorship import SETUP_ORIENTATION_AUTHOR_ID
+        from .setup_orientation import PRODUCER
+
+        if (record.metadata or {}).get("_request_identity_producer") == PRODUCER:
+            return AuthorReference.system(SETUP_ORIENTATION_AUTHOR_ID)
         return record.author
 
     if any(getattr(request, field, None) for field in _CORRELATION_FIELDS):

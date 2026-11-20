@@ -104,6 +104,8 @@ def delivery_audience(record: DeliveryRecord, *, default_user: str | None) -> De
     service's configured default user. Precedence matches the live projection:
     maintenance user-queue, then ordinary chat, then prompt schedule.
     """
+    if record.metadata.get("_request_identity_producer") == "setup":
+        return DeliveryAudience(record.metadata["setup_owner_user_id"], record.target_bot_id)
     chat_user = None
     if record.metadata.get("ordinary_chat"):
         # Deferred: the retry module imports the delivery store.

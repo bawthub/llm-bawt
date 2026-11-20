@@ -10,6 +10,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_summary_expansion_pg.py::",
     "test_history_timeline_summaries_pg.py::",
     "test_new_bot_storage_pg.py::",
+    "test_setup_orientation_pg.py::",
     "test_generated_title_pg.py::",
     "test_isolated_recall_pg.py::",
     "test_recall_ledger_pg.py::",

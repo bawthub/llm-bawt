@@ -86,6 +86,7 @@ def engine(private_app_pg):
             ("x_reply", "private_fixture", "priv", "assistant", "bot", "private_fixture", None),
             ("x_user", "private_fixture", "priv", "user", "user", "user_a", None),
             ("sys", "publicfixture", "pub", "system", None, None, None),
+            ("orientation", "publicfixture", "pub", "user", "system", "setup-orientation", None),
         ]
         for ts, (mid, part, session, role, atype, aid, _) in enumerate(rows, start=1):
             conn.execute(text("INSERT INTO messages VALUES (:id, :bot, :s, :role, :c, :ts, :t, :a)"),

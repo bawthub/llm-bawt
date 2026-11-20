@@ -22,10 +22,27 @@ AuthorStatus = Literal["canonical", "legacy", "unknown"]
 # parameter in-process; signed service capability over MCP); caller-facing
 # inputs keep ``normalize_author`` (user|bot only). The value is the
 # presentation label.
+SETUP_ORIENTATION_AUTHOR_ID = "setup-orientation"
 SYSTEM_AUTHORS: Mapping[str, str] = MappingProxyType({
     "approval-continuation:mcp": "Tool result",
     "approval-continuation:harness": "Approval result",
+    SETUP_ORIENTATION_AUTHOR_ID: "BawtHub setup",
 })
+
+
+def is_setup_orientation(author: Mapping[str, Any]) -> bool:
+    return (author.get("entity_type") == "system"
+            and author.get("entity_id") == SETUP_ORIENTATION_AUTHOR_ID)
+
+
+def not_setup_orientation_sql(alias: str) -> str:
+    """Exclude the internal cue from display queries, not from turn history.
+
+    ``alias`` is a trusted query-local identifier, never request input. Keep
+    NULL/legacy authors visible; both fields must identify the setup cue.
+    """
+    return (f"({alias}.author_entity_type IS DISTINCT FROM 'system' OR "
+            f"{alias}.author_entity_id IS DISTINCT FROM '{SETUP_ORIENTATION_AUTHOR_ID}')")
 
 
 @dataclass(frozen=True)

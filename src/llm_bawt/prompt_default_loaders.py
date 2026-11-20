@@ -379,3 +379,14 @@ def load_setup_first_agent_prompt() -> str:
     from .seeding.data import FIRST_AGENT_PROMPT_SEED
 
     return FIRST_AGENT_PROMPT_SEED
+
+
+def load_setup_first_chat_prompt() -> str:
+    return (
+        "The user opted into a BawtHub introduction when creating this bot. "
+        "Welcome them in one short message. Your selected connection and bridge "
+        "passed setup checks, and this reply demonstrates that chat works. "
+        "Don't claim that tools, repositories, or host access were verified. "
+        "Ask one question about what they want to accomplish first. A repository "
+        "is optional. Don't call tools, change settings, or perform work yet."
+    )

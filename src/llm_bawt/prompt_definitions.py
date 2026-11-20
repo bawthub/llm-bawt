@@ -92,6 +92,7 @@ from .prompt_default_loaders import (
     load_refine_system_guard,
     load_refine_user_frame,
     load_setup_first_agent_prompt,
+    load_setup_first_chat_prompt,
     load_working_memory_notice,
     load_working_memory_scheduled_note,
     load_working_memory_section,
@@ -1090,6 +1091,13 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
             "as default_system_prompt; the operator can edit it before creating the bot, "
             "and the bot then owns its own copy. Keep it owner-neutral."
         )},
+    ),
+    "setup.first_chat": PromptDefinition(
+        key="setup.first_chat",
+        title="Setup: First Chat",
+        category="setup",
+        loader=load_setup_first_chat_prompt,
+        metadata={"notes": "One private trigger for the opted-in first bot's welcome turn."},
     ),
     "media.prompt_expansion.video": PromptDefinition(
         key="media.prompt_expansion.video",

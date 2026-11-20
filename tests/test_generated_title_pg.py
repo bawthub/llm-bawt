@@ -21,7 +21,10 @@ def engine(private_pg, private_module_db):
     with engine.begin() as conn:
         conn.execute(text("DROP TABLE IF EXISTS sessions, messages"))
         conn.execute(text("CREATE TABLE sessions (id text, bot_id text, user_id text, status text, session_metadata jsonb)"))
-        conn.execute(text("CREATE TABLE messages (bot_id text, id text, role text, content text, timestamp float8, session_id text)"))
+        conn.execute(text("""CREATE TABLE messages (
+            bot_id text, id text, role text, content text, timestamp float8,
+            session_id text, author_entity_type text, author_entity_id text
+        )"""))
     try:
         yield engine
     finally:
@@ -58,6 +61,16 @@ def test_first_message_gets_generated_title(engine):
     assert generate_session_title(engine, "s1", "bot-a", "operator", model) == "Git rebase question"
     assert _meta(engine, "s1") == {"title": "Git rebase question", "title_source": "generated"}
     assert "how do I rebase onto master?" in model.calls[0].prompt
+
+
+def test_setup_cue_does_not_generate_a_title(engine):
+    _session(engine, "setup", {}, [("cue", "user", "Internal first-chat instructions")])
+    with engine.begin() as conn:
+        conn.execute(text("""UPDATE messages SET author_entity_type='system',
+                             author_entity_id='setup-orientation' WHERE id='cue'"""))
+    model = Model("Unused")
+    assert generate_session_title(engine, "setup", "bot-a", "operator", model) is gt.NO_ELIGIBLE
+    assert model.calls == []
 
 
 def test_given_names_are_left_alone(engine):

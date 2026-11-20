@@ -24,7 +24,8 @@ def manager(private_pg, private_module_db):
         """))
         conn.execute(text("""
             CREATE TABLE messages (
-                bot_id TEXT, session_id TEXT, role TEXT, content TEXT, timestamp FLOAT8
+                bot_id TEXT, session_id TEXT, role TEXT, content TEXT, timestamp FLOAT8,
+                author_entity_type TEXT, author_entity_id TEXT
             ) PARTITION BY LIST (bot_id)
         """))
         for key in ("synthetica", "syntheticb", "syntheticdenied"):

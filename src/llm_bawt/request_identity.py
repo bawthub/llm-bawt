@@ -171,7 +171,7 @@ class RequestIdentityResolver:
               metadata: dict[str, Any], producer: str,
               explicit_user: str | None, explicit_assistant: str | None) -> tuple[DeliveryRecord, bool]:
         """One bounded resolution, then INSERT or one winner re-read; never remint."""
-        if producer not in {"ordinary", "maintenance", "schedule", "bot", "retry"}:
+        if producer not in {"ordinary", "maintenance", "schedule", "bot", "retry", "setup"}:
             raise ValueError("unknown trusted delivery producer")
         explicit = canonical_uuid(explicit_user, "user_message_id") if explicit_user is not None else None
         assistant = canonical_uuid(explicit_assistant, "assistant_message_id") if explicit_assistant else None

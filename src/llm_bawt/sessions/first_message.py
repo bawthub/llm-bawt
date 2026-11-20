@@ -7,10 +7,11 @@ The removed auto-title writer kept a 60-character copy of that message as
 the ``title``; search over the copy missed everything past the cut. Existing
 ``title_source='auto'`` rows are ignored by every reader until cleanup.
 
-Eligibility (one SQL rule shared by every reader): a ``user``-role row whose
-content, stripped of Python whitespace, is non-empty, is not a slash command,
-and still has text once code-fence markers, backticks and markdown
-heading/quote/list markers are removed. Ties break on ``(timestamp, id)``.
+Eligibility (one SQL rule shared by every reader): a ``user``-role row
+other than the internal setup cue, whose content is non-empty when stripped
+of Python whitespace, is not a slash command, and still has text once
+code-fence markers, backticks and markdown heading/quote/list markers are
+removed. Ties break on ``(timestamp, id)``.
 
 Every query using these fragments must bind ``:fm_strip`` via
 ``first_message_params()``.
@@ -18,6 +19,8 @@ Every query using these fragments must bind ``:fm_strip`` via
 from __future__ import annotations
 
 import re
+
+from ..message_authorship import not_setup_orientation_sql
 
 # Every character Python's str.strip() removes. PostgreSQL btrim's default
 # trims only ASCII space; eligibility follows the Python rule.
@@ -46,6 +49,7 @@ def eligible_sql(alias: str) -> str:
     content = f"btrim({alias}.content, :fm_strip)"
     return f"""(
         {alias}.role = 'user'
+        AND {not_setup_orientation_sql(alias)}
         AND {content} <> ''
         AND left({content}, 1) <> '/'
         AND EXISTS (

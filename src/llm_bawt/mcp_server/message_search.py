@@ -17,7 +17,7 @@ from sqlalchemy.engine import Engine
 
 from llm_bawt.bot_access import BotAccess, BotAccessError, PartitionScope
 from llm_bawt.memory.postgresql import MESSAGES_PARENT
-from llm_bawt.message_authorship import AuthorReference, EffectiveAuthorRule
+from llm_bawt.message_authorship import AuthorReference, EffectiveAuthorRule, not_setup_orientation_sql
 from llm_bawt.retrieval.fts_query import FtsQuery
 
 AuthorHydrator = Callable[[list[dict[str, Any]], str], list[dict[str, Any]]]
@@ -32,7 +32,7 @@ class OperatorMessageScope:
     classified by ``EffectiveAuthorRule.operator_case()``; an ``author``
     filter narrows on that same computed class in WHERE, before the window
     count and LIMIT. Unfiltered searches add no session, user or status
-    eligibility predicates, so their row set is the public partitions' rows.
+    eligibility predicates; they search public partitions' displayable rows.
     """
 
     partitions: tuple[PartitionScope, ...]
@@ -222,6 +222,7 @@ class CrossBotMessageSearcher:
                    COUNT(*) OVER () AS total
             {scope.from_sql}
             WHERE m.role != 'system'
+              AND {not_setup_orientation_sql('m')}
               {match_clause}
               {scope.author_clause}
               {role_clause}

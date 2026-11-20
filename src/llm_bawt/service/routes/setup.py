@@ -34,6 +34,7 @@ from pydantic import BaseModel, Field, field_validator
 from ...prompt_registry import get_prompt_resolver
 from ...seeding import FIRST_BOT_AGENT_BACKEND, seed_tenant
 from ..agent_runtime import check_agent_runtime
+from ..setup_orientation import prepare_first_chat, record_choice
 from ...utils.bot_identity import optional_default_bot_id
 from ..dependencies import get_bot_profile_store, get_runtime_settings_store, get_service
 from ... import bot_profile_changes as profile_changes
@@ -85,6 +86,7 @@ class FirstBotRequest(TenantPreferences):
     # Same shape as the admin bot-profile create (palette key / avatar ref).
     color: str | None = Field(default=None, max_length=64)
     avatar: str | None = Field(default=None, max_length=2048)
+    guide_me: bool | None = None  # Omitted by older clients; never infer consent server-side.
 
 
 def _store_setup_preferences(service, body: TenantPreferences | None) -> dict[str, object]:
@@ -169,6 +171,7 @@ async def get_first_bot_defaults():
         raise _http_error(exc, what="First bot defaults") from exc
     return {
         "default_system_prompt": prompt,
+        "supports_orientation": True,
         "bot_type": "agent",
         "agent_backend": FIRST_BOT_AGENT_BACKEND,
     }
@@ -189,6 +192,21 @@ async def create_first_bot(body: FirstBotRequest, http_request: Request,
         runtime = await check_agent_runtime(service.config)
         if not runtime.ready:
             raise HTTPException(status_code=503, detail=f"Agent runtime not ready: {runtime.detail}")
+        actor = profile_actor(http_request, user_id)
+        audience = user_id.strip() if user_id and actor == user_id.strip() else None
+        if body.guide_me and (not audience or actor.startswith("bot:")):
+            raise HTTPException(status_code=403, detail="Choose an administrator before starting the introduction")
+        dispatcher = getattr(service, "_inter_bot_dispatcher", None)
+        prompt = await run_in_threadpool(prepare_first_chat, service.config) if body.guide_me else None
+        delivery = None
+
+        def save_choice(conn, profile):
+            nonlocal delivery
+            delivery = record_choice(
+                conn, profile, opted_in=bool(body.guide_me), user_id=audience,
+                prompt=prompt, store=dispatcher.store if dispatcher is not None else None,
+            )
+
         try:
             bot = await _persist_bot_profile({
                     "slug": body.slug,
@@ -210,8 +228,8 @@ async def create_first_bot(body: FirstBotRequest, http_request: Request,
                     "endpoint_id": body.endpoint_id,
                     **{key: value for key, value in (("color", body.color), ("avatar", body.avatar))
                        if value},
-                    profile_changes.CHANGED_BY: profile_actor(http_request, user_id),
-                }, create_only=True)
+                    profile_changes.CHANGED_BY: actor,
+                }, create_only=True, **({"on_create": save_choice} if body.guide_me is not None else {}))
         except HTTPException as exc:
             # Retry after a partial setup (bot saved, default write failed):
             # the wizard resumes on this 409, so finish the default here first.
@@ -219,6 +237,11 @@ async def create_first_bot(body: FirstBotRequest, http_request: Request,
             if exc.status_code == 409:
                 await run_in_threadpool(_record_first_default_bot, service, body.slug)
             raise
+        if delivery is not None:
+            try:
+                dispatcher.announce_admitted(delivery)
+            except Exception:
+                log.exception("First chat announcement failed; dispatcher will recover the durable row")
         await run_in_threadpool(_record_first_default_bot, service, body.slug)
         preferences = await run_in_threadpool(_store_setup_preferences, service, body)
     except Exception as exc:  # noqa: BLE001 — mapped to HTTP below

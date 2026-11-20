@@ -93,6 +93,8 @@ class BotCreateTransaction:
         overrides: dict[str, Any],
         guard: ProfileWriteGuard,
         validate_writes: Callable[[Any, list[tuple[str, str, str, object]]], None],
+        *,
+        on_create: Callable[[Any, BotProfile], None] | None = None,
     ) -> BotProfile:
         with Session(self.store.engine, expire_on_commit=False) as session:
             conn = session.connection()
@@ -161,5 +163,7 @@ class BotCreateTransaction:
             validate_writes(conn, [(scope, bot, key, value) for scope, bot, key, value, _ in writes])
             for scope, bot, key, _value, encoded in writes:
                 session.add(RuntimeSetting(scope_type=scope, scope_id=bot, key=key, value_json=encoded))
+            if on_create is not None:
+                on_create(conn, profile)
             session.commit()
             return profile

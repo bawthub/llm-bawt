@@ -81,6 +81,7 @@ def test_first_bot_defaults_prompt_comes_from_the_registry():
     assert response.status_code == 200
     assert response.json() == {
         "default_system_prompt": "Operator-edited agent prompt",
+        "supports_orientation": True,
         "bot_type": "agent",
         "agent_backend": "claude-code",
     }
@@ -268,6 +269,42 @@ def test_first_bot_happy_path_creates_agent_through_the_admin_writer():
         "runtime": _READY.to_dict(),
         "preferences": {},
     }
+
+
+@pytest.mark.parametrize("guide_me", [True, False])
+def test_setup_orientation_receives_only_bound_user_and_is_announced_after_create(guide_me):
+    dispatcher = MagicMock()
+    record = SimpleNamespace(id="orientation-delivery") if guide_me else None
+    connection = object()
+    profile = SimpleNamespace(slug="helper")
+
+    async def _persist(_payload, *, create_only, on_create):
+        assert create_only
+        on_create(connection, profile)
+        dispatcher.announce_admitted.assert_not_called()
+        return {"slug": "helper"}
+
+    with (
+        _first_bot_env(persist=AsyncMock(side_effect=_persist)) as env,
+        patch.object(setup_routes, "prepare_first_chat", return_value="Welcome"),
+        patch.object(setup_routes, "record_choice", return_value=record) as choice,
+    ):
+        env.service._inter_bot_dispatcher = dispatcher
+        response = _client().post("/v1/setup/first-bot?user_id=setup-owner", json={**_FIRST_BOT, "guide_me": guide_me})
+    assert response.status_code == 200, response.text
+    choice.assert_called_once_with(connection, profile, opted_in=guide_me, user_id="setup-owner",
+                                  prompt="Welcome" if guide_me else None, store=dispatcher.store)
+    if guide_me:
+        dispatcher.announce_admitted.assert_called_once_with(record)
+    else:
+        dispatcher.announce_admitted.assert_not_called()
+
+
+def test_orientation_requires_bound_person_before_persisting():
+    with _first_bot_env() as env:
+        response = _client().post("/v1/setup/first-bot", json={**_FIRST_BOT, "guide_me": True})
+    assert response.status_code == 403
+    env.persist.assert_not_awaited()
 
 
 def test_first_bot_saves_chosen_avatar_and_color():

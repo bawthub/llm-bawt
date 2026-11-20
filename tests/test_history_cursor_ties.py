@@ -46,6 +46,21 @@ def history_client(monkeypatch):
         yield transport, rows
 
 
+def test_orientation_cue_stays_in_history_but_not_in_search(history_client):
+    client, rows = history_client
+    content = "orientation cue"
+    rows.extend([
+        {"id": "setup", "role": "user", "timestamp": 98.0, "content": content,
+         "author": {"entity_type": "system", "entity_id": "setup-orientation"}},
+        {"id": "human", "role": "user", "timestamp": 99.0, "content": content,
+         "author": {"entity_type": "user", "entity_id": "setup-orientation"}},
+    ])
+    history = client.get("/v1/history").json()["messages"]
+    assert {"setup", "human"} <= {row["id"] for row in history}
+    matches = client.get("/v1/history/search", params={"query": content}).json()["messages"]
+    assert [row["id"] for row in matches] == ["human"]
+
+
 @pytest.mark.parametrize("direction", ["before", "after"])
 def test_history_id_cursor_visits_timestamp_peers_once(history_client, direction):
     client, _ = history_client

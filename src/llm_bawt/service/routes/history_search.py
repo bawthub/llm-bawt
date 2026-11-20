@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter, HTTPException, Query
 
+from ...message_authorship import is_setup_orientation
 from ..dependencies import get_service
 from ..logging import get_service_logger
 from ..http_errors import internal_error
@@ -51,11 +52,10 @@ def _search_visible_messages(
 ) -> list[dict]:
     """Case-insensitive substring search over visible message content."""
     query_lower = query.lower()
-    if not query_lower:
-        return messages
     return [
         msg for msg in messages
-        if query_lower in str(msg.get("content", "")).lower()
+        if not is_setup_orientation(_message_author_payload(msg))
+        and query_lower in str(msg.get("content", "")).lower()
     ]
 
 

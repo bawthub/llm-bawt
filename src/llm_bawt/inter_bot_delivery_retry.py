@@ -293,6 +293,7 @@ def _retry(
         original = DeliveryRecord.from_mapping(row)
         metadata = original.metadata
         if (any(key in metadata for key in policy.refused_metadata)
+                or metadata.get("_request_identity_producer") == "setup"
                 or original.message_kind == "CONTEXT_MAINTENANCE"):
             return None
         if original.status != FAILED:

@@ -84,6 +84,9 @@ def _populate_first_messages(conn):
         # Marker plus non-ASCII Python whitespace: the old writer skipped it.
         ("samplea", "x1", "user", "#\u00a0", 1.0, "mixed", "bot", "gavel"),
         ("samplea", "x2", "user", "Please investigate searchable-needle", 2.0, "mixed", "user", "carol"),
+        ("samplea", "x0", "user", "internal orientation text", 0.5, "mixed", "system", "setup-orientation"),
+        ("samplea", "e1", "user", "internal orientation text", 1.0, "empty", "system", "setup-orientation"),
+        ("samplea", "e2", "assistant", "Welcome, what would you like to do?", 2.0, "empty", "bot", "sample-a"),
     ]
     for row in messages:
         conn.execute(text("INSERT INTO messages VALUES (:b,:i,:r,:c,:t,:s,:at,:ai)"),
@@ -191,7 +194,10 @@ def test_sql_eligibility_matches_the_retired_writer(repository):
 
     with repository.engine.connect() as conn:
         for case in ELIGIBILITY_CASES:
-            sql = f"SELECT {eligible_sql('m')} FROM (SELECT 'user'::text AS role, CAST(:c AS text) AS content) m"
+            sql = f"""SELECT {eligible_sql('m')} FROM (
+                SELECT 'user'::text AS role, CAST(:c AS text) AS content,
+                       NULL::text AS author_entity_type, NULL::text AS author_entity_id
+            ) m"""
             got = conn.execute(text(sql), {"c": case, **first_message_params()}).scalar_one()
             assert got is (_retired_writer_title(case) is not None), repr(case)
 
@@ -260,5 +266,14 @@ def test_thread_list_query_searches_full_history_before_limit(repository):
     # The stale auto copy "sup" is not a source; the assistant reply is.
     assert ids(query="sup") == ["stale"]
     assert ids(query="%_") == []
-    assert len(ids(query="", limit=200)) == 5  # sample-a sessions of carol
     assert ids(query="zebra", limit=1) == ["long"]
+
+    listed = {row["id"]: row for row in manager.list_sessions(user_id="carol", limit=200)}
+    assert len(listed) == 5  # sample-a sessions of carol
+    assert listed["empty"]["first_user_message"] is None
+    assert listed["empty"]["last_user_message"] is None
+    assert listed["empty"]["last_assistant_message"] == "Welcome, what would you like to do?"
+    assert listed["empty"]["turn_count"] == 1
+    assert ids(query="orientation text") == []
+    assert ids(query="welcome") == ["empty"]
+    assert repository.search(user_id="carol", query="orientation text")["total_count"] == 0

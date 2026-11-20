@@ -295,6 +295,7 @@ class PostgreSQLShortTermManager(ShortTermMessageReadsMixin, ShortTermMessageMut
             else:
                 params["since"] = since
             clauses.append("started_at >= :since")
+        from ..message_authorship import not_setup_orientation_sql
         from ..sessions.first_message import storage_bot_sql
 
         messages_table = self._backend._messages_table_name if target_bot else "messages"
@@ -310,6 +311,7 @@ class PostgreSQLShortTermManager(ShortTermMessageReadsMixin, ShortTermMessageMut
                     SELECT 1 FROM {messages_table} mq
                     WHERE mq.session_id = s.id AND mq.bot_id = {storage_bot_sql('s.bot_id')}
                       AND mq.role IN ('user', 'assistant', 'summary')
+                      AND {not_setup_orientation_sql('mq')}
                       AND mq.content ILIKE :query_like ESCAPE '\\'
                 )
             )""")
@@ -329,11 +331,11 @@ class PostgreSQLShortTermManager(ShortTermMessageReadsMixin, ShortTermMessageMut
                     (ARRAY_AGG(
                         LEFT(REGEXP_REPLACE(content, '[[:space:]]+', ' ', 'g'), 240)
                         ORDER BY timestamp ASC
-                    ) FILTER (WHERE role = 'user'))[1] AS first_user_message,
+                    ) FILTER (WHERE role = 'user' AND {not_setup_orientation_sql('m')}))[1] AS first_user_message,
                     (ARRAY_AGG(
                         LEFT(REGEXP_REPLACE(content, '[[:space:]]+', ' ', 'g'), 240)
                         ORDER BY timestamp DESC
-                    ) FILTER (WHERE role = 'user'))[1] AS last_user_message,
+                    ) FILTER (WHERE role = 'user' AND {not_setup_orientation_sql('m')}))[1] AS last_user_message,
                     (ARRAY_AGG(
                         LEFT(REGEXP_REPLACE(content, '[[:space:]]+', ' ', 'g'), 600)
                         ORDER BY timestamp DESC
@@ -343,7 +345,7 @@ class PostgreSQLShortTermManager(ShortTermMessageReadsMixin, ShortTermMessageMut
                         LEFT(REGEXP_REPLACE(content, '[[:space:]]+', ' ', 'g'), 600)
                         ORDER BY timestamp DESC
                     ) FILTER (WHERE role = 'summary'))[1] AS summary
-                FROM {messages_table}
+                FROM {messages_table} m
                 WHERE session_id IS NOT NULL
                   AND (bot_id, session_id) IN (
                       SELECT {storage_bot_sql('s.bot_id')}, s.id FROM filtered_sessions AS s

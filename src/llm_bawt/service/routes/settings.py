@@ -364,6 +364,7 @@ async def _persist_bot_profile(
     create_only: bool,
     runtime_settings: dict[str, object] | None = None,
     require_existing: bool = False,
+    on_create=None,
 ) -> BotProfileResponse:
     service = get_service()
     store = get_bot_profile_store(service.config)
@@ -417,6 +418,7 @@ async def _persist_bot_profile(
             profile = BotCreateTransaction(store).create(
                 payload, runtime_settings or {}, guard,
                 lambda conn, writes: _validate_setting_writes(store.engine, writes, conn=conn),
+                on_create=on_create,
             )
         else:
             profile = store.upsert(payload, guard=guard, require_existing=require_existing)
