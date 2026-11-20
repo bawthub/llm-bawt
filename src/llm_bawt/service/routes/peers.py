@@ -66,6 +66,22 @@ async def create_invite():
     return {"code": invite.code(), "expires_at": expires, "fingerprint": invite.fingerprint}
 
 
+async def _pinned_certificate(invite) -> str | None:
+    """Read an HTTPS peer's certificate and keep it only if its key is the invite's."""
+    from ...peer import client, identity, pairing, tls
+
+    if not invite.base_url.startswith("https://"):
+        return None
+    cert = await client.fetch_certificate(invite.base_url)
+    try:
+        matches = identity.fingerprint(tls.public_key_of(cert)) == invite.fingerprint
+    except tls.CertificateError:
+        matches = False
+    if not matches:
+        raise pairing.PairingError("the peer's TLS certificate does not match the invite", 409)
+    return cert
+
+
 @router.post("/v1/peers/join", tags=["Peers"])
 async def join(body: JoinBody):
     """Without ``confirm_fingerprint``: preview who the invite names. With it: pair."""
@@ -74,9 +90,11 @@ async def join(body: JoinBody):
     rt = _require_enabled()
     try:
         invite = pairing.parse_code(body.code)
+        cert = await _pinned_certificate(invite)
         challenge = pairing.new_challenge()
-        remote = await client.fetch_identity(invite.base_url, challenge)
+        remote = await client.fetch_identity(invite.base_url, challenge, cert)
         pairing.check_remote_identity(invite, remote, challenge)
+        cert = pairing.peer_certificate(invite.base_url, cert, remote["public_key"])
     except pairing.PairingError as exc:
         raise HTTPException(status_code=exc.status, detail=exc.reason) from None
     except client.PeerUnavailable as exc:
@@ -91,7 +109,8 @@ async def join(body: JoinBody):
         own = identity.load_or_create(conn)
     try:
         reply = await client.send_pair(invite.base_url,
-                                       pairing.pair_request_body(own, invite, rt.public_url()))
+                                       pairing.pair_request_body(own, invite, rt.public_url()),
+                                       cert)
         pairing.check_pair_ack(own, invite, remote["public_key"], reply)
     except client.PeerUnavailable as exc:
         raise HTTPException(status_code=502, detail=exc.reason) from None
@@ -100,7 +119,7 @@ async def join(body: JoinBody):
     with rt.engine().begin() as conn:
         store.upsert_pending(conn, install_id=preview["install_id"], label=preview["label"],
                              base_url=invite.base_url, public_key=remote["public_key"],
-                             key_id=identity.key_id(remote["public_key"]))
+                             key_id=identity.key_id(remote["public_key"]), tls_cert=cert)
         store.set_state(conn, preview["install_id"], "active")
     return {"paired": preview, "note": "The other install's owner must also confirm."}
 

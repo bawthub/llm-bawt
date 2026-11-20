@@ -10,7 +10,8 @@ Three tables, all owned by this install:
   key, the base URL of its peer endpoint, its state and the grants this side
   gives it (``export_bots``: which of our bots it may see and message).
   Grants are read on every inbound call, so a revoke or a grant change takes
-  effect for tokens already issued.
+  effect for tokens already issued. ``tls_cert`` is the peer listener's
+  certificate, the only one trusted when calling it over HTTPS.
 * ``peer_invites``: single-use, short-lived pairing invitations (hash only).
 * ``peer_jti``: seen assertion IDs until they expire (replay protection).
 
@@ -24,7 +25,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 
 PEER_STATES = ("pending", "active", "revoked")
 
@@ -44,6 +45,7 @@ _DDL = (
       key_id VARCHAR(64) NOT NULL,
       state VARCHAR(16) NOT NULL,
       export_bots TEXT NOT NULL DEFAULT '[]',
+      tls_cert TEXT NULL,
       created_at DOUBLE PRECISION NOT NULL,
       updated_at DOUBLE PRECISION NOT NULL)""",
     """CREATE TABLE IF NOT EXISTS peer_invites (
@@ -60,6 +62,9 @@ _DDL = (
 def ensure_schema(conn) -> None:
     for ddl in _DDL:
         conn.execute(text(ddl))
+    # Tables created before peer TLS lack the certificate column.
+    if "tls_cert" not in {c["name"] for c in inspect(conn).get_columns("peer_links")}:
+        conn.execute(text("ALTER TABLE peer_links ADD COLUMN tls_cert TEXT NULL"))
 
 
 @dataclass(frozen=True)
@@ -71,6 +76,7 @@ class PeerLink:
     key_id: str
     state: str
     export_bots: tuple[str, ...] = field(default_factory=tuple)
+    tls_cert: str | None = None
 
     def public(self) -> dict[str, Any]:
         return {"install_id": self.install_id, "label": self.label, "base_url": self.base_url,
@@ -81,7 +87,7 @@ def _link(row) -> PeerLink:
     m = row._mapping
     bots = json.loads(m["export_bots"] or "[]")
     return PeerLink(m["install_id"], m["label"], m["base_url"], m["public_key"], m["key_id"],
-                    m["state"], tuple(str(b) for b in bots))
+                    m["state"], tuple(str(b) for b in bots), m.get("tls_cert"))
 
 
 def get_link(conn, install_id: str) -> PeerLink | None:
@@ -95,7 +101,8 @@ def list_links(conn) -> list[PeerLink]:
 
 
 def upsert_pending(conn, *, install_id: str, label: str, base_url: str, public_key: str,
-                   key_id: str, now: float | None = None) -> PeerLink:
+                   key_id: str, tls_cert: str | None = None,
+                   now: float | None = None) -> PeerLink:
     """Record a peer as ``pending``. A revoked peer must be re-invited, never revived here."""
     now = time.time() if now is None else now
     existing = get_link(conn, install_id)
@@ -104,13 +111,17 @@ def upsert_pending(conn, *, install_id: str, label: str, base_url: str, public_k
     if existing:
         conn.execute(text(
             "UPDATE peer_links SET label=:l, base_url=:u, public_key=:k, key_id=:kid, "
-            "state='pending', export_bots='[]', updated_at=:n WHERE install_id=:i"),
-            {"l": label, "u": base_url, "k": public_key, "kid": key_id, "n": now, "i": install_id})
+            "tls_cert=:c, state='pending', export_bots='[]', updated_at=:n "
+            "WHERE install_id=:i"),
+            {"l": label, "u": base_url, "k": public_key, "kid": key_id, "c": tls_cert,
+             "n": now, "i": install_id})
     else:
         conn.execute(text(
-            "INSERT INTO peer_links (install_id, label, base_url, public_key, key_id, state, "
-            "export_bots, created_at, updated_at) VALUES (:i,:l,:u,:k,:kid,'pending','[]',:n,:n)"),
-            {"i": install_id, "l": label, "u": base_url, "k": public_key, "kid": key_id, "n": now})
+            "INSERT INTO peer_links (install_id, label, base_url, public_key, key_id, tls_cert, "
+            "state, export_bots, created_at, updated_at) "
+            "VALUES (:i,:l,:u,:k,:kid,:c,'pending','[]',:n,:n)"),
+            {"i": install_id, "l": label, "u": base_url, "k": public_key, "kid": key_id,
+             "c": tls_cert, "n": now})
     link = get_link(conn, install_id)
     assert link is not None
     return link

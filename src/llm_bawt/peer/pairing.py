@@ -28,7 +28,7 @@ from urllib.parse import urlsplit
 
 from sqlalchemy import text
 
-from . import identity, store
+from . import identity, store, tls
 
 INVITE_TTL = 600
 CODE_PREFIX = "bawthub-peer:"
@@ -101,6 +101,20 @@ def create_invite(conn, ident: identity.Identity, base_url: str,
                   ident.label), expires
 
 
+def peer_certificate(base_url: str, cert_pem, public_key: str) -> str | None:
+    """The certificate to pin for an HTTPS peer: it must carry the peer's identity key.
+
+    Plain HTTP (only when explicitly allowed) has no certificate to pin.
+    """
+    if not base_url.startswith("https://"):
+        return None
+    try:
+        tls.require_key(str(cert_pem or ""), public_key)
+    except tls.CertificateError as exc:
+        raise PairingError(f"peer TLS certificate refused: {exc}", 409) from exc
+    return str(cert_pem)
+
+
 def new_challenge() -> str:
     return secrets.token_urlsafe(24)
 
@@ -143,6 +157,7 @@ def accept_pair_request(conn, own: identity.Identity, body: dict,
         raise
     except Exception as exc:  # noqa: BLE001
         raise PairingError("malformed pairing request") from exc
+    tls_cert = peer_certificate(base_url, body.get("tls_cert"), public_key)
     if peer_id == own.install_id:
         raise PairingError("an install cannot pair with itself")
     res = conn.execute(text(
@@ -162,7 +177,7 @@ def accept_pair_request(conn, own: identity.Identity, body: dict,
     try:
         return store.upsert_pending(conn, install_id=peer_id, label=label, base_url=base_url,
                                     public_key=public_key, key_id=identity.key_id(public_key),
-                                    now=now)
+                                    tls_cert=tls_cert, now=now)
     except ValueError:  # still active here: this owner must revoke before re-pairing
         raise PairingError("already paired with this install; its owner must revoke the "
                            "old link first", 409) from None
@@ -178,6 +193,7 @@ def pair_ack(own: identity.Identity, body: dict) -> str:
 def pair_request_body(own: identity.Identity, invite: Invite, own_base_url: str) -> dict:
     return {"nonce": invite.nonce, "install_id": own.install_id, "label": own.label,
             "base_url": normalize_base_url(own_base_url), "public_key": own.public_key,
+            "tls_cert": tls.certificate_pem(own),
             "proof": own.sign(identity.PAIR, invite.install_id,
                               nonce=identity.nonce_hash(invite.nonce), key=own.key_id)}
 
