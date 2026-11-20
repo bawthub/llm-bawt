@@ -468,3 +468,18 @@ def test_an_ops_event_never_deadlocks_a_committing_delivery_transition(ledger):
         with engine.begin() as conn:
             conn.execute(sa_text("DELETE FROM system_events WHERE event_key=:k"),
                          {"k": f"ops:{job.id}:failed"})
+
+
+def test_known_refusal_commits_failed_with_the_row_and_replay_keeps_it(ledger):
+    """TASK-2552: admission runs in a worker the request may abandon, so a
+    known refusal is settled in the enqueue transaction, never as a later write."""
+    sender, target = ledger.bot(), ledger.bot()
+    record, duplicate = _send(ledger, sender, target, idempotency_key=f"refused-{ledger.tag}",
+                              refusal="target is not durable-capable")
+    assert not duplicate and record.status == "FAILED"
+    with ledger.deliveries.engine.connect() as conn:
+        row = _row(conn, record.id)
+    assert row["status"] == "FAILED" and row["last_error"] == "target is not durable-capable"
+    replay, duplicate = _send(ledger, sender, target, idempotency_key=f"refused-{ledger.tag}")
+    assert duplicate and replay.id == record.id and replay.status == "FAILED"
+    assert [e["event_key"].split(":")[2] for e in _events(ledger, record.id)] == ["QUEUED", "FAILED"]

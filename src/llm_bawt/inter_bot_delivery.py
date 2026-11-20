@@ -240,8 +240,11 @@ class InterBotDeliveryStore:
         on_gate: str = "deny",
         sender_turn_id: str | None = None,
         allow_media_only: bool = False,
+        refusal: str | None = None,
     ) -> tuple[DeliveryRecord, bool]:
-        """``allow_media_only``: an ordinary chat turn whose payload carries
+        """``refusal``: a known admission refusal; a new row commits FAILED with it.
+
+        ``allow_media_only``: an ordinary chat turn whose payload carries
         attachments may have empty text (TASK-425); the replayed request's own
         user-turn guard still refuses it if no attachment loads.
 
@@ -310,6 +313,10 @@ class InterBotDeliveryStore:
 
                     refuse_waited_conflict(conn, sender=sender, target=target, delivery_id=record.id)
                 DeliveryTransitionEvents.stage(conn, record)
+                if refusal:
+                    # A known refusal commits FAILED with the row, so it is never
+                    # dispatchable nor left QUEUED for a keyed replay (TASK-2552).
+                    record = self._fail_queued(conn, record.id, refusal) or record
             return record, duplicate
 
     def get(self, delivery_id: str, *, allowed_bot_ids: frozenset[str] | None = None) -> DeliveryRecord | None:
@@ -881,17 +888,21 @@ class InterBotDeliveryStore:
         if self.engine is None:
             return None
         with self.engine.begin() as conn:
-            row = conn.execute(sa_text("""
-                UPDATE inter_bot_deliveries SET status='FAILED',
-                    lease_expires_at=NULL, claim_token=NULL, claim_owner=NULL, next_retry_at=NULL,
-                    last_error=:error, updated_at=now()
-                WHERE id=:id AND status = 'QUEUED' RETURNING *
-            """), {"id": delivery_id, "error": error[:4000]}).mappings().first()
-            DeliveryTransitionEvents.stage(conn, row)
-            if row:
-                from .service.turn_terminal_reservations import interrupt_protocol_reservation
-                interrupt_protocol_reservation(conn, row["turn_id"], status="error",
-                                               error_text=error[:4000], audit={"cause": "delivery_failed"})
+            return self._fail_queued(conn, delivery_id, error)
+
+    @staticmethod
+    def _fail_queued(conn, delivery_id: str, error: str) -> DeliveryRecord | None:
+        row = conn.execute(sa_text("""
+            UPDATE inter_bot_deliveries SET status='FAILED',
+                lease_expires_at=NULL, claim_token=NULL, claim_owner=NULL, next_retry_at=NULL,
+                last_error=:error, updated_at=now()
+            WHERE id=:id AND status = 'QUEUED' RETURNING *
+        """), {"id": delivery_id, "error": error[:4000]}).mappings().first()
+        DeliveryTransitionEvents.stage(conn, row)
+        if row:
+            from .service.turn_terminal_reservations import interrupt_protocol_reservation
+            interrupt_protocol_reservation(conn, row["turn_id"], status="error",
+                                           error_text=error[:4000], audit={"cause": "delivery_failed"})
         return DeliveryRecord.from_mapping(row) if row else None
 
     @staticmethod

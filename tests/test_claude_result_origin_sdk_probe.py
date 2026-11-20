@@ -22,6 +22,11 @@ pytestmark = [pytest.mark.integration, pytest.mark.sdk_probe, pytest.mark.skipif
 MODEL = "claude-sonnet-4-6"  # protocol fixture, not runtime model preference
 
 
+def _kind(origin):
+    """Newer CLIs add producer/runId to origin; the bridge only routes on kind."""
+    return {"kind": origin["kind"]} if isinstance(origin, dict) else origin
+
+
 def _wire(blocks, stop="end_turn"):
     events = [("message_start", {"type": "message_start", "message": {
         "id": "msg_" + uuid.uuid4().hex[:8], "type": "message", "role": "assistant",
@@ -154,7 +159,7 @@ async def test_local_cli_background_bash_result_order(tmp_path: Path):
         assert [(m.result, m.origin) for m in second if isinstance(m, ResultMessage)] == [
             ("FOLLOW_DONE", None)
         ]
-        normal_results = [frame for frame in frames if frame[0] == "result"]
+        normal_results = [(f[0], f[1], _kind(f[2]), *f[3:]) for f in frames if f[0] == "result"]
         assert normal_results[-2:] == [
             ("result", "success", {"kind": "task-notification"}, "NOTIFY_DONE"),
             ("result", "success", None, "FOLLOW_DONE"),
@@ -193,13 +198,13 @@ async def test_local_cli_background_bash_result_order(tmp_path: Path):
         assert [(m.result, m.origin) for m in created if isinstance(m, ResultMessage)] == [
             ("STARTED", None)
         ]
-        assert third == [
+        assert [(r, _kind(o), s) for r, o, s in third] == [
             (None, {"kind": "task-notification"}, "error_during_execution"),
             ("FOLLOW_INTERRUPT_DONE", None, "success"),
         ]
         assert live._finishing is True
         assert live._expected_interrupt_results == 0
-        assert [frame[:3] for frame in frames if frame[0] == "result"][-2:] == [
+        assert [(f[0], f[1], _kind(f[2])) for f in frames if f[0] == "result"][-2:] == [
             ("result", "error_during_execution", {"kind": "task-notification"}),
             ("result", "success", None),
         ]

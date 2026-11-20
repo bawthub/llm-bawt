@@ -54,6 +54,7 @@ Limits
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import mimetypes
@@ -391,7 +392,10 @@ async def upload_asset(
             detail="Media metadata database unavailable; try again shortly",
         )
     try:
-        asset = store.upload(
+        # Image processing, blob writes and the metadata insert are all
+        # blocking; run them off the event loop (TASK-2552).
+        asset = await asyncio.to_thread(
+            store.upload,
             raw_bytes=raw,
             original_mime=mime,
             source=source,

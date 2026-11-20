@@ -369,6 +369,7 @@ class NewSessionLifecycle:
         message_kind: str | None = None, max_attempts: int = 5,
         reset_reason: str | None = None, producer: str = "bot",
         connection=None, on_gate: str = "deny", sender_turn_id: str | None = None,
+        refusal: str | None = None,
     ) -> tuple[DeliveryRecord, bool]:
         """Public bot-send and internal callers share one policy admission.
 
@@ -406,6 +407,7 @@ class NewSessionLifecycle:
             message_kind=message_kind, max_attempts=max_attempts,
             reset_reason=reset_reason or intent.reason, producer=producer,
             connection=connection, on_gate=on_gate, sender_turn_id=sender_turn_id,
+            refusal=refusal,
         )
         if record.metadata.get("new_session_intent") != self._encode(intent):
             raise ValueError("idempotency key belongs to another reset intent")

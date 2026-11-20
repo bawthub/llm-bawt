@@ -10,6 +10,7 @@ detail), plus the ``steer_only`` mode.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from collections.abc import Iterable
@@ -344,11 +345,15 @@ class DeliverySender:
                 "detail": "A remote message needs the sending bot's own signed turn"})
         if not runtime.enabled():
             raise DeliveryRefused(status_code=409, detail="Peer networking is off on this install")
-        try:
+        def admit() -> tuple[Any, bool, Any]:
             with runtime.engine().begin() as conn:
                 row, duplicate = messaging.enqueue(conn, target=target, sender=sender,
                                                    message=body.message, key=body.idempotency_key)
-                link = store.get_link(conn, target.install_id)
+                return row, duplicate, store.get_link(conn, target.install_id)
+
+        try:
+            # Synchronous DB transaction: keep it off the event loop (TASK-2552).
+            row, duplicate, link = await asyncio.to_thread(admit)
         except messaging.OutboundRefused as exc:
             raise DeliveryRefused(status_code=exc.status, detail=exc.detail) from exc
         runtime.wake_pump()
@@ -597,7 +602,11 @@ class DeliverySender:
             self._require_owned_session(body.session_id, target, delivery_user)
             payload["session_id"] = body.session_id
         dispatcher = self._dispatcher()
-        try:
+        unknown, not_durable = admission_refusals(target)
+        refusal = unknown if not target_exists else (None if durable_capable else not_durable)
+        # Admission is a synchronous DB transaction (target lock, row write, the
+        # commit-time delivery ledger); run it off the event loop (TASK-2552).
+        def admit() -> tuple[Any, bool]:
             if policy.value != "continue":
                 from .service.session_lifecycle.intent import Admission, Continuity, NewSessionIntent, Origin
                 from .service.session_lifecycle.lifecycle import NewSessionLifecycle
@@ -610,15 +619,15 @@ class DeliverySender:
                     idempotency_key=body.idempotency_key or f"bot-reset:{uuid4()}",
                     follow_up=body.message, reason=body.reset_reason or automatic_reason,
                 )
-                record, duplicate = NewSessionLifecycle(self.service).admit_bot_delivery(
+                return NewSessionLifecycle(self.service).admit_bot_delivery(
                     intent, payload=payload, metadata=metadata,
                     sender_bot_id=sender, project_id=body.project_id, task_id=body.task_id,
                     message_kind=body.message_kind, max_attempts=body.max_attempts,
                     reset_reason=body.reset_reason or automatic_reason, producer="bot",
-                    on_gate=on_gate, sender_turn_id=sender_turn_id,
+                    on_gate=on_gate, sender_turn_id=sender_turn_id, refusal=refusal,
                 )
             else:
-                record, duplicate = dispatcher.store.enqueue(
+                return dispatcher.store.enqueue(
                     sender_bot_id=sender, target_bot_id=target, message=body.message,
                     payload=payload, author=author,
                     idempotency_key=body.idempotency_key or body.user_message_id,
@@ -627,25 +636,23 @@ class DeliverySender:
                     message_kind=body.message_kind, metadata=metadata,
                     max_attempts=body.max_attempts, session_policy=policy,
                     reset_reason=body.reset_reason or automatic_reason, producer="bot",
-                    on_gate=on_gate, sender_turn_id=sender_turn_id,
+                    on_gate=on_gate, sender_turn_id=sender_turn_id, refusal=refusal,
                 )
+
+        try:
+            record, duplicate = await asyncio.to_thread(admit)
         except (IdentityConflict, InvalidIdentity, AdmissionUnavailable) as exc:
             raise DeliveryRefused(status_code=exc.status_code, detail=str(exc)) from exc
         except WaitAdmissionRefused as exc:
             raise DeliveryRefused(status_code=exc.status_code, detail=exc.detail) from exc
         except ValueError as exc:
             raise DeliveryRefused(status_code=409, detail=str(exc)) from exc
-        unknown, not_durable = admission_refusals(target)
-        if not duplicate and not target_exists:
-            record = dispatcher.store.mark_failed(record.id, unknown) or record
-        elif not duplicate and not durable_capable:
-            record = dispatcher.store.mark_failed(record.id, not_durable) or record
         if not duplicate:
             await dispatcher._emit(record)
         if durable_capable:
             dispatcher.wake(target)
-        current = dispatcher.store.get(record.id) or record
-        stored_payload = dispatcher.store.payload(current.id) or {}
+        current = await asyncio.to_thread(dispatcher.store.get, record.id) or record
+        stored_payload = await asyncio.to_thread(dispatcher.store.payload, current.id) or {}
         status_code, result = submission_result(
             current,
             duplicate=duplicate,

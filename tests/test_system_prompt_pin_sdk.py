@@ -87,6 +87,8 @@ def bridge_options(tmp: Path, base_url: str, system_prompt: str, resume_id: str 
     async def observe(*_args, **_kwargs):
         return {}
 
+    bridge._make_external_failure_hook = lambda: observe
+
     options = ClaudeStreamMixin._build_agent_options(
         bridge, model=MODEL, system_prompt=system_prompt, disallowed_tools=[],
         resume_id=resume_id, sdk_env=env, settings_path=None, bot_effort=None,
