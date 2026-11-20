@@ -11,7 +11,8 @@ from claude_code_bridge.send_usage import LiveUsagePublisher
 from llm_bawt.model_catalog import AccessPath, ModelCatalog, ModelEndpoint, ModelIdentity
 from llm_bawt.service.turn_usage import catalog_turn_cost, encode_token_usage
 
-RATES = {"input": 2, "output": 10, "cache_read": 0.1, "cache_write": 2.5}
+BASE_RATES = {"input": 2, "output": 10, "cache_read": 0.1}
+RATES = {**BASE_RATES, "cache_write": 2.5}
 REF = "gpt-6.2-sol@openai-oauth"
 THRESHOLD = 272_000
 
@@ -184,7 +185,11 @@ async def test_oauth_cache_writes_are_not_fresh_tokens(kind, stop) -> None:
     out = _encode(usage)
     assert out["total_cost_usd"] == pytest.approx(0.0199)
     assert out["cost_kind"] == "notional"
-    assert _encode(usage, {"input": 2, "output": 10, "cache_read": 0.1})["total_cost_usd"] is None
+    base = _encode(usage, BASE_RATES)
+    assert base["total_cost_usd"] == pytest.approx(0.0164)
+    assert base["turn_request_totals"] == totals
+    assert base["cost_kind"] == "notional"
+    assert catalog_turn_cost(usage, _catalog(BASE_RATES, access="openai-api"), "gpt-6.2-sol@openai-api") is None
 
 
 @pytest.mark.asyncio
@@ -215,6 +220,7 @@ async def test_bad_write_telemetry_keeps_tokens_but_invalidates_whole_turn(detai
     assert totals["cache_creation_tokens"] == known_writes
     assert totals["unmeasured_requests"] == 0 and totals["unpriced_cache_write_requests"] == 1
     assert _encode(usage)["total_cost_usd"] is None
+    assert _encode(usage, BASE_RATES)["total_cost_usd"] == pytest.approx(0.03298)
 
 
 @pytest.mark.asyncio
@@ -225,8 +231,9 @@ async def test_providers_without_write_telemetry_keep_existing_pricing() -> None
     usage = pub.with_totals(None)
     assert "unpriced_cache_write_requests" not in usage["turn_request_totals"]
     assert catalog_turn_cost(usage, _catalog(RATES, access="openai-api"), "gpt-6.2-sol@openai-api") == pytest.approx(0.0164)
-    # A stale OAuth bridge with the same old shape must fail closed.
+    # A stale OAuth bridge can price only the explicitly configured base rates.
     assert _encode(usage)["total_cost_usd"] is None
+    assert _encode(usage, BASE_RATES)["total_cost_usd"] == pytest.approx(0.0164)
 
 
 @pytest.mark.asyncio

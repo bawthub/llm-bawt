@@ -106,7 +106,10 @@ def catalog_turn_cost(usage: dict[str, Any], catalog: Any, model_ref: str | None
         return None
     if totals.get("unmeasured_requests") != 0:  # absent or >0: some request's usage is unknown
         return None
-    if endpoint.access_path.key == "openai-oauth":
+    # OAuth endpoints with only base rates estimate the non-read input at the
+    # fresh rate. This lower bound excludes the write premium (TASK-2503).
+    oauth_base_rates = endpoint.access_path.key == "openai-oauth" and "cache_write" not in pricing
+    if endpoint.access_path.key == "openai-oauth" and not oauth_base_rates:
         # Require positive evidence even when an older bridge omits the field.
         unknown_writes = totals.get("unpriced_cache_write_requests")
         if type(unknown_writes) is not int or unknown_writes != 0:
@@ -124,6 +127,9 @@ def catalog_turn_cost(usage: dict[str, Any], catalog: Any, model_ref: str | None
         return None
     if fresh < 0:
         return None
+    if oauth_base_rates:
+        fresh += cache_write
+        cache_write = 0  # price the base input, not the unknown premium
     threshold = effective_pricing_threshold(getattr(endpoint.model, "pricing_threshold", None))
     if threshold is not None and peak > threshold:
         return None
