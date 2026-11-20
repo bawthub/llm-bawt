@@ -63,7 +63,8 @@ class BraveSearchKeyAdapter(SearchKeyAdapter):
     label = "Brave Search"
     env_vars = ("LLM_BAWT_BRAVE_API_KEY", "BRAVE_API_KEY")
     config_attr = "BRAVE_API_KEY"
-    setup_url = "https://api.search.brave.com/app/keys"
+    # Keys are managed on the dashboard host; api.search.brave.com only serves the API.
+    setup_url = "https://api-dashboard.search.brave.com/app/keys"
     description = "Optional web search. Without a key, web search uses DuckDuckGo."
     # Brave answers an invalid subscription token with 422.
     rejected_statuses = frozenset({400, 401, 403, 422})

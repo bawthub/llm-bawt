@@ -65,6 +65,14 @@ def test_each_search_key_is_a_registered_tool_credential(real_store, cls):
     assert descriptor["health"]["state"] == "unconfigured"
 
 
+def test_brave_setup_link_points_at_the_key_dashboard():
+    from llm_bawt.service.providers.search_keys import BraveSearchKeyAdapter
+
+    assert BraveSearchKeyAdapter.setup_url == "https://api-dashboard.search.brave.com/app/keys"
+    url, _ = BraveSearchKeyAdapter._probe_request("k")
+    assert url.startswith("https://api.search.brave.com/res/v1/")
+
+
 # --- resolution order ----------------------------------------------------------
 
 
