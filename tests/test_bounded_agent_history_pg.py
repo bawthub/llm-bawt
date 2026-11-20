@@ -203,6 +203,44 @@ def test_small_history_counts_match_for_cold_start(private_app_pg):
             conn.execute(text("DELETE FROM sessions WHERE bot_id=:bot"), {"bot": bot})
 
 
+@pytest.mark.parametrize("rows,summary_count", [
+    ([("summary", 5), ("user", 10), ("assistant", 11)], 0),
+    ([("summary", 5), ("summary", 6), ("user", 10)], 1),
+    ([("user", 10), ("assistant", 11), ("system", 12)], 3),
+])
+def test_cold_start_priming_count_matches_full_read(private_app_pg, rows, summary_count):
+    # Codex review: the window's summary/system caps must not move the
+    # cold-start priming gate (len(messages) <= 3 after the prompt is appended).
+    config = require_test_db_config()
+    bot = "_t2395c_" + uuid.uuid4().hex[:12]
+    manager = PostgreSQLShortTermManager(config, bot_id=bot)
+    sid = manager.get_or_create_active_session(bot_id=bot, user_id="user_a")
+    table = manager._backend._messages_table_name
+    try:
+        with manager._backend.engine.begin() as conn:
+            for role, ts in rows:
+                conn.execute(text(f"""INSERT INTO {table}
+                    (id, bot_id, role, content, timestamp, session_id, summarized,
+                     author_entity_type, author_entity_id)
+                    VALUES (:id, :bot, :role, :content, :ts, :sid, false, 'bot', :bot)"""),
+                    {"id": str(uuid.uuid4()), "bot": bot, "role": role,
+                     "content": f"{role} {ts}", "ts": ts, "sid": sid})
+        settings = {**SETTINGS, "summary_count": summary_count}
+        full = _history(manager, settings)
+        full.load_history()
+        bounded = _history(manager, settings)
+        bounded.load_history(window=(10, summary_count))
+        assert len(full.messages) == 3
+        for hm in (full, bounded):
+            hm.messages.append(hm.messages[-1])  # stand-in for the new prompt
+        assert (len(bounded.messages) <= 3) == (len(full.messages) <= 3)
+    finally:
+        with manager._backend.engine.begin() as conn:
+            for p in PARENT_TABLES:
+                conn.execute(text(f"DROP TABLE IF EXISTS {partition_name(p, bot)}"))
+            conn.execute(text("DELETE FROM sessions WHERE bot_id=:bot"), {"bot": bot})
+
+
 def test_window_reads_one_snapshot_across_a_concurrent_summarization(snapshot, monkeypatch):
     # Codex finding 2: a summary committed after the summary query (here,
     # after the first raw page) must not drop both itself and the rows it

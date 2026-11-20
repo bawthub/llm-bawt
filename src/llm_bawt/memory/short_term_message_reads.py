@@ -218,11 +218,10 @@ class ShortTermMessageReadsMixin:
           that crosses it is included, and the newest complete turn is always
           read, so the newest-turn floor and degrade decisions see exactly what
           they would see in the full list.
-        System rows are not read for the seed, which drops them (agents carry
-        their own system prompt). At least ``min_rows`` rows are returned when
-        they exist, topping up with system rows only for a tiny history, so
-        cold-start priming (``len(messages) <= 3`` after the new prompt is
-        appended) sees the same side of its threshold as the full read.
+        System rows are not read: this window only feeds seed assembly, which
+        drops them (agents carry their own system prompt). At least
+        ``min_rows`` rows are read when they exist, so small-history checks
+        (cold-start priming counts ``<= 3``) match the full read.
 
         Order and ties match ``get_messages()``: ``timestamp, id`` ascending.
         """
@@ -262,7 +261,6 @@ class ShortTermMessageReadsMixin:
             used = 0
             raw_count = 0
             seen_user = False
-            exhausted = False
             offset = 0
             while True:
                 page = conn.execute(
@@ -286,24 +284,7 @@ class ShortTermMessageReadsMixin:
                     if len(page) == page_size:
                         offset += page_size
                         continue
-                    exhausted = True
                 break
-            # Cold-start priming counts every history row (``<= 3`` after the
-            # new prompt is appended), system rows included. When the whole
-            # unsummarized history fit and is still under ``min_rows``, add
-            # enough system rows to keep that count on the same side of the
-            # threshold as the full read. Seed delivery drops them anyway.
-            if exhausted and len(rows) < min_rows:
-                rows.extend(conn.execute(
-                    text(f"""
-                        SELECT {cols} FROM {table}
-                        WHERE role = 'system'
-                          AND (summarized IS NULL OR summarized = FALSE){owner_sql}
-                        ORDER BY timestamp DESC, id DESC
-                        LIMIT :need
-                    """),
-                    {**params, "need": min_rows - len(rows)},
-                ).fetchall())
 
         def order(row):
             # Mirrors ORDER BY timestamp ASC, id ASC (NULL timestamps last).
