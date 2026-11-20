@@ -9,15 +9,16 @@ Every later connection trusts only that one stored certificate, with hostname
 checks off: the pin, not a CA or a DNS name, identifies the peer.
 
 Key custody: the identity key stays encrypted at rest in the database. TLS
-needs it in plaintext only for the moment uvicorn loads its context (see
-``load_server_tls``); after that it lives only in process memory, as it
-already does for signing assertions. Both ends require TLS 1.3.
+stages it on disk only encrypted, under a one-time in-memory password, for
+the moment uvicorn loads its context (``load_server_tls``); after that it
+lives only in process memory, as it already does for signing assertions. Both ends require TLS 1.3.
 """
 from __future__ import annotations
 
 import asyncio
 import datetime
 import os
+import secrets
 import shutil
 import ssl
 import tempfile
@@ -93,29 +94,39 @@ def client_context(cert_pem: str) -> ssl.SSLContext:
 
 
 def load_server_tls(config, own: identity.Identity) -> None:
-    """Load a uvicorn config's TLS context, then delete the key file at once.
+    """Load a uvicorn config's TLS context without a plaintext key on disk.
 
-    uvicorn reads the key only from a file. It is written 0600 to a private
-    directory on tmpfs where available and removed as soon as the context is
-    loaded, on failure too, so the identity key does not stay on disk.
+    uvicorn reads the key only from a file, so it is staged as PKCS#8
+    encrypted under a one-time password held in memory, in a private 0600
+    directory (tmpfs where available), and removed right after the context
+    loads. A failed removal stops startup rather than leaving it silently.
     """
     shm = "/dev/shm"
     folder = tempfile.mkdtemp(prefix="llm-bawt-peer-tls-",
                               dir=shm if os.path.isdir(shm) else None)
+    password = secrets.token_urlsafe(32)
     try:
         cert_path, key_path = os.path.join(folder, "cert.pem"), os.path.join(folder, "key.pem")
-        key = own.private_key.private_bytes(serialization.Encoding.PEM,
-                                            serialization.PrivateFormat.PKCS8,
-                                            serialization.NoEncryption())
+        key = own.private_key.private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+            serialization.BestAvailableEncryption(password.encode()))
         for path, data in ((cert_path, certificate_pem(own).encode()), (key_path, key)):
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(fd, "wb") as fh:
                 fh.write(data)
         config.ssl_certfile, config.ssl_keyfile = cert_path, key_path
+        config.ssl_keyfile_password = password
         config.load()
     finally:
-        shutil.rmtree(folder, ignore_errors=True)
+        config.ssl_keyfile_password = None
+        _remove(folder)
     config.ssl.minimum_version = ssl.TLSVersion.TLSv1_3
+
+
+def _remove(folder: str) -> None:
+    shutil.rmtree(folder)
+    if os.path.exists(folder):
+        raise RuntimeError(f"could not remove the peer TLS staging directory {folder}")
 
 
 async def fetch_certificate(base_url: str) -> str:

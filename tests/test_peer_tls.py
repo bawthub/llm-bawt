@@ -162,6 +162,26 @@ def test_listener_tls_is_1_3_and_leaves_no_key_file(monkeypatch):
     assert made and not os.path.exists(made[0])
 
 
+def test_staged_key_is_encrypted_and_failed_cleanup_stops_startup(monkeypatch):
+    own = identity.Identity("a", "A", Ed25519PrivateKey.generate())
+    config = uvicorn.Config(server.build_app(lambda: None), port=1)
+    real_load, seen = config.load, {}
+
+    def load():
+        with open(config.ssl_keyfile) as fh:
+            seen["key"] = fh.read()
+        real_load()
+
+    monkeypatch.setattr(config, "load", load)
+    tls.load_server_tls(config, own)
+    assert "ENCRYPTED PRIVATE KEY" in seen["key"]
+    assert config.ssl_keyfile_password is None  # the password is not kept
+
+    monkeypatch.setattr(tls.shutil, "rmtree", lambda path: None)  # removal silently fails
+    with pytest.raises(RuntimeError, match="could not remove"):
+        tls.load_server_tls(uvicorn.Config(server.build_app(lambda: None), port=1), own)
+
+
 def test_extra_certificates_never_reach_the_trust_store(monkeypatch, tls_installs):
     a, b = tls_installs
     _join(monkeypatch, a, b)
