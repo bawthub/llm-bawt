@@ -109,10 +109,9 @@ def peer_certificate(base_url: str, cert_pem, public_key: str) -> str | None:
     if not base_url.startswith("https://"):
         return None
     try:
-        tls.require_key(str(cert_pem or ""), public_key)
+        return tls.require_key(str(cert_pem or ""), public_key)
     except tls.CertificateError as exc:
         raise PairingError(f"peer TLS certificate refused: {exc}", 409) from exc
-    return str(cert_pem)
 
 
 def new_challenge() -> str:

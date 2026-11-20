@@ -74,6 +74,7 @@ async def _pinned_certificate(invite) -> str | None:
         return None
     cert = await client.fetch_certificate(invite.base_url)
     try:
+        cert = tls.canonical(cert)
         matches = identity.fingerprint(tls.public_key_of(cert)) == invite.fingerprint
     except tls.CertificateError:
         matches = False

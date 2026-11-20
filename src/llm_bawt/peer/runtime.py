@@ -89,17 +89,15 @@ async def serve_forever() -> None:
 
     port = int(os.environ[PORT_ENV])
     app = build_app(engine)
-    ssl_files = await asyncio.to_thread(_tls_files)
-    tls_kwargs = {} if ssl_files is None else {"ssl_certfile": ssl_files[0],
-                                               "ssl_keyfile": ssl_files[1]}
-    server = _SecondaryServer(uvicorn.Config(app, host="0.0.0.0", port=port,
-                                             log_level="warning", lifespan="on", **tls_kwargs))
+    config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="warning", lifespan="on")
+    secure = await asyncio.to_thread(_load_tls, config)
+    server = _SecondaryServer(config)
     log.warning("Peer listener on :%d over %s (public URL %s)", port,
-                "HTTPS" if ssl_files else "plain HTTP", public_url() or "unset")
+                "HTTPS" if secure else "plain HTTP", public_url() or "unset")
     await server.serve()
 
 
-def _tls_files() -> tuple[str, str] | None:
+def _load_tls(config) -> bool:
     """Serve HTTPS with the identity-key certificate (``peer.tls``).
 
     Plain HTTP only when the owner explicitly allowed it and the public URL
@@ -108,10 +106,11 @@ def _tls_files() -> tuple[str, str] | None:
     from . import identity, pairing, tls
 
     if pairing.allow_http() and public_url().startswith("http://"):
-        return None
+        return False
     with engine().begin() as conn:
         own = identity.load_or_create(conn)
-    return tls.write_server_files(own)
+    tls.load_server_tls(config, own)
+    return True
 
 
 def _secondary_server_class():

@@ -32,11 +32,11 @@ class TlsInstall(Install):
 
     def _start(self, *, as_identity: identity.Identity | None = None):
         self.url = f"https://127.0.0.1:{self.port}"
-        cert, key = tls.write_server_files(as_identity or self.ident())
         app = server.build_app(lambda: self.engine, list_bots=self._list, admit=self._admit)
-        self.server = uvicorn.Server(uvicorn.Config(
-            app, host="127.0.0.1", port=self.port, log_level="warning", lifespan="on",
-            ssl_certfile=cert, ssl_keyfile=key))
+        config = uvicorn.Config(app, host="127.0.0.1", port=self.port, log_level="warning",
+                                lifespan="on")
+        tls.load_server_tls(config, as_identity or self.ident())
+        self.server = uvicorn.Server(config)
         threading.Thread(target=self.server.run, daemon=True).start()
         deadline = time.time() + 10  # timing-ok: generous startup hang bound, not a speed claim
         while not self.server.started:
@@ -130,17 +130,56 @@ def test_listener_serves_plain_http_only_when_explicitly_allowed(monkeypatch):
     monkeypatch.setattr(runtime, "engine", lambda: pytest.fail("needs no identity"))
     monkeypatch.setenv(runtime.URL_ENV, "http://peer.example:9443")
     monkeypatch.setenv(pairing.ALLOW_HTTP_ENV, "1")
-    assert runtime._tls_files() is None
-    monkeypatch.delenv(pairing.ALLOW_HTTP_ENV)
+    config = uvicorn.Config(server.build_app(lambda: None), port=1)
+    assert runtime._load_tls(config) is False
+    assert config.ssl_keyfile is None
+
+
+def test_listener_tls_is_1_3_and_leaves_no_key_file(monkeypatch):
     from sqlalchemy import create_engine
     eng = create_engine("sqlite://")
     with eng.begin() as conn:
         store.ensure_schema(conn)
         identity.load_or_create(conn)
     monkeypatch.setattr(runtime, "engine", lambda: eng)
-    cert_path, _ = runtime._tls_files()
-    with open(cert_path) as fh:
-        assert tls.public_key_of(fh.read()) == identity.load_or_create(eng.connect()).public_key
+    monkeypatch.setenv(runtime.URL_ENV, "https://peer.example:9443")
+    import os
+    import ssl
+    import tempfile
+    made = []
+    real = tempfile.mkdtemp
+    monkeypatch.setattr(tls.tempfile, "mkdtemp", lambda **k: made.append(real(**k)) or made[-1])
+    config = uvicorn.Config(server.build_app(lambda: eng), port=1)
+    assert runtime._load_tls(config) is True
+    assert config.ssl.minimum_version == ssl.TLSVersion.TLSv1_3
+    assert made and not os.path.exists(made[0])
+
+    made.clear()  # a failed load removes the key file too
+    broken = uvicorn.Config(server.build_app(lambda: eng), port=1)
+    monkeypatch.setattr(broken, "load", lambda: (_ for _ in ()).throw(RuntimeError("x")))
+    with pytest.raises(RuntimeError):
+        runtime._load_tls(broken)
+    assert made and not os.path.exists(made[0])
+
+
+def test_extra_certificates_never_reach_the_trust_store(monkeypatch, tls_installs):
+    a, b = tls_installs
+    _join(monkeypatch, a, b)
+    with b.engine.begin() as conn:
+        store.set_state(conn, a.ident().install_id, "active")
+    link = a.link(b)
+    extra = tls.certificate_pem(identity.Identity("x", "X", Ed25519PrivateKey.generate()))
+    bundled = link.tls_cert + extra
+    with pytest.raises(pairing.PairingError):
+        pairing.peer_certificate("https://p", bundled, b.ident().public_key)
+    with pytest.raises(tls.CertificateError):
+        tls.client_context(bundled)
+    with pytest.raises(Exception):
+        asyncio.run(client.call(a.ident(), store.PeerLink(**{**link.__dict__,
+                                                            "tls_cert": bundled}),
+                                "peer_bots_list"))
+    assert link.tls_cert.count("-----BEGIN") == 1
+    assert tls.client_context(link.tls_cert).cert_store_stats()["x509"] == 1
 
 
 def test_existing_link_table_gains_the_certificate_column():
