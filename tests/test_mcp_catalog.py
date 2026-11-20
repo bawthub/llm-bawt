@@ -351,7 +351,10 @@ async def test_catalog_token_budgets():
     # TASK-2494: image_role, image_captions and replace_current_results on
     # tasks_update/tasks_create, so acceptance shots supersede by round
     # instead of piling up unlabelled. Measured 19,859 (+126).
-    assert total <= 19859, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-2395: messages_get context_budget_tokens/context_summary_limit, the
+    # bounded agent-history read used by the app's MCP client (schema only, no
+    # description text). Measured 19,901 (+42).
+    assert total <= 19901, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 

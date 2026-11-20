@@ -15,7 +15,8 @@ class PromptHistoryManager(HistoryManager):
             kwargs["extract_memory"] = False
         return super().add_message(role, content, **kwargs)
 
-    def load_history(self, since_minutes=None, session_id=None):
+    def load_history(self, since_minutes=None, session_id=None, *, window=None):
+        # ``window`` bounds only the continuous read, which automation never does.
         self.messages = []
         if session_id is None:
             # Construction must not load the personal conversation at all.

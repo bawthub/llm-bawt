@@ -81,11 +81,25 @@ class _MCPShortTermManager:
     ) -> list:
         # NOTE: despite name, since_minutes is seconds for backward compatibility.
         # ``user_id`` (TASK-1774): only that user's sessions.
-        from llm_bawt.models.message import Message
-
         rows = self._memory_client.get_messages(
             since_seconds=since_minutes, user_id=user_id,
         )
+        return self._to_messages(rows)
+
+    def get_context_window(
+        self, *, token_budget: int, summary_limit: int, user_id: str | None = None,
+    ) -> list:
+        """Budget-bounded newest slice of ``get_messages`` (TASK-2395)."""
+        rows = self._memory_client.get_messages(
+            user_id=user_id, context_budget_tokens=token_budget,
+            context_summary_limit=summary_limit,
+        )
+        return self._to_messages(rows)
+
+    @staticmethod
+    def _to_messages(rows) -> list:
+        from llm_bawt.models.message import Message
+
         return [
             Message(
                 role=r.get("role", ""),

@@ -317,6 +317,8 @@ class MemoryClient(
         summaries_only: bool = False,
         exclude_summarized: bool = False,
         user_id: str | None = None,
+        context_budget_tokens: int | None = None,
+        context_summary_limit: int | None = None,
     ) -> list[dict[str, Any]]:
         """Get conversation messages with optional filtering.
 
@@ -347,6 +349,10 @@ class MemoryClient(
                     "summaries_only": summaries_only,
                     "exclude_summarized": exclude_summarized,
                     "user_id": user_id,
+                    **({
+                        "context_budget_tokens": context_budget_tokens,
+                        "context_summary_limit": context_summary_limit,
+                    } if context_budget_tokens else {}),
                 },
             )
             # Apply timestamp filtering (server doesn't support since/until yet)
@@ -363,7 +369,7 @@ class MemoryClient(
             return result
         storage = self._get_storage()
         # Use storage API directly (async) via helper
-        messages = _run_async(storage.get_messages(bot_id=self.bot_id, since_seconds=since_seconds, limit=limit, session_id=session_id, summaries_only=summaries_only, exclude_summarized=exclude_summarized, user_id=user_id))
+        messages = _run_async(storage.get_messages(bot_id=self.bot_id, since_seconds=since_seconds, limit=limit, session_id=session_id, summaries_only=summaries_only, exclude_summarized=exclude_summarized, user_id=user_id, context_budget_tokens=context_budget_tokens, context_summary_limit=context_summary_limit))
 
         # Apply timestamp filtering if specified (post-filter for now)
         if since is not None or until is not None:

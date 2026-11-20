@@ -26,6 +26,9 @@ logger = logging.getLogger(__name__)
 slog = get_service_logger(__name__)
 console = Console()
 
+# A /new's seed read is reused by its own turn only, across the rotation.
+SEED_HISTORY_REUSE_SECONDS = 30.0
+
 
 class ServiceLLMBawt(BaseLLMBawt):
     """Server-side LLM class that can load local models directly.
@@ -332,6 +335,64 @@ class ServiceLLMBawt(BaseLLMBawt):
             if self.verbose:
                 console.print(f"[yellow]Warning:[/yellow] Memory client failed: {escape(str(e))}")
 
+    def history_window(self) -> tuple[int, int] | None:
+        """``(token_budget, summary_limit)`` for agent-backend history reads (TASK-2395).
+
+        An agent turn's context is its SDK session plus a seed; the app never
+        assembles inline history for it, so its continuous read only needs the
+        newest slice a seed of the model's budget can use. Non-agent bots and
+        an unbudgeted model return None: the full read, unchanged.
+        """
+        if self._prompt_bot_type != "agent":
+            return None
+        try:
+            from ..setting_definitions import setting_default
+
+            _, _, budget = self.config.resolve_context_budget(
+                getattr(self.client, "model_alias", None)
+            )
+            summaries = int(self._resolve_setting(
+                "summary_count", setting_default("summary_count", 5),
+            ))
+        except Exception:  # noqa: BLE001 - no window: fall back to the full read
+            return None
+        return (int(budget), summaries) if budget and budget > 0 else None
+
+    def load_history(self, since_minutes: int | None = None) -> list[dict]:
+        window = self.history_window() if since_minutes is None else None
+        if window:
+            self.history_manager.load_history(window=window)
+        else:
+            self.history_manager.load_history(since_minutes=since_minutes)
+        return [msg.to_dict() for msg in self.history_manager.messages]
+
+    def keep_seed_history(self, window: tuple[int, int]) -> None:
+        """Remember a continuous window read made for a seed (TASK-2395).
+
+        A /new reads history for its seed, then rotates the session, which
+        invalidates this cache. Rotation does not change the continuous pool,
+        so the turn that follows reuses this read once instead of reading the
+        same rows again. Any other invalidation (summary writes, thread
+        selection) discards it, and it expires quickly.
+        """
+        if window != self.history_window():
+            self._seed_history = None
+            return
+        self._seed_history = (
+            window, list(self.history_manager.messages), time.monotonic(),
+        )
+
+    def _take_seed_history(self) -> bool:
+        kept = getattr(self, "_seed_history", None)
+        self._seed_history = None
+        if not kept:
+            return False
+        window, messages, at = kept
+        if time.monotonic() - at > SEED_HISTORY_REUSE_SECONDS or window != self.history_window():
+            return False
+        self.history_manager.messages = list(messages)
+        return True
+
     def _refresh_history_if_stale(self) -> None:
         """Refresh history from DB only when cache is stale."""
         ttl = max(
@@ -347,12 +408,19 @@ class ServiceLLMBawt(BaseLLMBawt):
         is_empty = not bool(getattr(self.history_manager, "messages", []))
         is_stale = ttl == 0.0 or (now - self._last_history_load_at) >= ttl
         if is_empty or is_stale:
-            self.load_history()
+            if not self._take_seed_history():
+                self.load_history()
             self._last_history_load_at = now
 
-    def invalidate_history_cache(self) -> None:
-        """Force a history refresh on the next request."""
+    def invalidate_history_cache(self, *, keep_seed_history: bool = False) -> None:
+        """Force a history refresh on the next request.
+
+        ``keep_seed_history`` is only for session rotation, which leaves the
+        continuous pool unchanged (see ``keep_seed_history``).
+        """
         self._last_history_load_at = 0.0
+        if not keep_seed_history:
+            self._seed_history = None
     
     def _initialize_client(self) -> LLMClient:
         """Initialize client based on model type - supports local models."""

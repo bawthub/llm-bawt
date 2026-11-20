@@ -197,7 +197,108 @@ class ShortTermMessageReadsMixin:
                 }
                 for row in reversed(rows)
             ]
-    
+    def get_context_window(
+        self,
+        *,
+        token_budget: int,
+        summary_limit: int,
+        user_id: str | None = None,
+        min_rows: int = 4,
+        page_size: int = 50,
+    ) -> list:
+        """Newest slice of ``get_messages()`` that a budgeted seed can use (TASK-2395).
+
+        Returns the same rows ``get_messages()`` would, restricted to:
+        - the newest ``summary_limit`` summaries (the assembler keeps at most
+          ``summary_count`` of them, newest last), and
+        - unsummarized rows newest-first until the non-system rows exceed
+          ``token_budget`` by the assembler's own estimate. The row that
+          crosses the budget is included, so newest-turn floor and degrade
+          decisions see exactly what they would see in the full list.
+        System rows inside that span are kept (never counted): seed delivery
+        drops them later, chat-side consumers still see them. At least
+        ``min_rows`` rows are read when they exist, so small-history checks
+        (cold-start priming counts ``<= 3``) match the full read.
+
+        Order and ties match ``get_messages()``: ``timestamp, id`` ascending.
+        """
+        from ..models.message import Message
+        from ..utils.token_estimate import estimate_message_tokens
+
+        params: dict = {}
+        owner = (
+            history_owner_clause(params, bot_id=self.bot_id, user_id=user_id)
+            if user_id is not None
+            else None
+        )
+        owner_sql = f" AND {owner}" if owner else ""
+        cols = (
+            "id, role, content, timestamp, session_id,"
+            " author_entity_type, author_entity_id"
+        )
+        table = self._backend._messages_table_name
+        rows: list = []
+        # One REPEATABLE READ snapshot for the summary query and every raw
+        # page, like the single-statement full read: a summary committed in
+        # between can't drop both itself and the rows it replaces, and an
+        # insert or delete can't shift later OFFSET pages.
+        with self._backend.engine.connect().execution_options(
+            isolation_level="REPEATABLE READ",
+        ) as conn, conn.begin():
+            if summary_limit > 0:
+                rows.extend(conn.execute(
+                    text(f"""
+                        SELECT {cols} FROM {table}
+                        WHERE role = 'summary'{owner_sql}
+                        ORDER BY timestamp DESC, id DESC
+                        LIMIT :summary_limit
+                    """),
+                    {**params, "summary_limit": summary_limit},
+                ).fetchall())
+            used = 0
+            raw_count = 0
+            offset = 0
+            while True:
+                page = conn.execute(
+                    text(f"""
+                        SELECT {cols} FROM {table}
+                        WHERE role <> 'summary'
+                          AND (summarized IS NULL OR summarized = FALSE){owner_sql}
+                        ORDER BY timestamp DESC, id DESC
+                        LIMIT :page_size OFFSET :offset
+                    """),
+                    {**params, "page_size": page_size, "offset": offset},
+                ).fetchall()
+                for row in page:
+                    rows.append(row)
+                    raw_count += 1
+                    if row.role != "system":
+                        used += estimate_message_tokens(row.content or "")
+                    if used > token_budget and raw_count >= min_rows:
+                        break
+                else:
+                    if len(page) == page_size:
+                        offset += page_size
+                        continue
+                break
+
+        def order(row):
+            # Mirrors ORDER BY timestamp ASC, id ASC (NULL timestamps last).
+            return (row.timestamp is None, row.timestamp or 0.0, row.id or "")
+
+        return [
+            Message(
+                role=row.role,
+                content=row.content,
+                timestamp=row.timestamp,
+                db_id=row.id,
+                session_id=row.session_id,
+                author_entity_type=row.author_entity_type,
+                author_entity_id=row.author_entity_id,
+            )
+            for row in sorted(rows, key=order)
+        ]
+
     def count(self) -> int:
         """Count messages in current session."""
         with Session(self._backend.engine) as session:
@@ -263,7 +364,7 @@ class ShortTermMessageReadsMixin:
                            author_entity_type, author_entity_id
                     FROM {self._backend._messages_table_name}
                     WHERE {' AND '.join(clauses)}
-                    ORDER BY timestamp ASC
+                    ORDER BY timestamp ASC, id ASC
                 """
                 rows = conn.execute(text(sql), params).fetchall()
 

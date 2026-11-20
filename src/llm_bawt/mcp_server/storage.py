@@ -602,8 +602,14 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
         summaries_only: bool = False,
         exclude_summarized: bool = False,
         user_id: str | None = None,
+        context_budget_tokens: int | None = None,
+        context_summary_limit: int | None = None,
     ) -> list[dict[str, Any]]:
         """Get messages for building a context window.
+
+        TASK-2395: ``context_budget_tokens`` (> 0, default path only) returns the
+        newest budget-sized slice of the default read instead of all of it; see
+        ``get_context_window``. ``context_summary_limit`` caps the summaries.
 
         Default path (``raw=False``) uses the short-term manager's
         summary-aware retrieval, so older session summaries stand in for raw
@@ -663,9 +669,26 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
 
         try:
             def load_and_hydrate() -> list[dict[str, Any]]:
-                messages = manager.get_messages(
-                    since_minutes=since_seconds, user_id=user_id,
-                )
+                if (
+                    context_budget_tokens and context_budget_tokens > 0
+                    and since_seconds is None
+                ):
+                    try:
+                        messages = manager.get_context_window(
+                            token_budget=int(context_budget_tokens),
+                            summary_limit=max(0, int(context_summary_limit or 0)),
+                            user_id=user_id,
+                        )
+                    except Exception as e:  # noqa: BLE001 - optimization only
+                        logger.warning(
+                            "Bounded context read failed for bot=%s; "
+                            "using the full read: %s", bot_id, e,
+                        )
+                        messages = manager.get_messages(user_id=user_id)
+                else:
+                    messages = manager.get_messages(
+                        since_minutes=since_seconds, user_id=user_id,
+                    )
                 if limit is not None and limit >= 0:
                     # [-0:] is the whole list; zero means none.
                     messages = messages[-limit:] if limit else []

@@ -50,7 +50,12 @@ class BridgeSessionResetMixin:
             )
             inv = getattr(llm_bawt, "invalidate_history_cache", None)
             if callable(inv):
-                inv()
+                # Rotation leaves the continuous pool unchanged, so a /new's
+                # seed read stays valid for its own turn (TASK-2395).
+                try:
+                    inv(keep_seed_history=True)
+                except TypeError:
+                    inv()
             try:
                 hm = llm_bawt.history_manager
                 hm.messages = [

@@ -41,6 +41,21 @@ def cap_seed_contents(
     return contents, trimmed
 
 
+def _seed_window(llm_bawt, budget: int) -> tuple[int, int] | None:
+    """``(budget, summary_count)`` for a bounded continuous seed read."""
+    if not budget or budget <= 0:
+        return None
+    from ...setting_definitions import setting_default
+
+    try:
+        summaries = int(llm_bawt.history_manager._setting(
+            "summary_count", setting_default("summary_count", 5),
+        ))
+    except Exception:  # noqa: BLE001 - no window: fall back to the full read
+        return None
+    return (int(budget), summaries)
+
+
 def build_context_seed(
     bot_id: str, model: str | None, service, session_id: str | None = None,
     *, llm_bawt=None, history_scope: str | None = None,
@@ -97,11 +112,6 @@ def build_context_seed(
     # Load fresh so we never serve a stale in-memory transcript.
     # ``session_id`` (TASK-252): scoped seed for hydrating an explicitly
     # opened thread — pool becomes that thread's raw + rolling summaries.
-    if fork_from:
-        llm_bawt.history_manager.load_history(session_id=session_id, fork_from=fork_from)
-    else:
-        llm_bawt.history_manager.load_history(session_id=session_id)
-
     # Same budget the agent path uses (base.py) — the ONE Tier-2 authority.
     # 0 => no budget (return everything). TASK-609. Capture the full
     # decomposition (window -> reserve -> prompt budget) so the context-management
@@ -109,6 +119,29 @@ def build_context_seed(
     context_window, effective_reserve, budget = service.config.resolve_context_budget(
         model_alias
     )
+    if fork_from:
+        llm_bawt.history_manager.load_history(session_id=session_id, fork_from=fork_from)
+    elif session_id:
+        llm_bawt.history_manager.load_history(session_id=session_id)
+    else:
+        # TASK-2395: the continuous seed reads only the newest rows this budget
+        # can use (same assembler result as the full read), and lets the /new
+        # turn that follows reuse this read across its rotation.
+        # Only for agent bots (history_window() is None otherwise): a chat
+        # bot's shared cache must keep the full pool its inline assembly uses.
+        agent_window = getattr(llm_bawt, "history_window", None)
+        window = (
+            _seed_window(llm_bawt, budget)
+            if callable(agent_window) and agent_window() is not None
+            else None
+        )
+        if window:
+            llm_bawt.history_manager.load_history(window=window)
+            keep = getattr(llm_bawt, "keep_seed_history", None)
+            if callable(keep):
+                keep(window)
+        else:
+            llm_bawt.history_manager.load_history(session_id=None)
 
     # TASK-493/518: seed content comes from the ONE shared handler
     # (HistoryManager.build_context_payload) — the same function the chat turn

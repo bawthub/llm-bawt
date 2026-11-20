@@ -809,8 +809,13 @@ async def get_messages(
     summaries_only: bool = False,
     exclude_summarized: bool = False,
     user_id: str | None = None,
+    context_budget_tokens: int | None = None,
+    context_summary_limit: int | None = None,
 ) -> list[dict]:
     """Get messages for building context windows.
+
+    ``context_budget_tokens`` returns only the newest slice a seed of that
+    token budget can use, with at most ``context_summary_limit`` summaries.
 
     TASK-284: pass ``session_id`` to scope the read to one durable thread's
     transcript (direct-table read). Omit it for the existing summary-aware
@@ -829,6 +834,8 @@ async def get_messages(
         bot_id=bot_id, since_seconds=since_seconds, limit=limit,
         session_id=session_id, summaries_only=summaries_only,
         exclude_summarized=exclude_summarized, user_id=user_id,
+        context_budget_tokens=context_budget_tokens,
+        context_summary_limit=context_summary_limit,
     ))
 
 

@@ -209,7 +209,16 @@ class HistoryManager:
     def load_history(
         self, since_minutes: int | None = None, session_id: str | None = None,
         *, fork_from: dict | None = None,
+        window: tuple[int, int] | None = None,
     ):
+        """Load the history pool.
+
+        ``window`` (TASK-2395) is ``(token_budget, summary_limit)`` for a caller
+        that only assembles a seed-style context of that budget: the continuous
+        DB read then returns just the newest slice the assembler can use. It
+        never applies to thread/fork scoped reads, ``since_minutes`` reads, or
+        backends without ``get_context_window``.
+        """
         self.messages = []
 
         # TASK-1774: without a user there is no safe slice of the bot's shared
@@ -280,9 +289,32 @@ class HistoryManager:
         # Use PostgreSQL backend if available
         if self._db_backend:
             try:
-                self.messages = self._db_backend.get_messages(
-                    since_minutes=since_minutes, user_id=self.user_id,
-                )
+                window_loader = getattr(self._db_backend, "get_context_window", None)
+                bounded = None
+                if (
+                    window and window[0] > 0 and since_minutes is None
+                    and callable(window_loader)
+                ):
+                    try:
+                        bounded = window_loader(
+                            token_budget=int(window[0]),
+                            summary_limit=max(0, int(window[1])),
+                            user_id=self.user_id,
+                        )
+                    except Exception as e:  # noqa: BLE001 - optimization only
+                        logger.warning(
+                            "Bounded history read failed for bot=%s user=%s; "
+                            "using the full read: %s", self.bot_id, self.user_id, e,
+                        )
+                # An empty bounded result is indistinguishable from a swallowed
+                # failure (the MCP path returns [] on error), so confirm it with
+                # the full read; for a truly empty history that read is cheap.
+                if bounded:
+                    self.messages = bounded
+                else:
+                    self.messages = self._db_backend.get_messages(
+                        since_minutes=since_minutes, user_id=self.user_id,
+                    )
                 logger.debug(f"Loaded {len(self.messages)} messages from PostgreSQL short-term memory")
                 return
             except Exception as e:
