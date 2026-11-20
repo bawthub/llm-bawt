@@ -187,11 +187,15 @@ def test_small_history_counts_match_for_cold_start(private_app_pg):
         full.load_history()
         bounded = _history(manager)
         bounded.load_history(window=(10, 3))
-        # The oversized newest turn is floored in whole; the system row is
-        # left out at the query because seed delivery drops it.
+        # Cold-start priming checks len(messages) <= 3 after the new prompt
+        # is appended; the bounded read must land on the same side.
         assert len(full.messages) == 3
-        assert [m.db_id for m in bounded.messages] == [
-            m.db_id for m in full.messages if m.role != "system"]
+        assert len(bounded.messages) == 3
+        assert {m.db_id for m in full.messages if m.role != "system"} <= {
+            m.db_id for m in bounded.messages}
+        for hm in (full, bounded):
+            hm.add_message("user", "next prompt")
+        assert (len(bounded.messages) <= 3) == (len(full.messages) <= 3)
     finally:
         with manager._backend.engine.begin() as conn:
             for p in PARENT_TABLES:
