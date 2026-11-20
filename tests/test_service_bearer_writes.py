@@ -49,6 +49,7 @@ PROTECTED = {
     ("POST", "/v1/ops/host-access"),
     ("PATCH", "/v1/ops/host-access/{host_id}"),
     ("DELETE", "/v1/ops/host-access/{host_id}"),
+    ("POST", "/v1/ops/host-access/{host_id}/confirm-host-key"),
     ("PUT", "/v1/models/catalog/models/{model_key}"),
     ("DELETE", "/v1/models/catalog/models/{model_key}"),
     ("PUT", "/v1/models/catalog/access-paths/{access_key}"),
