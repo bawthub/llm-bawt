@@ -1,25 +1,43 @@
 """Unified profile routes."""
 
+from datetime import timezone
+
 from sqlalchemy import func
 from sqlmodel import Session, select
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from ..dependencies import attribute_to_response, get_profile_manager, get_service
 from ..logging import get_service_logger
 from ..http_errors import internal_error
+from ..profile_summary import regenerate_summary
+from .service_auth import NO_STORE, require_service_token
 from ..schemas import (
     ProfileAttributeUpdateRequest,
     ProfileAttributeListResponse,
     ProfileAttributeUpsertRequest,
     ProfileDetail,
     ProfileListResponse,
+    ProfileSummaryRegenerateRequest,
+    ProfileSummaryRegenerated,
     ProfileUpdateRequest,
     UserProfileAttribute,
 )
 
 router = APIRouter()
 log = get_service_logger(__name__)
+
+
+@router.post(
+    "/v1/internal/profile-summary/regenerate",
+    response_model=ProfileSummaryRegenerated,
+    dependencies=[Depends(require_service_token)],
+    tags=["Profiles"],
+)
+def regenerate_user_profile_summary(request: ProfileSummaryRegenerateRequest, response: Response):
+    """Regenerate a user's summary for the trusted caller that bound the subject."""
+    response.headers.update(NO_STORE)
+    return regenerate_summary(get_service(), request.entity_id)
 
 
 def _get_profile_detail(manager, entity_type_enum, entity_type: str, entity_id: str) -> ProfileDetail:
@@ -43,7 +61,8 @@ def _profile_detail_from(profile, attributes, entity_type: str, entity_id: str) 
         avatar=profile.avatar,
         avatar_render=profile.avatar_render,
         summary=profile.summary,
-        summary_updated_at=profile.summary_updated_at.isoformat() if profile.summary_updated_at else None,
+        summary_updated_at=(profile.summary_updated_at.replace(tzinfo=timezone.utc).isoformat()
+                            if profile.summary_updated_at else None),
         attributes=[attribute_to_response(attr) for attr in attributes],
         created_at=profile.created_at.isoformat() if profile.created_at else None,
     )

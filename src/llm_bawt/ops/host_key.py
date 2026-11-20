@@ -38,7 +38,9 @@ import re
 from urllib.parse import quote
 
 ACTION = "host_key"
-WORKER_CAPABILITY_LABEL = "llm-bawt.ops.host-key"
+# v2 (TASK-2520): the scan op and bot ssh trust. A v1 worker would pass a v1
+# label check and then refuse ``scan`` mid-job, so the label moves with the ops.
+WORKER_CAPABILITY_LABEL = "llm-bawt.ops.host-key-v2"
 OPS = ("scan", "verify", "add", "remove")
 OUTPUT_LIMIT = 8192
 CONNECT_TIMEOUT_SECONDS = 10

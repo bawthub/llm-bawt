@@ -22,6 +22,8 @@ LABEL llm-bawt.ops.import-preflight="1"
 LABEL llm-bawt.ops.wake-on-lan="1"
 # TASK-2430: fixed host-key verify/add/remove, exec'd in the key container.
 LABEL llm-bawt.ops.host-key="1"
+# TASK-2520: ...plus the scan op (offered host keys, no login) and bot ssh trust.
+LABEL llm-bawt.ops.host-key-v2="1"
 LABEL llm-bawt.ops.operation-sequence="1"
 LABEL llm-bawt.ops.runtime-source="1"
 # TASK-1800: classified restart targets, published tested SHAs, pinned dirty capture.

@@ -615,6 +615,16 @@ class ProfileDetail(BaseModel):
     created_at: str | None = None
 
 
+class ProfileSummaryRegenerateRequest(BaseModel):
+    entity_id: str = Field(min_length=1, max_length=100)
+
+
+class ProfileSummaryRegenerated(BaseModel):
+    entity_id: str
+    summary: str
+    summary_updated_at: datetime
+
+
 class ProfileUpdateRequest(BaseModel):
     """Request payload for updating core profile fields."""
     is_service: StrictBool | None = None

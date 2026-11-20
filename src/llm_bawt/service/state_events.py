@@ -62,11 +62,13 @@ NEXTCLOUD_TALK = "nextcloud_talk"
 GOOGLE_TASKS = "google_tasks"
 #: TASK-893: a user guidance proposal was decided.
 GUIDANCE = "guidance"
+#: A profile summary was saved. The event carries no profile identity or content.
+PROFILE_SUMMARY = "profile_summary"
 
 #: Every topic a browser may receive. Closed: the client ignores anything else.
 TOPICS = frozenset({OPS_JOBS, OPS_RELEASES, GPU, QUEUE_HOLD, APPROVAL_POLICIES, MEDIA, SCHEDULES,
                     MAINTENANCE_JOBS, DELIVERIES, NOTIFICATIONS, FREEZE, OPS_CATALOG, PLAYGROUND,
-                    UTILITY_USAGE, NEXTCLOUD_TALK, GOOGLE_TASKS, GUIDANCE})
+                    UTILITY_USAGE, NEXTCLOUD_TALK, GOOGLE_TASKS, GUIDANCE, PROFILE_SUMMARY})
 
 #: Bursts of commits inside this window produce one fingerprint pass.
 MIN_INTERVAL_SECONDS = 1.0

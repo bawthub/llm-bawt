@@ -76,6 +76,11 @@ def test_a_new_action_is_gated_until_classified():
     assert not UNGATED_ACTIONS & (IMAGE_ACTIONS | CONFIG_CHECKED_ACTIONS | {ROUTING_ACTION, "start", "restart"})
 
 
+def test_host_key_names_no_container_and_is_ungated():
+    # A host-access job talks SSH to a user host; it must be admitted with no Compose identity.
+    assert gpu_voice_target({"action": "host_key", "host": "nas.lan"}, {}, Inspector()) is None
+
+
 @pytest.mark.parametrize("action", LITERAL_ACTIONS)
 def test_other_services_are_not_gated(action):
     spec = {"action": action, "compose_project": "bawthub", "compose_service": "frontend",

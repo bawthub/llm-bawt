@@ -269,6 +269,15 @@ def test_worker_scan_returns_fingerprints_without_login():
     assert not any(c[2] and "ssh" in c[2].get("Cmd", []) for c in api.calls)
 
 
+def test_execute_action_creates_missing_lock_root(tmp_path, monkeypatch):
+    from llm_bawt.ops import worker
+    monkeypatch.setattr(hk, "run_worker", lambda *a, **k: "ok")
+    lock_root = tmp_path / "fresh-volume" / ".target-locks"
+    out = worker.execute_action(None, _snapshot("scan", known_host_keys=[]), "job-1",
+                                lock_root=lock_root, receipt={})
+    assert out == "ok" and lock_root.is_dir()
+
+
 def test_worker_scan_without_keys_fails():
     with pytest.raises(hk.HostKeyFailed):
         _run_worker("scan", [(1, "", "connect to host box.example port 22: Connection refused")])
@@ -357,3 +366,10 @@ def test_catalog_approval_keeps_frozen_host_key_details():
     assert "deploy@box.example:2222" in text
     assert hk.fingerprint(BLOB) in text and "pinned host key" in text
     assert "other keys kept" in text
+
+
+def test_host_key_ops_pass_the_self_target_guard():
+    # TASK-2520: host-key jobs name no container; the guard must not refuse them.
+    from llm_bawt.ops.self_target import self_target
+    snapshot = {"spec": {"action": hk.ACTION}, "resolved_args": {"host_id": 1}}
+    assert self_target(snapshot, own=lambda: object(), inspect=lambda _: pytest.fail("no target")) is None

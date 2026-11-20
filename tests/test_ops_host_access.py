@@ -229,3 +229,16 @@ def test_confirm_pins_only_the_one_checked_key(engine):
                                                  hk.host_key_fingerprint(HOSTKEY2)])
     after = ha.confirm_host_keys(engine, row["id"], [hk.host_key_fingerprint(HOSTKEY2)])
     assert after["known_host_keys"] == [HOSTKEY2]
+
+
+def test_scan_needs_a_worker_that_knows_it():
+    """A worker built before the scan op must be refused before approval, not mid-job."""
+    from pathlib import Path
+
+    from llm_bawt.ops.executor import spec_capability_labels
+
+    spec = {"action": "host_key", "op": "scan", "key_container": "acme-agent-bridge"}
+    assert hk.WORKER_CAPABILITY_LABEL in spec_capability_labels(spec)
+    assert hk.WORKER_CAPABILITY_LABEL != "llm-bawt.ops.host-key"
+    dockerfile = (Path(__file__).resolve().parents[1] / "docker" / "Dockerfile.ops-worker").read_text()
+    assert f'LABEL {hk.WORKER_CAPABILITY_LABEL}="1"' in dockerfile

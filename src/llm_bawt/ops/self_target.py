@@ -42,12 +42,15 @@ from . import sequence
 from .worker import target_selector
 from .wake_on_lan import ACTION as WAKE_ACTION
 from .compose_secrets import ACTION as COMPOSE_SECRETS_ACTION
+from .host_key import ACTION as HOST_KEY_ACTION
 
 COMPOSE_PROJECT_LABEL = "com.docker.compose.project"
 COMPOSE_SERVICE_LABEL = "com.docker.compose.service"
 #: ``pull`` fetches an image and touches no container.
 #: ``compose_secrets_write`` (TASK-2386) only writes two volumes.
-NO_CONTAINER_ACTIONS = frozenset({"pull", WAKE_ACTION, COMPOSE_SECRETS_ACTION})
+#: ``host_key`` (TASK-2520) talks SSH to a user host and execs in the fixed key container,
+#: but never starts, stops or recreates a container (lifecycle-free).
+NO_CONTAINER_ACTIONS = frozenset({"pull", WAKE_ACTION, COMPOSE_SECRETS_ACTION, HOST_KEY_ACTION})
 #: Actions whose end state leaves their target stopped or removed.
 STOPPING_ACTIONS = frozenset({"stop", REMOVE_ACTION})
 

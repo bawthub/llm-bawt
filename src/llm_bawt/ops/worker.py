@@ -314,6 +314,8 @@ def execute_action(api, snapshot, job_id, *, lock_root, receipt, before_submit=N
     if action == host_key.ACTION:
         # TASK-2430: serialize writes per host record across jobs.
         target = host_key.validate_target(snapshot.get("host_key"))
+        # A fresh receipt volume has no lock directory yet (TASK-2520).
+        Path(lock_root).mkdir(mode=0o700, parents=True, exist_ok=True)
         with open(Path(lock_root) / f"host-key-{target['host_id']}.lock", "a+") as lock:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

@@ -15,7 +15,7 @@ from enum import Enum
 from typing import Any
 
 from pydantic import ConfigDict
-from sqlalchemy import Column, Index, JSON, String, Text, text
+from sqlalchemy import Column, Index, JSON, String, Text, text, update
 from sqlmodel import Field, Session, SQLModel, select
 from .utils.schema import SchemaBootstrapGuard
 
@@ -358,6 +358,26 @@ class ProfileManager:
 
             return profile
     
+    def save_regenerated_summary(self, snapshot: EntityProfile, summary: str) -> datetime | None:
+        """Save only if the profile and its summary revision still match the snapshot."""
+        now = datetime.now(timezone.utc)
+        with Session(self.engine) as session:
+            saved = session.execute(
+                update(EntityProfile)
+                .where(
+                    EntityProfile.id == snapshot.id,
+                    EntityProfile.entity_type == snapshot.entity_type,
+                    EntityProfile.entity_id == snapshot.entity_id,
+                    EntityProfile.is_service.is_(False),
+                    EntityProfile.summary_updated_at == snapshot.summary_updated_at,
+                    EntityProfile.summary == snapshot.summary,
+                )
+                .values(summary=summary, summary_updated_at=now, updated_at=now)
+                .returning(EntityProfile.id)
+            ).scalar_one_or_none()
+            session.commit()
+        return now if saved is not None else None
+
     def set_display_name(
         self,
         entity_type: EntityType,

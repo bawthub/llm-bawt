@@ -14,7 +14,7 @@ import logging
 import os
 from pathlib import Path
 
-from .source_store import GitSpec, SourceStore
+from .source_store import GitSpec, SourceError, SourceStore
 from .sources import SkillSourceService
 
 logger = logging.getLogger(__name__)
@@ -46,8 +46,12 @@ def _github_token(config):
         except GitHubNotConnectedError:
             return None
         except Exception:  # noqa: BLE001 - never log upstream bodies or credentials
+            # Connected but the mint failed (network, GitHub outage): a temporary
+            # error, not "not connected", so the user doesn't reconnect for nothing.
             logger.warning("skill source credential mint failed")
-            return None
+            raise SourceError(503, "credential_mint_failed",
+                              "Could not get a GitHub access token right now (network or GitHub error). "
+                              "Try again shortly.") from None
 
     return token_for
 
