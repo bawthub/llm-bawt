@@ -6,10 +6,12 @@ one ``system_events`` row per (delivery, revision), after every domain write.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import text as sa_text
@@ -20,6 +22,7 @@ from llm_bawt.message_authorship import AuthorReference
 from llm_bawt.profiles import EntityProfile, EntityType
 from tests.bot_tag_fixtures import clear_tags, make_private
 from tests.pg_lock_wait import wait_blocked_by
+from tests.test_inter_bot_dispatcher_supervision import _make_dispatcher
 from tests.test_turn_gates_pg import gated  # noqa: F401  (gated is a fixture)
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("private_app_pg")]
@@ -101,6 +104,99 @@ def test_enqueue_and_terminal_transitions_each_get_one_receipt(ledger):
     assert queued["payload"] == {"phase": "QUEUED"} and queued["tone"] == "info"
     assert failed["tone"] == "error" and failed["payload"] == {"phase": "FAILED"}
     assert "secret" not in failed["summary"]
+
+
+@pytest.mark.asyncio
+async def test_periodic_lease_recovery_commit_leaves_loop_responsive(ledger):
+    store = ledger.deliveries
+    record, _ = _send(ledger, ledger.bot(), ledger.bot())
+    claim = store.claim_next(record.target_bot_id, claim_owner="old-owner", steer_capable=False)
+    assert claim is not None and claim.id == record.id
+    before_events = _events(ledger, record.id)
+
+    def expire():
+        with store.engine.begin() as conn:
+            conn.execute(sa_text("""
+                UPDATE inter_bot_deliveries SET lease_expires_at=now() - interval '1 second'
+                WHERE id=:id
+            """), {"id": record.id})
+            conn.execute(sa_text("""
+                UPDATE turn_logs SET status='pending', terminal_protocol_state=NULL WHERE id=:id
+            """), {"id": claim.turn_id})
+
+    def snapshot():
+        with store.engine.connect() as conn:
+            delivery = _row(conn, record.id)
+            turn_status = conn.execute(sa_text(
+                "SELECT status FROM turn_logs WHERE id=:id"
+            ), {"id": claim.turn_id}).scalar_one()
+        return delivery, turn_status, _events(ledger, record.id)
+
+    loop = asyncio.get_running_loop()
+    loop_thread = threading.get_ident()
+    entered, scheduled = asyncio.Event(), asyncio.Event()
+    release_commit, committed = threading.Event(), threading.Event()
+    original_commit = store.engine.dialect.do_commit
+    commit_patch = pytest.MonkeyPatch()
+    commit_threads = []
+
+    def held_commit(dbapi_connection):
+        # Arm after startup so this holds the periodic recovery transaction only.
+        if commit_threads:
+            return original_commit(dbapi_connection)
+        thread = threading.get_ident()
+        commit_threads.append(thread)
+        loop.call_soon_threadsafe(entered.set)
+        # Fail via the loop's thread assertion, not a hang, on the old code.
+        if thread != loop_thread and not release_commit.wait(timeout=10):
+            raise TimeoutError("test did not release recovery commit")
+        original_commit(dbapi_connection)
+        committed.set()
+
+    async def after_initial_recovery(*, stop):
+        await asyncio.to_thread(expire)
+        commit_patch.setattr(store.engine.dialect, "do_commit", held_commit)
+
+    async def confirmed():
+        return True
+
+    dispatcher = _make_dispatcher()
+    dispatcher.store = store
+    dispatcher._leadership_confirmed = confirmed
+    dispatcher._recovery = SimpleNamespace(run_once=after_initial_recovery)
+    dispatch_after_commit = []
+
+    def schedule():
+        dispatch_after_commit.append(committed.is_set())
+        scheduled.set()
+        dispatcher._stop_event.set()
+
+    dispatcher._schedule_eligible_targets = schedule
+    task = asyncio.create_task(dispatcher.run())
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        assert commit_threads[0] != loop_thread
+        # A second connection can read the old state while the loop drives it.
+        before, turn_status, events = await asyncio.to_thread(snapshot)
+        assert before["status"] == "DISPATCHING" and turn_status == "pending"
+        assert events == before_events and not scheduled.is_set() and not committed.is_set()
+        release_commit.set()
+        await asyncio.wait_for(scheduled.wait(), timeout=5)
+        assert dispatch_after_commit == [True]
+        after, turn_status, events = await asyncio.to_thread(snapshot)
+        assert after["status"] == "QUEUED" and turn_status == "reserved"
+        assert after["turn_id"] == claim.turn_id and after["attempt_count"] == claim.attempt_count
+        assert after["claim_token"] is None and after["lease_expires_at"] is None
+        assert events[:-1] == before_events
+        assert events[-1]["payload"] == {"phase": "QUEUED", "reason_code": "lease_recovery"}
+    finally:
+        release_commit.set()
+        dispatcher._stop_event.set()
+        dispatcher._wake_event.set()
+        try:
+            await asyncio.wait_for(task, timeout=5)
+        finally:
+            commit_patch.undo()
 
 
 @pytest.mark.parametrize(("code", "kept"), [("user_stop", True), ("Stopped by user: secret", False)])

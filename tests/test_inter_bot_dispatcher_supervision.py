@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -112,6 +113,61 @@ async def test_run_absorbs_transient_sweep_error_and_backs_off_in_place():
         f"expected ≥3 recover_expired calls across the transient failure; "
         f"got {dispatcher.store.recover_expired_calls}"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("held_pass", [1, 2], ids=["startup", "periodic"])
+async def test_stop_waits_for_lease_recovery_before_unlocking(monkeypatch, held_pass):
+    dispatcher = _make_dispatcher()
+    from llm_bawt.service.turn_execution import turn_executions
+
+    monkeypatch.setattr(turn_executions, "detach_agents", lambda: [])
+    loop = asyncio.get_running_loop()
+    loop_thread = threading.get_ident()
+    entered = asyncio.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    calls = []
+    startup_checks = []
+    schedules = []
+    unlocks = []
+
+    def recover(*, live_owner):
+        calls.append((live_owner, threading.get_ident()))
+        if len(calls) == held_pass:
+            loop.call_soon_threadsafe(entered.set)
+            if threading.get_ident() != loop_thread and not release.wait(timeout=10):
+                raise TimeoutError("test did not release recovery")
+            finished.set()
+
+    async def run_once(*, stop):
+        startup_checks.append(True)
+
+    async def stop_check():
+        pass
+
+    dispatcher.store.recover_expired = recover
+    dispatcher.store.release_dispatcher_lock = lambda _conn: unlocks.append(finished.is_set())
+    dispatcher._recovery = SimpleNamespace(run_once=run_once, stop=stop_check)
+    dispatcher._schedule_eligible_targets = lambda: schedules.append(True)
+    dispatcher._task = asyncio.create_task(dispatcher.run())
+    stopping = None
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        stopping = asyncio.create_task(dispatcher.stop())
+        await asyncio.wait_for(dispatcher._stop_event.wait(), timeout=5)
+        assert len(calls) == held_pass
+        assert all(owner == dispatcher.claim_owner and thread != loop_thread for owner, thread in calls)
+        assert not finished.is_set() and not stopping.done()
+        assert dispatcher.is_leader and not unlocks
+    finally:
+        release.set()
+        if stopping is None:
+            stopping = asyncio.create_task(dispatcher.stop())
+        await asyncio.wait_for(stopping, timeout=5)
+    assert startup_checks == ([True] if held_pass == 2 else [])
+    assert not schedules
+    assert unlocks == [True] and not dispatcher.is_leader
 
 
 @pytest.mark.asyncio

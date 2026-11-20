@@ -30,6 +30,7 @@ from .inter_bot_dispatcher_steer import (
     OPEN_TURN_STATUSES,
     SteerGeneration,
 )
+from .owned_thread import run_in_thread
 from .schemas import ChatCompletionRequest
 from .turn_logs import DeliveryTargetBusy
 
@@ -405,10 +406,10 @@ class InterBotDeliveryDispatcher:
         # exponential backoff instead of hot-looping.
         recovery = getattr(self, "_recovery", None)
         try:
-            self.store.recover_expired(live_owner=self.claim_owner)
+            await self._recover_expired()
         except Exception:
             logger.exception("initial recover_expired failed; continuing")
-        if recovery is not None:
+        if recovery is not None and not self._stop_event.is_set():
             # TASK-1232: the first run() entry is this process's startup under
             # held leadership; a crash re-entry never reruns the check. After
             # recover_expired: recovery steps defer claimed deliveries to it,
@@ -436,7 +437,10 @@ class InterBotDeliveryDispatcher:
                 # the workers, so no sweep may claim anything after it.
                 break
             try:
-                self.store.recover_expired(live_owner=self.claim_owner)
+                await self._recover_expired()
+                if self._stop_event.is_set():
+                    # stop() may have detached/cancelled workers during recovery.
+                    break
                 self._schedule_eligible_targets()
                 side_pumps = getattr(self, "side_pumps", None)
                 if side_pumps is not None:
@@ -459,6 +463,11 @@ class InterBotDeliveryDispatcher:
         await asyncio.gather(
             *self._target_tasks.values(), *self._dispatch_tasks, return_exceptions=True
         )
+
+    async def _recover_expired(self) -> None:
+        # Keep the transaction and its commit hooks together in the worker.
+        # A cancelled sweep must not leave a live writer behind its leadership.
+        await run_in_thread(self.store.recover_expired, live_owner=self.claim_owner)
 
     @staticmethod
     async def _off_loop(fn, *args):

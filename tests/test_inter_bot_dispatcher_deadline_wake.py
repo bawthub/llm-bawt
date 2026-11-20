@@ -102,6 +102,11 @@ def _dispatcher(store, *, side=()):
         return fn(*args)
 
     d._off_loop = inline
+
+    async def recover():  # lease recovery is unrelated to the deadline clock
+        store.recover_expired(live_owner=d.claim_owner)
+
+    d._recover_expired = recover
     return d
 
 
