@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import math
 import sys
 import threading
@@ -12,14 +11,13 @@ import time
 from collections import deque
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from os import write as _write_fd
 from pathlib import PurePath
 from types import FrameType
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
-
-log = logging.getLogger(__name__)
 
 HEARTBEAT_SECONDS = 0.05
 STALL_SECONDS = 0.25
@@ -41,6 +39,23 @@ def _stack_frames(frame: FrameType | None) -> list[dict[str, str | int]]:
         })
         frame = frame.f_back
     return frames
+
+
+def _emit_warning(lag: float, frames: list[dict[str, str | int]]) -> None:
+    # One write within Linux PIPE_BUF, without StreamHandler or TextIO locks.
+    # The OS sink can still block this daemon, but it cannot hold a logging
+    # lock that the serving thread needs. Heartbeat accounting is independent.
+    payload = {"lag_ms_at_capture": round(lag * 1000, 3), "frames": frames}
+    while True:
+        line = ("WARNING event_loop_stall " + json.dumps(payload, separators=(",", ":")) + "\n").encode()
+        if len(line) <= 4096:
+            break
+        frames.pop()
+    try:
+        _write_fd(2, line)
+    except OSError:
+        # No retry and no fallback to the shared logger if stderr is unavailable.
+        pass
 
 
 class LoopStallWatchdog:
@@ -81,16 +96,20 @@ class LoopStallWatchdog:
             self._episode_counted = True
             self._stall_count += 1
 
+    def _beat(self) -> float:
+        with self._lock:
+            now = time.monotonic()
+            lag = max(0, now - self._deadline)
+            self._record_stall(lag)
+            self._samples.append((now, lag))
+            self._episode_counted = False
+            self._deadline = now + self._heartbeat_interval
+        return lag
+
     async def _heartbeat(self) -> None:
         while not self._stop.is_set():
             await asyncio.sleep(max(0, self._deadline - time.monotonic()))
-            with self._lock:
-                now = time.monotonic()
-                lag = max(0, now - self._deadline)
-                self._record_stall(lag)
-                self._samples.append((now, lag))
-                self._episode_counted = False
-                self._deadline = now + self._heartbeat_interval
+            self._beat()
 
     def _watch(self) -> None:
         while not self._stop.wait(self._heartbeat_interval):
@@ -104,11 +123,8 @@ class LoopStallWatchdog:
                     continue
                 self._last_log = now
                 frames = _stack_frames(sys._current_frames().get(self._loop_thread))
-            # No log I/O under the shared lock. The duration is a lower bound at capture.
-            log.warning("event_loop_stall %s", json.dumps({
-                "lag_ms_at_capture": round(lag * 1000, 3),
-                "frames": frames,
-            }, separators=(",", ":")))
+            # No I/O under the state lock; the duration is a lower bound at capture.
+            _emit_warning(lag, frames)
 
     def snapshot(self) -> dict[str, float | int]:
         """Non-destructive rolling window; independent scrape clients cannot erase peaks."""
