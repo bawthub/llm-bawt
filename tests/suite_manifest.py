@@ -198,6 +198,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_guidance_run_pg.py::",
     "test_guidance_view_pg.py::",
     "test_history_read_cursor_pg.py::",
+    "test_abandon_legacy_turn_pg.py::",
     "test_ops_freeze_executor_pg.py::",
     "test_thread_auto_archive_pg.py::",
 )
