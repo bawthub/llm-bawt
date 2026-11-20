@@ -27,7 +27,10 @@ def rig(monkeypatch):
                            status="streaming", ended_at=None, user_prompt="working",
                            agent_session_key="target:operator", agent_request_id="req-A",
                            agent_backend="claude-code", agent_steer_caps="next")
-    memory = SimpleNamespace(add_message=Mock())
+    anchor = Mock(return_value=True)
+    memory = SimpleNamespace(add_message=Mock(), get_short_term_manager=lambda: SimpleNamespace(
+        _backend=SimpleNamespace(set_interrupt_anchor=anchor),
+    ))
     service = SimpleNamespace(config=object(), get_memory_client=lambda *_: memory,
                               _turn_log_store=SimpleNamespace(engine=engine, get_turn=lambda _: copy(turn)))
     subscriber = SimpleNamespace(send_steer=AsyncMock(return_value={"ok": True}))

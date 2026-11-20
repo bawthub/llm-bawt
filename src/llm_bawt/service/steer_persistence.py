@@ -37,11 +37,12 @@ def persist_input_history(
         "user", message, destination.session_id, None, message_id,
         attachment_refs, None, author.entity_type, author.entity_id,
     )
-    if content_offset is not None and not persist_anchor(
+    # The source identifies an accepted steer even if its text position is unknown.
+    if not persist_anchor(
         service, bot_id=destination.bot_id, message_id=message_id,
         source_message_id=destination.source_message_id, content_offset=content_offset,
     ):
-        raise RuntimeError("Persisted steer message was not found for anchor update")
+        raise RuntimeError("Persisted steer message was not found for source update")
     return True
 
 

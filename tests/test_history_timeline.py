@@ -104,6 +104,32 @@ def test_window_matches_full_scan_reference(window_db, anchor, before, after, se
     )
 
 
+def test_legacy_steer_sources_exclude_new_turns_and_other_owners():
+    engine = create_engine("sqlite://")
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("CREATE TABLE turn_logs (id TEXT, bot_id TEXT, user_id TEXT, trigger_message_id TEXT)"))
+            conn.execute(text("""INSERT INTO turn_logs VALUES
+                ('active', 'bot', 'operator', 'trigger'),
+                ('other', 'bot', 'other-owner', 'private-trigger'),
+                ('idle', 'bot', 'operator', 'queued')"""))
+            conn.execute(text("""CREATE TABLE inter_bot_deliveries (
+                user_message_id TEXT, target_turn_id TEXT, target_bot_id TEXT,
+                delivery_mode TEXT, transport_accepted_at TEXT)"""))
+            conn.execute(text("""INSERT INTO inter_bot_deliveries VALUES
+                ('steer', 'active', 'bot', 'steer', 'yes'),
+                ('pending', 'active', 'bot', 'steer', NULL),
+                ('queued', 'idle', 'bot', 'start', 'yes'),
+                ('other-owner-input', 'other', 'bot', 'steer', 'yes'),
+                ('wrong-bot', 'active', 'other-bot', 'steer', 'yes')"""))
+        service = SimpleNamespace(_turn_log_store=SimpleNamespace(engine=engine))
+        ids = ["steer", "pending", "queued", "other-owner-input", "wrong-bot"]
+        assert history_pages._legacy_steer_sources(service, "bot", "operator", ids) == {"steer": "trigger"}
+        assert history_pages._legacy_steer_sources(service, "bot", None, ids) == {}
+    finally:
+        engine.dispose()
+
+
 def test_window_excludes_system_and_summary_anchors(window_db):
     service, _ = window_db
     for hidden in ("sys", "sum", "nope"):

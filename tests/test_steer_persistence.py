@@ -65,6 +65,15 @@ def test_required_anchor_failure_stays_unpersisted_until_repair(rig, monkeypatch
     rig.sub.send_steer.assert_not_awaited()
 
 
+def test_steer_with_unknown_text_offset_still_writes_its_source(rig):
+    anchor = Mock(return_value=True)
+    assert persist(rig, resolve_offset=False, persist_anchor=anchor)
+    assert anchor.call_args.kwargs == {
+        "bot_id": "target", "message_id": "message", "source_message_id": "trigger", "content_offset": None,
+    }
+    rig.sub.send_steer.assert_not_awaited()
+
+
 def test_timeline_publication_failure_does_not_undo_successful_history(rig, monkeypatch):
     timeline = SimpleNamespace(
         content_offset=AsyncMock(return_value=None),

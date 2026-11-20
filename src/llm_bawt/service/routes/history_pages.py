@@ -208,12 +208,39 @@ def _hydrate_turn_meta_for_page(
         return {}
 
 
+def _legacy_steer_sources(
+    service, bot_id: str, user_id: str | None, message_ids: list[str],
+) -> dict[str, str]:
+    """Recover older unanchored bot steers only when admission proves it."""
+    engine = getattr(getattr(service, "_turn_log_store", None), "engine", None)
+    if not user_id or not message_ids or engine is None:
+        return {}
+    from sqlalchemy import bindparam, text
+
+    # user_message_id is unique and indexed. An idle/queued delivery has its
+    # own turn; it must not be classified as input into another turn.
+    query = text("""
+        SELECT d.user_message_id, t.trigger_message_id
+        FROM inter_bot_deliveries d JOIN turn_logs t ON t.id = d.target_turn_id
+        WHERE d.user_message_id IN :ids
+          AND d.target_bot_id = :bot AND t.bot_id = :bot AND t.user_id = :user
+          AND d.delivery_mode = 'steer' AND d.transport_accepted_at IS NOT NULL
+          AND t.trigger_message_id <> d.user_message_id
+    """).bindparams(bindparam("ids", expanding=True))
+    try:
+        with engine.connect() as conn:
+            return dict(conn.execute(query, {"ids": message_ids, "bot": bot_id, "user": user_id}).tuples().all())
+    except Exception as exc:
+        log.debug("Could not load legacy steer receipts for history page: %s", exc)
+        return {}
+
+
 def _hydrate_interrupt_anchors_for_page(
     service,
     bot_id: str,
     page_messages: list[dict],
-) -> dict[str, tuple[str, int] | None]:
-    """Resolve durable mid-turn interrupt anchors for the given history page."""
+) -> dict[str, tuple[str, int | None] | None]:
+    """Resolve steer provenance even when an exact text anchor is unavailable."""
     message_ids = [
         str(message.get("id"))
         for message in page_messages
@@ -239,7 +266,7 @@ def _hydrate_interrupt_anchors_for_page(
         if engine is None:
             return {mid: None for mid in message_ids}
         table = partition_name(MESSAGES_PARENT, bot_id)
-        result: dict[str, tuple[str, int] | None] = {mid: None for mid in message_ids}
+        result: dict[str, tuple[str, int | None] | None] = {mid: None for mid in message_ids}
         with engine.connect() as conn:
             rows = conn.execute(
                 text(
@@ -251,8 +278,8 @@ def _hydrate_interrupt_anchors_for_page(
         for row in rows:
             source_id = row.get("interrupt_source_message_id")
             offset = row.get("interrupt_content_offset")
-            if source_id and isinstance(offset, int) and offset >= 0:
-                result[str(row["id"])] = (str(source_id), offset)
+            if source_id:
+                result[str(row["id"])] = (str(source_id), offset if isinstance(offset, int) and offset >= 0 else None)
         return result
     except Exception as exc:
         log.warning("Failed to load interrupt anchors for history page: %s", exc)
@@ -559,6 +586,10 @@ def _build_history_response(
     interrupt_anchors_by_id = _hydrate_interrupt_anchors_for_page(
         service, effective_bot_id, page_messages
     )
+    legacy_sources = _legacy_steer_sources(service, effective_bot_id, origin_user_id, [
+        str(msg["id"]) for msg in page_messages
+        if msg.get("role") == "user" and msg.get("id") and not interrupt_anchors_by_id.get(str(msg["id"]))
+    ])
     scheduler_by_id = hydrate_scheduler_for_page(
         service, effective_bot_id, page_messages, origin_user_id
     )
@@ -586,7 +617,7 @@ def _build_history_response(
             token_usage=turn_meta.get("token_usage"),
             quota_snapshot=turn_meta.get("quota_snapshot"),
             completed_at=turn_meta.get("completed_at"),
-            interrupt_source_message_id=(interrupt_anchor[0] if interrupt_anchor else None),
+            interrupt_source_message_id=(interrupt_anchor[0] if interrupt_anchor else legacy_sources.get(message_id)),
             interrupt_content_offset=(interrupt_anchor[1] if interrupt_anchor else None),
             author=_message_author_payload(msg),
             scheduler=scheduler_by_id.get(message_id) if msg.get("role") == "user" else None,

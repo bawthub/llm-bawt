@@ -151,9 +151,9 @@ def _persist_interrupt_anchor(
     bot_id: str,
     message_id: str,
     source_message_id: str,
-    content_offset: int,
+    content_offset: int | None,
 ) -> bool:
-    """Persist a steer anchor through embedded or MCP-backed memory modes."""
+    """Persist a steer source and any known text offset in either memory mode."""
     memory_client = service.get_memory_client(bot_id)
     if memory_client is not None:
         manager = memory_client.get_short_term_manager()
@@ -178,7 +178,7 @@ def _persist_interrupt_anchor(
             text(
                 "UPDATE messages "
                 "SET interrupt_source_message_id=:source_message_id, "
-                "interrupt_content_offset=:content_offset "
+                "interrupt_content_offset=COALESCE(:content_offset, interrupt_content_offset) "
                 "WHERE bot_id=:bot_id AND id=:message_id"
             ),
             {

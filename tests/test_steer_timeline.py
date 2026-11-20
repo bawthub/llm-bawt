@@ -81,6 +81,21 @@ def test_hyphenated_timeline_retry_publication_and_fallback_anchor(timeline, mon
     assert timeline._message()["interrupt_source_message_id"] == "new-trigger"
 
 
+def test_fallback_saves_source_with_no_offset_and_does_not_erase_known_offset(timeline):
+    from llm_bawt.service.routes.chat import _persist_interrupt_anchor
+
+    persist(timeline, offset=None)
+    service = SimpleNamespace(get_memory_client=lambda _: None,
+                              _turn_log_store=SimpleNamespace(engine=timeline.engine))
+    args = dict(bot_id="target", message_id="message-steer", source_message_id="source")
+    assert _persist_interrupt_anchor(service, **args, content_offset=None)
+    assert timeline._message()["interrupt_source_message_id"] == "source"
+    assert timeline._message()["interrupt_content_offset"] is None
+    assert _persist_interrupt_anchor(service, **args, content_offset=0)
+    assert _persist_interrupt_anchor(service, **args, content_offset=None)
+    assert timeline._message()["interrupt_content_offset"] == 0
+
+
 def test_unknown_turn_position_never_invents_an_anchor(timeline):
     subscriber = SimpleNamespace(turn_text_offset=AsyncMock(return_value=None))
     assert asyncio.run(timeline.content_offset(subscriber, None)) is None

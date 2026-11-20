@@ -209,10 +209,10 @@ class PostgreSQLMessageMixin:
         self,
         message_id: str,
         source_message_id: str,
-        content_offset: int,
+        content_offset: int | None,
     ) -> bool:
-        """Persist the assistant-turn anchor for one accepted steer message."""
-        if not message_id or not source_message_id or content_offset < 0:
+        """Persist the steer source and its text offset, when known."""
+        if not message_id or not source_message_id or (content_offset is not None and content_offset < 0):
             return False
 
         with self.engine.begin() as conn:
@@ -220,7 +220,7 @@ class PostgreSQLMessageMixin:
                 text(
                     f"UPDATE {self._messages_table_name} "
                     "SET interrupt_source_message_id=:source_message_id, "
-                    "interrupt_content_offset=:content_offset "
+                    "interrupt_content_offset=COALESCE(:content_offset, interrupt_content_offset) "
                     "WHERE id=:message_id"
                 ),
                 {
@@ -234,12 +234,12 @@ class PostgreSQLMessageMixin:
     def get_interrupt_anchors_for_message_ids(
         self,
         message_ids: list[str],
-    ) -> dict[str, tuple[str, int] | None]:
-        """Return durable interrupt anchors for a history page."""
+    ) -> dict[str, tuple[str, int | None] | None]:
+        """Return steer sources and optional text offsets for a history page."""
         if not message_ids:
             return {}
 
-        result: dict[str, tuple[str, int] | None] = {mid: None for mid in message_ids}
+        result: dict[str, tuple[str, int | None] | None] = {mid: None for mid in message_ids}
         with self.engine.connect() as conn:
             rows = conn.execute(
                 text(
@@ -251,8 +251,8 @@ class PostgreSQLMessageMixin:
         for row in rows:
             source_id = row.get("interrupt_source_message_id")
             offset = row.get("interrupt_content_offset")
-            if source_id and isinstance(offset, int) and offset >= 0:
-                result[str(row["id"])] = (str(source_id), offset)
+            if source_id:
+                result[str(row["id"])] = (str(source_id), offset if isinstance(offset, int) and offset >= 0 else None)
         return result
 
     def add(self, message_id: str, role: str, content: str, timestamp: float) -> None:
