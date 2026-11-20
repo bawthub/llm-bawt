@@ -34,22 +34,24 @@ from tests.test_bot_access_mcp import Resolver, identity, signer, turn  # noqa: 
 
 MCP_ID = "approval-continuation:mcp"
 HARNESS_ID = "approval-continuation:harness"
+SETUP_ID = "setup-orientation"
 BOT, USER_ID = "private_fixture", "user_a"
 
 
 # ---------------------------------------------------------------- author model
 
 def test_system_reference_is_allowlisted():
-    assert set(SYSTEM_AUTHORS) == {MCP_ID, HARNESS_ID}
+    assert set(SYSTEM_AUTHORS) == {MCP_ID, HARNESS_ID, SETUP_ID}
     assert AuthorReference.system(MCP_ID).to_dict() == {
         "entity_type": "system", "entity_id": MCP_ID, "status": "canonical"}
     with pytest.raises(ValueError):
         AuthorReference.system("approval-continuation:other")
 
 
-def test_caller_facing_normalizer_stays_user_or_bot():
+@pytest.mark.parametrize("author_id", [MCP_ID, SETUP_ID])
+def test_caller_facing_normalizer_stays_user_or_bot(author_id):
     with pytest.raises(ValueError):
-        normalize_author("system", MCP_ID)
+        normalize_author("system", author_id)
 
 
 @pytest.mark.parametrize("pair,expected", [
@@ -210,10 +212,11 @@ async def test_service_principal_writes_system_author(fenced, signer):
 
 
 @pytest.mark.asyncio
-async def test_agent_turn_cannot_write_system_author(fenced, signer):
+@pytest.mark.parametrize("author_id", [MCP_ID, SETUP_ID])
+async def test_agent_turn_cannot_write_system_author(fenced, signer, author_id):
     server, storage = fenced
     with identity(turn(BOT, USER_ID)), pytest.raises(Exception, match="access_denied"):
-        await _call(server, _args())
+        await _call(server, _args(author_id=author_id))
     assert storage.calls == []
 
 

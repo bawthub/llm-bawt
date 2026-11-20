@@ -86,7 +86,7 @@ def test_legacy_resolution_never_parses_content_or_defaults_unknown_to_viewer() 
 
 
 def test_validated_inter_bot_claim_returns_durable_author() -> None:
-    record = SimpleNamespace(author=AuthorReference.user("Operator"))
+    record = SimpleNamespace(author=AuthorReference.user("Operator"), metadata={})
 
     class Store:
         def validate_claim(self, **kwargs):

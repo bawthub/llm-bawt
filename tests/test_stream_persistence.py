@@ -56,6 +56,7 @@ def test_inter_bot_nonstream_turn_publishes_visible_lifecycle(
             get=Mock(return_value=SimpleNamespace(
                 sender_bot_id="snark",
                 author=AuthorReference.bot("snark"),
+                metadata={},
             )),
         )
     )
@@ -213,6 +214,7 @@ def test_inter_bot_nonstream_turn_start_prefers_request_session_over_archived_se
             get=Mock(return_value=SimpleNamespace(
                 sender_bot_id="snark",
                 author=AuthorReference.bot("snark"),
+                metadata={},
             )),
         )
     )
