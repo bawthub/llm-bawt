@@ -21,6 +21,22 @@ def test_cumulative_requests_not_resident_context_and_no_session_cost():
     assert facts["billing_mode"] == "subscription"
 
 
+@pytest.mark.parametrize("source, unmeasured, summed, expected", [
+    ("catalog_pricing", 0, 1549, 1549),
+    ("catalog_pricing", 0, 0, 0),
+    ("catalog_pricing", 0, None, 1541),
+    ("catalog_pricing", 1, 1549, 1541),
+    (None, 0, 1549, 1541),
+])
+def test_catalog_priced_retro_shows_the_output_used_for_cost(source, unmeasured, summed, expected):
+    facts = usage_facts({
+        "total_cost_usd": 0.4174288, "cost_source": source, "output_tokens": 1541,
+        "turn_request_totals": {"output_tokens": summed, "unmeasured_requests": unmeasured},
+    })
+    assert facts["cost_usd"] == "0.4174288"
+    assert facts["output_tokens"] == expected
+
+
 @pytest.mark.parametrize("raw", [None, "", "{", "null", "[]", [],
                                 {"input_tokens": 199000, "cache_read_tokens": 190000}])
 def test_old_or_missing_request_totals_remain_unmeasured(raw):

@@ -42,12 +42,18 @@ def usage_facts(raw: str | dict | None) -> dict:
     valid_input = (total is not None and read is not None and write is not None
                    and read + write <= total)
     cost = nonnegative(usage.get("total_cost_usd"))
+    output = counter(usage.get("output_tokens"))
+    if usage.get("cost_source") == "catalog_pricing" and counter(totals.get("unmeasured_requests")) == 0:
+        # Catalog costs use the complete request sums, not the SDK summary.
+        request_output = counter(totals.get("output_tokens"))
+        if request_output is not None:
+            output = request_output
     return {
         "cost_usd": str(cost) if cost is not None else None,
         "fresh_input_tokens": total - read if valid_input else None,
         "cache_read_tokens": read if valid_input else None,
         "cache_write_tokens": write if valid_input else None,
-        "output_tokens": counter(usage.get("output_tokens")),
+        "output_tokens": output,
         "model_requests": counter(totals.get("requests")),
         "usage_status": usage.get("usage_status") if isinstance(usage.get("usage_status"), str) else None,
         "billing_mode": path.get("billing_mode") if isinstance(path.get("billing_mode"), str) else "unknown",
