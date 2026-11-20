@@ -73,6 +73,21 @@ def test_no_note_without_a_bot_reply_channel_or_for_maintenance(record) -> None:
     assert delivery_reply_channel_note(record) is None
 
 
+def test_peer_delivery_note_names_the_remote_sender_and_local_wins() -> None:
+    # TASK-2517: a paired install's sender is answered at slug@install; a
+    # local bot author still takes precedence, and records without metadata
+    # (local or legacy shapes) keep their existing notes.
+    origin = {"peer_origin": {"sender": "scout", "install_id": "a" * 32}}
+    remote = _record(author=AuthorReference.user("peer"))
+    remote.metadata = origin
+    assert delivery_reply_channel_note(remote) == DEFAULT_REPLY_CHANNEL_ASYNC.replace(
+        "{sender_bot_id}", "scout@" + "a" * 32)
+    local = _record()
+    local.metadata = origin
+    assert delivery_reply_channel_note(local) == DEFAULT_REPLY_CHANNEL_ASYNC.replace(
+        "{sender_bot_id}", "vex")
+
+
 class _Tags:
     """``BotTags`` double: one snapshot for every read."""
 

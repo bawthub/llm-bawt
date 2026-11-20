@@ -59,9 +59,16 @@ PRIVILEGED_FIELDS = ("session_id", "augment_memory", "raw_message")
 # control lane's pin; ``prompt_schedule`` is written only by the scheduler's
 # outbox (its owner routes receipts, TASK-1790). A caller supplying any of them
 # is refused on every route.
+def admission_refusals(target: str) -> tuple[str, str]:
+    """Errors a row is failed with on arrival: it was recorded, never admitted."""
+    return (f"Unknown target bot '{target}'",
+            f"Target bot '{target}' does not support durable when-idle delivery")
+
+
 SERVER_OWNED_METADATA_KEYS = (
     "new_session_intent", "batch_id", "batch", "control", "prompt_schedule",
     "_failure_origin", "_failure_notice", "_content_approval_id",
+    "peer_origin",  # TASK-2517: written only when a paired install's message is admitted
 )
 
 
@@ -298,7 +305,54 @@ class DeliverySender:
     async def admit(self, body: DeliveryCreate, request: Any = None) -> tuple[int, dict[str, Any]]:
         """The single-target route: one call to ``_admit_one``."""
         refuse_server_owned_metadata(body.metadata)
+        if "@" in body.target_bot_id:
+            return await self._admit_remote(body, request)
         return await self._admit_one(body, request)
+
+    async def _admit_remote(self, body: DeliveryCreate, request: Any = None) -> tuple[int, dict[str, Any]]:
+        """A ``slug@install`` target goes to the peer outbox (TASK-2517).
+
+        Only a plain async message from a real local bot. Waiting, steering, selectors, resets and
+        pinned fields don't cross installs.
+        """
+        from .peer import messaging, runtime, store
+
+        try:
+            target = messaging.parse_target(body.target_bot_id)
+        except ValueError as exc:
+            raise DeliveryRefused(status_code=422, detail=str(exc)) from exc
+        assert target is not None
+        sender = body.sender_bot_id.strip().lower()
+        unsupported = [name for name in ("steer_only", "from_selector", "session_id",
+                                         "user_message_id", "session_policy",
+                                         "reset_session_before_delivery", "raw_message",
+                                         "augment_memory")
+                       if getattr(body, name, None) not in (None, False)]
+        if body.reply_mode != "async":
+            unsupported.append("reply_mode")
+        if unsupported:
+            raise DeliveryRefused(status_code=422, detail={
+                "error": "remote_unsupported",
+                "detail": f"Not supported for a bot on another install: {', '.join(unsupported)}"})
+        if body.author_entity_type not in (None, "bot") or not _is_real_bot(
+                BotManager(self.service.config), sender):
+            raise DeliveryRefused(status_code=422, detail="Remote messages need a real local sender bot")
+        if _signed_sender_context(request, sender) is None:
+            # The peer sees this install vouch for the sender, so the sender must be proven.
+            raise DeliveryRefused(status_code=403, detail={
+                "error": "remote_sender_unverified",
+                "detail": "A remote message needs the sending bot's own signed turn"})
+        if not runtime.enabled():
+            raise DeliveryRefused(status_code=409, detail="Peer networking is off on this install")
+        try:
+            with runtime.engine().begin() as conn:
+                row, duplicate = messaging.enqueue(conn, target=target, sender=sender,
+                                                   message=body.message, key=body.idempotency_key)
+                link = store.get_link(conn, target.install_id)
+        except messaging.OutboundRefused as exc:
+            raise DeliveryRefused(status_code=exc.status, detail=exc.detail) from exc
+        runtime.wake_pump()
+        return 202, {**messaging.receipt(row, link), "duplicate": duplicate, "success": True}
 
     async def submit(self, body: BatchDeliveryCreate, request: Any = None) -> tuple[int, dict[str, Any]]:
         """A fan-out batch (design r3 §1.2, §1.3)."""
@@ -581,13 +635,11 @@ class DeliverySender:
             raise DeliveryRefused(status_code=exc.status_code, detail=exc.detail) from exc
         except ValueError as exc:
             raise DeliveryRefused(status_code=409, detail=str(exc)) from exc
+        unknown, not_durable = admission_refusals(target)
         if not duplicate and not target_exists:
-            record = dispatcher.store.mark_failed(record.id, f"Unknown target bot '{target}'") or record
+            record = dispatcher.store.mark_failed(record.id, unknown) or record
         elif not duplicate and not durable_capable:
-            record = dispatcher.store.mark_failed(
-                record.id,
-                f"Target bot '{target}' does not support durable when-idle delivery",
-            ) or record
+            record = dispatcher.store.mark_failed(record.id, not_durable) or record
         if not duplicate:
             await dispatcher._emit(record)
         if durable_capable:

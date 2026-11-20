@@ -395,6 +395,13 @@ async def lifespan(app):
     from .bridge_down_alert import run_bridge_down_alert
     service._bridge_down_alert_task = asyncio.create_task(
         run_bridge_down_alert(config), name="bridge-down-alert")
+    # TASK-2517: opt-in peer endpoint on its own port (off unless configured).
+    from ..peer import runtime as peer_runtime
+    if peer_runtime.enabled():
+        service._peer_listener_task = asyncio.create_task(
+            peer_runtime.serve_forever(), name="peer-listener")
+        service._peer_pump_task = asyncio.create_task(
+            peer_runtime.pump_forever(), name="peer-outbox-pump")
     if scheduler is not None:
         scheduler.wake_hub = service._commit_wake_hub
         scheduler.on_runs_changed = lambda: mark_state(service, MAINTENANCE_JOBS)
@@ -533,6 +540,8 @@ BACKGROUND_TASK_ATTRIBUTES = (
     "_ops_bell_task",
     "_house_watcher_task",
     "_bridge_down_alert_task",
+    "_peer_listener_task",
+    "_peer_pump_task",
     "_claude_refresh_task",
     "_codex_refresh_task",
     "_google_tasks_sync_task",
