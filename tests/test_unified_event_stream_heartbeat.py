@@ -23,6 +23,7 @@ class _FakeSubscriber:
     subscription_include_global = False
     groups_scope = None
     subscription_scope = None
+    include_system = False
 
     def __init__(self, _url: str) -> None:
         self.closed = False
@@ -34,6 +35,7 @@ class _FakeSubscriber:
         cls = type(self)
         cls.groups_scope = args[:2]
         cls.groups_include_global = kwargs.get("include_global", False)
+        cls.include_system = kwargs.get("include_system", False)
         bot_ids = args[0]
 
         class _Reader:
@@ -135,3 +137,21 @@ def test_stream_requires_a_full_scope_or_config_only(monkeypatch):
         response = client.get(invalid)
         assert response.status_code == 400, invalid
         assert "consumer_id" in response.json()["detail"]
+
+
+def test_user_without_bots_still_gets_system_events(monkeypatch):
+    """A fresh install has no bots yet; ops job completions are user-scoped
+    system events and must still reach that user's window (TASK-2520)."""
+    monkeypatch.setattr(event_stream, "RedisSubscriber", _FakeSubscriber)
+    monkeypatch.setattr(event_stream, "get_service", lambda: SimpleNamespace(
+        _redis_subscriber=SimpleNamespace(_redis_url="redis://unused"),
+    ))
+    app = FastAPI()
+    app.include_router(event_stream.router)
+    client = TestClient(app)
+
+    response = client.get("/v1/ws?user_id=operator&consumer_id=window-new")
+    assert response.status_code == 200
+    assert '"mode": "unified"' in response.text
+    assert _FakeSubscriber.groups_scope == ([], "operator")
+    assert _FakeSubscriber.include_system is True

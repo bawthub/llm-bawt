@@ -42,7 +42,9 @@ async def event_stream(
 
     Modes:
     - Unified: ``?bot_id=X&bot_id=Y&user_id=Z&consumer_id=UUID`` — resumable stream
-      for one UI window over one or more bots.
+      for one UI window over one or more bots. ``bot_id`` may be omitted: a
+      user with no bots yet (a fresh install) still gets their system events,
+      such as ops job completions.
     - Configuration only: ``?config_only=true&consumer_id=UUID`` — global profile
       updates without claiming a user identity or subscribing to any turns.
     """
@@ -62,11 +64,12 @@ async def event_stream(
         if not consumer_id or bot_id or user_id:
             raise HTTPException(status_code=400, detail="config_only requires consumer_id and no user or bot scope")
         bot_id, user_id = [], ""
-    elif not (bot_id and user_id and consumer_id):
+    elif not (user_id and consumer_id):
         raise HTTPException(
             status_code=400,
-            detail="Provide bot_id+user_id+consumer_id, or config_only+consumer_id",
+            detail="Provide user_id+consumer_id (plus any bot_id), or config_only+consumer_id",
         )
+    bot_id = list(bot_id or [])
 
     return StreamingResponse(
         _unified_event_stream(redis_url, bot_id, user_id, consumer_id, _parse_resume(resume)),
@@ -136,7 +139,7 @@ async def _unified_event_stream(
                 "bot_ids": bot_ids,
                 "user_id": user_id,
                 "consumer_id": consumer_id,
-                "mode": "unified" if bot_ids else "config-only",
+                "mode": "unified" if user_id else "config-only",
                 "connected": True,
                 "ts": datetime.now(timezone.utc).isoformat(),
             },
