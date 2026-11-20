@@ -505,7 +505,9 @@ async def lifespan(app):
     home_audio_worker.start()
 
     from ..bot_access.refresh import policy_refresh_async_lifecycle
-    async with policy_refresh_async_lifecycle(model_engine):
+    from .loop_watchdog import monitor_serving_loop
+
+    async with policy_refresh_async_lifecycle(model_engine), monitor_serving_loop(app):
         try:
             yield
         finally:
