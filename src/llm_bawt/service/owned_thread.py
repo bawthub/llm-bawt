@@ -22,29 +22,33 @@ async def finish_in_thread(fn: Callable[..., Any], /, *args, **kwargs) -> tuple[
     cancelled, the cancellation wins (the worker wrote nothing to own).
     """
     fut = asyncio.ensure_future(asyncio.to_thread(fn, *args, **kwargs))
-    cancelled = False
-    while True:
-        try:
-            result = await asyncio.shield(fut)
-            break
-        except asyncio.CancelledError:
-            cancelled = True
-            if fut.done():
-                if fut.cancelled() or fut.exception() is not None:
-                    raise
-                result = fut.result()
+    try:
+        return await asyncio.shield(fut), False
+    except asyncio.CancelledError:
+        pass
+    # Cancelled while the worker runs. AnyIO (Starlette disconnects) cancels
+    # level-triggered, re-cancelling every await, so drain inside a shielded
+    # scope: one wait, no retry spin. A further native task.cancel() can
+    # still land; each one costs one more await, not a loop.
+    import anyio
+
+    with anyio.CancelScope(shield=True):
+        while True:
+            try:
+                await asyncio.shield(fut)
                 break
-        except BaseException:
-            if cancelled:
-                raise asyncio.CancelledError() from None
-            raise
-    if cancelled:
-        task = asyncio.current_task()
-        if task is not None:
-            # Clear the absorbed requests; the caller re-raises explicitly.
-            while task.uncancel():
-                pass
-    return result, cancelled
+            except asyncio.CancelledError:
+                if fut.done():
+                    break
+    task = asyncio.current_task()
+    if task is not None:
+        # Clear the absorbed requests; the caller re-raises explicitly.
+        while task.uncancel():
+            pass
+    if fut.cancelled() or fut.exception() is not None:
+        # The worker failed: it wrote nothing to own, so the cancellation wins.
+        raise asyncio.CancelledError()
+    return fut.result(), True
 
 
 async def run_in_thread(fn: Callable[..., Any], /, *args, **kwargs) -> Any:

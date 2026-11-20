@@ -97,7 +97,8 @@ def test_blocked_stream_admission_leaves_the_loop_free(monkeypatch):
 def _record_scope(monkeypatch, order):
     def admitted(self, lease, **_k):
         order.append(("admitted", lease))
-        self.follower = Mock()
+        if lease is not None:  # legacy admissions leave the scope unowned
+            self.follower = Mock()
 
     def abandon(self):
         order.append("abandoned")
@@ -161,4 +162,66 @@ def test_nonstream_cancel_during_persist_settles_the_late_lease(monkeypatch):
 
     asyncio.run(main())
     assert order == [("admitted", lease), "abandoned", "closed"]
+    service._get_llm_bawt.return_value.execute_llm_query.assert_not_called()
+
+
+def test_anyio_level_cancellation_drains_without_spinning(monkeypatch):
+    # Starlette cancels a disconnected request through an AnyIO scope, which
+    # re-cancels every await. The drain must wait once, not retry in a loop.
+    import anyio
+
+    from llm_bawt.service import owned_thread
+
+    real_shield = asyncio.shield
+    awaits = []
+
+    def counting_shield(fut):
+        awaits.append(1)
+        return real_shield(fut)
+
+    monkeypatch.setattr(owned_thread.asyncio, "shield", counting_shield)
+    gate = Gate(result="lease")
+    seen = []
+
+    async def main():
+        async with anyio.create_task_group() as tg:
+            async def request():
+                with anyio.CancelScope() as scope:
+                    scopes.append(scope)
+                    seen.append(await finish_in_thread(gate))
+
+            scopes = []
+            tg.start_soon(request)
+            await gate.wait_entered()
+            scopes[0].cancel()
+            await _spin(200)  # AnyIO gets many chances to re-deliver
+            assert len(awaits) <= 2, f"drain re-entered {len(awaits)} times"
+            gate.release.set()
+
+    anyio.run(main)
+    assert seen == [("lease", True)]
+
+
+def test_stream_disconnect_during_legacy_persist_settles_the_row(monkeypatch):
+    service, collect = _stream(monkeypatch, claim=None)
+    gate = Gate(result=None)  # legacy admission returns no lease
+    service._persist_turn_log = gate
+    service._update_turn_log = Mock()
+    order: list = []
+    _record_scope(monkeypatch, order)
+
+    async def main():
+        task = asyncio.create_task(collect())
+        await gate.wait_entered()
+        task.cancel()
+        await _spin()
+        gate.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(main())
+    settle = [c for c in service._update_turn_log.call_args_list
+              if c.kwargs.get("status") == "cancelled"]
+    assert len(settle) == 1 and settle[0].kwargs["end_reason"] == "aborted"
+    assert "abandoned" not in order
     service._get_llm_bawt.return_value.execute_llm_query.assert_not_called()

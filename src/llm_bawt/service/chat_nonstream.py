@@ -212,10 +212,16 @@ class ChatNonStreamMixin:
             on_close=lambda: self._end_generation(cancel_event, done_event, bot_id),
         )
         if abandoned:
-            # TASK-2541: the caller left while the lease was being written. The
-            # scope owns it now: settle the row as cancelled and never launch;
-            # request cleanup then closes the follower.
-            await finish_in_thread(terminal_scope.abandon_unlaunched)
+            # TASK-2541: the caller left while the turn row was being written.
+            # Settle it as cancelled and never launch; request cleanup then
+            # closes any follower.
+            if terminal_scope.follower is not None:
+                await finish_in_thread(terminal_scope.abandon_unlaunched)
+            else:  # legacy admission: no lease, settle the row directly
+                await finish_in_thread(
+                    self._update_turn_log, turn_id=turn_log_id, status="cancelled",
+                    response_text="", end_reason="aborted",
+                )
             raise asyncio.CancelledError()
         from ..content_provenance import ContentTurn
         from .content_lineage import inherit_admitted_request
