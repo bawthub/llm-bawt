@@ -17,7 +17,7 @@ from fastapi import HTTPException
 
 from llm_bawt.peer import client, identity, pairing, runtime, server, store, tls
 from llm_bawt.service.routes import peers
-from tests.test_peer_pairing_discovery import Install
+from tests.test_peer_pairing_discovery import Install, _free_port
 
 
 @pytest.fixture(autouse=True)
@@ -86,6 +86,7 @@ def test_join_refuses_a_listener_with_another_key(monkeypatch, tls_installs):
     a, b = tls_installs
     b.stop()
     impostor = identity.Identity("impostor", "Lab", Ed25519PrivateKey.generate())
+    b.port = _free_port()  # a fresh port: the stopped listener may still hold the old one
     b._start(as_identity=impostor)  # the invite's URL now serves someone else's cert
     with pytest.raises(HTTPException) as refused:
         _join(monkeypatch, a, b, confirm=False)
