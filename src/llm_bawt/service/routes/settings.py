@@ -1,5 +1,6 @@
 """Runtime settings and bot profile routes."""
 
+import asyncio
 import json
 import logging
 
@@ -333,6 +334,30 @@ def _invalidate_all_instance_cache(service) -> int:
     return cleared
 
 
+async def _provision_bot_storage(service, slug: str) -> None:
+    """Create a new bot's message/memory partitions as part of creating it.
+
+    History, timeline and session reads address the bot's partition directly,
+    so a bot nobody has written to yet would otherwise fail its first empty
+    read. Idempotent. The profile row is already committed, so a failure is
+    logged and the bot's first backend write still provisions.
+    """
+    from ...media.assets import _build_engine
+    from ...memory.postgresql import ensure_bot_partitions
+
+    def provision() -> None:
+        engine = _build_engine(service.config)
+        if engine is None:
+            return
+        with engine.begin() as conn:
+            ensure_bot_partitions(conn, slug)
+
+    try:
+        await asyncio.to_thread(provision)
+    except Exception:
+        logger.exception("Could not provision storage for new bot %s", slug)
+
+
 async def _persist_bot_profile(
     payload: dict[str, object],
     *,
@@ -423,6 +448,8 @@ async def _persist_bot_profile(
         if msg is not None:
             raise HTTPException(status_code=400, detail=msg)
         raise
+    if create_only:
+        await _provision_bot_storage(service, profile.slug)
     _reload_bot_registry()
     _reload_service_model_catalog(service)
     _invalidate_bot_instance_cache(service, profile.slug)
