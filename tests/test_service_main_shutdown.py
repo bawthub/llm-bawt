@@ -26,3 +26,4 @@ def test_uvicorn_is_started_with_a_bounded_graceful_shutdown(monkeypatch):
 
     assert len(calls) == 1
     assert calls[0]["timeout_graceful_shutdown"] == 3
+    assert calls[0]["workers"] == 1

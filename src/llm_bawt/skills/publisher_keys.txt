@@ -1,0 +1,9 @@
+# Trust root for the built-in BawtHub skill source (TASK-2534).
+#
+# One base64 raw Ed25519 public key per line. The built-in source installs
+# only releases whose manifest.json.sig verifies under one of these keys.
+# This file ships inside the app image, so the trust root changes only with
+# a reviewed app release; list the old and new key together to rotate.
+#
+# Empty until the release key is created with public distribution: with no
+# key, the built-in source is never installed and the image bundle applies.

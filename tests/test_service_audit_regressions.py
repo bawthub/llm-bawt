@@ -45,6 +45,23 @@ def test_catalog_reload_during_chat_build_cannot_repopulate_new_generation():
     assert svc._llm_bawt_cache == svc._client_cache == {}
 
 
+@pytest.mark.parametrize("evicted_bot", ["fixture", "other"])
+def test_bot_eviction_during_history_initialization_fences_only_that_bot(evicted_bot):
+    svc = _make_service()
+    cache_key = ("test-model", "fixture", "user", False)
+    first = _fake_instance(False)
+    second = _fake_instance(False)
+
+    def build(**_kwargs):
+        svc.invalidate_bot_instances(evicted_bot)
+        return first
+
+    with patch("llm_bawt.service.core.ServiceLLMBawt", side_effect=build):
+        assert svc._get_llm_bawt(*cache_key) is first
+    with patch("llm_bawt.service.core.ServiceLLMBawt", return_value=second):
+        assert svc._get_llm_bawt(*cache_key) is (second if evicted_bot == "fixture" else first)
+
+
 @pytest.mark.parametrize("reload_during_build", [False, True])
 def test_catalog_reload_rebuilds_same_background_endpoint(monkeypatch, reload_during_build):
     svc = background_service({"type": "openai", "model_key": "model", "model_id": "old"})

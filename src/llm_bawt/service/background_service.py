@@ -106,7 +106,10 @@ class BackgroundService(
 
         # Cached instances isolate request memory-augmentation mode.
         self._llm_bawt_cache: dict[tuple[str, str, str, bool], Any] = {}
-        self._cache_lock = asyncio.Lock()
+        # Cached chat construction can block on history and must stay serialized
+        # across worker threads (including sync context-seed requests).
+        self._chat_instance_lock = threading.Lock()
+        self._chat_build_key: tuple[str, str, str, bool] | None = None
 
         # Cached LLM clients keyed by model_alias only
         # This prevents loading the same model (especially GGUF) multiple times
@@ -158,9 +161,8 @@ class BackgroundService(
         # zero results. Created once per model, thereafter only read. Isolated
         # from the chat model lifecycle.
         self._bg_client_cache: dict[str, Any] = {}
-        # Guards create-and-insert into _bg_client_cache. A plain threading.Lock
-        # (NOT the asyncio _cache_lock) because _get_background_client is sync and
-        # runs in the _bg_executor thread pool. Steady-state reads are lock-free.
+        # Guards publication and invalidation in the chat and background caches.
+        # Do not hold it across client construction, history I/O or model lifecycle calls.
         self._bg_client_lock = threading.Lock()
 
         # Session model overrides: when user switches model via tool,

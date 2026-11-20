@@ -24,17 +24,12 @@ class InstanceManagerMixin:
         """Called when a model is unloaded - clears related caches."""
         log.debug(f"Model '{model_alias}' unloaded - clearing caches")
 
-        # Clear client cache for this model
-        if model_alias in self._client_cache:
-            del self._client_cache[model_alias]
-
-        # Clear all LLMBawt instances that use this model
-        keys_to_remove = [
-            key for key in self._llm_bawt_cache
-            if key[0] == model_alias
-        ]
-        for key in keys_to_remove:
-            del self._llm_bawt_cache[key]
+        with self._bg_client_lock:
+            self._client_cache.pop(model_alias, None)
+            keys_to_remove = [key for key in self._llm_bawt_cache if key[0] == model_alias]
+            for key in keys_to_remove:
+                del self._llm_bawt_cache[key]
+            self._invalidate_chat_build(model_alias=model_alias)
 
         log.debug(f"Cleared {len(keys_to_remove)} cached instances for model '{model_alias}'")
 
@@ -43,12 +38,11 @@ class InstanceManagerMixin:
         normalized_bot_id = (bot_id or "").strip().lower()
         if not normalized_bot_id:
             return 0
-        keys_to_remove = [
-            key for key in self._llm_bawt_cache
-            if key[1] == normalized_bot_id
-        ]
-        for key in keys_to_remove:
-            del self._llm_bawt_cache[key]
+        with self._bg_client_lock:
+            keys_to_remove = [key for key in self._llm_bawt_cache if key[1] == normalized_bot_id]
+            for key in keys_to_remove:
+                del self._llm_bawt_cache[key]
+            self._invalidate_chat_build(bot_id=normalized_bot_id)
         if keys_to_remove:
             log.debug(
                 "Cleared %s cached instances for bot '%s'",
@@ -57,10 +51,23 @@ class InstanceManagerMixin:
             )
         return len(keys_to_remove)
 
-    def invalidate_all_instances(self) -> int:
-        """Invalidate all cached ServiceLLMBawt instances."""
+    def _invalidate_chat_build(self, *, bot_id: str | None = None, model_alias: str | None = None) -> None:
+        """Under the cache-state lock, revoke a matching in-flight publication."""
+        key = getattr(self, "_chat_build_key", None)
+        if key is not None and (bot_id is None or key[1] == bot_id) and (model_alias is None or key[0] == model_alias):
+            self._chat_build_key = None
+
+    def _clear_chat_cache(self) -> int:
+        """Clear instances and revoke publication, under the cache-state lock."""
         cleared = len(self._llm_bawt_cache)
         self._llm_bawt_cache.clear()
+        self._invalidate_chat_build()
+        return cleared
+
+    def invalidate_all_instances(self) -> int:
+        """Invalidate all cached ServiceLLMBawt instances."""
+        with self._bg_client_lock:
+            cleared = self._clear_chat_cache()
         if cleared:
             log.debug("Cleared all cached instances (%s)", cleared)
         return cleared
@@ -69,30 +76,24 @@ class InstanceManagerMixin:
         """Retire cache entries, not clients still held by in-flight requests."""
         with self._bg_client_lock:
             self._catalog_generation = getattr(self, "_catalog_generation", 0) + 1
-            cleared = self.invalidate_all_instances()
+            cleared = self._clear_chat_cache()
             self._client_cache.clear()
             self._bg_client_cache.clear()
         return cleared
 
     def clear_session_model_overrides(self, bot_id: str | None = None, user_id: str | None = None) -> int:
         """Clear session model overrides, optionally scoped by bot and/or user."""
-        if not self._session_model_overrides:
-            return 0
-
         normalized_bot = (bot_id or "").strip().lower() if bot_id is not None else None
         normalized_user = (user_id or "").strip() if user_id is not None else None
 
-        keys_to_remove: list[tuple[str, str]] = []
-        for key in self._session_model_overrides:
-            key_bot, key_user = key
-            if normalized_bot is not None and key_bot != normalized_bot:
-                continue
-            if normalized_user is not None and key_user != normalized_user:
-                continue
-            keys_to_remove.append(key)
-
-        for key in keys_to_remove:
-            del self._session_model_overrides[key]
+        with self._bg_client_lock:
+            keys_to_remove = [
+                key for key in self._session_model_overrides
+                if (normalized_bot is None or key[0] == normalized_bot)
+                and (normalized_user is None or key[1] == normalized_user)
+            ]
+            for key in keys_to_remove:
+                del self._session_model_overrides[key]
 
         if keys_to_remove:
             scope = []
@@ -324,6 +325,15 @@ class InstanceManagerMixin:
             return self._memory_clients[cache_key]
 
     def _get_llm_bawt(self, model_alias: str, bot_id: str, user_id: str, local_mode: bool = False):
+        """Run the serialized cached lookup from a synchronous worker."""
+        with self._chat_instance_lock:
+            try:
+                return self._resolve_chat_instance(model_alias, bot_id, user_id, local_mode)
+            finally:
+                with self._bg_client_lock:
+                    self._chat_build_key = None
+
+    def _resolve_chat_instance(self, model_alias: str, bot_id: str, user_id: str, local_mode: bool):
         """Get or create an LLMBawt instance with caching.
 
         This method enforces single-model loading through the ModelLifecycleManager.
@@ -341,18 +351,17 @@ class InstanceManagerMixin:
 
         # Check for pending model switch (from switch_model tool)
         pending = self._model_lifecycle.clear_pending_switch(owner=session_key)
+        with self._bg_client_lock:
+            if pending:
+                self._session_model_overrides[session_key] = pending
+            override = self._session_model_overrides.get(session_key)
+            model_alias = override or model_alias
+            cache_key = (model_alias, bot_id, user_id, local_mode)
+            self._chat_build_key = cache_key
         if pending:
             log.info(f"🔄 Switching to model: {pending}")
-            # Store as session override so subsequent requests use this model
-            self._session_model_overrides[session_key] = pending
-            model_alias = pending
-        elif session_key in self._session_model_overrides:
-            # Use the session model override from a previous switch
-            model_alias = self._session_model_overrides[session_key]
+        elif override is not None:
             log.debug(f"Using session model override: {model_alias}")
-
-        generation = getattr(self, "_catalog_generation", 0)
-        cache_key = (model_alias, bot_id, user_id, local_mode)
 
         # Check if we need to switch models (different model requested).
         # Only unload when the PREVIOUS model holds local resources
@@ -370,8 +379,7 @@ class InstanceManagerMixin:
             else:
                 log.debug(f"Model switch: {current_model} → {model_alias} (no unload needed)")
 
-        if cache_key in self._llm_bawt_cache:
-            cached = self._llm_bawt_cache[cache_key]
+        if (cached := self._llm_bawt_cache.get(cache_key)) is not None:
             # Memory augmentation is part of instance identity in both directions.
             discard = False
             if not local_mode:
@@ -390,7 +398,7 @@ class InstanceManagerMixin:
                     discard = True
 
             if discard:
-                del self._llm_bawt_cache[cache_key]
+                self._llm_bawt_cache.pop(cache_key, None)
             else:
                 log.cache_hit("llm_bawt", f"{model_alias}/{bot_id}/{user_id}")
                 log.debug(f"Reusing cached ServiceLLMBawt instance for {cache_key}")
@@ -434,10 +442,10 @@ class InstanceManagerMixin:
                 user_id=user_id,
                 existing_client=existing_client,  # Reuse cached client if available
             )
-            # A catalog reload may finish while this instance is building.
-            # Its in-flight caller can finish, but must not warm the new pools.
+            # An invalidation may finish while history is loading. The caller
+            # can finish, but must not put the stale instance back in the cache.
             with self._bg_client_lock:
-                if generation == getattr(self, "_catalog_generation", 0):
+                if self._chat_build_key == cache_key:
                     self._llm_bawt_cache[cache_key] = llm_bawt
                     if model_type not in ("agent_backend", "claude-code"):
                         self._client_cache.setdefault(model_alias, llm_bawt.client)

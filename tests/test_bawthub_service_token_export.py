@@ -57,7 +57,7 @@ def test_no_export_path_does_nothing(derived, tmp_path):
 
 def test_writes_the_derived_token_mode_0600(derived, target):
     assert _export(target) is ExportResult.WRITTEN
-    assert target.read_text().strip() == DERIVED
+    assert target.read_bytes() == (DERIVED + "\n").encode("utf-8")
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
     assert _leftovers(target) == []
 

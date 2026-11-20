@@ -154,11 +154,11 @@ class ApiAuthMiddleware:
         kind = scope.get("type")
         if kind not in ("http", "websocket"):
             return await self.app(scope, receive, send)
-        mode = self.resolver.mode()
-        if mode == "off":
-            return await self.app(scope, receive, send)
         path = scope.get("path") or ""
         if kind == "http" and (path in self.allowed_paths or scope.get("method") == "OPTIONS"):
+            return await self.app(scope, receive, send)
+        mode = self.resolver.mode()
+        if mode == "off":
             return await self.app(scope, receive, send)
         if mode == UNRESOLVED:
             return await self._refuse(scope, send, 503, "auth_mode_unresolved")

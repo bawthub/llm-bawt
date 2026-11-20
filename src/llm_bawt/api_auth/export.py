@@ -2,10 +2,10 @@
 
 ``LLM_BAWT_API_KEY_EXPORTS`` lists ``principal=/dir[:uid[:gid]]`` entries,
 comma separated. For each, the app writes ``<dir>/api-key`` holding the full
-header value (``<principal>.<key>``), atomically (0600, or 0640 with a gid),
-owned by the consumer's uid/gid when given. Each consumer mounts only its own
-directory read-only (a directory, never a single-file bind, so a replaced file
-is seen) and points ``LLM_BAWT_API_KEY_FILE`` at the file.
+header value (``<principal>.<key>``) with no trailing newline. Writes are
+atomic (0600, or 0640 with a gid), with the consumer's uid/gid when given.
+Each consumer mounts only its own directory read-only (never a single-file
+bind, so a replaced file is seen) and sets ``LLM_BAWT_API_KEY_FILE``.
 
 A principal that can't be derived right now keeps its last good file. Nothing
 here logs a key.
@@ -85,7 +85,9 @@ def export_all(specs: list[ExportSpec] | None = None, *, root=None) -> dict[str,
                 results[spec.principal] = "kept"
                 continue
             try:
-                _write_atomically(spec.directory / FILE_NAME, value, spec.uid, spec.gid)
+                _write_atomically(
+                    spec.directory / FILE_NAME, value, spec.uid, spec.gid, trailing_newline=False
+                )
                 results[spec.principal] = "written"
             except OSError as exc:
                 log.warning("api key export %s failed (%s)", spec.principal, type(exc).__name__)

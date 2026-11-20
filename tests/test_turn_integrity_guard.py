@@ -90,6 +90,85 @@ def test_none_tool_details_treated_as_empty():
     ) is True
 
 
+class _FakeConn:
+    def __init__(self, acked):
+        self._acked = acked
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, statement, params):
+        sql = str(statement)
+        assert "new_session_provider_ack" in sql and "turn_id" in sql
+        hit = params["turn"] in self._acked
+
+        class _Result:
+            def first(self_inner):
+                return (1,) if hit else None
+
+        return _Result()
+
+
+class _FakeEngine:
+    def __init__(self, acked):
+        self.acked = set(acked)
+
+    def connect(self):
+        return _FakeConn(self.acked)
+
+
+def _with_engine(engine, fn):
+    import llm_bawt.utils.db as db
+
+    original = db.get_shared_engine
+    db.get_shared_engine = lambda config=None, *a, **k: engine
+    try:
+        return fn()
+    finally:
+        db.get_shared_engine = original
+
+
+_RESET = "Session reset. Ready for a new conversation."
+
+
+def test_reset_text_alone_is_still_a_flaggable_claim():
+    # TASK-2535: the confirmation prose is >= the threshold, so the predicate
+    # flags it; the exemption must come from recorded evidence, not text.
+    assert _is_unbacked_work_claim(
+        is_bridge_turn=True, tool_call_details=[], response_text=_RESET
+    ) is True
+
+
+def test_bridge_acknowledged_reset_turn_is_exempt():
+    from llm_bawt.service.turn_lifecycle import _turn_has_reset_ack
+
+    assert _with_engine(_FakeEngine({"turn-reset"}),
+                        lambda: _turn_has_reset_ack(object(), "turn-reset")) is True
+
+
+def test_model_imitating_reset_text_is_not_exempt():
+    # Same text on a turn with no recorded provider ack stays checked.
+    from llm_bawt.service.turn_lifecycle import _turn_has_reset_ack
+
+    assert _with_engine(_FakeEngine({"turn-reset"}),
+                        lambda: _turn_has_reset_ack(object(), "turn-imitation")) is False
+
+
+def test_reset_ack_lookup_fails_closed_to_flagging():
+    from llm_bawt.service.turn_lifecycle import _turn_has_reset_ack
+
+    class _Broken:
+        def connect(self):
+            raise RuntimeError("db down")
+
+    assert _with_engine(_Broken(), lambda: _turn_has_reset_ack(object(), "t")) is False
+    assert _with_engine(None, lambda: _turn_has_reset_ack(object(), "t")) is False
+    assert _with_engine(_FakeEngine({""}), lambda: _turn_has_reset_ack(object(), "")) is False
+
+
 if __name__ == "__main__":
     import sys
     import traceback

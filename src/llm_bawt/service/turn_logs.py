@@ -627,6 +627,33 @@ class TurnLogStore:
         except Exception as e:
             logger.debug("update_partial_response failed for %s: %s", turn_id, e)
 
+    def abandon_open_legacy_turn(self, turn_id: str) -> bool:
+        """Close a non-protocol turn whose caller left before launch (TASK-2541).
+
+        Only a still-open legacy row changes: an ended row (a Stop or another
+        owner already settled it) is left alone, and a pending Stop
+        (``cancelling``) settles as ``aborted`` like the protocol does.
+        """
+        if self.engine is None or not turn_id:
+            return False
+        with Session(self.engine) as session:
+            row = session.exec(
+                select(TurnLog).where(TurnLog.id == turn_id).with_for_update()
+            ).first()
+            if (row is None or row.terminal_protocol_state is not None
+                    or row.ended_at is not None):
+                return False
+            if row.status == "cancelling":
+                row.status, row.end_reason = "aborted", "aborted"
+            elif row.status in ("streaming", "pending"):
+                row.status, row.end_reason = "cancelled", "aborted"
+            else:
+                return False
+            row.ended_at = datetime.now(timezone.utc)
+            session.add(row)
+            session.commit()
+            return True
+
     def reap_other_open_turns(
         self, *, bot_id: str, current_turn_id: str
     ) -> list[dict]:

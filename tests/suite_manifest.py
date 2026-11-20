@@ -11,6 +11,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_history_timeline_summaries_pg.py::",
     "test_bounded_agent_history_pg.py::",
     "test_new_bot_storage_pg.py::",
+    "test_skill_sources_pg.py::",
     "test_setup_orientation_pg.py::",
     "test_generated_title_pg.py::",
     "test_isolated_recall_pg.py::",
@@ -198,6 +199,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_guidance_run_pg.py::",
     "test_guidance_view_pg.py::",
     "test_history_read_cursor_pg.py::",
+    "test_abandon_legacy_turn_pg.py::",
     "test_ops_freeze_executor_pg.py::",
     "test_thread_auto_archive_pg.py::",
 )

@@ -18,6 +18,7 @@ protected tail kept raw.
 
 from __future__ import annotations
 
+import re
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -414,9 +415,12 @@ class TestCallSiteGuards:
         assert branch.index("_maybe_summarize_on_new") < branch.index(
             "_rotate_chat_session"
         )
-        for path in ("chat_streaming.py", "chat_nonstream.py"):
-            caller = (SRC / "llm_bawt/service" / path).read_text()
-            assert "NewSessionExecution.prepare_chat(" in caller
+        # Non-streaming calls it directly; streaming offloads the same call to a
+        # worker thread (TASK-2541) so the event loop never blocks on it.
+        nonstream = (SRC / "llm_bawt/service/chat_nonstream.py").read_text()
+        assert "NewSessionExecution.prepare_chat(" in nonstream
+        streaming = (SRC / "llm_bawt/service/chat_streaming.py").read_text()
+        assert re.search(r"await run_in_thread\(\s*NewSessionExecution\.prepare_chat,", streaming)
 
     def test_job_routes_thread_windows_through_common_unit(self):
         """summarize_eligible_sessions must call summarize_thread for

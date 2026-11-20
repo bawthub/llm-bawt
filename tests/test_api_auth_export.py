@@ -26,6 +26,7 @@ def test_export_writes_verifiable_key_and_client_reads_it(tmp_path, monkeypatch)
     spec = export.ExportSpec("bawthub-web", tmp_path / "web", None, None)
     assert export.export_all([spec], root=_root) == {"bawthub-web": "written"}
     path = tmp_path / "web" / export.FILE_NAME
+    assert path.read_bytes() == keys.header_value(spec.principal, root=_root).encode("ascii")
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     monkeypatch.setenv(client.FILE_ENV, str(path))
     headers = client.add_auth_header({"Accept": "x"})

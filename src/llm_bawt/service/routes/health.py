@@ -2,8 +2,7 @@
 
 import dataclasses
 
-from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter
 
 from ..dependencies import get_service
 from ..schemas import HealthResponse, ServiceStatusResponse, SystemStatusResponse
@@ -15,16 +14,6 @@ router = APIRouter()
 def health_check():
     """Health check endpoint."""
     return HealthResponse()
-
-
-@router.get("/metrics", include_in_schema=False)
-async def loop_metrics(request: Request):
-    """Numeric process metrics only; stacks remain in the app log."""
-    headers = {"Cache-Control": "no-store"}
-    monitor = getattr(request.app.state, "loop_watchdog", None)
-    if monitor is None:
-        return JSONResponse({"error": "metrics_unavailable"}, status_code=503, headers=headers)
-    return JSONResponse(monitor.snapshot(), headers=headers)
 
 
 @router.get("/status", response_model=ServiceStatusResponse, tags=["System"])

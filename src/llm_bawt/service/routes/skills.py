@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import asyncio
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from ...skills.service import SkillService, SkillServiceError
 from ..dependencies import get_bot_profile_store, get_service
+from .service_auth import require_service_token
 
 router = APIRouter()
 
@@ -97,3 +98,87 @@ async def list_bot_skills():
 async def bot_skills(slug: str):
     """One bot's effective skills, with why any assigned skill does not apply."""
     return await _run(skill_service().effective, slug)
+
+
+# -- Skill sources (TASK-2534) ------------------------------------------------
+
+
+class SourceRequest(BaseModel):
+    label: str
+    url: str
+    ref: str | None = None
+    subdir: str | None = None
+    credential: str = "none"
+    priority: int = Field(default=100, ge=0, le=10_000)
+
+
+class SourceActionRequest(BaseModel):
+    revision: str | None = None
+
+
+# Source writes change the skills every bot gets, so they need BawtHub's
+# service bearer (added by its proxy for admins only, TASK-2370). ``user_id``
+# is bound to the signed-in person by that proxy and recorded as the actor.
+_SERVICE = [Depends(require_service_token)]
+
+
+def source_service():
+    from ...skills.source_config import source_service_for
+
+    config = get_service().config
+    engine = get_bot_profile_store(config).engine
+    if engine is None:
+        raise HTTPException(status_code=503, detail="Bot profiles DB unavailable")
+    return source_service_for(engine, config)
+
+
+async def _run_source(fn, *args, **kwargs):
+    from ...skills.source_store import SourceError
+
+    try:
+        return await asyncio.to_thread(lambda: fn(*args, **kwargs))
+    except SourceError as exc:
+        raise HTTPException(status_code=exc.status, detail={"code": exc.code, "message": exc.detail}) from exc
+
+
+@router.get("/v1/skills/sources", tags=["Skills"])
+async def list_sources():
+    """Configured skill sources, their pinned revisions and any pending update."""
+    return await _run_source(source_service().list)
+
+
+@router.post("/v1/skills/sources", tags=["Skills"], dependencies=_SERVICE)
+async def add_source(request: SourceRequest, user_id: str | None = None):
+    """Fetch, validate and activate a new Git source. Nothing is saved if it can't be read."""
+    service = source_service()
+    return await _run_source(service.add, label=request.label, url=request.url, ref=request.ref,
+                             subdir=request.subdir, credential=request.credential,
+                             priority=request.priority, updated_by=user_id)
+
+
+@router.post("/v1/skills/sources/{source_id}/check", tags=["Skills"], dependencies=_SERVICE)
+async def check_source(source_id: str):
+    """Stage the remote revision and report which skills it adds, changes or removes."""
+    return await _run_source(source_service().check, source_id)
+
+
+@router.post("/v1/skills/sources/{source_id}/update", tags=["Skills"], dependencies=_SERVICE)
+async def update_source(source_id: str, request: SourceActionRequest, user_id: str | None = None):
+    """Activate exactly the checked revision the owner reviewed."""
+    if not request.revision:
+        raise HTTPException(status_code=400, detail={"code": "revision_required",
+                                                     "message": "Check for updates and confirm a revision."})
+    return await _run_source(source_service().update, source_id, revision=request.revision,
+                             updated_by=user_id)
+
+
+@router.post("/v1/skills/sources/{source_id}/rollback", tags=["Skills"], dependencies=_SERVICE)
+async def rollback_source(source_id: str, user_id: str | None = None):
+    """Re-activate the previous pinned revision."""
+    return await _run_source(source_service().rollback, source_id, updated_by=user_id)
+
+
+@router.delete("/v1/skills/sources/{source_id}", tags=["Skills"], dependencies=_SERVICE)
+async def remove_source(source_id: str):
+    """Remove a source and its files. Other sources, the bundle and assignments are untouched."""
+    return await _run_source(source_service().remove, source_id)

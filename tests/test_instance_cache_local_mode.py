@@ -25,6 +25,7 @@ def _make_service(**overrides: Any) -> BackgroundService:
     """Build a minimal BackgroundService without full __init__."""
     svc = BackgroundService.__new__(BackgroundService)
     svc._llm_bawt_cache = {}
+    svc._chat_instance_lock = threading.Lock()
     svc._client_cache = {}
     svc._bg_client_cache = {}
     svc._bg_client_lock = threading.Lock()

@@ -142,8 +142,10 @@ class TerminalFollowerScope:
         self._inference_started = False
         self._closed = False
         self._on_close = None
+        self._turn_id: str | None = None
 
     def admitted(self, lease, *, turn_id: str, cancel_event: Event, is_agent: bool, on_close=None):
+        self._turn_id = turn_id
         if lease is None:
             return
         if not isinstance(lease, FollowerLease):
@@ -187,6 +189,31 @@ class TerminalFollowerScope:
             # recovery to finish a failed write once the database is reachable.
             log.warning("Could not commit pre-launch terminal failure", exc_info=True)
 
+    def abandon_unlaunched(self):
+        """Settle an admitted turn whose caller left before launch (TASK-2541).
+
+        Leased turns commit ``cancelled``/``aborted`` under the lease; legacy
+        turns close only while still open. Either way a prior Stop or another
+        owner's outcome wins, and nothing launched is touched.
+        """
+        if self._launched or self._inference_started or self._turn_id is None:
+            return
+        if self.follower is None:
+            try:
+                self.store.abandon_open_legacy_turn(self._turn_id)
+            except Exception:
+                log.warning("Could not close abandoned pre-launch turn", exc_info=True)
+            return
+        try:
+            self.follower.protocol.commit(
+                self.follower.lease, status="cancelled", end_reason="aborted",
+            )
+        except FollowerFenceLost:
+            return
+        except Exception:
+            # Lease expiry still lets recovery settle it once the DB is back.
+            log.warning("Could not commit abandoned pre-launch turn", exc_info=True)
+
     def _close(self):
         follower = self.follower
         if follower is None or self._closed:
@@ -202,6 +229,7 @@ class TerminalFollowerScope:
 
     def launch_worker(self, loop, worker, *, execution=None):
         if self.follower is None:
+            self._launched = True  # legacy: the worker owns the row from here
             return (
                 execution.launch_worker(loop, worker) if execution is not None
                 else loop.run_in_executor(None, worker)

@@ -847,9 +847,7 @@ def clear_history(
             raise HTTPException(status_code=500, detail="Could not clear all bot history")
 
         # Evict any cached LLMBawt instances for this bot
-        stale_keys = [k for k in service._llm_bawt_cache if k[1] == effective_bot_id]
-        for k in stale_keys:
-            del service._llm_bawt_cache[k]
+        service.invalidate_bot_instances(effective_bot_id)
 
         return HistoryClearResponse(
             success=True,
@@ -954,9 +952,7 @@ def delete_message(
 
         # Evict cached LLMBawt instances so their in-memory history_manager
         # doesn't keep serving the just-forgotten message on the next turn.
-        stale_keys = [k for k in service._llm_bawt_cache if k[1] == effective_bot_id]
-        for k in stale_keys:
-            del service._llm_bawt_cache[k]
+        service.invalidate_bot_instances(effective_bot_id)
 
         return HistoryClearResponse(
             success=True,

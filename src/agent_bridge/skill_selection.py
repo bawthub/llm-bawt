@@ -98,7 +98,18 @@ def injected_field(refs) -> str:
 
 
 def legacy_claude_skill_roots() -> tuple[Path, ...]:
-    """Legacy CLI discovery roots (the bootstrap default links ~/.claude/skills)."""
+    """Legacy CLI discovery roots (the bootstrap default links ~/.claude/skills).
+
+    A skill-source store's ``SKILL_SOURCES_CURRENT`` replaces the configured
+    path while it resolves to a directory, matching the bridge's link.
+    """
+    current = os.environ.get("SKILL_SOURCES_CURRENT")
+    if current:
+        try:
+            if Path(current).resolve(strict=True).is_dir():
+                return (Path(current),)
+        except OSError:
+            pass
     configured = os.environ.get("CLAUDE_CODE_SKILLS_PATH")
     return tuple(
         Path(value) for value in configured.split(os.pathsep) if value

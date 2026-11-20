@@ -25,10 +25,11 @@ from llm_bawt.service.routes import (
     ops,
     providers,
     service_auth,
+    skills,
 )
 from llm_bawt.service.routes.service_auth import require_service_token
 
-ROUTERS = (approval_policies, ops, model_catalog, integrations, providers, guidance)
+ROUTERS = (approval_policies, ops, model_catalog, integrations, providers, guidance, skills)
 
 PROTECTED = {
     ("POST", "/v1/tool-approval-policies"),
@@ -71,6 +72,11 @@ PROTECTED = {
     ("GET", "/v1/guidance"),
     ("POST", "/v1/guidance/proposals/{proposal_id}/decide"),
     ("POST", "/v1/guidance/runs"),
+    ("POST", "/v1/skills/sources"),
+    ("POST", "/v1/skills/sources/{source_id}/check"),
+    ("POST", "/v1/skills/sources/{source_id}/update"),
+    ("POST", "/v1/skills/sources/{source_id}/rollback"),
+    ("DELETE", "/v1/skills/sources/{source_id}"),
 }
 
 
@@ -106,7 +112,7 @@ def test_protected_route_refuses_a_caller_without_the_bearer(monkeypatch, method
                         lambda: SimpleNamespace(check=lambda header: TokenCheck.INVALID))
     url = path.format(policy_id="p", request_id="r", slug="s", job_id="j", model_key="m",
                       access_key="a", endpoint_id="e", integration_id="unraid", provider_id="openai-api", host_id="h",
-                      proposal_id="1")
+                      proposal_id="1", source_id="s")
     response = TestClient(_app()).request(method, url)
     assert response.status_code == 401
     assert response.headers["www-authenticate"] == "Bearer"

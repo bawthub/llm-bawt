@@ -1,6 +1,7 @@
 """FastAPI-based background service wiring for llm-bawt."""
 
 import asyncio
+import threading
 from contextlib import asynccontextmanager
 
 from ..utils.config import Config
@@ -36,6 +37,10 @@ def _is_tcp_listening(host: str, port: int) -> bool:
 async def lifespan(app):
     """FastAPI lifespan handler for startup/shutdown."""
     from datetime import datetime, timezone
+
+    # Build FastAPI's cached schema before readiness, not on the serving loop
+    # during the first request. All routers are registered before lifespan starts.
+    await asyncio.to_thread(app.openapi)
 
     # TASK-1232: the startup recovery check only touches turns created before
     # this instant; anything newer belongs to this process's own workers.
@@ -98,6 +103,24 @@ async def lifespan(app):
         seed_enforced_defaults(gate_settings.engine)
     except Exception as exc:  # noqa: BLE001 - the env default still enforces
         log.warning("Could not seed bridge gate enforcement (%s)", type(exc).__name__)
+
+    # Skill sources (TASK-2534): a fresh volume gets its effective tree from
+    # the configured sources and the image bundle. Optional; skills fall back
+    # to CLAUDE_CODE_SKILLS_PATH when this is unset or fails.
+    try:
+        from ..skills.source_config import source_service_for
+
+        if gate_settings.engine is not None:
+            sources = source_service_for(gate_settings.engine, config)
+            sources.ensure_current()
+            # The built-in archive source downloads in the background so a slow
+            # or offline release host never delays startup; the bundle serves meanwhile.
+            from ..skills.source_config import install_default_source
+
+            threading.Thread(target=install_default_source, args=(sources,),
+                             name="skill-default-source", daemon=True).start()
+    except Exception as exc:  # noqa: BLE001 - startup continues on the old path
+        log.warning("Could not prepare skill sources (%s)", type(exc).__name__)
 
     # Prefer MCP tool-based memory retrieval for llm-service.
     # This ensures memory retrieval happens via MCP tools and can be logged clearly.
@@ -481,8 +504,8 @@ async def lifespan(app):
 
     # TASK-2105 S3: the one provider probe kept on a timer (a switched-off
     # Ollama server has no event); it publishes only when reachability flips.
-    import threading
-
+    # Uses the module-level threading import: a local one would make the name
+    # local to lifespan and break the earlier skill-source thread (TASK-2534).
     from .providers.ollama import reachability_loop
     service._ollama_reachability_stop = threading.Event()
     threading.Thread(
@@ -615,6 +638,7 @@ def shutdown_phases(service, *, scheduler, redis_subscriber, home_audio_worker) 
 try:
     from fastapi import FastAPI
 
+    from .metrics import install as install_metrics
     from .routes import all_routers
 
     app = FastAPI(
@@ -626,6 +650,7 @@ try:
 
     for router in all_routers:
         app.include_router(router)
+    prometheus_metrics = install_metrics(app)
 
     from .request_guard import RequestGuardMiddleware
 
@@ -634,7 +659,7 @@ try:
     # TASK-2380: added last so it runs first; mode off unless set.
     from ..api_auth.wiring import install as install_api_auth
 
-    install_api_auth(app)
+    install_api_auth(app, prometheus_metrics=prometheus_metrics)
 
 except ImportError:
     # FastAPI not installed - create stub
@@ -789,6 +814,8 @@ def main():
             port=args.port,
             reload=args.reload,
             reload_excludes=reload_excludes,
+            # The app's watchdog and Prometheus registry are process-local.
+            workers=1,
             log_level=uvicorn_log_level,
             # Keep uvicorn on our root handler so access lines use the standard
             # format and the polling filter (TASK-2225).

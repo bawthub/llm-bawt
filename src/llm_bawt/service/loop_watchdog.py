@@ -23,7 +23,9 @@ HEARTBEAT_SECONDS = 0.05
 STALL_SECONDS = 0.25
 WINDOW_SECONDS = 60.0
 LOG_INTERVAL_SECONDS = 30.0
+LONG_STALL_SECONDS = 1.0
 MAX_STACK_FRAMES = 24
+MAX_PENDING_LONG_STACKS = 32
 
 
 def _stack_frames(frame: FrameType | None) -> list[dict[str, str | int]]:
@@ -41,11 +43,13 @@ def _stack_frames(frame: FrameType | None) -> list[dict[str, str | int]]:
     return frames
 
 
-def _emit_warning(lag: float, frames: list[dict[str, str | int]]) -> None:
+def _emit_warning(lag: float, frames: list[dict[str, str | int]], episode: int, *, long: bool) -> None:
     # One write within Linux PIPE_BUF, without StreamHandler or TextIO locks.
     # The OS sink can still block this daemon, but it cannot hold a logging
     # lock that the serving thread needs. Heartbeat accounting is independent.
-    payload = {"lag_ms_at_capture": round(lag * 1000, 3), "frames": frames}
+    payload = {"stall_episode": episode, "lag_ms_at_capture": round(lag * 1000, 3), "frames": frames}
+    if long:
+        payload["long_stall"] = True
     while True:
         line = ("WARNING event_loop_stall " + json.dumps(payload, separators=(",", ":")) + "\n").encode()
         if len(line) <= 4096:
@@ -68,18 +72,25 @@ class LoopStallWatchdog:
         self._stop = threading.Event()
         self._deadline = 0.0
         self._episode_counted = False
+        self._long_captured = False
         self._last_log = -math.inf
+        self._output_ready = threading.Condition()
+        self._pending_long = deque(maxlen=MAX_PENDING_LONG_STACKS)
+        self._pending_short = None
+        self._output_closed = False
         self._stall_count = 0
         self._samples: deque[tuple[float, float]] = deque(maxlen=math.ceil(WINDOW_SECONDS / heartbeat) + 2)
         self._loop_thread = 0
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._watcher = threading.Thread(target=self._watch, name="event-loop-watchdog", daemon=True)
+        self._writer = threading.Thread(target=self._write_warnings, name="event-loop-watchdog-output", daemon=True)
 
     def start(self) -> None:
         """Call once, from the serving loop."""
         loop = asyncio.get_running_loop()
         self._loop_thread = threading.get_ident()
         self._deadline = time.monotonic() + self._heartbeat_interval
+        self._writer.start()
         self._watcher.start()
         self._heartbeat_task = loop.create_task(self._heartbeat())
 
@@ -88,8 +99,15 @@ class LoopStallWatchdog:
         if self._heartbeat_task is not None:
             self._heartbeat_task.cancel()
             await asyncio.gather(self._heartbeat_task, return_exceptions=True)
-            # A log sink can be slow; never wait for it on the serving loop.
             await asyncio.to_thread(self._watcher.join, 1.0)
+            self._close_output()
+            # A log sink can be slow; never wait for it on the serving loop.
+            await asyncio.to_thread(self._writer.join, 1.0)
+
+    def _close_output(self) -> None:
+        with self._output_ready:
+            self._output_closed = True
+            self._output_ready.notify()
 
     def _record_stall(self, lag: float) -> None:
         if lag >= self._threshold and not self._episode_counted:
@@ -103,6 +121,7 @@ class LoopStallWatchdog:
             self._record_stall(lag)
             self._samples.append((now, lag))
             self._episode_counted = False
+            self._long_captured = False
             self._deadline = now + self._heartbeat_interval
         return lag
 
@@ -113,18 +132,54 @@ class LoopStallWatchdog:
 
     def _watch(self) -> None:
         while not self._stop.wait(self._heartbeat_interval):
-            with self._lock:
-                now = time.monotonic()
-                lag = now - self._deadline
-                if lag < self._threshold or self._episode_counted:
-                    continue
-                self._record_stall(lag)
-                if now - self._last_log < LOG_INTERVAL_SECONDS:
-                    continue
+            self._sample_stall()
+
+    def _sample_stall(self) -> None:
+        with self._lock:
+            now = time.monotonic()
+            lag = now - self._deadline
+            if lag < self._threshold:
+                return
+            first = not self._episode_counted
+            self._record_stall(lag)
+            long = lag >= LONG_STALL_SECONDS
+            if long:
+                if self._long_captured:
+                    return
+                self._long_captured = True
+            elif first and now - self._last_log >= LOG_INTERVAL_SECONDS:
                 self._last_log = now
-                frames = _stack_frames(sys._current_frames().get(self._loop_thread))
-            # No I/O under the state lock; the duration is a lower bound at capture.
-            _emit_warning(lag, frames)
+            else:
+                return
+            frames = _stack_frames(sys._current_frames().get(self._loop_thread))
+            warning = (lag, frames, self._stall_count)
+
+        # A blocked sink cannot stop sampling. Keep the newest severe captures
+        # under sustained output backpressure and prefer them to a short warning.
+        with self._output_ready:
+            if self._output_closed:
+                return
+            if long:
+                self._pending_long.append(warning)
+            else:
+                self._pending_short = warning
+            self._output_ready.notify()
+
+    def _write_warnings(self) -> None:
+        while True:
+            with self._output_ready:
+                self._output_ready.wait_for(
+                    lambda: bool(self._pending_long) or self._pending_short is not None or self._output_closed,
+                )
+                long = bool(self._pending_long)
+                if long:
+                    warning = self._pending_long.popleft()
+                elif self._pending_short is not None:
+                    warning, self._pending_short = self._pending_short, None
+                else:
+                    return
+            # No sink access while holding either monitor lock.
+            _emit_warning(*warning, long=long)
 
     def snapshot(self) -> dict[str, float | int]:
         """Non-destructive rolling window; independent scrape clients cannot erase peaks."""

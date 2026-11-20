@@ -11,7 +11,13 @@ import logging
 from collections.abc import Mapping
 from typing import Any
 
-from .middleware import TURN_HEADER, ApiAuthMiddleware, Observations, Principal
+from .middleware import (
+    ALLOWED_PATHS,
+    TURN_HEADER,
+    ApiAuthMiddleware,
+    Observations,
+    Principal,
+)
 from .mode import DENYLIST_KEY, ModeResolver
 
 logger = logging.getLogger(__name__)
@@ -125,6 +131,8 @@ def use_store(store) -> None:
     SETTINGS.store = store
 
 
-def install(app) -> None:
+def install(app, *, prometheus_metrics: bool = False) -> None:
+    # The standard endpoint is read-only, bounded telemetry for the LAN.
+    allowed = ALLOWED_PATHS | {"/metrics"} if prometheus_metrics else ALLOWED_PATHS
     app.add_middleware(ApiAuthMiddleware, resolver=RESOLVER, checkers=CHECKERS,
-                       observations=OBSERVATIONS, route_template=route_template(app))
+                       observations=OBSERVATIONS, route_template=route_template(app), allowed_paths=allowed)

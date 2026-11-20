@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from threading import Lock
 from typing import Any
 
 from llm_bawt import bots as bots_module
@@ -91,6 +92,7 @@ def test_db_bot_profiles_load_correctly(monkeypatch) -> None:
 def test_background_service_invalidates_bot_instances() -> None:
     """Bot-level cache invalidation should only evict matching bot keys."""
     service = BackgroundService.__new__(BackgroundService)
+    service._bg_client_lock = Lock()
     service._llm_bawt_cache = {
         ("model-a", "nova", "u1"): object(),
         ("model-b", "nova", "u2"): object(),
@@ -108,6 +110,7 @@ def test_background_service_invalidates_bot_instances() -> None:
 def test_background_service_invalidates_all_instances() -> None:
     """Global cache invalidation should clear all cached instances."""
     service = BackgroundService.__new__(BackgroundService)
+    service._bg_client_lock = Lock()
     service._llm_bawt_cache = {
         ("model-a", "nova", "u1"): object(),
         ("model-b", "spark", "u2"): object(),
@@ -122,6 +125,7 @@ def test_background_service_invalidates_all_instances() -> None:
 def test_background_service_clears_session_model_overrides_for_bot() -> None:
     """Clearing model overrides by bot should only remove matching bot sessions."""
     service = BackgroundService.__new__(BackgroundService)
+    service._bg_client_lock = Lock()
     service._session_model_overrides = {
         ("nova", "u1"): "grok-4-fast",
         ("nova", "u2"): "grok-4-fast",
@@ -139,6 +143,7 @@ def test_background_service_clears_session_model_overrides_for_bot() -> None:
 def test_background_service_clears_all_session_model_overrides() -> None:
     """Clearing with no scope should remove every session override."""
     service = BackgroundService.__new__(BackgroundService)
+    service._bg_client_lock = Lock()
     service._session_model_overrides = {
         ("nova", "u1"): "grok-4-fast",
         ("spark", "u1"): "gpt-4.1",

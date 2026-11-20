@@ -44,6 +44,34 @@ def _is_unbacked_work_claim(
     return len((response_text or "").strip()) >= _MIN_NARRATION_CHARS_FOR_GUARD
 
 
+def _turn_has_reset_ack(config, turn_id: str) -> bool:
+    """TASK-2535: True when this turn is a bridge-acknowledged /new reset.
+
+    The evidence is the provider ack the app recorded on the turn's delivery
+    (NewSessionReceipt.record_provider_ack), written from the bridge's
+    terminal event before the turn finalizes. Response text is never
+    consulted, so a model imitating the reset confirmation is still checked.
+    Runs only for turns the guard would flag, on the finalizer's worker thread.
+    """
+    try:
+        from sqlalchemy import text
+
+        from ..utils.db import get_shared_engine
+
+        engine = get_shared_engine(config)
+        if engine is None or not turn_id:
+            return False
+        with engine.connect() as conn:
+            return conn.execute(text("""
+                SELECT 1 FROM inter_bot_deliveries
+                WHERE turn_id=:turn AND metadata_json->'new_session_provider_ack' IS NOT NULL
+                LIMIT 1
+            """), {"turn": turn_id}).first() is not None
+    except Exception:
+        log.debug("reset-ack lookup failed for turn %s", turn_id, exc_info=True)
+        return False
+
+
 def _message_to_dict(msg: Any) -> dict[str, Any]:
     """Normalize message objects for JSON logging."""
     if hasattr(msg, "to_dict"):
@@ -444,7 +472,7 @@ class TurnLifecycleMixin:
             is_bridge_turn=is_bridge_turn,
             tool_call_details=tool_call_details,
             response_text=response_text,
-        ):
+        ) and not _turn_has_reset_ack(self.config, turn_id):
             stripped = response_text.strip()
             log.warning(
                 "TURN-INTEGRITY: bridge turn %s (bot=%s) finalized with "

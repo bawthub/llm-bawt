@@ -36,6 +36,22 @@ def _write_json_if_changed(path: Path, payload: dict) -> bool:
     return True
 
 
+def skills_link_target(configured: str, current: str | None = None) -> Path:
+    """The directory Claude's skills link points at.
+
+    ``SKILL_SOURCES_CURRENT`` (a skill-source store's ``current`` entry) wins
+    only when it resolves to an existing directory; otherwise the single
+    ``CLAUDE_CODE_SKILLS_PATH`` (the image bundle) applies, exactly as before.
+    """
+    if current:
+        try:
+            if Path(current).resolve(strict=True).is_dir():
+                return Path(current)
+        except OSError:
+            pass
+    return Path(configured)
+
+
 def _ensure_skills_link(claude_dir: Path, target: Path) -> None:
     skills_link = claude_dir / "skills"
     if target.exists():
@@ -141,10 +157,9 @@ def bootstrap_claude_home() -> None:
     claude_dir = Path.home() / ".claude"
     claude_dir.mkdir(parents=True, exist_ok=True)
 
-    skills_target = Path(
-        os.getenv("CLAUDE_CODE_SKILLS_PATH") or _DEFAULT_SKILLS_PATH
-    )
-    _ensure_skills_link(claude_dir, skills_target)
+    _ensure_skills_link(claude_dir, skills_link_target(
+        os.getenv("CLAUDE_CODE_SKILLS_PATH") or _DEFAULT_SKILLS_PATH,
+        os.getenv("SKILL_SOURCES_CURRENT")))
 
     settings_path = claude_dir / "settings.json"
     settings: dict = {}

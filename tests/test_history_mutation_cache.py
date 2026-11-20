@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
+from threading import Lock
 
 import pytest
 from fastapi import HTTPException
 
 from llm_bawt.service import dependencies
+from llm_bawt.service.background_service import BackgroundService
 from llm_bawt.service.routes import history
 
 
@@ -43,15 +44,16 @@ def reset_service():
 
 
 def fake_service(client: FakeMemoryClient):
-    return SimpleNamespace(
-        _default_bot="nova",
-        _available_models=[],
-        _llm_bawt_cache={
-            ("model", "nova", "user"): object(),
-            ("model", "other", "user"): object(),
-        },
-        get_memory_client=lambda bot_id: client,
-    )
+    service = BackgroundService.__new__(BackgroundService)
+    service._default_bot = "nova"
+    service._available_models = []
+    service._bg_client_lock = Lock()
+    service._llm_bawt_cache = {
+        ("model", "nova", "user"): object(),
+        ("model", "other", "user"): object(),
+    }
+    service.get_memory_client = lambda bot_id: client
+    return service
 
 
 def test_clear_history_uses_cached_client_for_messages_and_memories() -> None:

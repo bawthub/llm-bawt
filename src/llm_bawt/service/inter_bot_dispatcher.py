@@ -1019,10 +1019,14 @@ class InterBotDeliveryDispatcher:
             ambiguous = current
         await self._emit(ambiguous)
 
+    LEASE_RENEW_INTERVAL_SECONDS = 60
+
     async def _heartbeat(self, delivery_id: str, claim_token: str) -> None:
         while True:
-            await asyncio.sleep(60)
-            if not self.store.renew_lease(delivery_id, claim_token):
+            await asyncio.sleep(self.LEASE_RENEW_INTERVAL_SECONDS)
+            # The transaction and commit can wait on PostgreSQL. The same
+            # claim token fences an in-flight renewal against terminalization.
+            if not await asyncio.to_thread(self.store.renew_lease, delivery_id, claim_token):
                 return
 
     @staticmethod

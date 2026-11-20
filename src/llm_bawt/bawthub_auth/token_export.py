@@ -78,14 +78,14 @@ def _reader_uid(environ: Mapping[str, str], uid_env: str) -> int | None:
 
 
 def _write_atomically(path: Path, token: str, uid: int | None,
-                      gid: int | None = None) -> None:
+                      gid: int | None = None, *, trailing_newline: bool = True) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     # mkstemp creates the file 0600 with O_EXCL, so no reader ever sees a
     # wider mode or a partial write under the final name.
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(token + "\n")
+            handle.write(token + "\n" if trailing_newline else token)
             handle.flush()
             os.fsync(handle.fileno())
         os.chmod(tmp, _MODE if gid is None else _GROUP_MODE)
