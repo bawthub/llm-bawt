@@ -348,6 +348,35 @@ def test_timeline_repository_constant_sql_and_owner_predicates():
         assert "s.bot_id = :bot_id AND s.user_id = :user_id" in metadata_sql
 
 
+def test_timeline_rows_empty_before_new_bot_partition_exists():
+    """A new bot's first page load precedes its first write (no partition yet)."""
+    from llm_bawt.service.routes.history_timeline_store import timeline_rows
+
+    class Scalar:
+        def scalar(self):
+            return None
+
+    class Connection:
+        dialect = SimpleNamespace(name="postgresql")
+        def __init__(self):
+            self.calls = []
+        def execute(self, statement, params):
+            self.calls.append((str(statement), params))
+            if "to_regclass" in str(statement):
+                return Scalar()
+            raise AssertionError("queried a missing partition")
+        def __enter__(self):
+            return self
+        def __exit__(self, *_):
+            return False
+
+    conn = Connection()
+    engine = SimpleNamespace(connect=lambda: conn)
+    assert timeline_rows(engine, "messages_p_newbot", "newbot", "operator", None,
+                         "America/New_York", 1., 100.) == ([], {}, {}, [], 1.)
+    assert conn.calls == [("SELECT to_regclass(:t)", {"t": "messages_p_newbot"})]
+
+
 def test_timeline_summary_schema_defaults_and_cap():
     from pydantic import ValidationError
     from llm_bawt.service.schemas_history_timeline import TimelinePromptsResponse, TimelineStoredSummary

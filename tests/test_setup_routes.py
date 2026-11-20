@@ -270,6 +270,33 @@ def test_first_bot_happy_path_creates_agent_through_the_admin_writer():
     }
 
 
+def test_first_bot_saves_chosen_avatar_and_color():
+    with _first_bot_env() as env:
+        response = _client().post("/v1/setup/first-bot",
+                                  json={**_FIRST_BOT, "color": "violet", "avatar": "emoji:🦊"})
+
+    assert response.status_code == 200, response.text
+    payload = env.persist.call_args.args[0]
+    assert (payload["color"], payload["avatar"]) == ("violet", "emoji:🦊")
+
+
+def test_first_bot_without_identity_leaves_automatic_look():
+    with _first_bot_env() as env:
+        response = _client().post("/v1/setup/first-bot", json={**_FIRST_BOT, "avatar": ""})
+
+    assert response.status_code == 200, response.text
+    payload = env.persist.call_args.args[0]
+    assert "color" not in payload and "avatar" not in payload
+
+
+def test_first_bot_rejects_oversized_identity_fields():
+    with _first_bot_env() as env:
+        response = _client().post("/v1/setup/first-bot", json={**_FIRST_BOT, "color": "x" * 65})
+
+    assert response.status_code == 422
+    env.persist.assert_not_awaited()
+
+
 @pytest.mark.parametrize("access_path_key", list(ROUTES))
 def test_admin_writer_settles_first_bot_harness_on_every_route(access_path_key):
     """The payload first-bot builds, run through the real profile validation."""

@@ -151,6 +151,33 @@ async def _enter(gate) -> str:
     return set_cookie.split(":", 1)[1].strip().split(";", 1)[0]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("method", "target"), [
+    ("GET", "/api/chat/turn-logs?bot_id=sample&active_only=true&limit=2"),
+    ("GET", "/api"), ("POST", "/api/chat"), ("POST", "/api/chat/steer"),
+    ("POST", "/"), ("HEAD", "/api/chat/turn-logs"),
+])
+async def test_signed_in_idle_preview_refuses_api_and_writes(method, target):
+    gate = await _gate()
+    try:
+        cookie = await _enter(gate)
+        raw = (f"{method} {target} HTTP/1.1\r\nHost: preview.example.test\r\n"
+               f"Cookie: {cookie}\r\nContent-Length: 0\r\n\r\n").encode()
+        response = await _request(gate.port, raw)
+        head, body = response.split("\r\n\r\n", 1)
+        assert head.startswith("HTTP/1.1 503 Service Unavailable")
+        assert "Content-Type: application/json" in head
+        assert "Cache-Control: no-store" in head
+        assert body == "" if method == "HEAD" else json.loads(body) == {"detail": "preview_unavailable"}
+        document = await _request(gate.port, _get("/", cookie))
+        assert document.startswith("HTTP/1.1 200 OK")
+        assert "<p>fallback page</p>" in document
+        unsigned = await _request(gate.port, _get(target))
+        assert unsigned.startswith("HTTP/1.1 401")
+    finally:
+        await gate.stop()
+
+
 # --- parsing ----------------------------------------------------------------
 
 def test_parse_and_framing_refuse_ambiguity():

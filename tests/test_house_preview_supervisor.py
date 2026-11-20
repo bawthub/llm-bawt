@@ -102,9 +102,9 @@ def test_page_escapes_and_names_the_occupant():
 
 # --- the fallback page and supervision --------------------------------------
 
-async def _http_get(port: int) -> str:
+async def _http_get(port: int, target: str = "/", method: str = "GET") -> str:
     reader, writer = await asyncio.open_connection("127.0.0.1", port)
-    writer.write(b"GET / HTTP/1.1\r\nHost: dev1.example.test\r\n\r\n")
+    writer.write(f"{method} {target} HTTP/1.1\r\nHost: preview.example.test\r\n\r\n".encode())
     await writer.drain()
     data = await reader.read()
     writer.close()
@@ -138,6 +138,29 @@ async def test_empty_house_answers_with_the_page_and_forgets_the_choice(tmp_path
         assert body.startswith("HTTP/1.1 200 OK")
         assert "House h1: empty" in body and "Nobody lives here" in body
         assert sup.target_key("h1") not in redis.data
+    finally:
+        await s._stop_run()
+        await s.fallback.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("method", "target"), [
+    ("GET", "/api/chat/turn-logs?bot_id=sample&active_only=true&limit=2"),
+    ("GET", "/api"), ("GET", "/api/chat/proxy/v1/turn-logs"),
+    ("POST", "/api/chat"), ("POST", "/api/chat/steer"), ("POST", "/"),
+    ("HEAD", "/api/chat/turn-logs"), ("OPTIONS", "/api/chat"),
+])
+async def test_empty_house_never_acknowledges_api_or_writes(tmp_path, monkeypatch, method, target):
+    s, port = _supervisor(tmp_path, monkeypatch, {"value": _campus()})
+    try:
+        await s.tick()
+        response = await _http_get(port, target, method)
+        head, body = response.split("\r\n\r\n", 1)
+        assert head.startswith("HTTP/1.1 503 Service Unavailable")
+        assert "Content-Type: application/json" in head
+        assert "Cache-Control: no-store" in head
+        assert "Location:" not in head
+        assert body == "" if method == "HEAD" else json.loads(body) == {"detail": "preview_unavailable"}
     finally:
         await s._stop_run()
         await s.fallback.stop()

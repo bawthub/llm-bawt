@@ -53,7 +53,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from .house_preview import INNER_PORT, PREVIEW_PORT, gate_enabled
+from .house_preview import INNER_PORT, PREVIEW_PORT, fallback_response, gate_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -202,7 +202,7 @@ This page refreshes itself.</p>
 
 
 class FallbackServer:
-    """Answers every request on the preview port with the current page."""
+    """Serves the status document; API and write requests fail unavailable."""
 
     def __init__(self, port: int = PREVIEW_PORT) -> None:
         self.port = port
@@ -226,15 +226,19 @@ class FallbackServer:
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
-            await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=5)
-            body = self.page.encode()
+            head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=5)
+            method, target, _ = head.split(b"\r\n", 1)[0].decode("latin-1").split(" ", 2)
+            status, content_type, text = fallback_response(method, target, self.page)
+            body = text.encode()
+            reason = "OK" if status == 200 else "Service Unavailable"
             writer.write(
-                b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
-                b"Cache-Control: no-store\r\nConnection: close\r\n"
-                + f"Content-Length: {len(body)}\r\n\r\n".encode() + body)
+                f"HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\n".encode()
+                + b"Cache-Control: no-store\r\nConnection: close\r\n"
+                + f"Content-Length: {len(body)}\r\n\r\n".encode()
+                + (b"" if method == "HEAD" else body))
             await writer.drain()
         except (asyncio.TimeoutError, asyncio.IncompleteReadError, asyncio.LimitOverrunError,
-                ConnectionError):
+                ConnectionError, ValueError):
             pass
         finally:
             writer.close()

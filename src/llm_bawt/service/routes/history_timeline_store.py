@@ -62,6 +62,11 @@ def timeline_rows(engine, table: str, bot_id: str, user_id: str, session_id: str
         ORDER BY groups.day, first_ts, first_id LIMIT :limit
     """)
     with engine.connect() as conn:
+        # A bot's message partition is created by its first write, so a brand
+        # new bot has no history yet: answer with an empty timeline, not 500.
+        if (getattr(getattr(conn, "dialect", None), "name", None) == "postgresql"
+                and conn.execute(text("SELECT to_regclass(:t)"), {"t": table}).scalar() is None):
+            return [], {}, {}, [], start
         groups = [] if overview_only else [dict(row) for row in conn.execute(group_sql, base).mappings()]
         if (recent and not overview_only and not any(g.get("has_more") for g in groups)
                 and len({str(g['day']) for g in groups}) < 7):

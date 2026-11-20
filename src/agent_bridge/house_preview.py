@@ -40,6 +40,14 @@ def gate_enabled() -> bool:
     return os.environ.get(GATE_ENV, "").strip().lower() == "on"
 
 
+def fallback_response(method: str, target: str, page: str) -> tuple[int, str, str]:
+    """An idle preview may serve a document, never a successful API/write ACK."""
+    path = target.split("?", 1)[0]
+    if method not in ("GET", "HEAD") or path == "/api" or path.startswith("/api/"):
+        return 503, "application/json", json.dumps({"detail": "preview_unavailable"})
+    return 200, "text/html; charset=utf-8", page
+
+
 def vite_port() -> int:
     """The port this house's Vite listens on."""
     return INNER_PORT if gate_enabled() else PREVIEW_PORT

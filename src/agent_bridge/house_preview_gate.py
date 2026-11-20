@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import parse_qs
 
-from .house_preview import INNER_PORT, PREVIEW_PORT
+from .house_preview import INNER_PORT, PREVIEW_PORT, fallback_response
 
 logger = logging.getLogger(__name__)
 
@@ -297,7 +297,7 @@ class PreviewGate:
                         up_reader, up_writer = await asyncio.open_connection(
                             "127.0.0.1", self.upstream_port)
                     except OSError:
-                        await self._respond(writer, 200, self.page, html_body=True)
+                        await self._fallback(writer, req)
                         return
                     pump = asyncio.create_task(self._pipe(up_reader, writer, half_close=False))
                 up_writer.write(self._forward_head(req, others, peer))
@@ -348,7 +348,7 @@ class PreviewGate:
         try:
             up_reader, up_writer = await asyncio.open_connection("127.0.0.1", self.upstream_port)
         except OSError:
-            await self._respond(writer, 200, self.page, html_body=True)
+            await self._fallback(writer, req)
             return
         try:
             up_writer.write(self._forward_head(req, others, peer))
@@ -478,12 +478,19 @@ class PreviewGate:
                 f"House {esc(self.house)}</h1><p>{why}</p>{back}</main></body></html>")
         await self._respond(writer, 401, body, html_body=True)
 
+    async def _fallback(self, writer: asyncio.StreamWriter, req: Request) -> None:
+        status, content_type, body = fallback_response(
+            "UPGRADE" if req.is_upgrade else req.method, req.target, self.page)
+        await self._respond(writer, status, body, content_type=content_type,
+                            head_only=req.method == "HEAD")
+
     @staticmethod
     async def _respond(writer: asyncio.StreamWriter, status: int, body: str, *,
                        headers: list[tuple[str, str]] | None = None, html_body: bool = False,
-                       content_type: str | None = None) -> None:
+                       content_type: str | None = None, head_only: bool = False) -> None:
         reason = {200: "OK", 303: "See Other", 400: "Bad Request", 401: "Unauthorized",
-                  404: "Not Found", 431: "Request Header Fields Too Large"}.get(status, "Error")
+                  404: "Not Found", 431: "Request Header Fields Too Large",
+                  503: "Service Unavailable"}.get(status, "Error")
         data = body.encode()
         ctype = content_type or ("text/html; charset=utf-8" if html_body
                                  else "text/plain; charset=utf-8")
@@ -492,7 +499,8 @@ class PreviewGate:
                  "Connection: close", f"Content-Length: {len(data)}"]
         lines += [f"{k}: {v}" for k, v in headers or []]
         try:
-            writer.write(("\r\n".join(lines) + "\r\n\r\n").encode("latin-1") + data)
+            writer.write(("\r\n".join(lines) + "\r\n\r\n").encode("latin-1")
+                         + (b"" if head_only else data))
             await writer.drain()
         except ConnectionError:
             pass

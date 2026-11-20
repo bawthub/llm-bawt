@@ -81,6 +81,10 @@ class FirstBotRequest(TenantPreferences):
     name: str = Field(min_length=1, max_length=255)
     description: str = Field(default="", max_length=2000)
     system_prompt: str = Field(min_length=1)
+    # Optional identity chosen in the wizard; omitted keeps the automatic look.
+    # Same shape as the admin bot-profile create (palette key / avatar ref).
+    color: str | None = Field(default=None, max_length=64)
+    avatar: str | None = Field(default=None, max_length=2048)
 
 
 def _store_setup_preferences(service, body: TenantPreferences | None) -> dict[str, object]:
@@ -204,6 +208,8 @@ async def create_first_bot(body: FirstBotRequest, http_request: Request,
                     # The writer heals this to ``claude-proxy`` for non-Anthropic endpoints.
                     "harness": FIRST_BOT_AGENT_BACKEND,
                     "endpoint_id": body.endpoint_id,
+                    **{key: value for key, value in (("color", body.color), ("avatar", body.avatar))
+                       if value},
                     profile_changes.CHANGED_BY: profile_actor(http_request, user_id),
                 }, create_only=True)
         except HTTPException as exc:
