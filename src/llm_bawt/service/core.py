@@ -347,6 +347,7 @@ class ServiceLLMBawt(BaseLLMBawt):
             return None
         try:
             from ..setting_definitions import setting_default
+            from ..utils.history import raw_history_cap
 
             _, _, budget = self.config.resolve_context_budget(
                 getattr(self.client, "model_alias", None)
@@ -354,9 +355,14 @@ class ServiceLLMBawt(BaseLLMBawt):
             summaries = int(self._resolve_setting(
                 "summary_count", setting_default("summary_count", 5),
             ))
+            history_tokens = int(self._resolve_setting(
+                "history_tokens", setting_default("history_tokens", 12000),
+            ))
         except Exception:  # noqa: BLE001 - no window: fall back to the full read
             return None
-        return (int(budget), summaries) if budget and budget > 0 else None
+        if not budget or budget <= 0:
+            return None
+        return (raw_history_cap(int(budget), history_tokens), summaries)
 
     def load_history(self, since_minutes: int | None = None) -> list[dict]:
         window = self.history_window() if since_minutes is None else None

@@ -211,12 +211,15 @@ class ShortTermMessageReadsMixin:
         Returns the same rows ``get_messages()`` would, restricted to:
         - the newest ``summary_limit`` summaries (the assembler keeps at most
           ``summary_count`` of them, newest last), and
-        - unsummarized rows newest-first until the non-system rows exceed
-          ``token_budget`` by the assembler's own estimate. The row that
-          crosses the budget is included, so newest-turn floor and degrade
-          decisions see exactly what they would see in the full list.
-        System rows inside that span are kept (never counted): seed delivery
-        drops them later, chat-side consumers still see them. At least
+        - unsummarized non-system rows newest-first until they exceed
+          ``token_budget`` by the assembler's own estimate and the newest user
+          row has been read. ``token_budget`` is the raw cap the assembler
+          applies (``history_tokens`` bounded by the physical budget). The row
+          that crosses it is included, and the newest complete turn is always
+          read, so the newest-turn floor and degrade decisions see exactly what
+          they would see in the full list.
+        System rows are not read: this window only feeds seed assembly, which
+        drops them (agents carry their own system prompt). At least
         ``min_rows`` rows are read when they exist, so small-history checks
         (cold-start priming counts ``<= 3``) match the full read.
 
@@ -257,12 +260,13 @@ class ShortTermMessageReadsMixin:
                 ).fetchall())
             used = 0
             raw_count = 0
+            seen_user = False
             offset = 0
             while True:
                 page = conn.execute(
                     text(f"""
                         SELECT {cols} FROM {table}
-                        WHERE role <> 'summary'
+                        WHERE role NOT IN ('summary', 'system')
                           AND (summarized IS NULL OR summarized = FALSE){owner_sql}
                         ORDER BY timestamp DESC, id DESC
                         LIMIT :page_size OFFSET :offset
@@ -272,9 +276,9 @@ class ShortTermMessageReadsMixin:
                 for row in page:
                     rows.append(row)
                     raw_count += 1
-                    if row.role != "system":
-                        used += estimate_message_tokens(row.content or "")
-                    if used > token_budget and raw_count >= min_rows:
+                    used += estimate_message_tokens(row.content or "")
+                    seen_user = seen_user or row.role == "user"
+                    if used > token_budget and raw_count >= min_rows and seen_user:
                         break
                 else:
                     if len(page) == page_size:

@@ -46,14 +46,15 @@ def _seed_window(llm_bawt, budget: int) -> tuple[int, int] | None:
     if not budget or budget <= 0:
         return None
     from ...setting_definitions import setting_default
+    from ...utils.history import raw_history_cap
 
     try:
-        summaries = int(llm_bawt.history_manager._setting(
-            "summary_count", setting_default("summary_count", 5),
-        ))
+        setting = llm_bawt.history_manager._setting
+        summaries = int(setting("summary_count", setting_default("summary_count", 5)))
+        history_tokens = int(setting("history_tokens", setting_default("history_tokens", 12000)))
     except Exception:  # noqa: BLE001 - no window: fall back to the full read
         return None
-    return (int(budget), summaries)
+    return (raw_history_cap(int(budget), history_tokens), summaries)
 
 
 def build_context_seed(

@@ -142,6 +142,16 @@ class ContextBudgetError(RuntimeError):
     """
 
 
+def raw_history_cap(budget: int, history_tokens: int) -> int:
+    """Raw-history token cap the assembler applies for ``budget`` (TASK-2395).
+
+    Mirrors ``get_context_messages``: ``history_tokens`` bounded by the
+    physical budget, or the whole budget when ``history_tokens`` <= 0. A
+    bounded read sized by this cap returns everything the fill can use.
+    """
+    return budget if history_tokens <= 0 else min(history_tokens, budget)
+
+
 class HistoryManager:
     messages: list[Message] = []
     client: LLMClient

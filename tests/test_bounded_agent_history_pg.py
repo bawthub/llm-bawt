@@ -18,7 +18,7 @@ from llm_bawt.memory.postgresql import (
     PostgreSQLShortTermManager,
     partition_name,
 )
-from llm_bawt.utils.history import HistoryManager
+from llm_bawt.utils.history import HistoryManager, raw_history_cap
 from tests.pg_isolation import require_test_db_config
 
 pytestmark = pytest.mark.integration
@@ -105,15 +105,44 @@ def test_window_seed_matches_full_read(snapshot, budget, scope):
     full = _history(snapshot)
     full.load_history()
     bounded = _history(snapshot)
-    bounded.load_history(window=(budget, SETTINGS["summary_count"]))
+    cap = raw_history_cap(budget, SETTINGS["history_tokens"])
+    bounded.load_history(window=(cap, SETTINGS["summary_count"]))
 
     assert _seed(bounded, budget, *scope) == _seed(full, budget, *scope)
-    # Bounded means bounded: a small budget reads a small slice. Uncounted
-    # system rows inside the span (a third of this fixture) ride along.
+    # Seed delivery drops system rows, so the window never reads them.
+    assert not any(m.role == "system" for m in bounded.messages)
+    # Bounded means bounded: a small budget reads a small slice.
     if budget <= 200:
         assert len(bounded.messages) < len(full.messages) // 4
     elif budget <= 2000:
-        assert len(bounded.messages) < len(full.messages) // 2
+        assert len(bounded.messages) < len(full.messages) // 3
+
+
+@pytest.mark.parametrize("history_tokens", [300, 1500, 5000])
+def test_history_tokens_far_below_budget_bounds_the_read(snapshot, history_tokens):
+    # Live failure: a 1M-window agent with history_tokens=20000 passed the
+    # physical budget, so the read barely shrank. The cap is history_tokens.
+    settings = {**SETTINGS, "history_tokens": history_tokens}
+    budget = 900000
+    full = _history(snapshot, settings)
+    full.load_history()
+    bounded = _history(snapshot, settings)
+    bounded.load_history(window=(raw_history_cap(budget, history_tokens), 3))
+
+    for scope in [(True, True), (True, False), (False, True)]:
+        assert _seed(bounded, budget, *scope) == _seed(full, budget, *scope)
+    assert len(bounded.messages) < len(full.messages) // 2
+
+
+def test_newest_turn_floor_is_read_past_a_tiny_cap(snapshot):
+    # history_tokens smaller than the newest turn: the assembler floors the
+    # whole turn in, so the window must read back to its user row.
+    settings = {**SETTINGS, "history_tokens": 1}
+    full = _history(snapshot, settings)
+    full.load_history()
+    bounded = _history(snapshot, settings)
+    bounded.load_history(window=(raw_history_cap(200000, 1), 3))
+    assert _seed(bounded, 200000) == _seed(full, 200000)
 
 
 def test_window_matches_full_order_for_the_rows_it_returns(snapshot):
@@ -158,7 +187,11 @@ def test_small_history_counts_match_for_cold_start(private_app_pg):
         full.load_history()
         bounded = _history(manager)
         bounded.load_history(window=(10, 3))
-        assert len(bounded.messages) == len(full.messages) == 3
+        # The oversized newest turn is floored in whole; the system row is
+        # left out at the query because seed delivery drops it.
+        assert len(full.messages) == 3
+        assert [m.db_id for m in bounded.messages] == [
+            m.db_id for m in full.messages if m.role != "system"]
     finally:
         with manager._backend.engine.begin() as conn:
             for p in PARENT_TABLES:
