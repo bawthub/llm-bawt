@@ -73,10 +73,11 @@ def docker_args(job):
 
 
 def api_key_header():
-    """TASK-2380: this host's llm-bawt API key (``LLM_BAWT_API_KEY_FILE``), or None."""
+    """Read the explicit key file, else this host's standard exported ops key."""
     path = (os.environ.get("LLM_BAWT_API_KEY_FILE") or "").strip()
     if not path:
-        return None
+        config = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+        path = config / "llm-bawt" / "api-keys" / "host-ops" / "api-key"
     try:
         with open(path, encoding="utf-8") as handle:
             return handle.read().strip() or None

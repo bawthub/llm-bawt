@@ -74,6 +74,40 @@ def test_memory_admission_requires_actual_available(tmp_path):
         heavy_queue.available_memory(path)
 
 
+@pytest.mark.parametrize("use_xdg", [False, True])
+def test_callback_reads_host_export_without_shell_environment(tmp_path, monkeypatch, use_xdg):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("LLM_BAWT_API_KEY_FILE", raising=False)
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    config = tmp_path / "home" / ".config"
+    if use_xdg:
+        config = tmp_path / "custom-config"
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(config))
+    path = config / "llm-bawt" / "api-keys" / "host-ops" / "api-key"
+    path.parent.mkdir(parents=True)
+    path.write_text("host-ops.fixture-key\n")
+    assert heavy_queue.api_key_header() == "host-ops.fixture-key"
+    # Replacements and withdrawal are observed without restarting a worker.
+    path.write_text("host-ops.replaced-fixture\n")
+    assert heavy_queue.api_key_header() == "host-ops.replaced-fixture"
+    path.unlink()
+    assert heavy_queue.api_key_header() is None
+
+
+def test_callback_explicit_key_path_does_not_fall_back(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    fallback = tmp_path / "llm-bawt" / "api-keys" / "host-ops" / "api-key"
+    fallback.parent.mkdir(parents=True)
+    fallback.write_text("host-ops.fixture-key")
+    explicit = tmp_path / "explicit"
+    monkeypatch.setenv("LLM_BAWT_API_KEY_FILE", str(explicit))
+    assert heavy_queue.api_key_header() is None
+    explicit.write_text("separate.fixture-key\n")
+    assert heavy_queue.api_key_header() == "separate.fixture-key"
+    explicit.write_text("")
+    assert heavy_queue.api_key_header() is None
+
+
 def test_callback_enqueues_one_idempotent_self_delivery_without_log_output():
     requests = []
 
