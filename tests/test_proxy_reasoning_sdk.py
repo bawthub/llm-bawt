@@ -21,7 +21,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.sdk_probe, pytest.mark.skipif
 
 @pytest.mark.parametrize("continuation", [False, True])
 def test_cli_persists_and_replays_opaque_reasoning_on_resume(tmp_path, monkeypatch, continuation):
-    from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, query
+    from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, StreamEvent, query
 
     codec = ReasoningCodec.for_account("openai_chatgpt", "test", "http://local", "fake")
     item = {"type": "reasoning", "id": "rs_local_probe", "summary": [],
@@ -34,11 +34,16 @@ def test_cli_persists_and_replays_opaque_reasoning_on_resume(tmp_path, monkeypat
                 {"type": "response.output_item.added", "item": {"type": "reasoning", "id": item["id"]}},
                 {"type": "response.output_item.done", "item": item},
                 {"type": "response.output_text.delta", "delta": "Local fixture answer."},
-                {"type": "response.completed", "response": {"status": "completed", "usage": None}},
+                {"type": "response.completed", "response": {"status": "completed", "usage": {
+                    "input_tokens": 12_000, "output_tokens": 5, "input_tokens_details": {
+                        "cached_tokens": 4000, "cache_write_tokens": 7000,
+                        "cache_write_tokens_details": {"ttl_30m_tokens": 7000, "ttl_12h_tokens": 0},
+                    },
+                }}},
             ]:
                 yield _event_object(event)
         return b"".join([frame async for frame in responses_to_anthropic_sse(
-            upstream(), "openai_chatgpt/test", reasoning_codec=codec,
+            upstream(), "openai_chatgpt/test", reasoning_codec=codec, reports_cache_write_usage=True,
         )])
     wire = asyncio.run(frames())
     if continuation:
@@ -97,12 +102,22 @@ def test_cli_persists_and_replays_opaque_reasoning_on_resume(tmp_path, monkeypat
                 model="openai_chatgpt/test", cwd=str(work), env=env,
                 tools=[], mcp_servers={}, strict_mcp_config=True, setting_sources=[],
                 system_prompt="Local protocol fixture. No tools.",
-                max_turns=1, resume=sid,
+                max_turns=1, resume=sid, include_partial_messages=True,
             )
+            terminal_usage = []
             async for message in query(prompt=prompt, options=options):
+                if isinstance(message, StreamEvent) and message.event.get("type") == "message_delta":
+                    terminal_usage.append(message.event["usage"])
                 if isinstance(message, ResultMessage):
                     assert not message.is_error, message.result
                     sid = message.session_id
+            if not continuation:
+                assert any(
+                    usage.get("cache_write_pricing_complete") is True
+                    and usage.get("input_tokens") == 1000
+                    and usage.get("cache_creation_input_tokens") == 7000
+                    for usage in terminal_usage
+                ), terminal_usage
         return sid
     try:
         assert asyncio.run(asyncio.wait_for(run(), timeout=60))

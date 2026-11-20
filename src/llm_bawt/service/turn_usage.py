@@ -106,6 +106,11 @@ def catalog_turn_cost(usage: dict[str, Any], catalog: Any, model_ref: str | None
         return None
     if totals.get("unmeasured_requests") != 0:  # absent or >0: some request's usage is unknown
         return None
+    if endpoint.access_path.key == "openai-oauth":
+        # Require positive evidence even when an older bridge omits the field.
+        unknown_writes = totals.get("unpriced_cache_write_requests")
+        if type(unknown_writes) is not int or unknown_writes != 0:
+            return None
     from ..model_catalog import effective_pricing_threshold
     from .usage.background_spend import catalog_cost
 

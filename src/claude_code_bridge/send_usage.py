@@ -117,6 +117,7 @@ class LiveUsagePublisher:
     _main_message_ids: dict[int, str] = field(default_factory=dict)
     # TASK-2503: requests whose terminal message_delta usage arrived.
     _terminal_requests: set[int] = field(default_factory=set)
+    _cache_write_pricing: dict[int, bool] = field(default_factory=dict)
 
     def observe_stream_event(self, event: dict, source: str | None = None) -> None:
         """Track each upstream request: message_start opens one, deltas update it.
@@ -149,6 +150,8 @@ class LiveUsagePublisher:
             if index is not None and isinstance(usage, dict) and "output_tokens" in usage:
                 # The terminal usage delta: this request's counts are final.
                 self._terminal_requests.add(index)
+                if "cache_write_pricing_complete" in usage:
+                    self._cache_write_pricing[index] = usage["cache_write_pricing_complete"] is True
 
     def _merge_request_usage(self, source: str | None, usage: object) -> None:
         # Same merge as the SDK: a later non-zero value replaces an earlier one.
@@ -197,6 +200,11 @@ class LiveUsagePublisher:
             # final counts (GPT proxy starts are zero placeholders; native
             # starts carry input but output=1), so the sums are a lower bound.
             "unmeasured_requests": len(self.request_usages) - len(self._terminal_requests),
+            # Only scoped proxy streams report write pricing coverage. Once
+            # reported, a terminal request without it cannot be priced either.
+            **({"unpriced_cache_write_requests": (
+                len(self._terminal_requests) - sum(self._cache_write_pricing.values())
+            )} if self._cache_write_pricing else {}),
             "output_tokens": sum(u.get("output_tokens", 0) for u in self.request_usages),
             "max_request_input_tokens": max(
                 u.get("input_tokens", 0) + u.get("cache_read_input_tokens", 0)

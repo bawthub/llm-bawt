@@ -226,6 +226,39 @@ def _extract_usage(resp: Any) -> tuple[int, int, int, int]:
     return input_tokens, output_tokens, cache_read, 0
 
 
+def _token_count(obj: Any, key: str) -> int | None:
+    value = _usage_get(obj, key)
+    return value if type(value) is int and value >= 0 else None
+
+
+def _extract_oauth_usage(resp: Any) -> tuple[int, int, int, int, bool]:
+    """Normalize OAuth usage, separately checking default-30m price coverage."""
+    usage = _usage_get(resp, "usage")
+    details = _usage_get(usage, "input_tokens_details")
+    total = _token_count(usage, "input_tokens")
+    output = _token_count(usage, "output_tokens")
+    read = _token_count(details, "cached_tokens")
+    write = _token_count(details, "cache_write_tokens")
+    # Only split out counts that can fit within the reported input total.
+    # Missing write telemetry must not erase the reported input or output.
+    valid_read = read is not None and total is not None and read <= total
+    known_read = read if valid_read else 0
+    valid_write = write is not None and total is not None and write <= total - known_read
+    known_write = write if valid_write else 0
+    no_breakdown = object()
+    ttl = _usage_get(details, "cache_write_tokens_details", no_breakdown)
+    # No retention override is sent on this route. If present, the provider's
+    # breakdown must confirm that every write belongs to the default tier.
+    default_ttl = ttl is no_breakdown or (
+        _token_count(ttl, "ttl_12h_tokens") == 0
+        and _token_count(ttl, "ttl_30m_tokens") == write
+    )
+    return (
+        total or 0, output or 0, known_read, known_write,
+        valid_read and valid_write and output is not None and default_ttl,
+    )
+
+
 def _extract_reasoning(resp: Any) -> int | None:
     """``usage.output_tokens_details.reasoning_tokens``; None when unreported."""
     usage = _usage_get(resp, "usage", None)
@@ -248,6 +281,7 @@ async def responses_to_anthropic_sse(
     reasoning_codec: ReasoningCodec | None = None,
     allowed_skill_names: tuple[str, ...] = (),
     request_context: ProxyRequestContext | None = None,
+    reports_cache_write_usage: bool = False,
 ) -> AsyncIterator[bytes]:
     """Translate a Responses API event stream into Anthropic SSE bytes.
 
@@ -346,6 +380,7 @@ async def responses_to_anthropic_sse(
     saw_refusal = False
     explicit_stop: str | None = None
     input_tokens = output_tokens = cache_read = cache_create = 0
+    cache_write_pricing_complete = False
     reasoning_tokens: int | None = None
 
     def _open_start_frame(kind: str, idx: int, **extra: Any) -> bytes:
@@ -669,57 +704,43 @@ async def responses_to_anthropic_sse(
                         _set_open(None)
                 continue
 
-            # ── terminal: success ───────────────────────────────────────────
-            if etype == "response.completed":
+            # ── terminal: completed or incomplete ──────────────────────────
+            if etype in ("response.completed", "response.incomplete"):
                 terminal_event_seen = True
                 if state is not None:
                     state.terminal_event_seen = True
                 resp = getattr(event, "response", None)
+                incomplete = etype == "response.incomplete"
+                if incomplete:
+                    explicit_stop = "max_tokens"
                 if resp is not None:
-                    input_tokens, output_tokens, cache_read, cache_create = _extract_usage(resp)
+                    if reports_cache_write_usage:
+                        (input_tokens, output_tokens, cache_read, cache_create,
+                         cache_write_pricing_complete) = _extract_oauth_usage(resp)
+                    else:
+                        input_tokens, output_tokens, cache_read, cache_create = _extract_usage(resp)
                     reasoning_tokens = _extract_reasoning(resp)
-                    # TASK-714 (review #4): stash usage on state so the retry loop
-                    # can pick the FINAL successful attempt's numbers, not the
-                    # sum across aborted attempts. Callback still fires for
-                    # side effects; the loop is responsible for gating which
-                    # attempt's callback actually credits the turn.
+                    # Use the final attempt's usage; the retry loop gates which
+                    # attempt's callback actually credits the turn (TASK-714).
                     if state is not None:
                         state.usage_snapshot = (input_tokens, output_tokens, cache_read, cache_create)
                     if on_usage is not None:
                         on_usage(input_tokens, output_tokens, cache_read, cache_create)
-                    logger.debug(
-                        "Responses usage: input=%d cached=%d uncached=%d output=%d cache_hit=%.1f%%",
-                        input_tokens, cache_read,
-                        max(input_tokens - cache_read, 0), output_tokens,
-                        (100.0 * cache_read / input_tokens) if input_tokens else 0.0,
-                    )
-                    raw_stop = (
-                        getattr(resp, "status", "")
-                        or getattr(resp, "stop_reason", "")
-                    )
-                    if raw_stop in _STOP_REASON_MAP:
-                        explicit_stop = _STOP_REASON_MAP[raw_stop]
-                # Match Codex CLI: the Responses terminal event ends the stream.
-                # Do not wait for transport EOF after a valid completion.
-                break
-
-            # ── terminal: incomplete (e.g. hit max_output_tokens) ───────────
-            if etype == "response.incomplete":
-                terminal_event_seen = True
-                if state is not None:
-                    state.terminal_event_seen = True
-                resp = getattr(event, "response", None)
-                explicit_stop = "max_tokens"
-                if resp is not None:
-                    input_tokens, output_tokens, cache_read, cache_create = _extract_usage(resp)
-                    reasoning_tokens = _extract_reasoning(resp)
-                    if state is not None:
-                        state.usage_snapshot = (input_tokens, output_tokens, cache_read, cache_create)
-                    if on_usage is not None:
-                        on_usage(input_tokens, output_tokens, cache_read, cache_create)
-                    details = getattr(resp, "incomplete_details", None)
-                    reason = getattr(details, "reason", "") if details else ""
-                    explicit_stop = _STOP_REASON_MAP.get(reason, "max_tokens")
+                    if incomplete:
+                        details = getattr(resp, "incomplete_details", None)
+                        reason = getattr(details, "reason", "") if details else ""
+                        explicit_stop = _STOP_REASON_MAP.get(reason, "max_tokens")
+                    else:
+                        logger.debug(
+                            "Responses usage: input=%d cached=%d uncached=%d output=%d cache_hit=%.1f%%",
+                            input_tokens, cache_read,
+                            max(input_tokens - cache_read - cache_create, 0), output_tokens,
+                            (100.0 * cache_read / input_tokens) if input_tokens else 0.0,
+                        )
+                        raw_stop = getattr(resp, "status", "") or getattr(resp, "stop_reason", "")
+                        if raw_stop in _STOP_REASON_MAP:
+                            explicit_stop = _STOP_REASON_MAP[raw_stop]
+                # Match Codex CLI: don't wait for EOF after a terminal event.
                 break
 
             # ── terminal: failure / error ───────────────────────────────────
@@ -918,7 +939,7 @@ async def responses_to_anthropic_sse(
         else:
             stop_reason = "end_turn"
 
-        uncached_input_tokens = max((input_tokens or 0) - (cache_read or 0), 0)
+        uncached_input_tokens = max(input_tokens - cache_read - cache_create, 0)
         yield _sse(
             "message_delta",
             {
@@ -929,6 +950,8 @@ async def responses_to_anthropic_sse(
                     "output_tokens": output_tokens or 0,
                     "cache_creation_input_tokens": cache_create or 0,
                     "cache_read_input_tokens": cache_read or 0,
+                    **({"cache_write_pricing_complete": cache_write_pricing_complete}
+                       if reports_cache_write_usage else {}),
                     # TASK-1586: OpenAI's exact reasoning share of output.
                     **({"reasoning_output_tokens": reasoning_tokens}
                        if reasoning_tokens is not None else {}),

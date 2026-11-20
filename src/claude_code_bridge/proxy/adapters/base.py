@@ -145,6 +145,7 @@ class ProviderAdapter(ABC):
 
     name: ClassVar[str]
     capture_codex_usage: ClassVar[bool] = True
+    reports_cache_write_usage: ClassVar[bool] = False
 
     def __init__(self) -> None:
         self._lifecycle_lock = asyncio.Lock()
@@ -521,6 +522,7 @@ class ProviderAdapter(ABC):
                     reasoning_codec=reasoning_codec,
                     allowed_skill_names=context.skill_names if context else (),
                     request_context=context,
+                    reports_cache_write_usage=self.reports_cache_write_usage,
                 ):
                     progress = getattr(upstream_stream, "progress", None)
                     if progress is not None:
