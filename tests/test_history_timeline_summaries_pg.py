@@ -103,6 +103,12 @@ def captured(db):
         event.remove(db, "before_cursor_execute", capture)
 
 
+def after_preflight(calls, table="messages_test"):
+    """timeline_rows first checks, with one bound query, that the bot's partition exists."""
+    assert calls[0][0] == "SELECT to_regclass(%(t)s)" and calls[0][1] == {"t": table}
+    return calls[1:]
+
+
 @contextmanager
 def client():
     app = FastAPI()
@@ -299,7 +305,7 @@ def test_index_counts_revision_and_constant_batch_query_count(db):
     with captured(db) as calls:
         groups, _, _, _, _ = timeline_rows(db, "messages_test", "synthetic", "viewer",
                                           None, "America/New_York", START, END)
-    assert len(calls) == 3
+    assert len(after_preflight(calls)) == 3
     assert groups[0]["summary_count"] == 1
     first_revision = groups[0]["summary_revision"]
     assert "excerpt" not in groups[0] and "content" not in groups[0]
@@ -314,12 +320,12 @@ def test_index_counts_revision_and_constant_batch_query_count(db):
     with captured(db) as calls:
         result = timeline_rows(db, "messages_test", "synthetic", "viewer",
                                None, "America/New_York", START, END, overview_only=True)
-    assert len(calls) == 1 and result[0] == []
+    assert len(after_preflight(calls)) == 1 and result[0] == []
     source(db, "previous", ts=START - 1)
     with captured(db) as calls:
         timeline_rows(db, "messages_test", "synthetic", "viewer", None,
                       "America/New_York", START, END, recent=True)
-    assert len(calls) == 5
+    assert len(after_preflight(calls)) == 5
 
 
 def test_group_metadata_after_aggregation_preserves_owned_segments(db):
@@ -342,7 +348,7 @@ def test_group_metadata_after_aggregation_preserves_owned_segments(db):
         groups, meta, prompts, _, _ = timeline_rows(
             db, "messages_test", "synthetic", "viewer", None,
             "America/New_York", START, END + 86400)
-    assert len(calls) == 3
+    assert len(after_preflight(calls)) == 3
     assert [(g["session_id"], g["n"], g["prompts"], g["first_id"], g["continued"])
             for g in groups] == [
                 ("own", 2, 1, "a", False),
@@ -421,6 +427,7 @@ def test_whole_day_page_defers_entire_day_that_would_cross_64(db):
     assert len(groups) == 32 and {g["day"] for g in groups} == {new_day}
     assert all(g["has_more"] for g in groups)
     assert set(meta) == set(new_ids) and set(first) == set(new_ids)
+    calls = after_preflight(calls)
     assert months == [] and len(calls) == 3
     assert set(calls[1][1]["ids"]) == set(new_ids)
     assert {k["session_id"] for k in json.loads(calls[2][1]["summary_keys"])} == set(new_ids)
@@ -452,7 +459,7 @@ def test_newest_day_still_rejects_above_2000_without_enrichment(db):
     with captured(db) as calls, pytest.raises(HTTPException) as exc:
         timeline_rows(db, "messages_test", "synthetic", "viewer", None,
                       "America/New_York", START, END)
-    assert exc.value.status_code == 413 and len(calls) == 1
+    assert exc.value.status_code == 413 and len(after_preflight(calls)) == 1
 
 
 def test_index_labels_bounded_but_requested_session_detail_is_full(db):
