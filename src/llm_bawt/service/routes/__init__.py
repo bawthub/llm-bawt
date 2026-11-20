@@ -33,6 +33,7 @@ from .bot_purge_preview import router as bot_purge_preview_router
 from .turn_tasks import router as turn_tasks_router
 from .task_retros import router as task_retros_router
 from .setup import router as setup_router
+from .setup_presets import router as setup_presets_router
 from .sessions import router as sessions_router
 from .skills import router as skills_router
 from .session_continuity import router as session_continuity_router
@@ -106,6 +107,7 @@ all_routers = [
     houses_router,
     skills_router,
     setup_router,
+    setup_presets_router,
     sessions_router,
     session_continuity_router,
     config_router,

@@ -25,7 +25,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from llm_bawt.integrations.keep_workspace import (
-    KEEP_URL, WorkspaceAuthError, delegated_token, validate_service_account,
+    KEEP_URL, TOKEN_URL, WorkspaceAuthError, delegated_token, validate_service_account,
 )
 from llm_bawt.runtime_settings import RuntimeSetting
 from llm_bawt.service.providers import crypto
@@ -66,7 +66,10 @@ REGISTRY = {
     },
     "google-tasks": {
         "id": "google-tasks", "label": "Google Tasks", "auth_method": "oauth_web",
-        "supported_account_types": ["google"],
+        # Browser sign-in is the general path; a Workspace domain can instead
+        # delegate a service account it already trusts (for example Keep's).
+        "auth_methods": ["oauth_web", "service_account_delegation"],
+        "supported_account_types": ["google", "google_workspace"],
         "description": "Import tasks from selected Google Tasks lists (including ones Google Assistant creates) as BawtHub tasks.",
         "scopes": [TASKS_SCOPE],
         "capabilities": {"read_tasks": True, "write_tasks": False},
@@ -94,6 +97,11 @@ FINALIZE_SECONDS = 120
 
 class IntegrationError(Exception):
     """A bounded, public error code; never includes an upstream body or token."""
+
+
+def _connection_subject(record) -> str | None:
+    """The account BawtHub fences a connected integration's runs by, else None."""
+    return record.meta.get("google_subject") if record and record.status == "connected" else None
 
 
 def keep_failure_code(response: httpx.Response, prefix: str = "keep") -> str:
@@ -396,7 +404,13 @@ class IntegrationConnections:
             **definition,
             "configured": configured or workspace_public["configured"],
             "workspace": workspace_public,
-            "workspace_admin_scopes": [KEEP_SCOPE],
+            "workspace_admin_scopes": [OAUTH.get(integration_id, {"required_scope": KEEP_SCOPE})["required_scope"]],
+            # Other integrations' saved Workspace keys this one may reuse by reference.
+            "workspace_sources": [
+                other for other in OAUTH if other != integration_id
+                and "service_account_delegation" in REGISTRY[other].get("auth_methods", [REGISTRY[other]["auth_method"]])
+                and (source := self.store.load(f"workspace:{other}")) is not None and source.secret.get("private_key")
+            ] if "service_account_delegation" in definition.get("auth_methods", []) else [],
             "has_unverified_credentials": self.store.load(f"unverified:{integration_id}") is not None,
             "reauthorization_required": bool(connection and connection.status == "connected"
                 and OAUTH.get(integration_id, {"required_scope": KEEP_SCOPE})["required_scope"]
@@ -503,23 +517,65 @@ class IntegrationConnections:
         return {"name": name, "title": note.get("title", ""), "unchecked_items": items,
                 "account": connection.account, "updated_at": note.get("updateTime")}
 
-    def configure_workspace(self, integration_id: str, raw: str, subject: str):
-        try:
-            meta, secret = validate_service_account(raw, subject)
-        except WorkspaceAuthError as exc:
-            raise IntegrationError(str(exc)) from exc
-        previous = self.store.load(f"workspace:{integration_id}")
-        self.store.save(ConnectionRecord(provider=f"workspace:{integration_id}", status="configured",
-                                         auth_method="service_account_delegation", meta=meta, secret=secret))
-        connection = self.store.load(integration_id)
-        if (connection and connection.auth_method == "service_account_delegation"
-                and (not previous or previous.meta != meta or previous.secret != secret)):
-            self.store.delete(integration_id)
-        self.store.delete(f"pending:{integration_id}")
-        self.store.delete(f"unverified:{integration_id}")
+    def _delegation_scope(self, integration_id: str) -> str:
+        definition = REGISTRY.get(integration_id, {})
+        if "service_account_delegation" not in definition.get("auth_methods", [definition.get("auth_method")]):
+            raise IntegrationError("workspace_not_supported")
+        return OAUTH[integration_id]["required_scope"]
+
+    def configure_workspace(self, integration_id: str, raw: str | None, subject: str, copy_from: str | None = None):
+        """Save this integration's Workspace key, pasted or copied from another integration's.
+
+        A copy reuses the stored key server-side, so it never crosses the
+        browser again; Google still authorizes each scope separately.
+        """
+        self._delegation_scope(integration_id)
+        if copy_from is not None:
+            if copy_from == integration_id or copy_from not in self.descriptor(integration_id)["workspace_sources"]:
+                raise IntegrationError("workspace_source_unavailable")
+            source = self.store.load(f"workspace:{copy_from}")
+            if not source or not source.secret.get("private_key"):
+                raise IntegrationError("workspace_source_unavailable")  # removed since the allowlist read
+            try:
+                meta, _ = validate_service_account(json.dumps({
+                    "type": "service_account", "token_uri": TOKEN_URL,
+                    "client_email": source.meta["client_email"], "client_id": source.meta["client_id"],
+                    "private_key_id": source.meta["private_key_id"], "project_id": source.meta["project_id"],
+                    "private_key": source.secret["private_key"],
+                }), subject)
+            except (WorkspaceAuthError, KeyError) as exc:
+                raise IntegrationError("invalid_service_account_key") from exc
+            secret = {"private_key": source.secret["private_key"]}
+        else:
+            try:
+                meta, secret = validate_service_account(raw or "", subject)
+            except WorkspaceAuthError as exc:
+                raise IntegrationError(str(exc)) from exc
+        with self._lifecycle(integration_id):
+            self._fenced(integration_id)
+            previous = self.store.load(f"workspace:{integration_id}")
+            connection = self.store.load(integration_id)
+            replaced = (connection and connection.auth_method == "service_account_delegation"
+                        and (not previous or previous.meta != meta or previous.secret != secret))
+            if replaced:
+                # Fence imports, then drop the connection before the new key lands so
+                # no refresh can pair the old verified record with the new key.
+                self._notify_bawthub(integration_id, None)
+                self.store.delete(integration_id)
+            self.store.save(ConnectionRecord(provider=f"workspace:{integration_id}", status="configured",
+                                             auth_method="service_account_delegation", meta=meta, secret=secret))
+            self.store.delete(f"pending:{integration_id}")
+            self.store.delete(f"unverified:{integration_id}")
         return self.descriptor(integration_id)
 
     def verify_workspace(self, integration_id: str):
+        with self._lifecycle(integration_id):
+            self._fenced(integration_id)
+            return self._verify_workspace(integration_id)
+
+    def _verify_workspace(self, integration_id: str):
+        scope = self._delegation_scope(integration_id)
+        oauth = OAUTH[integration_id]
         config = self.store.load(f"workspace:{integration_id}")
         if not config or not config.secret.get("private_key"):
             raise IntegrationError("workspace_not_configured")
@@ -534,20 +590,38 @@ class IntegrationConnections:
             raise IntegrationError("invalid_state")
         try:
             with self.client_factory(timeout=20, follow_redirects=False) as http:
-                token, expires_at = delegated_token(http, config.meta, config.secret)
-                probe = http.get(KEEP_URL, params={"pageSize": 1}, headers={"Authorization": f"Bearer {token}"})
+                token, expires_at = delegated_token(http, config.meta, config.secret, scope)
+                probe = http.get(oauth["probe_url"], params=oauth["probe_params"],
+                                 headers={"Authorization": f"Bearer {token}"})
                 if probe.status_code != 200:
-                    raise IntegrationError(keep_failure_code(probe))
+                    raise IntegrationError(keep_failure_code(probe, oauth["error_prefix"]))
         except WorkspaceAuthError as exc:
             raise IntegrationError(str(exc)) from exc
         except httpx.HTTPError as exc:
             raise IntegrationError("google_unavailable") from exc
-        self.store.commit_connection(integration_id, pending["claim"], ConnectionRecord(
+        claim = pending["claim"]
+        subject = config.meta["subject"]
+        if oauth.get("bawthub_connection"):
+            # Same order as browser OAuth: own the final step, tell BawtHub the
+            # account (the delegated user's address), then commit.
+            claim = self.store.finalize_claim(integration_id, claim)
+            try:
+                self._notify_bawthub(integration_id, subject)
+            except Exception:
+                current = self.store.load(integration_id)
+                try:
+                    self.record_connection(_connection_subject(current))
+                except Exception:
+                    pass
+                self.store.release_claim(integration_id, claim)
+                raise
+        self._commit_after_notify(integration_id, claim, bool(oauth.get("bawthub_connection")), ConnectionRecord(
             provider=integration_id, status="connected", auth_method="service_account_delegation",
-            account=config.meta["subject"],
-            meta={"client_id": config.meta["client_id"], "scopes": [KEEP_SCOPE],
+            account=subject,
+            meta={"client_id": config.meta["client_id"], "scopes": [scope], "google_subject": subject,
                   "service_account_email": config.meta["client_email"], "workspace_domain": config.meta["workspace_domain"],
-                  "verified_at": time.time(), "expires_at": expires_at, "read_only": False},
+                  "key_digest": digest(config.secret["private_key"]),
+                  "verified_at": time.time(), "expires_at": expires_at, "read_only": oauth["read_only"]},
             secret={"access_token": token},
         ))
         return self.descriptor(integration_id)
@@ -700,14 +774,13 @@ class IntegrationConnections:
             except Exception:
                 # An ambiguous bump may have landed: restore BawtHub to the local truth.
                 current = self.store.load(integration_id)
-                restore = current.meta.get("google_subject") if current and current.status == "connected" else None
                 try:
-                    self.record_connection(restore)
+                    self.record_connection(_connection_subject(current))
                 except Exception:
                     pass  # runs still refuse a subject mismatch; the next connect heals it
                 self.store.release_claim(integration_id, claim)
                 raise
-        self.store.commit_connection(integration_id, claim, ConnectionRecord(
+        self._commit_after_notify(integration_id, claim, bool(oauth.get("bawthub_connection")), ConnectionRecord(
             provider=integration_id, status="connected", auth_method="oauth_redirect",
             account=user["email"],
             meta={"google_subject": user["sub"], "scopes": token["scope"].split(),
@@ -716,6 +789,32 @@ class IntegrationConnections:
                   "read_only": oauth["read_only"]},
             secret={"access_token": token["access_token"], "refresh_token": refresh_token},
         ))
+
+    def _commit_after_notify(self, integration_id: str, claim: str, notified: bool, record: ConnectionRecord) -> None:
+        """Commit a connection BawtHub was already told about; on failure, re-align BawtHub.
+
+        If the write may have failed, BawtHub's subject is set back to whatever the
+        local record actually holds and the finalizing claim is released for retry.
+        """
+        try:
+            self.store.commit_connection(integration_id, claim, record)
+        except Exception:
+            if not notified:
+                raise
+            current = self.store.load(integration_id)
+            landed = bool(current and current.status == "connected"
+                          and current.meta.get("verified_at") == record.meta.get("verified_at"))
+            if landed:
+                return  # ambiguous error, but the write is in place and matches BawtHub
+            try:
+                self.record_connection(_connection_subject(current))
+            except Exception:
+                pass  # runs still refuse a subject mismatch; the next connect heals it
+            try:
+                self.store.release_claim(integration_id, claim)
+            except Exception:
+                pass
+            raise
 
     def disconnect(self, integration_id: str) -> bool:
         with self._lifecycle(integration_id):
@@ -742,11 +841,34 @@ def access_token(manager: IntegrationConnections, integration_id: str, http: htt
     """
     snap = manager.store.snapshot(integration_id)
     record = snap.record
-    if not record or record.status != "connected" or record.auth_method != "oauth_redirect":
+    if (not record or record.status != "connected"
+            or record.auth_method not in ("oauth_redirect", "service_account_delegation")):
         raise IntegrationError("not_connected")
     subject = record.meta.get("google_subject")
     if record.secret.get("access_token") and record.meta.get("expires_at", 0) > time.time() + 60:
         return record.secret["access_token"], subject
+    if record.auth_method == "service_account_delegation":
+        # Re-mint for the verified subject only; a changed key needs re-verification.
+        config = manager.store.load(f"workspace:{integration_id}")
+        if (not config or not config.secret.get("private_key") or config.meta.get("subject") != record.account
+                or config.meta.get("client_id") != record.meta.get("client_id")
+                or digest(config.secret["private_key"]) != record.meta.get("key_digest")):
+            raise IntegrationError("reauthorization_required")
+        try:
+            token, expires_at = delegated_token(http, config.meta, config.secret, OAUTH[integration_id]["required_scope"])
+        except WorkspaceAuthError as exc:
+            raise IntegrationError(str(exc)) from exc
+        record.secret = {**record.secret, "access_token": token}
+        record.meta = {**record.meta, "expires_at": expires_at}
+        if not manager.store.replace(integration_id, snap, record):
+            # Lost the write: use only a winner that is still this verified connection.
+            winner = manager.store.load(integration_id)
+            if (winner and winner.status == "connected" and winner.auth_method == "service_account_delegation"
+                    and winner.account == record.account and winner.meta.get("key_digest") == record.meta.get("key_digest")
+                    and winner.secret.get("access_token") and winner.meta.get("expires_at", 0) > time.time() + 60):
+                return winner.secret["access_token"], winner.meta.get("google_subject")
+            raise IntegrationError("reauthorization_required")
+        return token, subject
     client = manager.store.load(f"client:{integration_id}")
     refresh = record.secret.get("refresh_token")
     if not client or not refresh or client.meta.get("client_id") != record.meta.get("client_id"):

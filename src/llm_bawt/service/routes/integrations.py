@@ -61,8 +61,10 @@ class ClientConfig(BaseModel):
 
 
 class WorkspaceConfig(BaseModel):
-    service_account_json: str = Field(min_length=1, max_length=32768, repr=False)
+    service_account_json: str | None = Field(default=None, min_length=1, max_length=32768, repr=False)
     subject: str = Field(min_length=3, max_length=254)
+    # Reuse another integration's stored key instead of pasting one (TASK-905).
+    copy_from: str | None = Field(default=None, max_length=64)
 
 
 @router.get("/{integration_id}/notes")
@@ -77,13 +79,19 @@ async def read_keep_list(integration_id: str, note_id: str):
 
 @router.put("/{integration_id}/workspace", dependencies=_SERVICE)
 async def configure_workspace(integration_id: str, body: WorkspaceConfig):
-    return await call(manager(integration_id).configure_workspace, integration_id,
-                      body.service_account_json, body.subject)
+    if (body.service_account_json is None) == (body.copy_from is None):
+        raise HTTPException(422, "Provide a service-account key or a source integration, not both")
+    result = await call(manager(integration_id).configure_workspace, integration_id,
+                        body.service_account_json, body.subject, body.copy_from)
+    await _publish_google_tasks(integration_id)
+    return result
 
 
-@router.post("/{integration_id}/workspace/verify")
+@router.post("/{integration_id}/workspace/verify", dependencies=_SERVICE)
 async def verify_workspace(integration_id: str):
-    return await call(manager(integration_id).verify_workspace, integration_id)
+    result = await call(manager(integration_id).verify_workspace, integration_id)
+    await _publish_google_tasks(integration_id)
+    return result
 
 
 class StartConfig(BaseModel):

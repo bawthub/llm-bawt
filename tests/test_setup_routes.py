@@ -112,17 +112,15 @@ def test_wizard_keeps_no_route_table_or_model_writer_of_its_own():
 
 
 def test_first_agent_prompt_is_registered_with_an_owner_neutral_agent_default():
-    from pathlib import Path
-
+    # Operator identities are covered by the gate's general-use scan of the
+    # prompt file; this test only pins the registration and fleet-neutral body.
     from llm_bawt.prompt_registry import PromptResolver
-    from scripts.general_use_contract import load_policy
 
     definition = PromptResolver.definition_for("setup.first_agent_prompt")
     assert definition is not None and definition.category == "setup"
     body = definition.default_body()
     assert body.strip() and "agent" in body.lower()
-    names = load_policy(Path(__file__).resolve().parents[1])["operator_identities"]
-    for forbidden in (*names, "nova", "mira", "vex", "personal ai assistant"):
+    for forbidden in ("nova", "mira", "vex", "personal ai assistant"):
         assert forbidden.lower() not in body.lower()
 
 

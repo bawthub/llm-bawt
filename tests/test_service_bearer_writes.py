@@ -59,6 +59,7 @@ PROTECTED = {
     ("PATCH", "/v1/models/catalog/endpoints/{model_key}/{access_key}"),
     ("DELETE", "/v1/models/catalog/endpoints/{endpoint_id}"),
     ("PUT", "/v1/integrations/{integration_id}/workspace"),
+    ("POST", "/v1/integrations/{integration_id}/workspace/verify"),
     ("PUT", "/v1/integrations/{integration_id}/credentials"),
     ("PUT", "/v1/integrations/{integration_id}/client"),
     ("DELETE", "/v1/integrations/{integration_id}"),

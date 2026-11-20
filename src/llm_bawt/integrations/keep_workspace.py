@@ -55,10 +55,11 @@ def validate_service_account(raw: str, subject: str) -> tuple[dict, dict]:
     )
 
 
-def delegated_token(http: httpx.Client, meta: dict, secret: dict) -> tuple[str, int]:
+def delegated_token(http: httpx.Client, meta: dict, secret: dict, scope: str = KEEP_SCOPE) -> tuple[str, int]:
+    """A delegated token for the configured subject and one fixed product scope."""
     now = int(time.time())
     assertion = jwt.encode(
-        {"iss": meta["client_email"], "sub": meta["subject"], "scope": KEEP_SCOPE,
+        {"iss": meta["client_email"], "sub": meta["subject"], "scope": scope,
          "aud": TOKEN_URL, "iat": now, "exp": now + 3600},
         secret["private_key"], algorithm="RS256", headers={"kid": meta["private_key_id"]},
     )
@@ -81,7 +82,7 @@ def delegated_token(http: httpx.Client, meta: dict, secret: dict) -> tuple[str, 
         lifetime = int(token["expires_in"])
         if not isinstance(access, str) or not access or not 0 < lifetime <= 3600:
             raise ValueError("token")
-        if "scope" in token and KEEP_SCOPE not in token["scope"].split():
+        if "scope" in token and scope not in token["scope"].split():
             raise WorkspaceAuthError("workspace_scope_denied")
         return access, now + lifetime
     except (ValueError, KeyError, TypeError, AttributeError) as exc:

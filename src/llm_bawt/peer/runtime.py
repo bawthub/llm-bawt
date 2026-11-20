@@ -3,7 +3,8 @@
 Off unless ``LLM_BAWT_PEER_PORT`` is set. Then the app also serves the peer
 endpoint on that port (separate from ``/v1`` and the ``:8001`` MCP catalog).
 ``LLM_BAWT_PEER_PUBLIC_URL`` is the URL other installs use to reach it, on the
-LAN or a VPN; it goes into invites. Publishing the port beyond that is a
+LAN or a VPN; it goes into invites. The listener serves HTTPS with a
+certificate pinned to this install's identity key (``peer.tls``). Publishing the port beyond that is a
 deployment decision, not something this module does.
 """
 from __future__ import annotations
@@ -88,10 +89,28 @@ async def serve_forever() -> None:
 
     port = int(os.environ[PORT_ENV])
     app = build_app(engine)
-    server = _SecondaryServer(uvicorn.Config(app, host="0.0.0.0", port=port,
-                                             log_level="warning", lifespan="on"))
-    log.warning("Peer listener on :%d (public URL %s)", port, public_url() or "unset")
+    config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="warning", lifespan="on")
+    secure = await asyncio.to_thread(_load_tls, config)
+    server = _SecondaryServer(config)
+    log.warning("Peer listener on :%d over %s (public URL %s)", port,
+                "HTTPS" if secure else "plain HTTP", public_url() or "unset")
     await server.serve()
+
+
+def _load_tls(config) -> bool:
+    """Serve HTTPS with the identity-key certificate (``peer.tls``).
+
+    Plain HTTP only when the owner explicitly allowed it and the public URL
+    says http, for a link that is already encrypted underneath.
+    """
+    from . import identity, pairing, tls
+
+    if pairing.allow_http() and public_url().startswith("http://"):
+        return False
+    with engine().begin() as conn:
+        own = identity.load_or_create(conn)
+    tls.load_server_tls(config, own)
+    return True
 
 
 def _secondary_server_class():

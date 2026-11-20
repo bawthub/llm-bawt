@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 
 import httpx2
 
-from . import identity, pairing, store
+from . import identity, pairing, store, tls
 
 TIMEOUT = 10.0
 
@@ -38,9 +38,26 @@ class AssertionAuth(httpx2.Auth):
             self.refused = response.status_code
 
 
-async def fetch_identity(base_url: str, challenge: str) -> dict:
+def verify_for(base_url: str, tls_cert: str | None):
+    """The TLS policy for one peer: HTTPS trusts only its pinned certificate."""
+    if not base_url.startswith("https://"):
+        return True  # plain HTTP, only reachable when explicitly allowed
+    if not tls_cert:
+        raise PeerUnavailable("no pinned certificate for this peer; pair it again")
+    return tls.client_context(tls_cert)
+
+
+async def fetch_certificate(base_url: str) -> str:
+    """The certificate a peer URL presents; the caller must check it before use."""
     try:
-        async with httpx2.AsyncClient(timeout=TIMEOUT) as http:
+        return await tls.fetch_certificate(base_url)
+    except (OSError, ValueError) as exc:
+        raise PeerUnavailable(f"cannot reach {base_url}: {type(exc).__name__}") from exc
+
+
+async def fetch_identity(base_url: str, challenge: str, tls_cert: str | None = None) -> dict:
+    try:
+        async with httpx2.AsyncClient(timeout=TIMEOUT, verify=verify_for(base_url, tls_cert)) as http:
             resp = await http.get(f"{base_url}/peer/identity", params={"challenge": challenge})
     except httpx2.HTTPError as exc:
         raise PeerUnavailable(f"cannot reach {base_url}: {type(exc).__name__}") from exc
@@ -49,9 +66,9 @@ async def fetch_identity(base_url: str, challenge: str) -> dict:
     return resp.json()
 
 
-async def send_pair(base_url: str, body: dict) -> dict:
+async def send_pair(base_url: str, body: dict, tls_cert: str | None = None) -> dict:
     try:
-        async with httpx2.AsyncClient(timeout=TIMEOUT) as http:
+        async with httpx2.AsyncClient(timeout=TIMEOUT, verify=verify_for(base_url, tls_cert)) as http:
             resp = await http.post(f"{base_url}/peer/pair", json=body)
     except httpx2.HTTPError as exc:
         raise PeerUnavailable(f"cannot reach {base_url}: {type(exc).__name__}") from exc
@@ -72,9 +89,10 @@ def _error(resp) -> str:
 async def session(own: identity.Identity, link: store.PeerLink, auth: AssertionAuth):
     from mcp import ClientSession
     from mcp.client.streamable_http import streamable_http_client
-    from mcp.shared._httpx_utils import create_mcp_http_client
 
-    async with create_mcp_http_client(auth=auth, timeout=httpx2.Timeout(TIMEOUT)) as http:
+    verify = verify_for(link.base_url, link.tls_cert)
+    async with httpx2.AsyncClient(auth=auth, timeout=httpx2.Timeout(TIMEOUT),
+                                  verify=verify) as http:
         async with streamable_http_client(f"{link.base_url}/peer/mcp", http_client=http) as (r, w):
             async with ClientSession(r, w) as sess:
                 await sess.initialize()

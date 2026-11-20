@@ -519,6 +519,21 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
             ),
         },
     ),
+    "integrations.google_tasks_route.system": PromptDefinition(
+        key="integrations.google_tasks_route.system",
+        title="Google Tasks Routing Instructions",
+        category="integrations",
+        required_vars=(),
+        loader=lambda: __import__("llm_bawt.integrations.google_tasks_route", fromlist=["DEFAULT_SYSTEM"]).DEFAULT_SYSTEM,
+        metadata={
+            "notes": (
+                "System instruction for the one utility-model call that routes a newly "
+                "imported Google task to a bot and/or project. The reply must stay the "
+                "JSON shape described in the default. A blank body or a load failure "
+                "keeps the list's default destination. TASK-905."
+            ),
+        },
+    ),
     "agents.room_freeze_notice": PromptDefinition(
         key="agents.room_freeze_notice",
         title="Agent In-the-Room Freeze Notice",

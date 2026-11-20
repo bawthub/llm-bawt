@@ -1,0 +1,17 @@
+# TASK-2517 opt-in overlay: peer networking between installs.
+# Append to COMPOSE_FILE only on an install that pairs with others; without it
+# LLM_BAWT_PEER_PORT stays unset and the app opens no peer listener.
+#
+# The listener serves HTTPS with a self-signed certificate made from this
+# install's identity key; peers pin it at pairing, so no CA or DNS name is
+# involved. Publish it on a LAN (or VPN) address only, never 0.0.0.0 on a host
+# with a public interface, and never through the public ingress.
+services:
+  app:
+    environment:
+      - LLM_BAWT_PEER_PORT=${LLM_BAWT_PEER_PORT:?set the peer listener port, e.g. 8643}
+      # What other installs dial, e.g. https://<lan-address>:8643. It goes into invites.
+      - LLM_BAWT_PEER_PUBLIC_URL=${LLM_BAWT_PEER_PUBLIC_URL:?set the https:// URL peers use to reach this install}
+      - LLM_BAWT_PEER_LABEL
+    ports:
+      - "${LLM_BAWT_PEER_BIND_IP:?set the LAN address to publish the peer port on}:${LLM_BAWT_PEER_PORT}:${LLM_BAWT_PEER_PORT}"

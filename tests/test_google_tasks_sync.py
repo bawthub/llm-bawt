@@ -185,7 +185,7 @@ def test_disconnect_fences_bawthub_first(manager):
 
 class FakeHub:
     def __init__(self, pages_needed=2, start_status=200, updated_min="2026-11-18T00:00:00Z"):
-        self.ingested, self.runs, self.failures = [], 0, []
+        self.ingested, self.runs, self.failures, self.routed = [], 0, [], []
         self.start_status, self.updated_min = start_status, updated_min
 
     def client(self):
@@ -206,8 +206,14 @@ class FakeHub:
             if path.endswith("/ingest"):
                 body = json.loads(request.content)
                 self.ingested.append(body)
+                to_route = [{"linkId": f"link-{t['id']}", "title": t.get("title", ""), "notes": ""}
+                            for t in body["tasks"] if not t.get("deleted")]
                 return httpx.Response(200, json={"ok": True, "final": body["nextPageToken"] is None,
-                                                 "created": len(body["tasks"]), "updated": 0, "pendingLinkIds": []})
+                                                 "created": len(body["tasks"]), "updated": 0,
+                                                 "toRoute": to_route, "projects": ["Timeline"]})
+            if path.endswith("/route"):
+                self.routed.append(json.loads(request.content))
+                return httpx.Response(200, json={"applied": True})
             raise AssertionError(path)
         return httpx.Client(base_url="http://hub", transport=httpx.MockTransport(handle))
 
@@ -234,13 +240,32 @@ def test_sync_paginates_and_posts_each_page_with_fence(manager):
     record.meta["expires_at"] = time.time() - 1  # forces a refresh
     manager.store.save(record)
     hub, seen = FakeHub(), []
-    summary = GoogleTasksSync(manager, google_factory=task_pages(seen), bawthub_factory=hub.client).sync_all()
+    decided = []
+    def decide(item, bots, projects):
+        decided.append((item["title"], [b["id"] for b in bots], projects))
+        return {"linkId": item["linkId"], "botId": "juno", "project": None, "reason": "named"}
+    summary = GoogleTasksSync(manager, google_factory=task_pages(seen), bawthub_factory=hub.client,
+                              decide=decide, roster=lambda: [{"id": "juno", "name": "Juno", "description": ""}]).sync_all()
+    assert decided == [("Buy milk", ["juno"], ["Timeline"])]  # new imports only, once each
+    assert hub.routed == [{"linkId": "link-a", "botId": "juno", "project": None, "reason": "named"}]
     assert summary == {"sources": 1, "created": 2, "updated": 0, "skipped": 0, "errors": []}
     assert [p["nextPageToken"] for p in hub.ingested] == ["p2", None]
     assert hub.ingested[0]["tasks"] == [{"id": "a", "title": "Buy milk"}]  # unknown fields dropped
     assert hub.ingested[1]["tasks"] == [{"id": "b", "status": "completed", "deleted": True}]
     assert all(p["runId"] == "r" and p["connectionGeneration"] == 3 for p in hub.ingested)
     assert manager.store.load(TID).secret["access_token"] == "refreshed"
+
+
+def test_a_failing_decision_posts_the_default_and_the_run_continues(manager):
+    fake_google(manager)
+    connect(manager)
+    hub, seen = FakeHub(), []
+    def decide(item, bots, projects):
+        raise ValueError("bad model output")
+    summary = GoogleTasksSync(manager, google_factory=task_pages(seen), bawthub_factory=hub.client,
+                              decide=decide, roster=lambda: [{"id": "juno", "name": "Juno", "description": ""}]).sync_all()
+    assert [r["botId"] for r in hub.routed] == [None] and "default" in hub.routed[0]["reason"]
+    assert summary["errors"] == [] and len(hub.ingested) == 2
 
 
 def test_busy_run_is_skipped_without_google_calls(manager):

@@ -23,9 +23,10 @@ logger = logging.getLogger(__name__)
 INTEGRATION_ID = "google-tasks"
 INTERVAL_SECONDS = 600
 MAX_PAGES = 50
-TASK_FIELDS = ("id", "title", "notes", "status", "updated", "due", "deleted", "hidden", "webViewLink", "selfLink")
+TASK_FIELDS = ("id", "title", "notes", "status", "updated", "due", "deleted", "hidden", "parent", "webViewLink", "selfLink")
 SOURCES_PATH = "/internal/integrations/google-tasks/sources"
 INGEST_PATH = "/internal/integrations/google-tasks/ingest"
+ROUTE_PATH = "/internal/integrations/google-tasks/route"
 MAX_LIST_PAGES = 10
 
 
@@ -47,8 +48,12 @@ def _item(raw: Any) -> dict | None:
 
 class GoogleTasksSync:
     def __init__(self, manager: IntegrationConnections, *, google_factory: Callable[..., httpx.Client] = httpx.Client,
-                 bawthub_factory: Callable[[], httpx.Client] = bawthub_client):
+                 bawthub_factory: Callable[[], httpx.Client] = bawthub_client,
+                 decide: Callable[..., dict] | None = None, roster: Callable[[], list[dict]] | None = None):
+        from llm_bawt.integrations import google_tasks_route
         self.manager = manager
+        self.decide = decide or google_tasks_route.decide
+        self.roster = roster or google_tasks_route.roster
         self.google_factory = google_factory
         self.bawthub_factory = bawthub_factory
 
@@ -159,11 +164,37 @@ class GoogleTasksSync:
             result = ingested.json()
             totals["created"] += result.get("created", 0)
             totals["updated"] += result.get("updated", 0)
+            self._route(hub, result)
             if result.get("final") or next_token is None:
                 return totals
             page_token = next_token
         # The stored cursor lets the next run resume where this one stopped.
         raise IntegrationError("tasks_too_many_pages")
+
+
+    def _route(self, hub: httpx.Client, result: dict) -> None:
+        """Classify each new import once; BawtHub holds its delivery until answered or timed out."""
+        pending = [i for i in result.get("toRoute") or [] if isinstance(i, dict) and isinstance(i.get("linkId"), str)]
+        if not pending:
+            return
+        try:
+            bots = self.roster()
+        except Exception:  # noqa: BLE001 -- without a roster every item keeps its default
+            logger.warning("google task routing: bot roster unavailable")
+            bots = []
+        projects = [p for p in result.get("projects") or [] if isinstance(p, str)]
+        for item in pending:
+            decision = {"linkId": item["linkId"], "botId": None, "project": None,
+                        "reason": "No bots or projects to route to; used the list's default"}
+            if bots or projects:
+                try:
+                    decision = self.decide(item, bots, projects)
+                except Exception:  # noqa: BLE001 -- one bad item never stops the page or the run
+                    decision = {**decision, "reason": "Routing unavailable; used the list's default"}
+            try:
+                hub.post(ROUTE_PATH, json=decision)
+            except httpx.HTTPError:
+                logger.warning("google task routing: BawtHub unavailable; the route will time out to the default")
 
 
 async def run_once(service: Any) -> dict:
