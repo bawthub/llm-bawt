@@ -403,7 +403,7 @@ class BridgeSessionResetMixin:
             # the heuristic template. Time-bounding stays with the worker
             # thread join below.
             bg_client, bg_alias = self._get_background_client(
-                job="session_seed_summary", allow_fallback=True,
+                job="session_seed_summary", allow_fallback=True, heuristic_fallback=True,
             )
             if bg_client is None:
                 log.warning(

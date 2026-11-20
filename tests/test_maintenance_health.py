@@ -106,7 +106,7 @@ def test_background_client_is_wrapped_with_job_labels(monkeypatch):
     with patch.object(InstanceManagerMixin, "_resolve_background_endpoint",
                       return_value=(inner, "grok-4.3", {})), \
          patch.object(InstanceManagerMixin, "_background_credential_labels", return_value=("xai", "Default")):
-        client, alias = svc._get_background_client(job="profile_maintenance")
+        client, alias = svc._get_background_client("grok-4.3", job="profile_maintenance")
     assert alias == "grok-4.3" and client.wrapped is inner
     client.query(messages=[])
     assert _only(health) == [{"name": "profile_maintenance", "status": "ok", "reason": None}]
@@ -137,7 +137,7 @@ def test_raw_error_text_never_reaches_reason_or_log(caplog):
     assert secret not in str(health.checks_payload()) and secret not in caplog.text
 
 
-def test_unset_model_is_a_recorded_failure(monkeypatch):
+def test_unset_utility_model_is_shown_but_not_a_failure(monkeypatch):
     from fastapi import HTTPException
     from llm_bawt.service import utility_completion as uc
 
@@ -147,9 +147,108 @@ def test_unset_model_is_a_recorded_failure(monkeypatch):
     monkeypatch.setattr("llm_bawt.runtime_settings.resolve_job_model", lambda *_a, **_k: None)
     with pytest.raises(HTTPException):
         uc.complete_utility(SimpleNamespace(model=None))
+    assert _only(health) == [{
+        "name": "utility_completion", "status": "ok",
+        "reason": "not configured (maintenance_model is not set); off until a model is set",
+    }]
+
+
+@pytest.fixture
+def unconfigured_jobs(monkeypatch):
+    from llm_bawt.service.background_tasks import BackgroundTasksMixin
+    from llm_bawt.service.instance_manager import InstanceManagerMixin
+
+    class Service(BackgroundTasksMixin, InstanceManagerMixin):
+        pass
+
+    health = MaintenanceHealth()
+    monkeypatch.setattr(mh, "_registry", health)
+    monkeypatch.setattr("llm_bawt.runtime_settings.resolve_job_model", lambda *_a, **_k: None)
+    svc = Service.__new__(Service)
+    svc.config = SimpleNamespace(resolve_summarization_job=dict,
+                                 resolve_context_budget=lambda _alias: (0, 0, 1000))
+    svc._default_bot = "test-bot"
+    svc._llm_bawt_cache = {}
+    return svc, health
+
+
+def _assert_unconfigured(health, job, fallback):
+    row = next(row for row in _only(health) if row["name"] == job)
+    effect = "using the built-in fallback" if fallback else "off until a model is set"
+    assert row == {"name": job, "status": "ok",
+                   "reason": f"not configured (maintenance_model is not set); {effect}"}
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+def test_scheduled_history_respects_heuristics_and_summary_extraction_skips(
+    monkeypatch, unconfigured_jobs, fallback,
+):
+    svc, health = unconfigured_jobs
+    summarizer = MagicMock()
+    summarizer.return_value.summarize_eligible_sessions.return_value = {
+        "results": [{"created": True, "summary": "A completed summary"}],
+    }
+    monkeypatch.setattr("llm_bawt.memory.summarization.HistorySummarizer", summarizer)
+    monkeypatch.setattr("llm_bawt.bots.BotManager", MagicMock())
+    monkeypatch.setattr("llm_bawt.runtime_settings.RuntimeSettingsResolver", MagicMock())
+    task = SimpleNamespace(bot_id="test-bot", user_id="system", payload={"use_heuristic_fallback": fallback})
+    result = svc._process_history_summarization(task)
+    assert result["extraction"]["extraction_method"] == "skipped"
+    assert summarizer.return_value.summarize_eligible_sessions.call_args.kwargs["use_heuristic_fallback"] is fallback
+    _assert_unconfigured(health, "history_summarization", fallback)
+    _assert_unconfigured(health, "summary_fact_extraction", False)
+
+
+@pytest.mark.parametrize("route", ["summarize_history", "rebuild_history_summaries"])
+@pytest.mark.parametrize("fallback", [False, True])
+def test_manual_history_respects_heuristic_opt_in(monkeypatch, unconfigured_jobs, route, fallback):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from llm_bawt.service.routes import history_summaries
+
+    svc, health = unconfigured_jobs
+    summarizer = MagicMock()
+    summarizer.summarize_eligible_sessions.return_value = {}
+    summarizer.rebuild_recent_sessions.return_value = {}
+    monkeypatch.setattr("llm_bawt.memory.summarization.HistorySummarizer", lambda *_a, **_k: summarizer)
+    # Prompt construction is irrelevant when no client can render or send one.
+    monkeypatch.setattr("llm_bawt.prompt_registry.PromptResolver", MagicMock())
+    monkeypatch.setattr(history_summaries, "get_service", lambda: svc)
+    app = FastAPI()
+    app.post("/summary")(getattr(history_summaries, route))
+    with TestClient(app) as client:
+        # Exercise the actual FastAPI default as well as explicit opt-in.
+        response = client.post("/summary", params={"use_heuristic": "true"} if fallback else {})
+    assert response.status_code == 200
+    summarize = (summarizer.summarize_eligible_sessions if route == "summarize_history"
+                 else summarizer.rebuild_recent_sessions)
+    assert summarize.call_args.kwargs["use_heuristic_fallback"] is fallback
+    _assert_unconfigured(health, "history_summary_rebuild", fallback)
+
+
+def test_failure_is_attributed_to_model_attempted_even_if_settings_change(monkeypatch, unconfigured_jobs):
+    svc, health = unconfigured_jobs
+    settings = {"extraction_model": "oauth-only-model"}
+    monkeypatch.setattr("llm_bawt.runtime_settings.resolve_job_model", lambda _config, key: settings.get(key))
+
+    def lookup(_config, alias):
+        assert alias == "oauth-only-model"
+        settings.clear()
+        return None
+
+    monkeypatch.setattr("llm_bawt.service.background_clients.resolve_background_model", lookup)
+    assert svc._get_background_client(job="summary_fact_extraction") == (None, None)
     row = _only(health)[0]
-    assert row["name"] == "utility_completion" and "unconfigured" in row["reason"]
-    assert "maintenance_model is not set" in row["reason"]
+    assert row["status"] == "down" and "oauth-only-model" in row["reason"]
+
+
+def test_success_after_unconfigured_clears_the_note():
+    health = MaintenanceHealth()
+    health.record_unconfigured("history_summarization", "not configured")
+    inner = MagicMock()
+    inner.query.return_value = "a summary"
+    _client(health, inner).query(messages=[])
+    assert _only(health) == [{"name": "history_summarization", "status": "ok", "reason": None}]
 
 
 def test_route_serves_aggregator_shape(monkeypatch):

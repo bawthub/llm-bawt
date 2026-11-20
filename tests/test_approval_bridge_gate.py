@@ -15,6 +15,9 @@ import asyncio
 import json
 import logging
 import math  # noqa: F401 (production AST namespace)
+import os
+import shlex
+import subprocess
 import time
 import types
 from dataclasses import dataclass
@@ -467,7 +470,8 @@ def test_live_hook_exact_reissue_and_hard_deny_wins():
     assert b._grant_approval(gk, 600, session_key="s", request_id="tuid-1")
     assert not gate(original, request="unrelated")
     assert not gate(original, request=_continuation(), session="other")
-    assert not gate(original, request=_continuation(), cwd="/elsewhere")
+    # A cwd-only difference is relocated into the approved cwd (TASK-2553);
+    # see test_reissue_from_base_cwd_runs_once_in_the_approved_cwd.
     assert not gate({**original, "timeout": 101}, request=_continuation())
     assert not gate({**original, "command": "rm  -rf /home/x"}, request=_continuation())
     b._policy_bundle.policies.insert(0, ApprovalPolicy(id="hard", order=0, tool_name="Bash",
@@ -817,3 +821,101 @@ def test_policy_fetch_failure_backoff_without_cache(monkeypatch):
     assert asyncio.run(b._get_policy_bundle()).etag == "e1"
     asyncio.run(b._get_policy_bundle())
     assert calls["n"] == 4
+
+
+def _relocation_bridge():
+    b = _bridge()
+    b._policy_bundle = PolicyBundle(version=1, etag="all", policies=[
+        ApprovalPolicy(id="all", tool_name="Bash", matcher_type=MatcherType.ALWAYS),
+    ])
+    events = []
+    b._publish_event = lambda *a, **kw: events.append(kw)
+
+    def gate(arguments, request, cwd, session="s", tool="Bash"):
+        hook = b._make_pre_tool_use_hook(request_id=request, session_key=session, seq_holder=[0])
+        return asyncio.run(hook({"tool_name": tool, "tool_input": arguments, "cwd": cwd}, "tuid-1", {}))
+
+    return b, events, gate
+
+
+def test_reissue_from_base_cwd_runs_once_in_the_approved_cwd(tmp_path):
+    """TASK-2553: gated after a ``cd``; the continuation (launched at the base
+    cwd so its transcript resumes) re-issues the identical command. The single
+    grant is consumed and the command is rewritten to run where it was
+    approved. A second re-issue is gated again."""
+    b, events, gate = _relocation_bridge()
+    approved = str(tmp_path / "it's here")
+    os.mkdir(approved)
+    cmd = {"command": "pgq llm-bawt -c 'select 1'", "description": "q"}
+
+    assert _hook_decision(gate(cmd, "origin", approved)) == "deny"
+    gk = events[-1]["extra_raw"]["grant_key"]
+    assert b._grant_approval(gk, 600, session_key="s", request_id="tuid-1")
+
+    out = gate(cmd, _continuation(), b._cwd)
+    spec = out["hookSpecificOutput"]
+    assert spec["permissionDecision"] == "allow"
+    assert spec["updatedInput"] == {
+        "command": f"cd -- {shlex.quote(approved)} || exit 1\npgq llm-bawt -c 'select 1'",
+        "description": "q",
+    }
+    assert b._pending_approvals[("s", "tuid-1")].state == "consumed"
+    assert _hook_decision(gate(cmd, _continuation(), b._cwd)) == "deny"
+
+
+def test_relocation_never_widens_the_exact_grant(tmp_path):
+    b, events, gate = _relocation_bridge()
+    cmd = {"command": "rm -rf build"}
+    approved = str(tmp_path)
+    assert _hook_decision(gate(cmd, "origin", approved)) == "deny"
+    gk = events[-1]["extra_raw"]["grant_key"]
+    assert b._grant_approval(gk, 600, session_key="s", request_id="tuid-1")
+
+    misses = [
+        ({"command": "rm -rf build "}, _continuation(), "s"),               # input differs
+        ({**cmd, "timeout": 5}, _continuation(), "s"),                       # extra field
+        (cmd, "unrelated-request", "s"),                                     # not the continuation
+        (cmd, _continuation(), "other"),                                     # other session
+    ]
+    for args, request, session in misses:
+        assert _hook_decision(gate(args, request, "/base", session=session)) == "deny"
+    assert b._pending_approvals[("s", "tuid-1")].state == "granted"
+
+    # A hard deny added after approval still wins over relocation.
+    b._policy_bundle.policies.insert(0, ApprovalPolicy(id="hard", order=0, tool_name="Bash",
+        matcher_type=MatcherType.ALWAYS, action=PolicyAction.DENY))
+    assert _hook_decision(gate(cmd, _continuation(), "/base")) == "deny"
+    assert b._pending_approvals[("s", "tuid-1")].state == "granted"
+    b._policy_bundle.policies.pop(0)
+
+    # Same cwd still takes the ordinary exact path with no rewrite.
+    assert gate(cmd, _continuation(), approved) == {}
+    assert b._pending_approvals[("s", "tuid-1")].state == "consumed"
+
+
+def test_failed_relocation_runs_no_line_of_a_multiline_command(tmp_path):
+    """Codex TASK-2553 r2: a failed cd must stop every following line."""
+    b, events, gate = _relocation_bridge()
+    approved = tmp_path / "wt"
+    approved.mkdir()
+    marker = tmp_path / "ran.txt"
+    cmd = {"command": f"echo one >> {shlex.quote(str(marker))}\necho two >> {shlex.quote(str(marker))}"}
+    assert _hook_decision(gate(cmd, "origin", str(approved))) == "deny"
+    gk = events[-1]["extra_raw"]["grant_key"]
+    assert b._grant_approval(gk, 600, session_key="s", request_id="tuid-1")
+    rewritten = gate(cmd, _continuation(), str(tmp_path))["hookSpecificOutput"]["updatedInput"]["command"]
+
+    # Folder disappears between rewrite and execution: nothing runs, nonzero exit.
+    approved.rmdir()
+    proc = subprocess.run(["bash", "-c", rewritten], cwd=tmp_path, capture_output=True)
+    assert proc.returncode != 0 and not marker.exists()
+
+    # Folder already gone at re-issue time: no rewrite, grant kept, gated as usual.
+    b2, events2, gate2 = _relocation_bridge()
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    assert _hook_decision(gate2(cmd, "origin", str(gone))) == "deny"
+    assert b2._grant_approval(events2[-1]["extra_raw"]["grant_key"], 600, session_key="s", request_id="tuid-1")
+    gone.rmdir()
+    assert _hook_decision(gate2(cmd, _continuation(), str(tmp_path))) == "deny"
+    assert b2._pending_approvals[("s", "tuid-1")].state == "granted"

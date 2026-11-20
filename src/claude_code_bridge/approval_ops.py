@@ -44,6 +44,10 @@ class _PendingApproval:
     state: str = "pending"
     grant_expires_at: float = 0.0
     continuation_request_id: str = ""
+    # Hook cwd the exact grant key was computed under (TASK-2553). The SDK
+    # persists ``cd`` within a turn, so the continuation must start here for
+    # the identical re-issue to reproduce the same exact invocation key.
+    cwd: str = ""
 
 
 class ClaudeApprovalMixin:
@@ -116,7 +120,7 @@ class ClaudeApprovalMixin:
 
     def _remember_approval(
         self, grant_key: str, session_key: str, approval_request_id: str,
-        origin_request_id: str,
+        origin_request_id: str, cwd: str | None = None,
     ) -> None:
         if not all((grant_key, session_key, approval_request_id, origin_request_id)):
             return
@@ -128,6 +132,7 @@ class ClaudeApprovalMixin:
         if key not in records and len(records) < 10000:
             records[key] = _PendingApproval(
                 grant_key, origin_request_id, time.monotonic() + 86400,
+                cwd=cwd or "",
             )
 
     def _grant_approval(
@@ -161,6 +166,48 @@ class ClaudeApprovalMixin:
         )
         logger.info("Approval grant stored: %s session=%s request=%s", grant_key[:12], session_key, request_id)
         return True
+
+    def _consume_relocated_grant(
+        self, tool_name: str, tool_input: dict, cwd: str | None, *,
+        session_key: str, request_id: str,
+    ) -> dict | None:
+        """Run an exact Bash re-issue in its approved cwd (TASK-2553).
+
+        The SDK persists ``cd`` within a turn, but the approval continuation
+        starts at the bridge base cwd (its resume transcript is keyed by that
+        launch cwd), so an identical re-issue can arrive from another folder.
+        When the tool input is byte-identical and only the hook cwd differs,
+        re-evaluate the policy at the grant's recorded cwd; if that reproduces
+        the exact granted key, consume the single grant and return the input
+        rewritten to ``cd -- <approved cwd> && <command>``. Nothing else
+        changes: other tools, other inputs, other turns and sessions still miss.
+        """
+        import os
+        import shlex
+
+        command = tool_input.get("command") if tool_name == "Bash" else None
+        if not (isinstance(command, str) and session_key and request_id):
+            return None
+        now = time.monotonic()
+        for (session, _), record in self._pending_approval_records().items():
+            if not (session == session_key and record.state == "granted"
+                    and record.grant_expires_at > now
+                    and record.continuation_request_id == request_id
+                    and record.cwd and record.cwd != cwd):
+                continue
+            if not os.path.isdir(record.cwd):
+                # Approved folder is gone: keep the grant, gate as usual.
+                return None
+            decision = self._decide_approval(tool_name, tool_input, cwd=record.cwd)
+            if (decision.action is PolicyAction.REQUIRE_APPROVAL
+                    and decision.grant_key == record.grant_key
+                    and self._consume_grant(
+                        record.grant_key, session_key=session_key, request_id=request_id)):
+                # Own line + exit: a failed cd must stop every following line,
+                # not just the first `&&` operand of a multiline command.
+                return {**tool_input, "command":
+                        f"cd -- {shlex.quote(record.cwd)} || exit 1\n{command}"}
+        return None
 
     def _consume_grant(
         self, grant_key: str, *, session_key: str = "", request_id: str = "",
@@ -232,6 +279,7 @@ class ClaudeApprovalMixin:
         request_id: str,
         session_key: str,
         seq_holder: list[int],
+        cwd: str | None = None,
     ) -> None:
         """Publish an APPROVAL_REQUIRED event for a gated tool (TASK-292).
 
@@ -239,7 +287,10 @@ class ClaudeApprovalMixin:
         the PreToolUse hook gate (_evaluate_tool_gate_hook). Best-effort: a publish failure is logged,
         never raised — the caller still ends the turn with the pending-ack.
         """
-        self._remember_approval(decision.grant_key, session_key, tool_use_id, request_id)
+        self._remember_approval(
+            decision.grant_key, session_key, tool_use_id, request_id,
+            cwd=cwd if cwd is not None else self._cwd,
+        )
         try:
             seq_holder[0] += 1
             self._publish_event(
@@ -408,6 +459,26 @@ class ClaudeApprovalMixin:
             )
             return {}
 
+        relocated = self._consume_relocated_grant(
+            tool_name, tool_input, cwd, session_key=session_key, request_id=request_id,
+        )
+        if relocated is not None:
+            logger.info(
+                "Tool ALLOWED by prior approval grant in its approved cwd: %s %r",
+                tool_name, decision.subject[:80],
+            )
+            self._emit_tool_preapproved(
+                decision, tool_name, (tool_use_id or "").strip(),
+                request_id, session_key, seq_holder,
+            )
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "allow",
+                    "updatedInput": relocated,
+                }
+            }
+
         tool_use_id = (tool_use_id or "").strip()
         if not tool_use_id:
             # No id → app can't key a persistent request; defer cleanly anyway.
@@ -419,7 +490,7 @@ class ClaudeApprovalMixin:
 
         self._emit_approval_required(
             decision, tool_name, tool_input, tool_use_id,
-            request_id, session_key, seq_holder,
+            request_id, session_key, seq_holder, cwd=cwd,
         )
         return self._hook_deny(self._APPROVAL_PENDING_ACK)
 

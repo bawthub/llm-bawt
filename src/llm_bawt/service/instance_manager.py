@@ -473,25 +473,31 @@ class InstanceManagerMixin:
 
     def _get_background_client(
         self, model_override: str | None = None, *, job: str = "background",
-        allow_fallback: bool = False,
+        allow_fallback: bool = False, heuristic_fallback: bool = False,
     ) -> tuple[Any | None, str | None]:
         """Background client wrapped so every call's outcome is recorded for ``job``.
 
-        TASK-1704: a job with no usable client is recorded as a failure too, so
-        "fell back to heuristics" stops being silent. See ``maintenance_health``.
+        An unusable configured model is a failure. With no model selected,
+        ``heuristic_fallback`` describes what the caller actually does instead.
 
         ``allow_fallback`` is set only by callers whose model came from settings
         (not one a caller named): then a provider spending limit replays the
         call on ``maintenance_model_fallback``. See ``maintenance_fallback``.
         """
-        from .maintenance_health import UNAVAILABLE, MonitoredClient, maintenance_health
+        from .maintenance_health import (
+            UNAVAILABLE, MonitoredClient, maintenance_health, record_unconfigured,
+        )
 
-        client, model_alias, model_def = self._resolve_background_endpoint(model_override)
+        preferred = self._preferred_background_model(model_override)
+        if not preferred:
+            record_unconfigured(job, "maintenance_model", fallback=heuristic_fallback)
+            return None, None
+        client, model_alias, model_def = self._resolve_background_endpoint(preferred)
         provider, credential = self._background_credential_labels(model_alias, model_def)
         if client is None:
             maintenance_health().record_failure(
                 job, UNAVAILABLE, "no usable background client for the configured job model",
-                model=model_alias or model_override, provider=provider, credential=credential,
+                model=model_alias or preferred, provider=provider, credential=credential,
             )
             return None, None
         monitored = MonitoredClient(client, job=job, model=model_alias, provider=provider,
@@ -582,23 +588,26 @@ class InstanceManagerMixin:
         Returns:
             ``(client, model_alias)`` or ``(None, None)`` if unavailable.
         """
-        client, model_alias, _ = self._resolve_background_endpoint(model_override)
+        preferred = self._preferred_background_model(model_override)
+        if not preferred:
+            return None, None
+        client, model_alias, _ = self._resolve_background_endpoint(preferred)
         return client, model_alias
 
-    def _resolve_background_endpoint(
-        self, model_override: str | None = None,
-    ) -> tuple[Any | None, str | None, dict | None]:
-        """:meth:`_resolve_background_client` plus the endpoint definition it built from."""
+    def _preferred_background_model(self, model_override: str | None = None) -> str | None:
+        """The model a background job asks for: the caller's, else the job settings."""
         from ..runtime_settings import resolve_job_model
 
-        preferred = (
+        return (
             model_override
             or resolve_job_model(self.config, "extraction_model")
             or resolve_job_model(self.config, "maintenance_model")
         )
-        if not preferred:
-            log.warning("No background job model configured; falling back to heuristics.")
-            return None, None, None
+
+    def _resolve_background_endpoint(
+        self, preferred: str,
+    ) -> tuple[Any | None, str | None, dict | None]:
+        """Resolve a selected model alias without re-reading the job settings."""
 
         # TASK-857: background jobs are GLOBAL (TASK-522), resolved with no bot
         # identity. TASK-1726: the ``background`` harness (after ``chat``) also

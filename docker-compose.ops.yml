@@ -17,9 +17,9 @@ services:
       - ops-secrets:/run/llm-bawt-ops-secrets
 
   ops-reconciler:
-    # Must be the verified existing CPU app image, not a guessed image tag.
-    image: ${LLM_BAWT_OPS_RECONCILER_IMAGE:?Set existing app image ID or digest}
-    entrypoint: ["python", "-m", "llm_bawt.ops.reconciler"]
+    # Run source and the Alembic graph from the same verified CPU app image.
+    image: ${LLM_BAWT_OPS_RECONCILER_IMAGE:?Set pinned CPU app image ID or digest}
+    entrypoint: ["python", "-I", "/usr/local/libexec/ops-reconciler-entrypoint.py"]
     command: []
     # Internal network only: no host port, proxy route or generic Docker API.
     # 8650 is the GET-only health surface; 8651 is the app's bearer-authenticated
@@ -41,7 +41,9 @@ services:
       LLM_BAWT_OPS_RECEIPT_ROOT: /var/lib/llm-bawt-ops
       # TASK-1169 S4: process-mode jobs pin this interpreter identity (the
       # reconciler's own immutable image) in their approved snapshot.
-      LLM_BAWT_OPS_RECONCILER_IMAGE: ${LLM_BAWT_OPS_RECONCILER_IMAGE:?Set existing app image ID or digest}
+      LLM_BAWT_OPS_RECONCILER_IMAGE: ${LLM_BAWT_OPS_RECONCILER_IMAGE:?Set pinned CPU app image ID or digest}
+      # Checked at startup, not at Compose parse time for other services.
+      LLM_BAWT_OPS_RECONCILER_SOURCE_SHA: ${LLM_BAWT_OPS_RECONCILER_SOURCE_SHA:-}
       POSTGRES_HOST:
       POSTGRES_PORT:
       POSTGRES_USER:
@@ -65,7 +67,7 @@ services:
       # TASK-2386: read the app's exports instead of the master key.
       LLM_BAWT_OPS_SECRETS_DIR: /run/llm-bawt-ops-secrets
     volumes:
-      - ./src:/app/src:ro
+      # The checkout is Git input only; never shadow the image's runtime files.
       - .:/srv/llm-bawt-repo:ro
       - ${LLM_BAWT_OPS_GATE_SCRATCH:-/tmp/llm-bawt-ops-gate-disabled}:${LLM_BAWT_OPS_GATE_SCRATCH:-/tmp/llm-bawt-ops-gate-disabled}
       - ops-secrets:/run/llm-bawt-ops-secrets:ro

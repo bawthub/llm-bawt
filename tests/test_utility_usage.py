@@ -111,7 +111,7 @@ def test_empty_completion_is_its_own_outcome(rig):
 def test_unconfigured_model_makes_no_call_and_no_row(rig, monkeypatch):
     _, rows = rig
     monkeypatch.setattr("llm_bawt.runtime_settings.resolve_job_model", lambda *_: None)
-    monkeypatch.setattr("llm_bawt.service.maintenance_health.record_unconfigured", lambda *_: None)
+    monkeypatch.setattr("llm_bawt.service.maintenance_health.record_unconfigured", lambda *_a, **_k: None)
     with pytest.raises(HTTPException):
         llm.complete_utility(RawCompletionRequest(prompt="p"))
     assert rows == []

@@ -108,6 +108,22 @@ Arguments: an anchor, either `bot` + `id` or `handle` + `card_ref`; plus
   only, after reauthorizing the anchor. Open any neighbour in full by passing
   its `bot` + `id` as a new anchor.
 
+## Retrieval statistics
+
+When MCP runs in the app process, the Prometheus scrape includes two counters:
+
+- `message_retrieval_find_total{outcome}` counts completed initial searches
+  (`ok` or `no_match`). It excludes browsing, paging and errors.
+- `message_retrieval_weak_opens_total{rung}` counts successful card-ref opens
+  by the rung that served the card. Attribution uses that handle's original
+  query and served card (including its rank), after reauthorizing the anchor.
+  Bare ID and cursor calls are unattributed. Each successful card-ref call
+  counts once, not once per unique card or query.
+
+Only aggregate counts with bounded labels reach `/metrics`. This adds no
+query, handle, or message logging, and does not feed ranking or change tool
+responses.
+
 ## Changing this contract
 
 Both tools count against the MCP catalog token budget

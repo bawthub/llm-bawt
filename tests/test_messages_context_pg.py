@@ -3,7 +3,7 @@
 Private PostgreSQL, isolated schema, synthetic fixtures only (the
 ``messages_find`` world). Covers the §5.0 denial tests that apply to context
 (4, 5, 6, 8, 9, 10, 12), the §5.2 order/budget/cursor contract and the §5.3
-card-reference tests 2-5. Labels (§5.3 tests 1 and 6) are TASK-1487.
+card-reference and weak-label tests (§5.3).
 """
 from __future__ import annotations
 
@@ -32,8 +32,9 @@ def ctx(world):  # noqa: F811
     def call(caller="pub", user="operator", *, trigger_id=None, raw=False, **request):
         if "focus" in request and request["focus"] is not None:
             request["focus"] = tuple(request["focus"])
-        out = world.context.context(world.access(caller, user), ContextRequest(**request),
-                                    trigger_id=trigger_id)
+        out, world.label = world.context.context_with_open(
+            world.access(caller, user), ContextRequest(**request), trigger_id=trigger_id,
+        )
         return out if raw else json.loads(out)
     world.ctx = call
     return world
@@ -297,6 +298,21 @@ def test_card_ref_resolves_the_served_card_with_find_terms(ctx):
     assert "TASK-901" in again["neighbors"]["after"][0]["snippet"]
 
 
+def test_1_open_labels_the_original_find_not_the_latest_find(ctx):
+    first = ctx.message("pub", "s_pub", "TASK-908 anotherterm")
+    a = find(ctx, query="  TASK-908  ", speaker="user")
+    b = find(ctx, query="anotherterm")
+    assert a["handle"] != b["handle"] and a["rung"] != b["rung"]
+    assert a["best"][0]["id"] == b["best"][0]["id"] == first
+
+    response = ctx.ctx(handle=a["handle"], card_ref="c0.0", focus=["anotherterm"])
+    assert response["anchor"]["id"] == first
+    assert "label" not in response
+    assert ctx.label.find.query == "TASK-908"
+    assert ctx.label.find.filters.speaker == "user"
+    assert (ctx.label.card.ref, ctx.label.card.rank, ctx.label.card.rung) == ("c0.0", 0, a["rung"])
+
+
 def test_2_insert_between_find_and_context_cannot_move_c0_0(ctx):
     ctx.session("s_a", "pub")
     first = ctx.message("pub", "s_a", "TASK-902 original", age=100)
@@ -306,6 +322,7 @@ def test_2_insert_between_find_and_context_cannot_move_c0_0(ctx):
     ctx.message("pub", "s_b", "TASK-902 TASK-902 newer and better", age=1)
     assert find(ctx, query="TASK-902")["best"][0]["id"] != first  # a fresh find would move
     assert ctx.ctx(handle=served["handle"], card_ref="c0.0")["anchor"]["id"] == first
+    assert ctx.label.card.id == first  # No label for the replacement-ranked hit.
 
 
 def test_3_policy_flip_makes_the_card_not_found(ctx):
@@ -313,6 +330,7 @@ def test_3_policy_flip_makes_the_card_not_found(ctx):
     served = find(ctx, query="TASK-903")
     ctx.flag("pub2", False)
     assert ctx.ctx(handle=served["handle"], card_ref="c0.0") == NOT_FOUND
+    assert ctx.label is None
 
 
 def test_3_policy_flip_of_the_partition_makes_the_card_not_found(ctx):
@@ -320,26 +338,45 @@ def test_3_policy_flip_of_the_partition_makes_the_card_not_found(ctx):
     served = find(ctx, query="TASK-906")
     ctx.flag("pub2", False)
     assert ctx.ctx(handle=served["handle"], card_ref="c0.0") == NOT_FOUND
+    assert ctx.label is None
 
 
 def test_4_other_owner_forged_or_expired_handle(ctx):
     ctx.message("pub", "s_pub", "TASK-904 note")
     served = find(ctx, query="TASK-904")
-    assert ctx.ctx("pub2", handle=served["handle"], card_ref="c0.0") == EXPIRED
-    assert ctx.ctx("pub", "eve", handle=served["handle"], card_ref="c0.0") == EXPIRED
-    assert ctx.ctx(handle="forged", card_ref="c0.0") == EXPIRED
+    for caller, user, handle in (("pub2", "operator", served["handle"]),
+                                 ("pub", "eve", served["handle"]),
+                                 ("pub", "operator", "forged")):
+        assert ctx.ctx(caller, user, handle=handle, card_ref="c0.0") == EXPIRED
+        assert ctx.label is None
     now = [0.0]
     ctx.handles = ctx.finder.handles = HandleStore(ttl=60, clock=lambda: now[0])
     ctx.context.finds = ctx.handles
     fresh = find(ctx, query="TASK-904")
     assert ctx.ctx(handle=fresh["handle"], card_ref="c0.0")["status"] == "ok"
+    assert ctx.label is not None
     now[0] = 61
     assert ctx.ctx(handle=fresh["handle"], card_ref="c0.0") == EXPIRED
+    assert ctx.label is None
 
 
 def test_5_unserved_card_ref_is_not_found(ctx):
     ctx.message("pub", "s_pub", "TASK-905 note")
     served = find(ctx, query="TASK-905")
-    assert ctx.ctx(handle=served["handle"], card_ref="c0.1") == NOT_FOUND
-    assert ctx.ctx(handle=served["handle"], card_ref="c1.0") == NOT_FOUND
+    for ref in ("c0.1", "c1.0"):
+        assert ctx.ctx(handle=served["handle"], card_ref=ref) == NOT_FOUND
+        assert ctx.label is None
     assert ctx.ctx(handle=served["handle"], card_ref=None) == INVALID
+    assert ctx.label is None
+    assert ctx.ctx(handle=served["handle"], card_ref="c0.0", offset=1000) == INVALID
+    assert ctx.label is None
+
+
+def test_6_a_bare_id_served_by_two_handles_is_unattributed(ctx):
+    mid = ctx.message("pub", "s_pub", "TASK-909 anotherterm")
+    a = find(ctx, query="TASK-909")
+    b = find(ctx, query="anotherterm")
+    assert a["handle"] != b["handle"]
+    assert a["best"][0]["id"] == b["best"][0]["id"] == mid
+    assert ctx.ctx(bot="pub", id=mid)["anchor"]["id"] == mid
+    assert ctx.label is None

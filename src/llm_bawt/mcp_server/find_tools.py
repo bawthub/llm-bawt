@@ -17,6 +17,7 @@ from functools import lru_cache
 from typing import Literal
 
 from llm_bawt.bot_access import BotAccessError, BotPolicyResolver
+from llm_bawt.retrieval import metrics
 from llm_bawt.retrieval.context import CHARS_DEFAULT, SIDE_DEFAULT, ContextRequest, MessageContext
 from llm_bawt.retrieval.find import FindRequest, MessageFinder, failure, serialize
 
@@ -114,7 +115,9 @@ async def messages_find(
                                   parse_find_time("until", until), handle)
             resolver, finder = _runtime()
             access = await resolver.resolve(caller)
-            return await asyncio.to_thread(finder.find, access, request, trigger_id=trigger_id)
+            payload = await asyncio.to_thread(finder.find, access, request, trigger_id=trigger_id)
+            metrics.record_find(request, payload)
+            return payload
     except InvalidTime as error:
         return invalid_time(error.field)
     except BotAccessError as error:
@@ -181,8 +184,11 @@ async def messages_context(
                                      max_chars, offset, cursor)
             resolver, _ = _runtime()
             access = await resolver.resolve(caller)
-            return await asyncio.to_thread(_context_runtime().context, access, request,
-                                           trigger_id=trigger_id)
+            payload, label = await asyncio.to_thread(_context_runtime().context_with_open,
+                                                     access, request, trigger_id=trigger_id)
+            if label is not None:
+                metrics.record_open(label)
+            return payload
     except BotAccessError as error:
         return failure(error.code)
     except TimeoutError:

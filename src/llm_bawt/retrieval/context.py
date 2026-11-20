@@ -78,6 +78,14 @@ class ContextCursor:
 CONTEXT_CURSORS: HandleStore[ContextCursor] = HandleStore(per_owner=16)
 
 
+@dataclass(frozen=True)
+class WeakOpen:
+    """Server-only attribution for a successful, reauthorized card open."""
+
+    find: FindContinuation
+    card: ServedCard
+
+
 class NotFound(LookupError):
     """Denied, vanished, unserved or unknown anchor: one indistinguishable answer."""
 
@@ -146,31 +154,36 @@ class MessageContext:
 
     def context(self, access: BotAccess, request: ContextRequest, *,
                 trigger_id: str | None = None) -> str:
-        """The serialized wire payload; failures are ``unavailable`` with a reason."""
+        """The serialized wire payload, without internal attribution."""
+        return self.context_with_open(access, request, trigger_id=trigger_id)[0]
+
+    def context_with_open(self, access: BotAccess, request: ContextRequest, *,
+                          trigger_id: str | None = None) -> tuple[str, WeakOpen | None]:
+        """Build the wire payload and a separate label for the metrics consumer."""
         try:
             return self._context(access, request, trigger_id)
         except NotFound:
-            return serialize({"status": "not_found"})
+            return serialize({"status": "not_found"}), None
         except BotAccessError as error:
-            return failure(error.code)
+            return failure(error.code), None
         except FindError as error:
             if error.code == "response_overflow":
                 logger.error("messages_context response overflow")
-            return failure(error.code)
+            return failure(error.code), None
         except HandleExpired:
-            return failure("handle_expired")
+            return failure("handle_expired"), None
         except OperationalError as error:
             code = getattr(getattr(error, "orig", None), "pgcode", None)
             logger.warning("messages_context query failed: %s", type(error).__name__)
-            return failure("timeout" if code == "57014" else "source_unavailable")
+            return failure("timeout" if code == "57014" else "source_unavailable"), None
         except Exception:
             logger.exception("messages_context failed")
-            return failure("source_unavailable")
+            return failure("source_unavailable"), None
 
     # -- entry -------------------------------------------------------------
 
     def _context(self, access: BotAccess, request: ContextRequest,
-                 trigger_id: str | None) -> str:
+                 trigger_id: str | None) -> tuple[str, WeakOpen | None]:
         if access.caller is None or not access.caller.user_id:
             raise BotAccessError("caller_unavailable")
         owner: Owner = (access.caller.bot_id, access.caller.user_id)
@@ -186,21 +199,20 @@ class MessageContext:
                 raise FindError("invalid_request")
             cursor = self.cursors.get(request.cursor, owner)
             n = before if cursor.direction == "before" else after
-            return self._page(access, owner, cursor, n, max_chars, trigger_id,
-                              cursor.focus if focus is None else focus)
+            focus = cursor.focus if focus is None else focus
+            return self._page(access, owner, cursor, n, max_chars, trigger_id, focus), None
         if by_id == by_card:
             raise FindError("invalid_request")
         if by_card:
             card, served = self._served_card(owner, request.handle, request.card_ref)
-            bot, mid = card.bot, card.id
-            if focus is None:
-                focus = served.terms
-        else:
-            if not isinstance(request.bot, str) or not isinstance(request.id, str) or not request.id:
-                raise FindError("invalid_request")
-            bot, mid = request.bot, request.id
-        return self._expand(access, owner, bot, mid, before, after, max_chars, offset,
-                            focus or (), trigger_id)
+            payload = self._expand(access, owner, card.bot, card.id, before, after, max_chars,
+                                   offset, served.terms if focus is None else focus, trigger_id)
+            return payload, WeakOpen(served, card)
+        if not isinstance(request.bot, str) or not isinstance(request.id, str) or not request.id:
+            raise FindError("invalid_request")
+        # A bare id has no explicit provenance; don't guess from other finds.
+        return self._expand(access, owner, request.bot, request.id, before, after, max_chars,
+                            offset, focus or (), trigger_id), None
 
     def _served_card(self, owner: Owner, handle: Any, card_ref: Any,
                      ) -> tuple[ServedCard, FindContinuation]:

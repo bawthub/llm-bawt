@@ -51,7 +51,9 @@ COPY server.sh ./
 # Alembic config + revisions (TASK-631); run `alembic ...` from /app.
 COPY alembic.ini ./
 COPY migrations/ ./migrations/
-RUN chmod +x server.sh
+# The ops entrypoint checks the baked source and migration bytes against this pin.
+COPY docker/ops-reconciler-entrypoint.py /usr/local/libexec/ops-reconciler-entrypoint.py
+RUN printf '%s\n' "$SOURCE_SHA" > /app/.image-source-sha && chmod +x server.sh
 RUN uv sync --locked --no-dev --extra mcp --extra service --extra search
 
 # Runtime dirs

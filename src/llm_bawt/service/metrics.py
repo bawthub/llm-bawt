@@ -19,6 +19,8 @@ from prometheus_fastapi_instrumentator.middleware import (
 )
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from llm_bawt.retrieval import metrics as retrieval_metrics
+
 # The library labels requests by method as well as by handler. HTTP allows
 # arbitrary method tokens, even on a known route that responds with 405.
 _HTTP_METHODS = frozenset({"GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "TRACE", "CONNECT"})
@@ -107,6 +109,7 @@ def install(app: FastAPI) -> bool:
     PlatformCollector(registry=registry)
     ProcessCollector(registry=registry)
     registry.register(_LoopMetrics(app))
+    retrieval_metrics.register(registry)
 
     app.add_middleware(_BoundedHTTPMetrics, registry=registry)
     Instrumentator(registry=registry).expose(app, include_in_schema=False)

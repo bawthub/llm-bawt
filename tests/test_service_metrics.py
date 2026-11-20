@@ -9,6 +9,9 @@ from prometheus_client.parser import text_string_to_metric_families
 
 from llm_bawt.api_auth import wiring
 from llm_bawt.api_auth.mode import ModeResolver
+from llm_bawt.retrieval import metrics as retrieval_metrics
+from llm_bawt.retrieval.context import WeakOpen
+from llm_bawt.retrieval.find import FindContinuation, FindFilters, FindRequest, ServedCard
 from llm_bawt.service.metrics import PROMETHEUS_METRICS_ENV, install
 from llm_bawt.service.request_guard import GuardPolicy, RequestGuardMiddleware
 
@@ -74,6 +77,37 @@ async def test_http_metrics_keep_only_bounded_labels():
                    and sample.value == value for sample in samples), name
     assert {"process_cpu_seconds_total", "process_resident_memory_bytes",
             "python_gc_collections_total"} <= {s.name for s in samples}
+
+
+@pytest.mark.asyncio
+async def test_retrieval_metrics_export_counts_without_query_or_message_identity():
+    app = FastAPI()
+    install(app)
+    find = FindContinuation("fixture-private-query", FindFilters(bot="fixture-private-bot"),
+                            0, (), 0, (), (), 1)
+    card = ServedCard("c0.0", "fixture-private-bot", "fixture-private-message", "fixture-private-session",
+                      (), "best", 0, "exact_all", 0)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        def totals(body):
+            return {(s.name, tuple(s.labels.items())): s.value
+                    for f in text_string_to_metric_families(body) for s in f.samples
+                    if s.name.startswith("message_retrieval_") and s.name.endswith("_total")}
+
+        before = totals((await client.get("/metrics")).text)
+        query = FindRequest(query=find.query)
+        retrieval_metrics.record_find(query, '{"status":"ok"}')
+        retrieval_metrics.record_find(query, '{"status":"no_match"}')
+        retrieval_metrics.record_find(query, '{"status":"unavailable"}')
+        retrieval_metrics.record_find(FindRequest(handle="fixture-private-handle"), '{"status":"ok"}')
+        retrieval_metrics.record_find(FindRequest(), '{"status":"ok"}')
+        retrieval_metrics.record_open(WeakOpen(find, card))
+        body = (await client.get("/metrics")).text
+    assert "fixture-private-" not in body
+    assert {k: v - before.get(k, 0) for k, v in totals(body).items() if v != before.get(k, 0)} == {
+        ("message_retrieval_find_total", (("outcome", "ok"),)): 1,
+        ("message_retrieval_find_total", (("outcome", "no_match"),)): 1,
+        ("message_retrieval_weak_opens_total", (("rung", "exact_all"),)): 1,
+    }
 
 
 @pytest.mark.asyncio

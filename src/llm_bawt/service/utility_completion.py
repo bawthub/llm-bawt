@@ -125,7 +125,7 @@ def _complete_utility(
     job = "recall_completion" if timeout_seconds is not None else "utility_completion"
     if not requested_model:
         from .maintenance_health import record_unconfigured
-        record_unconfigured(job, "maintenance_model")
+        record_unconfigured(job, "maintenance_model", fallback=False)
         raise HTTPException(status_code=503, detail="No maintenance model configured")
     client, model_alias = service._get_background_client(
         model_override=requested_model, job=job, allow_fallback=not request.model,

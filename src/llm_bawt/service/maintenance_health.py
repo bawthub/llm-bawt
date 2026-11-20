@@ -110,6 +110,7 @@ class JobState:
     failures: int = 0
     since: str | None = None
     last_at: str | None = None
+    note: str | None = None
 
 
 def _publish(reason: str) -> None:
@@ -134,8 +135,21 @@ class MaintenanceHealth:
                 log.info("Maintenance job %s recovered after %d failure(s)", job, previous.failures)
             self._jobs[job] = JobState(job=job, ok=True, model=model, provider=provider,
                                        credential=credential, last_at=_now())
-        if previous is None or not previous.ok:
+        if previous is None or not previous.ok or previous.note:
             _publish(f"maintenance {job} ok")
+
+    def record_unconfigured(self, job: str, note: str) -> None:
+        """No model is set for ``job``: an operator choice, not a failure (TASK-2522).
+
+        The row stays ``ok`` with ``note`` as its reason, so it shows what the
+        job does without raising the bell. A configured model that can't serve
+        is still a failure (``record_failure``).
+        """
+        with self._lock:
+            previous = self._jobs.get(job)
+            self._jobs[job] = JobState(job=job, ok=True, note=note, last_at=_now())
+        if previous is None or not previous.ok or previous.note != note:
+            _publish(f"maintenance {job} not configured")
 
     def record_failure(self, job: str, error_class: str, detail: str, *, model: str | None,
                        provider: str | None, credential: str | None) -> None:
@@ -163,7 +177,7 @@ class MaintenanceHealth:
         checks = []
         for state in sorted(self.snapshot(), key=lambda s: s.job):
             if state.ok:
-                checks.append({"name": state.job, "status": "ok", "reason": None})
+                checks.append({"name": state.job, "status": "ok", "reason": state.note})
                 continue
             served = "/".join(p for p in (state.provider, state.credential) if p) or "no client"
             times = f"{state.failures}x since {state.since}" if state.failures > 1 else f"at {state.since}"
@@ -175,13 +189,14 @@ class MaintenanceHealth:
         return {"checks": checks}
 
 
-UNCONFIGURED = "unconfigured"
+def record_unconfigured(job: str, setting: str, *, fallback: bool) -> None:
+    """A job whose model setting is unset: visible, but not a failure (TASK-2522).
 
-
-def record_unconfigured(job: str, setting: str) -> None:
-    """A job that can't run because its model setting is unset fails visibly too."""
-    _registry.record_failure(job, UNCONFIGURED, f"{setting} is not set",
-                             model=None, provider=None, credential=None)
+    ``fallback`` says whether the job still runs on its built-in heuristics;
+    without one, the feature is simply off until a model is set.
+    """
+    effect = "using the built-in fallback" if fallback else "off until a model is set"
+    _registry.record_unconfigured(job, f"not configured ({setting} is not set); {effect}")
 
 
 _registry = MaintenanceHealth()

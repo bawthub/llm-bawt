@@ -43,7 +43,10 @@ def _invalidate_bot_history_cache(service, bot_id: str) -> None:
             invalidate()
 
 
-def _build_summary_callable(service, bot_id: str, user_id: str = "system", model: str | None = None):
+def _build_summary_callable(
+    service, bot_id: str, user_id: str = "system", model: str | None = None,
+    *, use_heuristic: bool = False,
+):
     """Create a summarization callable using the service's model resolution path."""
     from ...memory.summarization import (
         _extract_json_object,
@@ -80,7 +83,7 @@ def _build_summary_callable(service, bot_id: str, user_id: str = "system", model
         # heuristic. ``_get_background_client`` is the one job-model resolver.
         client, model_alias = service._get_background_client(
             model_override=requested_model, job="history_summary_rebuild",
-            allow_fallback=not model,
+            allow_fallback=not model, heuristic_fallback=use_heuristic,
         )
         if client is None:
             raise RuntimeError(
@@ -395,6 +398,7 @@ def summarize_history(
             bot_id=effective_bot_id,
             user_id="system",
             model=model,
+            use_heuristic=use_heuristic,
         )
         # Compute context budget from model
         resolved_model = model or getattr(service, '_default_model', None)
@@ -452,6 +456,7 @@ def rebuild_history_summaries(
             bot_id=effective_bot_id,
             user_id="system",
             model=model,
+            use_heuristic=use_heuristic,
         )
         # Compute context budget from model
         resolved_model = model or getattr(service, '_default_model', None)

@@ -870,20 +870,25 @@ An operator setting up a new installation must:
    install is required. Record the built worker's immutable image ID (or published
    digest) as `LLM_BAWT_OPS_WORKER_IMAGE`; a mutable tag is refused at dispatch.
 3. Choose a dedicated per-stack volume name and set
-   `LLM_BAWT_OPS_RECEIPT_VOLUME`. Set `LLM_BAWT_OPS_RECONCILER_IMAGE` to the
-   verified existing CPU app image ID/digest. These are topology configuration,
-   not catalog metadata. Preserve historical image/volume availability while
-   jobs are active.
+   `LLM_BAWT_OPS_RECEIPT_VOLUME`. Build the CPU app image from the exact
+   published commit, passing the full commit SHA as `SOURCE_SHA`, for example
+   `git archive "$sha" | docker build --build-arg SOURCE_SHA="$sha" -f Dockerfile.app-cpu -t "$tag" -`.
+   Set `LLM_BAWT_OPS_RECONCILER_IMAGE` to its immutable image ID/digest and
+   `LLM_BAWT_OPS_RECONCILER_SOURCE_SHA` to that full SHA. Preserve historical
+   images/volumes while jobs are active. When a release changes reconciler code
+   or the Alembic graph, rebuild and repin the reconciler; restarting it will
+   not load changes from the checkout.
 4. Append `docker-compose.ops.yml` **last** to the existing compose configuration
    (preserve any dev/prod overlays). Review merged config before applying. The
    override mounts the volume at `/var/lib/llm-bawt-ops` in app and reconciler,
    and starts a separate `python -m llm_bawt.ops.reconciler` service. It uses
-   the existing app image, `.env` DB configuration, default stack network and
-   read-only dev source mount. It also mounts the app's existing credential key
-   file read-only, not the entire app config directory; reconciliation needs the
-   same key to decrypt DB-stored GitHub tokens. Validate the merged Compose config
-   and separately authorize recreation of an existing reconciler to add the mount.
-   Adapt the source mount/network for a baked image or alternate DB network.
+   the pinned image, `.env` DB configuration, default stack network and the app's
+   read-only secret exports. The repository mount is used only for Git input:
+   the entrypoint verifies the baked `src`, `alembic.ini` and `migrations` against
+   the pinned Git commit before starting. It never imports from the checkout or
+   compares against its moving HEAD. Keep the pinned commit available in the
+   mounted repository and don't overlay any of the baked paths. Verify the
+   merged Compose config before recreating the reconciler.
 5. With explicit deployment permission, recreate **only** app and the new
    ops-reconciler service. Confirm the declared dependencies are already healthy,
    then name both services with `docker compose up -d --no-deps app ops-reconciler`

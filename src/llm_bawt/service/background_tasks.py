@@ -194,7 +194,7 @@ class BackgroundTasksMixin:
         )
         if not requested_model:
             from .maintenance_health import record_unconfigured
-            record_unconfigured("profile_maintenance", "maintenance_model")
+            record_unconfigured("profile_maintenance", "maintenance_model", fallback=False)
             return {"error": "No model configured for profile maintenance"}
 
         # Job models are global, not bot models. Resolving through the task's
@@ -505,6 +505,7 @@ class BackgroundTasksMixin:
         client, model_alias = self._get_background_client(
             model_override=requested_model, job="history_summarization",
             allow_fallback=not task.payload.get("model"),
+            heuristic_fallback=use_heuristic_fallback,
         )
 
         # TASK-858: size the prompt off the job model's REAL context window.
@@ -688,7 +689,7 @@ class BackgroundTasksMixin:
         # Use isolated background client for LLM calls
         extraction_client, extraction_model = self._get_background_client(
             model_override=task.payload.get("model"), job="memory_extraction",
-            allow_fallback=not task.payload.get("model"),
+            allow_fallback=not task.payload.get("model"), heuristic_fallback=True,
         )
         use_llm = extraction_client is not None
 
