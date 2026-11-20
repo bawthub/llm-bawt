@@ -21,6 +21,7 @@ from .chat_message_text import last_user_text, message_content_text
 from .http_errors import safe_error_text
 from .inter_bot_claims import continuation_author, turn_admission_claim, validate_inter_bot_claim
 from .ordinary_turn_queue import admit_ordinary_agent_turn
+from .owned_thread import finish_in_thread, run_in_thread
 from .turn_admission import turn_start_extensions
 from .logging import RequestContext, generate_request_id, get_service_logger
 from .schemas import (
@@ -179,7 +180,7 @@ class ChatNonStreamMixin:
         # even if the backend times out or errors before responding.
         admission_claim = turn_admission_claim(self, request)
         # TASK-2395: admission may wait on an advisory lock; keep it off the loop.
-        decision = await asyncio.to_thread(
+        decision = await run_in_thread(
             admit_ordinary_agent_turn,
             self, llm_bawt.bot, request, is_agent_backend=is_agent_backend,
             admission_claim=admission_claim, bot_id=bot_id, user_id=user_id,
@@ -191,7 +192,7 @@ class ChatNonStreamMixin:
         protocol_options = await direct_protocol_options(
             self.config, bot_id, request, user_prompt, admission_claim,
         )
-        admission_lease = await asyncio.to_thread(
+        admission_lease, abandoned = await finish_in_thread(
             self._persist_turn_log,
             turn_id=turn_log_id, request_id=ctx.request_id, path=ctx.path,
             stream=False, model=model_alias, bot_id=bot_id, user_id=user_id,
@@ -210,6 +211,12 @@ class ChatNonStreamMixin:
             is_agent=is_agent_backend,
             on_close=lambda: self._end_generation(cancel_event, done_event, bot_id),
         )
+        if abandoned:
+            # TASK-2541: the caller left while the lease was being written. The
+            # scope owns it now: settle the row as cancelled and never launch;
+            # request cleanup then closes the follower.
+            await finish_in_thread(terminal_scope.abandon_unlaunched)
+            raise asyncio.CancelledError()
         from ..content_provenance import ContentTurn
         from .content_lineage import inherit_admitted_request
 

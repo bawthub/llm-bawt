@@ -187,6 +187,24 @@ class TerminalFollowerScope:
             # recovery to finish a failed write once the database is reachable.
             log.warning("Could not commit pre-launch terminal failure", exc_info=True)
 
+    def abandon_unlaunched(self):
+        """Settle an admitted turn whose caller left before launch (TASK-2541).
+
+        Commits ``cancelled``/``aborted`` under this scope's lease, so the row
+        never sits open waiting for lease expiry. A prior Stop/owner wins.
+        """
+        if self.follower is None or self._launched:
+            return
+        try:
+            self.follower.protocol.commit(
+                self.follower.lease, status="cancelled", end_reason="aborted",
+            )
+        except FollowerFenceLost:
+            return
+        except Exception:
+            # Lease expiry still lets recovery settle it once the DB is back.
+            log.warning("Could not commit abandoned pre-launch turn", exc_info=True)
+
     def _close(self):
         follower = self.follower
         if follower is None or self._closed:

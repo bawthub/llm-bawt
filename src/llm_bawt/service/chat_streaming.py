@@ -28,6 +28,7 @@ from .logging import RequestContext, generate_request_id, get_service_logger
 from .schemas import ChatCompletionRequest
 from .stream_request_attachments import has_user_turn, prepare_stream_request_attachments
 from .ordinary_turn_queue import admit_ordinary_agent_turn
+from .owned_thread import finish_in_thread, run_in_thread
 from .tool_event_coordinator import ToolEventCoordinator
 from .turn_admission import AdmissionFenceLost, AdmissionUnavailable, SystemGateRefused, turn_start_extensions
 from .turn_stream_context import TurnStreamContext
@@ -302,7 +303,7 @@ class ChatStreamingMixin(BridgeSessionResetMixin):
             # ACTIVE thread so seed/resume decisions use canonical per-thread
             # metadata rather than the retired bot scalar.
             # TASK-2395: DB-bound; keep it off the event loop.
-            thread_binding = await asyncio.to_thread(self._bind_agent_thread, llm_bawt, request)
+            thread_binding = await run_in_thread(self._bind_agent_thread, llm_bawt, request)
             if prompt_record and (not thread_binding or not thread_binding.get("explicit_thread")):
                 raise ValueError("Scheduled prompt could not bind its isolated thread")
             # Explicit selection is a read-only validation. Resolving an
@@ -320,7 +321,7 @@ class ChatStreamingMixin(BridgeSessionResetMixin):
         try:
             # TASK-2395: admission can wait on a per-target advisory lock;
             # run it in a worker so contention never stalls the event loop.
-            decision = await asyncio.to_thread(
+            decision = await run_in_thread(
                 admit_ordinary_agent_turn,
                 self, llm_bawt.bot, request, is_agent_backend=is_agent_backend,
                 admission_claim=admission_claim, bot_id=bot_id, user_id=user_id,
@@ -342,7 +343,7 @@ class ChatStreamingMixin(BridgeSessionResetMixin):
             self.config, bot_id, request, user_prompt, admission_claim,
         )
         try:
-            admission_lease = await asyncio.to_thread(
+            admission_lease, abandoned = await finish_in_thread(
                 self._persist_turn_log,
                 turn_id=turn_log_id, request_id=ctx.request_id, path=ctx.path,
                 stream=True, model=model_alias, bot_id=bot_id, user_id=user_id,
@@ -369,6 +370,12 @@ class ChatStreamingMixin(BridgeSessionResetMixin):
             is_agent=is_agent_backend,
             on_close=lambda: self._end_generation(cancel_event, done_event, bot_id),
         )
+        if abandoned:
+            # TASK-2541: the caller left while the lease was being written. The
+            # scope owns it now: settle the row as cancelled and never launch;
+            # request cleanup then closes the follower.
+            await finish_in_thread(terminal_scope.abandon_unlaunched)
+            raise asyncio.CancelledError()
         from ..content_provenance import ContentTurn
         from .content_lineage import inherit_admitted_request
 
@@ -388,7 +395,7 @@ class ChatStreamingMixin(BridgeSessionResetMixin):
             try:
                 from .session_lifecycle.execution import NewSessionExecution
 
-                chat_reset = await asyncio.to_thread(
+                chat_reset = await run_in_thread(
                     NewSessionExecution.prepare_chat,
                     self, llm_bawt, request, bot_id=bot_id,
                     user_id=user_id, user_prompt=user_prompt,
@@ -446,7 +453,7 @@ class ChatStreamingMixin(BridgeSessionResetMixin):
                         backend_name=backend_name, prompt_record=prompt_record,
                     )
 
-                prepared_reset = await asyncio.to_thread(_prepare_agent_reset, thread_binding)
+                prepared_reset = await run_in_thread(_prepare_agent_reset, thread_binding)
                 inject_seed_messages = prepared_reset.seed_messages
                 thread_binding = prepared_reset.thread_binding
                 bridge_reset_action = prepared_reset.bridge_reset_action
