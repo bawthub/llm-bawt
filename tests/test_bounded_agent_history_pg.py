@@ -241,6 +241,46 @@ def test_cold_start_priming_count_matches_full_read(private_app_pg, rows, summar
             conn.execute(text("DELETE FROM sessions WHERE bot_id=:bot"), {"bot": bot})
 
 
+def test_sparse_window_over_large_omitted_pool_stays_bounded(private_app_pg, monkeypatch):
+    # Codex review: two recent raw rows over many omitted summaries must keep
+    # the old (no priming) decision without falling back to the full read.
+    config = require_test_db_config()
+    bot = "_t2395s_" + uuid.uuid4().hex[:12]
+    manager = PostgreSQLShortTermManager(config, bot_id=bot)
+    sid = manager.get_or_create_active_session(bot_id=bot, user_id="user_a")
+    table = manager._backend._messages_table_name
+    rows = [("summary", float(i)) for i in range(300)]
+    rows += [("system", 400.0), ("user", 500.0), ("assistant", 501.0)]
+    try:
+        with manager._backend.engine.begin() as conn:
+            for role, ts in rows:
+                conn.execute(text(f"""INSERT INTO {table}
+                    (id, bot_id, role, content, timestamp, session_id, summarized,
+                     author_entity_type, author_entity_id)
+                    VALUES (:id, :bot, :role, :content, :ts, :sid, false, 'bot', :bot)"""),
+                    {"id": str(uuid.uuid4()), "bot": bot, "role": role,
+                     "content": f"{role} {ts}", "ts": ts, "sid": sid})
+        settings = {**SETTINGS, "summary_count": 0}
+        full_ids = {m.db_id for m in manager.get_messages(user_id="user_a")}
+
+        def no_full_read(*a, **k):
+            raise AssertionError("full read taken for a sparse window")
+
+        monkeypatch.setattr(manager, "get_messages", no_full_read)
+        bounded = _history(manager, settings)
+        bounded.load_history(window=(10, 0))
+        assert len(bounded.messages) == 4
+        assert {m.db_id for m in bounded.messages} <= full_ids
+        assert [m.role for m in bounded.messages][-2:] == ["user", "assistant"]
+        bounded.messages.append(bounded.messages[-1])  # the new prompt
+        assert len(bounded.messages) > 3  # full read: 303 rows, no priming
+    finally:
+        with manager._backend.engine.begin() as conn:
+            for p in PARENT_TABLES:
+                conn.execute(text(f"DROP TABLE IF EXISTS {partition_name(p, bot)}"))
+            conn.execute(text("DELETE FROM sessions WHERE bot_id=:bot"), {"bot": bot})
+
+
 def test_window_reads_one_snapshot_across_a_concurrent_summarization(snapshot, monkeypatch):
     # Codex finding 2: a summary committed after the summary query (here,
     # after the first raw page) must not drop both itself and the rows it

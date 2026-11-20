@@ -153,7 +153,8 @@ def raw_history_cap(budget: int, history_tokens: int) -> int:
 
 
 # Cold-start memory priming fires at len(messages) <= 3 once the new prompt is
-# appended, so a history of 4+ rows can never trigger it.
+# appended, so a history of 4+ rows can never trigger it. Bounded reads
+# return at least this many full-read rows when they exist.
 COLD_START_ROWS = 4
 
 
@@ -323,12 +324,10 @@ class HistoryManager:
                         )
                 # An empty bounded result is indistinguishable from a swallowed
                 # failure (the MCP path returns [] on error), so confirm it with
-                # the full read. A result under COLD_START_ROWS means the raw
-                # history is tiny; the window's summary/system caps could then
-                # move the cold-start priming count (len(messages) <= 3 after
-                # the prompt is appended), so take the full read, which is
-                # cheap at that size. At or above it, both reads stay > 3.
-                if bounded and len(bounded) >= COLD_START_ROWS:
+                # the full read; for a truly empty history that read is cheap.
+                # The window itself keeps cold-start parity: it returns at
+                # least COLD_START_ROWS full-read rows when they exist.
+                if bounded:
                     self.messages = bounded
                 else:
                     self.messages = self._db_backend.get_messages(

@@ -219,9 +219,10 @@ class ShortTermMessageReadsMixin:
           read, so the newest-turn floor and degrade decisions see exactly what
           they would see in the full list.
         System rows are not read: this window only feeds seed assembly, which
-        drops them (agents carry their own system prompt). At least
-        ``min_rows`` rows are read when they exist, so small-history checks
-        (cold-start priming counts ``<= 3``) match the full read.
+        drops them (agents carry their own system prompt). When fewer than
+        ``min_rows`` rows result, up to ``min_rows`` of the full read's other
+        rows are added, so small-history checks (cold-start priming counts
+        ``<= 3``) see the full read's count without an unbounded read.
 
         Order and ties match ``get_messages()``: ``timestamp, id`` ascending.
         """
@@ -285,6 +286,33 @@ class ShortTermMessageReadsMixin:
                         offset += page_size
                         continue
                 break
+            if len(rows) < min_rows:
+                # The caps above dropped older summaries and every system row.
+                # Small-history checks (cold-start priming counts ``<= 3``
+                # after the prompt is appended) must see the full read's
+                # cardinality, so top up with at most ``min_rows`` more of the
+                # full read's own rows in this snapshot. The seed assembler
+                # drops system rows and keeps only the newest summaries, so
+                # these never change the seed.
+                seen = [row.id for row in rows]
+                top_params = {**params, "need": min_rows - len(rows)}
+                skip_sql = ""
+                if seen:
+                    top_params.update({f"seen_{i}": v for i, v in enumerate(seen)})
+                    skip_sql = " AND id NOT IN ({})".format(
+                        ", ".join(f":seen_{i}" for i in range(len(seen)))
+                    )
+                rows.extend(conn.execute(
+                    text(f"""
+                        SELECT {cols} FROM {table}
+                        WHERE (role = 'summary'
+                               OR summarized IS NULL OR summarized = FALSE)
+                          {skip_sql}{owner_sql}
+                        ORDER BY timestamp DESC, id DESC
+                        LIMIT :need
+                    """),
+                    top_params,
+                ).fetchall())
 
         def order(row):
             # Mirrors ORDER BY timestamp ASC, id ASC (NULL timestamps last).
