@@ -177,9 +177,11 @@ def test_staged_key_is_encrypted_and_failed_cleanup_stops_startup(monkeypatch):
     assert "ENCRYPTED PRIVATE KEY" in seen["key"]
     assert config.ssl_keyfile_password is None  # the password is not kept
 
+    real_rmtree = tls.shutil.rmtree
     monkeypatch.setattr(tls.shutil, "rmtree", lambda path: None)  # removal silently fails
-    with pytest.raises(RuntimeError, match="could not remove"):
+    with pytest.raises(RuntimeError, match="could not remove") as failed:
         tls.load_server_tls(uvicorn.Config(server.build_app(lambda: None), port=1), own)
+    real_rmtree(str(failed.value).rsplit(" ", 1)[-1])  # tidy the synthetic staging folder
 
 
 def test_extra_certificates_never_reach_the_trust_store(monkeypatch, tls_installs):
