@@ -178,7 +178,9 @@ class ChatNonStreamMixin:
         # Persist turn log immediately so the user's prompt is recorded
         # even if the backend times out or errors before responding.
         admission_claim = turn_admission_claim(self, request)
-        decision = admit_ordinary_agent_turn(
+        # TASK-2395: admission may wait on an advisory lock; keep it off the loop.
+        decision = await asyncio.to_thread(
+            admit_ordinary_agent_turn,
             self, llm_bawt.bot, request, is_agent_backend=is_agent_backend,
             admission_claim=admission_claim, bot_id=bot_id, user_id=user_id,
             user_prompt=user_prompt, trigger_message_id=trigger_message_id,
@@ -189,7 +191,8 @@ class ChatNonStreamMixin:
         protocol_options = await direct_protocol_options(
             self.config, bot_id, request, user_prompt, admission_claim,
         )
-        admission_lease = self._persist_turn_log(
+        admission_lease = await asyncio.to_thread(
+            self._persist_turn_log,
             turn_id=turn_log_id, request_id=ctx.request_id, path=ctx.path,
             stream=False, model=model_alias, bot_id=bot_id, user_id=user_id,
             status="pending", latency_ms=None, user_prompt=user_prompt,

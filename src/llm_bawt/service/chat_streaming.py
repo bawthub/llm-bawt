@@ -301,7 +301,8 @@ class ChatStreamingMixin(BridgeSessionResetMixin):
             # decision. Explicit selection wins; otherwise bind the current
             # ACTIVE thread so seed/resume decisions use canonical per-thread
             # metadata rather than the retired bot scalar.
-            thread_binding = self._bind_agent_thread(llm_bawt, request)
+            # TASK-2395: DB-bound; keep it off the event loop.
+            thread_binding = await asyncio.to_thread(self._bind_agent_thread, llm_bawt, request)
             if prompt_record and (not thread_binding or not thread_binding.get("explicit_thread")):
                 raise ValueError("Scheduled prompt could not bind its isolated thread")
             # Explicit selection is a read-only validation. Resolving an
@@ -317,7 +318,10 @@ class ChatStreamingMixin(BridgeSessionResetMixin):
         answered_question_id = getattr(request, "answered_question_id", None)
         admission_claim = turn_admission_claim(self, request)
         try:
-            decision = admit_ordinary_agent_turn(
+            # TASK-2395: admission can wait on a per-target advisory lock;
+            # run it in a worker so contention never stalls the event loop.
+            decision = await asyncio.to_thread(
+                admit_ordinary_agent_turn,
                 self, llm_bawt.bot, request, is_agent_backend=is_agent_backend,
                 admission_claim=admission_claim, bot_id=bot_id, user_id=user_id,
                 user_prompt=user_prompt, trigger_message_id=trigger_message_id,
@@ -338,7 +342,8 @@ class ChatStreamingMixin(BridgeSessionResetMixin):
             self.config, bot_id, request, user_prompt, admission_claim,
         )
         try:
-            admission_lease = self._persist_turn_log(
+            admission_lease = await asyncio.to_thread(
+                self._persist_turn_log,
                 turn_id=turn_log_id, request_id=ctx.request_id, path=ctx.path,
                 stream=True, model=model_alias, bot_id=bot_id, user_id=user_id,
                 status="streaming", latency_ms=None, user_prompt=user_prompt,
@@ -383,7 +388,8 @@ class ChatStreamingMixin(BridgeSessionResetMixin):
             try:
                 from .session_lifecycle.execution import NewSessionExecution
 
-                chat_reset = NewSessionExecution.prepare_chat(
+                chat_reset = await asyncio.to_thread(
+                    NewSessionExecution.prepare_chat,
                     self, llm_bawt, request, bot_id=bot_id,
                     user_id=user_id, user_prompt=user_prompt,
                 )
@@ -419,22 +425,28 @@ class ChatStreamingMixin(BridgeSessionResetMixin):
         session_resumption = None
         if is_agent_backend:
             try:
-                if thread_binding is None:
-                    thread_binding = self._resolve_active_thread_binding(llm_bawt)
                 from .agent_new_rotation import prepare_delivery_new_binding
-                thread_binding, delivery_new_id = prepare_delivery_new_binding(
-                    self, llm_bawt, request, bot_id=bot_id, user_id=user_id,
-                    user_prompt=user_prompt, thread_binding=thread_binding,
-                    backend_name=backend_name,
-                )
                 from .session_lifecycle.execution import NewSessionExecution
 
-                prepared_reset = NewSessionExecution.prepare_agent(
-                    self, llm_bawt, request, bot_id=bot_id,
-                    user_prompt=user_prompt, model_alias=model_alias,
-                    thread_binding=thread_binding, delivery_id=delivery_new_id,
-                    backend_name=backend_name, prompt_record=prompt_record,
-                )
+                def _prepare_agent_reset(binding):
+                    # TASK-2395: binding, /new summarize (bounded thread
+                    # join), seed build and rotation are blocking DB/LLM
+                    # work; the caller runs this in a worker thread.
+                    if binding is None:
+                        binding = self._resolve_active_thread_binding(llm_bawt)
+                    binding, delivery_new_id = prepare_delivery_new_binding(
+                        self, llm_bawt, request, bot_id=bot_id, user_id=user_id,
+                        user_prompt=user_prompt, thread_binding=binding,
+                        backend_name=backend_name,
+                    )
+                    return NewSessionExecution.prepare_agent(
+                        self, llm_bawt, request, bot_id=bot_id,
+                        user_prompt=user_prompt, model_alias=model_alias,
+                        thread_binding=binding, delivery_id=delivery_new_id,
+                        backend_name=backend_name, prompt_record=prompt_record,
+                    )
+
+                prepared_reset = await asyncio.to_thread(_prepare_agent_reset, thread_binding)
                 inject_seed_messages = prepared_reset.seed_messages
                 thread_binding = prepared_reset.thread_binding
                 bridge_reset_action = prepared_reset.bridge_reset_action
