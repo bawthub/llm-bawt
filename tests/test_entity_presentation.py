@@ -97,6 +97,30 @@ def test_resolver_batches_profiles_and_bots_once() -> None:
     assert result[("bot", "snark")].avatar_render == "data:image/svg+xml,bot"
 
 
+def test_registered_bot_uses_registry_even_when_presentation_was_cleared() -> None:
+    engine = Engine()
+    legacy_bot = engine.profile_rows[1]
+    legacy_bot.update(display_name="Old name", color="#ffffff", avatar="A", avatar_render="old-render")
+    engine.bot_rows[0].update(name="New name", color=None, avatar=None, avatar_render=None)
+
+    result = EntityPresentationResolver(engine).resolve_many([AuthorReference.bot("snark")])
+    author = result[("bot", "snark")]
+
+    assert author.display_name == "New name"
+    assert author.color != legacy_bot["color"]
+    assert author.avatar is None
+    assert author.avatar_render is None
+
+
+def test_bot_without_registry_row_keeps_legacy_presentation() -> None:
+    engine = Engine()
+    engine.bot_rows = []
+    engine.profile_rows[1].update(display_name="Legacy bot", color="rose", avatar="A")
+    result = EntityPresentationResolver(engine).resolve_many([AuthorReference.bot("snark")])
+    author = result[("bot", "snark")]
+    assert (author.display_name, author.color, author.avatar) == ("Legacy bot", "rose", "A")
+
+
 def test_missing_entity_preserves_identity_but_becomes_unknown() -> None:
     engine = Engine()
     engine.profile_rows = []

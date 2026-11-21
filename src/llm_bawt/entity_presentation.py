@@ -79,18 +79,20 @@ class EntityPresentationResolver:
             profile = profiles.get((entity_type, entity_id), {})
             bot = bots.get(entity_id, {}) if entity_type == "bot" else {}
             exists = bool(profile or bot)
+            # Registered bots use the registry row as a unit. Falling back
+            # field-by-field can revive a cleared avatar with an old render.
+            presentation = bot if bot else profile
             display_name = str(
-                profile.get("display_name")
-                or bot.get("name")
+                presentation.get("name" if bot else "display_name")
                 or entity_id.replace("-", " ").replace("_", " ").title()
             )
             result[key] = EntityPresentation(
                 entity_type=entity_type,
                 entity_id=entity_id,
                 display_name=display_name if exists else f"Unknown {entity_type}",
-                color=str(profile.get("color") or bot.get("color") or self._stable_color(entity_type, entity_id)),
-                avatar=profile.get("avatar") or bot.get("avatar"),
-                avatar_render=profile.get("avatar_render") or bot.get("avatar_render"),
+                color=str(presentation.get("color") or self._stable_color(entity_type, entity_id)),
+                avatar=presentation.get("avatar"),
+                avatar_render=presentation.get("avatar_render"),
                 status=author.status if exists else "unknown",
             )
         return result
