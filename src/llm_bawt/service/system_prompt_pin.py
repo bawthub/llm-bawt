@@ -55,7 +55,7 @@ from sqlalchemy import text
 
 from agent_bridge.maintenance import is_compact_command, is_new_command
 
-from .prompt_stale import clear_on_verified_boundary, reconcile_kept
+from .prompt_stale import clear_on_verified_boundary, reconcile_kept, working_memory_span
 
 from .turn_termination import dump_payload, turn_payload
 
@@ -435,6 +435,7 @@ def _mark_bare_reset(ctx, client, base: str, *, session_id: str, turn_id: str,
 
 def apply_session_pin(
     ctx, client, messages: list, *, turn_id: str, sections: Mapping[str, dict] | None = None,
+    working_memory_text: str | None = None,
 ) -> tuple[list, PinDecision | None]:
     """Swap the turn's system messages for the session's pinned prompt.
 
@@ -471,11 +472,13 @@ def apply_session_pin(
     from ..memory.postgresql import _sanitize_table_name
 
     try:
+        rendered = client.compose_system_prompt(base)
         decision = SystemPromptPinStore(ctx.svc._turn_log_store.engine).resolve(
             session_id=session_id,
             turn_id=turn_id,
             storage_bot=_sanitize_table_name(ctx.bot_id),
-            rendered=client.compose_system_prompt(base),
+            rendered=rendered,
+            rendered_memory_span=working_memory_span(base, rendered, working_memory_text),
             cold_start=is_cold_start(
                 binding, bridge_reset_action=ctx.bridge_reset_action,
                 user_prompt=ctx.user_prompt,
@@ -608,6 +611,7 @@ class SystemPromptPinStore:
         skill_manifest: Mapping | None = None,
         injected_skills: Sequence[str] = (),
         use_reset_render: bool = True,
+        rendered_memory_span: tuple[int, int] | None = None,
     ) -> PinDecision | None:
         """Decide this turn's prompt, stage a pin move if needed, record the audit.
 
@@ -772,7 +776,11 @@ class SystemPromptPinStore:
                     conn, session_id=session_id, metadata=session_metadata,
                     pinned_text=pinned_text, pinned_sha=pin["sha256"],
                     rendered=rendered, rendered_sha=rendered_sha,
-                    verified=not pin.get("snapshot_unverified"),
+                    verified=not decision.snapshot_unverified,
+                    rendered_span=rendered_memory_span,
+                    pinned_span=record.get("working_memory_span"),
+                    legacy_sections=(decision.candidate_sections if decision.snapshot_unverified
+                                     else decision.pinned_sections),
                 )
             else:  # pin_move_reason keeps a pin only when both exist
                 raise RuntimeError("system prompt pin kept without pinned text")
@@ -786,6 +794,14 @@ class SystemPromptPinStore:
                 audit["reset_turn_id"] = session_metadata[BOUNDARY_KEY]["turn_id"]
             if decision.pin_turn_id == turn_id:
                 audit["text"] = decision.text
+                # Comparison provenance belongs to the stored bytes, not to
+                # the held Working Memory version after an unverified re-pin.
+                if decision.is_boundary:
+                    memory_span = rendered_memory_span if reset_render is None else None
+                else:
+                    memory_span = record.get("working_memory_span")
+                if memory_span is not None:
+                    audit["working_memory_span"] = memory_span
                 if decision.skill_manifest is not None:
                     audit[SKILL_MANIFEST_KEY] = decision.skill_manifest
                 if decision.injected_skills:

@@ -353,6 +353,18 @@ def _set(rig, *, usage=None, stale=None):
                      {"m": json.dumps({STALE_KEY: stale} if stale else {}), "id": rig.session_id})
 
 
+@pytest.mark.parametrize("resident,expected", [(5_000, "resident context within threshold"), (100_001, None)])
+def test_claim_rechecks_an_old_memory_only_marker_without_another_turn(rig, resident, expected):
+    from llm_bawt.service.job_parameters import IdleContextResetParameters
+
+    stamp = (rig.now - timedelta(minutes=30)).isoformat()
+    _set(rig, usage={"resident_tokens": resident},
+         stale={"since": stamp, "changed_at": stamp, "sections": ["Working Memory"]})
+    on = IdleContextResetParameters(reset_when_prompt_stale=True)
+    with rig.engine.begin() as conn:
+        assert NewSessionLifecycle.scheduled_skip_reason(conn, _stale_intent(rig, on)) == expected
+
+
 def test_lifecycle_estimate_is_not_size_evidence_but_stale_remains_independent(rig, real_lifecycle):
     from llm_bawt.service.job_parameters import IdleContextResetParameters
 

@@ -89,6 +89,16 @@ def test_stale_trigger_replaces_only_the_size_threshold(row, parameters, expecte
     assert IdleContextCandidates.skip_reason(row, now=NOW, parameters=parameters) == expected
 
 
+def test_legacy_memory_marker_is_hidden_but_real_or_mixed_markers_are_not():
+    memory = marker(20, sections=["Working Memory"])
+    assert public_view(memory) is None
+    assert not settled(json.dumps(memory), now=NOW, settle_minutes=ON.prompt_stale_settle_minutes)
+    for edits in (marker(20, sections=["Rules", "Working Memory"]),
+                  {**memory, "comparison": "instructions"}):
+        assert public_view(edits)["sections"] == edits["sections"]
+        assert settled(edits, now=NOW, settle_minutes=ON.prompt_stale_settle_minutes)
+
+
 def job_with(rows, *, protected=()):
     lifecycle = SimpleNamespace(submit=AsyncMock(return_value=NewSessionResult(
         outcome=Outcome.COMPLETED, stage=Stage.RECEIPT, old_session_id="session",
@@ -102,6 +112,19 @@ def job_with(rows, *, protected=()):
 
 def run(job):
     return asyncio.run(job.run(job_id="job", run_id="run", target_bot="*"))
+
+
+def test_old_memory_marker_does_not_schedule_below_threshold(monkeypatch):
+    monkeypatch.setattr(idle_context_reset, "datetime", SimpleNamespace(now=lambda tz=None: NOW))
+    stale = marker(20, sections=["Working Memory"])
+    job, lifecycle = job_with([candidate(stale)])
+    assert run(job)["skipped"] == 1
+    lifecycle.submit.assert_not_awaited()
+
+    job, lifecycle = job_with([candidate(stale, token_usage_json='{"resident_tokens": 100001}')])
+    result = run(job)
+    assert result["reset"] == 1 and "trigger" not in result["bots"]["disposable"]
+    assert ":stale:" not in lifecycle.submit.await_args.args[0].idempotency_key
 
 
 def test_stale_reset_is_keyed_by_the_render_change(monkeypatch):

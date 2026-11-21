@@ -1253,7 +1253,7 @@ def test_task_pointer_actual_sent_prompt_keeps_pin_until_boundary(wm, ses, monke
         )
         messages, decision = apply_session_pin(
             ctx, client, [Message("system", section.text), Message("user", "hi")],
-            turn_id=tid, sections={"working_memory": section.meta},
+            turn_id=tid, sections={"working_memory": section.meta}, working_memory_text=section.text,
         )
         assert decision is not None
         if decision.is_boundary:
@@ -1269,6 +1269,7 @@ def test_task_pointer_actual_sent_prompt_keeps_pin_until_boundary(wm, ses, monke
         assert task.short_id in fresh.text and task.id in fresh.text
         kept, decision = sent(fresh, cold=False)
         assert kept == first and task.short_id not in kept
+        assert "system_prompt_stale" not in ses.metadata(sid)
         assert _notice(wm, sid, decision) == prompts.DEFAULT_NOTICE
         assert wm.service.bot_list(ses.ctx(sid))["items"][0]["id"] == item["id"]
         new, boundary = sent(fresh, cold=True)

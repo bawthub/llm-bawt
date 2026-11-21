@@ -72,13 +72,13 @@ class Rig:
         return turn_id
 
     def resolve(self, turn_id, rendered, *, cold=False, sections=None, dispatched=True, resume=None,
-                skill_manifest=None, injected_skills=(), use_reset_render=True):
+                skill_manifest=None, injected_skills=(), use_reset_render=True, rendered_memory_span=None):
         """Resolve a turn; ``dispatched`` models the bridge's first output confirming it."""
         decision = self.store.resolve(
             session_id=self.session_id, turn_id=turn_id, storage_bot=self.bot,
             rendered=rendered, cold_start=cold, sections=sections, resume_id=resume,
             skill_manifest=skill_manifest, injected_skills=injected_skills,
-            use_reset_render=use_reset_render,
+            use_reset_render=use_reset_render, rendered_memory_span=rendered_memory_span,
         )
         if dispatched and decision is not None and decision.is_boundary:
             assert self.store.confirm(session_id=self.session_id, turn_id=turn_id)
@@ -706,6 +706,68 @@ def test_unverified_fallback_keeps_stale_until_a_real_boundary(rig):
     assert kept.action == "kept" and kept.snapshot_unverified
     assert STALE_KEY in rig.metadata()
     rig.resolve(rig.add_turn(), V2, cold=True)
+    assert STALE_KEY not in rig.metadata()
+
+
+@pytest.mark.parametrize("pin_kind", ["legacy-empty", "legacy-populated", "managed"])
+@pytest.mark.parametrize("wrapped", [True, False])
+def test_memory_churn_keeps_bytes_and_does_not_restart_instruction_settle_clock(rig, monkeypatch, pin_kind, wrapped):
+    legacy = pin_kind != "managed"
+    from llm_bawt.service import prompt_stale
+    from llm_bawt.working_memory.prompts import DEFAULT_SECTION, DEFAULT_SECTION_EMPTY
+
+    # The legacy pin uses the historical default. New pins also handle custom
+    # editable framing, including multiple headings and no default title.
+    empty = DEFAULT_SECTION_EMPTY if legacy else "## Notes\nNothing yet"
+    items = DEFAULT_SECTION if legacy else "## Notes\n### Snapshot\n{items}"
+    other_rules = "## Working Memory\nThis is a separate, authored instruction."
+    base = "## Rules\nFollow the review policy."
+    if not legacy:
+        base += "\n\n" + other_rules
+    stamp = datetime(2026, 11, 21, 12, tzinfo=timezone.utc)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return stamp
+
+    monkeypatch.setattr(prompt_stale, "datetime", Clock)
+
+    def send(rules, memory, version, *, cold=False):
+        prompt = f"{rules}\n\n{memory}" if memory else rules
+        composed = f"## Runtime\nmodel\n\n{prompt.rstrip()}\n\n## Provider\nrules" if wrapped else prompt
+        return rig.resolve(
+            rig.add_turn(), composed, cold=cold,
+            sections={"working_memory": {"v": 1, "state": "empty" if memory == empty else "ok",
+                                         "version": version}} if memory else None,
+            rendered_memory_span=(prompt_stale.working_memory_span(prompt, composed, memory)
+                                  if not (legacy and cold) else None),
+        )
+
+    first_item = '{"id": "a", "objective": "start"}'
+    second_item = '{"id": "b", "objective": "follow up"}'
+    initial_memory = items.replace("{items}", first_item) if pin_kind == "legacy-populated" else empty
+    initial = send(base, initial_memory, 0, cold=True)
+    added = items.replace("{items}", f"{first_item}\n{second_item}")
+    edited = added.replace("start", "finish")
+    for version, memory in enumerate((added, edited, empty, None), 1):
+        held = send(base, memory, version)
+        assert (held.text, held.sha256, held.pin_turn_id) == (initial.text, initial.sha256, initial.pin_turn_id)
+        assert STALE_KEY not in rig.metadata()
+
+    old_rule = "policy" if legacy else "authored instruction"
+    rules_edit = base.replace(old_rule, "new instruction")
+    send(rules_edit, added, 5)
+    marker = rig.metadata()[STALE_KEY]
+    assert marker["sections"] == ["Rules" if legacy else "Working Memory"]
+    assert prompt_stale.public_view(marker)
+    assert marker["changed_at"] == stamp.isoformat()
+    stamp += timedelta(minutes=11)
+    for version, memory in enumerate((edited, empty, None), 6):
+        send(rules_edit, memory, version)
+        assert rig.metadata()[STALE_KEY] == marker
+        assert prompt_stale.settled(marker, now=stamp, settle_minutes=10)
+    send(base, edited, 9)
     assert STALE_KEY not in rig.metadata()
 
 

@@ -12,15 +12,17 @@ The marker is content-free::
     {"since": iso, "changed_at": iso, "rendered_sha256": hex,
      "pinned_sha256": hex, "sections": [heading, ...]}
 
-``since`` is the first drifting turn; ``changed_at`` moves only when the
-render changes again, so a burst of edits can settle before one reset.
+For markers with ``comparison: "instructions"``, the digests and section
+names exclude the managed working-memory snapshot. The pin's actual bytes
+and digest are independent of this comparison. ``since`` is the first drifting
+turn; ``changed_at`` moves only when the instructions change again.
 
 Clearing needs evidence that the harness now holds the current render:
 
 * a confirmed verified boundary (cold start, manual compaction) — the
   unverified fallbacks (missing/corrupt pin, legacy adopt) never clear it,
   because the harness may still hold the old snapshot;
-* a kept turn on a *verified* pin whose bytes equal the render again
+* a kept turn on a *verified* pin whose instructions equal the render again
   (an edit rolled back).
 
 Bookkeeping is optional: it runs in a savepoint and only logs on failure,
@@ -37,6 +39,11 @@ from typing import Any, Mapping
 
 from sqlalchemy import text
 
+from ..working_memory.prompts import (
+    DEFAULT_SECTION, DEFAULT_SECTION_EMPTY, DEFAULT_SECTION_UNAVAILABLE, ITEMS_PLACEHOLDER,
+)
+from ..working_memory.render import SECTION_NAME
+
 logger = logging.getLogger(__name__)
 
 STALE_KEY = "system_prompt_stale"
@@ -44,6 +51,92 @@ STALE_KEY = "system_prompt_stale"
 PREAMBLE = "(preamble)"
 MAX_SECTIONS = 20
 _HEADING = re.compile(r"^(#{1,3}) +(\S.*?)\s*$")
+_INSTRUCTIONS = "instructions"
+_LEGACY_MEMORY_HEADING = "Working Memory"
+_SEPARATOR = "\n\n"
+
+
+def working_memory_span(base: str, composed: str, memory: str | None) -> tuple[int, int] | None:
+    """Locate the builder's managed tail section in the exact composed bytes.
+
+    Codex leaves the base intact. Claude wraps ``base.rstrip()`` with runtime
+    and optional provider instructions; keep those instructions on both sides.
+    The section text is supplied by the renderer, never inferred from a heading.
+    """
+    if not memory:
+        return None
+    wrapped = composed != base
+    if wrapped:
+        base, memory = base.rstrip(), memory.rstrip()
+    if base == memory:
+        preceding = ""
+    elif base.endswith(_SEPARATOR + memory):
+        preceding = base[:-len(_SEPARATOR + memory)]
+    else:
+        return None
+    offset = composed.find(base)
+    if offset < 0 or composed.find(base, offset + 1) >= 0:
+        return None  # don't guess if a backend duplicates or rewrites the base
+    end = offset + len(base)
+    if preceding:
+        return offset + len(preceding.rstrip() if wrapped else preceding), end
+    if offset and composed[:offset].endswith(_SEPARATOR):
+        return offset - len(_SEPARATOR), end
+    if composed.startswith(_SEPARATOR, end):
+        end += len(_SEPARATOR)
+    return offset, end
+
+
+def legacy_memory_span(prompt: str, sections: Mapping[str, Any] | None) -> tuple[int, int] | None:
+    """Recover a pre-upgrade pin's default snapshot, when provably managed.
+
+    Old pin metadata had the section's state but not its bounds. Require the
+    default framing for that state, not just a shared Markdown heading. A
+    legacy custom template with no identifiable framing is left alone.
+    """
+    meta = (sections or {}).get(SECTION_NAME)
+    if not isinstance(meta, Mapping) or meta.get("v") != 1:
+        return None
+    state = meta.get("state")
+    prefix = {
+        "empty": DEFAULT_SECTION_EMPTY,
+        "unavailable": DEFAULT_SECTION_UNAVAILABLE,
+        "ok": DEFAULT_SECTION.removesuffix(ITEMS_PLACEHOLDER),
+    }.get(state) if isinstance(state, str) else None
+    if prefix is None:
+        return None
+    start = prompt.find(prefix)
+    if start < 0 or prompt.find(prefix, start + 1) >= 0:
+        return None
+    end = start + len(prefix)
+    if state == "ok":
+        end = prompt.find(_SEPARATOR, end)
+        if end < 0:
+            end = len(prompt)
+        try:
+            rows = [json.loads(line) for line in prompt[start + len(prefix):end].split("\n")]
+        except ValueError:
+            return None
+        if not all(isinstance(row, dict) and ("id" in row or "omitted" in row) for row in rows):
+            return None
+    elif end != len(prompt) and not prompt.startswith(_SEPARATOR, end):
+        return None
+    if start and prompt[:start].endswith(_SEPARATOR):
+        return start - len(_SEPARATOR), end
+    if start == 0:
+        return start, end + (len(_SEPARATOR) if prompt.startswith(_SEPARATOR, end) else 0)
+    return None
+
+
+def _without_snapshot(prompt: str, span: Any) -> str:
+    if (isinstance(span, (tuple, list)) and len(span) == 2
+            and all(type(offset) is int for offset in span) and 0 <= span[0] < span[1] <= len(prompt)):
+        return prompt[:span[0]] + prompt[span[1]:]
+    return prompt
+
+
+def _digest(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def _sections(prompt: str) -> dict[str, str]:
@@ -82,7 +175,14 @@ def changed_sections(pinned: str, rendered: str) -> list[str]:
 
 
 def marker_value(value: Any) -> dict | None:
-    return value if isinstance(value, dict) and value.get("since") else None
+    if not isinstance(value, dict) or not value.get("since"):
+        return None
+    # Old markers carry only heading names. Ignore the old default memory-only
+    # signature at read time, including on idle sessions that never turn again.
+    # Retain mixed/unknown markers and do not apply this heuristic to new ones.
+    if "comparison" not in value and value.get("sections") == [_LEGACY_MEMORY_HEADING]:
+        return None
+    return value
 
 
 def public_view(value: Any) -> dict | None:
@@ -141,26 +241,38 @@ def _guarded(conn, session_id: str, action) -> None:
 
 def reconcile_kept(conn, *, session_id: str, metadata: Mapping[str, Any], pinned_text: str,
                    pinned_sha: str, rendered: str, rendered_sha: str, verified: bool,
+                   pinned_span: Any = None, rendered_span: tuple[int, int] | None = None,
+                   legacy_sections: Mapping[str, Any] | None = None,
                    now: datetime | None = None) -> None:
     """Update the marker after a kept-pin turn (inside the pin transaction)."""
-    existing = marker_value(metadata.get(STALE_KEY))
+    raw_marker = metadata.get(STALE_KEY)
+    existing = marker_value(raw_marker)
 
     def act() -> None:
-        if rendered_sha == pinned_sha:
-            if existing is not None and verified:
+        span = pinned_span if pinned_span is not None else legacy_memory_span(pinned_text, legacy_sections)
+        pinned = _without_snapshot(pinned_text, span)
+        fresh = _without_snapshot(rendered, rendered_span)
+        if rendered_sha == pinned_sha or fresh == pinned:
+            if isinstance(raw_marker, dict) and raw_marker.get("since") and (verified or existing is None):
                 _write(conn, session_id, None)
             return
-        if existing is not None and existing.get("rendered_sha256") == rendered_sha \
-                and existing.get("pinned_sha256") == pinned_sha:
+        fresh_sha = _digest(fresh)
+        held_sha = _digest(pinned)
+        previous = existing or {}
+        comparable = previous.get("comparison") == _INSTRUCTIONS
+        old_sha = previous.get("rendered_sha256")
+        same_render = old_sha == (fresh_sha if comparable else rendered_sha)
+        if comparable and same_render and previous.get("pinned_sha256") == held_sha:
             return
         stamp = (now or datetime.now(timezone.utc)).isoformat()
         _write(conn, session_id, {
-            "since": (existing or {}).get("since") or stamp,
-            "changed_at": stamp if (existing or {}).get("rendered_sha256") != rendered_sha
-            else existing.get("changed_at") or stamp,
-            "rendered_sha256": rendered_sha,
-            "pinned_sha256": pinned_sha,
-            "sections": changed_sections(pinned_text, rendered),
+            "comparison": _INSTRUCTIONS,
+            "since": previous.get("since") or stamp,
+            "changed_at": (previous.get("changed_at") or previous.get("since") or stamp)
+            if same_render else stamp,
+            "rendered_sha256": fresh_sha,
+            "pinned_sha256": held_sha,
+            "sections": changed_sections(pinned, fresh),
         })
 
     _guarded(conn, session_id, act)
@@ -172,7 +284,7 @@ def clear_on_verified_boundary(conn, *, session_id: str, metadata: Mapping[str, 
 
     Unverified fallback promotions keep it: the harness may hold old bytes.
     """
-    if marker_value(metadata.get(STALE_KEY)) is None or staged.get("snapshot_unverified"):
+    if STALE_KEY not in metadata or staged.get("snapshot_unverified"):
         return
     _guarded(conn, session_id, lambda: _write(conn, session_id, None))
 

@@ -278,6 +278,7 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                 messages, system_prompt_pin = apply_session_pin(
                     ctx, llm_bawt.client, messages, turn_id=turn_log_id,
                     sections=working_memory.sections,
+                    working_memory_text=working_memory.render.text if working_memory.render else None,
                 )
                 # TASK-1281: floor + notice, committed before the command publishes.
                 messages = working_memory.after_pin(messages, system_prompt_pin)
