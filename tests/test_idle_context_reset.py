@@ -102,6 +102,7 @@ def job_with(rows, result=None, *, protected=()):
     lifecycle = SimpleNamespace(submit=AsyncMock(return_value=result or completed()))
     job = IdleContextResetJob(None, object(), lifecycle=lifecycle, protected_bot_ids=protected)
     job.candidates.read = Mock(return_value=rows)
+    job.candidates.read_cache_hold_reason = Mock(return_value=None)
     return job, lifecycle
 
 

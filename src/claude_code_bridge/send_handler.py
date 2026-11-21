@@ -48,6 +48,7 @@ from .response_tracker import ResponseTracker
 from .subagent_usage import SubagentUsage
 from .worker_liveness import WorkerLiveness
 from .turn_phase import TurnPhaseTracker
+from .turn_prompt_cache import TurnPromptCache
 from .turn_watchdog import TurnWatchdog, TurnWatchdogTimeout
 
 logger = logging.getLogger("claude_code_bridge.bridge")
@@ -424,6 +425,15 @@ class ClaudeSendMixin(
                         skill_selection=req.skill_selection,
                     )
 
+                    prompt_cache = TurnPromptCache.from_sdk_env(
+                        getattr(options, "env", {}), use_proxy=use_proxy, access_path=req.access_path,
+                        model=model, resumed=bool(resume_id),
+                        oauth_gateway_url=(self._oauth_gateway_base_url(native_route)
+                                           if req.access_path == "anthropic-oauth" and native_route else None),
+                    )
+                    maintenance = is_compact_command(message)
+                    if maintenance:
+                        prompt_cache.suppress_estimate()
                     session_persisted = False
                     aborted = False
                     # Track the latest AssistantMessage.usage to surface "current
@@ -447,6 +457,7 @@ class ClaudeSendMixin(
                         self, request_id, session_key, actual_model, model,
                         bot_context_window,
                         compact_threshold=req.compact_threshold,
+                        prompt_cache=prompt_cache,
                         # Requests a failed attempt already made still count
                         # toward the turn's totals after an auth/session retry.
                         request_usages=live_usage.request_usages if live_usage is not None else [],
@@ -548,7 +559,7 @@ class ClaudeSendMixin(
                         active_run = ClaudeActiveRun(
                             client=sdk_client,
                             request_id=request_id,
-                            maintenance=is_compact_command(message),
+                            maintenance=maintenance,
                             teardown=teardown,
                             background_tasks=background_tasks_enabled(),
                             # TASK-1300: every origin, with the proof the app
@@ -649,6 +660,8 @@ class ClaudeSendMixin(
                                 # back from the transcript below.
                                 if data.get("session_id"):
                                     turn_session_id = data["session_id"]
+                                    if msg.subtype == "init":
+                                        prompt_cache.bind_session(turn_session_id)
                                     if resume_id and turn_session_id != resume_id:
                                         # The SDK started a replacement session
                                         # despite the requested resume key.
@@ -663,6 +676,8 @@ class ClaudeSendMixin(
                                 # outcome is recorded for the ResultMessage.
                                 phase_tracker.on_system_status(data)
                                 cr = data.get("compact_result")
+                                if data.get("status") == "compacting" or cr in ("success", "failed"):
+                                    prompt_cache.suppress_estimate()
                                 if cr == "success":
                                     compact_status = "success"
                                 elif cr == "failed":
@@ -697,6 +712,8 @@ class ClaudeSendMixin(
 
                             if isinstance(msg, StreamEvent):
                                 event = msg.event
+                                prompt_cache.observe_start(event, session_id=msg.session_id,
+                                                           parent=msg.parent_tool_use_id)
                                 phase_tracker.on_stream_event(event)
                                 live_usage.observe_stream_event(event, msg.parent_tool_use_id)
                                 if msg.parent_tool_use_id:
@@ -844,6 +861,7 @@ class ClaudeSendMixin(
                                 result_session_id = getattr(msg, "session_id", None)
                                 if result_session_id:
                                     turn_session_id = result_session_id
+                                    prompt_cache.bind_session(turn_session_id)
                                     if resume_id and turn_session_id != resume_id:
                                         session_start = "clean"
                                 terminal_usage = [None]
@@ -865,6 +883,7 @@ class ClaudeSendMixin(
                                     cost_baseline_usd=cost_baseline_usd,
                                     capture_usage=lambda usage: terminal_usage.__setitem__(0, usage),
                                     turn_request_totals=live_usage.request_totals(),
+                                    prompt_cache=prompt_cache.snapshot(),
                                     estimate_reasoning=live_usage.reasoning_tokens,
                                     compact_status=compact_status,
                                     compact_error_msg=compact_error_msg,

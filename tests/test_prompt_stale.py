@@ -96,6 +96,7 @@ def job_with(rows, *, protected=()):
     job = IdleContextResetJob(None, object(), lifecycle=lifecycle, protected_bot_ids=protected,
                               parameters=ON)
     job.candidates.read = Mock(return_value=rows)
+    job.candidates.read_cache_hold_reason = Mock(return_value=None)
     return job, lifecycle
 
 

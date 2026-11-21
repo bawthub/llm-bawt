@@ -255,6 +255,7 @@ def test_job_passes_snapshot_and_records_effective_parameters():
     params = IdleContextResetParameters(resident_tokens_gt=40000, idle_minutes_gt=5)
     job = IdleContextResetJob(None, None, lifecycle=lifecycle, parameters=params)
     job.candidates.read = Mock(return_value=[candidate()])
+    job.candidates.read_cache_hold_reason = Mock(return_value=None)
     result = asyncio.run(job.run(job_id="job", run_id="run", target_bot="*"))
     assert lifecycle.submit.call_args.args[0].scheduler_parameters == params
     assert result["parameters"] == params.model_dump(mode="json")

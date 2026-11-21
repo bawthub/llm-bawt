@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
-from claude_agent_sdk import AssistantMessage, ResultMessage, StreamEvent, TextBlock
+from claude_agent_sdk import AssistantMessage, ResultMessage, StreamEvent, SystemMessage, TextBlock
 
 from agent_bridge.continuity import SeedFraming
 from agent_bridge.events import AgentEventKind
@@ -201,7 +201,7 @@ class _SendHarness(ClaudeSendMixin, ClaudeCommandMixin, ClaudeEventMixin):
         if event.raw.get("turn_health", {}).get("phase") == "queued":
             self.queued.set()
 
-    def send(self, request_id="turn-request", resume_id="sdk-session"):
+    def send(self, request_id="turn-request", resume_id="sdk-session", **fields):
         return asyncio.create_task(self._handle_send({
             "request_id": request_id,
             "session_key": SESSION,
@@ -209,6 +209,7 @@ class _SendHarness(ClaudeSendMixin, ClaudeCommandMixin, ClaudeEventMixin):
             "message": "hello",
             "thread_resume_id": resume_id,
             "trigger_message_id": f"message-{request_id}",
+            **fields,
         }, f"send-{request_id}", self.redis))
 
     async def abort(self, request_id="turn-request", *, method="chat.abort"):
@@ -262,6 +263,55 @@ class _SDKStream:
         # Only the RPC disconnect is delayed; send cleanup may finish first.
         if self.disconnect_calls == 1:
             await self.release_disconnect.wait()
+
+
+@pytest.mark.parametrize("replacement", [False, True])
+def test_terminal_cache_ttl_uses_actual_options_and_sdk_session(monkeypatch, tmp_path, replacement):
+    from claude_code_bridge.context_env import prompt_cache_ttl_env
+    from claude_code_bridge.turn_prompt_cache import TurnPromptCache
+    from llm_bawt.service.turn_usage import encode_token_usage
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    env = prompt_cache_ttl_env("1h")
+    accepted_sid = "replacement-session" if replacement else "sdk-session"
+
+    class SDK(_SDKStream):
+        async def receive_messages(self):
+            yield SystemMessage(subtype="init", data={"session_id": "sdk-session", "model": MODEL})
+            yield StreamEvent(uuid="start", session_id="sdk-session", event={
+                "type": "message_start", "message": {
+                    "id": "msg_fixture", "model": MODEL, "usage": {
+                        "input_tokens": 23, "output_tokens": 0, "cache_read_input_tokens": 0,
+                        "cache_creation_input_tokens": 5000,
+                        "cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 5000},
+                    },
+                },
+            })
+            yield AssistantMessage(content=[TextBlock(text="done")], model=MODEL)
+            yield ResultMessage(subtype="success", duration_ms=1, duration_api_ms=1,
+                                is_error=False, num_turns=1, session_id=accepted_sid)
+
+    async def run():
+        harness = _SendHarness()
+        options = SimpleNamespace(env=env)
+        harness._build_agent_options.return_value = options
+        sdk_factory = Mock(return_value=SDK())
+        monkeypatch.setattr("claude_code_bridge.send_handler.ClaudeSDKClient", sdk_factory)
+        await harness.send(access_path="anthropic-api")
+        sdk_factory.assert_called_once_with(options=options)
+        done, = harness.terminal()
+        usage = done.token_usage
+        expected = TurnPromptCache.from_sdk_env(env, use_proxy=False, access_path="anthropic-api",
+                                                model=MODEL, resumed=True)
+        expected.bind_session(accepted_sid)
+        cache = usage["prompt_cache"]
+        assert cache["sdk_ttl"] == "1h" and cache["route"] == "native"
+        assert cache["sdk_session_ref"] == expected.snapshot()["sdk_session_ref"]
+        assert ("estimated_reuse_until_ms" in cache) is not replacement
+        assert ("actual_model" in cache) is not replacement
+        assert json.loads(encode_token_usage(usage, catalog=None, model_ref=MODEL))["prompt_cache"] == cache
+
+    asyncio.run(asyncio.wait_for(run(), timeout=5))
 
 
 def _run_dones(harness, request_id="turn-request"):

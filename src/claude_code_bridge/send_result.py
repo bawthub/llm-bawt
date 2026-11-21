@@ -43,6 +43,7 @@ class ClaudeResultMixin:
         compact_threshold: int | None = None,
         capture_usage: Callable[[dict | None], None] | None = None,
         turn_request_totals: dict | None = None,
+        prompt_cache: dict | None = None,
         estimate_reasoning: Callable[[int], tuple[int, str] | None] | None = None,
     ) -> int:
         full_text = "".join(text_parts)
@@ -142,6 +143,8 @@ class ClaudeResultMixin:
                     "reasoning_tokens": reasoning[0],
                     "reasoning_source": reasoning[1],
                 }
+        if prompt_cache is not None:
+            token_usage_payload = {**(token_usage_payload or {}), "prompt_cache": prompt_cache}
         seq += 1
         self._publish_event(
             request_id, session_key, seq,

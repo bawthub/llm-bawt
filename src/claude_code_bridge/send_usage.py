@@ -27,6 +27,7 @@ from ._bridge_helpers import (
 )
 
 from .context_env import effective_context_window
+from .turn_prompt_cache import TurnPromptCache
 
 # Same rough ratio as llm_bawt.utils.token_estimate (the bridge can't import it).
 _CHARS_PER_TOKEN = 4
@@ -118,6 +119,7 @@ class LiveUsagePublisher:
     # TASK-2503: requests whose terminal message_delta usage arrived.
     _terminal_requests: set[int] = field(default_factory=set)
     _cache_write_pricing: dict[int, bool] = field(default_factory=dict)
+    prompt_cache: TurnPromptCache | None = None
 
     def observe_stream_event(self, event: dict, source: str | None = None) -> None:
         """Track each upstream request: message_start opens one, deltas update it.
@@ -239,15 +241,14 @@ class LiveUsagePublisher:
         return min(max(tokens, 0), output_tokens), source
 
     def with_totals(self, usage: dict | None) -> dict | None:
-        """Attach the turn's request totals to a usage payload."""
+        """Attach metadata without inventing token counts or a context size."""
+        result = dict(usage or {})
         totals = self.request_totals()
-        if totals is None:
-            return usage
-        if not isinstance(usage, dict) or not usage:
-            # Cancelled/errored before any final-request usage: keep the
-            # measured totals without inventing a context size.
-            return {"turn_request_totals": totals}
-        return {**usage, "turn_request_totals": totals}
+        if totals is not None:
+            result["turn_request_totals"] = totals
+        if self.prompt_cache is not None:
+            result["prompt_cache"] = self.prompt_cache.snapshot()
+        return result or usage
 
     def publish(
         self,

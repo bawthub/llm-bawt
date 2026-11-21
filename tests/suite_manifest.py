@@ -67,6 +67,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_session_continuity_pg.py::",
     "test_agent_context.py::",
     "test_idle_context_reset_pg.py::",
+    "test_cache_reset_protection_pg.py::",
     "test_scheduler_wildcard_migration_pg.py::",
     "test_turn_context_snapshot_pg.py::",
     "test_api_balance_pg.py::",

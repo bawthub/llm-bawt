@@ -81,6 +81,18 @@ class IdleContextCandidates:
         """), {"target_bot": target_bot, "protected": list(self.protected_bot_ids), **_TAG_PARAMS})
         return [dict(row) for row in rows.mappings()]
 
+    @classmethod
+    def cache_hold_reason(cls, conn, candidate: dict) -> str | None:
+        if cls.house_idle_only(candidate):
+            return None
+        from .cache_reset_protection import cache_write_hold_reason
+
+        return cache_write_hold_reason(conn, candidate)
+
+    def read_cache_hold_reason(self, candidate: dict) -> str | None:
+        with self.engine.connect() as conn:
+            return self.cache_hold_reason(conn, candidate)
+
     @staticmethod
     def house_idle_only(candidate: dict) -> bool:
         """An unpinned house tenant: idleness alone ends its tenancy (TASK-2080)."""

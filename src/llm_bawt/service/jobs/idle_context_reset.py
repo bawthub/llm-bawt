@@ -45,6 +45,8 @@ class IdleContextResetJob:
                 else self.candidates.skip_reason(
                     candidate, now=datetime.now(timezone.utc), parameters=self.parameters,
                 ))
+            if not reason and not self.candidates.house_idle_only(candidate):
+                reason = await asyncio.to_thread(self.candidates.read_cache_hold_reason, candidate)
             stale = None
             if reason:
                 result = NewSessionResult(outcome=Outcome.SKIPPED, stage=Stage.ADMISSION, detail=reason)
