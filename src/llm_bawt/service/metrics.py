@@ -4,16 +4,18 @@ import os
 from collections.abc import Iterator
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from prometheus_client import (
+    CONTENT_TYPE_LATEST,
     CollectorRegistry,
     Gauge,
     GCCollector,
     PlatformCollector,
     ProcessCollector,
+    generate_latest,
 )
 from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily, Metric
-from prometheus_fastapi_instrumentator import Instrumentator, routing
+from prometheus_fastapi_instrumentator import routing
 from prometheus_fastapi_instrumentator.middleware import (
     PrometheusInstrumentatorMiddleware,
 )
@@ -112,5 +114,9 @@ def install(app: FastAPI) -> bool:
     retrieval_metrics.register(registry)
 
     app.add_middleware(_BoundedHTTPMetrics, registry=registry)
-    Instrumentator(registry=registry).expose(app, include_in_schema=False)
+    # A sync endpoint collects in FastAPI's worker pool, off the app event loop.
+    def scrape() -> Response:
+        return Response(generate_latest(registry), headers={"Content-Type": CONTENT_TYPE_LATEST})
+
+    app.add_api_route("/metrics", scrape, methods=["GET"], include_in_schema=False)
     return True

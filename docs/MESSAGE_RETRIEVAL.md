@@ -110,7 +110,7 @@ Arguments: an anchor, either `bot` + `id` or `handle` + `card_ref`; plus
 
 ## Retrieval statistics
 
-When MCP runs in the app process, the Prometheus scrape includes two counters:
+With `LLM_BAWT_PROMETHEUS_METRICS=1`, the app scrape includes two counters:
 
 - `message_retrieval_find_total{outcome}` counts completed initial searches
   (`ok` or `no_match`). It excludes browsing, paging and errors.
@@ -120,9 +120,13 @@ When MCP runs in the app process, the Prometheus scrape includes two counters:
   Bare ID and cursor calls are unattributed. Each successful card-ref call
   counts once, not once per unique card or query.
 
-Only aggregate counts with bounded labels reach `/metrics`. This adds no
-query, handle, or message logging, and does not feed ranking or change tool
-responses.
+Only aggregate counts with bounded labels reach `/metrics`. They do not feed
+ranking or change tool responses. `server.sh` passes the same local SQLite path
+under `.run` to the MCP and app processes and resets it on a fresh joint start.
+If starting those processes separately, set `LLM_BAWT_RETRIEVAL_METRICS_DB`
+to the same absolute path in a writable local runtime directory on both.
+Without that path the counters are process-local. Storage failures do not fail
+retrieval or the rest of the scrape.
 
 ## Changing this contract
 

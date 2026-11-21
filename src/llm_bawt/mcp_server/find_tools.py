@@ -116,8 +116,6 @@ async def messages_find(
             resolver, finder = _runtime()
             access = await resolver.resolve(caller)
             payload = await asyncio.to_thread(finder.find, access, request, trigger_id=trigger_id)
-            metrics.record_find(request, payload)
-            return payload
     except InvalidTime as error:
         return invalid_time(error.field)
     except BotAccessError as error:
@@ -126,6 +124,8 @@ async def messages_find(
         return failure("timeout")
     except Exception:
         return failure("source_unavailable")
+    await metrics.best_effort(metrics.record_find, request, payload)
+    return payload
 
 
 def _caller(tool: str, arguments: dict):
@@ -186,12 +186,12 @@ async def messages_context(
             access = await resolver.resolve(caller)
             payload, label = await asyncio.to_thread(_context_runtime().context_with_open,
                                                      access, request, trigger_id=trigger_id)
-            if label is not None:
-                metrics.record_open(label)
-            return payload
     except BotAccessError as error:
         return failure(error.code)
     except TimeoutError:
         return failure("timeout")
     except Exception:
         return failure("source_unavailable")
+    if label is not None:
+        await metrics.best_effort(metrics.record_open, label)
+    return payload

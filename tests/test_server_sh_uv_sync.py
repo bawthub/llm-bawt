@@ -23,7 +23,7 @@ REPO = Path(__file__).resolve().parents[1]
 SERVER_SH = REPO / "server.sh"
 
 FAKE_UV = """#!/usr/bin/env bash
-printf '%s\\n' "$*" >> "$FAKE_UV_LOG"
+printf '%s retrieval-db=%s\\n' "$*" "${LLM_BAWT_RETRIEVAL_METRICS_DB:-}" >> "$FAKE_UV_LOG"
 exit 0
 """
 
@@ -41,7 +41,9 @@ def run_start(tmp_path):
     absent_marker = tmp_path / "not-a-container"
 
     def run(*args: str, **extra_env: str) -> list[str]:
-        env = {k: v for k, v in os.environ.items() if k != "UV_NO_SYNC"}
+        env = {k: v for k, v in os.environ.items() if k not in {
+            "UV_NO_SYNC", "LLM_BAWT_PROMETHEUS_METRICS", "LLM_BAWT_RETRIEVAL_METRICS_DB",
+        }}
         env.update(
             PATH=f"{bin_dir}:{os.environ['PATH']}",
             FAKE_UV_LOG=str(log),
@@ -66,6 +68,7 @@ def run_start(tmp_path):
             time.sleep(0.02)
 
     run.marker = tmp_path / "dockerenv"  # type: ignore[attr-defined]
+    run.app = app  # type: ignore[attr-defined]
     return run
 
 
@@ -88,6 +91,18 @@ def test_dev_mode_disables_sync(run_start):
 def test_host_checkout_still_syncs(run_start):
     calls = run_start()
     assert calls and not any("--no-sync" in c for c in calls)
+
+
+@pytest.mark.parametrize("enabled", ["0", "1"])
+def test_retrieval_store_shared_only_when_enabled(run_start, enabled):
+    path = run_start.app / ".run" / "retrieval-metrics.sqlite3"
+    path.parent.mkdir()
+    path.write_bytes(b"previous launch")
+    calls = run_start(LLM_BAWT_PROMETHEUS_METRICS=enabled)
+    expected = str(path) if enabled == "1" else ""
+    for command in ("llm-mcp-server", "llm-service"):
+        assert any(command in call and call.endswith(f" retrieval-db={expected}") for call in calls)
+    assert path.exists() == (enabled == "0")
 
 
 def test_app_image_leaves_sync_policy_to_server_sh():

@@ -7,11 +7,15 @@ card-reference and weak-label tests (§5.3).
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import sys
 
 import pytest
+from prometheus_client.parser import text_string_to_metric_families
 from sqlalchemy import text
 
+from llm_bawt.bot_access import TrustedCaller
 from llm_bawt.retrieval.context import CHARS_MAX, ContextRequest, MessageContext
 from llm_bawt.retrieval.find import FindRequest
 from llm_bawt.retrieval.handles import HandleStore
@@ -380,3 +384,63 @@ def test_6_a_bare_id_served_by_two_handles_is_unattributed(ctx):
     assert a["best"][0]["id"] == b["best"][0]["id"] == mid
     assert ctx.ctx(bot="pub", id=mid)["anchor"]["id"] == mid
     assert ctx.label is None
+
+
+@pytest.mark.asyncio
+async def test_mcp_retrieval_counters_reach_separate_app_exporter(ctx, tmp_path, monkeypatch):
+    from llm_bawt.mcp_server import find_tools as tools
+    from tests.bot_policy_helpers import warm_policy_resolver
+
+    store = tmp_path / "counters.sqlite3"
+    monkeypatch.setenv("LLM_BAWT_PROMETHEUS_METRICS", "1")
+    monkeypatch.setenv("LLM_BAWT_RETRIEVAL_METRICS_DB", str(store))
+    monkeypatch.setattr(tools, "_caller", lambda *_: (TrustedCaller("pub", "operator", "turn"), None))
+    resolver = warm_policy_resolver(ctx.engine)
+    monkeypatch.setattr(tools, "_runtime", lambda: (resolver, ctx.finder))
+    monkeypatch.setattr(tools, "_context_runtime", lambda: ctx.context)
+    mid = ctx.message("pub2", "s_pub2", "TASK-160420 private-marker", mid="fixture-private-id")
+
+    async def scrape():
+        reader = await asyncio.create_subprocess_exec(sys.executable, "-c", """
+import asyncio
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
+from llm_bawt.service.metrics import install
+
+async def main():
+    app = FastAPI()
+    assert install(app)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
+        response = (await client.get('/metrics')).raise_for_status()
+        print(response.text)
+
+asyncio.run(main())
+""", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        out, err = await reader.communicate()
+        assert reader.returncode == 0, err.decode()
+        body = out.decode()
+        assert "process_resident_memory_bytes " in body
+        for private in ("TASK-160420", "fixture-private-id", "private-marker", "c0.0"):
+            assert private not in body
+        return {tuple(s.labels.items()): s.value
+                for f in text_string_to_metric_families(body) for s in f.samples
+                if s.name.startswith("message_retrieval_") and s.name.endswith("_total")}
+
+    hit = json.loads(await tools.messages_find(query="TASK-160420"))
+    assert hit["status"] == "ok" and hit["rung"] == "exact_all"
+    assert json.loads(await tools.messages_find(query="TASK-160421"))["status"] == "no_match"
+    anchor = {"handle": hit["handle"], "card_ref": hit["best"][0]["ref"]}
+    assert json.loads(await tools.messages_context(**anchor))["anchor"]["id"] == mid
+    expected = {(("outcome", "ok"),): 1, (("outcome", "no_match"),): 1, (("rung", "exact_all"),): 1}
+    assert await scrape() == expected
+    assert json.loads(await tools.messages_context(handle=hit["handle"], card_ref="c0.99")) == NOT_FOUND
+    assert json.loads(await tools.messages_context(bot="pub2", id=mid))["status"] == "ok"
+    ctx.flag("pub2", False)
+    resolver = warm_policy_resolver(ctx.engine)
+    assert json.loads(await tools.messages_context(**anchor)) == NOT_FOUND
+    assert await scrape() == expected
+
+    # Optional telemetry failure must not fail either MCP or the rest of the scrape.
+    store.write_bytes(b"invalid SQLite data")
+    assert json.loads(await tools.messages_find(query="TASK-160421"))["status"] == "no_match"
+    assert await scrape() == {}

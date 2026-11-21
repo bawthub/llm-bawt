@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import logging
 
+from mcp.types import ToolAnnotations
+
 from .server import mcp
 
 logger = logging.getLogger(__name__)
@@ -91,7 +93,8 @@ async def x_counts(
         return _x_error(query, exc)
 
 
-@mcp.tool(name="web_search")
+# Allow clients to dispatch independent calls together; providers still enforce pacing.
+@mcp.tool(name="web_search", annotations=ToolAnnotations(readOnlyHint=True))
 async def web_search(
     query: str,
     max_results: int = 5,

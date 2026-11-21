@@ -285,8 +285,21 @@ while [[ $# -gt 0 ]]; do
   esac
   shift
 done
+prepare_retrieval_metrics() {
+  [[ "${LLM_BAWT_PROMETHEUS_METRICS:-}" == 1 ]] || return 0
+  # Both children use the same bounded counter store. A full restart resets it;
+  # a repeated start with either child still alive must not unlink its database.
+  export LLM_BAWT_RETRIEVAL_METRICS_DB="$RUN_DIR/retrieval-metrics.sqlite3"
+  if ! is_running "$MCP_PID_FILE" && ! is_running "$SERVICE_PID_FILE"; then
+    if ! rm -f -- "$LLM_BAWT_RETRIEVAL_METRICS_DB" "$LLM_BAWT_RETRIEVAL_METRICS_DB-journal"; then
+      echo '[server] Could not reset the retrieval metrics store' >&2
+    fi
+  fi
+}
+
 case "$cmd" in
   start)
+    prepare_retrieval_metrics
     if [[ "$LOG_MODE" == "stdout" ]]; then
       trap 'shutdown_foreground SIGTERM' TERM
       trap 'shutdown_foreground SIGINT' INT
@@ -322,6 +335,7 @@ case "$cmd" in
   restart)
     stop_service "llm-service" "$SERVICE_PID_FILE" "llm-service"
     stop_service "mcp server" "$MCP_PID_FILE" "llm-mcp-server"
+    prepare_retrieval_metrics
     start_mcp_server
     start_llm_service
     status

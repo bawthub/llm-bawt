@@ -154,6 +154,14 @@ def test_named_provider_that_cannot_be_built_is_not_swapped(clients):
     assert clients[SearchProvider.DUCKDUCKGO].calls == 0
 
 
+def test_mcp_web_search_is_advertised_as_read_only():
+    from llm_bawt.mcp_server.search_tools import mcp
+
+    tools = asyncio.run(mcp.list_tools())
+    search = next(tool for tool in tools if tool.name == "web_search")
+    assert search.model_dump(by_alias=True, exclude_none=True)["annotations"] == {"readOnlyHint": True}
+
+
 def test_mcp_web_search_reports_the_fallback(clients):
     from llm_bawt.mcp_server.search_tools import web_search
 
