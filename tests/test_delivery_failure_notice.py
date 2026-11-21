@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from types import SimpleNamespace
 
 import pytest
@@ -29,10 +29,18 @@ def _row(caller):
             "metadata_json": {ORIGIN: FailureOrigin.capture(caller)}}
 
 
-def test_capture_round_trips_only_the_trusted_origin_fields(caller):
+@pytest.mark.parametrize("inspection", [None, ("fixture-account", "https://tenant.invalid", 122)])
+def test_capture_round_trips_only_the_trusted_origin_fields(caller, inspection):
+    caller = replace(caller, inspection=inspection)
+    expected = {
+        "bot_id": caller.bot_id,
+        "user_id": caller.user_id,
+        "session_id": caller.session_id,
+        "turn_id": caller.turn_id,
+        "trigger_message_id": caller.trigger_message_id,
+    }
     captured = FailureOrigin.capture(caller)
-    expected = asdict(caller)
-    expected.pop("issued_at")
+    assert "inspection" not in captured
     assert captured == {"version": 1, **expected}
     assert asdict(FailureOrigin.from_row(_row(caller))) == expected
 
