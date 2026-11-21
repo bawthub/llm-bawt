@@ -152,6 +152,11 @@ services:
       - LLM_BAWT_REDIS_URL
       - LLM_BAWT_MCP_SERVER_URL
       - LLM_BAWT_MCP_ALLOWED_HOSTS
+      # Human MCP OAuth stays off unless the resource and issuer are set.
+      - LLM_BAWT_MCP_OAUTH_RESOURCE
+      - LLM_BAWT_MCP_OAUTH_ISSUER
+      - LLM_BAWT_MCP_OAUTH_PRINCIPALS
+      - LLM_BAWT_MCP_OAUTH_INTROSPECT_URL
       - LLM_BAWT_HOST_GUARD
       - LLM_BAWT_PROMETHEUS_METRICS
       - LLM_BAWT_ALLOWED_HOSTS
