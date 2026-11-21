@@ -259,6 +259,49 @@ def _voice_send(rig, queue, **fields):
 
 
 @pytest.mark.integration
+@pytest.mark.parametrize("first_has_proof", [False, True])
+def test_ordinary_queue_keeps_only_the_first_verified_admission(rig, monkeypatch, first_has_proof):
+    from llm_bawt import inspection_admission as inspection
+    from llm_bawt.message_authorship import AuthorReference
+    from llm_bawt.service.inter_bot_claims import validate_inter_bot_claim
+
+    origin = "https://tenant.invalid"
+    now = 1_700_000_000
+    monkeypatch.setenv("BAWTHUB_INSPECTION_ORIGIN", origin)
+    monkeypatch.setattr(inspection, "time", SimpleNamespace(time=lambda: now))
+    _, deliveries, queue = _voice_queue(rig)
+    prompt = "Inspect Tasks"
+    request = ChatCompletionRequest(
+        bot_id=rig.bot, user=rig.user, stream=True, user_message_id=str(uuid.uuid4()),
+        messages=[ChatMessage(role="user", content=prompt)],
+    )
+    original = inspection.WebInspectionAdmission(rig.bot, rig.user, "owner-account", origin, now - 10)
+    request._inspection_web_admission = original if first_has_proof else None
+    decision = queue.decide(request=request, bot_id=rig.bot, user_id=rig.user, user_prompt=prompt)
+    new_proof = original._replace(admitted_at=now)
+    request._inspection_web_admission = new_proof
+    replay = queue.decide(request=request, bot_id=rig.bot, user_id=rig.user, user_prompt=prompt)
+    assert replay.delivery_id == decision.delivery_id
+    payload = deliveries.payload(decision.delivery_id)
+    assert payload.pop(inspection.INSPECTION_QUEUE_FIELD, None) == (list(original) if first_has_proof else None)
+
+    with rig.engine.begin() as conn:
+        conn.execute(sa_text("UPDATE turn_logs SET ended_at=now(),status='ok' WHERE id=:id"), {"id": rig.turn_id})
+    claim = deliveries.claim_next(rig.bot, claim_owner="inspection-test", steer_capable=False)
+    assert claim.id == decision.delivery_id and claim.status == "DISPATCHING"
+    queued = ChatCompletionRequest.model_validate({**payload, "inter_bot_claim_token": claim.claim_token})
+    service = SimpleNamespace(_inter_bot_dispatcher=SimpleNamespace(store=deliveries))
+    # Even a fresh first-party web proof cannot upgrade a dispatcher claim.
+    queued._inspection_web_admission = new_proof
+    assert validate_inter_bot_claim(service, queued) == AuthorReference.user(rig.user)
+    assert queued._inspection_web_admission == (original if first_has_proof else None)
+    if first_has_proof:
+        monkeypatch.setattr(inspection, "time", SimpleNamespace(time=lambda: now + 291))
+        validate_inter_bot_claim(service, queued)
+        assert queued._inspection_web_admission is None
+
+
+@pytest.mark.integration
 def test_voice_steers_next_past_same_authors_typed_wait_without_changing_author(rig, monkeypatch):
     from llm_bawt.message_authorship import AuthorReference
     from llm_bawt.service.inter_bot_dispatcher import InterBotDeliveryDispatcher

@@ -17,6 +17,7 @@ from sqlalchemy import text
 from agent_bridge.maintenance import is_new_command
 
 from ..bot_types import durable_agent_backend
+from ..inspection_admission import INSPECTION_QUEUE_FIELD, restore_queued_admission
 from ..message_authorship import AuthorReference
 from ..request_identity import AdmissionUnavailable, canonical_uuid
 from .delivery_reply import IN_FLIGHT_RECEIPT, QUEUED_RECEIPT
@@ -163,6 +164,12 @@ class OrdinaryTurnQueue:
         sender = getattr(request, "_internal_inter_bot_sender_id", None)
         sender = sender.strip().lower() if isinstance(sender, str) and sender.strip() else None
         author = AuthorReference.bot(sender) if sender else AuthorReference.user(user_id)
+        if sender is None and getattr(request, "stream", False):
+            proof = restore_queued_admission(
+                getattr(request, "_inspection_web_admission", None), bot_id=bot_id, user_id=user_id,
+            )
+            if proof is not None:
+                payload[INSPECTION_QUEUE_FIELD] = list(proof)
         sender_id = sender or bot_id
         key = f"ordinary:{canonical_uuid(message_id, 'user_message_id')}" if message_id else None
         with self.turns.engine.begin() as conn:

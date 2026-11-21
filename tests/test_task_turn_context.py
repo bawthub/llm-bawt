@@ -39,6 +39,23 @@ def test_round_trip_preserves_all_trusted_identifiers(fernet: Fernet) -> None:
     assert opened.bot_id == "loopy"
     assert opened.user_id == "operator"
     assert opened.issued_at == 123
+    assert opened.inspection is None
+
+
+@pytest.mark.parametrize("prefix", ["turn-", "turn-delivery-"])
+def test_inspection_proof_is_carried_by_the_signed_turn(fernet: Fernet, prefix: str) -> None:
+    inspection = ("fixture-account", "https://tenant.invalid:8443", 1_700_000_000)
+    values = {**_values(), "turn_id": prefix + "a" * 32}
+    token = codec.mint_for_agent_turn(backend="claude-code", inspection=inspection, **values)
+    assert codec.open_task_turn_context(token).inspection == inspection
+
+
+@pytest.mark.parametrize("admitted_at", [True, "123", 124])
+def test_inspection_provenance_requires_an_admission_time_before_mint(fernet: Fernet, admitted_at) -> None:
+    with pytest.raises(codec.TaskTurnContextError, match="Invalid inspection provenance"):
+        codec.mint_task_turn_context(
+            inspection=("fixture-account", "https://tenant.invalid", admitted_at), issued_at=123, **_values(),
+        )
 
 
 def test_first_party_agent_backends_support_task_turn_context() -> None:

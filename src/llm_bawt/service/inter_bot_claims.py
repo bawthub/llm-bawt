@@ -4,6 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..inspection_admission import (
+    INSPECTION_QUEUE_FIELD,
+    inspection_origin,
+    restore_queued_admission,
+)
+
 
 _CORRELATION_FIELDS = (
     "inter_bot_turn_id",
@@ -46,9 +52,29 @@ def validate_inter_bot_claim(service: Any, request: Any):
         from ..message_authorship import SETUP_ORIENTATION_AUTHOR_ID
         from .setup_orientation import PRODUCER
 
-        if (record.metadata or {}).get("_request_identity_producer") == PRODUCER:
+        metadata = record.metadata or {}
+        producer = metadata.get("_request_identity_producer")
+        # For a dispatch, only the claimed ordinary human row can supply
+        # provenance. A web header on this request may not upgrade the row.
+        if getattr(request, "_inspection_web_admission", None) is not None:
+            request._inspection_web_admission = None
+        if producer == PRODUCER:
             return AuthorReference.system(SETUP_ORIENTATION_AUTHOR_ID)
-        return record.author
+        author = record.author
+        user_id = getattr(request, "user", None)
+        ordinary = metadata.get("ordinary_chat")
+        if (
+            inspection_origin() and getattr(request, "stream", False)
+            and producer == "ordinary" and isinstance(ordinary, dict) and ordinary.get("stream") is True
+            and not getattr(request, "_internal_inter_bot_delivery_ids", None)
+            and author.entity_type == "user" and author.entity_id == user_id
+        ):
+            payload = dispatcher.store.payload(delivery_id) or {}
+            if user_id and payload.get("user") == user_id:
+                request._inspection_web_admission = restore_queued_admission(
+                    payload.get(INSPECTION_QUEUE_FIELD), bot_id=record.target_bot_id, user_id=user_id,
+                )
+        return author
 
     if any(getattr(request, field, None) for field in _CORRELATION_FIELDS):
         raise ValueError(

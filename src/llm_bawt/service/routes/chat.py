@@ -1019,6 +1019,16 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
     if internal_sender:
         request._internal_inter_bot_sender_id = internal_sender
 
+    if request.stream:
+        from ...inspection_admission import INSPECTION_ADMISSION_HEADER, read_web_admission
+
+        markers = http_request.headers.getlist(INSPECTION_ADMISSION_HEADER)
+        if len(markers) == 1:
+            request._inspection_web_admission = read_web_admission(
+                getattr(http_request.state, "api_principal", None), markers[0],
+                bot_id=request.bot_id, user_id=request.user,
+            )
+
     # Log request BEFORE validation so we can debug failures
     log.debug(f"Request payload: {request.model_dump(exclude_none=True)}")
 

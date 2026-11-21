@@ -10,6 +10,7 @@ from typing import Any
 
 import httpx
 
+from ..inspection_admission import INSPECTION_QUEUE_FIELD
 from ..inter_bot_delivery import DeliveryRecord, InterBotDeliveryStore
 from ..inter_bot_delivery_retry import fail_claim_with_restart_retry
 from ..inter_bot_delivery_user import resolve_delivery_user
@@ -799,6 +800,9 @@ class InterBotDeliveryDispatcher:
                 "inter_bot_claim_token": claim_token,
                 "stream": True,
             }
+            # The claim validator restores provenance from the durable row,
+            # never from the public request model.
+            payload.pop(INSPECTION_QUEUE_FIELD, None)
             request = ChatCompletionRequest.model_validate(payload)
             request._internal_inter_bot_delivery_ids = batch_delivery_ids
             if not self.store.mark_transport_accepted(record.id, claim_token):

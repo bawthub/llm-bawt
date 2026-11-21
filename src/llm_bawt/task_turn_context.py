@@ -70,6 +70,15 @@ class TaskTurnContextError(ValueError):
     """The current-turn capability is absent, malformed, invalid, or expired."""
 
 
+# (auth account ID, canonical origin, original web admission time)
+InspectionClaim = tuple[str, str, int]
+
+
+def is_inspection_turn_id(turn_id: str) -> bool:
+    """Eligible ID shapes; the signed inspection claim carries the authority."""
+    return bool(_TURN_ID_RE.fullmatch(turn_id) or _DELIVERY_TURN_ID_RE.fullmatch(turn_id))
+
+
 @dataclass(frozen=True)
 class TaskTurnContext:
     session_id: str
@@ -78,6 +87,8 @@ class TaskTurnContext:
     bot_id: str
     user_id: str
     issued_at: int
+    # Present only on ordinary turns admitted by the signed-in web frontend.
+    inspection: InspectionClaim | None = None
 
 
 def backend_supports_task_turn_context(backend: str | None) -> bool:
@@ -117,6 +128,16 @@ def _validate_context(context: TaskTurnContext) -> TaskTurnContext:
             "turn_id must match a canonical ordinary, delivery, or approval "
             "continuation turn identifier"
         )
+    inspection = context.inspection
+    if inspection is not None:
+        if (
+            not is_inspection_turn_id(turn_id)
+            or not isinstance(inspection, (tuple, list)) or len(inspection) != 3
+            or not all(isinstance(part, str) and 0 < len(part) <= 512 for part in inspection[:2])
+            or type(inspection[2]) is not int or not 0 < inspection[2] <= context.issued_at
+        ):
+            raise TaskTurnContextError("Invalid inspection provenance")
+        inspection = (inspection[0], inspection[1], inspection[2])
     return TaskTurnContext(
         session_id=_canonical_uuid(context.session_id, "session_id"),
         turn_id=turn_id,
@@ -127,6 +148,7 @@ def _validate_context(context: TaskTurnContext) -> TaskTurnContext:
         bot_id=_actor_id(context.bot_id, "bot_id"),
         user_id=_actor_id(context.user_id, "user_id"),
         issued_at=int(context.issued_at),
+        inspection=inspection,
     )
 
 
@@ -138,6 +160,7 @@ def mint_task_turn_context(
     bot_id: str,
     user_id: str,
     issued_at: int | None = None,
+    inspection: InspectionClaim | None = None,
 ) -> str:
     """Mint an opaque capability for exactly one server-owned chat turn."""
     context = _validate_context(TaskTurnContext(
@@ -147,8 +170,12 @@ def mint_task_turn_context(
         bot_id=bot_id,
         user_id=user_id,
         issued_at=int(time.time()) if issued_at is None else int(issued_at),
+        inspection=inspection,
     ))
-    payload = json.dumps(asdict(context), separators=(",", ":"), sort_keys=True)
+    fields = asdict(context)
+    if inspection is None:
+        fields.pop("inspection")  # keep the existing token shape when dormant
+    payload = json.dumps(fields, separators=(",", ":"), sort_keys=True)
     return _get_fernet().encrypt(payload.encode("utf-8")).decode("ascii")
 
 
@@ -160,6 +187,7 @@ def mint_for_agent_turn(
     trigger_message_id: str,
     bot_id: str,
     user_id: str,
+    inspection: InspectionClaim | None = None,
 ) -> str | None:
     """Best-effort capability for one agent turn, shared by stream/non-stream.
 
@@ -175,6 +203,7 @@ def mint_for_agent_turn(
             trigger_message_id=trigger_message_id,
             bot_id=bot_id,
             user_id=user_id,
+            inspection=inspection,
         )
     except Exception as error:  # noqa: BLE001 - see docstring
         import logging

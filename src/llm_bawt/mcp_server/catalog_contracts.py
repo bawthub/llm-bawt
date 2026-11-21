@@ -86,6 +86,7 @@ TOOL_SUMMARIES: dict[str, str] = {
     "tasks_create": f"Create task/steps. Own bot_id; associate_current_turn links new work via trusted turn. {_IMAGES_GUIDE} {_BLOCKED_GUIDE}",
     "tasks_update": f"Patch; UI/UX the user can see → REVIEW with dev URL/steps. Other work: coordinators close COMPLETED after review (Tier 0: self-check), attributable push and test/live receipt. BUG is human-locked. {_BLOCKED_POINTER} Own bot_id fills missing owner; associate_current_turn links work and its images.",
     "browser_check_session": "1h non-admin BawtHub session for your UI checks: Playwright cookies; never echo them.",
+    "inspect_bawthub_tasks": "Read-only screenshot of your linked Tasks. Needs a recent signed-in owner chat turn and Settings → Profile authorization. Returns a PNG or status, never a browser login.",
     "initiative_state": "Read, acquire an expiring lease, or CAS-checkpoint recurring task state; trusted turn identity owns writes and stale owners conflict.",
     "tasks_delete": "Permanently delete task/steps; prefer tasks_update CANCELLED to retain history.",
     "tasks_add_dependency": "Add task_id prerequisite depends_on_id; cuid/TASK-N. Rejects self/cycles.",
@@ -161,10 +162,12 @@ TOOL_SUMMARIES: dict[str, str] = {
     "x_counts": "Paid X post counts per minute|hour|day, last 7 days. Find peaks, then x_search them.",
 }
 
+OPTIONAL_TOOLS = frozenset({"inspect_bawthub_tasks"})
+
 # A compact pointer on every tool works even when discovery loads one schema only.
 # Group references are loaded on demand, not injected with the whole catalog.
 REFERENCE_GROUPS: dict[str, tuple[str, ...]] = {
-    "tasks": ("tasks_", "steps_", "projects_", "activity_", "initiative_"),
+    "tasks": ("tasks_", "steps_", "projects_", "activity_", "initiative_", "inspect_bawthub_"),
     "memory-history": ("memory_", "messages_", "context_", "facts_", "system_", "profile", "working_memory_", "tool_calls"),
     "sessions-delivery": ("sessions_", "bots_", "agent_", "self_", "schedule_"),
     "ops-media": ("ops_", "monitors_", "media_", "generate_", "web_", "x_", "speech_", "home_audio_", "notify_", "notifications_", "browser_", "attachment_", "usage_", "playground_"),

@@ -220,6 +220,16 @@ size or a defer_loading flag alone cannot establish a turn's billed input.
 Verify actual request-level metadata before claiming provider-side savings.
 No provider-loading behavior is changed by this refactor.
 
+## Optional catalog entries
+
+TASK-2523 adds `inspect_bawthub_tasks` only to the opt-in, single-process
+sign-in tenant stack. The default catalog remains 128 tools, 5,273 description
+tokens and 19,901 full-definition tokens. Enabled: 129 / 5,318 / 19,993,
+a delta of 45 description and 92 full-definition tokens (o200k_base).
+The default caps are unchanged; the optional tool has its own budget and MCP
+protocol tests. Discovery alone grants nothing: an owner-authorized recent
+turn and current renderer grant are checked again on each call.
+
 ## Activation and review
 
 The MCP server runs inside the app. Source tests and local registration do not

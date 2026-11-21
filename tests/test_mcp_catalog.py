@@ -10,7 +10,7 @@ from mcp.server.mcpserver import MCPServer as FastMCP
 
 from llm_bawt.mcp_server.approval_interceptor import ApprovalAwareFastMCP
 from llm_bawt.mcp_server.catalog import CatalogFastMCP, compact_schema
-from llm_bawt.mcp_server.catalog_contracts import TOOL_SUMMARIES, tool_reference
+from llm_bawt.mcp_server.catalog_contracts import OPTIONAL_TOOLS, TOOL_SUMMARIES, tool_reference
 from llm_bawt.mcp_server.server import mcp
 
 
@@ -24,7 +24,7 @@ async def test_catalog_covers_every_registered_tool_without_changing_validation(
     original = await FastMCP.list_tools(mcp)
     compact = await mcp.list_tools()
     assert [tool.name for tool in original] == [tool.name for tool in compact]
-    assert set(TOOL_SUMMARIES) == {tool.name for tool in original}
+    assert set(TOOL_SUMMARIES) == {tool.name for tool in original} | OPTIONAL_TOOLS
     for before, after in zip(original, compact, strict=True):
         assert after.input_schema == compact_schema(before.input_schema)
         # Everything outside the two presentation fields stays identical.
@@ -123,7 +123,8 @@ async def test_task_outcome_guidance_survives_catalog_compaction():
 @pytest.mark.anyio
 async def test_catalog_token_budgets():
     encoder = tiktoken.get_encoding("o200k_base")
-    tools = await mcp.list_tools()
+    # Optional tools have separate budgets; do not loosen the default cap.
+    tools = [tool for tool in await mcp.list_tools() if tool.name not in OPTIONAL_TOOLS]
     descriptions = [len(encoder.encode(tool.description or "")) for tool in tools]
     # TASK-2121: the user required their "finished" definition verbatim in
     # ops_quiesce_ack's description, so that one tool has its own cap.
@@ -587,7 +588,7 @@ async def test_mcp_protocol_advertises_compact_catalog(monkeypatch):
     async with Client(mcp, mode="legacy") as session:
         result = await session.list_tools()
     engine_factory.assert_called_once()
-    assert len(result.tools) == len(TOOL_SUMMARIES)
+    assert {tool.name for tool in result.tools} | OPTIONAL_TOOLS == set(TOOL_SUMMARIES)
     task = next(t for t in result.tools if t.name == "tasks_create")
     assert "Details: bawthub-mcp/" in task.description
     assert "title" in task.input_schema["properties"]

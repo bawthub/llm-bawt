@@ -40,6 +40,7 @@ NON_HISTORY_TOOLS = frozenset({
     "monitors_list", "monitors_upsert", "monitors_mute", "monitors_test",
     "ops_approvals_list", "ops_approvals_get", "ops_approval_resolve", "ops_approval_withdraw", "browser_check_session",
     "usage_utility_rollup",  # TASK-1538: aggregate counts, no bot or content
+    "inspect_bawthub_tasks",  # signed owner/bot turn and current frontend grant; no target argument
 })
 # ops_approvals_* (TASK-1609) read and decide approval cards, not history; the
 # route hides private requesters' and other users' cards itself.

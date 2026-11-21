@@ -899,10 +899,13 @@ from .profile_tools import _get_profile_manager, profile  # noqa: E402,F401
 
 from . import initiative_tools as _initiative_tools  # noqa: F401, E402
 from . import browser_check_tools as _browser_check_tools  # noqa: F401, E402
+from .inspection_tools import register_inspection_tool  # noqa: E402
 from . import project_tools as _project_tools  # noqa: F401, E402
 from . import step_tools as _step_tools  # noqa: F401, E402
 from . import task_tools as _task_tools  # noqa: F401, E402
 from . import task_review_tools as _task_review_tools  # noqa: F401, E402
+
+register_inspection_tool(mcp)
 
 # ---------------------------------------------------------------------------
 # Media library tools (Sonarr / Radarr / SABnzbd)

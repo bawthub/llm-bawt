@@ -67,6 +67,11 @@ async def lifespan(app):
 
     export_service_token()
 
+    # Read-only BawtHub inspection has a separate app/web key and no env-value fallback.
+    from ..inspection_attestation import export_inspection_key
+
+    export_inspection_key()
+
     # TASK-2386: the ops reconciler holds no master key; hand it the values it
     # derives or decrypts. Never raises; a missing value keeps its last copy.
     from ..ops.secret_exports import export_all as export_ops_secrets

@@ -16,6 +16,7 @@ from typing import Any
 from sqlalchemy import text as sa_text
 from sqlalchemy.engine import Connection
 
+from .inspection_admission import INSPECTION_QUEUE_FIELD
 from .inter_bot_delivery_record import DeliveryRecord
 
 IDENTITY_NS = 1144
@@ -110,6 +111,12 @@ class RequestIdentityResolver:
             comparison["assistant_message_id"] = stored_assistant
         return hashlib.sha256(json.dumps(comparison, sort_keys=True, default=str).encode()).hexdigest()
 
+    @classmethod
+    def _ordinary_digest(cls, payload: dict[str, Any], stored_assistant: str | None = None) -> str:
+        # A replay reuses the first row; it cannot add or refresh web admission.
+        comparison = {key: value for key, value in payload.items() if key != INSPECTION_QUEUE_FIELD}
+        return cls._digest(comparison, stored_assistant)
+
     def _validate(self, row: Any, values: dict[str, Any], payload: dict[str, Any],
                   producer: str) -> DeliveryRecord:
         if (row["author_entity_type"] != values["author_type"] or
@@ -139,7 +146,7 @@ class RequestIdentityResolver:
             stored_assistant = stored_payload.get("assistant_message_id") if isinstance(stored_payload, dict) else None
             if not isinstance(evidence, dict) or not evidence.get("digest") or not stored_assistant:
                 raise ReplayUnverifiable("ordinary replay comparison evidence is unavailable")
-            if self._digest(payload, stored_assistant) != evidence["digest"]:
+            if self._ordinary_digest(payload, stored_assistant) != evidence["digest"]:
                 raise IdentityConflict("same message id has a different queued request")
         elif producer == "maintenance":
             if (row["user_message_id"] != values["message_id"] or
@@ -216,7 +223,7 @@ class RequestIdentityResolver:
             comparison = {k: v for k, v in payload.items()
                           if k not in {"inter_bot_delivery_id", "inter_bot_turn_id",
                                        "inter_bot_bridge_request_id"}}
-            ordinary["digest"] = self._digest(comparison)
+            ordinary["digest"] = self._ordinary_digest(comparison)
             metadata["ordinary_chat"] = ordinary
         values = {**values, "id": delivery_id, "message_id": message_id,
                   "turn_id": turn_id,

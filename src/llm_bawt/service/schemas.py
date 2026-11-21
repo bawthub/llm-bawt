@@ -7,6 +7,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, PrivateAttr, StrictBool
 
+from ..inspection_admission import WebInspectionAdmission
+
 SERVICE_VERSION = "0.1.0"
 
 # =============================================================================
@@ -109,6 +111,8 @@ class ChatCompletionRequest(BaseModel):
     # Exact row returned by HTTP selected-thread admission, not a caller's id.
     # Consumed once by native execution; serialization cannot carry authority.
     _http_selected_session_owner: tuple[str, str, str] | None = PrivateAttr(default=None)
+    # Only the verified first-party web chat ingress stamps this proof.
+    _inspection_web_admission: WebInspectionAdmission | None = PrivateAttr(default=None)
     inter_bot_turn_id: str | None = Field(default=None, description="Deterministic reserved turn id for a durable delivery.")
     inter_bot_bridge_request_id: str | None = Field(default=None, description="Deterministic bridge run id used to deduplicate transport retries.")
     inter_bot_claim_token: str | None = Field(default=None, description="Private dispatcher claim token; rejected unless it matches the durable delivery row.")
@@ -164,6 +168,8 @@ class ChatCompletionRequest(BaseModel):
         copied = super().model_copy(update=update, deep=deep)
         copied.__dict__.pop("_http_selected_session_owner", None)
         copied._http_selected_session_owner = None
+        copied.__dict__.pop("_inspection_web_admission", None)
+        copied._inspection_web_admission = None
         return copied
 
 

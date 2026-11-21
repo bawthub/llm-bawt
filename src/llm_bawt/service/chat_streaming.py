@@ -486,8 +486,18 @@ class ChatStreamingMixin(BridgeSessionResetMixin):
                                           bot_id=bot_id, user_id=user_id,
                                           history_scope=prepared_reset.history_scope,
                                           report_empty=prepared_reset.report_empty_seed)
+                from ..inspection_admission import inspection_is_fresh
                 from ..task_turn_context import mint_for_agent_turn
 
+                web_admission = request._inspection_web_admission
+                inspection = None
+                if (
+                    web_admission and web_admission[:2] == (bot_id, user_id)
+                    and user_author == AuthorReference.user(user_id)
+                    and request._internal_approval_claim is None
+                    and inspection_is_fresh(web_admission.admitted_at, int(time.time()))
+                ):
+                    inspection = (web_admission.account_id, web_admission.origin, web_admission.admitted_at)
                 task_turn_capability = mint_for_agent_turn(
                     backend=str(getattr(llm_bawt.bot, "agent_backend", "") or ""),
                     session_id=session_id,
@@ -495,6 +505,7 @@ class ChatStreamingMixin(BridgeSessionResetMixin):
                     trigger_message_id=trigger_message_id,
                     bot_id=bot_id,
                     user_id=user_id,
+                    inspection=inspection,
                 )
             except Exception as exc:
                 self._update_turn_log(
