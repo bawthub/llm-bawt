@@ -130,6 +130,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_alembic_working_memory_pg.py::",
     "test_alembic_gates_pg.py::",
     "test_alembic_playground_pg.py::",
+    "test_alembic_utility_usage_pg.py::",
     "test_ops_gate_receipt_pg.py::",
     "test_ops_preflight_deadline_pg.py::",
     "test_ops_competing_dispatch_pg.py::",
