@@ -112,6 +112,7 @@ services:
       # sees. Mounted read-only below; tests/test_skill_compose_parity.py
       # keeps this equal to claude-code-bridge's value.
       - CLAUDE_CODE_SKILLS_PATH=/home/bridge/dev/agent-skills
+      - SKILL_SOURCES_ROOT=/var/lib/bawthub/skill-sources
       # TASK-636: CODEX_AUTH_PATH removed — the app reads the codex bundle
       # from the encrypted DB store (provider_connection:openai_chatgpt).
       # -- From .env (TASK-1476) --
@@ -255,6 +256,7 @@ services:
       - ${LLM_BAWT_MEDIA_HOST_PATH:-./data/media}:/var/lib/llm-bawt/media:rslave
       # TASK-1309: skill content, read-only (see CLAUDE_CODE_SKILLS_PATH).
       - ${HOME}/dev/agent-skills:/home/bridge/dev/agent-skills:ro
+      - skill-sources:/var/lib/bawthub/skill-sources
     extra_hosts:
       - "host.docker.internal:host-gateway"
       # The LAN host's names and address are deployment data (.env); see .env.docker.
@@ -648,6 +650,7 @@ services:
     restart: unless-stopped
 
 volumes:
+  skill-sources:
   redis-data:
   # TASK-1472: fixed name so BawtHub's separate compose project can mount it
   # as an external volume (bring `app` up first; it creates the volume).
