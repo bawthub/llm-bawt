@@ -13,6 +13,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_new_bot_storage_pg.py::",
     "test_skill_sources_pg.py::",
     "test_setup_orientation_pg.py::",
+    "test_setup_seed_source_pg.py::",
     "test_generated_title_pg.py::",
     "test_isolated_recall_pg.py::",
     "test_recall_ledger_pg.py::",
