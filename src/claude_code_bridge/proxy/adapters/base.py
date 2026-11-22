@@ -146,6 +146,7 @@ class ProviderAdapter(ABC):
     name: ClassVar[str]
     capture_codex_usage: ClassVar[bool] = True
     reports_cache_write_usage: ClassVar[bool] = False
+    normalize_openai_schemas: ClassVar[bool] = False
 
     def __init__(self) -> None:
         self._lifecycle_lock = asyncio.Lock()
@@ -274,6 +275,10 @@ class ProviderAdapter(ABC):
         if context is not None and context.apply_patch:
             from ..apply_patch import find_cwd
             context.patch_cwd = find_cwd(anthropic_body)
+        if self.normalize_openai_schemas:
+            from ..openai_tool_schemas import normalize_openai_tool_schemas
+
+            normalize_openai_tool_schemas(body)
         body = self.prepare_request(body, context)
         headers = tuple((self.extra_headers(body, context) or {}).items())
         prepared = PreparedCall(bearer, base_url, body, headers, codec, identity)

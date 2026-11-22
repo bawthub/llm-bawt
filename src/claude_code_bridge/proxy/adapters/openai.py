@@ -32,6 +32,7 @@ class OpenAIAdapter(ProviderAdapter):
     """OpenAI's standard Responses API using the connected platform key."""
 
     name: ClassVar[str] = "openai"
+    normalize_openai_schemas: ClassVar[bool] = True
 
     @staticmethod
     def _fetch_broker_key() -> str:

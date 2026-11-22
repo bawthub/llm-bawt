@@ -98,6 +98,7 @@ class OpenAIChatGPTAdapter(ProviderAdapter):
 
     name: ClassVar[str] = "openai_chatgpt"
     reports_cache_write_usage: ClassVar[bool] = True
+    normalize_openai_schemas: ClassVar[bool] = True
 
     def __init__(self) -> None:
         super().__init__()

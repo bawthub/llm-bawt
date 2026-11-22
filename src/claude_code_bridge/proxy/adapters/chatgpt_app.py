@@ -31,6 +31,7 @@ _UNSUPPORTED = (
 
 class ChatGPTAppAdapter(ProviderAdapter):
     name = "chatgpt_app"
+    normalize_openai_schemas = True
     capture_codex_usage = False  # Separate plan: never overwrite Codex quota snapshots.
 
     def __init__(self):
