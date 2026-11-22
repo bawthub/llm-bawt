@@ -257,6 +257,7 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                     context_suffix=agent_context_suffix,
                     context_prefix=getattr(ctx, "content_note", None),
                     author=user_author,
+                    orientation_session_id=(ctx.thread_binding or {}).get("thread_session_id"),
                     **({
                         "history_write_session_id": ctx.terminal_history_session_id,
                     } if terminal_follower is not None else {}),

@@ -583,6 +583,12 @@ class ChatNonStreamMixin:
                     )
 
                 def prepare_user_messages(binding, capability):
+                    # A legacy /new with a follow-up renders before rotation.
+                    # Don't carry onboarding instructions into its successor.
+                    binding = binding or {}
+                    orientation_session_id = binding.get("thread_session_id")
+                    if not binding.get("explicit_thread") and is_new_command(user_prompt):
+                        orientation_session_id = None
                     # The reply note stays outbound-only, never in stored history.
                     with history_context(binding, capability, phase="initial"):
                         return llm_bawt.prepare_messages_for_query(
@@ -592,6 +598,7 @@ class ChatNonStreamMixin:
                                 if _is_agent else None
                             ),
                             context_prefix=content_note,
+                            orientation_session_id=orientation_session_id,
                             **({
                                 "history_write_session_id": resolved_session_id,
                             } if terminal_scope.follower is not None else {}),

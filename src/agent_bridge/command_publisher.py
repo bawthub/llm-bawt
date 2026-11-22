@@ -227,9 +227,8 @@ class CommandPublisherMixin:
         # TASK-2077: a housed bot's turn location (house OR mansion fallback)
         # is written in the same atomic step as the first publication, before
         # any follow-up can be sent; a deduplicated retry writes nothing.
-        # TASK-2120: every turn records its request's stream, so the Campus
-        # view reads where a running turn actually went (a mansion turn's
-        # record isn't refreshed and lapses after TURN_TTL_S: then unknown).
+        # TASK-2120: every turn records its request's stream, so Campus and
+        # request-targeted follow-ups can find it. The bridge renews live turns.
         location_keys: list[str] = [turn_request_key(request_id)]
         if house:
             if backend and session_key:

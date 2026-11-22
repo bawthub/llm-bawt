@@ -230,6 +230,17 @@ The default caps are unchanged; the optional tool has its own budget and MCP
 protocol tests. Discovery alone grants nothing: an owner-authorized recent
 turn and current renderer grant are checked again on each call.
 
+### Registered SSH hosts (TASK-2569)
+
+`host_access_list` is discoverable by default (+55 description tokens, +83
+full-definition tokens). A trusted turn from this installation is required;
+there are no scope arguments. The tool reads up to 25 entries from Settings →
+Host access without probing a host or reading SSH configuration. An empty list
+is distinct from an unavailable registry. Checks are historical, entirely
+separate from authorization and live reachability. A recorded config install
+cannot establish that an alias is usable in the calling runtime, so no alias
+is advertised without that proof.
+
 ## Activation and review
 
 The MCP server runs inside the app. Source tests and local registration do not

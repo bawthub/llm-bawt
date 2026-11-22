@@ -15,7 +15,9 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime, timezone
+from typing import Literal
 
+from pydantic import BaseModel, Field as OutputField
 from sqlalchemy import Column, DateTime, Text, inspect
 from sqlmodel import Field, Session, SQLModel, select
 
@@ -24,6 +26,9 @@ from . import host_key
 
 _LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}")
 _PREFIXES = ("host keys scanned: ", "host login verified: ", "bot key present on host: ", "bot key removed from host: ")
+_FAILED_LOGIN = re.compile(
+    r"login check failed: (?:timeout|host_key_mismatch|key_refused|dns_failed|connection_refused|unreachable|ssh_failed)"
+)
 _guard = SchemaBootstrapGuard()
 
 
@@ -115,6 +120,67 @@ def list_hosts(engine) -> list[dict]:
         return [r.to_api() for r in session.exec(select(OpsHostAccess).order_by(OpsHostAccess.label)).all()]
 
 
+INVENTORY_LIMIT = 25
+CheckOperation = Literal["scan", "verify", "add", "remove"]
+
+
+class HostInventoryEntry(BaseModel):
+    label: str = OutputField(max_length=64)
+    host: str = OutputField(max_length=253)
+    port: int = OutputField(ge=1, le=65535)
+    login_user: str = OutputField(max_length=32)
+    last_checked_at: str | None = None
+    last_check: CheckOperation | None = None
+    login_status: Literal["registered_only", "known_failed", "verified", "unknown"]
+    managed_config: Literal["recorded_installed_runtime_unknown", "installation_not_confirmed", "unknown"] = "unknown"
+
+
+def read_host_inventory(engine) -> tuple[list[HostInventoryEntry], bool]:
+    """Bounded bot projection of the installation registry, with no schema bootstrap.
+
+    Worker receipts do not identify the caller's runtime or prove the current
+    managed files are present there. Do not advertise an alias on that evidence.
+    """
+    host = OpsHostAccess
+    query = select(
+        host.label, host.host, host.port, host.login_user, host.status,
+        host.last_checked_at, host.last_op, host.last_result_json,
+    ).order_by(host.label).limit(INVENTORY_LIMIT + 1)
+    with Session(engine) as session:
+        rows = session.exec(query).all()
+
+    entries = []
+    for label, hostname, port, login, status, checked, op, result_json in rows[:INVENTORY_LIMIT]:
+        last_check = op if op in host_key.OPS and checked is not None else None
+        entry = HostInventoryEntry(
+            label=label, host=hostname, port=port, login_user=login,
+            last_checked_at=_iso(checked) if last_check else None,
+            last_check=last_check, login_status="unknown",
+        )
+        if status in ("unverified", "scanned", "trusted"):
+            entry.login_status = "registered_only"
+        elif last_check == "verify" and status in ("login_failed", "verified"):
+            try:
+                result = json.loads(result_json or "null")
+            except ValueError:
+                result = None
+            if isinstance(result, dict):
+                if status == "login_failed":
+                    # Other terminal failures can occur before SSH is attempted.
+                    error = result.get("error")
+                    if result.get("state") == "failed" and isinstance(error, str) and _FAILED_LOGIN.fullmatch(error):
+                        entry.login_status = "known_failed"
+                elif result.get("login_ok") is True:
+                    entry.login_status = "verified"
+                    config = result.get("bot_ssh_config")
+                    if config == "installed":
+                        entry.managed_config = "recorded_installed_runtime_unknown"
+                    elif config == "not_writable":
+                        entry.managed_config = "installation_not_confirmed"
+        entries.append(entry)
+    return entries, len(rows) > INVENTORY_LIMIT
+
+
 def get_host(engine, host_id: int) -> OpsHostAccess | None:
     ensure_schema(engine)
     with Session(engine) as session:
@@ -152,6 +218,7 @@ def update_host(engine, host_id: int, fields: dict) -> dict:
             row.known_host_keys_json, row.status, row.passwordless_sudo = "[]", "unverified", None
             # Drop the old destination's scan too: it must never be confirmable here.
             row.last_op = row.last_job_id = row.last_result_json = None
+            row.last_checked_at = None
         row.updated_at = _utcnow()
         session.add(row)
         session.commit()

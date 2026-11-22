@@ -76,8 +76,17 @@ class FakeRedis:
         keys, argv = args[:numkeys], args[numkeys:]
         if script == houses._RELEASE_LEASE_LUA:  # compare-and-delete
             if self.kv.get(keys[0]) == argv[0]:
-                del self.kv[keys[0]]
+                await self.delete(keys[0])
                 return 1
+            return 0
+        if script == houses._RENEW_MANSION_REQUEST_LUA:
+            key, = keys
+            stream, ttl = argv
+            current = self.kv.get(key)
+            if current == stream:
+                return await self.expire(key, ttl)
+            if current is None:
+                return await self.set(key, stream, ex=ttl)
             return 0
         if keys[0] in self.kv:
             return [0, self.kv[keys[0]]]
@@ -249,6 +258,94 @@ def test_mansion_slot_is_inert():
         # harness-versions report (no TTL, not routing state).
         assert set(redis.kv) == {mansion_versions_key("claude-code")}
         assert redis.acks == []
+        slot._task.cancel()
+    run(go())
+
+
+def test_mansion_heartbeat_keeps_a_long_turn_locatable():
+    """TASK-2554: the publisher writes a mansion turn's request record once
+    with TURN_TTL_S; the mansion heartbeat renews it while the turn runs,
+    restores it if it lapsed, drops it when the turn ends, and never touches
+    session routing keys."""
+    async def go():
+        redis, queue = FakeRedis(), Queue()
+        slot = HouseSlot("", "codex", queue)
+        await slot.start(redis)
+        slot._task.cancel()
+        slot.GRACE_S = 0
+        key = houses.turn_request_key("r1")
+        await redis.set(key, MANSION, ex=houses.TURN_TTL_S)  # publisher's write
+        slot.track({"request_id": "r1", "session_key": "s"})
+        queue.live.add(("s", "r1"))
+
+        redis.ttl[key] = 1
+        await slot.refresh()
+        assert redis.kv[key] == MANSION and redis.ttl[key] == houses.TURN_TTL_S
+
+        await redis.delete(key)  # lapsed while the turn still runs
+        await slot.refresh()
+        assert redis.kv[key] == MANSION
+
+        queue.live.clear()
+        await slot.refresh()
+        assert key not in redis.kv
+        assert houses.turn_session_key("codex", "s") not in redis.kv
+        assert not slot._turns
+    run(go())
+
+
+@pytest.mark.parametrize("phase", ["renew", "restore_race", "cleanup"])
+def test_mansion_heartbeat_preserves_republished_house_route(phase):
+    async def go():
+        backend, session, request = "claude-code", "fixture:operator", "req_delivery_retry"
+        key = houses.turn_request_key(request)
+
+        class RetryRedis(FakeRedis):
+            retry_pending = False
+
+            async def publish_retry(self):
+                self.retry_pending = False
+                await Publisher(self).send_command(session, "hi", request, backend=backend, house="h1")
+                self.ttl[key] = 23  # distinct from the mansion renewal TTL
+
+            async def expire(self, target, ttl):
+                result = await super().expire(target, ttl)
+                if self.retry_pending and target == key and not result:
+                    # Old path: publish after EXPIRE misses, before restore SET.
+                    await self.publish_retry()
+                return result
+
+            async def eval(self, script, numkeys, *args):
+                if self.retry_pending and numkeys == 1 and args[0] == key:
+                    # New path: publish just before the indivisible mutation.
+                    await self.publish_retry()
+                return await super().eval(script, numkeys, *args)
+
+        redis, queue = RetryRedis(), Queue()
+        slot = HouseSlot("", backend, queue)
+        await slot.start(redis)
+        slot._task.cancel()
+        slot.GRACE_S = 0
+        await Publisher(redis).send_command(session, "hi", request, backend=backend, house="h1")
+        assert await follow_up_stream(redis, request_id=request) == MANSION
+        slot.track({"request_id": request, "session_key": session})
+        if phase != "cleanup":
+            queue.live.add((session, request))
+
+        await redis.set(lease_key("h1", backend), "2")
+        await redis.delete(f"agent:command:request:{request}")  # dedupe eviction
+        if phase == "restore_race":
+            await redis.delete(key)
+            redis.retry_pending = True
+        else:
+            await redis.publish_retry()
+
+        await slot.refresh()
+        assert [fields["request_id"] for fields in redis.streams[H1]] == [request]
+        assert await follow_up_stream(redis, request_id=request) == H1
+        assert redis.ttl[key] == 23
+        assert redis.kv[houses.turn_session_key(backend, session)] == H1
+
     run(go())
 
 

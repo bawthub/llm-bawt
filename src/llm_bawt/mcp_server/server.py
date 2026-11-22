@@ -952,6 +952,7 @@ from . import schedule_tools as _schedule_tools  # noqa: F401, E402
 # ---------------------------------------------------------------------------
 
 from . import ops_tools as _ops_tools  # noqa: F401, E402
+from . import host_access_tools as _host_access_tools  # noqa: F401, E402
 from . import monitor_tools as _monitor_tools  # noqa: F401, E402
 
 # ---------------------------------------------------------------------------

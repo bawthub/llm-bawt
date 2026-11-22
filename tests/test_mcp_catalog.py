@@ -210,7 +210,8 @@ async def test_catalog_token_budgets():
     # TASK-434: steps_reorder adds a bounded typed adapter and preservation/
     # partial-order caveats. Measured descriptions: 5,158.
     # TASK-1712: monitors_list/upsert/mute/test over BawtHub monitors (+115): 5,273.
-    assert sum(descriptions) <= 5273, f"Descriptions grew to {sum(descriptions)} tokens"
+    # TASK-2569: host_access_list, historical registration and login evidence (+55).
+    assert sum(descriptions) <= 5328, f"Descriptions grew to {sum(descriptions)} tokens"
     definitions = [{"name": f"mcp__bawthub__{t.name}", "description": t.description or "", "input_schema": t.input_schema} for t in tools]
     total = len(encoder.encode(json.dumps(definitions, ensure_ascii=False, separators=(",", ":"))))
     # TASK-900: explicit X search adds ~160 tokens; measured catalog 11,239.
@@ -355,7 +356,8 @@ async def test_catalog_token_budgets():
     # TASK-2395: messages_get context_budget_tokens/context_summary_limit, the
     # bounded agent-history read used by the app's MCP client (schema only, no
     # description text). Measured 19,901 (+42).
-    assert total <= 19901, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-2569: host_access_list has no scope or execution arguments (+83).
+    assert total <= 19984, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 

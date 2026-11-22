@@ -295,6 +295,8 @@ def _listener(monkeypatch, module, backend):
     reader = _Reader(redis, stop_after=3)
     monkeypatch.setattr(mod, "GroupReader", lambda *a, **k: reader)
     monkeypatch.setattr(mod.asyncio, "sleep", lambda *_: _noop())
+    # sleep never yields here, so the mansion turn-record heartbeat would spin.
+    monkeypatch.setattr(HouseSlot, "_heartbeat", lambda self: _noop())
     monkeypatch.setenv("BAWT_HOUSE", "")
     if hasattr(mod, "CommandAckOwner"):
         monkeypatch.setattr(mod, "CommandAckOwner",
@@ -354,6 +356,7 @@ def test_mansion_republishes_after_nogroup_recovery_through_the_real_reader(monk
     _cached(monkeypatch)
     redis = _NogroupRedis(stop_after=3)
     monkeypatch.setattr(mod.asyncio, "sleep", lambda *_: _noop())
+    monkeypatch.setattr(HouseSlot, "_heartbeat", lambda self: _noop())
     monkeypatch.setenv("BAWT_HOUSE", "")
     if hasattr(mod, "CommandAckOwner"):
         monkeypatch.setattr(mod, "CommandAckOwner",

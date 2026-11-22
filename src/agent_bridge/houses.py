@@ -49,6 +49,16 @@ _RELEASE_LEASE_LUA = (
     "if redis.call('GET', KEYS[1]) == ARGV[1] then "
     "return redis.call('DEL', KEYS[1]) else return 0 end"
 )
+_RENEW_MANSION_REQUEST_LUA = """
+local current = redis.call('GET', KEYS[1])
+if current == ARGV[1] then
+    return redis.call('EXPIRE', KEYS[1], ARGV[2])
+end
+if not current then
+    return redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
+end
+return 0
+"""
 
 
 def normalize_house(value: object) -> str:
@@ -192,8 +202,9 @@ def recycle_command(house: str, backend: str, epoch: str) -> dict:
 class HouseSlot:
     """A bridge's house membership: lease heartbeat, epoch fence, turn records.
 
-    For the mansion (``house == ''``) every method is a no-op and ``admit``
-    accepts everything, so mansion bridges behave exactly as before.
+    For the mansion (``house == ''``) there is no lease or fence and ``admit``
+    accepts everything; the heartbeat only renews running turns' request
+    records so Campus can locate long mansion turns (TASK-2554).
     """
 
     GRACE_S = 10.0
@@ -203,6 +214,7 @@ class HouseSlot:
         self.backend = backend
         self.stream = commands_stream(self.house)
         self._queue = queue
+        self._redis: Any = None
         self.epoch: str | None = None
         self._turns: dict[tuple[str, str], float] = {}
         self._task: asyncio.Task | None = None
@@ -223,6 +235,9 @@ class HouseSlot:
             # Called again after a listener restart, so this also republishes
             # after a Redis reconnect.
             await self._publish_versions(redis)
+            self._redis = redis
+            if self._task is None:
+                self._task = asyncio.create_task(self._heartbeat())
             return
         if self._task is not None:
             return
@@ -279,11 +294,14 @@ class HouseSlot:
         return (fields.get(EPOCH_FIELD) or "") == (self.epoch or "-")
 
     def track(self, fields: dict) -> None:
-        if not self.is_house:
-            return
         request_id = (fields.get("request_id") or "").strip()
         session_key = (fields.get("session_key") or "").strip()
         if not request_id or not session_key:
+            return
+        if not self.is_house:
+            # The publisher already wrote the record; only renew it (TASK-2554).
+            if self._redis is not None:
+                self._turns[(session_key, request_id)] = time.monotonic()
             return
         self._turns[(session_key, request_id)] = time.monotonic()
         asyncio.create_task(self._write_turn(session_key, request_id))
@@ -301,7 +319,12 @@ class HouseSlot:
 
         Only the current owner renews: a lease holding a newer epoch means a
         replacement started, so this slot stops admitting and renewing.
+        The mansion has no lease; it only renews its running turns' request
+        records so Campus can still read where a long turn runs (TASK-2554).
         """
+        if not self.is_house:
+            await self._renew_mansion_turns()
+            return
         key = lease_key(self.house, self.backend)
         current = await self._redis.get(key)
         if current and int(current) > int(self.epoch or 0):
@@ -336,6 +359,25 @@ class HouseSlot:
                 await self._redis.eval(_RELEASE_LEASE_LUA, 1,
                                        turn_session_key(self.backend, session_key),
                                        self.stream)
+
+    async def _renew_mansion_turns(self) -> None:
+        """Keep a running mansion turn's ``agent:turn:req`` record alive.
+
+        The publisher writes it once with ``TURN_TTL_S``; without renewal any
+        turn longer than that reads as location unknown. Only the request
+        record: session routing keys stay the publisher's and houses' concern.
+        A retry after dedupe eviction may have published this ID to a house.
+        Compare the stream and mutate it atomically, so that route wins.
+        """
+        now = time.monotonic()
+        for (session_key, request_id), seen in list(self._turns.items()):
+            key = turn_request_key(request_id)
+            if self._queue.request_phase(session_key, request_id) is not None \
+                    or now - seen < self.GRACE_S:
+                await self._redis.eval(_RENEW_MANSION_REQUEST_LUA, 1, key, self.stream, TURN_TTL_S)
+                continue
+            self._turns.pop((session_key, request_id), None)
+            await self._redis.eval(_RELEASE_LEASE_LUA, 1, key, self.stream)
 
     async def _publish_preview(self) -> None:
         """Campus preview status (TASK-2131); never fails the heartbeat."""

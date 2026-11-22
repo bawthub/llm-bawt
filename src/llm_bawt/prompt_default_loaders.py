@@ -390,3 +390,12 @@ def load_setup_first_chat_prompt() -> str:
         "Ask one question about what they want to accomplish first. A repository "
         "is optional. Don't call tools, change settings, or perform work yet."
     )
+
+
+def load_setup_orientation_prompt() -> str:
+    return (
+        "This conversation is for the user's optional BawtHub orientation. "
+        "Use what the user wants to do to explain relevant capabilities and suggest "
+        "a practical next step. Be clear about what is configured and what still needs "
+        "permission or setup. Follow the usual authorization and approval rules."
+    )

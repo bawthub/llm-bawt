@@ -93,6 +93,7 @@ from .prompt_default_loaders import (
     load_refine_user_frame,
     load_setup_first_agent_prompt,
     load_setup_first_chat_prompt,
+    load_setup_orientation_prompt,
     load_working_memory_notice,
     load_working_memory_scheduled_note,
     load_working_memory_section,
@@ -1113,6 +1114,17 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
         category="setup",
         loader=load_setup_first_chat_prompt,
         metadata={"notes": "One private trigger for the opted-in first bot's welcome turn."},
+    ),
+    "setup.orientation": PromptDefinition(
+        key="setup.orientation",
+        title="Setup: Orientation",
+        category="setup",
+        loader=load_setup_orientation_prompt,
+        metadata={"notes": (
+            "Guidance for the opted-in setup conversation, including later turns. "
+            "Bot overrides take precedence. For pinned agents, edits are picked up "
+            "at the next prompt refresh in that conversation (e.g. after /compact)."
+        )},
     ),
     "media.prompt_expansion.video": PromptDefinition(
         key="media.prompt_expansion.video",

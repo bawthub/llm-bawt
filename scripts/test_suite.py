@@ -499,6 +499,7 @@ def main(argv: list[str] | None = None) -> int:
                     "RUN_WORKER_LIVENESS_SDK_PROBE": "1",
                     "RUN_SYSTEM_PROMPT_PIN_SDK_PROBE": "1",
                     "RUN_MCP_RECONNECT_SDK_PROBE": "1",
+                    "RUN_HOST_ACCESS_SDK_PROBE": "1",
                 }):
                     if args.node:
                         requested = collect("", *args.node)

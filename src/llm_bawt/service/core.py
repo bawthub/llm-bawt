@@ -623,6 +623,7 @@ class ServiceLLMBawt(BaseLLMBawt):
         author=None,
         history_write_session_id: str | None = None,
         context_prefix: str | None = None,
+        orientation_session_id: str | None = None,
     ) -> list[Message]:
         """Prepare messages for query including history and memory context.
 
@@ -690,8 +691,16 @@ class ServiceLLMBawt(BaseLLMBawt):
         # Build context with system prompt, memory, and history. context_suffix
         # (e.g. the TASK-391 attachment manifest) rides the OUTBOUND user
         # message only — the clean ``prompt`` was already persisted above.
+        setup_orientation = None
+        if orientation_session_id:
+            from .setup_orientation import orientation_prompt
+
+            setup_orientation = orientation_prompt(
+                self.config, bot_id=self.bot_id, user_id=self.user_id, session_id=orientation_session_id,
+            )
         messages = self._build_context_messages(
             prompt, context_suffix=context_suffix, context_prefix=context_prefix,
+            **({"setup_orientation": setup_orientation} if setup_orientation else {}),
         )
 
         # TASK-225 LLM-boundary inlining: ``user_attachments`` is the

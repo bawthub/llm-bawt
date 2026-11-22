@@ -24,7 +24,7 @@ from ..clients import LLMClient
 from ..tools import get_tools_list, query_with_tools
 from ..utils.paths import resolve_log_dir
 from ..utils.history import HistoryManager, Message, _is_tool_result_system, scope_flags
-from .prompt_builder import PromptBuilder
+from .prompt_builder import PromptBuilder, SectionPosition
 from .prompt_manifest import PROMPT_MANIFEST, STABLE, PER_TURN
 from .initialization import OrchestratorInitializationMixin
 from .prompt_sections import PromptSectionsMixin
@@ -354,6 +354,7 @@ class BaseLLMBawt(OrchestratorInitializationMixin, PromptSectionsMixin, ABC):
     def _build_context_messages(
         self, prompt: str, context_suffix: str | None = None,
         context_prefix: str | None = None,
+        *, setup_orientation: str | None = None,
     ) -> list[Message]:
         """Build messages list with system prompt, memory context, and history.
 
@@ -373,6 +374,10 @@ class BaseLLMBawt(OrchestratorInitializationMixin, PromptSectionsMixin, ABC):
         # (TASK-487) so the effective-config inspector drives the SAME code path
         # and can never drift from what a live turn actually sends.
         builder = self._assemble_system_builder(prompt)
+        if setup_orientation:
+            # Follow the existing instructions while leaving managed Working Memory
+            # at the tail so prompt staleness can exclude its exact rendered bytes.
+            builder.add_section("setup_orientation", setup_orientation, position=SectionPosition.GLOBAL_INSTRUCTIONS)
 
         # Response-style instruction derived from keywords in the user's message.
         # Lets the user shape any bot's answer inline without extra config.
