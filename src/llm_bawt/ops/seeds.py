@@ -415,6 +415,7 @@ _CONFIG_SEEDS: list[dict[str, Any]] = [{
         data_mounts=["/app/.logs", "/app/models", "/app/storage", "/root/.config/llm-bawt",
                      "/root/.cache/huggingface", "/root/.cache/llm-bawt/models", "/var/lib/llm-bawt/media",
                      "/var/lib/llm-bawt-ops", "/var/run/docker.sock", "/home/bridge/dev/agent-skills",
+                     "/var/lib/bawthub/skill-sources",
                      "/run/bawthub-service-token", "/run/llm-bawt-bridge-tokens", "/run/llm-bawt-house-pool.json",
                      "/run/llm-bawt-crawl4ai-token",
                      # TASK-2386: the reconciler's secrets, which the app exports.
