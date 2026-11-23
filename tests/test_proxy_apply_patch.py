@@ -97,7 +97,7 @@ def test_relative_paths_resolve_against_cli_cwd_or_fail():
     ("*** Begin Patch\n*** End Patch", "no file sections"),
     ("*** Begin Patch\n*** Update File: /a\n@@\n x\n*** End Patch", "no + or -"),
     ("*** Begin Patch\n*** Update File: {W}/a\n@@\n+only added\n*** End Patch", "no context"),
-    ("*** Begin Patch\n*** Update File: /nonexistent/x\n@@\n-a\n+b\n*** End Patch", "Add File"),
+    ("*** Begin Patch\n*** Update File: {W}/missing-dir/x\n@@\n-a\n+b\n*** End Patch", "Add File"),
     ("*** Begin Patch\n*** Update File: {W}/a\n@@\n-zzz\n+b\n*** End Patch", "re-read"),
     ("*** Begin Patch\n*** Update File: {W}/a\n@@ nope\n-a\n+b\n*** End Patch", "not found"),
     ("*** Begin Patch\n*** Add File: /a\nnot plus\n*** End Patch", "must start with"),
