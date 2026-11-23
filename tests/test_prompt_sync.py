@@ -91,6 +91,18 @@ def test_export_writes_bodies_and_manifest(tmp_path: Path) -> None:
     assert manifest["brand.new"]["required_vars"] == ["thing"]
 
 
+def test_export_preserves_code_only_from_source_not_tenant_report(tmp_path: Path) -> None:
+    prompt_synced_defaults.write_manifest({"role.setup_coder": {"code_only": True}}, tmp_path)
+    keys = ["role.setup_coder", "role.custom"]
+    report = drift_report([_row(key, "Approved role instructions.") for key in keys], {}, include_body=True)
+    for item in report["promotion_candidates"]:
+        item["code_only"] = item["key"] == "role.custom"
+    assert export_report(report, tmp_path, approved_keys=keys)["count"] == 2
+    manifest = load_manifest(tmp_path)
+    assert manifest["role.setup_coder"]["code_only"] is True
+    assert "code_only" not in manifest["role.custom"]
+
+
 def test_export_holds_bodies_naming_install_terms(tmp_path: Path) -> None:
     rows = [_row("clean", "Ask the user first."), _row("named", "Ask Pat first; never touch Zed."),
             _row("partial", "Patterns and Zedonk are fine.")]
@@ -283,7 +295,10 @@ def test_synced_fixture_catalog_is_portable_and_matches_definitions() -> None:
     # Validate the serialized manifest itself too: Python-defined keys may ignore
     # its metadata at runtime, but that must not hide malformed/private fixtures.
     for key, entry in load_manifest().items():
-        assert set(entry) <= {"title", "category", "format", "required_vars"}
+        assert set(entry) <= {"title", "category", "format", "required_vars", "code_only"}
+        if "code_only" in entry:
+            assert entry["code_only"] is True
+            assert DEFAULT_PROMPT_DEFINITIONS[key].code_only
         path = prompt_synced_defaults.body_path(key)
         assert path.is_file(), f"manifest entry without body: {key}"
         errors = validate_promotion_item({
@@ -291,6 +306,54 @@ def test_synced_fixture_catalog_is_portable_and_matches_definitions() -> None:
             "sync_class": PRODUCT, "body": path.read_text(encoding="utf-8"),
         })
         assert not errors, f"manifest {key}: {errors}"
+
+
+@pytest.mark.parametrize("tenant_seed_first", [False, True])
+def test_stock_role_defaults_are_not_materialized(monkeypatch, tenant_seed_first) -> None:
+    from llm_bawt import prompt_registry
+    from llm_bawt.config_resolver import ConfigResolver
+    from llm_bawt.seeding.engine import TenantSeeder
+    from llm_bawt.utils import db
+    from llm_bawt.utils.schema import SchemaBootstrapGuard
+
+    engine = create_engine("sqlite://")
+    monkeypatch.setattr(prompt_registry, "has_database_credentials", lambda _: True)
+    monkeypatch.setattr(db, "get_shared_engine", lambda _: engine)
+    monkeypatch.setattr(db, "build_postgres_url", lambda _: "sqlite://")
+    monkeypatch.setattr(PromptTemplateStore, "_seeded_urls", set())
+    monkeypatch.setattr(PromptTemplateStore, "_schema_guard", SchemaBootstrapGuard())
+    config = object()
+    seeder = TenantSeeder(config, engine)
+    if tenant_seed_first:
+        seeder._seed_prompt_defaults()
+    resolver = ConfigResolver(config, settings=object())
+    store = PromptTemplateStore(config)
+    ordinary = "repos.workspace.commit_task"
+    assert store.get_exact(ordinary) is not None
+    assert len(store.list_versions(ordinary)) == 1
+
+    seeder._seed_prompt_defaults()
+    for role in ("arbiter", "coder", "coordinator", "reviewer"):
+        key = f"role.setup_{role}"
+        resolved = resolver.resolve_body(key)
+        assert resolved.source == "code_default"
+        assert resolved.body == prompt_synced_defaults.synced_body(key)
+        assert store.get_exact(key) is None
+        assert store.list_versions(key) == []
+
+    body = prompt_synced_defaults.synced_body(key)
+    store.upsert(key=key, body=body, updated_by="tenant")
+    store.upsert(key=key, body="Bot-specific instructions.", scope_type="bot", scope_id="fixture-bot")
+    seeder._seed_prompt_defaults()
+    assert resolver.resolve_body(key).provenance == "tenant_override"
+    assert resolver.resolve_body(key, "bot", "fixture-bot").body == "Bot-specific instructions."
+    assert store.reset(key, "bot", "fixture-bot")
+    assert resolver.resolve_body(key, "bot", "fixture-bot").source == "db_override"
+    assert store.reset(key)
+    seeder._seed_prompt_defaults()
+    assert resolver.resolve_body(key).source == "code_default"
+    assert store.get_exact(key) is None
+    assert len(store.list_versions(key)) == 1  # The explicit save, not a new seed.
 
 
 def test_fresh_repos_defaults_seed_render_and_fallback_use_one_body(monkeypatch) -> None:

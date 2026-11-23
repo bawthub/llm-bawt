@@ -20,7 +20,7 @@ from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator
 
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 
 from .background_spend import normalize_usage
 
@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 TOKEN_KEYS = ("input_tokens", "cache_read_tokens", "cache_write_tokens", "output_tokens")
 MAX_ROLLUP_DAYS = 90
+UTILITY_USAGE_SCHEMA_REVISION = "0006_utility_usage"
 
 _CALL: ContextVar[dict | None] = ContextVar("utility_usage_call", default=None)
 
@@ -64,9 +65,12 @@ def note_response(response: Any) -> None:
 
 
 def bootstrap_utility_usage_schema(conn) -> None:
+    """Idempotent DDL shared by compatibility startup and revision 0006."""
     if getattr(getattr(conn, "dialect", None), "name", None) != "postgresql":
         return
-    conn.execute(text("""
+    catalog = inspect(conn)
+    if not catalog.has_table("utility_usage"):
+        conn.execute(text("""
         CREATE TABLE IF NOT EXISTS utility_usage (
             id BIGSERIAL PRIMARY KEY,
             created_at TIMESTAMPTZ NOT NULL,
@@ -81,10 +85,22 @@ def bootstrap_utility_usage_schema(conn) -> None:
             elapsed_ms INTEGER NOT NULL,
             outcome VARCHAR(32) NOT NULL
         )
-    """))
-    conn.execute(text(
-        "CREATE INDEX IF NOT EXISTS ix_utility_usage_created ON utility_usage (created_at)"
-    ))
+        """))
+    indexes = {index["name"] for index in inspect(conn).get_indexes("utility_usage")}
+    if "ix_utility_usage_created" not in indexes:
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_utility_usage_created ON utility_usage (created_at)"
+        ))
+
+
+def ensure_utility_usage_schema(conn) -> None:
+    """Retain runtime DDL only until Alembic owns it, on the caller's connection."""
+    if getattr(getattr(conn, "dialect", None), "name", None) != "postgresql":
+        return
+    from ...utils.alembic_state import is_at_or_after, read_revision
+
+    if not is_at_or_after(read_revision(conn), UTILITY_USAGE_SCHEMA_REVISION):
+        bootstrap_utility_usage_schema(conn)
 
 
 def build_row(*, caller: str, bot_id: str | None, model: str | None, box: dict,

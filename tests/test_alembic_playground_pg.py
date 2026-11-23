@@ -1,5 +1,8 @@
 """TASK-631 slice 5: Playground ownership on disposable PostgreSQL."""
 
+# Imported pytest fixtures are intentionally shadowed by injected parameters.
+# ruff: noqa: F811
+
 from __future__ import annotations
 
 import pytest
@@ -56,6 +59,8 @@ def test_alembic_path_matches_runtime_schema(make_db):
 
 
 def test_upgrade_preserves_bootstrapped_schema_and_rows_without_ddl(make_db):
+    from alembic import command
+
     engine = make_db()
     store.PlaygroundStore(engine)
     seed(engine)
@@ -68,7 +73,10 @@ def test_upgrade_preserves_bootstrapped_schema_and_rows_without_ddl(make_db):
 
     event.listen(engine, "before_cursor_execute", capture)
     try:
-        assert alembic_state.upgrade_on_startup(engine) == HEAD
+        # This no-DDL proof covers 0005 only, not later unrelated table creation.
+        with engine.begin() as conn:
+            command.upgrade(alembic_state.alembic_config(conn), "0005_playground")
+            assert alembic_state.read_revision(conn) == "0005_playground"
     finally:
         event.remove(engine, "before_cursor_execute", capture)
     assert not any(s.startswith(("CREATE ", "ALTER ", "DROP ")) for s in statements)

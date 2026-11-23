@@ -28,6 +28,15 @@ packaged product default. All seven Repos templates are in the canonical prompt
 catalog and therefore the shared tenant seeder; consumers resolve those bodies,
 not a separately maintained frontend string.
 
+The shipped stock Setup role definitions explicitly marked `code_only: true`
+are an exception to automatic seeding. Cold startup and tenant seeding leave
+both their templates and history untouched, so withdrawing these definitions
+restores role-description fallback where no tenant prompt exists. An explicit
+save still overrides the shipped body, including an equal-body save. Existing
+rows, including copies seeded by an earlier build, still take precedence and
+are not reclassified or removed by recovery. The flag is source policy, not
+accepted from tenant exports.
+
 Seed/sync-written global rows with matching tracked hashes follow upgrades.
 Legacy rows with proven seed/sync provenance can follow too. Human-edited,
 ambiguous and bot-scoped rows are not adopted merely because their body equals a
@@ -83,6 +92,70 @@ Legacy `source` retains its storage meaning for existing clients.
    tenant's override if it should follow that product again. Never reset before
    the new release is available; that would restore the old default. Reset/live
    writes require their usual authority, not permission inferred from this file.
+
+## Stage the Setup roster in the same product sync run
+
+Use the same scheduled job, with an app-capable Python environment and approved
+read-only source configuration. This is a source candidate generator, not a
+customer install step. From a clean checkout of the release base:
+
+```sh
+# The operator supplies reviewed install terms, exclusions and input bytes.
+mkdir -m 700 "$PRODUCT_SYNC_STAGE"
+python -m llm_bawt.seeding.product_sync --stage "$PRODUCT_SYNC_STAGE" --setup-catalog \
+  --portable-input "$PRODUCT_SYNC_PORTABLE_INPUT" \
+  --portable-sha256 "$PRODUCT_SYNC_APPROVED_SHA256" \
+  --excluded-bots "$PRODUCT_SYNC_EXCLUDED_BOTS" \
+  --excluded-roles "$PRODUCT_SYNC_EXCLUDED_ROLES"
+```
+
+Add `--api "$LLM_BAWT_API" --key role.example` (repeat `--key` as needed) only
+when the exact global prompt changes are approved for export. No `--key` means
+no prompt API read. The read-only tenant projection returns only eligible
+bot slugs, structural role membership and one-way revisions computed by
+PostgreSQL, never raw IDs or timestamps. Private and hidden profiles are
+filtered before the role closure. Keep protected slugs in private operator
+inputs (`--excluded-bots` and `--excluded-roles`, explicitly empty only if
+there are none). Only role keys from approved portable definitions can be
+resolved; explicit denials win even for shared assignments. An unavailable
+required role holds the entire snapshot without returning its key or details.
+Only known product behavior assignments are ignored. Product sync never
+reads tenant profile/role prose, assets, grants, bindings or prompt overrides.
+The one-shot `read_setup_structure_pgq` operator helper accepts the same private
+scope (including a trusted non-live role allowlist), sends it over stdin, and
+uses the same read-only, repeatable-read projection as the app reader.
+
+Use the private structural snapshot to bind existing approved portable text to
+current revisions; do not export live prose for approval. Input schema `1` has
+`profiles` and `roles` objects keyed by slug. Each profile has `revision`, the
+reviewed `roles` list, and `preset` fields including starter `system_prompt`.
+Each role has `revision`, `name`, `description`, `color`, and `prompt_key` plus
+`prompt_sha256` (both null for a reviewed descriptive role). Pin refs to the
+canonical metadata and body digest from `portable_role_prompt_revisions` in
+the chosen product prompt source. This never duplicates a role prompt body.
+The approval digest is supplied by independent exact-byte review, not computed
+from whichever file happens to be on disk at run time. Source revision tokens
+are private and not published; edits that advance row timestamps, including
+operational edits, conservatively require a refreshed binding even if the
+portable text itself has not changed.
+
+The JSON result describes each stage. `held` or `failed` makes the command
+exit nonzero. A failed prompt stage does not prevent a catalog that can stand
+on shipped defaults, but a held or failed selected role-prompt change cannot
+silently fall back to the older shipped version. Use only files named by the
+current result: a previous catalog on disk after an error is not current.
+Serialize runs sharing a staging directory. Each `prompts-*` directory is an
+overlay on the exact release base (changed bodies and the merged manifest),
+not a replacement for the prompt defaults directory. Review all outgoing text
+and the matching dependency changes before copying them into release source.
+The product catalog at `src/llm_bawt/seeding/setup_catalog.json` contains
+only general-use starters. Its `stock/` refs are separate from the previous
+`starter/` choices. A generated roster that identifies a particular installation
+stays in private staging, even if its prose and role dependencies are portable.
+Do not copy its entries over the stock catalog or add policy exceptions for them.
+Only independently reviewed general-use content belongs in the distributed
+catalog. Remove private staging files when no longer needed. No timer,
+publication, or deployment action is performed here.
 
 ## Verification and drift
 

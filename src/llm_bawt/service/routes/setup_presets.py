@@ -14,6 +14,9 @@ Catalog parsing and planning live in :mod:`llm_bawt.seeding.bot_presets`.
 
 from __future__ import annotations
 
+import logging
+from functools import partial
+
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
@@ -21,21 +24,25 @@ from sqlalchemy import text
 
 from ...seeding import FIRST_BOT_AGENT_BACKEND
 from ...seeding import bot_presets as presets
+from ...seeding.setup_role_dependencies import SetupRoleConflict, install_missing_roles
 from ... import bot_profile_changes as profile_changes
 from ..agent_runtime import check_agent_runtime
 from ..dependencies import get_bot_profile_store, get_runtime_settings_store, get_service
 from ..providers.registry import access_path_connections, route_eligibility
+from ..setup_orientation import prepare_first_chat, record_choice
 from .model_catalog import harness_for_agent_backend
 from .settings import _USER_ID_QUERY, _persist_bot_profile, profile_actor
 from .setup import _http_error, _record_first_default_bot
 
 router = APIRouter()
+log = logging.getLogger(__name__)
 
 
 class PresetSelection(BaseModel):
     selection: list[str] | None = Field(default=None, max_length=presets._MAX_PRESETS * 4)
     # Optional per-preset endpoint choice: ``{"starter/helper": 12}``.
     endpoints: dict[str, int] | None = None
+    guide_me: bool | None = None
 
 
 def _settings(config):
@@ -72,14 +79,18 @@ def _known_tags(store) -> set[str] | None:
 
 
 def load_state(config, selection: list[str] | None = None,
-               endpoints: dict[str, int] | None = None) -> dict:
+               endpoints: dict[str, int] | None = None, *, allow_retired: bool = False) -> dict:
     """Catalog, selection and dry-run plan. Shared by the routes and ``preset_cli``."""
     settings = _settings(config)
     packs = presets.all_packs(settings.get_value("global", "*", presets.PACKS_KEY))
     known = presets.presets_by_ref(packs)
     stored = settings.get_value("global", "*", presets.SELECTION_KEY)
+    retired: list[str] = []
     if selection is not None:
-        selection = presets.normalize_selection(selection, known)
+        if allow_retired:
+            selection, retired = presets.partition_selection(selection, known)
+        else:
+            selection = presets.normalize_selection(selection, known)
     elif isinstance(stored, list):
         selection = [ref for ref in stored if ref in known]
     else:
@@ -88,14 +99,20 @@ def load_state(config, selection: list[str] | None = None,
     existing = {p.slug for p in profiles.list_all()}
     tags = _known_tags(profiles)
     rows = presets.plan(selection, known, usable_endpoints(config), existing, tags, endpoints)
-    return {"packs": [p.public() for p in packs], "selection": selection,
+    for ref in retired:
+        slug = ref.split("/", 1)[1]
+        rows.append({"ref": ref, "slug": slug, "name": slug, "action": "blocked",
+                     "reason": "This preset is no longer offered. Change your selection to continue."})
+    selected = set(selection)
+    visible = [p.public() for p in packs if any(not bot.legacy or bot.ref in selected for bot in p.presets)]
+    return {"packs": visible, "selection": selection,
             "stored": isinstance(stored, list), "plan": rows,
             "_known": known, "_tags": tags}
 
 
-def _state(service, body: PresetSelection | None = None) -> dict:
+def _state(service, body: PresetSelection | None = None, *, allow_retired: bool = False) -> dict:
     return load_state(service.config, body.selection if body is not None else None,
-                      body.endpoints if body is not None else None)
+                      body.endpoints if body is not None else None, allow_retired=allow_retired)
 
 
 def save_selection(config, selection: list[str]) -> dict:
@@ -143,15 +160,32 @@ async def apply_bot_presets(http_request: Request, body: PresetSelection | None 
         runtime = await check_agent_runtime(service.config)
         if not runtime.ready:
             raise HTTPException(status_code=503, detail=f"Agent runtime not ready: {runtime.detail}")
-        state = await run_in_threadpool(_state, service, body)
+        state = await run_in_threadpool(_state, service, body, allow_retired=True)
         profiles = get_bot_profile_store(service.config)
         actor = profile_actor(http_request, user_id)
         known, tags = state["_known"], state["_tags"]
+        guide_me = body.guide_me if body is not None else None
+        audience = user_id.strip() if user_id and actor == user_id.strip() else None
+        if guide_me and (not audience or actor.startswith("bot:")):
+            raise HTTPException(status_code=403, detail="Choose an administrator before starting the introduction")
+        dispatcher = getattr(service, "_inter_bot_dispatcher", None)
+        prompt = await run_in_threadpool(prepare_first_chat, service.config) if guide_me else None
+        delivery = None
+        first_created = None
+
+        def save_choice(conn, profile):
+            nonlocal delivery
+            delivery = record_choice(
+                conn, profile, opted_in=bool(guide_me), user_id=audience,
+                prompt=prompt, store=dispatcher.store if dispatcher is not None else None,
+            )
+
         results = []
         for row in state["plan"]:
             result = dict(row)
             if row["action"] == "create":
                 preset = known[row["ref"]]
+                roles = preset.role_dependencies
                 payload = {
                     "slug": preset.slug, "name": preset.name, "description": preset.summary,
                     "system_prompt": preset.system_prompt, "requires_memory": True,
@@ -159,14 +193,20 @@ async def apply_bot_presets(http_request: Request, body: PresetSelection | None 
                     "uses_tools": True, "uses_search": True, "uses_home_assistant": False,
                     "bot_type": "agent", "agent_backend": FIRST_BOT_AGENT_BACKEND,
                     "harness": FIRST_BOT_AGENT_BACKEND, "endpoint_id": row["endpoint_id"],
-                    "tags": [t for t in preset.tags if tags is None or t in tags],
+                    "tags": [t for t in preset.tags if roles is not None or tags is None or t in tags],
                     "tags_assigned_by": actor,
                     profile_changes.CHANGED_BY: actor,
                     **{k: v for k, v in (("color", preset.color), ("avatar", preset.icon)) if v},
                 }
+                delivery = None
                 try:
-                    await _persist_bot_profile(payload, create_only=True)
-                    result["action"] = "created"
+                    await _persist_bot_profile(
+                        payload, create_only=True,
+                        **({"before_create": partial(install_missing_roles, roles=roles)} if roles else {}),
+                        **({"on_create": save_choice} if guide_me is not None and first_created is None else {}),
+                    )
+                except SetupRoleConflict as exc:
+                    result.update(action="blocked", reason=str(exc))
                 except HTTPException as exc:
                     if exc.status_code >= 500:
                         raise
@@ -178,17 +218,23 @@ async def apply_bot_presets(http_request: Request, body: PresetSelection | None 
                                       reason=f"A bot named '{preset.slug}' already exists; it is left unchanged.")
                     else:
                         result.update(action="failed", reason=_reason(exc.detail))
+                else:
+                    result["action"] = "created"
+                    if first_created is None:
+                        first_created = preset.slug
+                        if delivery is not None:
+                            try:
+                                dispatcher.announce_admitted(delivery)
+                            except Exception:
+                                log.exception("First chat announcement failed; dispatcher will recover the durable row")
+                        await run_in_threadpool(_record_first_default_bot, service, first_created)
             results.append(result)
-        created = [r["slug"] for r in results if r["action"] == "created"]
-        if created:
-            # Same rule as the single first bot: only when no default exists.
-            await run_in_threadpool(_record_first_default_bot, service, created[0])
     except presets.PresetError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         raise _http_error(exc, what="Bot presets") from exc
-    failed = any(r["action"] == "failed" for r in results)
-    return {"ok": not failed, "selection": state["selection"], "results": results}
+    ok = all(r["action"] in {"created", "skip"} for r in results)
+    return {"ok": ok, "selection": state["selection"], "results": results}
 
 
 def _reason(detail) -> str:

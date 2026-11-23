@@ -1,8 +1,18 @@
 """Bot preset catalog and planning (TASK-2516)."""
 
+from contextlib import contextmanager
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
 
 from llm_bawt.seeding import bot_presets as bp
+from llm_bawt.seeding import preset_cli, preset_source
+from llm_bawt.seeding.setup_role_dependencies import SetupRoleConflict
+from llm_bawt.seeding.setup_seed_sync import SetupSeedSnapshot, stage_catalog
+from llm_bawt.service.routes import setup_presets as routes
 
 
 def _pack(**over):
@@ -13,11 +23,74 @@ def _pack(**over):
     return {"pack": "extra", "title": "Extra", "presets": [preset]}
 
 
-def test_builtin_pack_parses_and_recommends():
+@pytest.fixture
+def legacy_catalog(tmp_path, monkeypatch):
+    """Exercise old installs independently of the packaged stock resources."""
+    monkeypatch.setattr(bp, "GENERATED_CATALOG", tmp_path / "setup_catalog.json")
+
+
+@pytest.fixture
+def generated_catalog(tmp_path, monkeypatch):
+    target = tmp_path / "setup_catalog.json"
+    profiles = [{"key": slug, "slug": slug, "name": slug.title(), "summary": "Does a thing.",
+                 "system_prompt": "Be useful.", "role": "Assistant", "tags": tags,
+                 "recommended": slug == "alpha"}
+                for slug, tags in (("alpha", ["audit"]), ("beta", []), ("gamma", ["coach"]))]
+    roles = {slug: {"slug": slug, "name": slug.title()} for slug in ("audit", "coach")}
+    assert stage_catalog(lambda: SetupSeedSnapshot({"alpha", "beta", "gamma"}, profiles, roles, set()), target)
+    monkeypatch.setattr(bp, "GENERATED_CATALOG", target)
+    return target
+
+
+def test_builtin_pack_uses_generated_roster_and_preserves_legacy_refs(generated_catalog):
     packs = bp.all_packs(None)
-    assert packs[0].pack == bp.BUILTIN_PACK
-    recommended = bp.recommended_refs(packs)
-    assert recommended and all(ref.startswith("starter/") for ref in recommended)
+    assert packs[0].pack == bp.GENERATED_PACK
+    stock = [preset for preset in packs[0].presets if not preset.legacy]
+    assert [p.name for p in stock] == ["Alpha", "Beta", "Gamma"]
+    assert stock[0].role_dependencies[0].slug == "audit"
+    assert "role_dependencies" not in stock[0].public()
+    assert bp.recommended_refs(packs) == ["stock/alpha"]
+    assert bp.presets_by_ref(packs)["starter/helper"].legacy
+    assert stage_catalog(lambda: SetupSeedSnapshot(set(), [], {}, set()), generated_catalog)
+    assert not bp.all_packs(None)[0].presets
+    assert all(p.legacy for p in bp.all_packs(None)[1].presets)
+
+
+def test_shipped_catalog_loads_against_shipped_role_prompts():
+    stock = bp.load_generated_pack(bp.GENERATED_CATALOG)
+    assert stock.pack == bp.GENERATED_PACK
+    assert len(stock.presets) == 12
+    assert all(preset.ref == f"stock/{preset.slug}" for preset in stock.presets)
+    assert not bp.recommended_refs([stock])
+    assert {role.slug: role.prompt_key for preset in stock.presets
+            for role in preset.role_dependencies} == {
+        "arbiter": "role.setup_arbiter",
+        "coder": "role.setup_coder",
+        "coordinator": "role.setup_coordinator",
+        "reviewer": "role.setup_reviewer",
+    }
+
+
+def test_packaged_catalog_rejects_missing_role_prompt(tmp_path, monkeypatch):
+    from llm_bawt import prompt_synced_defaults
+
+    target = tmp_path / "setup_catalog.json"
+    prompt_dir = tmp_path / "prompt_defaults"
+    prompt_dir.mkdir()
+    monkeypatch.setattr(prompt_synced_defaults, "SYNCED_DIR", prompt_dir)
+    key = "role.auditor"
+    preset = {**_pack()["presets"][0], "slug": "alpha", "tags": ["audit"]}
+    roles = {"audit": {"slug": "audit", "name": "Audit", "prompt_key": key}}
+    assert stage_catalog(lambda: SetupSeedSnapshot({"alpha"}, [preset], roles, {key}), target)
+    prompt_synced_defaults.write_manifest({key: {
+        "title": "Audit", "category": "bot_tag", "format": "plain_text", "required_vars": [],
+    }}, prompt_dir)
+    body = prompt_synced_defaults.body_path(key, prompt_dir)
+    body.write_text("Review the result.", encoding="utf-8")
+    assert bp.load_generated_pack(target).presets[0].role_dependencies[0].prompt_key == key
+    body.unlink()
+    with pytest.raises(bp.PresetError, match="no released or exportable role prompt"):
+        bp.load_generated_pack(target)
 
 
 def test_bad_stored_pack_is_skipped_and_builtin_id_reserved():
@@ -29,7 +102,7 @@ def test_bad_stored_pack_is_skipped_and_builtin_id_reserved():
 def test_selection_refuses_unknown_and_slug_collision():
     known = bp.presets_by_ref(bp.all_packs([_pack(slug="helper")]))
     with pytest.raises(bp.PresetError, match="unknown"):
-        bp.normalize_selection(["nope/x"], known)
+        bp.normalize_selection(["nope/xx"], known)
     with pytest.raises(bp.PresetError, match="both create"):
         bp.normalize_selection(["starter/helper", "extra/alpha"], known)
 
@@ -55,17 +128,6 @@ def test_setup_preset_routes_registered():
 
 
 # --- routes and CLI ----------------------------------------------------------------------
-
-from contextlib import contextmanager
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
-
-from fastapi import FastAPI, HTTPException
-from fastapi.testclient import TestClient
-
-from llm_bawt.seeding import preset_cli
-from llm_bawt.service.routes import setup_presets as routes
-
 
 class _Settings:
     engine = object()
@@ -100,12 +162,16 @@ def _fakes(settings=None, profiles=None, usable=None, ready=True, refuse=()):
     profiles = profiles if profiles is not None else _Profiles()
     created = []
 
-    async def persist(payload, create_only):
+    async def persist(payload, create_only, on_create=None, before_create=None):
         assert create_only is True
         if payload["slug"] in profiles.slugs:
             raise HTTPException(status_code=409, detail="exists")
         if payload["slug"] in refuse:  # the route gate's refusal shares the 409
             raise HTTPException(status_code=409, detail="Anthropic is not connected (expired).")
+        if before_create is not None:
+            before_create(None)
+        if on_create is not None:
+            on_create(None, SimpleNamespace(slug=payload["slug"]))
         profiles.slugs.add(payload["slug"])
         created.append(payload)
         return payload
@@ -140,7 +206,7 @@ def test_get_offers_recommended_selection_until_one_is_stored():
     assert all(row["action"] == "create" for row in body["plan"])
 
 
-def test_subset_creates_exactly_those_bots_and_rerun_skips():
+def test_subset_creates_exactly_those_bots_and_rerun_skips(legacy_catalog):
     with _fakes() as f:
         client = _client()
         saved = client.put("/v1/setup/bot-presets", json={"selection": ["starter/critic"]})
@@ -156,7 +222,67 @@ def test_subset_creates_exactly_those_bots_and_rerun_skips():
     f.default_bot.assert_called_once()
 
 
-def test_existing_custom_bot_is_left_alone():
+@pytest.mark.parametrize("guide", [False, True])
+def test_generated_subset_and_guide_apply_once(guide, generated_catalog):
+    delivery = object() if guide else None
+    dispatcher = MagicMock()
+    with (
+        _fakes() as f,
+        patch.object(routes, "install_missing_roles") as install,
+        patch.object(routes, "profile_actor", return_value="owner"),
+        patch.object(routes, "prepare_first_chat", return_value="Offer an introduction") as prompt,
+        patch.object(routes, "record_choice", return_value=delivery) as choice,
+    ):
+        routes.get_service()._inter_bot_dispatcher = dispatcher
+        client = _client()
+        body = {"selection": ["stock/alpha", "stock/beta"], "guide_me": guide}
+        first = client.post("/v1/setup/bot-presets?user_id=owner", json=body)
+        again = client.post("/v1/setup/bot-presets?user_id=owner", json=body)
+        assert first.status_code == again.status_code == 200
+    assert [r["action"] for r in first.json()["results"]] == ["created", "created"]
+    assert [r["action"] for r in again.json()["results"]] == ["skip", "skip"]
+    assert [p["slug"] for p in f.created] == ["alpha", "beta"]
+    assert [p["tags"] for p in f.created] == [["audit"], []]
+    assert all(p["endpoint_id"] == 7 for p in f.created)
+    install.assert_called_once()
+    assert [role.slug for role in install.call_args.kwargs["roles"]] == ["audit"]
+    f.default_bot.assert_called_once()
+    assert f.default_bot.call_args.args[1] == "alpha"
+    choice.assert_called_once()
+    assert choice.call_args.args[1].slug == "alpha"
+    assert choice.call_args.kwargs["opted_in"] == guide
+    if guide:
+        dispatcher.announce_admitted.assert_called_once_with(delivery)
+    else:
+        dispatcher.announce_admitted.assert_not_called()
+        prompt.assert_not_called()
+
+
+def test_generated_role_conflict_blocks_only_the_dependent_bot(generated_catalog):
+    with (
+        _fakes() as f,
+        patch.object(routes, "install_missing_roles", side_effect=SetupRoleConflict("Local role conflict")),
+    ):
+        body = _client().post("/v1/setup/bot-presets", json={
+            "selection": ["stock/alpha", "stock/beta"],
+        }).json()
+    assert body["ok"] is False
+    assert [row["action"] for row in body["results"]] == ["blocked", "created"]
+    assert body["results"][0]["reason"] == "Local role conflict"
+    assert [p["slug"] for p in f.created] == ["beta"]
+
+
+def test_retired_stock_choice_does_not_fall_back_to_a_legacy_name(generated_catalog):
+    assert stage_catalog(lambda: SetupSeedSnapshot(set(), [], {}, set()), generated_catalog)
+    with _fakes() as f:
+        client = _client()
+        assert client.get("/v1/setup/bot-presets").json()["packs"] == []
+        result = client.post("/v1/setup/bot-presets", json={"selection": ["stock/helper"]}).json()
+        assert result["results"][0]["action"] == "blocked"
+        assert not f.created
+
+
+def test_existing_custom_bot_is_left_alone(legacy_catalog):
     with _fakes(profiles=_Profiles({"helper"})) as f:
         body = _client().post("/v1/setup/bot-presets",
                               json={"selection": ["starter/helper", "starter/builder"]}).json()
@@ -164,7 +290,7 @@ def test_existing_custom_bot_is_left_alone():
     assert [p["slug"] for p in f.created] == ["builder"]
 
 
-def test_no_connection_blocks_and_creates_nothing():
+def test_no_connection_blocks_and_creates_nothing(legacy_catalog):
     with _fakes(usable=[]) as f:
         body = _client().post("/v1/setup/bot-presets").json()
     assert {r["action"] for r in body["results"]} == {"blocked"}
@@ -187,7 +313,28 @@ def test_unknown_selection_is_rejected_without_saving():
     assert bp.SELECTION_KEY not in f.settings.values
 
 
-def test_cli_select_by_number_and_import(tmp_path, capsys):
+def test_retry_creates_valid_presets_and_reports_a_retired_choice(legacy_catalog):
+    with _fakes() as f:
+        client = _client()
+        body = {"selection": ["starter/retired", "starter/critic"]}
+        first = client.post("/v1/setup/bot-presets", json=body)
+        again = client.post("/v1/setup/bot-presets", json=body)
+    assert first.status_code == again.status_code == 200
+    assert [r["action"] for r in first.json()["results"]] == ["created", "blocked"]
+    assert "no longer offered" in first.json()["results"][1]["reason"]
+    assert [r["action"] for r in again.json()["results"]] == ["skip", "blocked"]
+    assert [p["slug"] for p in f.created] == ["critic"]
+
+
+def test_malformed_retry_ref_is_rejected_before_creation():
+    with _fakes() as f:
+        response = _client().post("/v1/setup/bot-presets",
+                                  json={"selection": ["starter/critic", "starter/a/b"]})
+    assert response.status_code == 400
+    assert f.created == []
+
+
+def test_cli_select_by_number_and_import(tmp_path, capsys, legacy_catalog):
     pack = tmp_path / "pack.json"
     pack.write_text(__import__("json").dumps(_pack()))
     with _fakes() as f, patch.object(preset_cli, "_config", return_value=f.config), \
@@ -196,8 +343,9 @@ def test_cli_select_by_number_and_import(tmp_path, capsys):
         assert preset_cli.main(["list"]) == 0
         listing = capsys.readouterr().out
         assert "Extra" in listing and "Alpha" in listing
-        count = len(bp.builtin_pack().presets)
-        assert preset_cli.main(["select", "1", str(count + 1)]) == 0
+        builtin = bp.builtin_pack().presets
+        helper = next(i for i, preset in enumerate(builtin, 1) if preset.key == "helper")
+        assert preset_cli.main(["select", str(helper), str(len(builtin) + 1)]) == 0
         assert f.settings.values[bp.SELECTION_KEY] == ["starter/helper", "extra/alpha"]
         assert preset_cli.main(["select", "current"]) == 0
         assert f.settings.values[bp.SELECTION_KEY] == ["starter/helper", "extra/alpha"]
@@ -334,26 +482,28 @@ def test_cli_export_refuses_addresses_and_secret_looking_text(prompt):
 
 
 def test_export_snapshot_excludes_private_in_one_read_only_statement():
-    sql = str(preset_cli._EXPORT_ROWS)
+    sql = str(preset_source.SELECTED_PROFILES)
     assert "include_in_global_search" in sql and "NOT EXISTS" in sql and "ANY(:slugs)" in sql
+    assert preset_source.EXPORTABLE_PROFILES in str(preset_source.ELIGIBLE_PROFILES)
     engine = MagicMock()
     conn = engine.connect.return_value.execution_options.return_value.__enter__.return_value
-    conn.execute.return_value.mappings.return_value.all.return_value = []
-    conn.execute.return_value.all.return_value = []
+    conn.execute.return_value.mappings.return_value.all.return_value = [{"slug": "ally"}]
+    conn.execute.return_value.__iter__.return_value = iter([])
     with patch("llm_bawt.utils.db.build_engine_from_config", return_value=engine):
-        preset_cli._read_snapshot(MagicMock(), ["ally"])
+        preset_cli._read_snapshot(MagicMock(), ["ally", "excluded"])
     engine.connect.return_value.execution_options.assert_called_once_with(
         isolation_level="REPEATABLE READ", postgresql_readonly=True)
+    conn.begin.assert_called_once()
     params = conn.execute.call_args_list[0].args[1]
-    assert set(params["private"]) >= {"private"} and params["slugs"] == ["ally"]
-    # Role tags come from this install's catalog, never from names in code.
-    tag_sql = str(preset_cli._EXPORT_TAGS)
+    assert set(params["private"]) >= {"private"} and params["slugs"] == ["ally", "excluded"]
+    # Join only the eligible bots, and use source role data, not coded names.
+    tag_sql = str(preset_source.ROLE_ASSIGNMENTS)
     assert "bot_tag_catalog" in tag_sql and "c.kind = 'role'" in tag_sql
     assert conn.execute.call_args_list[1].args[1] == {"slugs": ["ally"]}
     engine.dispose.assert_called_once()
 
 
-def test_route_refusal_is_reported_as_failed_not_as_an_existing_bot():
+def test_route_refusal_is_reported_as_failed_not_as_an_existing_bot(legacy_catalog):
     with _fakes(refuse={"critic"}) as f:
         body = _client().post("/v1/setup/bot-presets",
                               json={"selection": ["starter/critic", "starter/builder"]}).json()

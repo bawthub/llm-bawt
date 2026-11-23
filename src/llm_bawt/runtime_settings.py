@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections.abc import Callable
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
@@ -219,7 +220,10 @@ class BotProfileStore:
             from .house_retirement import ensure_schema as ensure_house_retirements
             ensure_house_retirements(conn)
             if not tags_existed:
-                tag_catalog.seed_starter_roles(conn)
+                from .seeding.bot_presets import GENERATED_CATALOG
+
+                if not GENERATED_CATALOG.is_file():
+                    tag_catalog.seed_starter_roles(conn)
                 migrated = tag_catalog.migrate_legacy_flag(conn)
                 # WARNING, not INFO: this first bootstrap usually runs at module
                 # import, before service logging is configured, and only the
@@ -277,7 +281,8 @@ class BotProfileStore:
     def upsert(self, profile: BotProfile | dict[str, Any], *,
                guard: ProfileWriteGuard | None = None,
                session: Session | None = None, create_only: bool = False,
-               require_existing: bool = False) -> BotProfile:
+               require_existing: bool = False,
+               before_create: Callable[[Any], None] | None = None) -> BotProfile:
         """Write under the bot lock; a borrowed session defers commit.
 
         Check creation/update preconditions under the lock, not a stale probe.
@@ -353,6 +358,8 @@ class BotProfileStore:
             if isinstance(payload_agent_backend, str):
                 payload_agent_backend = payload_agent_backend.strip().lower() or None
             if row is None:
+                if create_only and before_create is not None:
+                    before_create(session.connection())
                 row = BotProfile(
                     slug=slug,
                     name=str(payload.get("name") or slug.title()),

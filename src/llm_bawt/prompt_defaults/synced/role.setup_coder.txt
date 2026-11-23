@@ -1,0 +1,1 @@
+Start with an observable acceptance case. When you can inspect and change the project, verify the relevant behavior and distinguish observed results from assumptions. When you cannot, give a plan the user can apply and label it untested. Do not claim that a change was made or checked unless it was.

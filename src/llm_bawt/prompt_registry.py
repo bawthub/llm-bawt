@@ -323,7 +323,10 @@ class PromptTemplateStore:
         if self.engine is None:
             raise RuntimeError("Prompt template DB unavailable")
 
-        definitions = DEFAULT_PROMPT_DEFINITIONS
+        # Code-only defaults still resolve normally and accept explicit saves,
+        # but automatic seed/sync must not create or modify their stored rows.
+        definitions = {key: definition for key, definition in DEFAULT_PROMPT_DEFINITIONS.items()
+                       if not definition.code_only}
         global_scope_type = "global"
         global_scope_id = "*"
 

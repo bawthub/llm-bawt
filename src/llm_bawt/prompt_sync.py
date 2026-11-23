@@ -240,12 +240,16 @@ def export_report(
         body_path(key, root).write_text(body, encoding="utf-8")
         written.append(key)
         if item.get("kind") == "new" or key in manifest:
+            code_only = manifest.get(key, {}).get("code_only") is True
             manifest[key] = {
                 "title": item.get("title") or key,
                 "category": item.get("category") or "custom",
                 "format": item.get("format") or "plain_text",
                 "required_vars": list(item.get("required_vars") or []),
             }
+            # This is shipped source policy, never an exportable tenant field.
+            if code_only:
+                manifest[key]["code_only"] = True
             manifest_changed = True
     if manifest_changed:
         write_manifest(manifest, root)

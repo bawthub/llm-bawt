@@ -2,8 +2,8 @@
 
 One catalog serves the terminal installer and the browser wizard:
 
-- the built-in ``starter`` pack (``bot_presets.json``): owner-neutral agents,
-  one job each;
+- the built-in ``starter`` pack: portable starting points, with legacy
+  entries retained for saved selections;
 - optional packs an operator imports (for example one exported from another
   installation with ``python -m llm_bawt.seeding.preset_cli export``). Packs
   are stored in runtime settings, never shipped as product defaults.
@@ -23,13 +23,19 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping
+from typing import TYPE_CHECKING, Any, Iterable, Mapping
+
+if TYPE_CHECKING:
+    from .setup_role_dependencies import SetupRole
 
 SELECTION_KEY = "setup.bot_presets.selected"
 PACKS_KEY = "setup.bot_presets.packs"
 BUILTIN_PACK = "starter"
+GENERATED_PACK = "stock"
+_PRODUCT_PACKS = frozenset({BUILTIN_PACK, GENERATED_PACK})
+GENERATED_CATALOG = Path(__file__).with_name("setup_catalog.json")
 
 _SLUG = re.compile(r"^[a-z0-9][a-z0-9_-]{1,63}$")
 _PACK = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
@@ -58,8 +64,12 @@ class BotPreset:
     pick_if: str = ""
     differs: str = ""
     recommended: bool = False
+    legacy: bool = False
     provider_preference: tuple[str, ...] = ()
     description: str = ""
+    # None is an external/legacy pack; an empty tuple is a generated preset
+    # with no role dependencies. This internal metadata never travels via API.
+    role_dependencies: tuple[SetupRole, ...] | None = None
 
     @property
     def ref(self) -> str:
@@ -67,6 +77,7 @@ class BotPreset:
 
     def public(self) -> dict[str, Any]:
         data = asdict(self)
+        data.pop("role_dependencies")
         data["ref"] = self.ref
         data["tags"] = list(self.tags)
         data["provider_preference"] = list(self.provider_preference)
@@ -82,7 +93,7 @@ class PresetPack:
 
     def public(self) -> dict[str, Any]:
         return {"pack": self.pack, "title": self.title, "description": self.description,
-                "builtin": self.pack == BUILTIN_PACK,
+                "builtin": self.pack in _PRODUCT_PACKS,
                 "presets": [p.public() for p in self.presets]}
 
 
@@ -154,6 +165,7 @@ def parse_pack(raw: Any) -> PresetPack:
             pick_if=_text(item, "pick_if"),
             differs=_text(item, "differs"),
             recommended=bool(item.get("recommended", False)),
+            legacy=pack == BUILTIN_PACK and item.get("legacy") is True,
             provider_preference=tuple(v.lower() for v in _strings(item, "provider_preference")),
             description=_text(item, "summary"),
         ))
@@ -250,6 +262,28 @@ def builtin_pack() -> PresetPack:
     return parse_pack(raw)
 
 
+def load_generated_pack(path: Path) -> PresetPack:
+    from ..prompt_synced_defaults import SYNCED_DIR
+    from .setup_role_dependencies import portable_role_prompt_keys, required_roles
+
+    raw = json.loads(path.read_bytes())
+    if not isinstance(raw, dict) or raw.get("pack") != GENERATED_PACK:
+        raise PresetError("Expected the generated Setup catalog")
+    rows = raw.get("roles")
+    if not isinstance(rows, list) or any(not isinstance(row, dict) or not isinstance(row.get("slug"), str)
+                                         for row in rows):
+        raise PresetError("Invalid generated Setup role definitions")
+    catalog = {row["slug"]: row for row in rows}
+    pack = (PresetPack(GENERATED_PACK, _text(raw, "title"), _text(raw, "description"))
+            if raw.get("presets") == [] else parse_pack(raw))
+    roles = required_roles(pack.presets, catalog, portable_role_prompt_keys(SYNCED_DIR))
+    if len(roles) != len(rows) or {role.slug for role in roles} != catalog.keys():
+        raise PresetError("Generated Setup roles do not match the catalog's dependencies")
+    by_slug = {role.slug: role for role in roles}
+    return replace(pack, presets=tuple(replace(p, role_dependencies=tuple(by_slug[t] for t in p.tags))
+                                       for p in pack.presets))
+
+
 def stored_packs(raw: Any) -> list[PresetPack]:
     """Imported packs from the runtime setting value; a bad entry is skipped."""
     packs: list[PresetPack] = []
@@ -258,13 +292,19 @@ def stored_packs(raw: Any) -> list[PresetPack]:
             pack = parse_pack(item)
         except PresetError:
             continue
-        if pack.pack != BUILTIN_PACK:
+        if pack.pack not in _PRODUCT_PACKS:
             packs.append(pack)
     return packs
 
 
 def all_packs(stored: Any) -> list[PresetPack]:
-    return [builtin_pack(), *stored_packs(stored)]
+    compatibility = builtin_pack()
+    if not GENERATED_CATALOG.is_file():
+        return [compatibility, *stored_packs(stored)]
+    generated = load_generated_pack(GENERATED_CATALOG)
+    legacy = replace(compatibility, title="Previous starter lineup", description="",
+                     presets=tuple(replace(p, legacy=True) for p in compatibility.presets))
+    return [generated, legacy, *stored_packs(stored)]
 
 
 def presets_by_ref(packs: Iterable[PresetPack]) -> dict[str, BotPreset]:
@@ -272,30 +312,41 @@ def presets_by_ref(packs: Iterable[PresetPack]) -> dict[str, BotPreset]:
 
 
 def recommended_refs(packs: Iterable[PresetPack]) -> list[str]:
-    return [p.ref for pack in packs if pack.pack == BUILTIN_PACK for p in pack.presets if p.recommended]
+    return [p.ref for pack in packs if pack.pack in _PRODUCT_PACKS
+            for p in pack.presets if p.recommended and not p.legacy]
 
 
 def normalize_selection(refs: Any, known: Mapping[str, BotPreset]) -> list[str]:
     """Known refs in catalog order; refuses unknown refs and two presets on one slug."""
+    ordered, unknown = partition_selection(refs, known)
+    if unknown:
+        raise PresetError(f"unknown preset(s): {', '.join(unknown)}")
+    return ordered
+
+
+def partition_selection(refs: Any, known: Mapping[str, BotPreset]) -> tuple[list[str], list[str]]:
+    """Isolate well-formed retired refs without silently accepting malformed selections."""
     if not isinstance(refs, list) or not all(isinstance(r, str) for r in refs):
         raise PresetError("selection must be a list of preset refs")
     wanted = {r.strip() for r in refs if r.strip()}
-    unknown = sorted(wanted - set(known))
-    if unknown:
-        raise PresetError(f"unknown preset(s): {', '.join(unknown)}")
+    unknown = sorted(wanted - known.keys())
+    for ref in unknown:
+        pack, sep, slug = ref.partition("/")
+        if not sep or not _PACK.fullmatch(pack) or not _SLUG.fullmatch(slug):
+            raise PresetError("selection contains a malformed preset ref")
     ordered = [ref for ref in known if ref in wanted]
     slugs: dict[str, str] = {}
     for ref in ordered:
         other = slugs.setdefault(known[ref].slug, ref)
         if other != ref:
             raise PresetError(f"{other} and {ref} would both create bot '{known[ref].slug}'")
-    return ordered
+    return ordered, unknown
 
 
 def merge_pack(stored: Any, pack: PresetPack) -> list[dict[str, Any]]:
     """Stored packs with *pack* added or replaced (by id); the built-in id is reserved."""
-    if pack.pack == BUILTIN_PACK:
-        raise PresetError(f"pack id '{BUILTIN_PACK}' is reserved for the built-in lineup")
+    if pack.pack in _PRODUCT_PACKS:
+        raise PresetError(f"pack id '{pack.pack}' is reserved for the built-in lineup")
     kept = [p for p in stored_packs(stored) if p.pack != pack.pack]
     return [_pack_document(p) for p in [*kept, pack]]
 
@@ -340,9 +391,12 @@ def plan(selection: list[str], known: Mapping[str, BotPreset], usable: list[Endp
         row: dict[str, Any] = {"ref": ref, "slug": preset.slug, "name": preset.name}
         override = (endpoint_overrides or {}).get(ref)
         choice = by_id.get(override) if override is not None else choose_endpoint(preset, usable)
-        missing_tags = [] if known_tags is None else [t for t in preset.tags if t not in known_tags]
+        missing_tags = ([] if known_tags is None or preset.role_dependencies is not None
+                        else [t for t in preset.tags if t not in known_tags])
         if preset.slug in existing:
             row.update(action="skip", reason=f"A bot named '{preset.slug}' already exists; it is left unchanged.")
+        elif preset.legacy:
+            row.update(action="blocked", reason="This legacy preset is no longer offered. Change your selection to continue.")
         elif override is not None and choice is None:
             row.update(action="blocked", reason="The chosen model is not usable by an agent on this install.")
         elif choice is None:

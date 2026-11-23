@@ -122,6 +122,8 @@ class PromptDefinition:
     # deprecated key; its row and version history stay readable, and the
     # registry API refuses edits and resets so nobody tunes a dead prompt.
     replaced_by: str | None = None
+    # This shipped fallback must be withdrawable without leaving a DB copy.
+    code_only: bool = False
 
     @property
     def deprecated(self) -> bool:
@@ -1191,6 +1193,7 @@ def _register_synced_definitions() -> None:
             required_vars=tuple(str(v) for v in entry.get("required_vars") or ()),
             format=str(entry.get("format") or "plain_text"),
             metadata=dict(entry.get("metadata") or {}),
+            code_only=entry.get("code_only") is True,
         )
 
 
