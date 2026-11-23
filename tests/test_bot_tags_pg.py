@@ -63,14 +63,6 @@ class Rig:
 
 
 @pytest.fixture
-def legacy_setup(monkeypatch, tmp_path):
-    """Exercise pre-catalog bootstrap even when a distribution ships stock Setup."""
-    from llm_bawt.seeding import bot_presets
-
-    monkeypatch.setattr(bot_presets, "GENERATED_CATALOG", tmp_path / "setup_catalog.json")
-
-
-@pytest.fixture
 def rig(private_pg, monkeypatch):
     name = f"bot_tags_{uuid.uuid4().hex[:12]}_test"
     monkeypatch.setenv("LLM_BAWT_POSTGRES_DATABASE", name)
@@ -156,7 +148,7 @@ def test_catalog_constraints_refuse_a_referenced_delete_and_a_system_role(rig):
                                  "VALUES ('Fixture-Upper', 'private')")
 
 
-def test_seeds_are_idempotent_and_restore_behaviour_rows_from_code(rig, legacy_setup):
+def test_seeds_are_idempotent_and_restore_behaviour_rows_from_code(rig):
     rig.store()
     # A fresh catalog holds the behaviour tags plus the TASK-2127 starter roles.
     assert rig.scalar("SELECT array_agg(slug::text ORDER BY slug) FROM bot_tag_catalog") == sorted(
@@ -261,7 +253,7 @@ def test_a_tenant_seeing_only_public_bot_profiles_refuses_and_rolls_back(rig):
                       "WHERE n.nspname='tenant'") == 0
 
 
-def test_a_completely_empty_schema_gets_every_table_and_copies_nothing(rig, legacy_setup):
+def test_a_completely_empty_schema_gets_every_table_and_copies_nothing(rig):
     with rig.engine.begin() as conn:
         conn.exec_driver_sql("CREATE SCHEMA fresh")
 
@@ -561,7 +553,7 @@ def test_a_dry_run_takes_no_lock(rig, purge):
     assert len(remaining(rig)) == 3
 
 
-def test_starter_roles_are_insert_only_and_seeded_only_at_creation(rig, legacy_setup):
+def test_starter_roles_are_insert_only_and_seeded_only_at_creation(rig):
     rig.store()
     assert rig.scalar("SELECT prompt_key FROM bot_tag_catalog WHERE slug='coder'") == "role.coder"
     assert rig.scalar("SELECT capabilities::text FROM bot_tag_catalog WHERE slug='arbiter'") == \

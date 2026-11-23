@@ -30,14 +30,10 @@ from typing import Any, TextIO
 
 from datetime import UTC, datetime
 
+from sqlalchemy import text
+
+from ..bot_tags.vocabulary import LEGACY_PRIVATE_TAGS
 from . import bot_presets as presets
-from .preset_source import (
-    ELIGIBLE_SLUGS,
-    ROLE_ASSIGNMENTS,
-    SELECTED_PROFILES,
-    eligibility_params,
-    read_preset_source,
-)
 
 
 
@@ -92,16 +88,45 @@ def _refs_from_numbers(state: dict[str, Any], words: list[str]) -> list[str]:
     return refs
 
 
+# Private and protected bots never appear, in the same statement that reads
+# the rest (no separate deny list that could go stale between two reads).
+_EXPORTABLE = """
+    FROM bot_profiles p
+   WHERE p.include_in_global_search
+     AND NOT EXISTS (SELECT 1 FROM bot_profile_tags t
+                      WHERE t.bot_slug = lower(btrim(p.slug)) AND t.tag_slug = ANY(:private))
+"""
+_EXPORTABLE_SLUGS = text("SELECT lower(btrim(p.slug)) AS slug" + _EXPORTABLE + " ORDER BY 1")
+_EXPORT_ROWS = text(
+    "SELECT lower(btrim(p.slug)) AS slug, p.name, p.description, p.system_prompt, p.avatar, p.color"
+    + _EXPORTABLE + " AND lower(btrim(p.slug)) = ANY(:slugs) ORDER BY 1")
+# Role tags are this install's own data (the catalog's kind 'role'); a pack
+# carries them with their catalog names, which become the preset's role label.
+_EXPORT_TAGS = text(
+    "SELECT t.bot_slug, t.tag_slug, c.name FROM bot_profile_tags t"
+    " JOIN bot_tag_catalog c ON c.slug = t.tag_slug AND c.kind = 'role'"
+    " WHERE t.bot_slug = ANY(:slugs) ORDER BY t.tag_slug")
+
+
 def _read_snapshot(config, slugs: list[str] | None):
-    with read_preset_source(config) as conn:
-        scope = eligibility_params()
-        if slugs is None:
-            return list(conn.execute(ELIGIBLE_SLUGS, scope).scalars()), []
-        rows = conn.execute(SELECTED_PROFILES, {**scope, "slugs": slugs}).mappings().all()
-        eligible = [row["slug"] for row in rows]
-        tags = [(row.bot_slug, row.slug, row.name)
-                for row in conn.execute(ROLE_ASSIGNMENTS, {"slugs": eligible})] if eligible else []
-        return rows, tags
+    """One read-only, repeatable-read transaction; no store or schema bootstrap."""
+    from ..utils.db import build_engine_from_config
+
+    engine = build_engine_from_config(config, application_name="llm-bawt-preset-export",
+                                      pool_size=1, max_overflow=0)
+    if engine is None:
+        raise presets.PresetError("the bot database is not configured")
+    private = [str(tag) for tag in LEGACY_PRIVATE_TAGS]
+    try:
+        with engine.connect().execution_options(isolation_level="REPEATABLE READ",
+                                                postgresql_readonly=True) as conn:
+            if slugs is None:
+                return list(conn.execute(_EXPORTABLE_SLUGS, {"private": private}).scalars()), []
+            rows = conn.execute(_EXPORT_ROWS, {"private": private, "slugs": slugs}).mappings().all()
+            tags = conn.execute(_EXPORT_TAGS, {"slugs": slugs}).all()
+            return rows, tags
+    finally:
+        engine.dispose()
 
 
 def exportable_slugs(config) -> list[str]:

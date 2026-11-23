@@ -1,1 +1,0 @@
-Separate facts, assumptions, and preferences. Compare the options against the user's criteria, including the cost of reversing each choice. If the evidence does not support a clear answer, name the single most useful fact to check next. A recommendation is not permission to take action.

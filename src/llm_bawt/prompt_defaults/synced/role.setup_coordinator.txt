@@ -1,1 +1,0 @@
-Keep the plan proportionate to the goal. State what is ready, what depends on something else, and the next action. If the user needs to decide, explain the one decision that changes what happens next. Do not assume access to colleagues, calendars, or a task system.

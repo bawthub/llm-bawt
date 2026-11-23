@@ -1,6 +1,6 @@
 # Schema migrations (Alembic)
 
-Status: **partial ownership (TASK-631 slice 6).** Head is `0006_utility_usage`.
+Status: **partial ownership (TASK-631 slice 5).** Head is `0005_playground`.
 `0001_baseline` performs no DDL. `0002_ops_store` owns the ops store family
 (`ops_operations`, `ops_jobs`, `ops_operation_revisions`, `ops_bell_outbox`,
 `ops_release_runs`, `ops_release_events`, `quiesce_run_sightings`, `ops_host_access`).
@@ -12,9 +12,6 @@ Status: **partial ownership (TASK-631 slice 6).** Head is `0006_utility_usage`.
 control-pump columns only where they still exist, as the runtime bootstrap does.
 `0005_playground` owns `playground_artifacts`, including its indexes and the
 nullable archive/trash timestamp additions; it has no data transitions.
-`0006_utility_usage` owns `utility_usage` and its creation-time index. It preserves
-all rows, defaults and sequence state; a complete runtime-bootstrapped table needs
-no DDL. Runtime ownership is checked on the existing turn-log bootstrap connection.
 Every other table is still created and altered by the runtime bootstrap (`ensure_*`
 and `create_all` units guarded by `utils/schema.SchemaBootstrapGuard`).
 
@@ -43,7 +40,7 @@ What this slice does NOT provide:
 - **Parity.** `target_metadata` is None, so autogenerate is off. The SQLModel
   metadata covers only part of the schema; diffing it would propose dropping real tables.
 - **Full reconstruction.** `alembic upgrade head` on an empty database creates only
-  the eight ops-family, five working-memory, four gate, one Playground and one utility-usage table;
+  the eight ops-family, five working-memory, four gate and one Playground table;
   every other table still needs the runtime bootstrap.
 - **Drift detection.** That comes in a later slice, along with schema reconstruction
   and retiring runtime DDL.

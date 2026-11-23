@@ -1,18 +1,18 @@
 {
   "about": "Prompt defaults added by the prompt sync for keys with no Python definition.",
   "prompts": {
-    "agents.project_planning": {
-      "title": "Agent Project Planning Nudge",
-      "category": "agent_execution",
-      "format": "plain_text",
-      "required_vars": [
-        "project_name",
-        "task_lines",
-        "outcome_spec_clause",
-        "project_context",
-        "taskUrl"
-      ]
-    },
+  "agents.project_planning": {
+   "title": "Agent Project Planning Nudge",
+   "category": "agent_execution",
+   "format": "plain_text",
+   "required_vars": [
+    "project_name",
+    "task_lines",
+    "outcome_spec_clause",
+    "project_context",
+    "taskUrl"
+   ]
+  },
     "repos.workspace.commit_aggregate": {
       "title": "Repos workspace: commit aggregate",
       "category": "repos",
@@ -110,30 +110,6 @@
     },
     "role.reviewer": {
       "title": "role.reviewer",
-      "category": "bot_tag",
-      "format": "plain_text",
-      "required_vars": []
-    },
-    "role.setup_arbiter": {
-      "title": "Setup role: Arbiter",
-      "category": "bot_tag",
-      "format": "plain_text",
-      "required_vars": []
-    },
-    "role.setup_coder": {
-      "title": "Setup role: Coder",
-      "category": "bot_tag",
-      "format": "plain_text",
-      "required_vars": []
-    },
-    "role.setup_coordinator": {
-      "title": "Setup role: Coordinator",
-      "category": "bot_tag",
-      "format": "plain_text",
-      "required_vars": []
-    },
-    "role.setup_reviewer": {
-      "title": "Setup role: Reviewer",
       "category": "bot_tag",
       "format": "plain_text",
       "required_vars": []

@@ -95,7 +95,6 @@ class BotCreateTransaction:
         validate_writes: Callable[[Any, list[tuple[str, str, str, object]]], None],
         *,
         on_create: Callable[[Any, BotProfile], None] | None = None,
-        before_create: Callable[[Any], None] | None = None,
     ) -> BotProfile:
         with Session(self.store.engine, expire_on_commit=False) as session:
             conn = session.connection()
@@ -103,10 +102,7 @@ class BotCreateTransaction:
             storage_id = sanitize_table_name(slug)
             lock_bot_storage(conn, storage_id)
             self._refuse_retained_identity(conn, slug, storage_id)
-            profile = self.store.upsert(
-                payload, guard=guard, session=session, create_only=True,
-                **({"before_create": before_create} if before_create is not None else {}),
-            )
+            profile = self.store.upsert(payload, guard=guard, session=session, create_only=True)
             slug = profile.slug
             if conn.dialect.name == "postgresql":
                 conn.execute(text("LOCK TABLE runtime_settings IN SHARE ROW EXCLUSIVE MODE"))
