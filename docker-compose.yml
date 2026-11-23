@@ -42,6 +42,14 @@ services:
       # bytecode here creates root-owned __pycache__ directories that block host
       # tooling. Keep generated caches out of the repository.
       - PYTHONDONTWRITEBYTECODE=1
+      # TASK-2426: each entry resolves to NAME=value when set (even empty),
+      # or repeats the fixed bytecode setting above when unset. Compose merges
+      # the repeats, leaving the resolved model and hash unchanged. A bare
+      # name here would render null and be refused by the app reconciler.
+      - ${LLM_BAWT_MCP_OAUTH_RESOURCE+LLM_BAWT_MCP_OAUTH_RESOURCE=}${LLM_BAWT_MCP_OAUTH_RESOURCE-PYTHONDONTWRITEBYTECODE=1}
+      - ${LLM_BAWT_MCP_OAUTH_ISSUER+LLM_BAWT_MCP_OAUTH_ISSUER=}${LLM_BAWT_MCP_OAUTH_ISSUER-PYTHONDONTWRITEBYTECODE=1}
+      - ${LLM_BAWT_MCP_OAUTH_PRINCIPALS+LLM_BAWT_MCP_OAUTH_PRINCIPALS=}${LLM_BAWT_MCP_OAUTH_PRINCIPALS-PYTHONDONTWRITEBYTECODE=1}
+      - ${LLM_BAWT_MCP_OAUTH_INTROSPECT_URL+LLM_BAWT_MCP_OAUTH_INTROSPECT_URL=}${LLM_BAWT_MCP_OAUTH_INTROSPECT_URL-PYTHONDONTWRITEBYTECODE=1}
       # TASK-1474: never READ bytecode from the checkout either. A __pycache__
       # .pyc beside the source would run instead of it; with a prefix Python
       # looks only here (container-local, outside every mount). The config

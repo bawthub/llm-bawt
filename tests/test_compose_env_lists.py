@@ -16,7 +16,10 @@ names. The compose files instead pass each service the names it reads.
 
 from __future__ import annotations
 
+import json
+import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -120,6 +123,73 @@ def test_no_service_loads_dotenv_unless_exempt():
     )
     stale = sorted(EXEMPT.keys() - loads)
     assert not stale, f"These no longer load .env; delete their EXEMPT entries: {stale}"
+
+
+_OAUTH_NAMES = (
+    "LLM_BAWT_MCP_OAUTH_RESOURCE",
+    "LLM_BAWT_MCP_OAUTH_ISSUER",
+    "LLM_BAWT_MCP_OAUTH_PRINCIPALS",
+    "LLM_BAWT_MCP_OAUTH_INTROSPECT_URL",
+)
+_FALLBACK = "PYTHONDONTWRITEBYTECODE=1"
+
+
+def _oauth_entries(service):
+    return [str(entry) for entry in service.get("environment", []) if "LLM_BAWT_MCP_OAUTH_" in str(entry)]
+
+
+def test_optional_oauth_compose_entries_are_app_only_and_repeat_a_fixed_assignment():
+    refs = {
+        (path.name, name): _oauth_entries(service)
+        for path in _compose_files()
+        for name, service in _services(path).items()
+        if _oauth_entries(service)
+    }
+    assert refs == {("docker-compose.yml", "app"): [
+        f"${{{name}+{name}=}}${{{name}-{_FALLBACK}}}" for name in _OAUTH_NAMES
+    ]}
+    assert _FALLBACK in _services(ROOT / "docker-compose.yml")["app"]["environment"]
+
+
+def test_compose_resolves_optional_oauth_names_without_nulls(tmp_path):
+    """Exercise the native Compose output consumed by the named app renderer."""
+    env = {"PATH": os.defpath + os.pathsep + os.environ.get("PATH", ""),
+           "HOME": str(tmp_path), "DOCKER_CONFIG": str(tmp_path),
+           "DOCKER_HOST": f"unix://{tmp_path}/no-daemon.sock"}
+    if cli := shutil.which("docker-compose"):
+        command = [cli]
+    elif cli := shutil.which("docker"):
+        command = [cli, "compose"]
+    else:
+        pytest.skip("Compose CLI unavailable")
+    if subprocess.run([*command, "version"], env=env, cwd=tmp_path,
+                      capture_output=True, timeout=10).returncode:
+        pytest.skip("Compose CLI unavailable")
+
+    app = {"image": "example.invalid/app:fixture", "environment": [_FALLBACK]}
+    conf = tmp_path / "compose.yaml"
+    settings = tmp_path / "fixture-settings.env"
+
+    def render(current, inputs, *flags):
+        conf.write_text(yaml.safe_dump({"services": {"app": current}}))
+        settings.write_text("".join(f"{k}={v}\n" for k, v in inputs.items()))
+        result = subprocess.run([*command, "--env-file", str(settings), "-p", "oauth-fixture",
+                                 "config", *flags, "app"], env=env, cwd=tmp_path,
+                                capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0 and not result.stderr, result.stderr
+        return result.stdout
+
+    before = render(app, {}, "--format", "json")
+    wired = {**app, "environment": [_FALLBACK, *_oauth_entries(_services(ROOT / "docker-compose.yml")["app"])]}
+    assert render(wired, {"UNRELATED": "fixture"}, "--format", "json") == before
+    assert render(wired, {}, "--hash") == render(app, {}, "--hash")
+    all_set = dict(zip(_OAUTH_NAMES, ("http://localhost:8001/mcp", "https://hub.example.test/api/auth",
+                                     "owner, ops", "http://frontend:3002"), strict=True))
+    for inputs in (all_set, {_OAUTH_NAMES[0]: ""}, {_OAUTH_NAMES[1]: all_set[_OAUTH_NAMES[1]]}):
+        actual = json.loads(render(wired, inputs | {"UNRELATED": "fixture"}, "--format", "json"))
+        assert actual["services"]["app"]["environment"] == {"PYTHONDONTWRITEBYTECODE": "1", **inputs}
+        actual["services"]["app"]["environment"] = {"PYTHONDONTWRITEBYTECODE": "1"}
+        assert actual == json.loads(before)
 
 
 def test_no_retired_name_reaches_a_container():
