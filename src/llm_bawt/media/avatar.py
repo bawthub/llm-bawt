@@ -8,10 +8,9 @@ when the avatar is assigned, and the result is stored inline on the
 - **emoji**  → the Twemoji SVG, fetched here once, as ``data:image/svg+xml``
 - **image**  → normalized + downscaled small WebP, as ``data:image/webp``
 
-Fetching the Twemoji SVG or a remote image is the *only* internet touch,
-and it happens at assignment time (pick-time), not on render. Any failure
-returns ``None`` so the caller stores NULL and the frontend falls back to
-the native emoji glyph — still zero external hosts at runtime.
+Callers that cannot wait for egress (including bot creation) opt out of
+remote lookups. A skipped or failed lookup returns ``None`` so the frontend
+can use the native emoji glyph, with no CDN dependency.
 """
 
 from __future__ import annotations
@@ -30,7 +29,7 @@ TWEMOJI_CDN = "https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/svg"
 AVATAR_MAX = (96, 96)
 AVATAR_WEBP_QUALITY = 82
 
-_FETCH_TIMEOUT = 8  # seconds — pick-time only, keep the save responsive
+_FETCH_TIMEOUT = 8  # socket timeout, not a whole-lookup deadline
 
 
 def _is_emoji(s: str) -> bool:
@@ -105,11 +104,11 @@ def _resolve_image(value: str) -> str | None:
     return f"data:image/webp;base64,{b64}"
 
 
-def resolve_avatar_render(avatar: str | None) -> str | None:
+def resolve_avatar_render(avatar: str | None, *, allow_remote: bool = True) -> str | None:
     """Resolve a raw avatar value to a self-contained ``data:`` URL, or None.
 
-    - Emoji → Twemoji SVG data URL.
-    - http(s) image URL or data: image → normalized small WebP data URL.
+    - Emoji → Twemoji SVG data URL if remote lookups are allowed.
+    - data: image (or http(s) image if allowed) → normalized small WebP data URL.
     - Plain text (initials) or unresolvable input → ``None`` (frontend draws
       the native glyph / letter / gradient).
     """
@@ -118,9 +117,9 @@ def resolve_avatar_render(avatar: str | None) -> str | None:
     a = avatar.strip()
     if not a:
         return None
-    if a.startswith("data:image/") or a.startswith("http"):
+    if a.startswith("data:image/") or (allow_remote and a.startswith("http")):
         return _resolve_image(a)
-    if _is_emoji(a):
+    if allow_remote and _is_emoji(a):
         return _resolve_emoji(a)
     # Same-origin relative path ("/...") is already self-hosted; leave it to
     # the frontend. Plain short text has no render asset.

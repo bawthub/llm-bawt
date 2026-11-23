@@ -255,7 +255,8 @@ def test_first_bot_happy_path_creates_agent_through_the_admin_writer():
     assert response.status_code == 200, response.text
     env.probe.assert_awaited_once_with(env.service.config)
     payload = env.persist.call_args.args[0]
-    assert env.persist.call_args.kwargs == {"create_only": True}
+    assert env.persist.call_args.kwargs["create_only"] is True
+    assert callable(env.persist.call_args.kwargs["on_create"])
     assert payload["slug"] == "helper"
     assert payload["endpoint_id"] == 7
     assert (payload["bot_type"], payload["agent_backend"]) == ("agent", "claude-code")
@@ -285,6 +286,7 @@ def test_setup_orientation_receives_only_bound_user_and_is_announced_after_creat
     with (
         _first_bot_env(persist=AsyncMock(side_effect=_persist)) as env,
         patch.object(setup_routes, "prepare_first_chat", return_value="Welcome"),
+        patch.object(setup_routes, "_write_first_bot_settings"),
         patch.object(setup_routes, "record_choice", return_value=record) as choice,
     ):
         env.service._inter_bot_dispatcher = dispatcher
@@ -296,6 +298,58 @@ def test_setup_orientation_receives_only_bound_user_and_is_announced_after_creat
         dispatcher.announce_admitted.assert_called_once_with(record)
     else:
         dispatcher.announce_admitted.assert_not_called()
+
+
+@pytest.mark.parametrize(("existing_default", "env_default", "expected"), [
+    (None, "", "helper"),
+    ('"chosen"', "", "chosen"),
+    ('"  "', "", "helper"),
+    (None, "configured", None),
+])
+def test_welcome_recovery_can_see_settings_as_soon_as_it_can_see_the_delivery(
+    tmp_path, existing_default, env_default, expected,
+):
+    from sqlalchemy import create_engine, text
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'setup.db'}")
+    with engine.begin() as conn:
+        conn.execute(text("""CREATE TABLE runtime_settings (
+            scope_type TEXT, scope_id TEXT, key TEXT, value_json TEXT, updated_at TIMESTAMP,
+            PRIMARY KEY (scope_type, scope_id, key)
+        )"""))
+        if existing_default is not None:
+            conn.execute(text("INSERT INTO runtime_settings VALUES ('global', '*', 'default_bot', :value, NULL)"),
+                         {"value": existing_default})
+    dispatcher = MagicMock()
+    record = SimpleNamespace(id="welcome")
+    observed = []
+
+    async def persist(payload, *, create_only, on_create):
+        assert create_only
+        with engine.begin() as conn:
+            on_create(conn, SimpleNamespace(slug=payload["slug"]))
+        # A recovery sweep can already claim the delivery at this point; it
+        # needn't wait for the route's explicit announcement.
+        dispatcher.announce_admitted.assert_not_called()
+        with engine.connect() as conn:
+            rows = conn.execute(text("SELECT key, value_json FROM runtime_settings"))
+            observed.append({key: value for key, value in rows})
+        return {"slug": payload["slug"]}
+
+    with (
+        _first_bot_env(persist=AsyncMock(side_effect=persist)) as env,
+        patch.object(setup_routes, "prepare_first_chat", return_value="Welcome"),
+        patch.object(setup_routes, "record_choice", return_value=record),
+        patch.object(setup_routes, "get_runtime_settings_store", return_value=MagicMock()),
+    ):
+        env.service.config.DEFAULT_BOT = env_default
+        env.service._inter_bot_dispatcher = dispatcher
+        response = _client().post("/v1/setup/first-bot?user_id=setup-owner",
+                                  json={**_FIRST_BOT, "guide_me": True, "voice_enabled": False})
+    assert response.status_code == 200, response.text
+    assert observed == [{"tenant.voice_enabled": "false", **({"default_bot": f'"{expected}"'} if expected else {})}]
+    dispatcher.announce_admitted.assert_called_once_with(record)
+    engine.dispose()
 
 
 def test_orientation_requires_bound_person_before_persisting():
@@ -340,7 +394,7 @@ def test_admin_writer_settles_first_bot_harness_on_every_route(access_path_key):
     service.config.ensure_model_catalog.return_value = _catalog(access_path_key, vendor=vendor, protocol=protocol)
     seen: dict = {}
 
-    async def _persist(payload, *, create_only):
+    async def _persist(payload, *, create_only, on_create):
         bot_profile_validation._validate_profile_payload(payload)
         seen.update(payload)
         return {"slug": payload["slug"]}
@@ -366,7 +420,7 @@ def test_admin_writer_refusals_reach_the_wizard_as_422(catalog, detail):
     service = _service()
     service.config.ensure_model_catalog.return_value = catalog
 
-    async def _persist(payload, *, create_only):
+    async def _persist(payload, *, create_only, on_create):
         bot_profile_validation._validate_profile_payload(payload)
         raise AssertionError("validation should have refused")
 
@@ -422,19 +476,17 @@ def test_first_bot_passes_through_duplicate_slug_conflict():
     assert response.json()["detail"] == "Bot 'helper' already exists"
 
 
-def test_first_bot_persists_preferences_after_bot_create():
-    order: list[str] = []
-    store = MagicMock()
-    store.engine = MagicMock()
-    store.set_value.side_effect = lambda *a: order.append("pref")
+def test_first_bot_persists_preferences_without_legacy_client_choosing_orientation():
+    conn = object()
 
-    async def _persist(payload, *, create_only):
-        order.append("bot")
+    async def _persist(payload, *, create_only, on_create):
+        on_create(conn, SimpleNamespace(slug=payload["slug"]))
         return {"slug": payload["slug"]}
 
     with (
-        _first_bot_env(persist=AsyncMock(side_effect=_persist)),
-        patch.object(setup_routes, "get_runtime_settings_store", return_value=store),
+        _first_bot_env(persist=AsyncMock(side_effect=_persist)) as env,
+        patch.object(setup_routes, "_write_first_bot_settings") as write,
+        patch.object(setup_routes, "record_choice") as choice,
     ):
         response = _client().post(
             "/v1/setup/first-bot",
@@ -442,21 +494,21 @@ def test_first_bot_persists_preferences_after_bot_create():
         )
 
     assert response.status_code == 200
-    assert response.json()["preferences"] == {"tenant.exposure": "private", "tenant.voice_enabled": True}
-    assert order == ["bot", "pref", "pref"]
+    preferences = {"tenant.exposure": "private", "tenant.voice_enabled": True}
+    assert response.json()["preferences"] == preferences
+    write.assert_called_once_with(conn, env.service.config, "helper", preferences)
+    choice.assert_not_called()
 
 
 def test_failed_bot_create_stores_no_preferences():
-    store = MagicMock()
-    store.engine = MagicMock()
     persist = AsyncMock(side_effect=HTTPException(status_code=422, detail="nope"))
     with (
         _first_bot_env(persist=persist),
-        patch.object(setup_routes, "get_runtime_settings_store", return_value=store),
+        patch.object(setup_routes, "_write_first_bot_settings") as write,
     ):
         response = _client().post("/v1/setup/first-bot", json={**_FIRST_BOT, "exposure": "private"})
     assert response.status_code == 422
-    store.set_value.assert_not_called()
+    write.assert_not_called()
 
 
 def test_first_bot_audit_names_the_proxy_bound_user():
@@ -473,31 +525,14 @@ def test_first_bot_audit_names_the_proxy_bound_user():
 # TASK-2404: the first bot becomes the default; a partial setup recovers on retry.
 
 
-def _default_store(order: list[str] | None = None) -> MagicMock:
-    store = MagicMock()
-    store.engine = MagicMock()
-    if order is not None:
-        store.set_value.side_effect = lambda *a: order.append(a[2])
-    return store
+def _default_store() -> MagicMock:
+    return MagicMock()
 
 
 def _profiles(existing: bool) -> MagicMock:
     profiles = MagicMock()
     profiles.get.return_value = object() if existing else None
     return profiles
-
-
-def test_first_bot_records_default_when_none_configured():
-    store = _default_store()
-    with (
-        _first_bot_env(),
-        patch.object(setup_routes, "get_bot_profile_store", return_value=_profiles(True)),
-        patch.object(setup_routes, "get_runtime_settings_store", return_value=store),
-        patch.object(setup_routes, "optional_default_bot_id", return_value=None),
-    ):
-        response = _client().post("/v1/setup/first-bot", json=_FIRST_BOT)
-    assert response.status_code == 200, response.text
-    store.set_value.assert_called_once_with("global", "*", "default_bot", "helper")
 
 
 def test_retry_after_partial_setup_records_default_then_keeps_409():

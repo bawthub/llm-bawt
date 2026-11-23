@@ -21,6 +21,7 @@ from llm_bawt.runtime_settings import BotProfileStore, RuntimeSettingsStore
 from llm_bawt.service.core import ServiceLLMBawt
 from llm_bawt.service.inter_bot_claims import validate_inter_bot_claim
 from llm_bawt.service.prompt_stale import STALE_KEY
+from llm_bawt.service.routes.setup import _write_first_bot_settings
 from llm_bawt.service.schemas import ChatCompletionRequest
 from llm_bawt.service.setup_orientation import ORIENTATION_PROMPT_KEY, SETTING_KEY, record_choice
 from llm_bawt.service.system_prompt_pin import COMPACTION, SystemPromptPinStore, apply_session_pin
@@ -54,6 +55,7 @@ def test_two_setup_submissions_commit_only_one_first_chat(private_app_pg):
 
     def create(slug, *, opted_in=True, fail=False, race=False):
         def on_create(conn, profile):
+            _write_first_bot_settings(conn, private_app_pg, profile.slug, {"tenant.voice_enabled": False})
             record_choice(conn, profile, opted_in=opted_in, user_id=f"user-{slug}",
                           prompt="Welcome", store=deliveries)
             if fail:
@@ -70,7 +72,8 @@ def test_two_setup_submissions_commit_only_one_first_chat(private_app_pg):
         create("rollback", fail=True)
     assert profiles.get("rollback") is None
     assert not deliveries.list()
-    assert settings.get_scope_settings("global", "*").get(SETTING_KEY) is None
+    globals_after_rollback = settings.get_scope_settings("global", "*")
+    assert not {SETTING_KEY, "default_bot", "tenant.voice_enabled"} & globals_after_rollback.keys()
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         first = pool.submit(create, "introduction-a", race=True)
@@ -83,7 +86,10 @@ def test_two_setup_submissions_commit_only_one_first_chat(private_app_pg):
     with pytest.raises(HTTPException, match="409"):
         create(target)
     assert [d.id for d in deliveries.list()] == [row.id]
-    state = settings.get_scope_settings("global", "*")[SETTING_KEY]
+    global_settings = settings.get_scope_settings("global", "*")
+    assert global_settings["default_bot"] == target
+    assert global_settings["tenant.voice_enabled"] is False
+    state = global_settings[SETTING_KEY]
     assert state == {"bot_id": target, "opted_in": True, "milestone": "first_chat", "delivery_id": row.id}
     assert delivery_audience(row, default_user="unrelated").user_id == f"user-{target}"
     assert "orientation-model, connection anthropic-api" in row.message

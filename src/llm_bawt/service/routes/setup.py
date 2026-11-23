@@ -24,12 +24,14 @@ Chat bots stay creatable from Settings; the wizard creates agents only.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, field_validator
+from sqlalchemy import text
 
 from ...prompt_registry import get_prompt_resolver
 from ...seeding import FIRST_BOT_AGENT_BACKEND, seed_tenant
@@ -89,7 +91,7 @@ class FirstBotRequest(TenantPreferences):
     guide_me: bool | None = None  # Omitted by older clients; never infer consent server-side.
 
 
-def _store_setup_preferences(service, body: TenantPreferences | None) -> dict[str, object]:
+def _setup_preferences(body: TenantPreferences | None) -> dict[str, object]:
     if body is None:
         return {}
     values = {
@@ -97,7 +99,11 @@ def _store_setup_preferences(service, body: TenantPreferences | None) -> dict[st
         "tenant.domains": body.domains,
         "tenant.voice_enabled": body.voice_enabled,
     }
-    selected = {key: value for key, value in values.items() if value is not None}
+    return {key: value for key, value in values.items() if value is not None}
+
+
+def _store_setup_preferences(service, body: TenantPreferences | None) -> dict[str, object]:
+    selected = _setup_preferences(body)
     if not selected:
         return {}
     store = get_runtime_settings_store(service.config)
@@ -108,8 +114,31 @@ def _store_setup_preferences(service, body: TenantPreferences | None) -> dict[st
     return selected
 
 
+def _write_first_bot_settings(conn, config, slug: str, preferences: dict[str, object]) -> None:
+    """Stage the default and preferences under the create's settings-table lock."""
+    settings = dict(preferences)
+    if not (config.DEFAULT_BOT or "").strip():
+        encoded = conn.execute(text("""
+            SELECT value_json FROM runtime_settings
+            WHERE scope_type='global' AND scope_id='*' AND key='default_bot'
+        """)).scalar_one_or_none()
+        try:
+            current = json.loads(encoded) if encoded is not None else None
+        except ValueError:
+            current = None  # An unreadable setting is not a configured default.
+        if not str(current or "").strip():
+            settings["default_bot"] = slug
+    if settings:
+        conn.execute(text("""
+            INSERT INTO runtime_settings (scope_type, scope_id, key, value_json, updated_at)
+            VALUES ('global', '*', :key, :value, CURRENT_TIMESTAMP)
+            ON CONFLICT (scope_type, scope_id, key) DO UPDATE
+            SET value_json=excluded.value_json, updated_at=excluded.updated_at
+        """), [{"key": key, "value": json.dumps(value)} for key, value in settings.items()])
+
+
 def _record_first_default_bot(service, slug: str) -> None:
-    """Make the first bot the default when none is configured yet (TASK-2404)."""
+    """Recover the default for a profile saved by an earlier partial Setup."""
     if optional_default_bot_id(service.config):
         return
     slug = slug.strip().lower()
@@ -185,7 +214,7 @@ async def create_first_bot(body: FirstBotRequest, http_request: Request,
     Refuses with 503 unless the agent runtime answers a ping. Then the admin
     bot-profile writer validates and creates the bot: 409 if the slug exists,
     422 if the endpoint is unknown or can't run a ``claude-code`` agent.
-    Preferences are stored last.
+    Preferences and the default are committed with the profile and welcome.
     """
     service = get_service()
     try:
@@ -199,13 +228,17 @@ async def create_first_bot(body: FirstBotRequest, http_request: Request,
         dispatcher = getattr(service, "_inter_bot_dispatcher", None)
         prompt = await run_in_threadpool(prepare_first_chat, service.config) if body.guide_me else None
         delivery = None
+        preferences = _setup_preferences(body)
 
-        def save_choice(conn, profile):
+        def finish_create(conn, profile):
             nonlocal delivery
-            delivery = record_choice(
-                conn, profile, opted_in=bool(body.guide_me), user_id=audience,
-                prompt=prompt, store=dispatcher.store if dispatcher is not None else None,
-            )
+            # A recovery sweep can claim the row at commit, before announcement.
+            _write_first_bot_settings(conn, service.config, profile.slug, preferences)
+            if body.guide_me is not None:
+                delivery = record_choice(
+                    conn, profile, opted_in=body.guide_me, user_id=audience,
+                    prompt=prompt, store=dispatcher.store if dispatcher is not None else None,
+                )
 
         try:
             bot = await _persist_bot_profile({
@@ -229,7 +262,7 @@ async def create_first_bot(body: FirstBotRequest, http_request: Request,
                     **{key: value for key, value in (("color", body.color), ("avatar", body.avatar))
                        if value},
                     profile_changes.CHANGED_BY: actor,
-                }, create_only=True, **({"on_create": save_choice} if body.guide_me is not None else {}))
+                }, create_only=True, on_create=finish_create)
         except HTTPException as exc:
             # Retry after a partial setup (bot saved, default write failed):
             # the wizard resumes on this 409, so finish the default here first.
@@ -242,8 +275,6 @@ async def create_first_bot(body: FirstBotRequest, http_request: Request,
                 dispatcher.announce_admitted(delivery)
             except Exception:
                 log.exception("First chat announcement failed; dispatcher will recover the durable row")
-        await run_in_threadpool(_record_first_default_bot, service, body.slug)
-        preferences = await run_in_threadpool(_store_setup_preferences, service, body)
     except Exception as exc:  # noqa: BLE001 — mapped to HTTP below
         raise _http_error(exc, what="First bot setup") from exc
 

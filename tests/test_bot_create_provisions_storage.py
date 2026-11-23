@@ -59,6 +59,16 @@ def test_successful_create_provisions_the_new_bots_storage():
     assert provision.await_args.args[1] == "fresh"
 
 
+@pytest.mark.parametrize("avatar", ["🤖", "https://example.com/avatar.png"])
+def test_bot_create_preserves_avatar_without_fetching_it(avatar):
+    payload = {**PAYLOAD, "avatar": avatar}
+    with _env(), patch("llm_bawt.media.avatar.urllib.request.urlopen") as fetch:
+        assert asyncio.run(routes._persist_bot_profile(payload, create_only=True)) == "response"
+    fetch.assert_not_called()
+    assert payload["avatar"] == avatar
+    assert payload["avatar_render"] is None
+
+
 def test_profile_update_does_not_provision():
     with _env(previous=SimpleNamespace(slug="fresh", avatar=None)) as provision:
         asyncio.run(routes._persist_bot_profile(dict(PAYLOAD), create_only=False))

@@ -384,10 +384,9 @@ async def _persist_bot_profile(
     if requested_model is not None and payload.get("default_model") != requested_model:
         raise HTTPException(status_code=422, detail="default_model must match the chosen endpoint")
 
-    # Resolve the avatar to a self-hosted ``data:`` URL at write time so the
-    # chat UI never fetches an avatar from a CDN at runtime. Only recompute
-    # when the avatar actually changed (or was never rendered) — avoids a
-    # redundant network fetch on every unrelated profile edit.
+    # Derive a self-hosted render when the avatar changed or has no render.
+    # A create (including first-run setup) must work without avatar egress:
+    # keep the raw value for native emoji / same-origin fallback.
     if "avatar" in payload:
         import asyncio
 
@@ -403,6 +402,7 @@ async def _persist_bot_profile(
             payload["avatar_render"] = await asyncio.to_thread(
                 resolve_avatar_render,
                 new_avatar if isinstance(new_avatar, str) else None,
+                allow_remote=not create_only,
             )
 
     # Provider health is probed here, before the save's transaction, so no
@@ -452,11 +452,13 @@ async def _persist_bot_profile(
         if msg is not None:
             raise HTTPException(status_code=400, detail=msg)
         raise
-    if create_only:
-        await _provision_bot_storage(service, profile.slug)
+    # Setup may have committed a claimable welcome alongside the profile.
+    # Update process-local routing before yielding to the dispatcher.
     _reload_bot_registry()
     _reload_service_model_catalog(service)
     _invalidate_bot_instance_cache(service, profile.slug)
+    if create_only:
+        await _provision_bot_storage(service, profile.slug)
     _clear_session_model_overrides(service, bot_id=profile.slug)
     rotated_threads = _rotate_threads_on_runtime_switch(store.engine, previous, profile)
 
