@@ -1,0 +1,18 @@
+# TASK-2590: opt-in broker-only token export for a tools-off reader house.
+#
+# Not part of the default stack: the base app service stays byte-identical, so
+# ordinary app reconciles keep their existing classification. Enable by adding
+# this file to COMPOSE_FILE after docker-compose.yml. The app then also writes
+# only the broker token into the dedicated directory volume below (atomic
+# replace inside the directory, so readers mount the directory, never the file).
+# The app's same-image reconcile must classify the new mount and env name
+# before it is used with this file (see the operator plan).
+services:
+  app:
+    environment:
+      - BRIDGE_BROKER_TOKEN_READER_EXPORT_FILE=/run/llm-bawt-reader-broker-token/broker
+    volumes:
+      - reader-broker-token:/run/llm-bawt-reader-broker-token
+
+volumes:
+  reader-broker-token:

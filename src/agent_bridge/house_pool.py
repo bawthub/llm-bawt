@@ -290,13 +290,18 @@ def render_compose(config: object, base_compose: Path) -> dict:
             service["cgroup_parent"] = pool["cgroup_parent"]
         services[f"house-{house_id}"] = service
     output: dict = {"services": services}
+    if any(is_tools_off(h) for h in pool["houses"]):
+        # TASK-2590: the broker-only copy the app writes when
+        # docker-compose.reader-broker.yml is in the stack. Same project
+        # volume; declaring it here too keeps the reader overlay standalone.
+        output["volumes"] = {READER_BROKER_VOLUME: {}}
     if any(not is_tools_off(h) for h in pool["houses"]):
         output["networks"] = {
             "house-previews": {"external": True, "name": pool["preview_network"]},
         }
-        output["volumes"] = {
+        output.setdefault("volumes", {}).update({
             "house-service-token": {"external": True, "name": pool["service_token_volume"]},
-        }
+        })
     return output
 
 
