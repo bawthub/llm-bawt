@@ -117,6 +117,7 @@ def test_plan_prefers_vendor_skips_existing_and_blocks_without_endpoint():
     assert rows[1]["action"] == "skip"
     blocked = bp.plan(["extra/alpha"], known, [], set(), None)
     assert blocked[0]["action"] == "blocked"
+    assert "add one of its models in Setup" in blocked[0]["reason"]
     override = bp.plan(["extra/alpha"], known, usable, set(), None, {"extra/alpha": 99})
     assert override[0]["action"] == "blocked"
 

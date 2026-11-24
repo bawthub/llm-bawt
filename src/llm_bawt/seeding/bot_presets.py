@@ -402,7 +402,8 @@ def plan(selection: list[str], known: Mapping[str, BotPreset], usable: list[Endp
         elif choice is None:
             wants = ", ".join(preset.provider_preference) or "any provider"
             row.update(action="blocked",
-                       reason=f"No connected model can run this agent yet. Connect a provider ({wants}) first.")
+                       reason=("No model in your library can run this agent yet. Connect a provider "
+                               f"({wants}), then add one of its models in Setup."))
         else:
             row.update(action="create", endpoint_id=choice.endpoint_id, endpoint=choice.label)
             if preset.provider_preference and choice.vendor != preset.provider_preference[0]:
