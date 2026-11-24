@@ -35,6 +35,22 @@ def is_strict_request(service, bot_id: str | None) -> bool:
     return bool(slug) and (bot_id or "").strip().lower() == slug
 
 
+def effective_bot_id(service, bot_id: str | None) -> str | None:
+    """The bot a request will actually reach: its own ID, else the service default.
+
+    Reads only configuration (never the bot registry), so ingress guards can
+    refuse the strict bot even when it is reached as the default.
+    """
+    explicit = (bot_id or "").strip()
+    if explicit:
+        return explicit
+    override = getattr(service, "_default_bot_override", None)
+    if override:
+        return override
+    from ..utils.bot_identity import optional_default_bot_id
+    return optional_default_bot_id(getattr(service, "config", None))
+
+
 class StrictReaderLLMBawt(BoundAgentLLMBawt):
     """A request-owned instance built from one pre-read profile."""
 

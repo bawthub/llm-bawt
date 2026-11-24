@@ -73,13 +73,16 @@ def test_ordinary_options_keep_tools_and_mcp():
     assert "bawthub" in args[args.index("--mcp-config") + 1]
 
 
-def test_non_streaming_strict_request_refused_before_any_lookup():
+@pytest.mark.parametrize("bot_id", ["sample", None], ids=["explicit", "service-default"])
+def test_non_streaming_strict_request_refused_before_any_lookup(bot_id):
     from llm_bawt.service.routes import chat
 
-    req = SimpleNamespace(stream=False, bot_id="sample", user="operator", model="m",
+    req = SimpleNamespace(stream=False, bot_id=bot_id, user="operator", model="m",
                           messages=[], session_id=None)
     http = SimpleNamespace(headers={})
-    with _no_registry(), patch.object(chat, "get_service", return_value=_service()), \
+    service = _service()
+    service._default_bot_override = "sample"
+    with _no_registry(), patch.object(chat, "get_service", return_value=service), \
             patch.object(chat, "_internal_inter_bot_sender", return_value=None), \
             patch("llm_bawt.service.chat_response_adapter.completion_response",
                   side_effect=AssertionError("ordinary path")), \
@@ -165,3 +168,25 @@ def test_abort_backend_for_strict_bot_needs_no_registry_read():
 
     with _no_registry():
         assert _bot_backend(_service(), "sample") == "claude-code"
+
+
+@pytest.mark.parametrize("stream,stamped", [(True, True), (False, False), (None, False)])
+def test_ordinary_start_claim_requires_streamed_ordinary_row(stream, stamped):
+    from llm_bawt.message_authorship import AuthorReference
+    from llm_bawt.service.inter_bot_claims import validate_inter_bot_claim
+
+    ordinary = {} if stream is None else {"stream": stream}
+    record = SimpleNamespace(
+        metadata={"_request_identity_producer": "ordinary", "ordinary_chat": ordinary},
+        author=AuthorReference.user("operator"), target_bot_id="sample",
+    )
+    store = SimpleNamespace(validate_claim=lambda **_: True, get=lambda _id: record,
+                            payload=lambda _id: {})
+    service = SimpleNamespace(_inter_bot_dispatcher=SimpleNamespace(store=store),
+                              _default_bot="sample")
+    req = SimpleNamespace(inter_bot_delivery_id="d-1", inter_bot_claim_token="t", bot_id="sample",
+                          inter_bot_turn_id="turn", user_message_id="u",
+                          inter_bot_bridge_request_id="b", user="operator", session_id=None,
+                          stream=True, _ordinary_start_claim=None)
+    validate_inter_bot_claim(service, req)
+    assert (req._ordinary_start_claim == "d-1") is stamped

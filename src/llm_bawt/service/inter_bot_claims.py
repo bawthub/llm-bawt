@@ -65,6 +65,7 @@ def validate_inter_bot_claim(service: Any, request: Any):
         ordinary = metadata.get("ordinary_chat")
         if (
             producer == "ordinary" and isinstance(ordinary, dict)
+            and ordinary.get("stream") is True
             and "new_session_intent" not in metadata
             and not getattr(request, "_internal_inter_bot_delivery_ids", None)
             and not getattr(request, "session_id", None)
