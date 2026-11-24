@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -39,11 +40,13 @@ def _layer(mode="enforce", answers=None, clock=None):
     return McpOAuthLayer(gate, load_config(ENV), introspect=introspect, cache=cache), gate, calls
 
 
-def _call(layer, gate, *headers, path="/mcp", method="POST"):
+def _call(layer, gate, *headers, path="/mcp", method="POST", app_status=200):
     sent, reached = [], []
 
     async def app(scope, receive, send):
         reached.append(scope["state"]["api_principal"])
+        await send({"type": "http.response.start", "status": app_status, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
 
     async def send(msg):
         sent.append(msg)
@@ -53,7 +56,7 @@ def _call(layer, gate, *headers, path="/mcp", method="POST"):
              "headers": [(k.lower().encode(), v.encode()) for k, v in headers]}
     asyncio.run(layer(scope, None, send))
     if reached:
-        return 200, reached[0], {}
+        return sent[0]["status"], reached[0], {}
     hdrs = {k.decode(): v.decode() for k, v in sent[0]["headers"]}
     return sent[0]["status"], json.loads(sent[1]["body"]), hdrs
 
@@ -183,6 +186,40 @@ def test_verified_user_and_client_reach_tool_execution():
 def test_active_answer_without_a_client_is_invalid():
     layer, gate, _ = _layer(answers={"t": {**ACTIVE, "clientId": ""}})
     assert _call(layer, gate, _bearer("t"))[0] == 401
+
+
+def test_audit_records_each_accepted_oauth_request_and_escapes_client_id(caplog):
+    client = 'second\n"client'
+    layer, gate, calls = _layer(answers={
+        "fixture-bearer-one": ACTIVE,
+        "fixture-bearer-two": {**ACTIVE, "clientId": client},
+    })
+    with caplog.at_level("INFO"):
+        for bearer in ("fixture-bearer-one", "fixture-bearer-two", "fixture-bearer-one"):
+            assert _call(layer, gate, _bearer(bearer))[0] == 200
+    assert calls == ["fixture-bearer-one", "fixture-bearer-two"]
+    events = [r.getMessage() for r in caplog.records
+              if r.getMessage().startswith("mcp_oauth_request_accepted ")]
+    assert [json.loads(event.split(" ", 1)[1]) for event in events] == [
+        {"entity_id": "owner", "client_id": client_id, "status": 200}
+        for client_id in ("c1", client, "c1")
+    ]
+    assert all("\n" not in event and "fixture-bearer" not in event for event in events)
+
+
+def test_audit_excludes_denied_anonymous_and_service_requests(caplog, monkeypatch):
+    layer, gate, _ = _layer(answers={"valid": ACTIVE, "denied": {**ACTIVE, "entityId": "guest"}})
+    monkeypatch.setattr(gate, "_verify_key", lambda _: SimpleNamespace(ok=True, principal=mcp.APP_PRINCIPAL))
+    with caplog.at_level("INFO"):
+        assert _call(layer, gate)[0] == 401
+        assert _call(layer, gate, _bearer("inactive"))[0] == 401
+        assert _call(layer, gate, _bearer("denied"))[0] == 403
+        assert _call(layer, gate, _bearer("valid"), app_status=403)[0] == 403
+        assert _call(layer, gate, path="/.well-known/oauth-protected-resource", method="GET")[0] == 200
+        assert _call(layer, gate, ("x-llm-bawt-key", "fixture-service"))[:2] == (
+            200, Principal(mcp.APP_PRINCIPAL, "key"),
+        )
+    assert "mcp_oauth_request_accepted" not in caplog.text
 
 
 def test_oauth_identity_does_not_supply_ops_turn_authority(monkeypatch):

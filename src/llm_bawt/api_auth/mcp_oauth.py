@@ -242,12 +242,34 @@ class McpOAuthLayer:
             if not isinstance(entity, str) or entity not in self.config.principals:
                 return await self._json(send, 403, {"detail": "principal_not_allowed"})
             scope.setdefault("state", {})[PRE_AUTH_KEY] = Principal(entity, "user")
-            token = _oauth_caller.set(OAuthCaller(entity, client))
+            caller = OAuthCaller(entity, client)
+            token = _oauth_caller.set(caller)
             try:
-                return await self.gate(scope, receive, self._with_challenge(send))
+                send_response = self._with_challenge(send)
+                return await self.gate(scope, receive, self._with_oauth_audit(send_response, caller))
             finally:
                 _oauth_caller.reset(token)
         return await self.gate(scope, receive, self._with_challenge(send))
+
+    @staticmethod
+    def _with_oauth_audit(send, caller: OAuthCaller):
+        logged = False
+
+        async def wrapped(message):
+            nonlocal logged
+            await send(message)
+            if not logged and message.get("type") == "http.response.start":
+                logged = True
+                status = message["status"]
+                if 200 <= status < 300:
+                    # Only the verified IDs and bounded server response status.
+                    # JSON escaping keeps even unexpected IDs on one log line.
+                    logger.info("mcp_oauth_request_accepted %s", json.dumps({
+                        "entity_id": caller.entity_id, "client_id": caller.client_id,
+                        "status": status,
+                    }, ensure_ascii=True, separators=(",", ":")))
+
+        return wrapped
 
     def _with_challenge(self, send):
         async def wrapped(message):
