@@ -15,6 +15,7 @@ from sqlalchemy import text
 
 from .inter_bot_batch import plain
 from .steer_capabilities import INBOX_NEXT, NEXT, run_steer_caps
+from .strict_reader_stamp import is_strict_stamped
 
 INBOX = "_inbox"
 
@@ -66,6 +67,7 @@ def eligible(row, *, user_id: str, config) -> bool:
         and row.get("delivery_mode") is None
         and row.get("transport_accepted_at") is None
         and inbox_marker(row) is None
+        and not is_strict_stamped(row)  # TASK-2590: runs only as its own turn
         and payload.get("prefer_steer", True)
         and plain(row, user_id=user_id, config=config)
     )

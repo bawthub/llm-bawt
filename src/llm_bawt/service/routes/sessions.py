@@ -163,6 +163,10 @@ class AgentSessionKeyRequest(BaseModel):
         default=None,
         description="Model the SDK session was created with (drives resume-vs-reset)",
     )
+    strict_run: str | None = Field(
+        default=None,
+        description="TASK-2590: the strict run token from the command that produced this key",
+    )
 
 
 class CreateSessionResponse(BaseModel):
@@ -671,9 +675,10 @@ async def put_agent_session_key(
     from ..strict_reader_execution import SESSION_SELECTION_KEY, STRICT_BACKEND, confirm_session_key
 
     if key_name == agent_key_name(STRICT_BACKEND) and meta.get(SESSION_SELECTION_KEY) is not None:
-        # TASK-2590: a strict thread's marker confirms only a key written while
-        # the same strict selection runs; any other writeback clears it.
-        patch.update(confirm_session_key(get_service(), effective_bot, meta, session_key))
+        # TASK-2590: a strict thread's marker confirms only a key written back
+        # by its current strict run; any other writeback clears it.
+        patch.update(confirm_session_key(get_service(), effective_bot, meta, session_key,
+                                         (body.strict_run or "").strip() or None))
     ok = await storage.update_session_metadata(session_id, patch, bot_id=effective_bot)
     if not ok:
         raise HTTPException(status_code=500, detail="Metadata update failed")

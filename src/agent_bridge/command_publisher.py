@@ -77,6 +77,7 @@ class CommandPublisherMixin:
         inbox_next: bool = False,
         task_turn_capability: str | None = None,
         tools_disabled: bool = False,
+        strict_run: str | None = None,
         access_path: str | None = None,
         access_path_provider: str | None = None,
         skill_selection: Mapping | None = None,
@@ -194,6 +195,9 @@ class CommandPublisherMixin:
             fields["task_turn_capability"] = task_turn_capability
         if tools_disabled:
             fields["tools_disabled"] = "1"
+            if strict_run:
+                # TASK-2590: echoed on this run's SDK key writeback only.
+                fields["strict_run"] = strict_run
         if access_path is not None:
             fields["access_path"] = access_path
         if access_path_provider:

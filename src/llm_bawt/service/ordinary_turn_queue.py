@@ -159,7 +159,9 @@ class OrdinaryTurnQueue:
         voice_input = bool(getattr(request, "voice_input", False))
         # /new is an ordered reset, not a mid-run message, even when spoken.
         payload.update(bot_id=bot_id, user=user_id,
-                       prefer_steer=voice_input and not is_new_command(user_prompt))
+                       prefer_steer=(voice_input and not is_new_command(user_prompt)
+                                     # TASK-2590: a strict row never steers.
+                                     and not isinstance(getattr(request, "_strict_selection_stamp", None), dict)))
         # This server-owned field is intentionally excluded by Pydantic's public
         # model_dump, but an accepted deferred run must see the same context.
         context = getattr(request, "client_system_context", None)

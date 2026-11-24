@@ -73,6 +73,8 @@ class SendRequest:
     skill_selection: str | None = None
     # TASK-2590: strict-reader turn; the bridge runs it with no tools at all.
     tools_disabled: bool = False
+    # TASK-2590: the app's strict run token, echoed on this run's key writeback.
+    strict_run: str | None = None
     # TASK-1691: comma-separated refs whose bodies the system prompt carries.
     injected_skills: str | None = None
     # TASK-1692: "locked"/"asked" while the user is in the room; the git hook reads it.
@@ -303,6 +305,7 @@ class SendRequest:
             task_turn_capability=task_turn_capability,
             skill_selection=fields.get(SELECTION_FIELD),
             tools_disabled=(fields.get("tools_disabled") or "").strip() == "1",
+            strict_run=(fields.get("strict_run") or "").strip() or None,
             injected_skills=fields.get(INJECTED_FIELD),
             room_freeze=fields.get(ROOM_FREEZE_FIELD),
             access_path=(

@@ -150,6 +150,7 @@ class ClaudeSessionMixin:
 
     async def _set_thread_session(
         self, thread_session_id: str, bot_id: str, sdk_session_id: str, model: str,
+        strict_run: str | None = None,
     ) -> bool:
         """Persist an SDK session id onto its bawthub thread.
 
@@ -173,6 +174,8 @@ class ClaudeSessionMixin:
                         "backend": "claude-code",
                         "session_key": sdk_session_id,
                         "model": model,
+                        # TASK-2590: binds a strict run's key to that run.
+                        **({"strict_run": strict_run} if strict_run else {}),
                     },
                 )
                 resp.raise_for_status()
@@ -316,6 +319,7 @@ class ClaudeSessionMixin:
         injected: list | None = None,
         thread_session_id: str | None = None,
         framing: SeedFraming | None = None,
+        strict_run: str | None = None,
     ) -> dict | None:
         """Seed a brand-new SDK session for ``bot_id`` from app-injected history.
         Writes the synthetic transcript, persists the minted session id, and
@@ -359,7 +363,7 @@ class ClaudeSessionMixin:
             persisted = True
             if thread_session_id:
                 persisted = await self._set_thread_session(
-                    thread_session_id, bot_id, session_id, model,
+                    thread_session_id, bot_id, session_id, model, strict_run=strict_run,
                 ) is not False
         except Exception as e:
             logger.warning("Seed write/persist failed for %s: %s", bot_id, e)

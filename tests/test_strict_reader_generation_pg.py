@@ -84,12 +84,17 @@ def _active_session(rig):
             " AND status='active' AND ended_at IS NULL"), {"b": rig.bot, "u": rig.user}).one()
 
 
-def _bind_sdk(durable, rig, monkeypatch, session_id, sdk_id):
-    """The bridge's real SDK key writeback (PUT /v1/sessions/{id}/agent-session-key)."""
+def _bind_sdk(durable, rig, monkeypatch, session_id, sdk_id, strict_run=None):
+    """The bridge's real SDK key writeback (PUT /v1/sessions/{id}/agent-session-key).
+
+    ``strict_run`` is the token the producing command carried; an ordinary
+    run's writeback carries none.
+    """
     import asyncio
     from llm_bawt.service.routes import sessions as routes
     monkeypatch.setattr(routes, "get_service", lambda: durable.rt.service)
-    body = routes.AgentSessionKeyRequest(backend="claude-code", session_key=sdk_id)
+    body = routes.AgentSessionKeyRequest(backend="claude-code", session_key=sdk_id,
+                                         strict_run=strict_run)
     assert asyncio.run(routes.put_agent_session_key(session_id, body, bot_id=rig.bot))["stored"]
 
 
@@ -99,9 +104,10 @@ def _marker(rig):
 
 def test_persisted_resume_binding_follows_the_selection(durable, rig, monkeypatch):
     service = durable.rt.service
-    _turn(durable, rig)
+    first = _turn(durable, rig)
+    assert first.get("strict_run")
     session_id, _ = _active_session(rig)
-    _bind_sdk(durable, rig, monkeypatch, session_id, "sdk-fx-a")
+    _bind_sdk(durable, rig, monkeypatch, session_id, "sdk-fx-a", first["strict_run"])
     assert _marker(rig)["sdk_key"] == "sdk-fx-a"
 
     # Same selection: the confirmed SDK session resumes.
@@ -120,16 +126,55 @@ def test_persisted_resume_binding_follows_the_selection(durable, rig, monkeypatc
 
     # Until a strict turn under this selection binds a new key, the old one
     # never resumes; the newly confirmed key then does.
-    assert not _turn(durable, rig).get("thread_resume_id")
-    _bind_sdk(durable, rig, monkeypatch, session_id, "sdk-fx-b")
+    cold = _turn(durable, rig)
+    assert not cold.get("thread_resume_id")
+    _bind_sdk(durable, rig, monkeypatch, session_id, "sdk-fx-b", cold["strict_run"])
     assert _turn(durable, rig).get("thread_resume_id") == "sdk-fx-b"
+
+
+def test_late_ordinary_writeback_after_reenable_is_not_confirmed(durable, rig, monkeypatch):
+    service = durable.rt.service
+    first = _turn(durable, rig)
+    session_id, _ = _active_session(rig)
+    _bind_sdk(durable, rig, monkeypatch, session_id, "sdk-fx-strict", first["strict_run"])
+    # An ordinary run started while strict was off finishes after re-enable
+    # and writes its key back under the current marker: no run token.
+    slug = service.strict_reader_bot
+    service.strict_reader_bot = None
+    service.strict_reader_bot = slug
+    _bind_sdk(durable, rig, monkeypatch, session_id, "sdk-fx-late-ordinary")
+    assert _marker(rig) is None
+    assert not _turn(durable, rig).get("thread_resume_id")
+
+
+def test_old_selection_writeback_is_not_confirmed(durable, rig, monkeypatch):
+    service = durable.rt.service
+    old = _turn(durable, rig)  # cold strict run under the first selection
+    session_id, _ = _active_session(rig)
+    _add_second_generation()
+    _select_second(service)
+    current = _turn(durable, rig)
+    assert current["strict_run"] != old["strict_run"]
+    # The earlier run's writeback lands late, under the new marker.
+    _bind_sdk(durable, rig, monkeypatch, session_id, "sdk-fx-old", old["strict_run"])
+    assert _marker(rig) is None
+    assert not _turn(durable, rig).get("thread_resume_id")
+
+
+def test_matching_strict_run_writeback_is_confirmed(durable, rig, monkeypatch):
+    first = _turn(durable, rig)
+    session_id, _ = _active_session(rig)
+    _bind_sdk(durable, rig, monkeypatch, session_id, "sdk-fx-run", first["strict_run"])
+    recorded = _marker(rig)
+    assert recorded["sdk_key"] == "sdk-fx-run" and recorded["run"] == first["strict_run"]
+    assert _turn(durable, rig).get("thread_resume_id") == "sdk-fx-run"
 
 
 def test_ordinary_key_writeback_never_inherits_strict_provenance(durable, rig, monkeypatch):
     service = durable.rt.service
-    _turn(durable, rig)
+    first = _turn(durable, rig)
     session_id, _ = _active_session(rig)
-    _bind_sdk(durable, rig, monkeypatch, session_id, "sdk-fx-strict")
+    _bind_sdk(durable, rig, monkeypatch, session_id, "sdk-fx-strict", first["strict_run"])
     assert _turn(durable, rig).get("thread_resume_id") == "sdk-fx-strict"
 
     # Strict mode is disabled; an ordinary cold turn binds its own SDK key.
@@ -145,9 +190,9 @@ def test_ordinary_key_writeback_never_inherits_strict_provenance(durable, rig, m
 
 
 def test_ordinary_resume_strips_strict_provenance(durable, rig, monkeypatch):
-    _turn(durable, rig)
+    first = _turn(durable, rig)
     session_id, _ = _active_session(rig)
-    _bind_sdk(durable, rig, monkeypatch, session_id, "sdk-fx-strict")
+    _bind_sdk(durable, rig, monkeypatch, session_id, "sdk-fx-strict", first["strict_run"])
     strict.clear_session_selection(rig.engine, {"thread_session_id": session_id,
                                                 "thread_resume_id": "sdk-fx-strict"})
     assert _marker(rig) is None

@@ -236,6 +236,7 @@ class ClaudeSendMixin(
                         bot_slug, model, injected=inject_messages,
                         thread_session_id=thread_session_id,
                         framing=req.inject_seed_framing,
+                        strict_run=req.strict_run,
                     )
                     # A reset followed by a task promises the selected
                     # continuity. A failed retained seed must stop before the
@@ -652,7 +653,7 @@ class ClaudeSendMixin(
                                             await self._set_thread_session(
                                                 thread_session_id,
                                                 bot_slug or session_key,
-                                                sid, model,
+                                                sid, model, strict_run=req.strict_run,
                                             )
                                         seed_unpersisted = False
                                     session_persisted = True
@@ -1042,6 +1043,7 @@ class ClaudeSendMixin(
                                     bot_slug, model, injected=inject_messages,
                                     thread_session_id=thread_session_id,
                                     framing=req.inject_seed_framing,
+                                    strict_run=req.strict_run,
                                 )
                                 if reseed and reseed.get("seeded"):
                                     resume_id = reseed["session_id"]

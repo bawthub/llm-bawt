@@ -122,10 +122,19 @@ def bind_session_selection(engine, binding: dict | None, fingerprint: dict) -> d
     (``confirm_session_key``). Any other key, a missing marker or another
     selection drops the resume id (a cold start re-pins the current render)
     and resets the marker with no confirmed key.
+
+    Every strict turn also mints a fresh run token, records it in the marker
+    and carries it on its bridge command (``binding["strict_run"]``). Only a
+    writeback presenting the current token is confirmed, so a late PUT from
+    an ordinary run, an earlier strict run or another selection never
+    inherits strict provenance.
     """
+    import uuid
+
     from sqlalchemy import text
 
     binding = dict(binding or {})
+    binding.pop("strict_run", None)
     session_id = str(binding.get("thread_session_id") or "").strip()
     if not session_id:
         return binding
@@ -133,40 +142,48 @@ def bind_session_selection(engine, binding: dict | None, fingerprint: dict) -> d
     if engine is None:
         binding["thread_resume_id"] = None  # nothing proves the session's selection
         return binding
+    run = uuid.uuid4().hex
     with engine.begin() as conn:
         metadata = conn.execute(
             text("SELECT session_metadata FROM sessions WHERE id=:sid FOR UPDATE"),
             {"sid": session_id},
         ).scalar_one_or_none()
         recorded = (metadata or {}).get(SESSION_SELECTION_KEY) if isinstance(metadata, dict) else None
-        if (resume_id and isinstance(recorded, dict) and recorded.get("selection") == fingerprint
-                and recorded.get("sdk_key") == resume_id):
-            return binding
-        value = {"selection": fingerprint, "sdk_key": None}
+        resumes = bool(resume_id and isinstance(recorded, dict) and recorded.get("selection") == fingerprint
+                       and recorded.get("sdk_key") == resume_id)
+        value = {"selection": fingerprint, "sdk_key": resume_id if resumes else None, "run": run}
         conn.execute(
             text("UPDATE sessions SET session_metadata = COALESCE(session_metadata, '{}'::jsonb)"
                  " || jsonb_build_object(CAST(:key AS text), CAST(:value AS jsonb)) WHERE id=:sid"),
             {"key": SESSION_SELECTION_KEY, "value": json.dumps(value), "sid": session_id},
         )
-    binding["thread_resume_id"] = None
+    if not resumes:
+        binding["thread_resume_id"] = None
+    binding["strict_run"] = run
     return binding
 
 
-def confirm_session_key(service, bot_id: str | None, metadata: dict | None, session_key: str) -> dict:
+def confirm_session_key(service, bot_id: str | None, metadata: dict | None, session_key: str,
+                        strict_run: str | None = None) -> dict:
     """The marker patch for an SDK key written back onto a thread.
 
-    Only while the thread's bot is the strict reader under the marker's exact
-    selection does the new key become the confirmed strict key; the strict
-    bot's turns all run strict, so the bridge's cold-start writeback is that
-    turn's key. Any other writeback (strict disabled, retargeted or another
-    selection) clears the marker so the key never inherits strict provenance.
-    Returns ``{}`` when the thread has no marker.
+    The new key becomes the confirmed strict key only when the writeback
+    carries the marker's current run token (minted by the strict turn that
+    produced it) while the thread's bot is still the strict reader under the
+    marker's exact selection. Any other writeback (an ordinary or earlier run,
+    strict disabled, retargeted or another selection) clears the marker so the
+    key never inherits strict provenance. Returns ``{}`` when the thread has
+    no marker.
     """
     recorded = (metadata or {}).get(SESSION_SELECTION_KEY) if isinstance(metadata, dict) else None
     if not isinstance(recorded, dict):
         return {}
-    if is_strict_request(service, bot_id) and recorded.get("selection") == strict_selection_fingerprint(service):
-        return {SESSION_SELECTION_KEY: {"selection": recorded["selection"], "sdk_key": session_key}}
+    run = recorded.get("run")
+    if (isinstance(run, str) and run and strict_run == run
+            and is_strict_request(service, bot_id)
+            and recorded.get("selection") == strict_selection_fingerprint(service)):
+        return {SESSION_SELECTION_KEY: {"selection": recorded["selection"], "sdk_key": session_key,
+                                        "run": run}}
     return {SESSION_SELECTION_KEY: None}
 
 

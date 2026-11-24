@@ -17,6 +17,7 @@ from .inter_bot_steer_only import (
 )
 from .maintenance_delivery import MaintenanceBarrier
 from .steer_capabilities import NEXT, NOW, run_steer_caps
+from .strict_reader_stamp import is_strict_stamped
 
 QUEUED = "QUEUED"
 STEERING = "STEERING"
@@ -134,6 +135,7 @@ class DeliveryClaim:
                 policy = SessionPolicy(head.get("session_policy") or SessionPolicy.CONTINUE.value)
                 prefer_steer = bool(payload.get("prefer_steer", True))
                 steer_only = is_steer_only(payload)
+                strict_stamped = is_strict_stamped(head)
                 from .service.turn_admission import classify_target, write_reservation
                 # Same classified view save_turn admits against (TASK-1082). Only an
                 # unambiguous executing row is a steer target; a fenced reservation
@@ -177,6 +179,11 @@ class DeliveryClaim:
                 # any other run is never silently `next`-steered: the row waits
                 # for that turn to end, then starts past the hold.
                 prefer_steer = prefer_steer or (bool(forced) and NOW in run_caps)
+                if strict_stamped:
+                    # TASK-2590: a strict-stamped row runs only as its own turn,
+                    # where drain validates the stamp; it never steers into
+                    # (or interrupts) another run in any lane.
+                    prefer_steer = can_steer = False
                 if steer_only and not can_steer:
                     # TASK-1431: nothing here can be steered, so the row is not
                     # needed; it never waits for or starts a turn.
