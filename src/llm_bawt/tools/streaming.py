@@ -118,7 +118,8 @@ def stream_with_tools(
     tool_call_details: list[dict] | None = None,
     trigger_message_id: str | None = None,
     turn_id: str | None = None,
-) -> Iterator[str]:
+    emit_tool_events: bool = False,
+) -> Iterator[str | dict]:
     """Stream LLM response with tool calling support.
 
     Uses format handlers with stop sequences to reliably detect tool calls.
@@ -146,6 +147,9 @@ def stream_with_tools(
         history_manager: History manager for recall operations.
         tool_call_details: Optional mutable list to collect per-call tool details
             for downstream logging/persistence.
+        emit_tool_events: Yield agent-contract ``tool_call``/``tool_result``
+            items for the service's ToolEventInterceptor, which then records
+            the details; ``tool_call_details`` is left to it.
 
     Yields:
         Text chunks from the LLM response (cleaned by adapter and handler).
@@ -273,11 +277,22 @@ def stream_with_tools(
         log.info(f"🔧 Calling tool: {tc.name} with args: {tc.arguments}")
 
         from .parser import ToolCall, tool_result_is_error
-        tool_call =ToolCall(name=tc.name, arguments=tc.arguments, raw_text=tc.raw_text or "")
+        tool_call = ToolCall(name=tc.name, arguments=tc.arguments, raw_text=tc.raw_text or "")
+        arguments = tc.arguments if isinstance(tc.arguments, dict) else {"raw": tc.arguments}
+        call_id = getattr(tc, "tool_call_id", None) or f"react_{iteration}"
+        if emit_tool_events:
+            yield {"event": "tool_call", "name": tc.name, "arguments": arguments,
+                   "tool_use_id": call_id, "trigger_message_id": trigger_message_id}
         tool_result = executor.execute(tool_call)
         has_executed_tools = True  # Mark that we've executed tools
         log.debug(f"Tool result: {len(tool_result)} chars")
-        if tool_call_details is not None:
+        if emit_tool_events:
+            from .parser import strip_tool_result_tags
+            yield {"event": "tool_result", "name": tc.name, "arguments": arguments,
+                   "result": strip_tool_result_tags(tool_result),
+                   "is_error": tool_result_is_error(tool_result),
+                   "tool_use_id": call_id, "trigger_message_id": trigger_message_id}
+        elif tool_call_details is not None:
             tool_call_details.append(
                 {
                     "tool": tc.name,

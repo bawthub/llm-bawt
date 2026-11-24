@@ -394,6 +394,7 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                         adapter=adapter,
                         history_manager=llm_bawt.history_manager,
                         tool_call_details=tool_call_details_holder,
+                        emit_tool_events=True,
                         trigger_message_id=trigger_message_id,
                         turn_id=turn_log_id,
                     )
