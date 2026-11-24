@@ -7,6 +7,7 @@ import pytest
 from llm_bawt.prompt_synced_defaults import write_manifest
 from llm_bawt.seeding import product_sync as sync
 from llm_bawt.seeding.setup_role_dependencies import portable_role_prompt_keys
+from llm_bawt.seeding.setup_live_source import LiveSetupSource
 from llm_bawt.seeding.setup_seed_sync import SetupSeedSnapshot
 
 
@@ -107,33 +108,48 @@ def test_only_matching_portable_artifacts_count(paths, monkeypatch):
     assert (stage / sync.CATALOG_FILE).is_file()
 
 
-def test_main_requires_reviewed_terms_and_reports_exit(paths, monkeypatch, capsys):
+def live(prompt_key="role.review", **extra):
+    bots = [{"slug": "example", "name": "Example", "description": "Reviews work.", "system_prompt": "Be helpful.",
+             "avatar": None, "color": None, "roles": ["review"]}]
+    if extra:
+        bots.append({"slug": "other", "name": "Other", "description": None, "system_prompt": "Be kind.",
+                     "avatar": None, "color": None, "roles": [], **extra})
+    return LiveSetupSource(bots, {"review": {"slug": "review", "name": "Review", "description": "Reviews.",
+                                             "color": None, "prompt_key": prompt_key}})
+
+
+def test_main_reads_live_lineup_and_reports_held_bots(paths, monkeypatch, capsys):
     _, stage = paths
     monkeypatch.setattr(sync, "SYNCED_DIR", paths[0])
     monkeypatch.delenv("PROMPT_SYNC_INSTALL_TERMS", raising=False)
-    monkeypatch.setattr(sync, "_read_configured_source", lambda keys, **_: roster(keys))
-    argv = ["--stage", str(stage), "--setup-catalog"]
-    with pytest.raises(SystemExit) as exc:
-        sync.main(argv)
-    assert exc.value.code == 2
-    assert "PROMPT_SYNC_INSTALL_TERMS" in capsys.readouterr().err
-    monkeypatch.setenv("PROMPT_SYNC_INSTALL_TERMS", "ExampleInternalTopic")
+    reads = []
+    source = live()
+    monkeypatch.setattr(sync, "read_live_setup_source_pgq", lambda **kw: reads.append(kw) or source)
+    argv = ["--stage", str(stage), "--setup-catalog", "--pgq"]
     with pytest.raises(SystemExit) as exc:
         sync.main(argv)
     assert exc.value.code == 2
     assert "--excluded-bots" in capsys.readouterr().err
-    argv += ["--portable-input", "reviewed.json", "--portable-sha256", "a" * 64, "--excluded-bots", ""]
-    with pytest.raises(SystemExit) as exc:
-        sync.main(argv)
-    assert exc.value.code == 2
-    assert "--excluded-roles" in capsys.readouterr().err
-    argv += ["--excluded-roles", ""]
-    assert sync.main(argv) == 1  # missing role dependency
+    argv += ["--excluded-bots", "Fixture-Protected"]
+    assert sync.main(argv) == 1  # role prompt is not a shipped product default
     catalog = json.loads(capsys.readouterr().out)["catalog"]
     assert catalog["status"] == "held" and catalog["previous_catalog_reusable"] is False
-    monkeypatch.setattr(sync, "_read_configured_source", lambda keys, **_: roster(keys, None))
+    assert reads == [{"excluded": ["fixture-protected"]}]
+
+    source = live(None, system_prompt="Mail user@example.test for access.")
+    assert sync.main(argv) == 1  # staged, but a held bot needs attention
+    output = capsys.readouterr().out
+    catalog = json.loads(output)["catalog"]
+    assert catalog["status"] == "staged" and catalog["bots"] == ["example"]
+    assert catalog["held_bots"] == {"other": ["system_prompt contains an email address"]}
+    assert "user@example.test" not in output
+    assert [p["slug"] for p in json.loads((stage / sync.CATALOG_FILE).read_bytes())["presets"]] == ["example"]
+
+    source = live(None, system_prompt="Be kind.")
+    assert sync.main(argv) == 0
+    catalog = json.loads(capsys.readouterr().out)["catalog"]
+    assert catalog == {"status": "staged", "file": sync.CATALOG_FILE, "bots": ["example", "other"]}
     stage.chmod(0o755)
     with pytest.raises(SystemExit) as unsafe:
         sync.main(argv)
     assert unsafe.value.code == 2
-    assert not list(stage.iterdir())

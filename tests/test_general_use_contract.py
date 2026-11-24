@@ -119,6 +119,18 @@ class ContractTests(unittest.TestCase):
         self.assertEqual({hit.rule for hit in hits if hit.path.endswith("reconcile.py")},
                          {"bot_slugs", "rfc1918"})
 
+    def test_operator_roster_skips_only_roster_rules_in_that_file(self):
+        line = "alice vexbot personal.invalid 10.1.2.3 /home/someone\n"
+        (roster,) = guard.OPERATOR_ROSTER_FILES
+        self.tracked(roster, line)
+        self.tracked("src/other.json", line)
+        hits, _, _ = guard.scan(self.repo, policy(
+            operator_identities=["alice"], personal_domains=["personal.invalid"], bot_slugs=["vexbot"]))
+        self.assertEqual({hit.rule for hit in hits if hit.path == roster},
+                         {"personal_domains", "rfc1918", "host_path"})
+        self.assertEqual({hit.rule for hit in hits if hit.path == "src/other.json"},
+                         {"operator_identities", "bot_slugs", "personal_domains", "rfc1918", "host_path"})
+
     def test_baseline_accepts_test_paths(self):
         hits = Counter({guard.Hit("tests/test_x.py", "operator_identities", "a" * 32): 1})
         entries = self.baseline(hits)

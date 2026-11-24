@@ -59,16 +59,17 @@ def test_builtin_pack_uses_generated_roster_and_preserves_legacy_refs(generated_
 def test_shipped_catalog_loads_against_shipped_role_prompts():
     stock = bp.load_generated_pack(bp.GENERATED_CATALOG)
     assert stock.pack == bp.GENERATED_PACK
-    assert len(stock.presets) == 12
+    # The roster is regenerated from the source lineup; check its shape, not its members.
+    assert stock.presets
     assert all(preset.ref == f"stock/{preset.slug}" for preset in stock.presets)
     assert not bp.recommended_refs([stock])
-    assert {role.slug: role.prompt_key for preset in stock.presets
-            for role in preset.role_dependencies} == {
-        "arbiter": "role.setup_arbiter",
-        "coder": "role.setup_coder",
-        "coordinator": "role.setup_coordinator",
-        "reviewer": "role.setup_reviewer",
-    }
+    from llm_bawt.prompt_synced_defaults import SYNCED_DIR
+    from llm_bawt.seeding.setup_role_dependencies import portable_role_prompt_keys
+
+    shipped = portable_role_prompt_keys(SYNCED_DIR)
+    for preset in stock.presets:
+        assert [role.slug for role in preset.role_dependencies] == list(preset.tags)
+        assert all(role.prompt_key in shipped for role in preset.role_dependencies if role.prompt_key)
 
 
 def test_packaged_catalog_rejects_missing_role_prompt(tmp_path, monkeypatch):

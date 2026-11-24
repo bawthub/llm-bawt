@@ -2,9 +2,7 @@
 
 import json
 import shutil
-from datetime import timezone
 from functools import partial
-from hashlib import sha256
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -12,11 +10,10 @@ import pytest
 from sqlalchemy import event, text
 from sqlmodel import Session
 
-from llm_bawt.seeding import bot_presets, setup_structure
+from llm_bawt.seeding import bot_presets, setup_live_source
 from llm_bawt.seeding.preset_source import read_preset_source
-from llm_bawt.seeding.setup_portable_input import PortableSetupInput
 from llm_bawt.seeding.setup_role_dependencies import SetupRole, SetupRoleConflict, install_missing_roles
-from llm_bawt.seeding.setup_seed_sync import approved_setup_snapshot, stage_catalog
+from llm_bawt.seeding.setup_seed_sync import live_setup_snapshot, stage_catalog
 from llm_bawt.utils import db
 from tests.private_postgres import PORT
 from tests.test_bot_tags_pg import legacy_profiles, rig  # noqa: F401
@@ -25,31 +22,34 @@ pytestmark = pytest.mark.integration
 
 
 @pytest.fixture
-def scoped_readers(rig, private_pg, monkeypatch):  # noqa: F811
-    app = partial(setup_structure.read_setup_structure, None)
+def live_readers(rig, private_pg, monkeypatch):  # noqa: F811
+    app = partial(setup_live_source.read_live_setup_source, None)
     # Gate images without a psql binary still exercise the same SQL in the app
     # path. Run the real psql transport parity check on hosts with the client.
     if (psql := shutil.which("psql")) is None:
         return (app,)
     command = (psql, "-h", str(private_pg), "-p", PORT, "-U", "test_user", "-d", rig.url.database)
-    monkeypatch.setattr(setup_structure, "_PGQ_COMMAND", (*command, *setup_structure._PGQ_COMMAND[2:]))
-    return app, setup_structure.read_setup_structure_pgq
+    monkeypatch.setattr(setup_live_source, "_PGQ_COMMAND", (*command, *setup_live_source._PGQ_COMMAND[2:]))
+    return app, setup_live_source.read_live_setup_source_pgq
 
 
-def test_source_filters_private_and_updates_after_privacy_change(rig, scoped_readers, monkeypatch, tmp_path):  # noqa: F811
+def test_live_lineup_filters_private_and_follows_edits(rig, live_readers, monkeypatch, tmp_path):  # noqa: F811
     legacy_profiles(rig, visible_bot=True, hidden_flag=False, hidden_tag=True, later_private=True, explicit=True)
     rig.store()
     with rig.engine.begin() as conn:
         conn.execute(text("""
             INSERT INTO bot_tag_catalog (slug, name, description, kind, prompt_key, capabilities)
-            VALUES ('fixture_role', 'Tenant role', 'Tenant-only notes.', 'role', 'role.unapproved',
-                    '["example_grant"]'::jsonb), ('hidden_role', 'Hidden role', '', 'role', NULL, '[]'::jsonb)
+            VALUES ('fixture_role', 'Fixture role', 'Reviews fixture changes.', 'role', 'role.fixture',
+                    '["example_grant"]'::jsonb), ('hidden_role', 'Hidden role', 'Private note', 'role', NULL, '[]'::jsonb)
         """))
         conn.execute(text("""
             INSERT INTO bot_profile_tags (bot_slug, tag_slug, assigned_by)
             VALUES ('hidden-tag', 'private', 'test'), ('visible-bot', 'fixture_role', 'test'),
+                   ('visible-bot', 'inactive', 'test'),
                    ('hidden-tag', 'hidden_role', 'test'), ('explicit', 'hidden_role', 'test')
         """))
+        conn.execute(text("UPDATE bot_profiles SET system_prompt='Review fixture work.', avatar='🧪', "
+                          "color='#123456', description='Fixture reviewer.' WHERE slug='visible-bot'"))
     source_queries = []
 
     def source_engine(*_a, **_kw):
@@ -62,146 +62,64 @@ def test_source_filters_private_and_updates_after_privacy_change(rig, scoped_rea
         assert conn.execute(text("SHOW transaction_read_only")).scalar_one() == "on"
         assert conn.execute(text("SHOW transaction_isolation")).scalar_one() == "repeatable read"
 
-    def structure():
-        scope = dict(excluded=("EXPLICIT",), allowed_roles=("fixture_role",), denied_roles=("hidden_role",))
-        app, *others = (reader(**scope) for reader in scoped_readers)
+    def read():
+        app, *others = (reader(excluded=("EXPLICIT",)) for reader in live_readers)
         assert all(app == result for result in others)
         return app
 
-    current = structure()
-    # Keep existing approval bindings valid. Verify the SQL bytes match the
-    # old Python encoding with real fixture types, including subsecond UTC.
-    def legacy_revision(kind, row):
-        def iso(value):
-            return (value.astimezone(timezone.utc) if value.tzinfo else value).isoformat()
-        return sha256(json.dumps([kind, row["slug"], row.get("id"), iso(row["created_at"]),
-                                  iso(row["updated_at"])]).encode()).hexdigest()
-
-    with rig.engine.connect() as conn:
-        profile = conn.execute(text("SELECT slug,id,created_at,updated_at FROM bot_profiles "
-                                    "WHERE slug='visible-bot'")).mappings().one()
-        role = conn.execute(text("SELECT slug,created_at,updated_at FROM bot_tag_catalog "
-                                 "WHERE slug='fixture_role'")).mappings().one()
-    assert current.profiles["visible-bot"] == legacy_revision("profile", profile)
-    assert current.roles["fixture_role"] == legacy_revision("role", role)
-    assert set(current.profiles) == {"later-private", "visible-bot"}
-    assert current.memberships == {"later-private": set(), "visible-bot": {"fixture_role"}}
-    assert set(current.roles) == {"fixture_role"}
-    approved = PortableSetupInput({slug: {
-        "revision": rev, "roles": list(current.memberships[slug]),
-        "preset": {"name": "Fixture " + slug, "summary": "Portable notes.",
-                   "role": "Review", "system_prompt": "Review independently."},
-    } for slug, rev in current.profiles.items()}, {"fixture_role": {
-        "revision": current.roles["fixture_role"], "name": "Fixture role", "color": None,
-        "description": "Reviews fixture changes.", "prompt_key": "role.fixture", "prompt_sha256": "a" * 64,
-    }})
+    source = read()
+    assert [row["slug"] for row in source.profiles] == ["later-private", "visible-bot"]
+    visible = source.profiles[1]
+    assert visible["roles"] == ["fixture_role"] and visible["system_prompt"] == "Review fixture work."
+    assert source.roles == {"fixture_role": {"slug": "fixture_role", "name": "Fixture role", "color": None,
+                                             "description": "Reviews fixture changes.", "prompt_key": "role.fixture"}}
     target = tmp_path / "generated.json"
-
-    def read():
-        return approved_setup_snapshot(structure(), approved, {"role.fixture": "a" * 64})
-
-    assert stage_catalog(read, target)
-    prior = target.read_bytes()
-    assert json.loads(prior)["roles"] == [{"slug": "fixture_role", "name": "Fixture role", "color": None,
-                                          "description": "Reviews fixture changes.", "prompt_key": "role.fixture"}]
-    for marker in (b"Tenant", b"hidden_role", b"example_grant", b"role.unapproved", b"revision"):
-        assert marker not in prior
-    assert not stage_catalog(read, target)
+    assert stage_catalog(lambda: live_setup_snapshot(read(), {"role.fixture"}), target)
+    prior = json.loads(target.read_bytes())
+    assert [(p["slug"], p["icon"], p["color"], p["role"], p["summary"]) for p in prior["presets"]] == [
+        ("later-private", "", None, "Assistant", "General-purpose assistant."),
+        ("visible-bot", "🧪", "#123456", "Fixture role", "Fixture reviewer."),
+    ]
+    for marker in ("hidden", "Private note", "example_grant", "inactive", "explicit"):
+        assert marker not in target.read_text()
+    # A live edit flows into the next run with no approval file in the loop.
     with rig.engine.begin() as conn:
-        conn.execute(text("UPDATE bot_profiles SET system_prompt='private synthetic edit', updated_at=now() "
+        conn.execute(text("UPDATE bot_profiles SET system_prompt='Edited fixture prompt.', updated_at=now() "
                           "WHERE slug='visible-bot'"))
-    with pytest.raises(bot_presets.PresetError, match="changed revision"):
-        stage_catalog(read, target)
-    assert target.read_bytes() == prior
-    # Refresh the binding without reading or copying the edited live prompt.
-    approved.profiles["visible-bot"]["revision"] = structure().profiles["visible-bot"]
-    assert not stage_catalog(read, target)
+    assert stage_catalog(lambda: live_setup_snapshot(read(), {"role.fixture"}), target)
+    assert json.loads(target.read_bytes())["presets"][1]["system_prompt"] == "Edited fixture prompt."
+    # Marking a bot private removes it on the next run.
     with rig.engine.begin() as conn:
-        conn.execute(text("""
-            INSERT INTO bot_profile_tags (bot_slug, tag_slug, assigned_by)
-            VALUES ('later-private', 'private', 'test')
-        """))
-    assert stage_catalog(read, target)
+        conn.execute(text("INSERT INTO bot_profile_tags (bot_slug, tag_slug, assigned_by) "
+                          "VALUES ('later-private', 'private', 'test')"))
+    assert stage_catalog(lambda: live_setup_snapshot(read(), {"role.fixture"}), target)
     assert [row["slug"] for row in json.loads(target.read_bytes())["presets"]] == ["visible-bot"]
     assert not any(field in sql.lower() for sql in source_queries for field in (
-        "system_prompt", "description", "prompt_key", "capabilities", "endpoint_id", "avatar", "overrides",
+        "capabilities", "endpoint_id", "default_model", "agent_backend", "nextcloud", "last_session",
+        "house", "prompt_override", "avatar_render",
     ))
 
 
-def test_unknown_absent_or_denied_shared_role_has_one_opaque_result(rig, scoped_readers, monkeypatch):  # noqa: F811
-    legacy_profiles(rig, public_first=True, public_second=True, fixture_protected=True)
-    rig.store()
-    monkeypatch.setattr(db, "build_engine_from_config", lambda *_a, **_kw: rig.connect())
-    with rig.engine.begin() as conn:
-        conn.execute(text("""
-            INSERT INTO bot_tag_catalog (slug, name, description, kind)
-            VALUES ('fixture_shared', 'Fixture shared', 'Tenant note', 'role'),
-                   ('fixture_protected_role', 'Fixture protected', 'Private note', 'role');
-            INSERT INTO bot_profile_tags (bot_slug, tag_slug)
-            VALUES ('public-first', 'fixture_shared'), ('public-second', 'fixture_shared'),
-                   ('fixture-protected', 'fixture_protected_role'), ('public-first', 'inactive');
-        """))
-    parse = setup_structure._parse_structure
-    received = []
-
-    def capture(payload):
-        received.append(json.loads(payload))
-        return parse(payload)
-
-    monkeypatch.setattr(setup_structure, "_parse_structure", capture)
-
-    def read(expected_roles, denied=()):
-        for reader in scoped_readers:
-            yield reader(excluded=("fixture-protected",), allowed_roles=expected_roles, denied_roles=denied)
-
-    for result in read(("fixture_shared",), ("fixture_protected_role",)):
-        assert result.memberships == {"public-first": {"fixture_shared"}, "public-second": {"fixture_shared"}}
-        assert result.roles.keys() == {"fixture_shared"}
-    assert len(received) == len(scoped_readers) and all(payload == received[0] for payload in received)
-    for payload in received:
-        assert set(payload) == {"status", "profiles", "roles"}
-        assert [row[0] for row in payload["profiles"]] == ["public-first", "public-second"]
-        assert all(len(row) == 3 for row in payload["profiles"])
-        assert [row[0] for row in payload["roles"]] == ["fixture_shared"]
-        assert all(len(row) == 2 for row in payload["roles"])
-        assert "fixture_protected" not in json.dumps(payload)
-    # Not approved at all, or explicitly denied despite positive approval.
-    for allowed, denied in (((), ()), (("fixture_shared",), ("fixture_shared",))):
-        for reader in scoped_readers:
-            with pytest.raises(bot_presets.PresetError) as error:
-                reader(excluded=("fixture-protected",), allowed_roles=allowed, denied_roles=denied)
-            assert str(error.value) == setup_structure.ROLE_HOLD
-    # The membership remains but the allowed key no longer resolves as a role.
-    with rig.engine.begin() as conn:
-        conn.execute(text("UPDATE bot_tag_catalog SET kind='behavior' WHERE slug='fixture_shared'"))
-    for reader in scoped_readers:
-        with pytest.raises(bot_presets.PresetError) as error:
-            reader(excluded=("fixture-protected",), allowed_roles=("fixture_shared",), denied_roles=())
-        assert str(error.value) == setup_structure.ROLE_HOLD
-    assert received[len(scoped_readers):] == [{"status": "role_hold"}] * (3 * len(scoped_readers))
-
-
-def test_partial_or_failed_query_cannot_return_a_snapshot(rig, scoped_readers, monkeypatch):  # noqa: F811
+def test_partial_or_failed_query_cannot_return_a_snapshot(rig, live_readers, monkeypatch):  # noqa: F811
     legacy_profiles(rig, fixture_first=True, fixture_second=True)
     rig.store()
     monkeypatch.setattr(db, "build_engine_from_config", lambda *_a, **_kw: rig.connect())
-    scope = dict(excluded=(), allowed_roles=(), denied_roles=())
-    for reader in scoped_readers:
-        assert set(reader(**scope).profiles) == {"fixture-first", "fixture-second"}
+    for reader in live_readers:
+        assert [row["slug"] for row in reader(excluded=()).profiles] == ["fixture-first", "fixture-second"]
     # Distinct raw profile keys with the same normalized key are ambiguous.
     with rig.engine.begin() as conn:
         conn.execute(text("UPDATE bot_profiles SET slug='FIXTURE-FIRST' WHERE slug='fixture-second'"))
-    for reader in scoped_readers:
+    for reader in live_readers:
         with pytest.raises(bot_presets.PresetError) as error:
-            reader(**scope)
-        assert str(error.value) == setup_structure.READ_FAILURE
+            reader(excluded=())
+        assert str(error.value) == setup_live_source.READ_FAILURE
     # A server error (not an empty result) produces the same safe failure.
     with rig.engine.begin() as conn:
         conn.execute(text("ALTER TABLE bot_tag_catalog RENAME TO fixture_unavailable"))
-    for reader in scoped_readers:
+    for reader in live_readers:
         with pytest.raises(bot_presets.PresetError) as error:
-            reader(**scope)
-        assert str(error.value) == setup_structure.READ_FAILURE
+            reader(excluded=())
+        assert str(error.value) == setup_live_source.READ_FAILURE
 
 
 def test_generated_subset_creates_only_its_roles_and_rolls_back_on_conflict(rig, monkeypatch, tmp_path):  # noqa: F811

@@ -95,67 +95,59 @@ Legacy `source` retains its storage meaning for existing clients.
 
 ## Stage the Setup roster in the same product sync run
 
-Use the same scheduled job, with an app-capable Python environment and approved
-read-only source configuration. This is a source candidate generator, not a
-customer install step. From a clean checkout of the release base:
+The Setup catalog (`src/llm_bawt/seeding/setup_catalog.json`) is the source
+installation's own bot lineup, generated from its live profiles. Browser Setup
+offers every entry, and the owner chooses which bots to import. There is no
+hand-edited input file: re-running the sync picks up added, edited and removed
+bots. Run it with an app-capable Python environment from a clean checkout of
+the release base:
 
 ```sh
-# The operator supplies reviewed install terms, exclusions and input bytes.
 mkdir -m 700 "$PRODUCT_SYNC_STAGE"
 python -m llm_bawt.seeding.product_sync --stage "$PRODUCT_SYNC_STAGE" --setup-catalog \
-  --portable-input "$PRODUCT_SYNC_PORTABLE_INPUT" \
-  --portable-sha256 "$PRODUCT_SYNC_APPROVED_SHA256" \
-  --excluded-bots "$PRODUCT_SYNC_EXCLUDED_BOTS" \
-  --excluded-roles "$PRODUCT_SYNC_EXCLUDED_ROLES"
+  --excluded-bots "$PRODUCT_SYNC_EXCLUDED_BOTS"
 ```
 
-Add `--api "$LLM_BAWT_API" --key role.example` (repeat `--key` as needed) only
-when the exact global prompt changes are approved for export. No `--key` means
-no prompt API read. The read-only tenant projection returns only eligible
-bot slugs, structural role membership and one-way revisions computed by
-PostgreSQL, never raw IDs or timestamps. Private and hidden profiles are
-filtered before the role closure. Keep protected slugs in private operator
-inputs (`--excluded-bots` and `--excluded-roles`, explicitly empty only if
-there are none). Only role keys from approved portable definitions can be
-resolved; explicit denials win even for shared assignments. An unavailable
-required role holds the entire snapshot without returning its key or details.
-Only known product behavior assignments are ignored. Product sync never
-reads tenant profile/role prose, assets, grants, bindings or prompt overrides.
-The one-shot `read_setup_structure_pgq` operator helper accepts the same private
-scope (including a trusted non-live role allowlist), sends it over stdin, and
-uses the same read-only, repeatable-read projection as the app reader.
+`--pgq` reads through the operator's `pgq` instead of app configuration.
+`--excluded-bots` is required (explicitly empty if none) and keeps protected
+bots out without reading them. Add `--api "$LLM_BAWT_API" --key role.example`
+(repeat `--key`) only when exact global prompt changes are also approved for
+export; no `--key` means no prompt API read.
 
-Use the private structural snapshot to bind existing approved portable text to
-current revisions; do not export live prose for approval. Input schema `1` has
-`profiles` and `roles` objects keyed by slug. Each profile has `revision`, the
-reviewed `roles` list, and `preset` fields including starter `system_prompt`.
-Each role has `revision`, `name`, `description`, `color`, and `prompt_key` plus
-`prompt_sha256` (both null for a reviewed descriptive role). Pin refs to the
-canonical metadata and body digest from `portable_role_prompt_revisions` in
-the chosen product prompt source. This never duplicates a role prompt body.
-The approval digest is supplied by independent exact-byte review, not computed
-from whichever file happens to be on disk at run time. Source revision tokens
-are private and not published; edits that advance row timestamps, including
-operational edits, conservatively require a refreshed binding even if the
-portable text itself has not changed.
+One read-only, repeatable-read query returns, for each eligible bot (visible
+in global search, no private tag, not excluded), only its slug, name,
+description, system prompt, avatar and color, plus its role tags and those
+roles' name, description, color and prompt key. Private profiles are filtered
+in SQL. Endpoints, models, houses, sessions, history, memories, credentials,
+capability grants and behavior tags never enter the result. An uploaded
+avatar or non-portable color is left out; an emoji avatar and hex or palette
+color travel. A missing description falls back to the bot's first role
+description.
 
-The JSON result describes each stage. `held` or `failed` makes the command
-exit nonzero. A failed prompt stage does not prevent a catalog that can stand
-on shipped defaults, but a held or failed selected role-prompt change cannot
-silently fall back to the older shipped version. Use only files named by the
-current result: a previous catalog on disk after an error is not current.
-Serialize runs sharing a staging directory. Each `prompts-*` directory is an
-overlay on the exact release base (changed bodies and the merged manifest),
-not a replacement for the prompt defaults directory. Review all outgoing text
-and the matching dependency changes before copying them into release source.
-The product catalog at `src/llm_bawt/seeding/setup_catalog.json` contains
-only general-use starters. Its `stock/` refs are separate from the previous
-`starter/` choices. A generated roster that identifies a particular installation
-stays in private staging, even if its prose and role dependencies are portable.
-Do not copy its entries over the stock catalog or add policy exceptions for them.
-Only independently reviewed general-use content belongs in the distributed
-catalog. Remove private staging files when no longer needed. No timer,
-publication, or deployment action is performed here.
+Every travelling field is scrubbed for URLs, email and IP addresses, paths,
+host names, keys and credential-like text, plus any `--install-term` or
+`PROMPT_SYNC_INSTALL_TERMS` entries. A bot that fails is left out and listed
+under `held_bots` with the kind of content found (never the text), and the
+command exits 1 so the operator fixes the live prompt. Text is never renamed
+or redacted. A role whose fields fail, or whose prompt key is not a shipped
+product default, holds the whole catalog; role prompt bodies ship through the
+prompt defaults above, never inside the catalog.
+
+The JSON result describes each stage and lists the catalog's `bots`. `held`
+or `failed` makes the command exit nonzero. A held or failed selected
+role-prompt change cannot silently fall back to the older shipped version. Use
+only files named by the current result: a previous catalog on disk after an
+error is not current. Serialize runs sharing a staging directory. Each
+`prompts-*` directory is an overlay on the exact release base (changed bodies
+and the merged manifest), not a replacement for the prompt defaults directory.
+Copy the staged catalog over the source file, review the diff, run focused
+checks, then follow the normal review and publication process. Remove private
+staging files when no longer needed. No timer, publication, or deployment
+action is performed here.
+
+The catalog names the source installation's bots and their prompts may name
+its operator, so the general-use contract skips only its bot-slug and
+operator-identity rules for this one file; every other rule still applies.
 
 ## Verification and drift
 

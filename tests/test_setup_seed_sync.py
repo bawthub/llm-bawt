@@ -5,7 +5,8 @@ from dataclasses import replace
 import pytest
 
 from llm_bawt.seeding.bot_presets import PresetError
-from llm_bawt.seeding.setup_seed_sync import SetupSeedSnapshot, stage_catalog
+from llm_bawt.seeding.setup_live_source import LiveSetupSource
+from llm_bawt.seeding.setup_seed_sync import SetupSeedSnapshot, live_setup_snapshot, stage_catalog
 
 
 def bot(slug, *roles, **extra):
@@ -104,3 +105,39 @@ def test_complete_empty_roster_can_remove_last_bot_and_its_roles(tmp_path):
     assert stage_catalog(lambda: SetupSeedSnapshot(set(), [], {}, set()), target)
     doc = json.loads(target.read_bytes())
     assert doc["presets"] == doc["roles"] == []
+
+
+def test_held_bot_is_reported_by_kind_and_left_out_when_collected(tmp_path):
+    target = tmp_path / "generated.json"
+    snapshot = SetupSeedSnapshot({"first", "second", "third"},
+                                 [bot("first"), bot("second", system_prompt="See https://example.test/x"),
+                                  bot("third", system_prompt="")], {}, set())
+    held = {}
+    assert stage_catalog(lambda: snapshot, target, held=held)
+    assert [p["slug"] for p in json.loads(target.read_bytes())["presets"]] == ["first"]
+    assert held == {"second": ["system_prompt contains a URL"],
+                    "third": ["fields do not fit the preset schema (empty prompt, length or format)"]}
+    assert "example.test" not in json.dumps(held)
+    # A reader that drops a bot entirely is still a roster mismatch, not a hold.
+    with pytest.raises(PresetError, match="does not match the complete eligible set"):
+        stage_catalog(lambda: replace(snapshot, eligible_slugs={"first", "second", "third", "gone"}),
+                      target, held={})
+
+
+def test_live_projection_keeps_real_identity_and_portable_assets():
+    source = LiveSetupSource(
+        [{"slug": "pilot", "name": "Pilot", "description": None, "system_prompt": "  Steer the work.  ",
+          "avatar": "🦊", "color": "#123abc", "roles": ["steer"]},
+         {"slug": "plain", "name": None, "description": "x" * 450, "system_prompt": "Be plain.",
+          "avatar": "uploads/face.png", "color": "rgb(1,2,3)", "roles": []}],
+        {"steer": {"slug": "steer", "name": "Steerer", "description": "Keeps work moving.", "color": None,
+                   "prompt_key": "role.steer"}})
+    snap = live_setup_snapshot(source, {"role.steer"})
+    pilot, plain = snap.bots
+    assert (pilot["name"], pilot["role"], pilot["summary"], pilot["system_prompt"], pilot["icon"],
+            pilot["color"], pilot["tags"]) == ("Pilot", "Steerer", "Keeps work moving.", "Steer the work.",
+                                               "🦊", "#123abc", ["steer"])
+    assert (plain["name"], plain["role"], plain["icon"], plain["color"]) == ("plain", "Assistant", "", None)
+    assert len(plain["summary"]) == 400 and plain["summary"].endswith("…")
+    assert snap.eligible_slugs == {"pilot", "plain"}
+    assert snap.roles["steer"]["prompt_key"] == "role.steer"
