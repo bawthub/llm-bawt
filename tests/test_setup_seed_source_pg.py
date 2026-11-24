@@ -164,6 +164,8 @@ def test_generated_subset_creates_only_its_roles_and_rolls_back_on_conflict(rig,
     assert store.get(second.slug) is None
 
 
+@pytest.mark.skipif(not bot_presets.GENERATED_CATALOG.is_file(),
+                    reason="no generated setup_catalog.json in this copy (public source export)")
 def test_shipped_catalog_import_is_create_only_on_disposable_pg(rig, monkeypatch):  # noqa: F811
     from llm_bawt.service.routes import setup_presets as routes
     from tests.test_bot_presets import _Settings, _USABLE, _client

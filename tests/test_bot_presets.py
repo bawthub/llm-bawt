@@ -57,6 +57,13 @@ def test_builtin_pack_uses_generated_roster_and_preserves_legacy_refs(generated_
 
 
 def test_shipped_catalog_loads_against_shipped_role_prompts():
+    if not bp.GENERATED_CATALOG.is_file():
+        # The generated roster is an installation's own lineup. A copy without
+        # it (the public source export) offers the current starter pack instead.
+        packs = bp.all_packs(None)
+        assert packs[0] == bp.builtin_pack()
+        assert packs[0].presets and not any(p.legacy for p in packs[0].presets)
+        return
     stock = bp.load_generated_pack(bp.GENERATED_CATALOG)
     assert stock.pack == bp.GENERATED_PACK
     # The roster is regenerated from the source lineup; check its shape, not its members.

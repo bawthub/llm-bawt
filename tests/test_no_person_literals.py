@@ -51,6 +51,8 @@ EXEMPT_FILES: dict[str, str] = {
     # The operator's live bot lineup, prompts included; the public export excludes it and ships a neutral catalog.
     "llm_bawt/seeding/setup_catalog.json": "private live Setup catalog, replaced in the public export",
 }
+# Exempt files the public source export omits, so their absence there is expected.
+EXPORT_OMITTED = frozenset({"llm_bawt/seeding/setup_catalog.json"})
 
 _TEXT_SUFFIXES = {".py", ".md", ".txt", ".yaml", ".yml", ".json", ".toml", ".sh", ".j2", ".html", ".sql", ".cfg", ".ini"}
 
@@ -142,7 +144,8 @@ def test_src_has_no_person_or_deployment_infrastructure():
                 where.append(f"{file}:{line} {kind} {match!r}")
     assert where == [], "deployment-specific value in src/; read it from settings/data instead"
     assert list(unused) == [], "ALLOWED entries match nothing; delete them"
-    assert [f for f in EXEMPT_FILES if not (SRC / f).is_file()] == [], "EXEMPT_FILES entries match nothing; delete them"
+    stale = [f for f in EXEMPT_FILES if f not in EXPORT_OMITTED and not (SRC / f).is_file()]
+    assert stale == [], "EXEMPT_FILES entries match nothing; delete them"
 
 
 def test_compose_files_hold_no_deployment_hosts():
