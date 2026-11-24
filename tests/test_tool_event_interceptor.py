@@ -391,3 +391,38 @@ def test_tts_end_block_holds_inside_an_open_code_fence():
     assert sc.feed("Here:\n```py\nx = 1") == ""
     assert sc.end_block() == ""
     assert sc.buf.endswith("x = 1")
+
+
+def test_idle_flush_survives_non_flushing_frames_before_the_tool_call():
+    """TASK-2613 review: subagent progress after text must not disarm the flush."""
+    import queue
+
+    from llm_bawt.agent_backends.agent_bridge import drain_with_idle_flush
+
+    now = [0.0]
+    tool = {"event": "tool_call", "name": "Bash", "arguments": {}, "tool_use_id": "tu1",
+            "provider": "claude"}
+    script = iter([
+        "Short tail.",
+        {"event": "subagent_progress", "task_id": "bg1"},  # arrives inside the window
+        queue.Empty,  # quiet while the model writes the tool input
+        tool,
+        None,
+    ])
+
+    class _Q:
+        def get(self, timeout):
+            step = next(script)
+            if step is queue.Empty:
+                now[0] += timeout
+                raise queue.Empty
+            now[0] += 0.05
+            return step
+
+    h = _make()
+    seen_tool_with = []
+    for item in h.it.run(drain_with_idle_flush(_Q(), lambda: True, clock=lambda: now[0])):
+        if isinstance(item, dict) and item.get("event") == "tool_call":
+            seen_tool_with = [e["delta"] for e in h.published if e["_type"] == "text_delta"]
+    # The tail was published before the tool card was read, exactly once.
+    assert seen_tool_with == ["Short tail."]

@@ -33,6 +33,42 @@ from ..utils.config import Config
 
 logger = logging.getLogger(__name__)
 
+# Items after which the consumer has already flushed its buffered text.
+_TEXT_FLUSHING_EVENTS = frozenset({"tool_call", "tool_result", "steer_lifecycle"})
+
+
+def drain_with_idle_flush(result_queue, producer_alive, *, idle_s: float = STREAM_IDLE_FLUSH_S, clock=time.monotonic):
+    """Yield queued stream items until the ``None`` sentinel (TASK-2613).
+
+    The first text after a flush arms a deadline ``idle_s`` later. Only the
+    consumer's own text flushes clear it; other frames (subagent progress,
+    usage) neither extend nor disarm it. When it passes, one internal
+    ``stream_idle`` item is yielded so the consumer publishes its text tail
+    while the model is still writing a tool input.
+    """
+    import queue as queue_mod
+
+    deadline: float | None = None
+    while True:
+        if deadline is not None and clock() >= deadline:
+            deadline = None
+            yield dict(STREAM_IDLE_ITEM)
+        timeout = 2.0 if deadline is None else max(0.0, deadline - clock())
+        try:
+            item = result_queue.get(timeout=timeout)
+        except queue_mod.Empty:
+            if deadline is None and not producer_alive():
+                break
+            continue
+        if item is None:
+            break
+        if isinstance(item, str):
+            if deadline is None:
+                deadline = clock() + idle_s
+        elif isinstance(item, dict) and item.get("event") in _TEXT_FLUSHING_EVENTS:
+            deadline = None
+        yield item
+
 # Module-level subscriber singleton — set by service startup
 _subscriber = None
 
@@ -929,25 +965,7 @@ class AgentBridgeBackend(AgentBackend):
                 execution.attach_stream_thread(t)
 
             # Drain the queue, yielding items to the caller
-            # TASK-2613: after text, wait briefly; if the model goes quiet
-            # (e.g. while writing a tool input), emit one internal
-            # stream_idle so the consumer can flush its buffered text tail.
-            text_pending = False
-            while True:
-                try:
-                    item = result_queue.get(timeout=STREAM_IDLE_FLUSH_S if text_pending else 2.0)
-                except queue_mod.Empty:
-                    if text_pending:
-                        text_pending = False
-                        yield dict(STREAM_IDLE_ITEM)
-                        continue
-                    if not t.is_alive():
-                        break
-                    continue
-                if item is None:
-                    break
-                text_pending = isinstance(item, str)
-                yield item
+            yield from drain_with_idle_flush(result_queue, t.is_alive)
 
             if execution is not None and execution.detach_requested() and not run_terminal_seen:
                 # TASK-1286: the stream ended because of detach (its subscriber
