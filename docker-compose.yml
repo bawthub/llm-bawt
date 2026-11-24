@@ -79,6 +79,11 @@ services:
       # TASK-701/793: trusted current-turn MCP tools write through BawtHub's
       # container-only association API, sending the BawtHub service bearer.
       - BAWTHUB_TASK_ASSOCIATION_INTERNAL_URL=${BAWTHUB_TASK_ASSOCIATION_INTERNAL_URL:-http://frontend-prod:3002}
+      # TASK-1485: browser_check_session mints a short non-admin session on
+      # one BawtHub frontend (its internal port, service bearer) for bots'
+      # Playwright checks. Empty keeps the tool reporting "not set up".
+      - BAWTHUB_BROWSER_CHECK_INTERNAL_URL=${BAWTHUB_BROWSER_CHECK_INTERNAL_URL:-}
+      - BAWTHUB_BROWSER_CHECK_ORIGIN=${BAWTHUB_BROWSER_CHECK_ORIGIN:-}
       # TASK-1472: the BawtHub service bearer is derived from the master key
       # (no hand-set secret). At startup the app writes it, 0600, to this file
       # in the shared bawthub-service-token volume, owned by the BawtHub
