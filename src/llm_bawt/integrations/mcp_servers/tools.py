@@ -15,7 +15,8 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from ..bawthub_mcp.client import BawtHubMcpClient, McpToolDefinition
 from ..ha_mcp.client import run_bounded
@@ -72,13 +73,13 @@ class RemoteMcpTools:
             from ...bot_tags.store import BotTagStore
             tags = BotTagStore(servers.store.engine).tags_for(self.bot_slug)
             granted = bool(servers.store.servers_for(self.bot_slug, tags))
-        except Exception as exc:  # storage outage: no remote tools this turn
+        except Exception as exc:  # noqa: BLE001 - storage outage: no remote tools this turn
             logger.warning("Remote MCP grants unavailable for %s: %s", self.bot_slug, type(exc).__name__)
             granted = False
         self._granted = (now, granted)
         return granted
 
-    def for_turn(self) -> "RemoteMcpTurn":
+    def for_turn(self) -> RemoteMcpTurn:
         return RemoteMcpTurn(self)
 
     # --- catalog cache (no credentials) -------------------------------------
@@ -119,7 +120,7 @@ class RemoteMcpTurn:
         if self._resolved is None:
             try:
                 found = self._tools._servers().resolve_for_bot(self._tools.bot_slug)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - no remote tools this turn
                 logger.warning("Remote MCP servers unavailable for %s: %s",
                                self._tools.bot_slug, type(exc).__name__)
                 found = []
@@ -133,7 +134,7 @@ class RemoteMcpTurn:
     def _catalog(self, server: ResolvedServer) -> list[McpToolDefinition]:
         try:
             return self._tools.catalog(server)
-        except Exception as exc:  # one unreachable server never hides the others
+        except Exception as exc:  # noqa: BLE001 - one unreachable server never hides the others
             logger.warning("Remote MCP server %s tool listing failed: %s", server.slug, type(exc).__name__)
             if server.slug not in self.unavailable:
                 self.unavailable.append(server.slug)
@@ -164,7 +165,7 @@ class RemoteMcpTurn:
             raise RemoteMcpToolError(f"Tool '{name}' is not enabled for this bot")
         try:
             result = run_bounded(_call(server, parts[1], arguments), CALL_TIMEOUT_SECONDS)
-        except Exception as exc:  # never echo transport details or credentials
+        except Exception as exc:  # noqa: BLE001 - never echo transport details or credentials
             logger.warning("Remote MCP call %s failed: %s", name, type(exc).__name__)
             raise RemoteMcpToolError(f"{server.name} could not run {parts[1]} ({type(exc).__name__})") from exc
         text, structured = BawtHubMcpClient._result_parts(result)
