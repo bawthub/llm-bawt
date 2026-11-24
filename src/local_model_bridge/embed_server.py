@@ -17,6 +17,9 @@ Environment:
     LOCAL_MODEL_EMBED_DEVICE  — torch device for the model (default "cpu"; MiniLM
                                 is tiny, and CPU keeps embeddings independent of
                                 GPU/NVML state and off the contended card)
+    LOCAL_MODEL_EMBED_PINNED_DIR — use the pinned MiniLM revision cached in this
+                                directory (fetched and SHA-256 checked on first
+                                use, then loaded offline) instead of the named model
 """
 
 from __future__ import annotations
@@ -42,19 +45,14 @@ _model: Any = None
 
 
 def pinned_model_dir() -> str | None:
-    """Directory of the pinned local-only model, or None for the named/cache path.
+    """Cache directory of the pinned model, or None for the named/cache path.
 
-    The public text profile ships without the video server and always uses the
-    fixed baked directory; it ignores ``LOCAL_MODEL_EMBED_PINNED_DIR`` so it can
-    never load other bytes or fall back to a network download. The private tree
-    uses the pinned directory only when that variable is set.
+    Set by ``LOCAL_MODEL_EMBED_PINNED_DIR``. The public install sets it to a
+    directory in the model data volume: the pinned revision is fetched there on
+    first use, hash-checked, and loaded local-only.
     """
-    from llm_bawt.public_text_profile import capability_present
+    from .pinned_embed_model import PINNED_DIR_ENV
 
-    from .pinned_embed_model import DEFAULT_DIR, PINNED_DIR_ENV
-
-    if not capability_present("local_model_bridge.video_server"):
-        return DEFAULT_DIR
     return os.getenv(PINNED_DIR_ENV, "").strip() or None
 
 
@@ -127,7 +125,8 @@ def load_model() -> Any:
             warnings.filterwarnings("ignore", message=".*layers were not sharded.*")
             warnings.filterwarnings("ignore", category=FutureWarning)
             if pinned_dir is not None:
-                # Local-only: verified pinned bytes or no model (never a download).
+                # Pinned revision only: fetched and hash-checked on first use, then
+                # loaded local-only; any mismatch means no model.
                 from .pinned_embed_model import load as load_pinned
 
                 model = load_pinned(pinned_dir, device=EMBED_DEVICE)

@@ -24,8 +24,7 @@ from typing import Any
 import httpx
 from mcp.server.mcpserver import Image
 
-from llm_bawt.media.image_format import sniff_image_format as _sniff_image_format
-
+from .media_generation_tools import _sniff_image_format
 from .server import mcp
 from .task_api import api_get
 from .task_images import ImageRefError, parse_image_ref

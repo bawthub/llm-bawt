@@ -527,14 +527,10 @@ async def lifespan(app):
         log.warning("GPU handoff requires operator reconciliation: %s", gpu_state.last_error)
 
     # Durable speech playback belongs to the app, not a short-lived MCP call.
-    # The public text profile omits home audio, so no worker claims its jobs.
-    from ..public_text_profile import home_audio_present
-    home_audio_worker = None
-    if home_audio_present():
-        from ..integrations.home_audio_store import HomeAudioStore
-        from ..integrations.home_audio_worker import HomeAudioWorker
-        home_audio_worker = HomeAudioWorker(config, HomeAudioStore(model_engine), hub=service._commit_wake_hub)
-        home_audio_worker.start()
+    from ..integrations.home_audio_store import HomeAudioStore
+    from ..integrations.home_audio_worker import HomeAudioWorker
+    home_audio_worker = HomeAudioWorker(config, HomeAudioStore(model_engine), hub=service._commit_wake_hub)
+    home_audio_worker.start()
 
     from ..bot_access.refresh import policy_refresh_async_lifecycle
     from .loop_watchdog import monitor_serving_loop
@@ -619,9 +615,7 @@ def shutdown_phases(service, *, scheduler, redis_subscriber, home_audio_worker) 
     dispatcher, while any other claim stays leased until it expires. Orderly
     shutdown is never counted as a delivery failure.
     """
-    phases: list = []
-    if home_audio_worker is not None:
-        phases.append(("home audio worker", home_audio_worker.stop))
+    phases: list = [("home audio worker", home_audio_worker.stop)]
     if hasattr(service, "_ollama_reachability_stop"):
         phases.append(("ollama reachability stop", service._ollama_reachability_stop.set))
     if hasattr(service, "_embedding_repair_stop"):

@@ -22,6 +22,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response
 
 from ...media.clients import MediaClient, media_provider_registry
+from ...media.clients.base import resolve_media_api_key
 from ...media.db import MediaGenerationStore
 from ...media.generation_service import MediaGenerationService
 from ...media.gpu_handoff_store import (
@@ -299,11 +300,29 @@ async def _store_image_job(gen_id: str, img_data: bytes) -> None:
 # Endpoints
 # ------------------------------------------------------------------
 
+#: Bring-your-own-key providers and the stored connection each one needs.
+_PROVIDER_KEYS = {
+    "grok": ("xai", ("XAI_API_KEY", "LLM_BAWT_XAI_API_KEY"), "XAI_API_KEY"),
+    "openai": ("openai-api", ("OPENAI_API_KEY",), None),
+}
+
+
+def _provider_configured(provider: str) -> bool:
+    """Whether a BYOK provider has its key; providers without one are always on."""
+    key = _PROVIDER_KEYS.get(provider)
+    if key is None:
+        return True
+    provider_id, env_vars, config_attr = key
+    return bool(resolve_media_api_key(None, provider_id, env_vars, config_attr=config_attr))
+
+
 @router.get("/v1/media/providers", response_model=MediaProviderListResponse)
 async def list_media_providers(media_type: str | None = Query(default=None)):
     """Return provider/model/capability metadata for clients."""
     providers = [
-        MediaProviderCapabilitiesResponse.model_validate(capability.to_dict())
+        MediaProviderCapabilitiesResponse.model_validate(
+            {**capability.to_dict(), "configured": _provider_configured(capability.provider)}
+        )
         for capability in media_provider_registry.list_capabilities(media_type)
     ]
     return MediaProviderListResponse(providers=providers, default_provider="grok")

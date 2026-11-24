@@ -142,6 +142,8 @@ class MediaProviderCapabilitiesResponse(BaseModel):
     durations: dict[str, list[int]] = Field(default_factory=dict)
     default_durations: dict[str, int] = Field(default_factory=dict)
     negative_prompt: bool = False
+    # False until the provider's API key is connected in Settings → Providers.
+    configured: bool = True
 
 
 class MediaProviderListResponse(BaseModel):

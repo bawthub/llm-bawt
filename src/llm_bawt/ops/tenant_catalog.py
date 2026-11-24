@@ -51,15 +51,6 @@ def _spec(**fields: Any) -> str:
     return json.dumps(fields, ensure_ascii=False)
 
 
-def _aux_services() -> tuple[str, ...]:
-    """Aux restart targets this tree supports; the public profile has no voice services."""
-    from ..public_text_profile import OMITTED_AUX_SERVICES, voice_media_present
-
-    if voice_media_present():
-        return AUX_SERVICES
-    return tuple(s for s in AUX_SERVICES if s not in OMITTED_AUX_SERVICES)
-
-
 def plan(project: str, services: dict[str, str]) -> dict[str, dict[str, Any]]:
     """The tenant form of each applicable restart row, keyed by slug."""
     out: dict[str, dict[str, Any]] = {}
@@ -91,7 +82,7 @@ def plan(project: str, services: dict[str, str]) -> dict[str, dict[str, Any]]:
     if "redis" in services:
         out["llm-bawt.restart-redis"] = {"command_script": _spec(
             action="restart", container_name=services["redis"])}
-    aux = [services[s] for s in _aux_services() if s in services]
+    aux = [services[s] for s in AUX_SERVICES if s in services]
     if aux:
         out["llm-bawt.restart-aux"] = {
             "description": "Restart a tenant voice or embedding service.",

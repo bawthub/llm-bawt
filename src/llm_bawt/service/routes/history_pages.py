@@ -540,10 +540,8 @@ def _load_window_via_sql(
 
 def _hydrate_response_audio_for_page(page_messages: list[dict], owner_user_id: str | None) -> dict[str, dict]:
     """Saved reply audio per assistant message (TASK-1115). One query; nonfatal."""
-    from ...public_text_profile import response_audio_present
-
     ids = [str(m["id"]) for m in page_messages if m.get("id") and m.get("role") == "assistant"]
-    if not ids or not owner_user_id or not response_audio_present():
+    if not ids or not owner_user_id:
         return {}
     try:
         from ...media.response_audio import get_response_audio_store, public_view

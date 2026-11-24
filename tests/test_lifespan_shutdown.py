@@ -143,16 +143,6 @@ def test_phases_omit_absent_optional_components():
     assert names == ["home audio worker", "background tasks", "service"]
 
 
-def test_phases_omit_home_audio_when_profile_has_none():
-    """The public text profile starts no home-audio worker (TASK-2589)."""
-    events: list[str] = []
-    service, scheduler, redis, _home_audio = _wiring(events, with_optional=False)
-    names = [name for name, _ in api.shutdown_phases(
-        service, scheduler=scheduler, redis_subscriber=redis, home_audio_worker=None,
-    )]
-    assert names == ["background tasks", "service"]
-
-
 def test_every_background_task_attribute_is_a_task_the_lifespan_creates():
     """The attributes the cancel phase sweeps are the ones api.py assigns."""
     import inspect

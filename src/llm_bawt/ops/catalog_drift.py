@@ -109,11 +109,11 @@ def compare(seeds: list[dict[str, Any]], live_rows: list[dict[str, Any]]) -> dic
 
 
 def report(store) -> dict[str, Any]:
-    """Read the whole catalog (soft-deleted included) and compare it to this tree's seeds."""
-    from .seeds import active_seeds
+    """Read the whole catalog (soft-deleted included) and compare it to SEEDS."""
+    from .seeds import SEEDS
 
     rows = store.list_operations(include_disabled=True, include_soft_deleted=True)
-    return compare(active_seeds(), [row.to_api(include_script=True) for row in rows])
+    return compare(SEEDS, [row.to_api(include_script=True) for row in rows])
 
 
 __all__ = ["IGNORED_FIELDS", "compare", "report"]

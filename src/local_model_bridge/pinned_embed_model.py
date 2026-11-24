@@ -1,14 +1,17 @@
-"""Pinned, local-only MiniLM embedding model files.
+"""Pinned MiniLM embedding model, fetched on the user's machine.
 
-The public text profile bakes exactly these upstream files into a fixed local
-directory at image build time and loads them with networking disabled. Loading
-fails closed: a missing, extra or mismatched file means no model, never a
-Hugging Face download or an ambient cache.
+No model weights ship in images, exports or the installer. On first use the
+bridge downloads exactly these files of the pinned upstream revision from
+Hugging Face into a cache directory (a data volume), checks every SHA-256 and
+size, then loads them with networking disabled. Later starts load the cache
+local-only. A missing upstream file, a wrong hash, or an extra or edited cached
+file fails closed with a clear error; it never falls back to a floating
+download or an ambient cache.
 
-Build step::
+Manual steps (optional; first use does the same)::
 
-    python -m local_model_bridge.pinned_embed_model fetch /opt/models/all-MiniLM-L6-v2
-    python -m local_model_bridge.pinned_embed_model verify /opt/models/all-MiniLM-L6-v2
+    python -m local_model_bridge.pinned_embed_model fetch /models/all-MiniLM-L6-v2
+    python -m local_model_bridge.pinned_embed_model verify /models/all-MiniLM-L6-v2
 """
 
 from __future__ import annotations
@@ -16,14 +19,17 @@ from __future__ import annotations
 import hashlib
 import os
 import sys
+import shutil
 import tempfile
+import threading
 import urllib.request
 from pathlib import Path
 
 REPO_ID = "sentence-transformers/all-MiniLM-L6-v2"
 REVISION = "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
 MODEL_NAME = "all-MiniLM-L6-v2"
-DEFAULT_DIR = "/opt/models/all-MiniLM-L6-v2"
+#: Cache directory inside the bridge's model data volume.
+DEFAULT_DIR = "/models/all-MiniLM-L6-v2"
 PINNED_DIR_ENV = "LOCAL_MODEL_EMBED_PINNED_DIR"
 
 # path -> (sha256, bytes); safetensors only, no pickle/ONNX/TF weight copies.
@@ -43,6 +49,9 @@ FILES: dict[str, tuple[str, int]] = {
 
 _OFFLINE_ENV = {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "HF_DATASETS_OFFLINE": "1"}
 
+
+#: Serializes first-use fetches in this process (warmup and /embed can race).
+_FIRST_USE_LOCK = threading.Lock()
 
 class PinnedModelError(RuntimeError):
     """The pinned model directory does not hold exactly the pinned bytes."""
@@ -79,9 +88,22 @@ def verify(directory: str | os.PathLike[str]) -> Path:
     return root
 
 
+def ensure(directory: str | os.PathLike[str]) -> Path:
+    """Fetch the pinned files into an absent or empty cache, then verify it.
+
+    An existing, non-empty cache is only verified: a mismatch is reported, not
+    silently overwritten.
+    """
+    root = Path(directory)
+    with _FIRST_USE_LOCK:  # one download per process; later callers verify the result
+        if not root.exists() or not any(root.iterdir()):
+            return fetch(root)
+        return verify(root)
+
+
 def load(directory: str | os.PathLike[str], device: str = "cpu"):
-    """Load the verified directory with Hugging Face networking disabled."""
-    root = verify(directory)
+    """Load the pinned model (fetching it on first use) with Hugging Face networking disabled."""
+    root = ensure(directory)
     os.environ.update(_OFFLINE_ENV)
     from sentence_transformers import SentenceTransformer
 
@@ -89,23 +111,45 @@ def load(directory: str | os.PathLike[str], device: str = "cpu"):
 
 
 def fetch(directory: str | os.PathLike[str]) -> Path:
-    """Download the pinned revision's files into an empty ``directory`` and verify them."""
+    """Download the pinned revision's files into an absent or empty ``directory``.
+
+    Files land in a sibling staging directory and are verified before it is
+    moved into place, so an interrupted or mismatched download leaves no cache.
+    """
     root = Path(directory)
     if root.exists() and any(root.iterdir()):
         raise PinnedModelError(f"fetch target is not empty: {root}")
-    root.mkdir(parents=True, exist_ok=True)
-    for rel, (sha, _size) in FILES.items():
-        target = root / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        url = f"https://huggingface.co/{REPO_ID}/resolve/{REVISION}/{rel}"
-        with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as tmp:
-            with urllib.request.urlopen(url, timeout=600) as response:  # noqa: S310 - fixed https URL
-                for chunk in iter(lambda: response.read(1 << 20), b""):
-                    tmp.write(chunk)
-        Path(tmp.name).replace(target)
-        if _sha256(target) != sha:
-            raise PinnedModelError(f"downloaded file mismatch: {rel}")
-    return verify(root)
+    root.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{root.name}-", dir=root.parent))
+    try:
+        for rel, (sha, size) in FILES.items():
+            target = staging / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            url = f"https://huggingface.co/{REPO_ID}/resolve/{REVISION}/{rel}"
+            try:
+                with urllib.request.urlopen(url, timeout=600) as response, target.open("wb") as out:  # noqa: S310 - fixed https URL
+                    shutil.copyfileobj(response, out, 1 << 20)
+            except OSError as exc:
+                raise PinnedModelError(f"could not download {REPO_ID}@{REVISION}/{rel}: {exc}") from exc
+            if target.stat().st_size != size or _sha256(target) != sha:
+                raise PinnedModelError(
+                    f"downloaded {rel} does not match the pinned SHA-256 for {REPO_ID}@{REVISION}"
+                )
+        verify(staging)
+        try:
+            if root.exists():
+                root.rmdir()  # empty, checked above
+            staging.replace(root)
+        except OSError:
+            # Another process published first; use its cache if it verifies,
+            # never overwrite it.
+            if root.is_dir() and any(root.iterdir()):
+                return verify(root)
+            raise
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+    return root
 
 
 def main(argv: list[str] | None = None) -> int:

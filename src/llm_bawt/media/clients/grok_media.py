@@ -23,6 +23,8 @@ XAI_BASE_URL = "https://api.x.ai/v1"
 DEFAULT_TIMEOUT = 60.0
 
 
+NO_XAI_KEY = "An xAI API key is required for the grok media provider (connect xAI in Settings → Providers)"
+
 class GrokMediaClient(MediaClient):
     """xAI media generation client using httpx."""
 
@@ -34,7 +36,7 @@ class GrokMediaClient(MediaClient):
         self.base_url = base_url.rstrip("/")
 
         if not self.api_key:
-            logger.warning("GrokMediaClient: no xAI API key; connect xAI in Settings → Providers.")
+            logger.warning("GrokMediaClient: %s", NO_XAI_KEY)
 
         self._client = httpx.AsyncClient(
             base_url=self.base_url,
@@ -66,6 +68,8 @@ class GrokMediaClient(MediaClient):
         num_outputs: int = 1,
     ) -> GenerationResult:
         """Submit a video or image generation request to xAI."""
+        if not self.api_key:
+            raise RuntimeError(NO_XAI_KEY)
         if media_type == "video":
             return await self._generate_video(
                 prompt=prompt,

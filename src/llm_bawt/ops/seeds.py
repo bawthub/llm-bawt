@@ -985,28 +985,15 @@ SEEDS: list[dict[str, Any]] = [
 ]
 
 
-def active_seeds() -> list[dict[str, Any]]:
-    """The seed rows this tree installs and checks for drift.
-
-    The full private tree uses every seed. The public text profile omits voice
-    and media source, so it also omits their voice and GPU Ops rows.
-    """
-    from ..public_text_profile import OMITTED_OPS_SEED_SLUGS, voice_media_present
-
-    if voice_media_present():
-        return list(SEEDS)
-    return [seed for seed in SEEDS if seed["slug"] not in OMITTED_OPS_SEED_SLUGS]
-
-
 def seed_all(store) -> tuple[list[str], list[str]]:
-    """Insert every active seed row that doesn't already exist.
+    """Insert every seed row that doesn't already exist.
 
     Returns ``(inserted_slugs, skipped_slugs)``. Preserves operator edits —
     any slug already present is skipped even if the seed dict differs.
     """
     inserted: list[str] = []
     skipped: list[str] = []
-    for seed in active_seeds():
+    for seed in SEEDS:
         row = store.seed_operation_if_missing(seed)
         if row is None:
             skipped.append(seed["slug"])
@@ -1037,4 +1024,4 @@ def _adopt_host_key_container(store) -> None:
                                    actor="system-seed", expect_version=1)
 
 
-__all__ = ["SEEDS", "active_seeds", "seed_all"]
+__all__ = ["SEEDS", "seed_all"]
