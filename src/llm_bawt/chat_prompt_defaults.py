@@ -122,6 +122,21 @@ RUNTIME_CONTEXT_TEMPLATE = (
     "invoking for this turn."
 )
 
+# Installation block (TASK-2523) — appended app-side to every composed agent
+# prompt when the deployment knows its public UI origin. {origin} is required.
+INSTALLATION_CONTEXT_TEMPLATE = (
+    "## This installation\n"
+    "This BawtHub's web UI is at {origin}, the address its people open. "
+    "If it asks you to sign in, you have no login there; never ask anyone for a password."
+)
+
+# Added under the installation block only when owner-authorized inspection is
+# configured on this deployment (TASK-2523).
+INSPECTION_HINT = (
+    "To see your linked Tasks as the owner sees them, use inspect_bawthub_tasks "
+    "once the owner authorizes it in Settings → Profile → Bot inspection."
+)
+
 TTS_OUTPUT_INSTRUCTIONS = (
     "VOICE OUTPUT:\n"
     "Your response will be spoken via text-to-speech. Only include words to be spoken. "

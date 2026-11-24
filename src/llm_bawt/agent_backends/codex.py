@@ -11,6 +11,9 @@ bridge after thread/started fires for the first turn.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from typing import Any
+
 from .agent_bridge import AgentBridgeBackend
 
 
@@ -47,6 +50,28 @@ class CodexBackend(AgentBridgeBackend):
         if str(config.get("codex_transport") or "").strip() == "app_server":
             return frozenset({NEXT, IMAGES})
         return NO_STEER_CAPS
+
+    def stream_raw(
+        self,
+        prompt: str,
+        config: dict,
+        attachments: list | None = None,
+        trigger_message_id: str | None = None,
+    ) -> Iterator[str | dict[str, Any]]:
+        # TASK-2523: a pinned prompt already holds the composed bytes. Without a
+        # pin (e.g. the pin store failed), compose here exactly as the pin would
+        # have, so the turn still carries the installation block.
+        if not config.get("system_prompt_pinned"):
+            original = config.get("system_prompt")
+            composed = self.compose_system_prompt(original or "", config)
+            if composed != (original or ""):
+                config = {**config, "system_prompt": composed}
+        return super().stream_raw(
+            prompt,
+            config,
+            attachments=attachments,
+            trigger_message_id=trigger_message_id,
+        )
 
     def system_prompt_delivery(self, is_boundary: bool) -> str | None:
         # "now": the pin moved this turn, paste it even on a resumed thread.

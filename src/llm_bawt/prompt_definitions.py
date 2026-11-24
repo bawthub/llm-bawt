@@ -20,6 +20,8 @@ from .chat_prompt_defaults import (
     RESPONSE_STYLE_ELI5,
     RESPONSE_STYLE_TLDR,
     RUNTIME_CONTEXT_TEMPLATE,
+    INSTALLATION_CONTEXT_TEMPLATE,
+    INSPECTION_HINT,
     SCOPED_COMMIT_PROMPT,
     TASK_COPY_POLICY,
     SESSION_SEED_ACK,
@@ -417,6 +419,34 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
                 "Injected app-side by the claude-code agent backend (prepended "
                 "to the system prompt) so the agent has a ground-truth model id. "
                 "Requires {model}. TASK-490: migrated out of a hardcoded literal."
+            ),
+        },
+    ),
+    "agents.installation_context_template": PromptDefinition(
+        key="agents.installation_context_template",
+        title="Agent Installation Block",
+        category="agent_execution",
+        required_vars=("origin",),
+        loader=lambda: INSTALLATION_CONTEXT_TEMPLATE,
+        metadata={
+            "notes": (
+                "Appended app-side to every composed agent prompt when the "
+                "deployment's public UI origin is a valid http(s) origin. "
+                "Requires {origin}. TASK-2523."
+            ),
+        },
+    ),
+    "agents.inspection_hint": PromptDefinition(
+        key="agents.inspection_hint",
+        title="Agent Bot-Inspection Hint",
+        category="agent_execution",
+        required_vars=(),
+        loader=lambda: INSPECTION_HINT,
+        metadata={
+            "notes": (
+                "Added under the installation block only when owner-authorized "
+                "bot inspection is configured (the inspect_bawthub_tasks tool "
+                "is registered). TASK-2523."
             ),
         },
     ),
