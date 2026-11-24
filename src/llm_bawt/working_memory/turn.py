@@ -85,6 +85,10 @@ class WorkingMemoryTurn:
         llm_bawt._working_memory_section = None
         if not ctx.is_agent_backend or ctx.bridge_reset_action == "reset_only":
             return cls(ctx)
+        if getattr(llm_bawt, "turn_context_sealed", False):
+            # A sealed turn has no tools to keep working memory, and the
+            # policy check reads every bot's tags (TASK-2590 strict reader).
+            return cls(ctx)
         session_id = _session_id(ctx)
         try:
             if not session_id or not _pins(llm_bawt):

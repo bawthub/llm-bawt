@@ -64,6 +64,16 @@ def validate_inter_bot_claim(service: Any, request: Any):
         user_id = getattr(request, "user", None)
         ordinary = metadata.get("ordinary_chat")
         if (
+            producer == "ordinary" and isinstance(ordinary, dict)
+            and "new_session_intent" not in metadata
+            and not getattr(request, "_internal_inter_bot_delivery_ids", None)
+            and not getattr(request, "session_id", None)
+            and author.entity_type == "user" and author.entity_id == user_id
+        ):
+            # Only this validated claim marks the turn as an ordinary human
+            # start; no request field can (TASK-2590 strict reader).
+            request._ordinary_start_claim = delivery_id
+        if (
             inspection_origin() and getattr(request, "stream", False)
             and producer == "ordinary" and isinstance(ordinary, dict) and ordinary.get("stream") is True
             and not getattr(request, "_internal_inter_bot_delivery_ids", None)

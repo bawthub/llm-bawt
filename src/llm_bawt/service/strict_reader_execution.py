@@ -38,6 +38,10 @@ def is_strict_request(service, bot_id: str | None) -> bool:
 class StrictReaderLLMBawt(BoundAgentLLMBawt):
     """A request-owned instance built from one pre-read profile."""
 
+    #: Turn-level extras that need tools or fleet-wide reads (working memory,
+    #: assigned cards) are omitted for this instance.
+    turn_context_sealed = True
+
     def __init__(self, *args, admitted_bot: Bot, **kwargs):
         self._admitted_bot = admitted_bot
         super().__init__(*args, **kwargs)
@@ -83,9 +87,14 @@ def create_strict_instance(service, request, *, read_bot=load_named_bot,
         raise StrictReaderRefused("Request is not for the strict reader's bot")
     if not request.user or not request.model:
         raise StrictReaderRefused("Strict execution needs an explicit user and model")
-    # Only one direct ordinary turn is supported: no inter-bot, scheduled or
-    # routed delivery, and no explicit thread selection.
-    if getattr(request, "inter_bot_delivery_id", None) or getattr(request, "session_id", None):
+    # Only one ordinary human turn is supported: no inter-bot, scheduled or
+    # routed delivery, and no explicit thread selection. A durable claim is
+    # accepted only when the claim validator marked it as that same ordinary
+    # human start; a request field alone never qualifies.
+    delivery_id = getattr(request, "inter_bot_delivery_id", None)
+    if delivery_id and getattr(request, "_ordinary_start_claim", None) != delivery_id:
+        raise StrictReaderRefused("Strict execution supports only a direct ordinary turn")
+    if getattr(request, "session_id", None):
         raise StrictReaderRefused("Strict execution supports only a direct ordinary turn")
     bot = read_bot(service.config, slug)
     if bot is None or bot.slug != slug:

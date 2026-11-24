@@ -29,6 +29,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_message_native_upsert_pg.py::",
     "test_native_selected_owner_pg.py::",
     "test_strict_reader_stream_pg.py::",
+    "test_strict_reader_durable_pg.py::",
     "test_native_selected_write_guard_pg.py::",
     "test_bot_tags_pg.py::",
     "test_content_provenance_pg.py::",

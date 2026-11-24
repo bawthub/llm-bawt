@@ -168,6 +168,10 @@ def apply_assigned_cards(ctx: Any, messages: list, decision: Any) -> list:
     """``messages`` with the block on the last user message of an eligible turn."""
     from .working_memory.turn import append_to_last_user, is_maintenance_command, scheduler_turn
 
+    if getattr(ctx.llm_bawt, "turn_context_sealed", False):
+        # A sealed turn has no task tools, and the block reads the whole
+        # fleet's board and every bot's tags (TASK-2590 strict reader).
+        return messages
     block = assigned_cards_notice(
         ctx.svc._turn_log_store.engine,
         bot_id=ctx.bot_id,

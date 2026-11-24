@@ -14,7 +14,7 @@ from ..inspection_admission import INSPECTION_QUEUE_FIELD
 from ..inter_bot_delivery import DeliveryRecord, InterBotDeliveryStore
 from ..inter_bot_delivery_retry import fail_claim_with_restart_retry
 from ..inter_bot_delivery_user import resolve_delivery_user
-from ..steer_capabilities import INBOX_NEXT, bot_steer_caps
+from ..steer_capabilities import INBOX_NEXT, NO_STEER_CAPS, bot_steer_caps
 from .dispatcher_leadership import (
     PROBE_TIMEOUT_SECONDS,
     SESSION_GONE_ERRORS,
@@ -537,9 +537,16 @@ class InterBotDeliveryDispatcher:
 
     async def _drain_target(self, target_bot_id: str) -> bool:
         from ..bots import BotManager
+        from .strict_reader_execution import is_strict_request
 
-        bot = BotManager(self.service.config).get_bot(target_bot_id)
-        caps = bot_steer_caps(bot)
+        if is_strict_request(self.service, target_bot_id):
+            # TASK-2590: the strict reader's bot never touches the shared
+            # registry. Steering is unsupported for it, so it claims with no
+            # steer capability and has no inbox wake to publish.
+            bot, caps = None, NO_STEER_CAPS
+        else:
+            bot = BotManager(self.service.config).get_bot(target_bot_id)
+            caps = bot_steer_caps(bot)
         if INBOX_NEXT in caps:
             # Existing commit/gate/release wakes reach this async path even
             # when the durable app claim yields a head to the bridge owner.
@@ -897,12 +904,16 @@ class InterBotDeliveryDispatcher:
                 return
             if self._is_context_overflow(error):
                 from ..bots import BotManager
+                from .strict_reader_execution import STRICT_BACKEND, is_strict_request
 
-                bot = BotManager(self.service.config).get_bot(record.target_bot_id)
-                backend = (
-                    (getattr(bot, "agent_backend", None) or getattr(bot, "harness", None))
-                    if bot else None
-                )
+                if is_strict_request(self.service, record.target_bot_id):
+                    backend = STRICT_BACKEND  # admitted only for this backend
+                else:
+                    bot = BotManager(self.service.config).get_bot(record.target_bot_id)
+                    backend = (
+                        (getattr(bot, "agent_backend", None) or getattr(bot, "harness", None))
+                        if bot else None
+                    )
                 recovered = self.store.recover_context_overflow(
                     record.id,
                     claim_token,
