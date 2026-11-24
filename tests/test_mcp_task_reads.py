@@ -385,3 +385,17 @@ def test_replaced_text_is_readable_at_task_revisions(monkeypatch):
     summary = run(task_tools.get_task("TASK-1907"))
     assert "/task/revisions" in summary["paging"]["paths"]
     assert not any(c[0].endswith("/revisions") for c in api.calls[api.calls.index(("/tasks/TASK-1907/revisions", None)) + 1:])
+
+
+def test_failed_revisions_read_is_an_error_not_an_empty_list(monkeypatch):
+    api = Api()
+    real = api.__call__
+
+    async def failing(path, params=None):
+        if path.endswith("/revisions"):
+            return {"error": "not_found"}
+        return await real(path, params)
+
+    install(monkeypatch, failing)
+    result = run(task_tools.get_task("TASK-1907", path="/task/revisions"))
+    assert result == {"error": "revisions_unavailable"}

@@ -211,7 +211,11 @@ async def read_task(api_get: ApiGet, task_id: str, *, tool: str, path: str | Non
         if parts[:2] == ["task", "revisions"]:
             # TASK-2604: text an update replaced on the response or description.
             listed = await api_get(f"/tasks/{ref}/revisions")
-            task = {**task, "revisions": listed.get("revisions", []) if isinstance(listed, dict) else []}
+            revisions = listed.get("revisions") if isinstance(listed, dict) else None
+            if not isinstance(revisions, list):
+                # A failed read must not look like "nothing was kept".
+                return {"error": "revisions_unavailable"}
+            task = {**task, "revisions": revisions}
         project = task.get("project")
         reviews = None
         if path is None or parts[0] == "reviews":
