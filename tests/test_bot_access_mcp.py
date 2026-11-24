@@ -454,3 +454,32 @@ async def test_protected_session_defaults_pin_user_and_reject_pointer_override(m
         with pytest.raises(Exception, match="access_denied"):
             await catalog._tool_manager.call_tool("sessions_rotate", {"bot_id": "private_fixture", "user_id": "user_b"}, None)
     assert seen == [("private_fixture", "user_a")]
+
+
+@pytest.mark.asyncio
+async def test_identity_only_turn_profile_is_bound_to_signed_user(signer):
+    """TASK-2614: a regular chat turn reads/writes only its own user's profile."""
+    catalog = CatalogFastMCP("profile-user", bot_policy_resolver=Resolver())
+    seen = []
+
+    async def handler(action: str, entity_type: str = "user", entity_id: str | None = None):
+        seen.append((entity_type, entity_id))
+        return "ok"
+
+    catalog.add_tool(handler, name="profile")
+    chat = turn_codec.mint_task_turn_context(
+        session_id=str(uuid.uuid4()), turn_id="turn-" + uuid.uuid4().hex,
+        trigger_message_id=str(uuid.uuid4()), bot_id="public_fixture", user_id="user_a",
+        identity_only=True,
+    )
+    call = catalog._tool_manager.call_tool
+    with identity(chat):
+        await call("profile", {"action": "get"}, None)
+        await call("profile", {"action": "get", "entity_id": "user_a"}, None)
+        with pytest.raises(Exception, match="access_denied"):
+            await call("profile", {"action": "set", "entity_id": "user_b"}, None)
+    assert seen == [("user", "user_a"), ("user", "user_a")]
+    # A conversation-owning (agent) turn keeps its existing behavior.
+    with identity(turn(bot="public_fixture", user="user_a")):
+        await call("profile", {"action": "get", "entity_id": "user_b"}, None)
+    assert seen[-1] == ("user", "user_b")

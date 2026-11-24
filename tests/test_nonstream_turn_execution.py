@@ -328,7 +328,7 @@ def test_native_nonstream_tools_use_service_turn_identity(
         allowlist=frozenset({"memory_store"}),
         allows=lambda name: name == "memory_store",
         call_tool=lambda capability, name, arguments, tool_use_id=None: (
-            mcp_calls.append((capability, name, arguments)) or "stored"),
+            mcp_calls.append((capability, name, arguments, tool_use_id)) or "stored"),
     )
     service = _service(None, model_type="openai")
     llm = service._get_llm_bawt.return_value
@@ -399,7 +399,8 @@ def test_native_nonstream_tools_use_service_turn_identity(
             assert prepared.kwargs.get("context_prefix") is None
         llm.home_client.set.assert_called_once_with(entity="light.kitchen", state="on", brightness=None)
         llm.web_fetch_client.fetch.assert_called_once_with("https://example.test")
-        assert mcp_calls == [("turn-capability", "memory_store", {"content": "clean fact"})]
+        # The second ReAct round's only call; a text format gets a turn-bound id.
+        assert mcp_calls == [("turn-capability", "memory_store", {"content": "clean fact"}, "react_2_0")]
         assert minted == [{
             "session_id": minted[0]["session_id"], "turn_id": observed["turn_id"],
             "trigger_message_id": request.user_message_id,

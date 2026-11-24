@@ -263,7 +263,10 @@ class ToolLoop:
                 logger.info(f"🔧 {tc.name}({tc.arguments})")
             
             # Execute tools
-            tool_messages, tool_results = self._execute_tools(tool_calls, effective_handler)
+            # Text formats carry no provider call id; give each call one that
+            # is unique within this turn so its BawtHub MCP call can be signed.
+            tool_messages, tool_results = self._execute_tools(
+                tool_calls, effective_handler, text_call_prefix=f"react_{iteration}")
             has_executed_tools = True  # Mark that we've executed tools
             
             # Track tool interactions for history/context
@@ -317,14 +320,19 @@ class ToolLoop:
         """
         return list(self.tool_call_details)
     
-    def _execute_tools(self, tool_calls: list, handler) -> tuple[list["Message"], list[str]]:
-        """Execute a list of tool calls and return formatted results."""
+    def _execute_tools(self, tool_calls: list, handler,
+                       text_call_prefix: str | None = None) -> tuple[list["Message"], list[str]]:
+        """Execute a list of tool calls and return formatted results.
+
+        Native calls keep the provider's id (none means the MCP signer refuses);
+        text-format calls without one get ``<text_call_prefix>_<n>``.
+        """
         from ..models.message import Message
         results = []
         tool_messages: list[Message] = []
         first_tool = True  # Track first tool to add guidance
         
-        for tc in tool_calls:
+        for index, tc in enumerate(tool_calls):
             if not self.executor.can_execute_more():
                 formatted = handler.format_result(
                     tc.name, 
@@ -337,7 +345,10 @@ class ToolLoop:
                 # Every requested call needs a result, so keep going without executing.
                 continue
             
-            tool_call = ToolCall(name=tc.name, arguments=tc.arguments, raw_text=tc.raw_text or "")
+            call_id = getattr(tc, "tool_call_id", None) or (
+                f"{text_call_prefix}_{index}" if text_call_prefix else "")
+            tool_call = ToolCall(name=tc.name, arguments=tc.arguments, raw_text=tc.raw_text or "",
+                                 tool_use_id=call_id)
             result = self.executor.execute(tool_call)
             results.append(result)
             formatted = handler.format_result(

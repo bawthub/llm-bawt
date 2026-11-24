@@ -276,9 +276,12 @@ def stream_with_tools(
         log.info(f"🔧 Calling tool: {tc.name} with args: {tc.arguments}")
 
         from .parser import ToolCall, tool_result_is_error
-        tool_call = ToolCall(name=tc.name, arguments=tc.arguments, raw_text=tc.raw_text or "")
         arguments = tc.arguments if isinstance(tc.arguments, dict) else {"raw": tc.arguments}
+        # ReAct text has no provider call id; this one is unique within the
+        # turn and is what the BawtHub MCP call is signed with.
         call_id = getattr(tc, "tool_call_id", None) or f"react_{iteration}"
+        tool_call = ToolCall(name=tc.name, arguments=tc.arguments, raw_text=tc.raw_text or "",
+                             tool_use_id=call_id)
         if emit_tool_events:
             yield {"event": "tool_call", "name": tc.name, "arguments": arguments,
                    "tool_use_id": call_id, "trigger_message_id": trigger_message_id}

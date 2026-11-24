@@ -14,7 +14,9 @@ from llm_bawt.bot_access.service import SERVICE_SELF_TOOLS, is_service_self
 from llm_bawt.utils.bounded_worker import BoundedWorker
 from llm_bawt.utils.config import Config
 from llm_bawt.utils.db import get_shared_engine
-from .bot_access_identity import trusted_caller, trusted_session_owner, native_selected_constraint
+from .bot_access_identity import (
+    identity_only_turn, native_selected_constraint, trusted_caller, trusted_session_owner,
+)
 from .bot_access_manifest import AGGREGATE_TOOLS, BOT_TARGET_TOOLS, GUARDED_TOOLS
 
 _invocation: ContextVar[tuple[str, dict] | None] = ContextVar("bot_access_invocation", default=None)
@@ -96,6 +98,14 @@ class ToolBotAccess:
         elif name == "profile" and values.get("entity_type") != "user":
             target = access.require_target(values["entity_id"])
             values["entity_id"] = target
+        elif name == "profile" and identity_only_turn():
+            # A regular chat turn speaks for one signed user: its user profile
+            # target is that user, never another one or the default user.
+            user_id = access.caller.user_id if access.caller is not None else None
+            supplied = values.get("entity_id")
+            if user_id is None or (supplied and supplied != user_id):
+                raise BotAccessError("access_denied")
+            values["entity_id"] = user_id
         elif name == "bots_deliveries_list":
             for key in ("bot_id", "sender_bot_id", "target_bot_id"):
                 if values.get(key):

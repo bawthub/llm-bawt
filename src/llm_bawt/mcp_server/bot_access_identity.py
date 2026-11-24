@@ -50,6 +50,23 @@ def trusted_caller(name: str, arguments: dict) -> TrustedCaller | None:
         raise BotAccessError("caller_unavailable") from None
 
 
+def identity_only_turn() -> bool:
+    """Whether this request's turn capability is a regular chat bot's identity-only one.
+
+    Those turns stand for exactly one signed user, so user-scoped targets must
+    be that user. A capability that does not open fails closed.
+    """
+    raw = _raw_turn_capability.get()
+    if raw is None:
+        raw = current_task_turn_capability()
+    if raw is None:
+        return False
+    try:
+        return bool(open_task_turn_context(raw).identity_only)
+    except Exception:
+        raise BotAccessError("caller_unavailable") from None
+
+
 def trusted_session_owner(session_id: str, caller: TrustedCaller | None, *,
                           name: str | None = None, arguments: dict | None = None):
     """Existing verified conversation capability, never an SDK session key.

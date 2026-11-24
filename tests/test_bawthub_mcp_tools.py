@@ -400,3 +400,59 @@ def test_gated_tool_stays_out_of_discovery_even_when_allowlisted(monkeypatch):
 
 async def _return(value):
     return value
+
+
+# --- Every loop signs real MCP calls (TASK-2614 review) ---
+
+def _react_replies(*replies):
+    queue = iter(replies)
+    return lambda *_a, **_k: next(queue)
+
+
+def test_react_tool_loop_signs_mcp_calls_with_a_turn_bound_id(monkeypatch):
+    from llm_bawt.models.message import Message
+    from llm_bawt.tools.loop import ToolLoop
+
+    client_mcp, capability, executed, sent = _interceptor_rig(monkeypatch)
+    loop = ToolLoop(user_id="fixture-owner", bot_id="fixture-bot", tool_format="react",
+                    bawthub_mcp=client_mcp, turn_capability=capability)
+    llm = SimpleNamespace(supports_native_tools=lambda: False, query=_react_replies(
+        'Action: memory_search\nAction Input: {"query": "dogs"}',
+        "Final Answer: done"))
+    assert "done" in loop.run([Message(role="user", content="hi")], llm)
+    assert executed == [("dogs", None, "fixture-bot", "fixture-owner")]
+    assert sent[0][MCP_CALL_CONTEXT_KEY]["tool_use_id"] == "react_1_0"
+
+
+def test_native_tool_loop_forwards_the_provider_call_id(monkeypatch):
+    from llm_bawt.models.message import Message
+    from llm_bawt.tools.loop import ToolLoop
+
+    client_mcp, capability, executed, sent = _interceptor_rig(monkeypatch)
+    loop = ToolLoop(user_id="fixture-owner", bot_id="fixture-bot", tool_format="native",
+                    bawthub_mcp=client_mcp, turn_capability=capability)
+    rounds = iter([
+        ("", [{"id": "call_provider_7", "function": {
+            "name": "memory_search", "arguments": '{"query": "cats"}'}}]),
+        ("done", None),
+    ])
+    llm = SimpleNamespace(supports_native_tools=lambda: True,
+                          query_with_tools=lambda *_a, **_k: next(rounds))
+    assert loop.run([Message(role="user", content="hi")], llm) == "done"
+    assert executed == [("cats", None, "fixture-bot", "fixture-owner")]
+    assert sent[0][MCP_CALL_CONTEXT_KEY]["tool_use_id"] == "call_provider_7"
+
+
+def test_streamed_react_signs_mcp_calls(monkeypatch):
+    from llm_bawt.models.message import Message
+    from llm_bawt.tools.streaming import stream_with_tools
+
+    client_mcp, capability, executed, sent = _interceptor_rig(monkeypatch)
+    replies = iter(['Action: memory_search\nAction Input: {"query": "fish"}', "All done."])
+    out = list(stream_with_tools(
+        [Message(role="user", content="hi")], lambda _m, _s=None: iter([next(replies)]),
+        user_id="fixture-owner", bot_id="fixture-bot", tool_format="react",
+        bawthub_mcp=client_mcp, turn_capability=capability))
+    assert executed == [("fish", None, "fixture-bot", "fixture-owner")]
+    assert sent[0][MCP_CALL_CONTEXT_KEY]["tool_use_id"] == "react_1"
+    assert "All done." in "".join(chunk for chunk in out if isinstance(chunk, str))
