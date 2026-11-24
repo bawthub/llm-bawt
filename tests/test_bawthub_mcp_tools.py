@@ -7,11 +7,12 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import mcp.types as mcp_types
+from agent_bridge.mcp_call_context import MCP_CALL_CONTEXT_KEY
 import pytest
 
 from llm_bawt.integrations.bawthub_mcp import client as mcp_client
 from llm_bawt.integrations.bawthub_mcp.client import (
-    BawtHubMcpClient, McpToolDefinition, parse_allowlist,
+    BawtHubMcpClient, parse_allowlist,
 )
 from llm_bawt.task_turn_context import TASK_TURN_CONTEXT_HEADER
 from llm_bawt.tools.executor import ToolExecutor
@@ -32,13 +33,20 @@ CATALOG = [
 
 @pytest.fixture
 def client(monkeypatch):
-    calls = []
+    calls, stamps = [], []
+    # The real stamp is covered against the real interceptor below.
+    monkeypatch.setattr(BawtHubMcpClient, "_call_context",
+                        staticmethod(lambda capability, name, arguments, tool_use_id: {"stamp": name}))
 
     def bounded(coro, _timeout):
         return asyncio.run(coro)
 
     def fake(kind, value):
         async def run(self, headers, *args):
+            if kind == "call":
+                name, arguments = args
+                stamps.append(arguments.get(MCP_CALL_CONTEXT_KEY))
+                args = (name, {k: v for k, v in arguments.items() if k != MCP_CALL_CONTEXT_KEY})
             calls.append((kind, value, headers, args))
             return value
         return run
@@ -48,7 +56,7 @@ def client(monkeypatch):
     result = SimpleNamespace(content=[SimpleNamespace(type="text", text='{"ok": true}')], isError=False)
     monkeypatch.setattr(BawtHubMcpClient, "_call_async", fake("call", result))
     out = BawtHubMcpClient("http://mcp.example:8001", parse_allowlist("memory_search, messages_find"))
-    out.calls, out.result = calls, result
+    out.calls, out.result, out.stamps = calls, result, stamps
     return out
 
 
@@ -265,3 +273,92 @@ def test_stream_and_nonstream_prompts_match_their_executors():
         stream = tools_prompt()
     assert "tool_search" in stream and "tool_search" not in nonstream
     assert "tool_search" not in tools_prompt()  # the mark is scoped to the turn
+
+
+# --- Real approval interceptor: per-call stamp from the server-owned turn ---
+
+def _interceptor_rig(monkeypatch):
+    """The client calling the real ApprovalAwareFastMCP in-process."""
+    from cryptography.fernet import Fernet
+
+    from llm_bawt import task_turn_context as turn_codec
+    from llm_bawt.mcp_server import task_association
+    from llm_bawt.mcp_server.approval_interceptor import ApprovalAwareFastMCP
+
+    fernet = Fernet(Fernet.generate_key())
+    monkeypatch.setattr(turn_codec, "_get_fernet", lambda: fernet)
+    capability = turn_codec.mint_task_turn_context(
+        session_id="00000000-0000-4000-8000-000000000001", turn_id="turn-" + "a" * 32,
+        trigger_message_id="00000000-0000-4000-8000-000000000002", bot_id="fixture-bot", user_id="fixture-owner",
+        identity_only=True)
+    server = ApprovalAwareFastMCP("test", approval_store_provider=lambda: None)
+    executed = []
+
+    @server.tool(name="memory_search")
+    async def memory_search(query: str, bot_id: str | None = None):
+        owner = task_association.current_task_turn_context()
+        executed.append((query, bot_id, owner.bot_id, owner.user_id))
+        return {"hits": [query]}
+
+    sent = []
+
+    async def call(self, headers, name, arguments):
+        sent.append(dict(arguments))
+        binding = task_association.set_current_task_turn_capability(headers[TASK_TURN_CONTEXT_HEADER])
+        try:
+            return await server.call_tool(name, arguments)
+        finally:
+            task_association.reset_current_task_turn_capability(binding)
+
+    monkeypatch.setattr(mcp_client, "run_bounded", lambda coro, _timeout: asyncio.run(coro))
+    monkeypatch.setattr(BawtHubMcpClient, "_call_async", call)
+    client = BawtHubMcpClient("http://mcp.example:8001", parse_allowlist("memory_search ops_run"))
+    return client, capability, executed, sent
+
+
+def test_stamped_read_runs_with_the_signed_owner_and_clean_args(monkeypatch):
+    client, capability, executed, sent = _interceptor_rig(monkeypatch)
+    executor = ToolExecutor(user_id="fixture-owner", bot_id="fixture-bot",
+                            bawthub_mcp=client, turn_capability=capability)
+    call = ToolCall(name="memory_search", arguments={"query": "dogs"}, raw_text="", tool_use_id="call_1")
+    result = executor.execute(call)
+    assert not tool_result_is_error(result), result
+    assert executed == [("dogs", None, "fixture-bot", "fixture-owner")]
+    # The stamp rides only on the wire, bound to the finalized args.
+    stamp = sent[0][MCP_CALL_CONTEXT_KEY]
+    assert stamp["tool_use_id"] == "call_1" and stamp["backend"] == mcp_client.CALL_CONTEXT_BACKEND
+    assert call.arguments == {"query": "dogs"} and MCP_CALL_CONTEXT_KEY not in result
+    assert capability not in json.dumps(sent) and capability not in result
+
+
+@pytest.mark.parametrize("stamp, status", [
+    (None, "approval_context_missing"),
+    ({"version": 1, "tool_use_id": "x"}, "approval_context_invalid"),
+    ("mismatch", "approval_context_invalid"),
+])
+def test_missing_malformed_or_mismatched_stamp_is_refused(monkeypatch, stamp, status):
+    from agent_bridge.mcp_call_context import mint_mcp_call_context
+
+    client, capability, executed, _ = _interceptor_rig(monkeypatch)
+    if stamp == "mismatch":
+        stamp = mint_mcp_call_context(
+            capability=capability, tool_name="memory_search", tool_input={"query": "cats"},
+            tool_use_id="call_1", agent_request_id="turn-" + "a" * 32,
+            session_key="s", backend=mcp_client.CALL_CONTEXT_BACKEND)
+    monkeypatch.setattr(BawtHubMcpClient, "_call_context",
+                        staticmethod(lambda *_args: stamp))
+    args = {"query": "dogs"}
+    if stamp is None:
+        monkeypatch.setattr(mcp_client, "MCP_CALL_CONTEXT_KEY", "_unused_key")
+    with pytest.raises(mcp_client.BawtHubMcpToolError) as error:
+        client.call_tool(capability, "memory_search", args, tool_use_id="call_1")
+    assert status in str(error.value) or "not executed" in str(error.value)
+    assert executed == []
+
+
+def test_without_provider_call_id_or_for_gated_tools_nothing_is_sent(monkeypatch):
+    client, capability, executed, sent = _interceptor_rig(monkeypatch)
+    for name, call_id in (("memory_search", ""), ("ops_run", "call_2")):
+        with pytest.raises(mcp_client.BawtHubMcpToolError):
+            client.call_tool(capability, name, {"query": "x"}, tool_use_id=call_id)
+    assert sent == [] and executed == []

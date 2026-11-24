@@ -314,6 +314,7 @@ class ToolExecutor:
             name=new_name,
             arguments=merged_args,
             raw_text=tool_call.raw_text,
+            tool_use_id=tool_call.tool_use_id,
         )
 
         if original_name != new_name:
@@ -430,7 +431,8 @@ class ToolExecutor:
                 and "bot_id" in (loaded.input_schema.get("properties") or {})):
             arguments["bot_id"] = self.bot_id
         try:
-            text = self.bawthub_mcp.call_tool(self.turn_capability, tool_call.name, arguments)
+            text = self.bawthub_mcp.call_tool(
+                self.turn_capability, tool_call.name, arguments, tool_use_id=tool_call.tool_use_id)
         except BawtHubMcpToolError as error:
             return format_tool_result(tool_call.name, None, error=str(error))
         return format_tool_result(tool_call.name, text)

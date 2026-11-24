@@ -15,6 +15,8 @@ class ToolCall:
     name: str
     arguments: dict[str, Any]
     raw_text: str
+    # Provider-assigned call id, when the model API gives one (native tools).
+    tool_use_id: str = ""
 
     def __str__(self) -> str:
         return f"ToolCall({self.name}, {self.arguments})"

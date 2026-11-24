@@ -19,10 +19,21 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
+from agent_bridge.mcp_call_context import (
+    MCP_CALL_CONTEXT_KEY,
+    McpCallContextError,
+    mint_mcp_call_context,
+)
+
 from ...task_turn_context import TASK_TURN_CONTEXT_HEADER
 from ..ha_mcp.client import HomeAssistantNativeClient, run_bounded
 
 logger = logging.getLogger(__name__)
+
+# Backend label in the per-call stamp for regular (non-agent) chat turns.
+CALL_CONTEXT_BACKEND = "llm-bawt-chat"
+# Tools the server holds for operator approval; see approval_interceptor.
+APPROVAL_GATED_TOOLS = frozenset({"ops_run"})
 
 DEFAULT_MCP_BASE_URL = "http://127.0.0.1:8001"
 CATALOG_TTL_SECONDS = 300.0
@@ -99,21 +110,55 @@ class BawtHubMcpClient:
         )
         return [tool for s, tool in ranked if s >= 0][: max(1, limit)]
 
-    def call_tool(self, capability: str | None, name: str, arguments: dict[str, Any]) -> str:
+    def call_tool(
+        self, capability: str | None, name: str, arguments: dict[str, Any], *, tool_use_id: str = "",
+    ) -> str:
         if not self.allows(name):
             raise BawtHubMcpToolError(f"Tool '{name}' is not enabled for this bot")
+        if name in APPROVAL_GATED_TOOLS:
+            # A regular turn has no way to resume a held approval, so never
+            # start one from here.
+            raise BawtHubMcpToolError(f"{name} needs an approval that regular chat turns can't wait for")
         headers = self._headers(capability)
+        stamped = {**arguments, MCP_CALL_CONTEXT_KEY: self._call_context(capability, name, arguments, tool_use_id)}
         try:
-            result = run_bounded(self._call_async(headers, name, arguments), self._timeout)
+            result = run_bounded(self._call_async(headers, name, stamped), self._timeout)
         except Exception as error:
             logger.warning("BawtHub MCP call failed: %s: %s", name, error)
             raise BawtHubMcpToolError(f"Error calling {name}: {error}") from error
         text = HomeAssistantNativeClient._extract_text(result)
-        if getattr(result, "isError", False) is True or getattr(result, "is_error", False) is True:
+        structured = getattr(result, "structured_content", None) or getattr(result, "structuredContent", None)
+        # Policy refusals arrive as is_error inside the structured content.
+        if (getattr(result, "isError", False) is True or getattr(result, "is_error", False) is True
+                or (isinstance(structured, dict) and structured.get("is_error") is True)):
             raise BawtHubMcpToolError(text or f"{name} reported an error")
         return text
 
     # --- internals ---
+
+    @staticmethod
+    def _call_context(capability: str | None, name: str, arguments: dict[str, Any], tool_use_id: str) -> dict[str, Any]:
+        """Signed stamp binding this provider tool call to its final arguments.
+
+        The request identity comes from the server-minted turn capability, never
+        from the model. The stamp travels only in the MCP request; callers keep
+        the unstamped arguments for events, persistence and logs.
+        """
+        from ...task_turn_context import TaskTurnContextError, open_task_turn_context
+
+        if not capability:
+            raise BawtHubMcpToolError("BawtHub tools need a signed turn identity, which this turn lacks")
+        if not str(tool_use_id or "").strip():
+            raise BawtHubMcpToolError("BawtHub tools need the provider's tool call id, which this call lacks")
+        try:
+            turn = open_task_turn_context(capability)
+            return mint_mcp_call_context(
+                capability=capability, tool_name=name, tool_input=arguments,
+                tool_use_id=tool_use_id, agent_request_id=turn.turn_id,
+                session_key=turn.session_id, backend=CALL_CONTEXT_BACKEND,
+            )
+        except (TaskTurnContextError, McpCallContextError) as error:
+            raise BawtHubMcpToolError(f"This turn's signed identity is unusable: {error}") from error
 
     @staticmethod
     def _headers(capability: str | None) -> dict[str, str]:

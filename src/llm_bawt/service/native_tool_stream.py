@@ -187,7 +187,8 @@ class NativeToolStream:
                                 "trigger_message_id": trigger_message_id,
                             }
 
-                            tool_call_obj = ToolCall(name=name, arguments=args, raw_text="")
+                            tool_call_obj = ToolCall(
+                                name=name, arguments=args, raw_text="", tool_use_id=call_id)
                             if time.monotonic() >= deadline:
                                 limit_reason = "tool time budget"
                                 raw_result = format_tool_result(
