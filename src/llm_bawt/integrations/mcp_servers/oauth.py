@@ -206,6 +206,13 @@ def discover(http: httpx.Client, server_url: str) -> dict:
             raise IntegrationError("oauth_metadata_invalid")
         if value:
             check_destination(value, server_url)
+    # Some authorization servers issue a refresh token only for offline_access. Without
+    # one, the sign-in dies when the first access token expires, so ask when offered.
+    offered = metadata.get("scopes_supported")
+    if isinstance(offered, list) and "offline_access" in offered:
+        requested = (scope or "").split()
+        if "offline_access" not in requested:
+            scope = " ".join([*requested, "offline_access"])
     return {
         "issuer": issuer,
         "authorization_endpoint": str(metadata["authorization_endpoint"]),
@@ -294,16 +301,17 @@ class McpOAuth:
         with self._http(server) as http:
             meta = discover(http, server.url)
             client = self.store.load(f"client:{sid}")
-            # Reuse a registration only for the same authorization server and callback.
+            # Reuse a registration only for the same authorization server, callback and scope.
             register = not (client and client.meta.get("issuer") == meta["issuer"]
-                            and client.meta.get("redirect_uri") == redirect_uri and owned_by(client, server))
+                            and client.meta.get("redirect_uri") == redirect_uri
+                            and client.meta.get("scope", "") == meta["scope"] and owned_by(client, server))
             if register:
                 body = _register(http, meta, redirect_uri)
                 client = ConnectionRecord(
                     provider=f"client:{sid}", status="configured",
                     meta={"client_id": str(body["client_id"]), "issuer": meta["issuer"],
                           "redirect_uri": redirect_uri, "server_url": server.url,
-                          "generation": server.generation,
+                          "generation": server.generation, "scope": meta["scope"],
                           "token_endpoint_auth_method": str(body.get("token_endpoint_auth_method") or "none")},
                     secret={"client_secret": str(body["client_secret"])} if body.get("client_secret") else {})
         state, browser, verifier = (secrets.token_urlsafe(32) for _ in range(3))

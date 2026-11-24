@@ -1,6 +1,7 @@
 """TASK-2610: MCP-standard OAuth client for owner-added remote MCP servers, against a fake server."""
 from __future__ import annotations
 
+import json
 import time
 from urllib.parse import parse_qs, urlsplit
 
@@ -59,6 +60,8 @@ class FakeRemote:
         self.calls: list[httpx.Request] = []
         self.registrations = 0
         self.refresh_status = 200
+        self.as_scopes: list[str] | None = None
+        self.registered_scopes: list[str] = []
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         self.calls.append(request)
@@ -76,11 +79,13 @@ class FakeRemote:
                 "authorization_endpoint": self.endpoint, "token_endpoint": f"{AS}/token",
                 **({"registration_endpoint": f"{AS}/register"} if self.registration else {}),
                 "code_challenge_methods_supported": self.pkce if isinstance(self.pkce, str) else list(self.pkce),
-                "authorization_response_iss_parameter_supported": self.iss_param})
+                "authorization_response_iss_parameter_supported": self.iss_param,
+                **({"scopes_supported": self.as_scopes} if self.as_scopes is not None else {})})
         if url == f"{AS}/register":
             self.registrations += 1
             body = httpx.Request("POST", url, content=request.content).read()
             assert b'"token_endpoint_auth_method":"none"' in body.replace(b" ", b"")
+            self.registered_scopes.append(json.loads(body).get("scope", ""))
             return httpx.Response(201, json={"client_id": f"client-{self.registrations}"})
         if url == f"{AS}/token":
             form = {k: v[0] for k, v in parse_qs(request.content.decode()).items()}
@@ -129,6 +134,25 @@ def test_reuses_registration_for_same_issuer_and_callback(store):
     sign_in(oauth)
     sign_in(oauth)
     assert remote.registrations == 1
+
+
+def test_requests_offline_access_when_the_authorization_server_offers_it(store):
+    # Without offline_access some servers issue no refresh token and the sign-in dies in an hour.
+    remote = FakeRemote()
+    remote.as_scopes = ["openid", "offline_access", "mcp"]
+    _, params, _ = sign_in(oauth_for(store, remote))
+    assert params["scope"] == "mcp offline_access"
+    assert remote.registered_scopes == ["mcp offline_access"]
+
+
+def test_re_registers_when_the_requested_scope_changes(store):
+    remote = FakeRemote()
+    oauth = oauth_for(store, remote)
+    sign_in(oauth)
+    remote.as_scopes = ["mcp", "offline_access"]
+    _, params, _ = sign_in(oauth)
+    assert remote.registrations == 2 and params["client_id"] == "client-2"
+    assert remote.registered_scopes == ["mcp", "mcp offline_access"]
 
 
 def test_falls_back_to_well_known_without_www_authenticate(store):
