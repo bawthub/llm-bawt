@@ -271,7 +271,9 @@ def _normalize_metadata(row: dict) -> dict:
     meta.setdefault("agent_session_keys", {})
     meta.setdefault("forked_from", None)
     meta.setdefault("archived_at", row.get("archived_at"))
-    return meta
+    from ..strict_reader_execution import public_session_metadata
+
+    return public_session_metadata(meta)
 
 
 def _first_messages_sync(rows: list[dict]) -> dict[str, dict]:
@@ -659,6 +661,26 @@ async def put_agent_session_key(
 
     meta = row.get("session_metadata") or {}
     key_name = agent_key_name(backend)
+    from ..strict_reader_execution import STRICT_BACKEND, write_session_key
+
+    engine = getattr(storage, "engine", None)
+    if key_name == agent_key_name(STRICT_BACKEND) and engine is not None:
+        # TASK-2590: the strict marker is validated and the key written in one
+        # locked transaction; only the current strict run's token confirms it.
+        try:
+            service = get_service()
+        except RuntimeError:
+            service = None  # no strict selection can be proven: any marker clears
+        keys = await asyncio.to_thread(
+            write_session_key, engine, service, session_id, effective_bot, key_name,
+            session_key, body.model, (body.strict_run or "").strip() or None,
+        )
+        if keys is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        log.info("Agent session key stored: bot=%s thread=%s backend=%s sid=%s",
+                 effective_bot, session_id, backend, session_key)
+        return {"session_id": session_id, "backend": backend,
+                "agent_session_keys": keys, "stored": True}
     keys = dict(meta.get("agent_session_keys") or {})
     keys[key_name] = session_key
     models = dict(meta.get("agent_session_key_models") or {})
@@ -672,13 +694,11 @@ async def put_agent_session_key(
         "agent_session_keys": keys,
         "agent_session_key_models": models,
     }
-    from ..strict_reader_execution import SESSION_SELECTION_KEY, STRICT_BACKEND, confirm_session_key
+    from ..strict_reader_execution import SESSION_SELECTION_KEY
 
-    if key_name == agent_key_name(STRICT_BACKEND) and meta.get(SESSION_SELECTION_KEY) is not None:
-        # TASK-2590: a strict thread's marker confirms only a key written back
-        # by its current strict run; any other writeback clears it.
-        patch.update(confirm_session_key(get_service(), effective_bot, meta, session_key,
-                                         (body.strict_run or "").strip() or None))
+    if meta.get(SESSION_SELECTION_KEY) is not None:
+        # No locked confirmation is possible here: fail closed, never confirm.
+        patch[SESSION_SELECTION_KEY] = None
     ok = await storage.update_session_metadata(session_id, patch, bot_id=effective_bot)
     if not ok:
         raise HTTPException(status_code=500, detail="Metadata update failed")

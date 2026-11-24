@@ -14,6 +14,7 @@ Unset (the default), every request keeps the ordinary path unchanged.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import re
 
@@ -110,6 +111,12 @@ def strict_selection_fingerprint(service) -> dict:
 #: ``sessions.session_metadata`` key: the strict selection a session's SDK
 #: transcript runs under, and the one SDK key confirmed under it.
 SESSION_SELECTION_KEY = "strict_reader_selection"
+#: Marker field holding SHA-256 of the current strict run token (never the token).
+RUN_DIGEST_FIELD = "run_sha256"
+
+
+def _run_digest(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
 
 
 def bind_session_selection(engine, binding: dict | None, fingerprint: dict) -> dict | None:
@@ -123,13 +130,16 @@ def bind_session_selection(engine, binding: dict | None, fingerprint: dict) -> d
     selection drops the resume id (a cold start re-pins the current render)
     and resets the marker with no confirmed key.
 
-    Every strict turn also mints a fresh run token, records it in the marker
-    and carries it on its bridge command (``binding["strict_run"]``). Only a
-    writeback presenting the current token is confirmed, so a late PUT from
-    an ordinary run, an earlier strict run or another selection never
-    inherits strict provenance.
+    Every strict turn also mints a fresh unguessable run token and carries it
+    only on its internal bridge command (``binding["strict_run"]``). The
+    marker stores just its SHA-256 digest (``run_sha256``), and session reads
+    strip that too (``public_session_metadata``), so the token is a
+    server-owned secret shared only with the bridge run that received it.
+    Only a writeback presenting it is confirmed (``write_session_key``), so a
+    late PUT from an ordinary run, an earlier strict run or another selection
+    never inherits strict provenance.
     """
-    import uuid
+    import secrets
 
     from sqlalchemy import text
 
@@ -142,7 +152,7 @@ def bind_session_selection(engine, binding: dict | None, fingerprint: dict) -> d
     if engine is None:
         binding["thread_resume_id"] = None  # nothing proves the session's selection
         return binding
-    run = uuid.uuid4().hex
+    run = secrets.token_hex(32)
     with engine.begin() as conn:
         metadata = conn.execute(
             text("SELECT session_metadata FROM sessions WHERE id=:sid FOR UPDATE"),
@@ -151,7 +161,8 @@ def bind_session_selection(engine, binding: dict | None, fingerprint: dict) -> d
         recorded = (metadata or {}).get(SESSION_SELECTION_KEY) if isinstance(metadata, dict) else None
         resumes = bool(resume_id and isinstance(recorded, dict) and recorded.get("selection") == fingerprint
                        and recorded.get("sdk_key") == resume_id)
-        value = {"selection": fingerprint, "sdk_key": resume_id if resumes else None, "run": run}
+        value = {"selection": fingerprint, "sdk_key": resume_id if resumes else None,
+                 RUN_DIGEST_FIELD: _run_digest(run)}
         conn.execute(
             text("UPDATE sessions SET session_metadata = COALESCE(session_metadata, '{}'::jsonb)"
                  " || jsonb_build_object(CAST(:key AS text), CAST(:value AS jsonb)) WHERE id=:sid"),
@@ -178,13 +189,61 @@ def confirm_session_key(service, bot_id: str | None, metadata: dict | None, sess
     recorded = (metadata or {}).get(SESSION_SELECTION_KEY) if isinstance(metadata, dict) else None
     if not isinstance(recorded, dict):
         return {}
-    run = recorded.get("run")
-    if (isinstance(run, str) and run and strict_run == run
+    digest = recorded.get(RUN_DIGEST_FIELD)
+    if (service is not None and isinstance(digest, str) and digest and strict_run
+            and hmac.compare_digest(digest, _run_digest(strict_run))
             and is_strict_request(service, bot_id)
             and recorded.get("selection") == strict_selection_fingerprint(service)):
         return {SESSION_SELECTION_KEY: {"selection": recorded["selection"], "sdk_key": session_key,
-                                        "run": run}}
+                                        RUN_DIGEST_FIELD: digest}}
     return {SESSION_SELECTION_KEY: None}
+
+
+def write_session_key(engine, service, session_id: str, bot_id: str, key_name: str,
+                      session_key: str, model: str | None, strict_run: str | None) -> dict | None:
+    """Store an SDK key writeback and decide its strict provenance atomically.
+
+    One transaction locks the thread row, reads the marker, validates the
+    presented run token against its digest and writes the key, model and
+    marker patch together, so a marker changed by a concurrent strict turn
+    (new run, selection or clear) is never confirmed against stale state.
+    Returns the stored ``agent_session_keys`` map, or ``None`` when the row
+    does not belong to ``bot_id``.
+    """
+    from sqlalchemy import text
+
+    with engine.begin() as conn:
+        meta = conn.execute(
+            text("SELECT session_metadata FROM sessions WHERE id=:sid AND bot_id=:bot FOR UPDATE"),
+            {"sid": session_id, "bot": bot_id},
+        ).first()
+        if meta is None:
+            return None
+        meta = meta[0] if isinstance(meta[0], dict) else {}
+        keys = dict(meta.get("agent_session_keys") or {})
+        keys[key_name] = session_key
+        models = dict(meta.get("agent_session_key_models") or {})
+        if model:
+            models[key_name] = model
+        else:
+            models.pop(key_name, None)
+        patch: dict = {"agent_session_keys": keys, "agent_session_key_models": models}
+        patch.update(confirm_session_key(service, bot_id, meta, session_key, strict_run))
+        conn.execute(
+            text("UPDATE sessions SET session_metadata ="
+                 " COALESCE(session_metadata, '{}'::jsonb) || CAST(:patch AS jsonb) WHERE id=:sid"),
+            {"patch": json.dumps(patch), "sid": session_id},
+        )
+    return keys
+
+
+def public_session_metadata(meta: dict) -> dict:
+    """Session metadata as returned by reads: the strict run proof never leaves the server."""
+    recorded = meta.get(SESSION_SELECTION_KEY)
+    if isinstance(recorded, dict):
+        meta[SESSION_SELECTION_KEY] = {k: v for k, v in recorded.items()
+                                       if k not in (RUN_DIGEST_FIELD, "run")}
+    return meta
 
 
 def clear_session_selection(engine, binding: dict | None) -> None:

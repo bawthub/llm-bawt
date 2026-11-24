@@ -8,6 +8,7 @@ generation or house, and that route loss never falls back to the mansion.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 
 import pytest
@@ -166,8 +167,87 @@ def test_matching_strict_run_writeback_is_confirmed(durable, rig, monkeypatch):
     session_id, _ = _active_session(rig)
     _bind_sdk(durable, rig, monkeypatch, session_id, "sdk-fx-run", first["strict_run"])
     recorded = _marker(rig)
-    assert recorded["sdk_key"] == "sdk-fx-run" and recorded["run"] == first["strict_run"]
+    assert recorded["sdk_key"] == "sdk-fx-run"
+    # Only the digest is stored at rest; the raw token never is.
+    assert recorded[strict.RUN_DIGEST_FIELD] == hashlib.sha256(first["strict_run"].encode()).hexdigest()
+    assert first["strict_run"] not in json.dumps(_active_session(rig)[1])
     assert _turn(durable, rig).get("thread_resume_id") == "sdk-fx-run"
+
+
+def test_wrong_run_token_is_not_confirmed(durable, rig, monkeypatch):
+    first = _turn(durable, rig)
+    session_id, _ = _active_session(rig)
+    forged = "0" * len(first["strict_run"])
+    _bind_sdk(durable, rig, monkeypatch, session_id, "sdk-fx-forged", forged)
+    assert _marker(rig) is None
+    assert not _turn(durable, rig).get("thread_resume_id")
+
+
+def test_presenting_the_stored_digest_is_not_confirmed(durable, rig, monkeypatch):
+    _turn(durable, rig)
+    session_id, _ = _active_session(rig)
+    digest = _marker(rig)[strict.RUN_DIGEST_FIELD]
+    _bind_sdk(durable, rig, monkeypatch, session_id, "sdk-fx-digest", digest)
+    assert _marker(rig) is None
+
+
+def test_ordinary_session_reads_expose_no_run_proof(durable, rig, monkeypatch):
+    import asyncio
+    from llm_bawt.service.routes import session_continuity, sessions as routes
+    first = _turn(durable, rig)
+    session_id, _ = _active_session(rig)
+    _bind_sdk(durable, rig, monkeypatch, session_id, "sdk-fx-read", first["strict_run"])
+    digest = _marker(rig)[strict.RUN_DIGEST_FIELD]
+    monkeypatch.setattr(routes, "get_service", lambda: durable.rt.service)
+    details = asyncio.run(session_continuity.session_details(session_id, rig.bot, rig.user, 0, 10))
+    listed = asyncio.run(routes.list_sessions(bot_id=rig.bot, user=rig.user, status=None,
+                                              include_deleted=False, limit=50, query=None))
+    for payload in (details["session"], listed):
+        dumped = json.dumps(payload, default=lambda o: o.model_dump() if hasattr(o, "model_dump") else str(o))
+        assert first["strict_run"] not in dumped and digest not in dumped
+    marker = details["session"].session_metadata[strict.SESSION_SELECTION_KEY]
+    assert marker["sdk_key"] == "sdk-fx-read" and strict.RUN_DIGEST_FIELD not in marker
+
+
+def test_marker_change_during_writeback_cannot_confirm(durable, rig, monkeypatch):
+    """A strict turn re-minting the run while a writeback is in flight wins atomically."""
+    import threading
+    from sqlalchemy import text
+    first = _turn(durable, rig)
+    session_id, _ = _active_session(rig)
+    locked, release = threading.Event(), threading.Event()
+
+    def hold_row():
+        with rig.engine.begin() as conn:
+            conn.execute(text("SELECT 1 FROM sessions WHERE id=:s FOR UPDATE"), {"s": session_id})
+            # The next strict turn rotates the run digest under the row lock.
+            conn.execute(text(
+                "UPDATE sessions SET session_metadata = jsonb_set(session_metadata,"
+                " ARRAY[CAST(:k AS text), CAST(:f AS text)], to_jsonb(CAST(:d AS text))) WHERE id=:s"),
+                {"k": strict.SESSION_SELECTION_KEY, "f": strict.RUN_DIGEST_FIELD,
+                 "d": hashlib.sha256(b"fx-next-run").hexdigest(), "s": session_id})
+            locked.set()
+            release.wait(10)
+
+    holder = threading.Thread(target=hold_row)
+    holder.start()
+    assert locked.wait(10)
+    result = {}
+
+    def writeback():
+        _bind_sdk(durable, rig, monkeypatch, session_id, "sdk-fx-racing", first["strict_run"])
+        result["done"] = True
+
+    writer = threading.Thread(target=writeback)
+    writer.start()
+    writer.join(0.5)
+    assert "done" not in result, "writeback did not wait for the row lock"
+    release.set()
+    holder.join(10)
+    writer.join(10)
+    assert result.get("done")
+    # It validated against the rotated digest, so the stale run is not confirmed.
+    assert _marker(rig) is None
 
 
 def test_ordinary_key_writeback_never_inherits_strict_provenance(durable, rig, monkeypatch):
