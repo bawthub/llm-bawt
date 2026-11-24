@@ -986,10 +986,6 @@ def run_server(
     from llm_bawt.inspection_attestation import export_inspection_key
 
     _install_api_key()
-    # TASK-2523: inspect_bawthub_tasks signs in whichever process serves MCP,
-    # standalone (llm-mcp-server) or in-process on llm-service's thread, so
-    # that process owns the key and is its only publisher.
-    export_inspection_key()
     import argparse
 
     # Parse CLI arguments when called as entry point
@@ -1074,7 +1070,16 @@ def run_server(
             port=final_port,
             log_level=mcp.settings.log_level.lower(),
         )
-        uvicorn.Server(config).run()
+        # TASK-2523: inspect_bawthub_tasks signs with this process's key, so
+        # only the instance that owns the listener may publish it. A start that
+        # loses the bind (a standalone/embedded overlap or a slow restart) must
+        # not replace the key the serving instance signs with.
+        try:
+            sock = config.bind_socket()
+        except SystemExit as exc:  # uvicorn exits on bind failure
+            raise OSError(f"MCP server could not bind {final_host}:{final_port}") from exc
+        export_inspection_key()
+        uvicorn.Server(config).run(sockets=[sock])
 
 
 if __name__ == "__main__":
