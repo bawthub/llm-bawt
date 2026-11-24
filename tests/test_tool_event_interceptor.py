@@ -417,12 +417,15 @@ def test_idle_flush_survives_non_flushing_frames_before_the_tool_call():
                 now[0] += timeout
                 raise queue.Empty
             now[0] += 0.05
+            if step is tool:
+                # Sampled BEFORE the queue hands over the tool call, so the
+                # interceptor's own pre-tool flush cannot mask a missed idle.
+                seen_tool_with[:] = [e["delta"] for e in h.published if e["_type"] == "text_delta"]
             return step
 
     h = _make()
-    seen_tool_with = []
-    for item in h.it.run(drain_with_idle_flush(_Q(), lambda: True, clock=lambda: now[0])):
-        if isinstance(item, dict) and item.get("event") == "tool_call":
-            seen_tool_with = [e["delta"] for e in h.published if e["_type"] == "text_delta"]
-    # The tail was published before the tool card was read, exactly once.
+    seen_tool_with: list[str] = []
+    list(h.it.run(drain_with_idle_flush(_Q(), lambda: True, clock=lambda: now[0])))
     assert seen_tool_with == ["Short tail."]
+    # Published exactly once over the whole turn.
+    assert [e["delta"] for e in h.published if e["_type"] == "text_delta"] == ["Short tail."]
