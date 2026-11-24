@@ -165,7 +165,7 @@ class RemoteMcpTurn:
             raise RemoteMcpToolError(f"Tool '{name}' is not enabled for this bot")
         try:
             result = run_bounded(_call(server, parts[1], arguments), CALL_TIMEOUT_SECONDS)
-        except Exception as exc:  # noqa: BLE001 - never echo transport details or credentials
+        except Exception as exc:  # never echo transport details or credentials
             logger.warning("Remote MCP call %s failed: %s", name, type(exc).__name__)
             raise RemoteMcpToolError(f"{server.name} could not run {parts[1]} ({type(exc).__name__})") from exc
         text, structured = BawtHubMcpClient._result_parts(result)
