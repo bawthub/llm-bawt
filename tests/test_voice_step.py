@@ -832,7 +832,7 @@ def test_adapter_keepalive_is_15_seconds_and_disconnect_cancels_and_joins_observ
                 await release_cleanup.wait()
                 finished.set()
 
-        async def force_keepalive(tasks, *, timeout):
+        async def force_keepalive(tasks, *, timeout, **_kwargs):
             waits.append(timeout)
             await entered.wait()
             if len(waits) == 1:
@@ -986,5 +986,103 @@ def test_adapter_busy_voice_end_to_end_uses_only_post_barrier_step(monkeypatch, 
         assert len(service.admissions) == 1
         whole_turn.assert_not_awaited()
         _assert_shared_resources_untouched(service)
+
+    asyncio.run(scenario())
+
+
+# ── TASK-2612: a fresh agent turn is spoken live, block by block ──
+
+def _fresh(kind, **fields):
+    return {"_type": kind, "turn_id": "turn-fresh", "bot_id": "test-bot",
+            "user_id": "test-user", **fields}
+
+
+def _fresh_resolved(**fields):
+    return {"status": "IN_FLIGHT", "voice_direct_reply": True, "turn_id": "turn-fresh", **fields}
+
+
+def _observe_live(service, reader, spoken):
+    return voice_step.observe_voice_step(
+        service, _request(), {**RECEIPT, "busy": False}, reader,
+        deadline=asyncio.get_running_loop().time() + 60, on_text=spoken.append,
+    )
+
+
+def test_fresh_turn_text_is_released_live_and_only_the_unspoken_tail_follows(resolver):
+    async def scenario():
+        resolver.side_effect = [
+            _fresh_resolved(),
+            {"status": "DELIVERED", "voice_direct_reply": True,
+             "response_text": "First block.\n\nSecond block.\n\nTail"},
+        ]
+        spoken: list[str] = []
+        reader = _Reader([
+            None,
+            _fresh("text_delta", text_offset=0, delta="First block."),
+            {**_fresh("text_delta", text_offset=0, delta="other"), "turn_id": "turn-other"},
+            _fresh("tool_event", event="tool_start", text_offset=12),
+            _fresh("text_delta", text_offset=12, delta="\n\nSecond block."),
+            _fresh("text_delta", text_offset=12, delta="\n\nSecond"),  # replay
+            _fresh("turn_complete", text_offset=27, status="ok"),
+        ])
+        reply = await _observe_live(_service(), reader, spoken)
+        assert spoken == ["First block.", "\n\nSecond block."]
+        assert reply == voice_step.VoiceReply("\n\nTail")
+        assert reader.closed.is_set()
+
+    asyncio.run(scenario())
+
+
+def test_fresh_turn_gap_stops_live_release_and_repairs_from_persisted_reply(resolver):
+    async def scenario():
+        resolver.side_effect = [
+            _fresh_resolved(),
+            {"status": "DELIVERED", "voice_direct_reply": True, "response_text": "One. Two. Three."},
+        ]
+        spoken: list[str] = []
+        reader = _Reader([
+            _fresh("text_delta", text_offset=0, delta="One."),
+            _fresh("text_delta", text_offset=9, delta="Three."),  # lost " Two."
+            _fresh("text_delta", text_offset=4, delta=" Two."),
+        ])
+        assert await _observe_live(_service(), reader, spoken) == voice_step.VoiceReply(" Two. Three.")
+        assert spoken == ["One."]
+
+    asyncio.run(scenario())
+
+
+def test_fresh_turn_mismatched_persisted_reply_is_never_respoken(resolver):
+    async def scenario():
+        resolver.side_effect = [
+            _fresh_resolved(),
+            {"status": "DELIVERED", "voice_direct_reply": True, "response_text": "Different text"},
+        ]
+        spoken: list[str] = []
+        reader = _Reader([
+            _fresh("text_delta", text_offset=0, delta="Spoken"),
+            _fresh("turn_complete", text_offset=6, status="ok"),
+        ])
+        assert await _observe_live(_service(), reader, spoken) is None
+        assert spoken == ["Spoken"]
+
+    asyncio.run(scenario())
+
+
+def test_adapter_streams_live_frames_then_a_clean_finish(monkeypatch):
+    async def scenario():
+        async def observer(*_args, on_text, **_kwargs):
+            on_text("First block.")
+            await asyncio.sleep(0)
+            on_text(" Second.")
+            return None  # Everything was spoken live.
+
+        monkeypatch.setattr(voice_step, "observe_voice_step", observer)
+        service = _stream_service({**RECEIPT, "busy": False}, _Reader())
+        frames = await _collect(service, admission_comment=True, extensions="comment")
+        contents = [c["choices"][0]["delta"].get("content")
+                    for c in _chunks(frames) if c.get("choices")]
+        assert "".join(c for c in contents if c) == "First block. Second."
+        assert frames[-1] == DONE
+        assert not any("voice_step_unavailable" in f for f in frames)
 
     asyncio.run(scenario())

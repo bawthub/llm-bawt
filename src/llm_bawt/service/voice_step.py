@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import aclosing
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from .delivery_reply import resolve_delivery_reply
 
@@ -89,8 +89,73 @@ class VoiceStep:
         return False, None
 
 
+@dataclass
+class FreshTurnText:
+    """Contiguous UTF-16 frontier of one fresh turn's live text (TASK-2612).
+
+    The turn's own text_delta events are released as they arrive so a call
+    speaks each block while the agent keeps working. Any gap or malformed
+    delta stops live release; the caller repairs from the persisted reply.
+    """
+
+    turn_id: str
+    bot_id: str
+    user_id: str
+    offset: int = 0
+    spoken: str = ""
+
+    def accept(self, event: dict) -> tuple[bool, str]:
+        """Return (stop, new_text)."""
+        if (event.get("turn_id") != self.turn_id
+                or event.get("bot_id") != self.bot_id or event.get("user_id") != self.user_id):
+            return False, ""
+        kind = event.get("_type")
+        if kind == "turn_complete":
+            return True, ""
+        if kind != "text_delta":
+            return False, ""
+        start, delta = event.get("text_offset"), event.get("delta")
+        if type(start) is not int or start < 0 or not isinstance(delta, str) or start > self.offset:
+            return True, ""
+        try:
+            raw = delta.encode("utf-16-le")
+            end = start + len(raw) // 2
+            if end <= self.offset:
+                return False, ""
+            tail = raw[(self.offset - start) * 2:].decode("utf-16-le")
+        except UnicodeError:
+            return True, ""
+        if end > MAX_STEP_UNITS:
+            return True, ""
+        self.offset = end
+        self.spoken += tail
+        return False, tail
+
+
+async def _stream_fresh_turn(reader: Any, fresh: FreshTurnText, on_text: Callable[[str], None],
+                             *, deadline: float) -> None:
+    loop = asyncio.get_running_loop()
+    async with aclosing(reader.events(timeout_s=max(0, deadline - loop.time()))) as events:
+        async for event in events:
+            if event is None:
+                continue
+            stop, text = fresh.accept(event)
+            if text:
+                on_text(text)
+            if stop:
+                return
+
+
+def _unspoken_remainder(text: str, spoken: str) -> str | None:
+    """Text still owed after live release; None if the two disagree."""
+    if not spoken:
+        return text
+    return text[len(spoken):] if text.startswith(spoken) else None
+
+
 async def observe_voice_step(service: Any, request: Any, receipt: dict, reader: Any,
-                             *, deadline: float) -> VoiceReply | None:
+                             *, deadline: float,
+                             on_text: Callable[[str], None] | None = None) -> VoiceReply | None:
     """Wait for durable identity, then consume the cursor claimed BEFORE admission.
 
     Lifecycle may precede delivery settlement; Redis retains those events while
@@ -105,6 +170,7 @@ async def observe_voice_step(service: Any, request: Any, receipt: dict, reader: 
         return None
     bot = receipt.get("bot_id") or request.bot_id or service._default_bot
     user = receipt.get("user_id") or request.user or service.config.DEFAULT_USER
+    fresh: FreshTurnText | None = None
     try:
         async with asyncio.timeout_at(deadline):
             while True:
@@ -126,10 +192,23 @@ async def observe_voice_step(service: Any, request: Any, receipt: dict, reader: 
                     # by durable delivery, not the advisory busy snapshot: an
                     # idle admission may become a steer before claim (or vice
                     # versa). Never return a steered target's whole response.
-                    text = resolved.get("response_text")
+                    text = resolved.get("response_text") or ""
+                    if fresh is not None:
+                        text = _unspoken_remainder(text, fresh.spoken)
+                        if text is None:
+                            return None  # Never re-speak or splice a mismatched reply.
                     return VoiceReply(text, resolved.get("animation")) if text else None
                 if resolved.get("status") not in {"QUEUED", "STEERING", "DISPATCHING", "IN_FLIGHT"}:
                     return None
+                if (fresh is None and on_text is not None and reader is not None and not binding
+                        and resolved.get("voice_direct_reply") is True
+                        and resolved.get("status") in {"DISPATCHING", "IN_FLIGHT"}
+                        and isinstance(resolved.get("turn_id"), str) and resolved["turn_id"]):
+                    # The request's own fresh turn is running: speak its text as
+                    # it streams, then wait for the persisted reply's remainder.
+                    fresh = FreshTurnText(resolved["turn_id"], bot, user)
+                    await _stream_fresh_turn(reader, fresh, on_text, deadline=deadline)
+                    continue
                 await asyncio.sleep(min(0.25, max(0, deadline - loop.time())))
             step = VoiceStep(binding, receipt["user_message_id"], bot, user)
             async with aclosing(reader.events(timeout_s=max(0, deadline - loop.time()))) as events:

@@ -118,6 +118,14 @@ async def _wait_stream_reply(
         yield frame
 
 
+def _live_frame(request: ChatCompletionRequest, response_id: str, text: str) -> str:
+    return _data({
+        "id": response_id, "object": "chat.completion.chunk", "created": int(time.time()),
+        "model": _model(request),
+        "choices": [{"index": 0, "finish_reason": None, "delta": {"content": text}}],
+    })
+
+
 def _reply_frames(
     request: ChatCompletionRequest, text: str, *, extensions: str = "none",
     animation: str | None = None,
@@ -257,17 +265,44 @@ async def completion_stream(
                     # Route on the durable outcome, not just the advisory busy
                     # snapshot: another admission can start before this claim.
                     reply = None
+                    streamed = False
+                    live_id: str | None = None
                     busy = payload.get("busy") is True
                     if not busy or payload.get("steer_capable") is True:
                         deadline = voice_deadline if busy else (
                             voice_deadline + REPLY_TIMEOUT_SECONDS - VOICE_STEP_TIMEOUT_SECONDS
                         )
+                        # TASK-2612: a fresh turn's text is released live so the
+                        # call speaks each block instead of the whole reply at end.
+                        live: list[str] = []
+                        arrived = asyncio.Event()
+
+                        def _on_text(text: str) -> None:
+                            live.append(text)
+                            arrived.set()
+
                         observer = asyncio.create_task(observe_voice_step(
                             service, request, payload, reader, deadline=deadline,
+                            on_text=_on_text,
                         ))
                         try:
-                            while not observer.done():
-                                done, _ = await asyncio.wait({observer}, timeout=15.0)
+                            while True:
+                                if live:
+                                    text, live[:] = "".join(live), []
+                                    streamed = True
+                                    live_id = live_id or f"chatcmpl-{uuid.uuid4().hex[:12]}"
+                                    yield _live_frame(request, live_id, text)
+                                if observer.done():
+                                    break
+                                arrived.clear()
+                                waiter = asyncio.ensure_future(arrived.wait())
+                                done, _ = await asyncio.wait(
+                                    {observer, waiter}, timeout=15.0,
+                                    return_when=asyncio.FIRST_COMPLETED,
+                                )
+                                if not waiter.done():
+                                    waiter.cancel()
+                                    await asyncio.gather(waiter, return_exceptions=True)
                                 if not done:
                                     yield ": waiting for voice reply\n\n"
                             reply = await observer
@@ -275,7 +310,11 @@ async def completion_stream(
                             if not observer.done():
                                 observer.cancel()
                                 await asyncio.gather(observer, return_exceptions=True)
-                    if reply is None:
+                    if reply is None and streamed:
+                        # Live text was spoken; end cleanly without a warning.
+                        for frame in _reply_frames(request, "", extensions=extensions):
+                            yield frame
+                    elif reply is None:
                         warning = {"object": "service.warning", "warnings": ["voice_step_unavailable"]}
                         for frame in _openai_frames(_data(warning), warning, extensions):
                             yield frame
