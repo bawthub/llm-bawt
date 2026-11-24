@@ -8,8 +8,9 @@
 #
 # Same base and locked project deps as Dockerfile.app-cpu. torch comes from
 # PyTorch's CPU wheel index at the uv.lock version instead of the default
-# PyPI wheel, which pulls the multi-GB CUDA runtime on amd64. The model is
-# baked in so first boot needs no Hugging Face download.
+# PyPI wheel, which pulls the multi-GB CUDA runtime on amd64. The image carries
+# no model weights: first start fetches the pinned MiniLM revision from Hugging
+# Face, checks every file's SHA-256 and caches it in the /models volume.
 FROM python:3.12-slim
 
 ARG SOURCE_SHA=unknown
@@ -46,14 +47,15 @@ ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     LOCAL_MODEL_BRIDGE_EMBED_ONLY=1 \
     LOCAL_MODEL_EMBED_DEVICE=cpu \
-    LOCAL_MODEL_EMBED_MODEL=all-MiniLM-L6-v2
+    LOCAL_MODEL_EMBED_MODEL=all-MiniLM-L6-v2 \
+    LOCAL_MODEL_EMBED_PINNED_DIR=/models/all-MiniLM-L6-v2
 
-ARG EMBED_MODEL_ID=sentence-transformers/all-MiniLM-L6-v2
-RUN python -c "from sentence_transformers import SentenceTransformer as S; \
-m = S('${EMBED_MODEL_ID}', device='cpu'); \
-assert m.get_sentence_embedding_dimension() == 384"
+# Fail the build, not a tenant's health, if the library stack cannot import.
+RUN python -c "import sentence_transformers, local_model_bridge.pinned_embed_model" \
+    && mkdir -p /models
+VOLUME /models
 
 EXPOSE 8683 8684
-HEALTHCHECK --interval=15s --timeout=5s --start-period=60s --retries=5 \
+HEALTHCHECK --interval=15s --timeout=5s --start-period=300s --retries=5 \
     CMD curl -f http://localhost:8683/health || exit 1
 CMD ["python", "-m", "local_model_bridge"]
