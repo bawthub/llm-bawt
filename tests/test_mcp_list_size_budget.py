@@ -43,8 +43,10 @@ FULL_BOT = {
     },
 }
 
-#: ~80 tokens per bot (JSON punctuation tokenizes densely; 4 chars/token is pessimistic).
-BOT_ROW_BUDGET = 340
+#: ~90 tokens per bot (JSON punctuation tokenizes densely; 4 chars/token is pessimistic).
+#: Raised from 340 to 370 when the model ref returned to compact rows: callers
+#: and the chat card need which model a bot runs, not just its vendor.
+BOT_ROW_BUDGET = 370
 
 
 def test_a_compact_bot_row_fits_its_budget_and_keeps_the_routing_facts():
