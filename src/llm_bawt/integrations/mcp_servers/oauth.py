@@ -373,14 +373,20 @@ class McpOAuth:
                   "client_id": pending["client_id"], "resource": pending["resource"],
                   "server_url": server.url, "generation": server.generation,
                   "scope": str(token.get("scope") or pending["scope"]),
-                  "expires_at": _expires_at(token), "verified_at": time.time()},
+                  "expires_at": _expires_at(token), "verified_at": time.time(),
+                  # The client's token-endpoint auth travels with the token it is bound to,
+                  # so one commit publishes both and refresh never needs another row.
+                  "token_endpoint_auth_method": str(client.meta.get("token_endpoint_auth_method") or "none")},
             secret={"access_token": token["access_token"],
-                    **({"refresh_token": token["refresh_token"]} if token.get("refresh_token") else {})})
+                    **({"refresh_token": token["refresh_token"]} if token.get("refresh_token") else {}),
+                    **({"client_secret": client.secret["client_secret"]}
+                       if client.secret.get("client_secret") else {})})
         with self.fenced(server):
             self.require_current(server)
             self.store.commit_connection(sid, pending["claim"], record)
             if isinstance(fresh, dict):
-                self.store.save(client)  # the new token is bound to this registration
+                # Only for reuse by a later sign-in; if this write is lost, that one registers again.
+                self.store.save(client)
         return pending["return_to"]
 
     def access_token(self, server: McpServer) -> str:
@@ -395,9 +401,19 @@ class McpOAuth:
         if record.secret.get("access_token") and (expires_at is None or expires_at > time.time() + 60):
             return record.secret["access_token"]
         refresh = record.secret.get("refresh_token")
-        client = self.store.load(f"client:{sid}")
-        if (not refresh or not client or client.meta.get("client_id") != record.meta.get("client_id")
-                or not owned_by(client, server)):
+        if record.meta.get("token_endpoint_auth_method") and record.meta.get("client_id"):
+            client = ConnectionRecord(
+                provider=f"client:{sid}", status="configured",
+                meta={"client_id": record.meta["client_id"],
+                      "token_endpoint_auth_method": record.meta["token_endpoint_auth_method"]},
+                secret=({"client_secret": record.secret["client_secret"]}
+                        if record.secret.get("client_secret") else {}))
+        else:  # a token committed before it carried its client's auth
+            client = self.store.load(f"client:{sid}")
+            if (not client or client.meta.get("client_id") != record.meta.get("client_id")
+                    or not owned_by(client, server)):
+                raise IntegrationError("reauthorization_required")
+        if not refresh:
             raise IntegrationError("reauthorization_required")
         check_destination(record.meta["token_endpoint"], server.url)
         try:

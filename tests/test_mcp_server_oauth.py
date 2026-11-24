@@ -63,6 +63,7 @@ class FakeRemote:
         self.as_scopes: list[str] | None = None
         self.resource_scopes = True  # the challenge and resource metadata name "mcp"
         self.registered_scopes: list[str | None] = []
+        self.refresh_clients: list[str | None] = []
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         self.calls.append(request)
@@ -94,6 +95,7 @@ class FakeRemote:
             form = {k: v[0] for k, v in parse_qs(request.content.decode()).items()}
             assert form["resource"] == MCP_URL
             if form["grant_type"] == "refresh_token":
+                self.refresh_clients.append(form.get("client_id"))
                 if self.refresh_status != 200:
                     return httpx.Response(self.refresh_status, json={"error": "invalid_grant"})
                 return httpx.Response(200, json={"access_token": "access-2", "refresh_token": "refresh-2",
@@ -197,6 +199,48 @@ def test_abandoned_reconnect_keeps_the_working_refresh(store):
     store.save(record)
     assert oauth.access_token(SERVER) == "access-2"
     assert store.load(f"client:{store_id('tools')}").meta["client_id"] == "client-1"
+    assert remote.refresh_clients == ["client-1"]
+
+
+def _expire(store):
+    record = store.load(store_id("tools"))
+    record.meta = {**record.meta, "expires_at": time.time() - 1}
+    store.save(record)
+
+
+def test_a_lost_registration_write_does_not_strand_the_new_token(store, monkeypatch):
+    remote = FakeRemote()
+    oauth = oauth_for(store, remote)
+    sign_in(oauth)
+    remote.as_scopes = ["mcp", "offline_access"]
+    save = store.save
+
+    def failing_save(record):
+        if record.provider.startswith("client:"):
+            raise RuntimeError("interrupted after the token commit")
+        return save(record)
+
+    monkeypatch.setattr(store, "save", failing_save)
+    with pytest.raises(RuntimeError):
+        sign_in(oauth)
+    monkeypatch.setattr(store, "save", save)
+    # The committed token refreshes with the client it was issued to, not the stale row.
+    assert store.load(f"client:{store_id('tools')}").meta["client_id"] == "client-1"
+    _expire(store)
+    assert oauth.access_token(SERVER) == "access-2"
+    assert remote.refresh_clients == ["client-2"]
+
+
+def test_a_token_from_before_the_client_auth_was_stored_still_refreshes(store):
+    remote = FakeRemote()
+    oauth = oauth_for(store, remote)
+    sign_in(oauth)
+    record = store.load(store_id("tools"))
+    record.meta = {k: v for k, v in record.meta.items() if k != "token_endpoint_auth_method"}
+    record.meta["expires_at"] = time.time() - 1
+    store.save(record)
+    assert oauth.access_token(SERVER) == "access-2"
+    assert remote.refresh_clients == ["client-1"]
 
 
 def test_falls_back_to_well_known_without_www_authenticate(store):
