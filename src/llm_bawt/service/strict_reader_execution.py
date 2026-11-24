@@ -46,6 +46,20 @@ class StrictReaderLLMBawt(BoundAgentLLMBawt):
     def _fallback_bot(self, config):
         raise StrictReaderRefused("Strict instance has no default-bot fallback")
 
+    def _tag_context_enabled(self) -> bool:
+        # The family roster lists every bot; a strict turn omits it.
+        return False
+
+    def _resolve_skills(self, service_cls, engine):
+        from ..skills.service import caps_from_settings
+
+        def no_roster():
+            raise StrictReaderRefused("Strict skill resolution may not list bots")
+
+        service = service_cls(engine, list_bots=no_roster,
+                              caps=lambda: caps_from_settings(self.config))
+        return service.resolve_admitted(self._admitted_bot)
+
 
 def create_strict_instance(service, request, *, read_bot=load_named_bot,
                            instance_type=StrictReaderLLMBawt):

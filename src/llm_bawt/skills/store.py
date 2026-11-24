@@ -13,7 +13,7 @@ catalog and the bot list.
 """
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 
 from sqlalchemy import text
@@ -94,6 +94,19 @@ class SkillAssignmentStore:
         result = conn.execute(text("""
             SELECT scope_type, scope_id, skill_ref, mode, position, updated_by
             FROM skill_assignments ORDER BY scope_type, scope_id, position, skill_ref"""))
+        return [Assignment(**row) for row in result.mappings()]
+
+    @staticmethod
+    def rows_for(conn, slug: str, tags: Iterable[str]) -> list[Assignment]:
+        """Only the rows that can apply to one bot: global, its own, its tags'."""
+        result = conn.execute(text("""
+            SELECT scope_type, scope_id, skill_ref, mode, position, updated_by
+            FROM skill_assignments
+            WHERE scope_type = 'global'
+               OR (scope_type = 'bot' AND scope_id = :slug)
+               OR (scope_type = 'tag' AND scope_id = ANY(:tags))
+            ORDER BY scope_type, scope_id, position, skill_ref"""),
+            {"slug": slug, "tags": sorted(tags)})
         return [Assignment(**row) for row in result.mappings()]
 
     @staticmethod

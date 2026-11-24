@@ -230,6 +230,14 @@ class PromptSectionsMixin:
                     },
                 )
 
+    def _tag_context_enabled(self) -> bool:
+        """The family roster reads every bot; strict instances turn it off."""
+        return True
+
+    def _resolve_skills(self, service_cls, engine):
+        """This turn's skill resolution; strict instances resolve their admitted bot only."""
+        return service_cls.from_config(engine, self.config).resolve_bot(self.bot_id)
+
     def _sec_tag_context(self, builder: PromptBuilder, prompt: str) -> None:
         """TASK-1249 bot-tag section (agent backends only): this bot's role-tag
         instructions and the family roster, rendered into the operator's
@@ -238,6 +246,8 @@ class PromptSectionsMixin:
         failure skips the section; it never fails the prompt build."""
         from ..bot_tags.context import TEMPLATE_KEY, load_tag_context
 
+        if not self._tag_context_enabled():
+            return
         try:
             resolved = self.config_resolver.resolve_body(
                 TEMPLATE_KEY, scope_type="bot", scope_id=self.bot_id
@@ -297,8 +307,7 @@ class PromptSectionsMixin:
         self._skill_resolution = None
         self._injected_skill_refs = ()
         try:
-            engine = get_shared_engine(self.config)
-            resolution = SkillService.from_config(engine, self.config).resolve_bot(self.bot_id)
+            resolution = self._resolve_skills(SkillService, get_shared_engine(self.config))
             self._skill_resolution = resolution
             injected = resolution.injected if resolution is not None else ()
             if not injected:

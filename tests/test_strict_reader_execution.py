@@ -213,3 +213,145 @@ def test_strict_instance_has_no_other_bot_or_default_fallback():
         BaseLLMBawt._init_bot(inst, None)
     with pytest.raises(strict.StrictReaderRefused):
         inst._fallback_bot(None)
+
+
+# -- turn assembly: skills and roster stay scoped to the admitted bot --------
+
+from contextlib import contextmanager  # noqa: E402
+
+from llm_bawt.bot_tags import facade as tag_facade  # noqa: E402
+from llm_bawt.core import prompt_sections  # noqa: E402
+from llm_bawt.skills import service as skill_service  # noqa: E402
+from llm_bawt.skills.resolver import Assignment  # noqa: E402
+
+ROWS = [
+    Assignment("global", "*", "shared-skill", "inject", 0, None),
+    Assignment("bot", SLUG, "own-skill", "inject", 1, None),
+    Assignment("tag", "coder", "role-skill", "inject", 2, None),
+    Assignment("bot", "other-agent", "foreign-skill", "inject", 0, None),
+    Assignment("tag", "reviewer", "foreign-role-skill", "inject", 0, None),
+]
+
+
+class ScopedStore:
+    """Emulates rows_for's WHERE clause; any unscoped read fails."""
+
+    def __init__(self):
+        self.asked = []
+
+    @contextmanager
+    def read(self):
+        yield "conn"
+
+    def rows_for(self, conn, slug, tags):
+        self.asked.append((slug, frozenset(tags)))
+        return [r for r in ROWS if r.scope_type == "global"
+                or (r.scope_type == "bot" and r.scope_id == slug)
+                or (r.scope_type == "tag" and r.scope_id in tags)]
+
+    def rows(self, conn):
+        raise AssertionError("every skill assignment was read")
+
+
+class Source:
+    kind = "synthetic"
+
+    def get(self, ref):
+        return SimpleNamespace(root=f"/skills/{ref}")
+
+    def read_body(self, ref):
+        return SimpleNamespace(tokens=10, content_sha=ref, text=f"BODY:{ref}")
+
+    def list(self):
+        return []
+
+    def complete(self):
+        return True
+
+
+class Builder:
+    def __init__(self):
+        self.sections = {}
+
+    def add_section(self, name, content, **_k):
+        self.sections[name] = content
+
+
+@pytest.fixture
+def skills_world(monkeypatch):
+    store = ScopedStore()
+    real_init = skill_service.SkillService.__init__
+
+    def init(self, engine, **kwargs):
+        real_init(self, engine, **kwargs)
+        self.store, self.source = store, Source()
+
+    monkeypatch.setattr(skill_service.SkillService, "__init__", init)
+    monkeypatch.setattr(skill_service.SkillService, "_is_migrated", lambda self, conn: True)
+    monkeypatch.setattr(skill_service.SkillService, "_world",
+                        lambda *a: (_ for _ in ()).throw(AssertionError("skill world read")))
+    monkeypatch.setattr(skill_service, "caps_from_settings",
+                        lambda config: skill_service.Caps(per_skill=1000, total=1000))
+    monkeypatch.setattr(tag_facade.BotTags, "snapshot",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("tag snapshot read")))
+    import llm_bawt.utils.db as db
+    monkeypatch.setattr(db, "get_shared_engine", lambda config: "engine")
+    return store
+
+
+def _assembling_instance():
+    bot = Bot(slug=SLUG, name="Sample", description="", system_prompt="", tags=["coder"],
+              bot_type="agent", agent_backend="claude-code")
+    inst = _bare_strict_instance(bot)
+    inst.bot_id, inst.bot, inst.config = SLUG, bot, SimpleNamespace()
+    inst.config_resolver = SimpleNamespace(resolve_body=lambda key, **k: SimpleNamespace(
+        body="{body}" if key.endswith("entry") or "entry" in key else "", source="t"))
+    return inst
+
+
+def test_strict_turn_assembly_resolves_only_admitted_skills_and_omits_roster(skills_world, monkeypatch):
+    monkeypatch.setattr("llm_bawt.bot_tags.context.load_tag_context",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("family roster read")))
+    inst = _assembling_instance()
+    builder = Builder()
+    inst._sec_tag_context(builder, "")
+    inst._sec_injected_skills(builder, "")
+    assert "tag_context" not in builder.sections
+    refs = {e.ref for e in inst._skill_resolution.injected}
+    assert refs == {"shared-skill", "own-skill", "role-skill"}
+    body = builder.sections["injected_skills"]
+    assert "BODY:own-skill" in body and "BODY:role-skill" in body
+    assert "foreign" not in body
+    assert skills_world.asked == [(SLUG, frozenset({"coder"}))]
+
+
+def test_strict_skills_refuse_before_migration(skills_world, monkeypatch):
+    monkeypatch.setattr(skill_service.SkillService, "_is_migrated", lambda self, conn: False)
+    inst = _assembling_instance()
+    builder = Builder()
+    inst._sec_injected_skills(builder, "")
+    assert inst._skill_resolution is None and "injected_skills" not in builder.sections
+
+
+def test_private_admitted_bot_gets_no_skills(skills_world):
+    inst = _assembling_instance()
+    inst._admitted_bot.include_in_global_search = False
+    builder = Builder()
+    inst._sec_injected_skills(builder, "")
+    assert "injected_skills" not in builder.sections
+
+
+def test_ordinary_turn_assembly_keeps_registry_resolution():
+    seen = []
+
+    class OrdinarySvc:
+        @classmethod
+        def from_config(cls, engine, config):
+            seen.append(engine)
+            return SimpleNamespace(resolve_bot=lambda slug: seen.append(slug) or "resolution")
+
+    ordinary = object.__new__(prompt_sections.PromptSectionsMixin)
+    ordinary.config, ordinary.bot_id = None, SLUG
+    assert ordinary._tag_context_enabled() is True
+    assert ordinary._resolve_skills(OrdinarySvc, "engine") == "resolution"
+    assert seen == ["engine", SLUG]

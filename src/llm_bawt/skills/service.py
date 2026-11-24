@@ -158,6 +158,25 @@ class SkillService:
             return None
         return self._resolve(world, slug, self._caps())
 
+    def resolve_admitted(self, bot) -> SkillResolution:
+        """One already-read bot's resolution without reading any other bot.
+
+        Reads only the assignment rows that can apply to this bot (global,
+        its own, its tags') and takes its facts from the admitted profile; it
+        never lists bots or reads the tag snapshot. Before the adopt-era
+        migration it refuses (that conversion needs every bot's facts).
+        """
+        tags = frozenset(bot.tags or ())
+        with self.store.read() as conn:
+            if not self._is_migrated(conn):
+                raise SkillServiceError(409, "skill assignments not migrated; scoped resolution unavailable")
+            rows = self.store.rows_for(conn, bot.slug, tags)
+        facts = BotFacts(
+            slug=bot.slug, bot_type=bot.bot_type, harness=bot.agent_backend, tags=tags,
+            private=BehaviorTag.PRIVATE in tags or not getattr(bot, "include_in_global_search", True),
+        )
+        return resolve(facts, rows, self.source, self._caps())
+
     # -- catalog -----------------------------------------------------------
 
     def catalog(self) -> list[dict]:
