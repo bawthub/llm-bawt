@@ -166,7 +166,9 @@ def test_advertised_endpoints_must_be_public_https(store):
 
 @pytest.mark.parametrize("url,error", [
     ("https://public.example.org/token", None),
-    ("https://tools.example.net:8443/token", None),  # the host the operator chose, even if private
+    ("https://tools.example.net/token", None),  # the origin the operator chose, even if private
+    ("https://tools.example.net:443/token", None),
+    ("https://tools.example.net:8443/token", "destination_not_allowed"),  # same host, another service
     ("https://private.example.org/token", "destination_not_allowed"),
     ("https://unknown.example.org/token", "destination_not_allowed"),
     ("https://10.0.0.5/token", "destination_not_allowed"),
@@ -284,3 +286,65 @@ def test_invalid_slugs_refused(slug):
 def test_invalid_urls_refused(url):
     with pytest.raises(McpServerError, match="invalid_url"):
         validate_url(url)
+
+
+def test_writes_are_fenced_to_the_row_they_began_for(store):
+    """A sign-in for a removed or re-added server never writes its pending flow or tokens."""
+    rows = {"tools": SERVER}
+    oauth = oauth_for(store, FakeRemote())
+    oauth.current = rows.get
+    flow = oauth.start(SERVER, ORIGIN, SETTINGS)
+    state = parse_qs(urlsplit(flow["authorization_url"]).query)["state"][0]
+    rows["tools"] = McpServer("tools", "Tools", MCP_URL, "streamable_http", "oauth", True, "gen-2")
+    with pytest.raises(IntegrationError, match="server_changed"):
+        oauth.finish(SERVER, state, flow["browser"], "the-code", "", "")
+    assert store.load(store_id("tools")) is None
+    with pytest.raises(IntegrationError, match="server_changed"):
+        oauth.start(SERVER, ORIGIN, SETTINGS)
+    del rows["tools"]
+    with pytest.raises(IntegrationError, match="server_changed"):
+        oauth.start(SERVER, ORIGIN, SETTINGS)
+
+
+class _Stream:
+    def __init__(self, host):
+        self.host = host
+
+
+def _backend(monkeypatch):
+    connected = []
+
+    def connect(self, host, port, timeout=None, local_address=None, socket_options=None):
+        connected.append((host, port))
+        return _Stream(host)
+
+    monkeypatch.setattr(oauth_module.httpcore.SyncBackend, "connect_tcp", connect)
+    return oauth_module._PolicyBackend(("tools.example.net", 443)), connected
+
+
+def test_connections_go_only_to_addresses_that_passed(monkeypatch):
+    backend, connected = _backend(monkeypatch)
+    backend.connect_tcp("tools.example.net", 443)  # the configured origin, as chosen
+    backend.connect_tcp("auth.example.net", 443)   # resolved here, connected by address
+    assert connected == [("tools.example.net", 443), ("93.184.216.34", 443)]
+    for host, port in [("private.example.org", 443), ("mixed.example.org", 443),
+                       ("tools.example.net", 8443), ("10.0.0.5", 443), ("unknown.example.org", 443)]:
+        with pytest.raises(IntegrationError, match="destination_not_allowed"):
+            backend.connect_tcp(host, port)
+    assert len(connected) == 2
+
+
+def test_the_default_client_uses_the_policy_transport():
+    transport = oauth_module.policy_transport(MCP_URL)
+    assert isinstance(transport._pool._network_backend, oauth_module._PolicyBackend)
+
+
+@pytest.mark.parametrize("url,shown", [
+    ("https://tools.example.net/mcp", "https://tools.example.net/…"),
+    ("https://tools.example.net/k/secret-path", "https://tools.example.net/…"),
+    ("https://tools.example.net:8443/?key=secret", "https://tools.example.net:8443/…"),
+    ("https://tools.example.net/", "https://tools.example.net"),
+])
+def test_members_see_only_the_origin(url, shown):
+    public = McpServer("tools", "Tools", url, "streamable_http", "none", True, "g").public()
+    assert public["url"] == shown and "secret" not in str(public)

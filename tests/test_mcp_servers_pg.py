@@ -8,7 +8,7 @@ from cryptography.fernet import Fernet
 from sqlalchemy import create_engine
 from sqlmodel import SQLModel
 
-from llm_bawt.integrations.connections import IntegrationStore
+from llm_bawt.integrations.connections import IntegrationError, IntegrationStore
 from llm_bawt.integrations.mcp_servers.oauth import store_id
 from llm_bawt.integrations.mcp_servers.service import McpServers
 from llm_bawt.integrations.mcp_servers.store import McpServerError
@@ -113,3 +113,15 @@ def test_bearer_kind_requires_a_token(servers):
     with pytest.raises(McpServerError, match="bearer_token_required"):
         add(servers, "beta", auth_kind="bearer", bearer_token="  ")
     assert servers.store.get("beta") is None
+
+
+def test_a_stale_bearer_write_never_lands_on_a_re_added_server(servers):
+    add(servers, "beta", auth_kind="bearer", bearer_token="old-token")
+    old = servers.get("beta")
+    servers.delete("beta")
+    add(servers, "beta", auth_kind="bearer", bearer_token="new-token")
+    with pytest.raises(McpServerError, match="not_found"), servers.oauth.fenced(old):
+        servers._write_bearer(old, "stale-token")
+    assert servers.headers(servers.get("beta")) == {"Authorization": "Bearer new-token"}
+    with pytest.raises(IntegrationError, match="not_connected"):
+        servers.headers(old)  # the old identity can't read the new token either

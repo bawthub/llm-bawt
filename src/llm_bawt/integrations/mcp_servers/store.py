@@ -71,7 +71,7 @@ class McpServer:
     generation: str = ""
 
     def public(self) -> dict:
-        """What any signed-in person may see: the URL without its query string."""
+        """What any signed-in person may see: the server's origin, never its path or query."""
         return {"slug": self.slug, "name": self.name, "url": display_url(self.url),
                 "transport": self.transport, "auth_kind": self.auth_kind, "enabled": self.enabled}
 
@@ -107,9 +107,10 @@ def validate_url(url: str) -> str:
 
 
 def display_url(url: str) -> str:
-    """The URL with any query string masked; a query may carry a credential."""
+    """The server's origin, with "/…" when there is more; a path or query may carry a credential."""
     parts = urlsplit(url)
-    return parts._replace(query="…" if parts.query else "").geturl()
+    more = parts.path not in ("", "/") or parts.query
+    return f"{parts.scheme}://{parts.netloc}" + ("/…" if more else "")
 
 
 def _row(r) -> McpServer:

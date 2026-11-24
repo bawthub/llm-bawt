@@ -21,6 +21,7 @@ import socket
 import time
 from urllib.parse import urlencode, urlsplit
 
+import httpcore
 import httpx
 
 from mcp.client.auth.utils import (
@@ -73,13 +74,62 @@ def _addresses(host: str) -> list[str]:
     return [info[4][0] for info in socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)]
 
 
-def check_destination(url: str, server_url: str) -> str:
-    """Egress policy for a URL the remote server advertised (metadata, endpoints).
+def _origin(url: str) -> tuple[str, int]:
+    parts = urlsplit(url)
+    return (parts.hostname or "").lower(), parts.port or (443 if parts.scheme == "https" else 80)
 
-    HTTPS only, since these endpoints receive OAuth codes and secrets. The host
-    the operator configured is trusted as chosen, including a private one; any
-    other host must resolve only to public addresses, so remote metadata can't
-    point the app at a private service. Redirects are never followed.
+
+def public_addresses(host: str) -> list[str]:
+    """``host``'s addresses, provided every one is public; else destination_not_allowed."""
+    try:
+        addresses = [ipaddress.ip_address(a.split("%")[0]) for a in _addresses(host)]
+    except (OSError, ValueError) as exc:
+        raise IntegrationError("destination_not_allowed") from exc
+    if not addresses or not all(a.is_global for a in addresses):
+        raise IntegrationError("destination_not_allowed")
+    return [str(a) for a in addresses]
+
+
+class _PolicyBackend(httpcore.SyncBackend):
+    """Enforces the egress policy on the connection itself, not on a separate lookup.
+
+    The configured server's exact origin (host and port) connects as the
+    operator chose it, private or not. Any other destination is resolved
+    here, once, and the socket goes only to an address that passed; TLS still
+    verifies the certificate against the URL's hostname (httpcore sends the
+    request host as SNI, not the address).
+    """
+
+    def __init__(self, allowed: tuple[str, int]):
+        self._allowed = allowed
+
+    def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
+        if (host.lower(), port) == self._allowed:
+            return super().connect_tcp(host, port, timeout, local_address, socket_options)
+        error: Exception | None = None
+        for address in public_addresses(host):
+            try:
+                return super().connect_tcp(address, port, timeout, local_address, socket_options)
+            except httpcore.ConnectError as exc:
+                error = exc
+        raise error or httpcore.ConnectError("no address")
+
+
+def policy_transport(server_url: str) -> httpx.HTTPTransport:
+    """An HTTPS transport whose every connection obeys :class:`_PolicyBackend`."""
+    transport = httpx.HTTPTransport()
+    transport._pool._network_backend = _PolicyBackend(_origin(server_url))
+    return transport
+
+
+def check_destination(url: str, server_url: str) -> str:
+    """Early refusal for a URL the remote server advertised (metadata, endpoints).
+
+    HTTPS only, since these endpoints receive OAuth codes and secrets. The
+    configured server's exact origin is trusted as the operator chose it;
+    anything else must resolve only to public addresses. This check gives a
+    clear error before any request; :class:`_PolicyBackend` enforces the same
+    policy on the actual connection. Redirects are never followed.
     """
     try:
         parts = urlsplit(url)
@@ -89,14 +139,8 @@ def check_destination(url: str, server_url: str) -> str:
     if (parts.scheme != "https" or not parts.hostname or "@" in parts.netloc
             or any(ord(c) < 0x21 or ord(c) == 0x7F for c in url)):
         raise IntegrationError("oauth_metadata_invalid")
-    if parts.hostname == (urlsplit(server_url).hostname or "").lower():
-        return url
-    try:
-        addresses = [ipaddress.ip_address(a.split("%")[0]) for a in _addresses(parts.hostname)]
-    except (OSError, ValueError) as exc:
-        raise IntegrationError("destination_not_allowed") from exc
-    if not addresses or not all(a.is_global for a in addresses):
-        raise IntegrationError("destination_not_allowed")
+    if _origin(url) != _origin(server_url):
+        public_addresses(parts.hostname)
     return url
 
 
@@ -213,12 +257,29 @@ def _token_request(http: httpx.Client, url: str, client: ConnectionRecord, data:
 
 
 class McpOAuth:
-    def __init__(self, config, *, store: IntegrationStore | None = None, client_factory=httpx.Client):
+    def __init__(self, config, *, store: IntegrationStore | None = None, client_factory=httpx.Client,
+                 current=None):
         self.store = store if store is not None else IntegrationStore(config)
         self.client_factory = client_factory
+        # slug -> the server row now, so writes can be fenced to the row they began for.
+        self.current = current
 
-    def _http(self):
-        return self.client_factory(timeout=20, follow_redirects=False)
+    def fenced(self, server: McpServer):
+        """Serialize this server's credential writes with create/remove (see McpServers)."""
+        return self.store.lifecycle(store_id(server.slug))
+
+    def require_current(self, server: McpServer) -> None:
+        """Inside :meth:`fenced`: refuse a write for a row that was removed or replaced."""
+        if self.current is None:
+            return
+        now = self.current(server.slug)
+        if now is None or now.generation != server.generation or now.url != server.url:
+            raise IntegrationError("server_changed")
+
+    def _http(self, server: McpServer):
+        if self.client_factory is httpx.Client:
+            return httpx.Client(timeout=20, follow_redirects=False, transport=policy_transport(server.url))
+        return self.client_factory(timeout=20, follow_redirects=False)  # tests inject a mock transport
 
     def start(self, server: McpServer, origin: str, return_to: str) -> dict:
         if server.auth_kind != "oauth":
@@ -230,12 +291,13 @@ class McpOAuth:
             raise IntegrationError("https_required")
         redirect_uri = f"https://{parts.netloc}{callback_path(server.slug)}"
         sid = store_id(server.slug)
-        with self._http() as http:
+        with self._http(server) as http:
             meta = discover(http, server.url)
             client = self.store.load(f"client:{sid}")
             # Reuse a registration only for the same authorization server and callback.
-            if not (client and client.meta.get("issuer") == meta["issuer"]
-                    and client.meta.get("redirect_uri") == redirect_uri and owned_by(client, server)):
+            register = not (client and client.meta.get("issuer") == meta["issuer"]
+                            and client.meta.get("redirect_uri") == redirect_uri and owned_by(client, server))
+            if register:
                 body = _register(http, meta, redirect_uri)
                 client = ConnectionRecord(
                     provider=f"client:{sid}", status="configured",
@@ -244,16 +306,19 @@ class McpOAuth:
                           "generation": server.generation,
                           "token_endpoint_auth_method": str(body.get("token_endpoint_auth_method") or "none")},
                     secret={"client_secret": str(body["client_secret"])} if body.get("client_secret") else {})
-                self.store.save(client)
         state, browser, verifier = (secrets.token_urlsafe(32) for _ in range(3))
         challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
-        self.store.save(ConnectionRecord(provider=f"pending:{sid}", status="pending", secret={
-            "state_hash": digest(state), "browser_hash": digest(browser), "verifier": verifier,
-            "expires_at": time.time() + PENDING_SECONDS, "redirect_uri": redirect_uri,
-            "return_to": return_to, "client_id": client.meta["client_id"], "server_url": server.url,
-            "generation": server.generation,
-            **{k: meta[k] for k in ("issuer", "token_endpoint", "resource", "scope", "iss_supported")},
-        }))
+        with self.fenced(server):
+            self.require_current(server)
+            if register:
+                self.store.save(client)
+            self.store.save(ConnectionRecord(provider=f"pending:{sid}", status="pending", secret={
+                "state_hash": digest(state), "browser_hash": digest(browser), "verifier": verifier,
+                "expires_at": time.time() + PENDING_SECONDS, "redirect_uri": redirect_uri,
+                "return_to": return_to, "client_id": client.meta["client_id"], "server_url": server.url,
+                "generation": server.generation,
+                **{k: meta[k] for k in ("issuer", "token_endpoint", "resource", "scope", "iss_supported")},
+            }))
         params = {"response_type": "code", "client_id": client.meta["client_id"], "redirect_uri": redirect_uri,
                   "state": state, "code_challenge": challenge, "code_challenge_method": "S256",
                   "resource": meta["resource"], **({"scope": meta["scope"]} if meta["scope"] else {})}
@@ -276,7 +341,7 @@ class McpOAuth:
             raise IntegrationError("client_not_registered")
         check_destination(pending["token_endpoint"], server.url)
         try:
-            with self._http() as http:
+            with self._http(server) as http:
                 response = _token_request(http, pending["token_endpoint"], client, {
                     "grant_type": "authorization_code", "code": code, "code_verifier": pending["verifier"],
                     "redirect_uri": pending["redirect_uri"], "resource": pending["resource"]})
@@ -285,7 +350,7 @@ class McpOAuth:
         token = _json(response)
         if not token or not token.get("access_token") or str(token.get("token_type", "bearer")).lower() != "bearer":
             raise IntegrationError("token_exchange_failed")
-        self.store.commit_connection(sid, pending["claim"], ConnectionRecord(
+        record = ConnectionRecord(
             provider=sid, status="connected", auth_method="oauth_mcp",
             meta={"issuer": pending["issuer"], "token_endpoint": pending["token_endpoint"],
                   "client_id": pending["client_id"], "resource": pending["resource"],
@@ -293,7 +358,10 @@ class McpOAuth:
                   "scope": str(token.get("scope") or pending["scope"]),
                   "expires_at": _expires_at(token), "verified_at": time.time()},
             secret={"access_token": token["access_token"],
-                    **({"refresh_token": token["refresh_token"]} if token.get("refresh_token") else {})}))
+                    **({"refresh_token": token["refresh_token"]} if token.get("refresh_token") else {})})
+        with self.fenced(server):
+            self.require_current(server)
+            self.store.commit_connection(sid, pending["claim"], record)
         return pending["return_to"]
 
     def access_token(self, server: McpServer) -> str:
@@ -314,7 +382,7 @@ class McpOAuth:
             raise IntegrationError("reauthorization_required")
         check_destination(record.meta["token_endpoint"], server.url)
         try:
-            with self._http() as http:
+            with self._http(server) as http:
                 response = _token_request(http, record.meta["token_endpoint"], client, {
                     "grant_type": "refresh_token", "refresh_token": refresh,
                     "resource": record.meta["resource"]})
