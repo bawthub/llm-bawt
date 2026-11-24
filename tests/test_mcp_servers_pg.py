@@ -125,3 +125,18 @@ def test_a_stale_bearer_write_never_lands_on_a_re_added_server(servers):
     assert servers.headers(servers.get("beta")) == {"Authorization": "Bearer new-token"}
     with pytest.raises(IntegrationError, match="not_connected"):
         servers.headers(old)  # the old identity can't read the new token either
+
+
+def test_a_stale_sign_out_leaves_a_re_added_servers_credentials(servers, monkeypatch):
+    add(servers, "beta", auth_kind="bearer", bearer_token="old-token")
+    old = servers.get("beta")
+    servers.delete("beta")
+    add(servers, "beta", auth_kind="bearer", bearer_token="new-token")
+    # The sign-out request read the old row before the replacement landed.
+    with monkeypatch.context() as patch, pytest.raises(McpServerError, match="not_found"):
+        patch.setattr(servers, "get", lambda slug: old)
+        servers.sign_out("beta")
+    assert servers.headers(servers.get("beta")) == {"Authorization": "Bearer new-token"}
+    assert servers.sign_out("beta") is True
+    with pytest.raises(IntegrationError, match="not_connected"):
+        servers.headers(servers.get("beta"))

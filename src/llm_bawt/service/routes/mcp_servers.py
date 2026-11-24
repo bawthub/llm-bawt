@@ -151,6 +151,4 @@ async def callback(slug: str, request: Request, state: str = "", code: str = "",
 @router.delete("/{slug}/connection", dependencies=_SERVICE)
 async def sign_out(slug: str):
     """Forget the server's tokens and client registration; the server row stays."""
-    service = servers()
-    await call(service.get, slug)
-    return {"disconnected": await call(service.oauth.disconnect, slug)}
+    return {"disconnected": await call(servers().sign_out, slug)}

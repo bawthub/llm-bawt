@@ -108,6 +108,20 @@ class McpServers:
             self.oauth.disconnect(slug)
         return removed
 
+    def sign_out(self, slug: str) -> bool:
+        """Forget the tokens and client registration of the row this request read.
+
+        Fenced like every credential write: if the server was removed or
+        replaced (same slug, new generation) meanwhile, refuse rather than
+        delete the replacement's credentials.
+        """
+        server = self.get(slug)
+        with self.oauth.fenced(server):
+            current = self.store.get(slug)
+            if current is None or current.generation != server.generation or current.url != server.url:
+                raise McpServerError("not_found")
+            return self.oauth.disconnect(slug)
+
     def set_bearer(self, slug: str, token: str) -> None:
         server = self.get(slug)
         if server.auth_kind != "bearer":
