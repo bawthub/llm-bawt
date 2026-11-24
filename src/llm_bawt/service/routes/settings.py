@@ -121,6 +121,7 @@ def is_protected_setting_key(key: str) -> bool:
         "workspace.bridge_url",
         "google_home_probe",
         "voice_backend_auth_mode",
+        "strict_reader",  # TASK-2590: operator database write only
     }
 
 

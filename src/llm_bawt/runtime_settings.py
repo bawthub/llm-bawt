@@ -856,6 +856,25 @@ class RuntimeSettingsStore:
                 )
         return out
 
+    def get_raw_value_json(self, scope_type: str, scope_id: str, key: str) -> str | None:
+        """The stored JSON text, or None only when the row is absent.
+
+        Unlike ``get_value`` this never hides a failure: no engine raises,
+        database errors propagate, and undecodable text is returned as-is for
+        the caller to judge. For fail-closed readers (TASK-2590).
+        """
+        if self.engine is None:
+            raise RuntimeError("Runtime settings DB unavailable")
+        with Session(self.engine) as session:
+            row = session.exec(
+                select(RuntimeSetting).where(
+                    RuntimeSetting.scope_type == scope_type,
+                    RuntimeSetting.scope_id == scope_id,
+                    RuntimeSetting.key == key,
+                )
+            ).first()
+        return None if row is None else row.value_json
+
     def get_value(self, scope_type: str, scope_id: str, key: str) -> Any | None:
         """Return one setting's decoded value, or None when absent or invalid."""
         if self.engine is None:

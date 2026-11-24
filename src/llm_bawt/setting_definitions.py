@@ -782,6 +782,22 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
             "summarization_model",
         ),
     ),
+    # TASK-2590: global only; read once at app start (strict_reader_config).
+    "strict_reader": SettingDefinition(
+        key="strict_reader",
+        type="json",
+        default={"enabled": False},
+        applies_to=(),
+        storage=STORAGE_RUNTIME_SETTING,
+        label="Strict skill reader",
+        help=(
+            "Operator-owned selection for the one strict reader bot: enabled, bot, "
+            "house, skill_generation ('legacy' or gen-<name>) and skill_layers "
+            "({source: revision}, generation only). Read once at app start; a "
+            "change takes effect after an app restart. Invalid enabled settings "
+            "refuse the named bot's turns rather than serving them ordinarily."
+        ),
+    ),
     # TASK-2195: global only; read by the playground trash purge.
     "playground_trash_days": SettingDefinition(
         key="playground_trash_days",

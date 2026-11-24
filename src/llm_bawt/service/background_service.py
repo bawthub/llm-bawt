@@ -148,6 +148,11 @@ class BackgroundService(
         from .chat_pending_questions import PendingQuestionStore
         self._pending_question_store = PendingQuestionStore(config)
 
+        # TASK-2590: operator's strict reader selection, read once per process.
+        from .dependencies import get_runtime_settings_store
+        from .strict_reader_config import load_snapshot
+        load_snapshot(config, lambda: get_runtime_settings_store(config)).apply(self)
+
         # TASK-290: durable registry + audit of approval-gated tool calls. Used
         # by chat_streaming to persist a request row when the bridge emits
         # APPROVAL_REQUIRED, and by the resolve endpoint.
