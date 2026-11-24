@@ -35,9 +35,9 @@ def test_install_dev_sync_uses_lock(tmp_path, deps_only):
 
 def test_gpu_docker_recipe_copies_lock_before_both_syncs():
     recipe = (REPO / "Dockerfile").read_text()
-    copy = recipe.index("COPY pyproject.toml setup.cfg uv.lock install.sh ./")
-    dependency_sync = recipe.index("RUN ./install.sh --dev --deps-only")
-    project_sync = recipe.index("RUN uv sync --frozen --inexact")
+    copy = recipe.index("COPY pyproject.toml setup.cfg uv.lock ./")
+    dependency_sync = recipe.index("RUN uv sync --frozen --inexact --no-install-project")
+    project_sync = recipe.index("RUN uv sync --frozen --inexact --extra", dependency_sync)
     assert copy < dependency_sync < project_sync
     assert (REPO / "uv.lock").is_file()
 
