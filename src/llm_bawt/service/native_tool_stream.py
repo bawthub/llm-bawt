@@ -66,6 +66,9 @@ class NativeToolStream:
             turn_id=turn_log_id,
             bawthub_mcp=getattr(llm_bawt, "bawthub_mcp", None),
             turn_capability=getattr(ctx, "mcp_turn_capability", None),
+            remote_mcp=(llm_bawt.remote_mcp.for_turn()
+                        if getattr(llm_bawt, "remote_mcp", None) is not None
+                        and llm_bawt.remote_mcp.has_servers() else None),
         )
 
         def native_stream_with_tool_loop():

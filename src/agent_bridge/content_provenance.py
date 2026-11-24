@@ -52,6 +52,17 @@ def external_source(tool_name: str, *, native: bool = False) -> str | None:
     return f"bawthub:{tool_name}" if tool_name in MCP_EXTERNAL_TOOLS else None
 
 
+def remote_mcp_source(tool_name: str) -> str | None:
+    """Provenance for an owner-added remote MCP server's tool (TASK-2610).
+
+    Tools are named ``<slug>__<tool>`` in regular chat and
+    ``mcp__<slug>__<tool>`` in agent bridges; either way the source is the
+    server slug, and everything the server returns is untrusted.
+    """
+    slug, sep, tool = tool_name.removeprefix("mcp__").partition("__")
+    return f"mcp:{slug}" if sep and slug and tool else None
+
+
 def write_kind(tool_name: str, arguments: Mapping[str, Any], *, native: bool = False) -> str | None:
     """Identify bot-initiated prompt-persistent writes, not shared storage APIs."""
     action = str(arguments.get("action", "")).strip().lower()

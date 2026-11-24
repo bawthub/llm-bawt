@@ -488,8 +488,8 @@ TOOL_SEARCH_NAME = "tool_search"
 TOOL_SEARCH_TOOL = Tool(
     name=TOOL_SEARCH_NAME,
     description=(
-        "Find and load more tools (memory, message history, profiles and other "
-        "BawtHub tools). Search by keywords, or load exact names with "
+        "Find and load more tools (memory, message history, profiles, other "
+        "BawtHub tools and tools from connected MCP servers). Search by keywords, or load exact names with "
         "'select:name_a,name_b'. Matching tools become callable on your next step."
     ),
     parameters=[

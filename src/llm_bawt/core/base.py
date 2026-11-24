@@ -47,6 +47,14 @@ _SLASH_COMMAND_RE = re.compile(r"^\s*/[a-zA-Z][\w-]*\b")
 
 
 
+def has_mcp_discovery(bot) -> bool:
+    """BawtHub MCP is opted in, or a remote MCP server is granted (TASK-2610)."""
+    if getattr(bot, "bawthub_mcp", None) is not None:
+        return True
+    remote = getattr(bot, "remote_mcp", None)
+    return remote is not None and remote.has_servers()
+
+
 class BaseLLMBawt(OrchestratorInitializationMixin, PromptSectionsMixin, ABC):
     """Base class for LLM orchestration with memory and tools.
     
@@ -588,7 +596,7 @@ class BaseLLMBawt(OrchestratorInitializationMixin, PromptSectionsMixin, ABC):
         """
         client = getattr(self, "client", None)
         return (
-            getattr(self, "bawthub_mcp", None) is not None
+            has_mcp_discovery(self)
             and client is not None
             and getattr(self, "tool_format", None) in ("native", "NATIVE_OPENAI")
             and hasattr(client, "stream_with_tools")
@@ -620,9 +628,10 @@ class BaseLLMBawt(OrchestratorInitializationMixin, PromptSectionsMixin, ABC):
         if self.memory is None:
             disallowed = {"memory", "history", "profile", "self"}
             tools = [t for t in tools if t.name not in disallowed]
-        if bawthub_mcp and getattr(self, "bawthub_mcp", None) is not None:
+        if bawthub_mcp and has_mcp_discovery(self):
             from ..tools.definitions import MCP_REPLACED_LOCAL_TOOLS, TOOL_SEARCH_TOOL
-            tools = [t for t in tools if t.name not in MCP_REPLACED_LOCAL_TOOLS]
+            if getattr(self, "bawthub_mcp", None) is not None:
+                tools = [t for t in tools if t.name not in MCP_REPLACED_LOCAL_TOOLS]
             tools.append(TOOL_SEARCH_TOOL)
         return tools
 

@@ -19,10 +19,13 @@ Consolidated tools (10 total):
 import logging
 import re
 from difflib import SequenceMatcher
+from itertools import zip_longest
 from datetime import datetime, timedelta
 from typing import Callable, TYPE_CHECKING
 
-from agent_bridge.content_provenance import external_source, provenance_envelope, write_kind
+from agent_bridge.content_provenance import (
+    external_source, provenance_envelope, remote_mcp_source, write_kind,
+)
 from agent_bridge.mcp_call_context import canonical_invocation_hash
 
 from .parser import ToolCall, format_tool_result, tool_result_is_error
@@ -130,6 +133,7 @@ class ToolExecutor:
         content_store=None,
         bawthub_mcp=None,
         turn_capability: str | None = None,
+        remote_mcp=None,
     ):
         """Initialize the executor.
 
@@ -169,6 +173,9 @@ class ToolExecutor:
         # identity; schemas a tool_search loaded join later rounds.
         self.bawthub_mcp = bawthub_mcp
         self.turn_capability = turn_capability
+        # Granted remote MCP servers (TASK-2610): a per-turn RemoteMcpTurn whose
+        # <slug>__<tool> schemas load through the same tool_search.
+        self.remote_mcp = remote_mcp
         self.mcp_loaded: dict = {}
         self.external_content_seen = False
         # Get max tool calls from config (0 = unlimited)
@@ -298,9 +305,11 @@ class ToolExecutor:
         # An exact advertised BawtHub MCP name dispatches as itself, before
         # legacy aliases (e.g. memory_search -> memory) can rewrite it.
         mcp = self.bawthub_mcp
-        mcp_exact = mcp is not None and (
-            tool_call.name == TOOL_SEARCH_NAME or mcp.allows(tool_call.name)
-        )
+        remote = self.remote_mcp
+        remote_exact = remote is not None and remote.allows(tool_call.name)
+        mcp_exact = remote_exact or (
+            (mcp is not None or remote is not None) and tool_call.name == TOOL_SEARCH_NAME
+        ) or (mcp is not None and mcp.allows(tool_call.name))
 
         # Normalize legacy tool names to consolidated tools
         original_name = tool_call.name
@@ -323,7 +332,8 @@ class ToolExecutor:
         logger.debug("Executing native tool: %s", normalized_call.name)
 
         result: str
-        source = external_source(normalized_call.name, native=True)
+        source = (remote_mcp_source(normalized_call.name) if remote_exact
+                  else external_source(normalized_call.name, native=True))
         try:
             content_hold = self._admit_content(normalized_call, source)
             if content_hold:
@@ -339,20 +349,21 @@ class ToolExecutor:
 
             if is_ha_native:
                 return self._execute_ha_native_tool(normalized_call)
-            if mcp_exact:
+            if remote_exact:
+                # Falls through to the provenance label below.
+                result = self._execute_remote_mcp(normalized_call)
+            elif mcp_exact:
                 if normalized_call.name == TOOL_SEARCH_NAME:
                     return self._execute_tool_search(normalized_call)
                 return self._execute_bawthub_mcp(normalized_call)
-            if mcp is not None and normalized_call.name in MCP_REPLACED_LOCAL_TOOLS:
+            elif mcp is not None and normalized_call.name in MCP_REPLACED_LOCAL_TOOLS:
                 # MCP mode replaces these local wrappers; hiding the schema is
                 # not enough, so their handlers (and aliases) are refused.
                 return format_tool_result(
                     original_name, None,
                     error=f"Tool '{original_name}' is not enabled for this bot",
                 )
-
-            handler = self._handlers.get(normalized_call.name)
-            if handler:
+            elif handler := self._handlers.get(normalized_call.name):
                 result = handler(normalized_call)
             else:
                 result = format_tool_result(
@@ -403,17 +414,36 @@ class ToolExecutor:
             limit = max(1, min(10, int(tool_call.arguments.get("max_results") or 5)))
         except (TypeError, ValueError):
             limit = 5
-        try:
-            if query.lower().startswith("select:"):
-                wanted = [n.strip() for n in query[7:].split(",") if n.strip()]
-                catalog = {t.name: t for t in self.bawthub_mcp.search_tools(
-                    self.turn_capability, "", limit=len(self.bawthub_mcp.allowlist) or 1)}
-                found = [catalog[n] for n in wanted if n in catalog]
+        selecting = query.lower().startswith("select:")
+        wanted = [n.strip() for n in query[7:].split(",") if n.strip()] if selecting else []
+        found: list = []
+        errors: list[str] = []
+        if self.bawthub_mcp is not None:
+            try:
+                if selecting:
+                    catalog = {t.name: t for t in self.bawthub_mcp.search_tools(
+                        self.turn_capability, "", limit=len(self.bawthub_mcp.allowlist) or 1)}
+                    found = [catalog[n] for n in wanted if n in catalog]
+                else:
+                    found = self.bawthub_mcp.search_tools(self.turn_capability, query, limit=limit)
+            except BawtHubMcpToolError as error:
+                errors.append(str(error))
+        remote = self.remote_mcp
+        if remote is not None:
+            # Remote names and descriptions are server-supplied: namespaced,
+            # bounded, and their results are labelled untrusted when called.
+            if selecting:
+                found = found + remote.select(wanted)
             else:
-                found = self.bawthub_mcp.search_tools(self.turn_capability, query, limit=limit)
-        except BawtHubMcpToolError as error:
-            return format_tool_result(tool_call.name, None, error=str(error))
+                # Interleave the two ranked lists so neither starves the other.
+                extra = remote.search_tools(query, limit=limit)
+                merged = [t for pair in zip_longest(found, extra) for t in pair if t is not None]
+                found = merged[:limit]
+            if remote.unavailable:
+                errors.append("Unavailable MCP servers: " + ", ".join(remote.unavailable))
         if not found:
+            if errors:
+                return format_tool_result(tool_call.name, None, error="; ".join(errors))
             return format_tool_result(tool_call.name, "No matching tools found.")
         for tool in found:
             self.mcp_loaded[tool.name] = tool
@@ -434,6 +464,17 @@ class ToolExecutor:
             text = self.bawthub_mcp.call_tool(
                 self.turn_capability, tool_call.name, arguments, tool_use_id=tool_call.tool_use_id)
         except BawtHubMcpToolError as error:
+            return format_tool_result(tool_call.name, None, error=str(error))
+        return format_tool_result(tool_call.name, text)
+
+    def _execute_remote_mcp(self, tool_call: ToolCall) -> str:
+        """Call a granted remote MCP server's tool; the caller labels the result untrusted."""
+        from ..integrations.mcp_servers.tools import RemoteMcpToolError
+
+        arguments = {k: v for k, v in (tool_call.arguments or {}).items() if v is not None}
+        try:
+            text = self.remote_mcp.call_tool(tool_call.name, arguments)
+        except RemoteMcpToolError as error:
             return format_tool_result(tool_call.name, None, error=str(error))
         return format_tool_result(tool_call.name, text)
 

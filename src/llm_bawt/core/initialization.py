@@ -165,6 +165,7 @@ class OrchestratorInitializationMixin:
 
         # BawtHub MCP tools for regular bots (opt-in, TASK-2599)
         self._init_bawthub_mcp(config)
+        self._init_remote_mcp(config)
 
         # Initialize NewsAPI client
         self._init_newsapi()
@@ -288,6 +289,28 @@ class OrchestratorInitializationMixin:
             allowlist = DEFAULT_ALLOWLIST
         self.bawthub_mcp = BawtHubMcpClient(config.MCP_SERVER_URL, allowlist)
         logger.info("BawtHub MCP tools enabled for %s (%d allowed)", self.bot_id, len(allowlist))
+
+    def _init_remote_mcp(self, config: Config) -> None:
+        """Owner-added remote MCP servers granted to this bot (TASK-2610).
+
+        Regular tool-using bots only; agent bridges wire the same grants into
+        their own MCP configuration. Grants are read per turn, so a server
+        granted later needs no bot reload.
+        """
+        self.remote_mcp = None
+        if not self.bot.uses_tools or self.model_definition.get("type") in ("agent_backend", "claude-code"):
+            return
+        from ..integrations.mcp_servers.service import McpServers
+        from ..integrations.mcp_servers.tools import RemoteMcpTools
+
+        servers: list[McpServers] = []
+
+        def factory() -> McpServers:
+            if not servers:
+                servers.append(McpServers(config))
+            return servers[0]
+
+        self.remote_mcp = RemoteMcpTools(factory, self.bot_id)
 
     def _init_newsapi(self) -> None:
         """Initialize NewsAPI client if API key is available."""
