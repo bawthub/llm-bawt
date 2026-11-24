@@ -423,6 +423,12 @@ class ToolExecutor:
         from ..integrations.bawthub_mcp.client import BawtHubMcpToolError
 
         arguments = {k: v for k, v in (tool_call.arguments or {}).items() if v is not None}
+        # Agents are told their slug in the prompt; a regular bot isn't, so
+        # default an omitted bot_id to the caller. The server still authorizes.
+        loaded = self.mcp_loaded.get(tool_call.name)
+        if (self.bot_id and "bot_id" not in arguments and loaded is not None
+                and "bot_id" in (loaded.input_schema.get("properties") or {})):
+            arguments["bot_id"] = self.bot_id
         try:
             text = self.bawthub_mcp.call_tool(self.turn_capability, tool_call.name, arguments)
         except BawtHubMcpToolError as error:

@@ -22,7 +22,8 @@ _EMPTY = {"type": "object", "properties": {}}
 CATALOG = [
     mcp_types.Tool(name="memory_search", description="Search stored memories",
                    input_schema={"type": "object", "properties": {
-                       "query": {"type": "string", "description": "What to find"}},
+                       "query": {"type": "string", "description": "What to find"},
+                       "bot_id": {"type": "string"}},
                        "required": ["query"]}),
     mcp_types.Tool(name="messages_find", description="Find past messages", input_schema=_EMPTY),
     mcp_types.Tool(name="ops_run", description="Run a service operation", input_schema=_EMPTY),
@@ -109,7 +110,20 @@ def test_tool_search_loads_schemas_and_renders_tool_references(client):
         {"type": "tool_reference", "tool_name": "memory_search"}]
     (definition,) = executor.mcp_tool_definitions()
     assert definition.name == "memory_search"
-    assert [(p.name, p.required) for p in definition.parameters] == [("query", True)]
+    assert [(p.name, p.required) for p in definition.parameters] == [("query", True), ("bot_id", False)]
+
+
+def test_discovered_tool_defaults_omitted_bot_id_to_the_caller(client):
+    executor = _executor(client)
+    executor.execute(ToolCall(name="tool_search", arguments={"query": "select:memory_search,messages_find"},
+                              raw_text=""))
+    executor.execute(ToolCall(name="memory_search", arguments={"query": "dogs"}, raw_text=""))
+    assert client.calls[-1][3] == ("memory_search", {"query": "dogs", "bot_id": "fixture-bot"})
+    executor.execute(ToolCall(name="memory_search", arguments={"query": "dogs", "bot_id": "other"},
+                              raw_text=""))
+    assert client.calls[-1][3] == ("memory_search", {"query": "dogs", "bot_id": "other"})
+    executor.execute(ToolCall(name="messages_find", arguments={}, raw_text=""))
+    assert client.calls[-1][3] == ("messages_find", {})
 
 
 def test_select_loads_exact_names_and_reports_no_match(client):
