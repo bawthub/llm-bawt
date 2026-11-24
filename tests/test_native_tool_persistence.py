@@ -46,7 +46,7 @@ def durable_rig(native_rig, monkeypatch):
         turn_stream_publish.asyncio, "run_coroutine_threadsafe",
         lambda coroutine, _loop: asyncio.run(coroutine),
     )
-    rig.stream.publish_event_direct = publisher._publish_event_direct
+    rig.publish = publisher._publish_event_direct
     rig.engine, rig.coordinator = engine, coordinator
     yield rig
     engine.dispose()
@@ -77,12 +77,12 @@ def test_long_unicode_native_results_remain_exact_in_store_and_continuation(dura
     first = "\t" + "café 雪 😀\n" * 400 + " first tail \n"
     second = "tool failed: " + "résultat 🧪\n" * 320 + "second tail"
     requests = _requests(rig, [first, format_tool_result("GetLiveContext", None, error=second)])
-    assert list(rig.stream.stream(rig.messages, {})) == ["\n\n", "Completed"]
+    assert list(rig.stream.stream(rig.messages, {})) == ["Completed"]
     assert [m.content for m in requests[1] if m.role == "tool"] == [first, second]
     rows = _rows(rig)
     assert len(rows) == 2
     assert [row.is_error for row in rows] == [False, True]
-    ends = [event for event in rig.events if event["event"] == "tool_end"]
+    ends = [event for event in rig.events if event.get("event") == "tool_end"]
     for row, event, expected in zip(rows, ends, [first, second]):
         assert len(expected) > 2_001
         assert row.result_text == event["result"] == expected[:2_000]
@@ -126,7 +126,7 @@ def test_start_persistence_failure_is_logged_counted_and_never_blocks_tools(
     monkeypatch.setattr(turn_stream_publish.log, "warning", warning)
     outputs = ["雪 one\n" * 400, "😀 two\n" * 400]
     requests = _requests(rig, outputs)
-    assert list(rig.stream.stream(rig.messages, {})) == ["\n\n", "Completed"]
+    assert list(rig.stream.stream(rig.messages, {})) == ["Completed"]
     assert rig.executor.execute.call_count == failure.call_count == 2
     assert rig.ctx.tool_start_persist_failures == warning.call_count == 2
     assert [call.args[-1] for call in warning.call_args_list] == [1, 2]
@@ -135,11 +135,11 @@ def test_start_persistence_failure_is_logged_counted_and_never_blocks_tools(
     # End persistence recovers both rows without needing a successful start.
     assert len(_rows(rig)) == 2
     if redis_enabled:
-        starts = [event for event in rig.events if event["event"] == "tool_start"]
+        starts = [event for event in rig.events if event.get("event") == "tool_start"]
         assert len(starts) == 2
         assert all("record_id" not in event and "_tool_persisted" not in event for event in starts)
         assert all(event["result_meta"]["available"] for event in rig.events
-                   if event["event"] == "tool_end")
+                   if event.get("event") == "tool_end")
 
 
 def test_end_storage_failure_keeps_exact_continuation_and_bounded_unavailable_event(
@@ -153,9 +153,9 @@ def test_end_storage_failure_keeps_exact_continuation_and_bounded_unavailable_ev
         monkeypatch.setattr(tool_call_store, "Session", Mock(side_effect=RuntimeError("DB offline")))
         return output
     rig.executor.execute.side_effect = execute
-    assert list(rig.stream.stream(rig.messages, {})) == ["\n\n", "Completed"]
+    assert list(rig.stream.stream(rig.messages, {})) == ["Completed"]
     assert [m.content for m in requests[1] if m.role == "tool"] == [output]
-    (end,) = [event for event in rig.events if event["event"] == "tool_end"]
+    (end,) = [event for event in rig.events if event.get("event") == "tool_end"]
     assert end["result"] == output[:2_000]
     assert end["result_meta"]["available"] is False
     assert end["result_meta"]["record_id"] is None

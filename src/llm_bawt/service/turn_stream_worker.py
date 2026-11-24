@@ -363,9 +363,7 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                     # Native streaming with tools - streams content AND handles tool calls
                     from .native_tool_stream import NativeToolStream
 
-                    stream_iter = NativeToolStream(
-                        ctx, publish_event_direct=_publish_event_direct,
-                    ).stream(messages, gen_kwargs)
+                    stream_iter = NativeToolStream(ctx).stream(messages, gen_kwargs)
                 else:
                     # Fall back to text-based streaming for non-native models (GGUF, etc.)
                     from ..tools import stream_with_tools

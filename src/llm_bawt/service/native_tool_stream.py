@@ -7,9 +7,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from collections.abc import Callable
 
-from .chat_stream_worker import put_queue_item_threadsafe
 from .logging import get_service_logger
 from .turn_stream_context import TurnStreamContext
 
@@ -24,21 +22,16 @@ HA_TOOL_LOOP_BUDGET_SECONDS = 20.0
 class NativeToolStream:
     """Per-turn native-tool iteration using the worker's shared context."""
 
-    def __init__(self, ctx: TurnStreamContext, *, publish_event_direct: Callable[[dict], None]):
+    def __init__(self, ctx: TurnStreamContext):
         self.ctx = ctx
-        self.publish_event_direct = publish_event_direct
 
     def stream(self, messages, gen_kwargs):
         # Preserve eager tool setup and lazy provider execution from the worker.
         ctx = self.ctx
         llm_bawt = ctx.llm_bawt
         cancel_event = ctx.cancel_event
-        loop, chunk_queue = ctx.loop, ctx.chunk_queue
         turn_log_id, trigger_message_id = ctx.turn_log_id, ctx.trigger_message_id
-        bot_id, user_id = ctx.bot_id, ctx.user_id
-        tool_call_details_holder = ctx.tool_call_details_holder
         tool_context_holder = ctx.tool_context_holder
-        _publish_event_direct = self.publish_event_direct
         from ..tools.executor import ToolExecutor
         from ..tools.formats import get_format_handler
         from ..models.message import Message as Msg
@@ -161,7 +154,7 @@ class NativeToolStream:
 
                         # Emit tool calls as OpenAI delta.tool_calls, then execute
                         tool_results = []
-                        for idx, tc in enumerate(real_tool_calls):
+                        for tc in real_tool_calls:
                             if cancel_event.is_set():
                                 return
                             func = tc.get("function", {})
@@ -174,34 +167,17 @@ class NativeToolStream:
                                 args = {}
 
                             log.debug(f"🔧 {name}({args})")
-                            # Push OpenAI-format tool_call delta to queue
-                            put_queue_item_threadsafe(
-                                loop,
-                                chunk_queue,
-                                {
-                                    "_type": "tool_call_delta",
-                                    "index": idx,
-                                    "id": call_id,
-                                    "name": name,
-                                    "arguments": args_str,
-                                },
-                            )
-                            # Publish tool_start directly to Redis
-                            # (bypasses chunk_queue so events reach
-                            # Redis even if the SSE generator is dead)
-                            _publish_event_direct({
-                                "_type": "tool_event",
-                                "event": "tool_start",
-                                "turn_id": turn_log_id,
-                                "trigger_message_id": trigger_message_id,
-                                "bot_id": bot_id,
-                                "user_id": user_id,
-                                "tool_name": name,
+                            # Same item contract as agent bridges: the
+                            # ToolEventInterceptor flushes preceding text, stamps
+                            # text_offset, persists and publishes tool_start, and
+                            # the SSE layer emits delta.tool_calls.
+                            yield {
+                                "event": "tool_call",
+                                "name": name,
                                 "arguments": args,
-                                "call_id": call_id,
-                                "iteration": iteration + 1,
-                                "ts": time.time(),
-                            })
+                                "tool_use_id": call_id,
+                                "trigger_message_id": trigger_message_id,
+                            }
 
                             tool_call_obj = ToolCall(name=name, arguments=args, raw_text="")
                             if time.monotonic() >= deadline:
@@ -224,39 +200,15 @@ class NativeToolStream:
                                 "tool_call_id": tc.get("id", ""),
                                 "content": result,
                             })
-                            # Publish tool_end directly to Redis
-                            _publish_event_direct({
-                                "_type": "tool_event",
-                                "event": "tool_end",
-                                "turn_id": turn_log_id,
+                            yield {
+                                "event": "tool_result",
+                                "name": name,
+                                "arguments": args,
+                                "result": result or "",
+                                "is_error": is_error,
+                                "tool_use_id": call_id,
                                 "trigger_message_id": trigger_message_id,
-                                "bot_id": bot_id,
-                                "user_id": user_id,
-                                "tool_name": name,
-                                "arguments": args,
-                                "call_id": call_id,
-                                "result": result or "",
-                                "is_error": is_error,
-                                "iteration": iteration + 1,
-                                "ts": time.time(),
-                            })
-
-                            # Persist for TurnLog.tool_calls_json
-                            tool_call_details_holder.append({
-                                "tool": name,
-                                "arguments": args,
-                                "call_id": call_id,
-                                "result": result or "",
-                                "is_error": is_error,
-                                "iteration": iteration + 1,
-                            })
-
-                        # Signal finish_reason: "tool_calls" to consumer
-                        put_queue_item_threadsafe(
-                            loop,
-                            chunk_queue,
-                            {"_type": "tool_calls_finish"},
-                        )
+                            }
 
                         # Retain every round for the persisted tool-results history.
                         round_context = "\n\n".join(
@@ -299,12 +251,8 @@ class NativeToolStream:
                             ),
                         ))
 
-                        # Continue to next iteration (will stream the follow-up)
-                        # Yield paragraph break so post-tool text is
-                        # separated from any prior content.  This flows
-                        # into full_response_holder (persisted to DB)
-                        # and the SSE stream.
-                        yield "\n\n"
+                        # Continue to the next iteration. The interceptor adds
+                        # the counted tool→text paragraph break.
                         break
                 else:
                     # Stream finished without a tool_calls dict

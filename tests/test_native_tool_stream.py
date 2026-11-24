@@ -9,6 +9,8 @@ import pytest
 
 from llm_bawt.models.message import Message
 from llm_bawt.service.native_tool_stream import NativeToolStream
+from llm_bawt.service.pending_tool_calls import PendingToolCallCorrelator
+from llm_bawt.service.tool_event_interceptor import ToolEventInterceptor
 
 
 @pytest.fixture
@@ -20,8 +22,6 @@ def rig(monkeypatch):
     monkeypatch.setattr("llm_bawt.tools.executor.ToolExecutor", factory)
     monkeypatch.setattr("llm_bawt.tools.formats.get_format_handler", lambda _format:
                         SimpleNamespace(get_tools_schema=lambda _definitions: schema))
-    monkeypatch.setattr("llm_bawt.service.native_tool_stream.put_queue_item_threadsafe",
-                        lambda _loop, _queue, item: queued.append(item))
     client = SimpleNamespace(stream_with_tools=Mock())
     llm = SimpleNamespace(
         client=client, bot=SimpleNamespace(uses_tools=True), tool_format="native",
@@ -35,13 +35,51 @@ def rig(monkeypatch):
         turn_log_id="fixture-turn", trigger_message_id="fixture-message",
         bot_id=llm.bot_id, user_id=llm.user_id,
         tool_call_details_holder=[], tool_context_holder=[""],
+        is_agent_backend=False, tts_scrubber=None, stream_text_offset=None,
+        _upstream_model=[None], token_usage_holder=[None], agent_attachments_holder=[],
+        reasoning_holder=[""], model_alias="fixture-model", _redis_sub=None,
     )
-    return SimpleNamespace(
+    out = SimpleNamespace(
         ctx=ctx, llm=llm, client=client, schema=schema, events=events, queued=queued,
         executor=executor, factory=factory,
-        stream=NativeToolStream(ctx, publish_event_direct=events.append),
+        publish=lambda e: events.append(e) if e.get("_type") == "tool_event" else None,
         messages=[Message(role="user", content="Temperature?")],
     )
+    out.stream = _Wired(out)
+    return out
+
+
+class _Wired:
+    """The production wiring: NativeToolStream items pass through the shared
+    ToolEventInterceptor, which publishes and records tool events."""
+
+    def __init__(self, rig):
+        self.rig = rig
+
+    def stream(self, messages, gen_kwargs):
+        rig = self.rig
+        inner = NativeToolStream(rig.ctx).stream(messages, gen_kwargs)
+        interceptor = ToolEventInterceptor(
+            rig.ctx, svc=SimpleNamespace(_update_turn_log=Mock(), config=None,
+                                         _turn_log_store=SimpleNamespace(
+                                             reap_other_open_turns=Mock(return_value=[]))),
+            publish_event_direct=lambda event: rig.publish(event),
+            persist_publish_approval=Mock(), persist_publish_await=Mock(),
+            changed_files=SimpleNamespace(persist=Mock(return_value=None)),
+            turn_usage=SimpleNamespace(capture=Mock(), http_chunk=Mock()),
+            pin_confirmer=SimpleNamespace(observe=Mock()),
+            scheduled_notices=SimpleNamespace(observe=Mock()),
+            tool_calls=PendingToolCallCorrelator(),
+            exec_stamps=SimpleNamespace(on_executing=Mock(), on_tool_started=Mock()),
+            confirmed_start_reaped=[True],
+        )
+        def texts():
+            for item in interceptor.run(inner):
+                if isinstance(item, str):
+                    yield item
+                else:
+                    rig.queued.append(item)
+        return texts()
 
 
 def tool_result(arguments='{"room":"office"}'):
@@ -68,7 +106,10 @@ def test_tool_execution_and_synthesis_preserve_events_and_context(rig, arguments
     call = rig.executor.execute.call_args.args[0]
     assert call.name == "GetLiveContext" and call.arguments == expected
     assert [item["event"] for item in rig.events] == ["tool_start", "tool_end"]
-    assert [item["_type"] for item in rig.queued] == ["tool_call_delta", "tool_calls_finish"]
+    assert [item["event"] for item in rig.queued] == ["tool_call", "tool_result"]
+    # The interceptor stamps the authoritative offset after the preceding text.
+    assert rig.events[0]["text_offset"] == len("Checking")
+    assert rig.events[0]["tool_use_id"] == rig.events[1]["tool_use_id"] == "call-fixture"
     assert all(item["turn_id"] == rig.ctx.turn_log_id for item in rig.events)
     assert all(item["trigger_message_id"] == rig.ctx.trigger_message_id for item in rig.events)
     assert all(item["bot_id"] == rig.ctx.bot_id and item["user_id"] == rig.ctx.user_id
@@ -113,7 +154,7 @@ def test_tool_failure_propagates_without_false_end_event(rig):
     with pytest.raises(RuntimeError, match="tool unavailable"):
         list(rig.stream.stream(rig.messages, {}))
     assert [item["event"] for item in rig.events] == ["tool_start"]
-    assert rig.ctx.tool_call_details_holder == []
+    assert [d.get("result") for d in rig.ctx.tool_call_details_holder] == [None]
 
 
 @pytest.mark.parametrize("ha_mode,limit", [(False, 5), (True, 3)])
@@ -124,7 +165,7 @@ def test_round_limit_runs_one_final_text_synthesis(rig, ha_mode, limit):
         requests.append((list(messages), kwargs))
         return iter(["Incomplete"] if kwargs["tool_choice"] == "none" else [tool_result()])
     rig.client.stream_with_tools.side_effect = stream
-    assert list(rig.stream.stream(rig.messages, {})) == ["\n\n"] * limit + ["Incomplete"]
+    assert list(rig.stream.stream(rig.messages, {})) == ["Incomplete"]
     assert rig.client.stream_with_tools.call_count == limit + 1
     assert rig.executor.execute.call_count == limit
     assert len(rig.ctx.tool_call_details_holder) == limit
@@ -152,13 +193,13 @@ def test_dependent_second_round_receives_results_then_answers(rig):
         ]
         return iter(["Completed"])
     rig.client.stream_with_tools.side_effect = stream
-    assert list(rig.stream.stream(rig.messages, {})) == ["\n\n", "\n\n", "Completed"]
+    assert list(rig.stream.stream(rig.messages, {})) == ["Completed"]
     assert rig.executor.execute.call_count == 2
     assert [call.args[0].arguments for call in rig.executor.execute.call_args_list] == [
         {"room": "office"}, {"room": "72 degrees"},
     ]
     assert [kwargs["tool_choice"] for _, kwargs in requests] == ["auto"] * 3
-    assert [event["iteration"] for event in rig.events] == [1, 1, 2, 2]
+    assert [event["event"] for event in rig.events] == ["tool_start", "tool_end"] * 2
     assert rig.ctx.tool_context_holder == [
         "[GetLiveContext]\n72 degrees\n\n[GetLiveContext]\nSearch used 72 degrees",
     ]
@@ -180,7 +221,7 @@ def test_elapsed_budget_prevents_next_round_and_synthesizes(rig, monkeypatch):
         requests.append((list(messages), kwargs))
         return iter(["Partial answer"] if kwargs["tool_choice"] == "none" else [tool_result()])
     rig.client.stream_with_tools.side_effect = stream
-    assert list(rig.stream.stream(rig.messages, {})) == ["\n\n", "Partial answer"]
+    assert list(rig.stream.stream(rig.messages, {})) == ["Partial answer"]
     rig.executor.execute.assert_called_once()
     assert [kwargs["tool_choice"] for _, kwargs in requests] == ["auto", "none"]
     assert "tool time budget" in requests[-1][0][-1].content
@@ -196,7 +237,7 @@ def test_budget_expiring_during_model_wait_never_executes_tool(rig, monkeypatch)
         clock[0] = 2.0
         return iter([tool_result()])
     rig.client.stream_with_tools.side_effect = stream
-    assert list(rig.stream.stream(rig.messages, {})) == ["\n\n", "Could not finish"]
+    assert list(rig.stream.stream(rig.messages, {})) == ["Could not finish"]
     rig.executor.execute.assert_not_called()
     assert rig.events[-1]["is_error"] is True
     assert "Not executed" in rig.events[-1]["result"]
@@ -214,7 +255,7 @@ def test_budget_is_checked_between_calls_in_same_round(rig, monkeypatch):
     calls["tool_calls"].extend(tool_result()["tool_calls"])
     rig.client.stream_with_tools.side_effect = lambda _messages, **kw: iter(
         ["Partial answer"] if kw["tool_choice"] == "none" else [calls])
-    assert list(rig.stream.stream(rig.messages, {})) == ["\n\n", "Partial answer"]
+    assert list(rig.stream.stream(rig.messages, {})) == ["Partial answer"]
     rig.executor.execute.assert_called_once()
     assert [event["is_error"] for event in rig.events if event["event"] == "tool_end"] == [
         False, True,
@@ -261,7 +302,7 @@ def test_xai_responses_adapter_keeps_schema_and_both_round_results(rig):
         ])
     client.client = SimpleNamespace(responses=SimpleNamespace(create=create))
     rig.llm.client = client
-    assert list(rig.stream.stream(rig.messages, {})) == ["\n\n", "\n\n", "Completed"]
+    assert list(rig.stream.stream(rig.messages, {})) == ["Completed"]
     assert [request["tool_choice"] for request in requests] == ["auto"] * 3
     assert all(request["tools"][0]["name"] == "GetLiveContext" for request in requests)
     outputs = [item for item in requests[-1]["input"]
@@ -296,7 +337,7 @@ def test_chat_completions_adapters_preserve_dependent_rounds(rig, monkeypatch, m
         return iter([SimpleNamespace(choices=[SimpleNamespace(delta=delta)])])
     client._chat_create_with_fallback = create
     rig.llm.client = client
-    assert list(rig.stream.stream(rig.messages, {})) == ["\n\n", "\n\n", "Completed"]
+    assert list(rig.stream.stream(rig.messages, {})) == ["Completed"]
     assert [request["tool_choice"] for request in requests] == ["auto"] * 3
     assert all(request["tools"] == rig.schema for request in requests)
     outputs = [item for item in requests[-1]["messages"] if item["role"] == "tool"]

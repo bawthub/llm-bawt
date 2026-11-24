@@ -92,8 +92,6 @@ def test_native_stream_flags_failed_tool_end(monkeypatch):
     monkeypatch.setattr("llm_bawt.tools.executor.ToolExecutor", Mock(return_value=executor))
     monkeypatch.setattr("llm_bawt.tools.formats.get_format_handler",
                         lambda _f: SimpleNamespace(get_tools_schema=lambda _d: []))
-    monkeypatch.setattr("llm_bawt.service.native_tool_stream.put_queue_item_threadsafe",
-                        lambda *_a: None)
     responses = [[{"tool_calls": [{"id": "c1", "function": {"name": "time", "arguments": "{}"}}]}],
                  ["It failed."]]
     client = SimpleNamespace(stream_with_tools=Mock(side_effect=lambda *_a, **_k: iter(responses.pop(0))))
@@ -108,13 +106,10 @@ def test_native_stream_flags_failed_tool_end(monkeypatch):
         turn_log_id="t", trigger_message_id="m", bot_id="b", user_id="u",
         tool_call_details_holder=[], tool_context_holder=[""],
     )
-    events = []
-    list(NativeToolStream(ctx, publish_event_direct=events.append)
-         .stream([Message(role="user", content="time?")], {}))
-    end = [e for e in events if e["event"] == "tool_end"]
+    items = list(NativeToolStream(ctx).stream([Message(role="user", content="time?")], {}))
+    end = [i for i in items if isinstance(i, dict) and i["event"] == "tool_result"]
     assert [e["is_error"] for e in end] == [True]
     assert end[0]["result"] == "clock unavailable"  # Tag still stripped for display.
-    assert ctx.tool_call_details_holder[0]["is_error"] is True
 
 
 def _real_ha_executor(monkeypatch, *, credentials=True, run=None):
