@@ -367,9 +367,11 @@ def trust_text(binding: dict, operation: dict, newly) -> str:
 def _overlay_text(spec: dict) -> str:
     """TASK-2406: the external deployment files this run reads, paths only."""
     compose, env = overlay_paths(spec["compose_config"])
-    if not compose:
-        return ""
     adopt = spec["compose_config"].get("adopt_files")
+    if not compose:
+        # TASK-2590: a detach binding names the overlay-carrying label it drops.
+        return (f"Detaches a container labelled: {', '.join(adopt)} (matched only, never read)\n"
+                if adopt else "")
     return ("Deployment overlay (outside the checkout; not git-verified, bound by the fingerprints below): "
             f"{', '.join(compose + env)}\n"
             + (f"Adopts a container labelled: {', '.join(adopt)} (matched only, never read)\n" if adopt else ""))

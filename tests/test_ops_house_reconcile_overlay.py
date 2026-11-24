@@ -104,9 +104,13 @@ def test_the_overlay_may_not_overlap_the_project():
     assert overlay_mounts(_config(), PROJECT) == (HOUSE_FILE, ENV_FILE)
 
 
-def test_adopt_files_need_an_overlay_and_clean_paths():
-    with pytest.raises(ValueError):
-        validate_label_compose_config({"compose_config": {"renderer_image": RENDERER, "adopt_files": [PIN]}})
+def test_adopt_files_without_an_overlay_only_detach_and_need_clean_paths():
+    # TASK-2590: no overlay = a detach list, which must be in-project files
+    # followed by outside ones; a lone outside file never renders.
+    spec = {"compose_config": {"renderer_image": RENDERER, "adopt_files": [PIN]}}
+    validate_label_compose_config(spec)
+    with pytest.raises(ComposeError):
+        compose_source(spec, _labelled([PIN]))
     with pytest.raises(ValueError):
         validate_label_compose_config({"compose_config": _config(adopt_files=["relative.yml"])})
 

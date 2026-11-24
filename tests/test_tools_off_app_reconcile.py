@@ -55,7 +55,9 @@ OVERLAY = _app("docker-compose.reader-broker.yml")
 def _binding(extra_mounts=(), extra_env=()):
     spec = json.loads(next(s for s in SEEDS if s["slug"] == "llm-bawt.reconcile-app-config")["command_script"])
     data = [t for t in _targets(BASE) if t not in spec["source_mounts"]]
-    spec["data_mounts"] = sorted(set(spec["data_mounts"]) | set(data) | set(extra_mounts))
+    # An installed row predating this change: the seed's own new entry removed.
+    installed = set(spec["data_mounts"]) - {READER_MOUNT}
+    spec["data_mounts"] = sorted(installed | (set(data) - {READER_MOUNT}) | set(extra_mounts))
     spec["env_names"] = sorted({n for n in _env(BASE) if n not in PRODUCT_ENV and ENV_NAME.fullmatch(n)
                                 and not reserved_env_name(n)} | set(extra_env))
     validate_source_spec(spec)

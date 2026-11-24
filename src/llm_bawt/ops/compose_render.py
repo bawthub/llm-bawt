@@ -251,8 +251,9 @@ def validate_adopt_paths(config: dict) -> list[str]:
     if (not isinstance(value, list) or not 1 <= len(value) <= MAX_ADOPT_FILES or len(set(value)) != len(value)
             or not all(working_dir_valid(p) for p in value)):
         raise ValueError("compose_config.adopt_files must be distinct clean absolute paths")
-    if "overlay_root" not in config:
-        raise ValueError("compose_config.adopt_files needs a declared overlay")
+    # TASK-2590: without a declared overlay, adopt_files is the exact earlier
+    # (overlay-carrying) label list to DETACH from; compose_source keeps only
+    # its in-project head and refuses anything else.
     return value
 
 
@@ -347,6 +348,8 @@ def compose_source(spec: dict, container: dict, project_dir: str | None = None) 
     if overlay:
         # The external tail is never rebased onto a sibling checkout.
         return _overlay_source(spec["compose_config"], working_dir, project_dir or working_dir, files, overlay)
+    if names is None and spec["compose_config"].get("adopt_files"):
+        files = _detach_overlay(spec["compose_config"], working_dir, files)
     if project_dir is not None and project_dir != working_dir:
         if not label_files_valid(working_dir, files):
             raise ComposeError("compose_source_invalid", detail="config files label")
@@ -371,6 +374,27 @@ def compose_source(spec: dict, container: dict, project_dir: str | None = None) 
             raise ComposeError("compose_source_invalid", detail="config files differ from the catalog spec")
         files = expected
     return {"project_dir": working_dir, "compose_files": files}
+
+
+def _detach_overlay(config: dict, label_dir: str, files: list) -> list:
+    """TASK-2590: a binding with no overlay but ``adopt_files`` detaches a
+    target created with a deployment overlay. Only when the label is EXACTLY
+    that list, made of in-project files followed by one or more files outside
+    the project, are the outside files dropped; the in-project head must pass
+    the ordinary label check. Any other label is returned unchanged (and is
+    then judged as before), so the detach happens once."""
+    adopt = validate_adopt_paths(config)
+    if files != adopt:
+        return files
+    head = []
+    for f in files:
+        if posixpath.dirname(f) != label_dir:
+            break
+        head.append(f)
+    tail = files[len(head):]
+    if not head or not tail or any(_within(f, label_dir) for f in tail):
+        raise ComposeError("compose_source_invalid", detail="adopt_files is not an in-project list plus an overlay")
+    return head
 
 
 def _overlay_source(config: dict, label_dir: str, project_dir: str, files: list, overlay: list) -> dict:

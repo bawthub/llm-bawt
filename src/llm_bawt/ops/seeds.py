@@ -418,6 +418,8 @@ _CONFIG_SEEDS: list[dict[str, Any]] = [{
                      "/var/lib/bawthub/skill-sources",
                      "/run/bawthub-service-token", "/run/llm-bawt-bridge-tokens", "/run/llm-bawt-house-pool.json",
                      "/run/llm-bawt-crawl4ai-token",
+                     # TASK-2590: the optional reader broker overlay's export directory.
+                     "/run/llm-bawt-reader-broker-token",
                      # TASK-2386: the reconciler's secrets, which the app exports.
                      "/run/llm-bawt-ops-secrets",
                      # TASK-2380: per-caller API key export directories the app writes.
