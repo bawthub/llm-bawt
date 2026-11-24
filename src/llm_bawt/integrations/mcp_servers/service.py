@@ -7,6 +7,7 @@ callers hold only a short-lived access token.
 """
 from __future__ import annotations
 
+import contextvars
 import logging
 import uuid
 from contextlib import asynccontextmanager
@@ -215,9 +216,48 @@ class McpServers:
         return [{"name": tool_name(slug, t.name), "description": (t.description or "")[:300]} for t in tools]
 
 
+# Third-party transport loggers that can write an upstream URL (path credentials
+# included) or exception chain. While a remote MCP session is open in this
+# context, their records keep level and logger name but lose the details.
+_SDK_LOGGERS = ("mcp.client.streamable_http", "mcp.client.sse", "mcp.client.session",
+                "mcp.shared.session", "httpx", "httpcore")
+_IN_REMOTE_SESSION = contextvars.ContextVar("remote_mcp_session", default=False)
+REDACTED_LOG = "Remote MCP transport diagnostic withheld"
+
+
+class _RedactRemoteSession(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        if _IN_REMOTE_SESSION.get():
+            record.msg, record.args = REDACTED_LOG, ()
+            record.exc_info = record.exc_text = record.stack_info = None
+        return True
+
+
+_REDACTOR = _RedactRemoteSession()
+for _name in _SDK_LOGGERS:
+    if _REDACTOR not in logging.getLogger(_name).filters:
+        logging.getLogger(_name).addFilter(_REDACTOR)
+
+
 @asynccontextmanager
 async def open_session(server_url: str, transport: str, headers: dict[str, str]):
-    """An initialized MCP client session over the server's transport."""
+    """An initialized MCP client session over the server's transport.
+
+    Tasks the SDK starts inherit this context, so its transport logs are redacted.
+    """
+    token = _IN_REMOTE_SESSION.set(True)
+    try:
+        async with _open_session(server_url, transport, headers) as session:
+            yield session
+    finally:
+        try:
+            _IN_REMOTE_SESSION.reset(token)
+        except ValueError:  # exited from another context
+            _IN_REMOTE_SESSION.set(False)
+
+
+@asynccontextmanager
+async def _open_session(server_url: str, transport: str, headers: dict[str, str]):
     from mcp import ClientSession
     if transport == "sse":
         from mcp.client.sse import sse_client

@@ -133,7 +133,23 @@ class RemoteMcpTurn:
         parts = split_tool_name(name)
         return parts is not None and parts[0] in self.servers
 
+    def _current(self, slug: str) -> ResolvedServer | None:
+        """The server's current grant and credential, never the turn's discovery snapshot."""
+        try:
+            return self._tools._servers().resolve_one(self._tools.bot_slug, slug)
+        except Exception as exc:  # noqa: BLE001 - storage outage
+            logger.warning("Remote MCP server %s unavailable: %s", slug, type(exc).__name__)
+            return None
+
     def _catalog(self, server: ResolvedServer) -> list[McpToolDefinition]:
+        # Checked before cached metadata is returned or a cold catalog is fetched,
+        # so a sign-out or revocation mid-turn hides the server's tools too.
+        current = self._current(server.slug)
+        if current is None:
+            if server.slug not in self.unavailable:
+                self.unavailable.append(server.slug)
+            return []
+        server = current
         try:
             return self._tools.catalog(server)
         except Exception as exc:  # noqa: BLE001 - one unreachable server never hides the others
@@ -164,12 +180,7 @@ class RemoteMcpTurn:
         parts = split_tool_name(name)
         if parts is None or parts[0] not in self.servers:
             raise RemoteMcpToolError(f"Tool '{name}' is not enabled for this bot")
-        try:
-            # Current authority, never the turn's discovery snapshot.
-            server = self._tools._servers().resolve_one(self._tools.bot_slug, parts[0])
-        except Exception as exc:  # noqa: BLE001 - storage outage
-            logger.warning("Remote MCP server %s unavailable: %s", parts[0], type(exc).__name__)
-            server = None
+        server = self._current(parts[0])
         if server is None:
             raise RemoteMcpToolError(f"Tool '{name}' is not available right now")
         try:

@@ -252,3 +252,12 @@ def test_list_follows_every_page_within_bounds(monkeypatch):
 
     monkeypatch.setattr(service, "MAX_TOOL_PAGES", 3)
     assert asyncio.run(service.list_all_tools(Endless())) == []
+
+
+def test_a_revoked_server_hides_its_catalog_for_the_rest_of_the_turn(remote):
+    executor = _executor(remote.for_turn())
+    _run(executor, "tool_search", query="select:docs__search_docs")  # resolves both, lists docs only
+    del remote.fake.servers["files"]  # signed out / revoked mid-turn
+    result = _run(executor, "tool_search", query="read file")
+    assert "files__read_file" not in result
+    assert ("list", "files") not in [c[:2] for c in remote.calls]  # its cold catalog is never fetched

@@ -158,7 +158,9 @@ class RemoteMcpGateway:
         except Exception as exc:  # fixed error: never the upstream diagnostics or URL
             logger.warning("Remote MCP gateway listing %s failed: %s", server.slug, type(exc).__name__)
             raise MCPError(-32603, LIST_FAILED) from None
-        return types.ListToolsResult(tools=list(tools))
+        # Results are relabelled (see labelled), so an upstream outputSchema no
+        # longer describes what the client receives; clients must not validate against it.
+        return types.ListToolsResult(tools=[t.model_copy(update={"output_schema": None}) for t in tools])
 
     async def _call_tool(self, _ctx, params: types.CallToolRequestParams) -> types.CallToolResult:
         server, turn = self._request()
@@ -181,9 +183,18 @@ def _error(text: str) -> types.CallToolResult:
 
 
 def labelled(result: types.CallToolResult, source: str) -> types.CallToolResult:
-    """The upstream result with every text block wrapped as untrusted ``source`` data."""
+    """The upstream result labelled untrusted ``source`` data in every model-visible part.
+
+    Text blocks are wrapped, and so is ``structuredContent``: some clients (Codex)
+    show the model only the structured value when it is present, dropping both
+    ``_meta`` and the content array.
+    """
     data = result.model_dump(by_alias=True, mode="json", exclude_none=True)
-    return types.CallToolResult.model_validate(label_mcp_output(data, source))
+    out = label_mcp_output(data, source)
+    if "structuredContent" in data:
+        out["structuredContent"] = {"untrusted_content": True, "source": source,
+                                    "data": data["structuredContent"]}
+    return types.CallToolResult.model_validate(out)
 
 
 class WithRemoteMcp:
