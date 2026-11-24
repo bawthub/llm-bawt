@@ -118,7 +118,7 @@ async def test_inspection_catalog_is_opt_in_and_returns_mcp_image(monkeypatch, r
     async with Client(server, mode="legacy") as session:
         [tool] = (await session.list_tools()).tools
         assert tool.name == "inspect_bawthub_tasks"
-        assert "Settings → Profile" in tool.description
+        assert "Account → Bot inspection" in tool.description
         assert set(tool.input_schema["properties"]) == {"viewport"}
         assert tool.input_schema["properties"]["viewport"]["enum"] == ["phone", "desktop"]
         from scripts.mcp_catalog_report import measure

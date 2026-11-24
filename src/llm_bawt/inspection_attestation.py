@@ -27,7 +27,10 @@ _key: bytes | None = None
 
 
 def export_inspection_key() -> None:
-    """Publish a fresh app-process key; the MCP server runs in that process.
+    """Publish a fresh key from the process that serves MCP tools.
+
+    run_server() calls this whether llm-mcp-server runs standalone or on
+    llm-service's thread; the tool signs with this process-local copy.
 
     Only a file path and reader uid are configurable. No key is accepted in
     the environment or inherited by a standalone MCP process.

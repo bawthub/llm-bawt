@@ -983,8 +983,13 @@ def run_server(
         port: Bind port for HTTP transport.
     """
     from llm_bawt.api_auth.outbound import install as _install_api_key  # TASK-2380
+    from llm_bawt.inspection_attestation import export_inspection_key
 
     _install_api_key()
+    # TASK-2523: inspect_bawthub_tasks signs in whichever process serves MCP,
+    # standalone (llm-mcp-server) or in-process on llm-service's thread, so
+    # that process owns the key and is its only publisher.
+    export_inspection_key()
     import argparse
 
     # Parse CLI arguments when called as entry point

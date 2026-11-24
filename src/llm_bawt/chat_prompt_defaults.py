@@ -134,7 +134,8 @@ INSTALLATION_CONTEXT_TEMPLATE = (
 # configured on this deployment (TASK-2523).
 INSPECTION_HINT = (
     "To see your linked Tasks as the owner sees them, use inspect_bawthub_tasks "
-    "once the owner authorizes it in Settings → Profile → Bot inspection."
+    "once the owner authorizes it on their profile's Account tab → Bot inspection "
+    "(Settings → You → Open your profile)."
 )
 
 TTS_OUTPUT_INSTRUCTIONS = (

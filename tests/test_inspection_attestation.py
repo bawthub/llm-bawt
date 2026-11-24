@@ -63,3 +63,20 @@ def test_key_is_not_imported_from_env_or_file_by_standalone_process(monkeypatch)
     monkeypatch.delenv("BAWTHUB_INSPECTION_KEY_EXPORT_FILE", raising=False)
     attestation.export_inspection_key()
     assert attestation.sign_inspection_tasks(TURN, "desktop") is None
+
+
+def test_mcp_server_process_publishes_the_signing_key(tmp_path, monkeypatch):
+    """The tool signs in the MCP server process, so that process must export."""
+    from llm_bawt.mcp_server import server
+
+    path = tmp_path / "inspection" / "key"
+    monkeypatch.setattr(attestation, "_key", None)
+    monkeypatch.setenv("BAWTHUB_INSPECTION_KEY_EXPORT_FILE", str(path))
+    monkeypatch.delenv("BAWTHUB_INSPECTION_KEY_EXPORT_UID", raising=False)
+    monkeypatch.setattr("sys.argv", ["llm-mcp-server"])
+    monkeypatch.setattr("llm_bawt.api_auth.outbound.install", lambda: None)
+    seen = []
+    monkeypatch.setattr(server.mcp, "run", lambda **kw: seen.append(attestation.inspection_key_available()))
+    server.run_server(transport="stdio")
+    assert seen == [True]
+    assert path.exists()

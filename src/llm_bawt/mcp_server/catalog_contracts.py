@@ -86,7 +86,7 @@ TOOL_SUMMARIES: dict[str, str] = {
     "tasks_create": f"Create task/steps. Own bot_id; associate_current_turn links new work via trusted turn. {_IMAGES_GUIDE} {_BLOCKED_GUIDE}",
     "tasks_update": f"Patch; UI/UX the user can see → REVIEW with dev URL/steps. Other work: coordinators close COMPLETED after review (Tier 0: self-check), attributable push and test/live receipt. BUG is human-locked. {_BLOCKED_POINTER} Own bot_id fills missing owner; associate_current_turn links work and its images.",
     "browser_check_session": "1h non-admin BawtHub session for your UI checks: Playwright cookies; never echo them.",
-    "inspect_bawthub_tasks": "Read-only screenshot of your linked Tasks. Needs a recent signed-in owner chat turn and Settings → Profile authorization. Returns a PNG or status, never a browser login.",
+    "inspect_bawthub_tasks": "Read-only screenshot of your linked Tasks. Needs a recent owner chat turn and Account → Bot inspection approval. Returns a PNG or status, never a login.",
     "initiative_state": "Read, acquire an expiring lease, or CAS-checkpoint recurring task state; trusted turn identity owns writes and stale owners conflict.",
     "tasks_delete": "Permanently delete task/steps; prefer tasks_update CANCELLED to retain history.",
     "tasks_add_dependency": "Add task_id prerequisite depends_on_id; cuid/TASK-N. Rejects self/cycles.",
