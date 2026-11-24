@@ -35,6 +35,39 @@ def client(monkeypatch):
     return client
 
 
+def test_callback_requires_the_service_bearer():
+    app = FastAPI()
+    app.include_router(mcp_servers.router)
+    response = TestClient(app).get("/v1/integrations/mcp-servers/alpha/callback?state=s&code=c")
+    assert response.status_code in (401, 403, 503)
+
+
+def test_each_server_has_its_own_sign_in_cookie(monkeypatch, client):
+    seen = {}
+
+    class Flow:
+        def start(self, server, origin, return_to):
+            return {"authorization_url": "https://auth.example.net/authorize", "browser": "b-" + server.slug}
+
+        def finish(self, server, state, browser, code, error, iss):
+            seen[server.slug] = browser
+            return "/settings/mcp-servers"
+
+    client.fake.oauth = Flow()
+    client.fake.get = lambda slug: type("S", (), {"slug": slug})()
+    response = client.post("/v1/integrations/mcp-servers/alpha/connect", json={},
+                           headers={"origin": "https://hub.example.com"})
+    cookie = response.headers["set-cookie"]
+    assert cookie.startswith("__Secure-bawthub-mcp-login=b-alpha")
+    assert "Path=/api/chat/proxy/v1/integrations/mcp-servers/alpha/callback" in cookie
+    client.cookies.set("__Secure-bawthub-mcp-login", "b-alpha")
+    done = client.get("/v1/integrations/mcp-servers/alpha/callback?state=s&code=c", follow_redirects=False)
+    assert seen == {"alpha": "b-alpha"} and done.status_code == 303
+    cleared = done.headers["set-cookie"]
+    assert "__Secure-bawthub-mcp-login=" in cleared and "mcp-servers/alpha/callback" in cleared
+    assert "bawthub-integration" not in cleared
+
+
 def test_registered_before_generic_integration_routes():
     order = [getattr(r, "prefix", None) for r in all_routers]
     assert order.index("/v1/integrations/mcp-servers") < order.index("/v1/integrations")

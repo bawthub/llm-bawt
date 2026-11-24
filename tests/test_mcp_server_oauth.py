@@ -11,7 +11,8 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel, create_engine
 
 from llm_bawt.integrations.connections import IntegrationError, IntegrationStore
-from llm_bawt.integrations.mcp_servers.oauth import McpOAuth, callback_path, store_id
+from llm_bawt.integrations.mcp_servers import oauth as oauth_module
+from llm_bawt.integrations.mcp_servers.oauth import McpOAuth, callback_path, check_destination, store_id
 from llm_bawt.integrations.mcp_servers.store import McpServer, McpServerError, validate_slug, validate_url
 from llm_bawt.runtime_settings import RuntimeSetting, RuntimeSettingsStore
 from llm_bawt.service.providers import crypto
@@ -19,8 +20,19 @@ from llm_bawt.service.providers import crypto
 ORIGIN = "https://hub.example.com"
 MCP_URL = "https://tools.example.net/mcp"
 AS = "https://auth.example.net"
-SERVER = McpServer("tools", "Tools", MCP_URL, "streamable_http", "oauth", True)
+SERVER = McpServer("tools", "Tools", MCP_URL, "streamable_http", "oauth", True, "gen-1")
 SETTINGS = "/settings/mcp-servers"
+PUBLIC = {"auth.example.net": ["93.184.216.34"], "public.example.org": ["2606:2800:220:1::1"],
+          "private.example.org": ["10.0.0.5"], "mixed.example.org": ["93.184.216.34", "127.0.0.1"]}
+
+
+@pytest.fixture(autouse=True)
+def resolver(monkeypatch):
+    def addresses(host):
+        if host not in PUBLIC:
+            raise OSError("unknown host")
+        return PUBLIC[host]
+    monkeypatch.setattr(oauth_module, "_addresses", addresses)
 
 
 @pytest.fixture
@@ -40,8 +52,10 @@ def store(monkeypatch):
 class FakeRemote:
     """A protected MCP resource plus its authorization server."""
 
-    def __init__(self, *, pkce=("S256",), registration=True, www_auth=True, iss_param=False):
+    def __init__(self, *, pkce=("S256",), registration=True, www_auth=True, iss_param=False,
+                 resource=MCP_URL, issuer=AS, endpoint=f"{AS}/authorize", prm_url=f"{AS}/prm"):
         self.pkce, self.registration, self.www_auth, self.iss_param = pkce, registration, www_auth, iss_param
+        self.resource, self.issuer, self.endpoint, self.prm_url = resource, issuer, endpoint, prm_url
         self.calls: list[httpx.Request] = []
         self.registrations = 0
         self.refresh_status = 200
@@ -50,16 +64,18 @@ class FakeRemote:
         self.calls.append(request)
         url = str(request.url).split("?")[0]
         if url == MCP_URL and request.method == "POST":
-            headers = {"WWW-Authenticate": f'Bearer resource_metadata="{AS}/prm", scope="mcp"'} if self.www_auth else {}
+            headers = ({"WWW-Authenticate": f'Bearer resource_metadata="{self.prm_url}", scope="mcp"'}
+                       if self.www_auth else {})
             return httpx.Response(401, headers=headers)
         if url in (f"{AS}/prm", "https://tools.example.net/.well-known/oauth-protected-resource/mcp"):
-            return httpx.Response(200, json={"resource": MCP_URL, "authorization_servers": [AS],
+            return httpx.Response(200, json={"resource": self.resource, "authorization_servers": [AS],
                                              "scopes_supported": ["mcp", "offline_access"]})
         if url == f"{AS}/.well-known/oauth-authorization-server":
             return httpx.Response(200, json={
-                "issuer": AS, "authorization_endpoint": f"{AS}/authorize", "token_endpoint": f"{AS}/token",
+                **({"issuer": self.issuer} if self.issuer else {}),
+                "authorization_endpoint": self.endpoint, "token_endpoint": f"{AS}/token",
                 **({"registration_endpoint": f"{AS}/register"} if self.registration else {}),
-                "code_challenge_methods_supported": list(self.pkce),
+                "code_challenge_methods_supported": self.pkce if isinstance(self.pkce, str) else list(self.pkce),
                 "authorization_response_iss_parameter_supported": self.iss_param})
         if url == f"{AS}/register":
             self.registrations += 1
@@ -121,9 +137,50 @@ def test_falls_back_to_well_known_without_www_authenticate(store):
     assert params["resource"] == MCP_URL and "mcp" in params["scope"]
 
 
-def test_refuses_server_without_s256(store):
+@pytest.mark.parametrize("pkce", [("plain",), "S256", ("s256",)])
+def test_refuses_server_without_s256(store, pkce):
     with pytest.raises(IntegrationError, match="pkce_unsupported"):
-        oauth_for(store, FakeRemote(pkce=("plain",))).start(SERVER, ORIGIN, SETTINGS)
+        oauth_for(store, FakeRemote(pkce=pkce)).start(SERVER, ORIGIN, SETTINGS)
+
+
+@pytest.mark.parametrize("resource", ["https://other.example.net/mcp", "https://tools.example.net/other", None])
+def test_protected_resource_metadata_must_name_this_server(store, resource):
+    with pytest.raises(IntegrationError, match="oauth_metadata_invalid"):
+        oauth_for(store, FakeRemote(resource=resource)).start(SERVER, ORIGIN, SETTINGS)
+
+
+@pytest.mark.parametrize("issuer", [None, "https://evil.example.org", f"{AS}/tenant"])
+def test_authorization_server_metadata_must_declare_its_issuer(store, issuer):
+    with pytest.raises(IntegrationError, match="issuer_mismatch"):
+        oauth_for(store, FakeRemote(issuer=issuer)).start(SERVER, ORIGIN, SETTINGS)
+
+
+def test_advertised_endpoints_must_be_public_https(store):
+    with pytest.raises(IntegrationError, match="oauth_metadata_invalid"):
+        oauth_for(store, FakeRemote(endpoint="http://auth.example.net/authorize")).start(SERVER, ORIGIN, SETTINGS)
+    with pytest.raises(IntegrationError, match="destination_not_allowed"):
+        oauth_for(store, FakeRemote(endpoint="https://private.example.org/authorize")).start(SERVER, ORIGIN, SETTINGS)
+    with pytest.raises(IntegrationError, match="destination_not_allowed"):
+        oauth_for(store, FakeRemote(prm_url="https://mixed.example.org/prm")).start(SERVER, ORIGIN, SETTINGS)
+
+
+@pytest.mark.parametrize("url,error", [
+    ("https://public.example.org/token", None),
+    ("https://tools.example.net:8443/token", None),  # the host the operator chose, even if private
+    ("https://private.example.org/token", "destination_not_allowed"),
+    ("https://unknown.example.org/token", "destination_not_allowed"),
+    ("https://10.0.0.5/token", "destination_not_allowed"),
+    ("https://169.254.169.254/latest", "destination_not_allowed"),
+    ("http://public.example.org/token", "oauth_metadata_invalid"),
+    ("https://user@public.example.org/token", "oauth_metadata_invalid"),
+    ("https://public.example.org/to ken", "oauth_metadata_invalid"),
+])
+def test_destination_policy(url, error):
+    if error is None:
+        assert check_destination(url, MCP_URL) == url
+    else:
+        with pytest.raises(IntegrationError, match=error):
+            check_destination(url, MCP_URL)
 
 
 def test_refuses_without_registration_endpoint(store):
@@ -183,9 +240,23 @@ def test_revoked_refresh_requires_reauthorization(store):
 def test_token_is_bound_to_the_server_url(store):
     oauth = oauth_for(store, FakeRemote())
     sign_in(oauth)
-    moved = McpServer("tools", "Tools", "https://elsewhere.example/mcp", "streamable_http", "oauth", True)
+    moved = McpServer("tools", "Tools", "https://elsewhere.example/mcp", "streamable_http", "oauth", True, "gen-1")
     with pytest.raises(IntegrationError, match="not_connected"):
         oauth.access_token(moved)
+
+
+def test_a_re_added_server_never_inherits_the_old_sign_in(store):
+    oauth = oauth_for(store, FakeRemote())
+    flow = oauth.start(SERVER, ORIGIN, SETTINGS)
+    state = parse_qs(urlsplit(flow["authorization_url"]).query)["state"][0]
+    readded = McpServer("tools", "Tools", MCP_URL, "streamable_http", "oauth", True, "gen-2")
+    with pytest.raises(IntegrationError, match="invalid_state"):
+        oauth.finish(readded, state, flow["browser"], "the-code", "", "")
+    sign_in(oauth)
+    assert oauth.access_token(SERVER) == "access-1"
+    assert oauth.status(readded)["connected"] is False
+    with pytest.raises(IntegrationError, match="not_connected"):
+        oauth.access_token(readded)
 
 
 def test_disconnect_forgets_tokens_and_registration(store):
@@ -201,13 +272,15 @@ def test_reserved_slugs_refused(slug):
         validate_slug(slug)
 
 
-@pytest.mark.parametrize("slug", ["A", "1x", "a__b", "x_", "", "a" * 40, "a b"])
+@pytest.mark.parametrize("slug", ["A", "1x", "a__b", "x_", "", "a" * 40, "a b", "abc\n"])
 def test_invalid_slugs_refused(slug):
     with pytest.raises(McpServerError, match="invalid_slug"):
         validate_slug(slug)
 
 
-@pytest.mark.parametrize("url", ["ftp://x/y", "https://user:pw@x/mcp", "https://x/mcp#f", "not a url"])
+@pytest.mark.parametrize("url", ["ftp://x/y", "https://user:pw@x/mcp", "https://x/mcp#f", "not a url",
+                                 "https://x/mc\np", "https://x/m cp", "https://x\\y/mcp", "https://x:0/mcp",
+                                 "https://x/mcp#"])
 def test_invalid_urls_refused(url):
     with pytest.raises(McpServerError, match="invalid_url"):
         validate_url(url)

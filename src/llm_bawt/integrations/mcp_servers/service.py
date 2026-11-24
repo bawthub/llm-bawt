@@ -8,13 +8,14 @@ callers hold only a short-lived access token.
 from __future__ import annotations
 
 import logging
+import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 
 from ..connections import IntegrationError, IntegrationStore
 from ...runtime_settings import RuntimeSettingsStore
 from ...service.providers.base import ConnectionRecord
-from .oauth import McpOAuth, store_id
+from .oauth import McpOAuth, owned_by, store_id
 from .store import (AUTH_KINDS, GRANT_SCOPES, TRANSPORTS, Grant, McpServer, McpServerError,
                     McpServerStore, validate_slug, validate_url)
 
@@ -68,7 +69,9 @@ class McpServers:
         if transport not in TRANSPORTS or auth_kind not in AUTH_KINDS:
             raise McpServerError("invalid_field")
         name = (name or "").strip()[:80] or slug
-        server = McpServer(slug, name, validate_url(url), transport, auth_kind, True)
+        server = McpServer(slug, name, validate_url(url), transport, auth_kind, True, uuid.uuid4().hex)
+        if auth_kind != "none" and not server.url.startswith("https://"):
+            raise McpServerError("https_required")  # never send a credential in plaintext
         if auth_kind == "bearer" and not (bearer_token or "").strip():
             raise McpServerError("bearer_token_required")
         if self.store.get(slug) is not None:
@@ -97,9 +100,17 @@ class McpServers:
         token = token.strip()
         if server.auth_kind != "bearer" or not token or len(token) > 8192 or any(c in token for c in "\r\n"):
             raise McpServerError("invalid_bearer_token")
-        self.credentials.save(ConnectionRecord(provider=store_id(slug), status="connected",
-                                               auth_method="bearer", meta={"server_url": server.url},
-                                               secret={"token": token}))
+        self.credentials.save(ConnectionRecord(
+            provider=store_id(slug), status="connected", auth_method="bearer",
+            meta={"server_url": server.url, "generation": server.generation}, secret={"token": token}))
+        # A concurrent remove/re-add can replace the row while we save: never leave
+        # this token behind for a different server with the same slug.
+        current = self.store.get(slug)
+        if current is None or current.generation != server.generation:
+            record = self.credentials.load(store_id(slug))
+            if record and record.meta.get("generation") == server.generation:
+                self.credentials.delete(store_id(slug))
+            raise McpServerError("not_found")
 
     def set_grants(self, slug: str, grants: list[dict], actor: str | None) -> dict:
         if not isinstance(grants, list) or len(grants) > MAX_GRANTS:
@@ -121,7 +132,8 @@ class McpServers:
             return {}
         if server.auth_kind == "bearer":
             record = self.credentials.load(store_id(server.slug))
-            if not record or record.auth_method != "bearer" or not record.secret.get("token"):
+            if not (record and record.auth_method == "bearer" and record.secret.get("token")
+                    and owned_by(record, server)):
                 raise IntegrationError("not_connected")
             return {"Authorization": f"Bearer {record.secret['token']}"}
         return {"Authorization": f"Bearer {self.oauth.access_token(server)}"}

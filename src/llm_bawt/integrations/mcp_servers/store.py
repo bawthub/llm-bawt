@@ -40,6 +40,7 @@ _RELATIONS = {
             transport TEXT NOT NULL CHECK ({_vocab('transport', TRANSPORTS)}),
             auth_kind TEXT NOT NULL CHECK ({_vocab('auth_kind', AUTH_KINDS)}),
             enabled BOOLEAN NOT NULL DEFAULT true,
+            generation TEXT NOT NULL,
             updated_by TEXT,
             created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
             updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -65,10 +66,14 @@ class McpServer:
     transport: str
     auth_kind: str
     enabled: bool
+    #: Random per-row identity. Every stored secret records it, so a slug that
+    #: was removed and re-added never uses the earlier server's credentials.
+    generation: str = ""
 
     def public(self) -> dict:
-        return {"slug": self.slug, "name": self.name, "url": self.url, "transport": self.transport,
-                "auth_kind": self.auth_kind, "enabled": self.enabled}
+        """What any signed-in person may see: the URL without its query string."""
+        return {"slug": self.slug, "name": self.name, "url": display_url(self.url),
+                "transport": self.transport, "auth_kind": self.auth_kind, "enabled": self.enabled}
 
 
 @dataclass(frozen=True)
@@ -78,7 +83,7 @@ class Grant:
 
 
 def validate_slug(slug: str) -> str:
-    if not isinstance(slug, str) or not SLUG_RE.match(slug) or "__" in slug or slug.endswith(("_", "-")):
+    if not isinstance(slug, str) or not SLUG_RE.fullmatch(slug) or "__" in slug or slug.endswith(("_", "-")):
         raise McpServerError("invalid_slug")
     if slug in RESERVED_SLUGS:
         raise McpServerError("reserved_slug")
@@ -87,19 +92,28 @@ def validate_slug(slug: str) -> str:
 
 def validate_url(url: str) -> str:
     """An absolute http(s) URL without credentials or fragment (the MCP resource identifier)."""
-    url = (url or "").strip()
+    url = (url or "").strip() if isinstance(url, str) else ""
+    if not url or len(url) > 2048 or any(ord(c) < 0x21 or ord(c) == 0x7F for c in url) or "\\" in url:
+        raise McpServerError("invalid_url")
     try:
         parts = urlsplit(url)
+        port = parts.port
     except ValueError as exc:
         raise McpServerError("invalid_url") from exc
-    if (parts.scheme not in ("https", "http") or not parts.hostname or parts.username
-            or parts.password or parts.fragment or len(url) > 2048):
+    if (parts.scheme not in ("https", "http") or not parts.hostname or "@" in parts.netloc
+            or parts.fragment or url.endswith("#") or port == 0):
         raise McpServerError("invalid_url")
     return url
 
 
+def display_url(url: str) -> str:
+    """The URL with any query string masked; a query may carry a credential."""
+    parts = urlsplit(url)
+    return parts._replace(query="…" if parts.query else "").geturl()
+
+
 def _row(r) -> McpServer:
-    return McpServer(r.slug, r.name, r.url, r.transport, r.auth_kind, r.enabled)
+    return McpServer(r.slug, r.name, r.url, r.transport, r.auth_kind, r.enabled, r.generation)
 
 
 class McpServerStore:
@@ -128,9 +142,12 @@ class McpServerStore:
     def create(self, server: McpServer, actor: str | None) -> None:
         with self._conn() as conn:
             inserted = conn.execute(text("""
-                INSERT INTO mcp_servers (slug, name, url, transport, auth_kind, enabled, updated_by)
-                VALUES (:slug, :name, :url, :transport, :auth_kind, :enabled, :actor)
-                ON CONFLICT (slug) DO NOTHING"""), {**server.public(), "actor": actor}).rowcount
+                INSERT INTO mcp_servers (slug, name, url, transport, auth_kind, enabled, generation, updated_by)
+                VALUES (:slug, :name, :url, :transport, :auth_kind, :enabled, :generation, :actor)
+                ON CONFLICT (slug) DO NOTHING"""),
+                {"slug": server.slug, "name": server.name, "url": server.url, "transport": server.transport,
+                 "auth_kind": server.auth_kind, "enabled": server.enabled, "generation": server.generation,
+                 "actor": actor}).rowcount
         if inserted != 1:
             raise McpServerError("slug_taken")
 

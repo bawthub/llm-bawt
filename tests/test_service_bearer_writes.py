@@ -73,6 +73,7 @@ PROTECTED = {
     ("PUT", "/v1/integrations/mcp-servers/{slug}/grants"),
     ("POST", "/v1/integrations/mcp-servers/{slug}/tools"),
     ("POST", "/v1/integrations/mcp-servers/{slug}/connect"),
+    ("GET", "/v1/integrations/mcp-servers/{slug}/callback"),
     ("DELETE", "/v1/integrations/mcp-servers/{slug}/connection"),
     ("POST", "/v1/providers/{provider_id}/connect/api-key"),
     ("POST", "/v1/providers/{provider_id}/connect/endpoint"),

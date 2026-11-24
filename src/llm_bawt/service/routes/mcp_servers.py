@@ -1,9 +1,11 @@
 """Remote MCP servers: add by URL, sign in, grant to bots or tags (TASK-2610).
 
 Mounted under ``/v1/integrations/mcp-servers`` so BawtHub's integration proxy
-applies its same-origin guard, browser-binding cookie and un-followed OAuth
-redirects. Writes need the service bearer, which BawtHub adds only after its
-admin check. Bodies are parsed by hand: a FastAPI 422 would echo a bearer token.
+applies its same-origin guard and un-followed OAuth redirects. Writes and the
+OAuth callback need the service bearer, which BawtHub adds only after its admin
+check. Each server's sign-in has its own browser-binding cookie, scoped to that
+server's callback path, so concurrent sign-ins never clobber each other.
+Bodies are parsed by hand: a FastAPI 422 would echo a bearer token.
 """
 from urllib.parse import urlencode
 
@@ -12,17 +14,23 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, RedirectResponse
 
 from llm_bawt.integrations.connections import IntegrationError
-from llm_bawt.integrations.mcp_servers.oauth import RETURN_PATHS
+from llm_bawt.integrations.mcp_servers.oauth import RETURN_PATHS, callback_path
 from llm_bawt.integrations.mcp_servers.service import McpServers
-from llm_bawt.integrations.mcp_servers.store import McpServerError
+from llm_bawt.integrations.mcp_servers.store import McpServerError, validate_slug
 from ..dependencies import get_service
-from .integrations import COOKIE, COOKIE_PATH
 from .service_auth import require_service_token
 
 router = APIRouter(prefix="/v1/integrations/mcp-servers")
 _SERVICE = [Depends(require_service_token)]
 SETTINGS_PATH = next(iter(RETURN_PATHS))
 _NO_STORE = {"Cache-Control": "no-store"}
+COOKIE = "__Secure-bawthub-mcp-login"
+_COOKIE_FLAGS = {"secure": True, "httponly": True, "samesite": "lax"}
+
+
+def cookie_path(slug: str) -> str:
+    """This server's callback path in the browser (behind BawtHub's integration proxy)."""
+    return callback_path(validate_slug(slug))
 
 
 def servers() -> McpServers:
@@ -117,11 +125,11 @@ async def connect(slug: str, request: Request):
                         _str(body, "return_to", SETTINGS_PATH))
     browser = result.pop("browser")
     response = JSONResponse(result, headers=_NO_STORE)
-    response.set_cookie(COOKIE, browser, max_age=600, secure=True, httponly=True, samesite="lax", path=COOKIE_PATH)
+    response.set_cookie(COOKIE, browser, max_age=600, path=cookie_path(server.slug), **_COOKIE_FLAGS)
     return response
 
 
-@router.get("/{slug}/callback")
+@router.get("/{slug}/callback", dependencies=_SERVICE)
 async def callback(slug: str, request: Request, state: str = "", code: str = "", error: str = "", iss: str = ""):
     service = servers()
     try:
@@ -133,7 +141,10 @@ async def callback(slug: str, request: Request, state: str = "", code: str = "",
         location = f"{SETTINGS_PATH}?{urlencode({'mcp_server': slug, 'mcp_error': str(exc)})}"
     response = RedirectResponse(location, status_code=303,
                                 headers={**_NO_STORE, "Referrer-Policy": "no-referrer"})
-    response.delete_cookie(COOKIE, path=COOKIE_PATH, secure=True, httponly=True, samesite="lax")
+    try:
+        response.delete_cookie(COOKIE, path=cookie_path(slug), **_COOKIE_FLAGS)
+    except McpServerError:
+        pass  # a malformed slug never had a cookie
     return response
 
 
