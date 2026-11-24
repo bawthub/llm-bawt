@@ -554,3 +554,69 @@ def test_no_route_compares_the_bridge_header_outside_bridge_gate():
 def test_guard_catches_an_aliased_header_read():
     src = 'NAME = "X-Bridge-Token"\ndef f(request):\n    """X-Bridge-Token"""\n    return request.headers.get(NAME)\n'
     assert _gate_name_literals(ast.parse(src)) == [1]
+
+
+# --- TASK-2590: opt-in broker-only reader export ---------------------------
+READER_ENV = bridge_gate.BROKER_READER_EXPORT_ENV
+
+
+def test_reader_export_is_off_by_default(tmp_path):
+    environ = {gate.export_env: str(tmp_path / "bridge-tokens" / gate.slug) for gate in GATES}
+    assert make(environ).export_tokens() == {g.slug: "written" for g in GATES}
+    assert not (tmp_path / "reader").exists()
+
+
+def test_reader_export_writes_only_the_broker_token(tmp_path):
+    shared = tmp_path / "bridge-tokens"
+    reader = tmp_path / "reader" / "broker"
+    environ = {gate.export_env: str(shared / gate.slug) for gate in GATES}
+    environ[READER_ENV] = str(reader)
+    result = make(environ).export_tokens()
+    assert result == {**{g.slug: "written" for g in GATES}, "broker_reader": "written"}
+    assert reader.read_text().strip() == DERIVED[BROKER.label]
+    assert stat.S_IMODE(reader.stat().st_mode) == 0o600
+    assert [p.name for p in reader.parent.iterdir()] == ["broker"]
+    # The ordinary export is identical to the export with the reader copy off.
+    assert sorted(p.name for p in shared.iterdir()) == sorted(g.slug for g in GATES)
+
+
+def test_reader_export_follows_rotation_through_its_directory(tmp_path):
+    reader = tmp_path / "reader" / "broker"
+    make({READER_ENV: str(reader)}).export_tokens()
+    directory = os.open(reader.parent, os.O_RDONLY)  # a directory mount keeps this view
+    try:
+        rotated = {BROKER.label: "rotated-" + "e" * 40}
+        make({READER_ENV: str(reader)}, derive=lambda label: rotated.get(label, "x")).export_tokens()
+        with open(os.path.join(f"/proc/self/fd/{directory}", "broker")) as handle:
+            assert handle.read().strip() == "rotated-" + "e" * 40
+    finally:
+        os.close(directory)
+
+
+def test_reader_export_is_removed_on_revocation(tmp_path):
+    reader = tmp_path / "reader" / "broker"
+    make({READER_ENV: str(reader)}).export_tokens()
+
+    def broken(_label):
+        raise RuntimeError("no root")
+
+    assert make({READER_ENV: str(reader)}, derive=broken).export_tokens()["broker_reader"] == "removed"
+    assert not reader.exists()
+
+
+@pytest.mark.parametrize("bad", ["relative/broker", "/broker"])
+def test_reader_export_needs_a_dedicated_directory(tmp_path, bad):
+    assert make({READER_ENV: bad}).export_tokens()["broker_reader"] == "failed"
+
+
+def test_reader_export_failure_never_breaks_the_ordinary_export(tmp_path, caplog):
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("")
+    broker = tmp_path / "bridge-tokens" / "broker"
+    with caplog.at_level("ERROR"):
+        result = make({BROKER.export_env: str(broker),
+                       READER_ENV: str(blocker / "broker")}).export_tokens()
+    assert result["broker"] == "written" and result["broker_reader"] == "failed"
+    assert broker.read_text().strip() == DERIVED[BROKER.label]
+    assert DERIVED[BROKER.label] not in caplog.text
+    assert "reader broker token" in caplog.text

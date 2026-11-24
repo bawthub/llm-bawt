@@ -106,6 +106,10 @@ services:
       # directory (owned by that directory's owner, 0600).
       - BRIDGE_VAULT_TOKEN_EXPORT_FILE=/run/llm-bawt-bridge-tokens/vault
       - BRIDGE_VAULT_TOKEN_HOST_EXPORT_FILE=/root/.config/llm-bawt/vault-token
+      # TASK-2590: opt-in broker-only copy for a tools-off reader house. Empty
+      # (the default) = off; to enable set it to
+      # /run/llm-bawt-reader-broker-token/broker and restart the app.
+      - BRIDGE_BROKER_TOKEN_READER_EXPORT_FILE=${BRIDGE_BROKER_TOKEN_READER_EXPORT_FILE:-}
       # The Crawl4AI bearer, derived the same way (crawl4ai_token_export.py):
       # one copy for the bridges, one for the crawl4ai container (uid 999,
       # `appuser` in the crawl4ai image), which reads it at boot. The app's own
@@ -213,6 +217,8 @@ services:
       # so atomic replaces reach the readers).
       - bridge-tokens:/run/llm-bawt-bridge-tokens
       - crawl4ai-token:/run/llm-bawt-crawl4ai-token
+      # TASK-2590: the broker-only reader copy (empty unless enabled above).
+      - reader-broker-token:/run/llm-bawt-reader-broker-token
       # TASK-2380: the app writes every caller's key directory.
       - api-key-app:/run/llm-bawt-api-keys/app
       - api-key-bridge-claude-code:/run/llm-bawt-api-keys/bridge-claude-code
@@ -663,6 +669,8 @@ volumes:
   # readers mount these read-only.
   bridge-tokens:
   crawl4ai-token:
+  # TASK-2590: broker token only, for a tools-off reader house (read-only there).
+  reader-broker-token:
   # TASK-2380: one API key directory per caller; the app writes them all.
   # BawtHub's are fixed-name so its separate compose project can mount them
   # as external volumes (bring `app` up first; it creates them).

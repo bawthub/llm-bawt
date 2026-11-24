@@ -452,3 +452,16 @@ def test_an_unreadable_preview_still_lists_houses(api, monkeypatch):
     monkeypatch.setattr(api.routes, "_previews", down)
     response = api.call("GET", "", "alpha")
     assert response.status_code == 200 and response.json()["houses"]
+
+
+def test_a_tools_off_house_in_a_separate_pool_is_never_self_claimed():
+    """TASK-2590: a reader house rendered from its own pool file is leased but
+    absent from the shared pool, so ordinary move-in neither picks nor accepts it."""
+    store = Store(alpha={})
+    reader_only = state(leases={"reader-a": {"claude-code": "3"}})
+    with pytest.raises(HouseMoveRefused) as named:
+        move_in(store, "alpha", "reader-a", reader_only)
+    assert named.value.code == "unconfigured"
+    with pytest.raises(HouseMoveRefused) as anyfree:
+        move_in(store, "alpha", None, reader_only)
+    assert anyfree.value.code == "no_free_house" and store.writes == []

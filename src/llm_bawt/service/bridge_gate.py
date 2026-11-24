@@ -87,6 +87,15 @@ GATES: tuple[Gate, ...] = (BROKER, GIT_CREDENTIAL, VAULT)
 #: A second vault token copy for the host user's ``bw-secret``: a path in the
 #: host config directory the app mounts. The file is owned by that directory's owner.
 VAULT_HOST_EXPORT_ENV = "BRIDGE_VAULT_TOKEN_HOST_EXPORT_FILE"
+#: TASK-2590: optional second copy of the broker token only, in a dedicated
+#: directory a tools-off reader house mounts read-only. Unset = off.
+BROKER_READER_EXPORT_ENV = "BRIDGE_BROKER_TOKEN_READER_EXPORT_FILE"
+
+
+def publish_token(path, token, environ, *, uid_env):
+    from llm_bawt.bawthub_auth.token_export import publish
+
+    return publish(path, token, environ, uid_env=uid_env)
 
 
 class Outcome(enum.Enum):
@@ -317,10 +326,33 @@ class BridgeGates:
                 logger.error("Could not export the %s bridge token to %s (%s: %s)",
                              gate.slug, raw, type(error).__name__, error)
                 results[gate.slug] = "failed"
+        reader = (self._environ.get(BROKER_READER_EXPORT_ENV) or "").strip()
+        if reader:
+            results["broker_reader"] = self._export_broker_reader_copy(Path(reader))
         host = (self._environ.get(VAULT_HOST_EXPORT_ENV) or "").strip()
         if host:
             results["vault_host"] = self._export_vault_host_copy(Path(host))
         return results
+
+    def _export_broker_reader_copy(self, path: Path) -> str:
+        """TASK-2590: the broker token alone, for a tools-off reader house.
+
+        Off unless the path is set. It must name a file inside its own
+        dedicated directory (that directory is the reader's whole volume), so
+        the atomic replace is seen through a directory mount. Same token,
+        owner and withdrawal rules as the ordinary broker export; a failure
+        here is logged without the value and never affects that export.
+        """
+        try:
+            if not path.is_absolute() or path.name in ("", ".", "..") or \
+                    path.parent == Path(path.anchor):
+                raise ValueError("must be an absolute file path inside a dedicated directory")
+            return publish_token(path, self.derived_token(BROKER), self._environ,
+                                 uid_env=EXPORT_UID_ENV).value
+        except (OSError, ValueError) as error:
+            logger.error("Could not export the reader broker token (%s)",
+                         type(error).__name__)
+            return "failed"
 
     def _export_vault_host_copy(self, path: Path) -> str:
         """The host user's copy of the vault token (``bw-secret`` on the host).

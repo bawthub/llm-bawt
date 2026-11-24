@@ -26,7 +26,7 @@ BASE = ROOT / "docker-compose.yml"
 def reader_row(**extra):
     row = {
         "id": "reader-a", "harness": "claude-code", "profile": "tools-off",
-        "home": "/srv/example/reader-a/home", "broker_token_volume": "example-broker-token",
+        "home": "/srv/example/reader-a/home",
         "memory": "2g",
     }
     row.update(extra)
@@ -75,7 +75,7 @@ def test_tools_off_house_mounts_only_its_role_inputs():
     assert volumes == [
         f"{ROOT}/src:/app/src:ro",
         "/srv/example/reader-a/home:/var/lib/bawt-reader/home",
-        "example-broker-token:/run/llm-bawt-bridge-tokens:ro",
+        "reader-broker-token:/run/llm-bawt-reader-broker-token:ro",
         "api-key-bridge-claude-code:/run/llm-bawt-api-key:ro",
     ]
     joined = "\n".join(volumes)
@@ -89,9 +89,7 @@ def test_tools_off_house_mounts_only_its_role_inputs():
 def test_tools_off_house_has_no_route_or_preview_resources():
     rendered = render_compose(pool(reader_row()), BASE)
     assert "networks" not in rendered
-    assert rendered["volumes"] == {
-        "example-broker-token": {"external": True, "name": "example-broker-token"},
-    }
+    assert "volumes" not in rendered  # reader-broker-token is the base file's own volume
     assert render_routes(pool(reader_row()), {}) == {"http": {"routers": {}, "services": {}}}
     # Preview-only pool keys are not required for a tools-off-only pool.
     assert validate_pool(pool(reader_row()))["houses"][0]["host"] is None
@@ -105,7 +103,7 @@ def test_default_houses_are_unchanged_beside_a_tools_off_house():
     mixed = render_compose(pool(preview, reader_row(), **extras), BASE)
     assert mixed["services"]["house-h1"] == alone["services"]["house-h1"]
     assert mixed["networks"] == alone["networks"]
-    assert set(mixed["volumes"]) == set(alone["volumes"]) | {"example-broker-token"}
+    assert mixed["volumes"] == alone["volumes"]
 
 
 @pytest.mark.parametrize("change, message", [
@@ -116,8 +114,7 @@ def test_default_houses_are_unchanged_beside_a_tools_off_house():
     ({"home": "/srv/../etc"}, "normalized absolute"),
     ({"home": "/"}, "normalized absolute"),
     ({"home": ""}, "home must be"),
-    ({"broker_token_volume": "bad/name"}, "Docker volume name"),
-    ({"broker_token_volume": None}, "broker_token_volume must be"),
+    ({"broker_token_volume": "x"}, "must contain only"),
 ])
 def test_tools_off_house_rejects_invalid_rows(change, message):
     with pytest.raises(ValueError, match=message):
@@ -127,7 +124,7 @@ def test_tools_off_house_rejects_invalid_rows(change, message):
 def test_tools_off_keys_require_the_profile_and_no_aliases():
     plain = {"id": "h1", "harness": "claude-code", "origin": "https://dev1.example.test",
              "home": "/srv/example/home"}
-    with pytest.raises(ValueError, match="require profile tools-off"):
+    with pytest.raises(ValueError, match="requires profile tools-off"):
         validate_houses({"houses": [plain]})
     with pytest.raises(ValueError, match="no preview aliases"):
         validate_pool(pool(reader_row(), preview_aliases={"reader-a": ["r.example.test"]}))
@@ -152,7 +149,9 @@ def test_rendered_overlay_passes_docker_compose_config(tmp_path):
     service = json.loads(result.stdout)["services"]["house-reader-a"]
     targets = {v["target"] for v in service["volumes"]}
     assert targets == {"/app/src", "/var/lib/bawt-reader/home",
-                       "/run/llm-bawt-bridge-tokens", "/run/llm-bawt-api-key"}
+                       "/run/llm-bawt-reader-broker-token", "/run/llm-bawt-api-key"}
+    assert all(v.get("read_only") for v in service["volumes"]
+               if v["target"] != "/var/lib/bawt-reader/home")
 
 
 # --- consumer fence ----------------------------------------------------------
@@ -231,3 +230,28 @@ def test_tools_off_env_requires_a_named_house():
         tools_off_from_env("reader-a", {"BAWT_HOUSE_TOOLS_OFF": "maybe"})
     with pytest.raises(ValueError, match="requires a named"):
         HouseSlot("", "claude-code", object(), tools_off=True)
+
+
+def test_tools_off_house_reads_the_broker_only_copy():
+    env = _service()["environment"]
+    assert env["BRIDGE_BROKER_TOKEN_FILE"] == "/run/llm-bawt-reader-broker-token/broker"
+    assert env["LLM_BAWT_API_KEY_FILE"] == "/run/llm-bawt-api-key/api-key"
+
+
+def test_base_compose_declares_the_reader_volume_off_by_default():
+    import yaml
+
+    base = yaml.safe_load(BASE.read_text())
+    assert "reader-broker-token" in base["volumes"]
+    app = base["services"]["app"]
+    assert "reader-broker-token:/run/llm-bawt-reader-broker-token" in app["volumes"]
+    assert ("BRIDGE_BROKER_TOKEN_READER_EXPORT_FILE="
+            "${BRIDGE_BROKER_TOKEN_READER_EXPORT_FILE:-}") in app["environment"]
+    # No ordinary bridge mounts the reader copy.
+    for name, service in base["services"].items():
+        if name != "app":
+            assert not any("reader-broker-token" in str(v) for v in service.get("volumes", []))
+
+
+def test_tools_off_house_never_generates_an_ssh_identity():
+    assert _service()["environment"]["BRIDGE_SSH_IDENTITY"] == "0"

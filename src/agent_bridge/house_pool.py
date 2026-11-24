@@ -42,15 +42,18 @@ POOL_KEYS = {
     # Optional: the shared dev site the mansion serves, linked from Campus.
     "mansion_origin",
 }
-HOUSE_KEYS = {"id", "harness", "origin", "memory", "profile", "home", "broker_token_volume"}
+HOUSE_KEYS = {"id", "harness", "origin", "memory", "profile", "home"}
 # TASK-2590: opt-in profile for a strict tools-off reader house. It is rendered
 # standalone (no mansion ``extends``), with no preview, so it inherits none of
 # the shared SDK state, dev tree, SSH or bridge-token mounts.
 TOOLS_OFF = "tools-off"
 TOOLS_OFF_HOME = "/var/lib/bawt-reader/home"
 TOOLS_OFF_UID = "1001:1001"
-_TOOLS_OFF_KEYS = {"home", "broker_token_volume"}
-_VOLUME_NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}\Z")
+_TOOLS_OFF_KEYS = {"home"}
+# The app's opt-in broker-only export directory (docker-compose.yml, the
+# BRIDGE_BROKER_TOKEN_READER_EXPORT_FILE setting), mounted read-only here.
+READER_BROKER_VOLUME = "reader-broker-token"
+READER_BROKER_DIR = "/run/llm-bawt-reader-broker-token"
 
 
 def _text(value: object, name: str) -> str:
@@ -108,12 +111,9 @@ def _tools_off_row(row: dict, house_id: str, harness: str, profile: object,
     path = Path(home)
     if not path.is_absolute() or ".." in path.parts or str(path) != home or home == "/":
         raise ValueError("home must be a normalized absolute deployment-local directory")
-    volume = _text(row.get("broker_token_volume"), "broker_token_volume")
-    if not _VOLUME_NAME.fullmatch(volume):
-        raise ValueError("broker_token_volume must be a Docker volume name")
     return {
         "id": house_id, "harness": harness, "profile": TOOLS_OFF,
-        "origin": None, "host": None, "home": home, "broker_token_volume": volume,
+        "origin": None, "host": None, "home": home,
         "memory": _memory(row.get("memory", config.get("memory"))),
     }
 
@@ -146,7 +146,7 @@ def validate_pool(config: object, *, renderer: bool = True) -> dict:
     for row in houses:
         if not isinstance(row, dict) or row.keys() - HOUSE_KEYS:
             raise ValueError("house must contain only id, harness, origin and memory "
-                             "(plus profile, home and broker_token_volume for tools-off)")
+                             "(plus profile and home for tools-off)")
         house_id = row.get("id")
         if not isinstance(house_id, str) or not HOUSE_ID.fullmatch(house_id):
             raise ValueError("house id must match ^[a-z0-9][a-z0-9-]{0,30}$")
@@ -161,7 +161,7 @@ def validate_pool(config: object, *, renderer: bool = True) -> dict:
             ids.add(house_id)
             continue
         if row.keys() & _TOOLS_OFF_KEYS:
-            raise ValueError("home and broker_token_volume require profile tools-off")
+            raise ValueError("home requires profile tools-off")
         origin, host = _origin(row.get("origin"))
         if house_id in ids or host in hosts:
             raise ValueError("house ids and preview hostnames must be unique")
@@ -209,12 +209,10 @@ def render_compose(config: object, base_compose: Path) -> dict:
     """Overlay the mansion Compose definition; inherit its credentials/mounts."""
     pool = validate_pool(config)
     services = {}
-    broker_volumes: set[str] = set()
     for house in pool["houses"]:
         house_id = house["id"]
         if is_tools_off(house):
             services[f"house-{house_id}"] = _tools_off_service(house, pool, base_compose)
-            broker_volumes.add(house["broker_token_volume"])
             continue
         service = {
             # One definition for either harness. Inherit the existing mansion
@@ -299,8 +297,6 @@ def render_compose(config: object, base_compose: Path) -> dict:
         output["volumes"] = {
             "house-service-token": {"external": True, "name": pool["service_token_volume"]},
         }
-    for name in sorted(broker_volumes):
-        output.setdefault("volumes", {})[name] = {"external": True, "name": name}
     return output
 
 
@@ -335,6 +331,7 @@ def _tools_off_service(house: dict, pool: dict, base_compose: Path) -> dict:
         "environment": {
             "BAWT_HOUSE": house_id,
             "BAWT_HOUSE_TOOLS_OFF": "on",
+            "BRIDGE_SSH_IDENTITY": "0",
             "HOME": home,
             "CLAUDE_CODE_CWD": f"{home}/work",
             # No skills path or MCP URLs: the image default skills path is not
@@ -346,13 +343,13 @@ def _tools_off_service(house: dict, pool: dict, base_compose: Path) -> dict:
             "LLM_BAWT_SERVICE_HOST": "app",
             # Passed through by name from the deployment .env, as the mansion does.
             "LLM_BAWT_REDIS_URL": None,
-            "BRIDGE_BROKER_TOKEN_FILE": "/run/llm-bawt-bridge-tokens/broker",
+            "BRIDGE_BROKER_TOKEN_FILE": f"{READER_BROKER_DIR}/broker",
             "LLM_BAWT_API_KEY_FILE": "/run/llm-bawt-api-key/api-key",
         },
         "volumes": [
             f"{root}/src:/app/src:ro",
             f"{house['home']}:{home}",
-            f"{house['broker_token_volume']}:/run/llm-bawt-bridge-tokens:ro",
+            f"{READER_BROKER_VOLUME}:{READER_BROKER_DIR}:ro",
             "api-key-bridge-claude-code:/run/llm-bawt-api-key:ro",
         ],
         "read_only": True,
