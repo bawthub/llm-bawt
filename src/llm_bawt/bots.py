@@ -200,54 +200,61 @@ def _load_db_bot_profiles() -> dict[str, dict[str, Any]]:
             slug = (row.slug or "").strip().lower()
             if not slug:
                 continue
-            entry: dict[str, Any] = {
-                "name": row.name,
-                "description": row.description,
-                "system_prompt": row.system_prompt,
-                "prompt_override_id": getattr(row, "prompt_override_id", None),
-                "requires_memory": row.requires_memory,
-                "voice_optimized": row.voice_optimized,
-                "tts_mode": row.tts_mode,
-                "include_summaries": row.include_summaries,
-                "include_in_global_search": row.include_in_global_search,
-                "tags": None if tags_by_bot is None else tags_by_bot.get(slug, []),
-                "uses_tools": row.uses_tools,
-                "uses_search": row.uses_search,
-                "uses_home_assistant": row.uses_home_assistant,
-            }
-            if row.default_model is not None:
-                entry["default_model"] = row.default_model
-            entry["harness"] = getattr(row, "harness", None)
-            entry["endpoint_id"] = getattr(row, "endpoint_id", None)
-            if getattr(row, "house", None):
-                entry["house"] = row.house
-            if getattr(row, "house_pinned", False):
-                entry["house_pinned"] = True
-            if row.color is not None:
-                entry["color"] = row.color
-            if getattr(row, "cli_color", None):
-                entry["cli_color"] = row.cli_color
-            if row.avatar is not None:
-                entry["avatar"] = row.avatar
-            if getattr(row, "avatar_render", None):
-                entry["avatar_render"] = row.avatar_render
-            if row.default_voice is not None:
-                entry["default_voice"] = row.default_voice
-            if row.nextcloud_config is not None:
-                entry["nextcloud"] = row.nextcloud_config
-            entry["bot_type"] = normalize_bot_type(
-                getattr(row, "bot_type", None), row.agent_backend,
+            profiles[slug] = _profile_entry(
+                row, None if tags_by_bot is None else tags_by_bot.get(slug, []),
             )
-            if row.agent_backend is not None:
-                entry["agent_backend"] = row.agent_backend
-            if row.agent_backend_config is not None:
-                entry["agent_backend_config"] = row.agent_backend_config
-            profiles[slug] = entry
         return profiles
     except BotRegistryUnavailable:
         raise
     except Exception as e:
         raise BotRegistryUnavailable(f"could not read bot profiles: {e}") from e
+
+
+def _profile_entry(row, tags: list[str] | None) -> dict[str, Any]:
+    """One registry entry for a bot_profiles row (shared by the registry and the named reader)."""
+    entry: dict[str, Any] = {
+        "name": row.name,
+        "description": row.description,
+        "system_prompt": row.system_prompt,
+        "prompt_override_id": getattr(row, "prompt_override_id", None),
+        "requires_memory": row.requires_memory,
+        "voice_optimized": row.voice_optimized,
+        "tts_mode": row.tts_mode,
+        "include_summaries": row.include_summaries,
+        "include_in_global_search": row.include_in_global_search,
+        "tags": tags,
+        "uses_tools": row.uses_tools,
+        "uses_search": row.uses_search,
+        "uses_home_assistant": row.uses_home_assistant,
+    }
+    if row.default_model is not None:
+        entry["default_model"] = row.default_model
+    entry["harness"] = getattr(row, "harness", None)
+    entry["endpoint_id"] = getattr(row, "endpoint_id", None)
+    if getattr(row, "house", None):
+        entry["house"] = row.house
+    if getattr(row, "house_pinned", False):
+        entry["house_pinned"] = True
+    if row.color is not None:
+        entry["color"] = row.color
+    if getattr(row, "cli_color", None):
+        entry["cli_color"] = row.cli_color
+    if row.avatar is not None:
+        entry["avatar"] = row.avatar
+    if getattr(row, "avatar_render", None):
+        entry["avatar_render"] = row.avatar_render
+    if row.default_voice is not None:
+        entry["default_voice"] = row.default_voice
+    if row.nextcloud_config is not None:
+        entry["nextcloud"] = row.nextcloud_config
+    entry["bot_type"] = normalize_bot_type(
+        getattr(row, "bot_type", None), row.agent_backend,
+    )
+    if row.agent_backend is not None:
+        entry["agent_backend"] = row.agent_backend
+    if row.agent_backend_config is not None:
+        entry["agent_backend_config"] = row.agent_backend_config
+    return entry
 
 
 def _load_bot_tags(engine) -> dict[str, list[str]] | None:
@@ -258,6 +265,65 @@ def _load_bot_tags(engine) -> dict[str, list[str]] | None:
     except Exception as e:
         logger.warning("Could not load bot tags; bots report them unavailable: %s", e)
         return None
+
+
+def load_named_bot(config, slug: str, *, profile_store=None, tag_store=None) -> Bot | None:
+    """Read exactly one bot by slug, bypassing the shared registry.
+
+    Strict callers use this so no other bot's profile or tags are read: one
+    slug-filtered profile row and that bot's own tag rows. It never consults,
+    fills or invalidates the registry cache and never falls back to a default
+    bot. Returns None when the profile is absent; read errors propagate.
+    """
+    normalized = (slug or "").strip().lower()
+    if not normalized:
+        return None
+    if profile_store is None:
+        from llm_bawt.runtime_settings import BotProfileStore
+        profile_store = BotProfileStore(config)
+        if profile_store.engine is None:
+            raise BotRegistryUnavailable(profile_store.init_error or "bot profiles DB engine unavailable")
+    row = profile_store.get(normalized)
+    if row is None or (row.slug or "").strip().lower() != normalized:
+        return None
+    if tag_store is None:
+        from llm_bawt.bot_tags.store import BotTagStore
+        tag_store = BotTagStore(profile_store.engine)
+    entry = _profile_entry(row, tag_store.tags_for(normalized))
+    return _bot_from_entry(normalized, entry, entry["bot_type"])
+
+
+def _bot_from_entry(slug: str, data: dict[str, Any], resolved_bot_type: str) -> Bot:
+    return Bot(
+        slug=slug,
+        name=data.get("name", slug.title()),
+        description=data.get("description", ""),
+        system_prompt=data.get("system_prompt", "You are a helpful assistant."),
+        prompt_override_id=data.get("prompt_override_id"),
+        requires_memory=data.get("requires_memory", True),
+        voice_optimized=data.get("voice_optimized", False),
+        tts_mode=data.get("tts_mode", False),
+        include_summaries=data.get("include_summaries", True),
+        include_in_global_search=data.get("include_in_global_search", True),
+        tags=data.get("tags"),
+        default_voice=data.get("default_voice"),
+        default_model=data.get("default_model"),
+        harness=data.get("harness"),
+        endpoint_id=data.get("endpoint_id"),
+        house=data.get("house") or None,
+        house_pinned=bool(data.get("house_pinned", False)),
+        uses_tools=data.get("uses_tools", False),
+        uses_search=data.get("uses_search", False),
+        uses_home_assistant=data.get("uses_home_assistant", False),
+        color=data.get("color"),
+        cli_color=data.get("cli_color"),
+        avatar=data.get("avatar"),
+        avatar_render=data.get("avatar_render"),
+        nextcloud=data.get("nextcloud"),
+        bot_type=resolved_bot_type,
+        agent_backend=data.get("agent_backend"),
+        agent_backend_config=data.get("agent_backend_config") or {},
+    )
 
 
 def _load_bots_config() -> None:
@@ -296,36 +362,7 @@ def _load_bots_config() -> None:
         raw_entry["bot_type"] = resolved_bot_type
         raw_data[slug] = raw_entry
 
-        bots[slug] = Bot(
-            slug=slug,
-            name=data.get("name", slug.title()),
-            description=data.get("description", ""),
-            system_prompt=data.get("system_prompt", "You are a helpful assistant."),
-            prompt_override_id=data.get("prompt_override_id"),
-            requires_memory=data.get("requires_memory", True),
-            voice_optimized=data.get("voice_optimized", False),
-            tts_mode=data.get("tts_mode", False),
-            include_summaries=data.get("include_summaries", True),
-            include_in_global_search=data.get("include_in_global_search", True),
-            tags=data.get("tags"),
-            default_voice=data.get("default_voice"),
-            default_model=data.get("default_model"),
-            harness=data.get("harness"),
-            endpoint_id=data.get("endpoint_id"),
-            house=data.get("house") or None,
-            house_pinned=bool(data.get("house_pinned", False)),
-            uses_tools=data.get("uses_tools", False),
-            uses_search=data.get("uses_search", False),
-            uses_home_assistant=data.get("uses_home_assistant", False),
-            color=data.get("color"),
-            cli_color=data.get("cli_color"),
-            avatar=data.get("avatar"),
-            avatar_render=data.get("avatar_render"),
-            nextcloud=data.get("nextcloud"),
-            bot_type=resolved_bot_type,
-            agent_backend=data.get("agent_backend"),
-            agent_backend_config=data.get("agent_backend_config") or {},
-        )
+        bots[slug] = _bot_from_entry(slug, data, resolved_bot_type)
 
     BUILTIN_BOTS.clear()
     BUILTIN_BOTS.update(bots)

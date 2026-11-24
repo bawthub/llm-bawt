@@ -26,7 +26,13 @@ def resolve_execution_endpoint(service, bot_id: str, model: str, user_id: str) -
     """Revalidate the immutable endpoint against the current bot/backend."""
     if not user_id or not bot_id or not model:
         raise ValueError("Bound execution needs user, bot, and model")
-    bot = BotManager(service.config).get_bot(bot_id)
+    return validate_bound_endpoint(service, BotManager(service.config).get_bot(bot_id), model)
+
+
+def validate_bound_endpoint(service, bot, model: str) -> str:
+    """Check an already-resolved bot can run ``model``; return the endpoint ref."""
+    if not model:
+        raise ValueError("Bound execution needs user, bot, and model")
     if not bot or not getattr(bot, "enabled", True):
         raise ValueError("Bound execution bot is missing or disabled")
     backend = durable_agent_backend(bot)

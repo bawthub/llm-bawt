@@ -3,9 +3,15 @@ from __future__ import annotations
 
 from .prompt_execution import create_prompt_instance, prompt_delivery_record
 from .request_model_execution import create_bound_instance, routed_delivery_record
+from .strict_reader_execution import create_strict_instance, is_strict_request
 
 
 def select_stream_execution(service, request, bot_id: str, local_mode: bool):
+    # The strict named reader is decided first so none of the paths below
+    # can touch the shared bot registry for it.
+    if is_strict_request(service, bot_id):
+        model, instance = create_strict_instance(service, request)
+        return model, [], instance, None
     prompt_record = prompt_delivery_record(service, request)
     route_record = routed_delivery_record(service, request)
     if prompt_record and route_record:

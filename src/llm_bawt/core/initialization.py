@@ -54,7 +54,7 @@ class OrchestratorInitializationMixin:
             raise ValueError("user_id is required - set LLM_BAWT_DEFAULT_USER or pass --user")
         self.resolved_model_alias = resolved_model_alias
         self.config = config
-        resolution_bot = BotManager(config).get_bot(bot_id)
+        resolution_bot = self._lookup_bot(config, bot_id)
         resolution_harness = getattr(resolution_bot, "harness", None)
         from ..model_catalog import resolve_model_config
 
@@ -179,14 +179,20 @@ class OrchestratorInitializationMixin:
         """Ordinary clients register globally; isolated automation overrides this."""
         return get_model_lifecycle(config)
 
+    def _lookup_bot(self, config: Config, slug: str) -> Bot | None:
+        """Construction-time bot lookup; strict request instances override it."""
+        return BotManager(config).get_bot(slug)
+
+    def _fallback_bot(self, config: Config) -> Bot:
+        return BotManager(config).get_default_bot()
+
     def _init_bot(self, config: Config):
         """Initialize bot configuration."""
-        bot_manager = BotManager(config)
-        bot = bot_manager.get_bot(self.bot_id)
-        
+        bot = self._lookup_bot(config, self.bot_id)
+
         if not bot:
             logger.warning(f"Bot '{self.bot_id}' not found, falling back to default")
-            bot = bot_manager.get_default_bot()
+            bot = self._fallback_bot(config)
             self.bot_id = bot.slug
         
         self.bot = bot
