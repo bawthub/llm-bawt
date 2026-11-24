@@ -110,10 +110,6 @@ def delivery_reply_channel_note(record: Any) -> str | None:
     from .inter_bot_delivery_retry import is_system_retry, retry_reply_to
 
     author = record.author
-    from .peer.messaging import reply_address
-
-    # Records without metadata (local or legacy shapes) have no peer address.
-    remote = reply_address(getattr(record, "metadata", None))
     if is_system_retry(record):
         # A system-authored retry (TASK-1231B) answers to the original bot
         # sender; a retry of a user's request has no bot to reply to.
@@ -123,12 +119,6 @@ def delivery_reply_channel_note(record: Any) -> str | None:
         # Reserved identities (system notices such as ops-blocked) cannot
         # receive a reply.
         sender = author.entity_id
-    elif remote is not None:
-        # TASK-2517: a paired install's bot; the address is bound to the
-        # authenticated peer at admission, never caller-supplied.
-        return resolve_reply_channel_note(
-            record.reply_mode if record.reply_mode in _DELIVERY_MODES else "async",
-            sender_bot_id=remote, target_bot_id=record.target_bot_id)
     else:
         sender = None
     if sender is None:

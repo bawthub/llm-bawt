@@ -1005,7 +1005,7 @@ async def list_available_bots(
         description="Add state.turn.kind (idle/reserved/executing/ambiguous) and the other live fields."
     )] = True,
     location: Annotated[str | None, Field(
-        description="Only bots on claude-code-bridge, codex-bridge, house, hN, app or peer."
+        description="Only bots on claude-code-bridge, codex-bridge, house, hN or app."
     )] = None,
     detail: Annotated[Literal["compact", "full"], Field(
         description='"compact" (default): one short row per bot. "full": every route and state field.'
@@ -1049,10 +1049,6 @@ async def list_available_bots(
     location, prompt_stale, steerable only when not true, unavailable); empty
     and null fields are left out, except ``steerable: null`` (unknown).
     "full" returns every field above.
-
-    Remote bots (TASK-2517) shared by paired installs follow the local ones,
-    with ``slug`` ``slug@<install_id>``, ``remote: true`` and location "peer";
-    they are listed unless a tag, capability or non-peer location filter is set.
     """
     from llm_bawt.bot_location import location_runtimes, read_locations
 
@@ -1116,34 +1112,5 @@ async def list_available_bots(
             entry["state"] = {**states[row.slug], "location": locations[row.slug],
                               "steerable": steerable.get(row.slug)}
         listed.append(entry if detail == "full" else _compact_bot(entry))
-    if tag is None and capability is None and wanted_location in (None, "peer"):
-        listed.extend(await _peer_rows(detail))
     return listed
 
-
-async def _peer_rows(detail: str) -> list[dict]:
-    """Bots paired installs share with this one (TASK-2517), addressed slug@install.
-
-    Remote bots have no local tags, capabilities or live state. A peer that
-    could not be read gets one ``{"peer", "install_id", "unavailable"}`` row
-    instead of silently looking like it shares nothing.
-    """
-    from llm_bawt.peer import discovery, runtime
-
-    if not runtime.enabled():
-        return []
-    try:
-        bots, unavailable = await discovery.all_peer_bots(runtime.engine())
-    except Exception:  # noqa: BLE001 - local discovery must not fail on peers
-        logger.warning("bot discovery: peer bots unavailable", exc_info=True)
-        return [{"peer": None, "unavailable": "peer table unreadable"}]
-    rows = []
-    for b in bots:
-        loc = b["location"]
-        row = {"slug": b["id"], "name": b["name"], "tags": [], "capabilities": [],
-               "location": f'peer ({loc["peer"]})', "remote": True}
-        if detail == "full":
-            row.update(description=b["description"], location=loc)
-        rows.append(row)
-    return rows + [{"peer": u["peer"], "install_id": u["install_id"],
-                    "unavailable": u["reason"]} for u in unavailable]

@@ -34,8 +34,6 @@ class ScopedDeliveryReader:
             raise BotAccessError("source_unavailable") from None
 
     def _get(self, delivery_id):
-        if delivery_id.startswith("peer:"):
-            return _PeerReceipt.find(delivery_id, self.allowed)
         return self.store.get(delivery_id, allowed_bot_ids=self.allowed)
 
     async def list(self, *, bot_id, sender_bot_id, target_bot_id, status, active_only,
@@ -62,22 +60,3 @@ class ScopedDeliveryReader:
     def _list(self, kwargs):
         return self.store.list(**kwargs)
 
-
-class _PeerReceipt:
-    """A peer outbox receipt (TASK-2517), readable by the bots allowed to see its sender."""
-
-    def __init__(self, receipt: dict):
-        self.receipt = receipt
-
-    def to_api(self) -> dict:
-        return self.receipt
-
-    @classmethod
-    def find(cls, delivery_id: str, allowed) -> "_PeerReceipt | None":
-        from llm_bawt.peer import messaging, runtime
-
-        if not runtime.enabled():
-            return None
-        senders = None if allowed is None else frozenset(allowed)
-        found = messaging.lookup(runtime.engine(), delivery_id, senders=senders)
-        return cls(found) if found else None

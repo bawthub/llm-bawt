@@ -85,20 +85,8 @@ def delivery_queue_view():
     return delivery_queues(_dispatcher().store.engine)
 
 
-def _peer_receipt(delivery_id: str) -> dict:
-    """An outbound message to a paired install (TASK-2517), from the peer outbox."""
-    from ...peer import messaging, runtime
-
-    found = messaging.lookup(runtime.engine(), delivery_id) if runtime.enabled() else None
-    if found is None:
-        raise HTTPException(status_code=404, detail="Delivery not found")
-    return found
-
-
 @router.get("/v1/inter-bot-deliveries/{delivery_id}", tags=["Inter-Bot Deliveries"])
 def get_delivery(delivery_id: str):
-    if delivery_id.startswith("peer:"):
-        return _peer_receipt(delivery_id)
     record = _dispatcher().store.get(delivery_id)
     if record is None or "prompt_schedule" in (record.metadata or {}):
         raise HTTPException(status_code=404, detail="Delivery not found")
