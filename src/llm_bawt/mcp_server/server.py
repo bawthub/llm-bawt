@@ -908,18 +908,20 @@ from . import task_review_tools as _task_review_tools  # noqa: F401, E402
 register_inspection_tool(mcp)
 
 # ---------------------------------------------------------------------------
-# Media library tools (Sonarr / Radarr / SABnzbd)
+# Optional capability tools: media library (Sonarr / Radarr / SABnzbd), image
+# generation and speech/home audio. The public text profile omits their source,
+# so they register only when present (no runtime switch).
 # ---------------------------------------------------------------------------
 
-from . import media_tools as _media_tools  # noqa: F401, E402
+from importlib import import_module as _import_module  # noqa: E402
 
-# ---------------------------------------------------------------------------
-# Image generation tool (Grok Imagine — text->image + iterate)
-# ---------------------------------------------------------------------------
+from llm_bawt.public_text_profile import capability_present as _capability_present  # noqa: E402
 
-from . import media_generation_tools as _media_generation_tools  # noqa: F401, E402
+for _optional_tools in ("media_tools", "media_generation_tools", "home_audio_tools"):
+    if _capability_present(f"{__package__}.{_optional_tools}"):
+        _import_module(f"{__package__}.{_optional_tools}")
+
 from . import attachment_tools as _attachment_tools  # noqa: F401, E402
-from . import home_audio_tools as _home_audio_tools  # noqa: F401, E402
 from . import notify_tools as _notify_tools  # noqa: F401, E402
 from . import playground_tools as _playground_tools  # noqa: F401, E402
 

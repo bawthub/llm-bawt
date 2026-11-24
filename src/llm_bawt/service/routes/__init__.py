@@ -1,5 +1,8 @@
 """Route router collection for app registration."""
 
+from importlib import import_module
+
+from ...public_text_profile import capability_present
 from .admin_gates import router as admin_gates_router
 from .auth_observations import router as auth_observations_router
 from .bawthub_auth_secrets import router as bawthub_auth_secrets_router
@@ -57,14 +60,19 @@ from .usage import router as usage_router
 # TASK-214: avatar_animations CRUD moved to bawthub Prisma.
 # /v1/avatar/animations routes were deleted; admin lives at
 # bawthub's /api/avatar/animation-triggers now.
-from .media import router as media_router
 from .uploads import router as uploads_router
-from .response_audio import router as response_audio_router
 from .working_memory import router as working_memory_router
 from .workspace import router as workspace_router
 from .campus import router as campus_router
 from .playground import router as playground_router
 from .guidance import router as guidance_router
+
+
+def _optional_routers(name: str) -> list:
+    """The router of ``routes.<name>`` when its source ships (public text profile omits it)."""
+    module = f"{__name__}.{name}"
+    return [import_module(module).router] if capability_present(module) else []
+
 
 all_routers = [
     health_router,
@@ -117,9 +125,9 @@ all_routers = [
     ops_approvals_router,
     profiles_router,
     llm_router,
-    media_router,
+    *_optional_routers("media"),
     uploads_router,
-    response_audio_router,
+    *_optional_routers("response_audio"),
     working_memory_router,
     workspace_router,
     campus_router,

@@ -34,6 +34,7 @@ from mcp.server.mcpserver import Image
 from llm_bawt.media import get_media_store
 from llm_bawt.default_user import resolve_user_id
 from llm_bawt.media.generation_service import MediaGenerationService
+from llm_bawt.media.image_format import sniff_image_format as _sniff_image_format
 
 from .server import mcp
 
@@ -43,24 +44,6 @@ _generation_service = MediaGenerationService()
 
 # Source tag recorded on the stored asset (one of media.store.ALLOWED_SOURCES).
 _SOURCE = "tool_generated"
-
-
-def _sniff_image_format(raw: bytes) -> str:
-    """Best-effort image subtype from magic bytes ('png' | 'jpeg' | 'webp' | 'gif').
-
-    Only used for the declared MIME hint and the FastMCP ``Image`` format; the
-    media store re-derives the real format from the bytes via Pillow regardless,
-    so a wrong guess is cosmetic, never corrupting.
-    """
-    if raw[:8].startswith(b"\x89PNG\r\n\x1a\n"):
-        return "png"
-    if raw[:3] == b"\xff\xd8\xff":
-        return "jpeg"
-    if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
-        return "webp"
-    if raw[:6] in (b"GIF87a", b"GIF89a"):
-        return "gif"
-    return "png"
 
 
 @mcp.tool(name="generate_image", structured_output=False)

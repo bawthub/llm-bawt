@@ -205,8 +205,11 @@ def main() -> None:
         embed_task.add_done_callback(_supervise("embed"))
         # Embed-only (CPU tenant sidecar, TASK-2448) has no GPU and no DB, so the
         # video server would only crash on its schema bootstrap.
+        # The public text profile omits the video server source entirely.
+        from llm_bawt.public_text_profile import capability_present
+
         video_task = None
-        if not embed_only:
+        if not embed_only and capability_present(f"{__package__}.video_server"):
             from .video_server import serve_video
 
             video_task = asyncio.create_task(serve_video(int(os.getenv("LOCAL_MODEL_VIDEO_PORT", "8685"))))

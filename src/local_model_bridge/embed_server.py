@@ -41,6 +41,23 @@ EMBED_DIM = 384
 _model: Any = None
 
 
+def pinned_model_dir() -> str | None:
+    """Directory of the pinned local-only model, or None for the named/cache path.
+
+    Set explicitly via ``LOCAL_MODEL_EMBED_PINNED_DIR``. The public text profile
+    ships without the video server and always uses the pinned directory, so it
+    can never fall back to a network download.
+    """
+    from .pinned_embed_model import DEFAULT_DIR, PINNED_DIR_ENV
+
+    explicit = os.getenv(PINNED_DIR_ENV, "").strip()
+    if explicit:
+        return explicit
+    from llm_bawt.public_text_profile import capability_present
+
+    return None if capability_present("local_model_bridge.video_server") else DEFAULT_DIR
+
+
 def load_model() -> Any:
     """Load and cache the sentence-transformers model.
 
@@ -52,6 +69,11 @@ def load_model() -> Any:
     global _model
     if _model is not None:
         return _model
+
+    pinned_dir = pinned_model_dir()
+    if pinned_dir is not None:
+        # Before importing sentence-transformers: HF reads these at import.
+        os.environ.update({"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "HF_DATASETS_OFFLINE": "1"})
 
     # sentence-transformers v5 (multimodal) hard-imports torchcodec — a
     # video/audio codec lib — at package import. When that torchcodec is built
@@ -104,29 +126,40 @@ def load_model() -> Any:
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", message=".*layers were not sharded.*")
             warnings.filterwarnings("ignore", category=FutureWarning)
-            try:
-                model = SentenceTransformer(
-                    EMBED_MODEL_NAME, device=EMBED_DEVICE, local_files_only=True
-                )
-                logger.info(
-                    "Loaded embedding model %s from local cache (device=%s)",
-                    EMBED_MODEL_NAME,
-                    EMBED_DEVICE,
-                )
-            except Exception as cache_miss:
-                logger.info(
-                    "Embedding model %s not cached (%s); downloading from HuggingFace…",
-                    EMBED_MODEL_NAME,
-                    cache_miss,
-                )
-                model = SentenceTransformer(EMBED_MODEL_NAME, device=EMBED_DEVICE)
+            if pinned_dir is not None:
+                # Local-only: verified pinned bytes or no model (never a download).
+                from .pinned_embed_model import load as load_pinned
+
+                model = load_pinned(pinned_dir, device=EMBED_DEVICE)
+                logger.info("Loaded pinned embedding model from %s (device=%s)", pinned_dir, EMBED_DEVICE)
+            else:
+                model = _load_named_model(SentenceTransformer)
     except Exception as e:
         logger.error("Failed to load embedding model %s: %s", EMBED_MODEL_NAME, e)
         return None
     finally:
         for n, lvl in old_levels.items():
             logging.getLogger(n).setLevel(lvl)
+    return _finish_load(model)
 
+
+def _load_named_model(SentenceTransformer: Any) -> Any:
+    """Private/default path: local HF cache first, network download on a miss."""
+    try:
+        model = SentenceTransformer(EMBED_MODEL_NAME, device=EMBED_DEVICE, local_files_only=True)
+        logger.info("Loaded embedding model %s from local cache (device=%s)", EMBED_MODEL_NAME, EMBED_DEVICE)
+        return model
+    except Exception as cache_miss:
+        logger.info(
+            "Embedding model %s not cached (%s); downloading from HuggingFace…",
+            EMBED_MODEL_NAME,
+            cache_miss,
+        )
+        return SentenceTransformer(EMBED_MODEL_NAME, device=EMBED_DEVICE)
+
+
+def _finish_load(model: Any) -> Any:
+    global _model
     try:
         dim = int(model.get_sentence_embedding_dimension())
         if dim != EMBED_DIM:
