@@ -58,11 +58,15 @@ def installation_context_block() -> str:
     origin = installation_origin()
     if not origin:
         return ""
+    from ..prompt_template_text import render_template
+
     template = _registry_body("agents.installation_context_template", INSTALLATION_CONTEXT_TEMPLATE)
+    # The registry's own one-pass renderer, so saved text renders exactly as
+    # its preview shows (literal braces stay literal).
     try:
-        block = template.format(origin=origin)
-    except (KeyError, IndexError, ValueError):
-        block = INSTALLATION_CONTEXT_TEMPLATE.format(origin=origin)
+        block = render_template(template, {"origin": origin})
+    except Exception:  # noqa: BLE001 — e.g. an unknown placeholder; never break a turn
+        block = render_template(INSTALLATION_CONTEXT_TEMPLATE, {"origin": origin})
     # Same switch that registers the tool (mcp_server/inspection_tools.py).
     if os.getenv("BAWTHUB_INSPECTION_KEY_EXPORT_FILE", "").strip():
         hint = _registry_body("agents.inspection_hint", INSPECTION_HINT).strip()

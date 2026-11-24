@@ -142,6 +142,25 @@ def test_registry_failure_or_bad_template_uses_the_default(monkeypatch, resolver
     assert installation_context_block() == INSTALLATION_CONTEXT_TEMPLATE.format(origin=ORIGIN)
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        '## Here\nOpen {origin}. Example: {"url": "{origin}", "n": 1}',
+        "## Here\nOpen {origin}; not a field: {origin.host} or {0}",
+        "## Here\nEscaped {{origin}} and {origin}",
+    ],
+)
+def test_saved_template_renders_exactly_as_the_registry_previews_it(monkeypatch, body):
+    from llm_bawt.prompt_template_text import extract_placeholders, render_template
+
+    monkeypatch.setenv("LLM_BAWT_PUBLIC_ORIGIN", ORIGIN)
+    resolver = _FakeResolver({"agents.installation_context_template": body})
+    monkeypatch.setattr("llm_bawt.prompt_registry.get_prompt_resolver", lambda: resolver)
+    assert extract_placeholders(body) == ["origin"]  # the registry accepts it
+    assert installation_context_block() == render_template(body, {"origin": ORIGIN})
+    assert "## Here" in installation_context_block()
+
+
 def test_installation_prompts_are_registered():
     from llm_bawt.prompt_definitions import DEFAULT_PROMPT_DEFINITIONS
 
