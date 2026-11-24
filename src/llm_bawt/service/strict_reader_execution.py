@@ -100,26 +100,28 @@ def strict_selection_fingerprint(service) -> dict:
                                sort_keys=True, separators=(",", ":"))
         digest = hashlib.sha256(canonical.encode()).hexdigest()
     return {
+        "bot": strict_reader_slug(service),
         "generation": name,
         "layers_sha256": digest,
         "house": (getattr(service, "strict_reader_house", None) or "").strip().lower(),
     }
 
 
-#: ``sessions.session_metadata`` key: the strict selection this session's SDK
-#: transcript was started under, and the resume id it replaced.
+#: ``sessions.session_metadata`` key: the strict selection a session's SDK
+#: transcript runs under, and the one SDK key confirmed under it.
 SESSION_SELECTION_KEY = "strict_reader_selection"
 
 
 def bind_session_selection(engine, binding: dict | None, fingerprint: dict) -> dict | None:
-    """Resume only a session started under ``fingerprint``; otherwise start fresh.
+    """Resume only the exact SDK key confirmed under ``fingerprint``; else start fresh.
 
     The pinned prompt carries the selected generation's skill text, so a
-    resumed SDK session started under another selection would keep the old
-    skills. On any mismatch, or a session with no recorded selection, the
-    resume id is dropped (a cold start re-pins the current render) and the
-    replaced id is remembered: until the bridge binds a new SDK session, that
-    id is never resumed again, even if this turn fails before running.
+    resumed SDK session started under another selection, or written by an
+    ordinary turn, would carry other skills. The thread's marker names the
+    selection and the single SDK key a strict turn under it bound
+    (``confirm_session_key``). Any other key, a missing marker or another
+    selection drops the resume id (a cold start re-pins the current render)
+    and resets the marker with no confirmed key.
     """
     from sqlalchemy import text
 
@@ -137,11 +139,10 @@ def bind_session_selection(engine, binding: dict | None, fingerprint: dict) -> d
             {"sid": session_id},
         ).scalar_one_or_none()
         recorded = (metadata or {}).get(SESSION_SELECTION_KEY) if isinstance(metadata, dict) else None
-        same = isinstance(recorded, dict) and recorded.get("selection") == fingerprint
-        stale = recorded.get("replaced_resume_id") if isinstance(recorded, dict) else None
-        if same and (resume_id is None or resume_id != stale):
+        if (resume_id and isinstance(recorded, dict) and recorded.get("selection") == fingerprint
+                and recorded.get("sdk_key") == resume_id):
             return binding
-        value = {"selection": fingerprint, "replaced_resume_id": resume_id if not same else stale}
+        value = {"selection": fingerprint, "sdk_key": None}
         conn.execute(
             text("UPDATE sessions SET session_metadata = COALESCE(session_metadata, '{}'::jsonb)"
                  " || jsonb_build_object(CAST(:key AS text), CAST(:value AS jsonb)) WHERE id=:sid"),
@@ -149,6 +150,50 @@ def bind_session_selection(engine, binding: dict | None, fingerprint: dict) -> d
         )
     binding["thread_resume_id"] = None
     return binding
+
+
+def confirm_session_key(service, bot_id: str | None, metadata: dict | None, session_key: str) -> dict:
+    """The marker patch for an SDK key written back onto a thread.
+
+    Only while the thread's bot is the strict reader under the marker's exact
+    selection does the new key become the confirmed strict key; the strict
+    bot's turns all run strict, so the bridge's cold-start writeback is that
+    turn's key. Any other writeback (strict disabled, retargeted or another
+    selection) clears the marker so the key never inherits strict provenance.
+    Returns ``{}`` when the thread has no marker.
+    """
+    recorded = (metadata or {}).get(SESSION_SELECTION_KEY) if isinstance(metadata, dict) else None
+    if not isinstance(recorded, dict):
+        return {}
+    if is_strict_request(service, bot_id) and recorded.get("selection") == strict_selection_fingerprint(service):
+        return {SESSION_SELECTION_KEY: {"selection": recorded["selection"], "sdk_key": session_key}}
+    return {SESSION_SELECTION_KEY: None}
+
+
+def clear_session_selection(engine, binding: dict | None) -> None:
+    """An ordinary turn ran on this thread: its SDK key loses strict provenance."""
+    from sqlalchemy import text
+
+    session_id = str((binding or {}).get("thread_session_id") or "").strip()
+    if not session_id or engine is None:
+        return
+    with engine.begin() as conn:
+        conn.execute(
+            text("UPDATE sessions SET session_metadata = session_metadata - CAST(:key AS text)"
+                 " WHERE id=:sid AND session_metadata ? CAST(:key AS text)"),
+            {"key": SESSION_SELECTION_KEY, "sid": session_id},
+        )
+
+
+def refuse_stamped_ordinary(service, request, bot_id: str | None) -> None:
+    """A row admitted under strict mode never runs on the ordinary path.
+
+    Its receipt-time stamp is a durable execution constraint: if the strict
+    selection was disabled or retargeted before drain, the turn is refused
+    before any ordinary model resolution or publish.
+    """
+    if isinstance(getattr(request, "_strict_selection_stamp", None), dict) and not is_strict_request(service, bot_id):
+        raise StrictReaderRefused("Strict reader selection changed since this turn was received")
 
 
 def strict_house(service, bot) -> str:

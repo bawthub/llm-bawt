@@ -287,6 +287,12 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                     ctx.thread_binding = bind_session_selection(
                         self._turn_log_store.engine, ctx.thread_binding, strict_selection,
                     )
+                elif (ctx.thread_binding or {}).get("thread_resume_id"):
+                    # TASK-2590: an ordinary turn resuming a thread's SDK key
+                    # strips any strict provenance from it.
+                    from .strict_reader_execution import clear_session_selection
+
+                    clear_session_selection(self._turn_log_store.engine, ctx.thread_binding)
                 messages, system_prompt_pin = apply_session_pin(
                     ctx, llm_bawt.client, messages, turn_id=turn_log_id,
                     sections=working_memory.sections,

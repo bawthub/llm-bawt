@@ -668,6 +668,12 @@ async def put_agent_session_key(
         "agent_session_keys": keys,
         "agent_session_key_models": models,
     }
+    from ..strict_reader_execution import SESSION_SELECTION_KEY, STRICT_BACKEND, confirm_session_key
+
+    if key_name == agent_key_name(STRICT_BACKEND) and meta.get(SESSION_SELECTION_KEY) is not None:
+        # TASK-2590: a strict thread's marker confirms only a key written while
+        # the same strict selection runs; any other writeback clears it.
+        patch.update(confirm_session_key(get_service(), effective_bot, meta, session_key))
     ok = await storage.update_session_metadata(session_id, patch, bot_id=effective_bot)
     if not ok:
         raise HTTPException(status_code=500, detail="Metadata update failed")

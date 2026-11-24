@@ -84,23 +84,27 @@ def _active_session(rig):
             " AND status='active' AND ended_at IS NULL"), {"b": rig.bot, "u": rig.user}).one()
 
 
-def _bind_sdk(rig, session_id, sdk_id):
-    """What the bridge persists when it binds an SDK session to the thread."""
-    from sqlalchemy import text
-    with rig.engine.begin() as conn:
-        conn.execute(text(
-            "UPDATE sessions SET session_metadata = COALESCE(session_metadata, '{}'::jsonb)"
-            " || jsonb_build_object('agent_session_keys', jsonb_build_object('claude_code', CAST(:k AS text)))"
-            " WHERE id=:sid"), {"k": sdk_id, "sid": session_id})
+def _bind_sdk(durable, rig, monkeypatch, session_id, sdk_id):
+    """The bridge's real SDK key writeback (PUT /v1/sessions/{id}/agent-session-key)."""
+    import asyncio
+    from llm_bawt.service.routes import sessions as routes
+    monkeypatch.setattr(routes, "get_service", lambda: durable.rt.service)
+    body = routes.AgentSessionKeyRequest(backend="claude-code", session_key=sdk_id)
+    assert asyncio.run(routes.put_agent_session_key(session_id, body, bot_id=rig.bot))["stored"]
 
 
-def test_persisted_resume_binding_follows_the_selection(durable, rig):
+def _marker(rig):
+    return (_active_session(rig)[1] or {}).get(strict.SESSION_SELECTION_KEY)
+
+
+def test_persisted_resume_binding_follows_the_selection(durable, rig, monkeypatch):
     service = durable.rt.service
     _turn(durable, rig)
     session_id, _ = _active_session(rig)
-    _bind_sdk(rig, session_id, "sdk-fx-a")
+    _bind_sdk(durable, rig, monkeypatch, session_id, "sdk-fx-a")
+    assert _marker(rig)["sdk_key"] == "sdk-fx-a"
 
-    # Same selection: the persisted SDK session resumes.
+    # Same selection: the confirmed SDK session resumes.
     assert _turn(durable, rig).get("thread_resume_id") == "sdk-fx-a"
 
     # Selection changes: the old SDK session (and its pinned prompt) is not
@@ -111,33 +115,98 @@ def test_persisted_resume_binding_follows_the_selection(durable, rig):
     assert not fields.get("thread_resume_id")
     for ref in APPROVED:
         assert _second_body(ref) in fields.get("system_prompt", ""), ref
-    _, metadata = _active_session(rig)
-    recorded = metadata[strict.SESSION_SELECTION_KEY]
-    assert recorded["selection"]["generation"] == SECOND
-    assert recorded["replaced_resume_id"] == "sdk-fx-a"
+    recorded = _marker(rig)
+    assert recorded["selection"]["generation"] == SECOND and recorded["sdk_key"] is None
 
-    # Until the bridge binds a new SDK session, the replaced one never resumes.
+    # Until a strict turn under this selection binds a new key, the old one
+    # never resumes; the newly confirmed key then does.
     assert not _turn(durable, rig).get("thread_resume_id")
-    _bind_sdk(rig, session_id, "sdk-fx-b")
+    _bind_sdk(durable, rig, monkeypatch, session_id, "sdk-fx-b")
     assert _turn(durable, rig).get("thread_resume_id") == "sdk-fx-b"
 
 
-def test_selection_change_between_receipt_and_drain_refuses(durable, rig):
-    from sqlalchemy import text
+def test_ordinary_key_writeback_never_inherits_strict_provenance(durable, rig, monkeypatch):
     service = durable.rt.service
-    receipt = _stream(service, _request(rig))
+    _turn(durable, rig)
+    session_id, _ = _active_session(rig)
+    _bind_sdk(durable, rig, monkeypatch, session_id, "sdk-fx-strict")
+    assert _turn(durable, rig).get("thread_resume_id") == "sdk-fx-strict"
+
+    # Strict mode is disabled; an ordinary cold turn binds its own SDK key.
+    slug = service.strict_reader_bot
+    service.strict_reader_bot = None
+    _bind_sdk(durable, rig, monkeypatch, session_id, "sdk-fx-ordinary")
+    assert _marker(rig) is None
+
+    # Re-enabled under the same selection: the ordinary transcript is not resumed.
+    service.strict_reader_bot = slug
+    assert not _turn(durable, rig).get("thread_resume_id")
+    assert _marker(rig)["sdk_key"] is None
+
+
+def test_ordinary_resume_strips_strict_provenance(durable, rig, monkeypatch):
+    _turn(durable, rig)
+    session_id, _ = _active_session(rig)
+    _bind_sdk(durable, rig, monkeypatch, session_id, "sdk-fx-strict")
+    strict.clear_session_selection(rig.engine, {"thread_session_id": session_id,
+                                                "thread_resume_id": "sdk-fx-strict"})
+    assert _marker(rig) is None
+    assert not _turn(durable, rig).get("thread_resume_id")
+
+
+def _queued_stamp(durable, rig):
+    from sqlalchemy import text
+    receipt = _stream(durable.rt.service, _request(rig))
     assert '"delivery_id"' in receipt, receipt
     with rig.engine.connect() as conn:
-        stamp = conn.execute(text(
+        return conn.execute(text(
             "SELECT metadata_json->'strict_reader' FROM inter_bot_deliveries"
             " WHERE target_bot_id=:b ORDER BY created_at DESC LIMIT 1"), {"b": rig.bot}).scalar_one()
+
+
+def test_selection_change_between_receipt_and_drain_refuses(durable, rig):
+    service = durable.rt.service
+    stamp = _queued_stamp(durable, rig)
     assert stamp == strict.strict_selection_fingerprint(service)
-    assert stamp["generation"] == GENERATION and stamp["house"] == HOUSE
+    assert stamp["generation"] == GENERATION and stamp["house"] == HOUSE and stamp["bot"] == rig.bot
 
     _add_second_generation()
     _select_second(service)  # a valid selection, but not the one admitted
     _drain(durable.dispatcher, rig.bot)
     assert durable.published == [] and _RecordingRedis.streams == []
+
+
+@pytest.mark.parametrize("change", ["disable", "retarget"])
+def test_stamped_row_stays_fenced_after_disable_or_retarget(durable, rig, monkeypatch, change):
+    service = durable.rt.service
+    assert _queued_stamp(durable, rig)["bot"] == rig.bot
+    resolved = []
+
+    def ordinary_resolver(*args, **kwargs):
+        resolved.append(args)
+        raise AssertionError("ordinary resolver reached")
+
+    monkeypatch.setattr(service, "_resolve_request_model", ordinary_resolver)
+
+    class _NoProfiles:  # no longer strict, so drain may consult the registry
+        def __init__(self, *_a, **_k):
+            pass
+
+        def get_bot(self, _slug):
+            return None
+
+    from llm_bawt import bots
+    monkeypatch.setattr(bots, "BotManager", _NoProfiles)
+    service.strict_reader_bot = None if change == "disable" else "fx-other-strict"
+    _drain(durable.dispatcher, rig.bot)
+    assert resolved == [], "a strict-stamped row reached the ordinary resolver"
+    assert durable.published == [] and _RecordingRedis.streams == []
+    from sqlalchemy import text
+    with rig.engine.connect() as conn:
+        error = conn.execute(text(
+            "SELECT last_error FROM inter_bot_deliveries WHERE target_bot_id=:b"
+            " ORDER BY created_at DESC LIMIT 1"), {"b": rig.bot}).scalar_one()
+    assert "selection changed" in (error or ""), error  # refused at the strict fence
 
 
 def test_candidate_and_legacy_are_each_explicit(durable, rig, tmp_path, monkeypatch):
