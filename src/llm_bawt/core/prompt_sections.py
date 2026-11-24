@@ -8,8 +8,6 @@ orchestrator stays under the monolith gate as new sections are added.
 """
 
 import logging
-from contextlib import contextmanager
-from contextvars import ContextVar
 
 from ..shared.rich_safe import SafeConsole as Console  # never raises (TASK-2434)
 from ..shared.rich_safe import escape
@@ -19,22 +17,6 @@ from .prompt_builder import GLOBAL_SYSTEM_PROMPT, PromptBuilder, SectionPosition
 
 logger = logging.getLogger(__name__)
 console = Console()
-
-# TASK-2599: set only around a streamed turn's prompt build, the one path that
-# executes BawtHub MCP discovery. Per-turn (not a bot attribute): a cached bot
-# instance serves concurrent streamed and non-streamed turns.
-_BAWTHUB_MCP_TURN: ContextVar[bool] = ContextVar("bawthub_mcp_turn", default=False)
-
-
-@contextmanager
-def bawthub_mcp_prompt_turn():
-    """Mark the enclosed prompt build as a native streaming (MCP-capable) turn."""
-    token = _BAWTHUB_MCP_TURN.set(True)
-    try:
-        yield
-    finally:
-        _BAWTHUB_MCP_TURN.reset(token)
-
 
 class PromptSectionsMixin:
     """Section renderers; mixed into ``BaseLLMBawt``, which supplies state."""
@@ -145,33 +127,18 @@ class PromptSectionsMixin:
     # --- per-turn section renderers (walked by _walk_manifest, PER_TURN) -----
     def _sec_tools(self, builder: PromptBuilder, prompt: str) -> None:
         """Chat-model tool instructions (native agent harnesses own theirs)."""
-        if self.tool_format != "none":
-            if self.bot.uses_tools:
-                tool_definitions = self._get_tool_definitions(
-                    bawthub_mcp=_BAWTHUB_MCP_TURN.get() and self._uses_bawthub_mcp_native_stream())
-                if tool_definitions:
-                    tools_prompt = get_tools_prompt(
-                        tools=tool_definitions,
-                        tool_format=self.tool_format,
-                    )
-                    builder.add_section(
-                        "tools",
-                        tools_prompt,
-                        position=SectionPosition.TOOLS,
-                        metadata={"source": "generated:tools", "gate": "uses_tools"},
-                    )
-            elif self.memory:
-                # Non-tool memory bots get a read-only memory search tool
-                from ..tools.definitions import MEMORY_TOOL
+        if self.tool_format != "none" and self.bot.uses_tools:
+            tool_definitions = self._get_tool_definitions()
+            if tool_definitions:
                 tools_prompt = get_tools_prompt(
-                    tools=[MEMORY_TOOL],
+                    tools=tool_definitions,
                     tool_format=self.tool_format,
                 )
                 builder.add_section(
                     "tools",
                     tools_prompt,
                     position=SectionPosition.TOOLS,
-                    metadata={"source": "generated:memory_tool", "gate": "memory_readonly"},
+                    metadata={"source": "generated:tools", "gate": "uses_tools"},
                 )
 
     def _sec_client_context(self, builder: PromptBuilder, prompt: str) -> None:

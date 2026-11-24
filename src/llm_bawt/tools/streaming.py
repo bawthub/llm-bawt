@@ -13,13 +13,10 @@ from ..adapters import ModelAdapter, DefaultAdapter
 
 if TYPE_CHECKING:
     from ..models.message import Message
-    from ..mcp_server.client import MemoryClient
-    from ..profiles import ProfileManager
     from ..search.base import SearchClient
     from ..integrations.ha_mcp.client import HomeAssistantMCPClient, HomeAssistantNativeClient
     from ..core.model_lifecycle import ModelLifecycleManager
     from ..utils.config import Config
-    from ..utils.history import HistoryManager
 
 # Use service logger if available, otherwise standard logging
 try:
@@ -102,8 +99,6 @@ _REACT_LINE_MARKERS = (
 def stream_with_tools(
     messages: list["Message"],
     stream_fn: Callable[[list["Message"], list[str] | None], Iterator[str]],
-    memory_client: "MemoryClient | None" = None,
-    profile_manager: "ProfileManager | None" = None,
     search_client: "SearchClient | None" = None,
     home_client: "HomeAssistantMCPClient | None" = None,
     ha_native_client: "HomeAssistantNativeClient | None" = None,
@@ -114,11 +109,13 @@ def stream_with_tools(
     max_iterations: int | None = None,
     tool_format: ToolFormat | str = ToolFormat.REACT,
     adapter: "ModelAdapter | None" = None,
-    history_manager: "HistoryManager | None" = None,
     tool_call_details: list[dict] | None = None,
     trigger_message_id: str | None = None,
     turn_id: str | None = None,
     emit_tool_events: bool = False,
+    bawthub_mcp=None,
+    turn_capability: str | None = None,
+    remote_mcp=None,
 ) -> Iterator[str | dict]:
     """Stream LLM response with tool calling support.
 
@@ -134,8 +131,6 @@ def stream_with_tools(
     Args:
         messages: Initial conversation messages.
         stream_fn: Function to stream from LLM. Signature: (messages, stop_sequences) -> Iterator[str]
-        memory_client: Memory client for tool execution.
-        profile_manager: Profile manager for profile tools.
         search_client: Search client for web search tools.
         model_lifecycle: Model lifecycle manager for model switching tools.
         config: Application config (used for lazy search setup).
@@ -144,12 +139,15 @@ def stream_with_tools(
         max_iterations: Max tool iterations per turn.
         tool_format: Tool format to use (determines stop sequences and parsing).
         adapter: Model adapter for model-specific cleaning and stop sequences.
-        history_manager: History manager for recall operations.
         tool_call_details: Optional mutable list to collect per-call tool details
             for downstream logging/persistence.
         emit_tool_events: Yield agent-contract ``tool_call``/``tool_result``
             items for the service's ToolEventInterceptor, which then records
             the details; ``tool_call_details`` is left to it.
+        bawthub_mcp: BawtHub MCP client; tool_search loads its tools, whose
+            usage comes back inline since a text format has no schema channel.
+        turn_capability: This turn's identity-only MCP capability.
+        remote_mcp: Granted remote MCP servers for this turn.
 
     Yields:
         Text chunks from the LLM response (cleaned by adapter and handler).
@@ -182,8 +180,6 @@ def stream_with_tools(
     log.info(f"🛑 Tool streaming with {len(stop_sequences)} stop sequences")
 
     executor = ToolExecutor(
-        memory_client=memory_client,
-        profile_manager=profile_manager,
         search_client=search_client,
         home_client=home_client,
         ha_native_client=ha_native_client,
@@ -191,9 +187,12 @@ def stream_with_tools(
         config=config,
         user_id=user_id,
         bot_id=bot_id,
-        history_manager=history_manager,
         trigger_message_id=trigger_message_id,
         turn_id=turn_id,
+        bawthub_mcp=bawthub_mcp,
+        turn_capability=turn_capability,
+        remote_mcp=remote_mcp,
+        inline_loaded_schemas=True,
     )
     current_messages = messages.copy()
     has_executed_tools = False  # Track if we've executed tools

@@ -154,24 +154,6 @@ async def test_registered_mcp_foreign_ids_never_mutate_real_store(owned_clients,
     assert row["owner_user_id"] == "owner-b"
 
 
-def test_executor_foreign_ids_refused_by_its_personal_client(owned_clients):
-    from llm_bawt.tools.executor import ToolExecutor
-    from llm_bawt.tools.parser import ToolCall
-
-    backend, a, b, _sources = owned_clients
-    target = b.store_memory("B's executor fact")
-    executor = ToolExecutor.__new__(ToolExecutor)
-    executor.memory_client = a
-    executor.user_id = "owner-a"
-    for action, extra in (("update", {"content": "Foreign change"}), ("delete", {})):
-        result = getattr(executor, "_memory_" + action)(ToolCall(
-            name="memory", arguments={"memory_id": target.id, **extra}, raw_text=""))
-        assert 'status="error"' in result
-    with backend.engine.connect() as conn:
-        assert conn.execute(text(f"SELECT content FROM {backend._memories_table_name} WHERE id=:id"),
-                            {"id": target.id}).scalar_one() == "B's executor fact"
-
-
 def test_duplicate_response_matches_durable_row(owned_clients):
     backend, a, _b, sources = owned_clients
     first = a.store_memory("Stable fact", tags=["original"], importance=0.3,

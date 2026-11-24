@@ -13,7 +13,7 @@ from ..shared.rich_safe import escape
 
 from ..clients import LLMClient, GrokClient
 from ..clients.openai_client import OpenAIClient
-from ..core.base import BaseLLMBawt
+from ..core.base import BaseLLMBawt, has_mcp_discovery, mcp_tool_kwargs
 from ..utils.config import Config, has_database_credentials
 from ..utils.history import Message
 from ..tools import query_with_tools
@@ -808,7 +808,7 @@ class ServiceLLMBawt(BaseLLMBawt):
         # Use tool loop if bot has tools enabled, model supports tool format,
         # and at least one tool backend is available.
         if not _is_agent_backend and self.bot.uses_tools and tools_enabled_for_model and (
-            self.memory
+            has_mcp_discovery(self)
             or self.search_client
             or self.news_client
             or self.web_fetch_client
@@ -824,11 +824,11 @@ class ServiceLLMBawt(BaseLLMBawt):
                     stream=stream,
                 )
                 return response, "", []
+            from ..task_turn_context import mint_mcp_turn_identity
+
             return query_with_tools(
                 messages=messages,
                 client=self.client,
-                memory_client=self.memory,
-                profile_manager=self.profile_manager,
                 search_client=self.search_client,
                 home_client=self.home_client,
                 ha_native_client=self.ha_native_client,
@@ -842,10 +842,11 @@ class ServiceLLMBawt(BaseLLMBawt):
                 tool_format=self.tool_format,
                 tools=tool_definitions,
                 adapter=self.adapter,
-                history_manager=self.history_manager,
                 ha_mode=self._ha_mode,
                 trigger_message_id=trigger_message_id,
                 turn_id=turn_id,
+                **mcp_tool_kwargs(self, mint_mcp_turn_identity(
+                    self, turn_id=turn_id, trigger_message_id=trigger_message_id)),
             )
         
         response = self.client.query(

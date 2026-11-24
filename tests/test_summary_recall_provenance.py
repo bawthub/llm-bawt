@@ -9,38 +9,6 @@ import pytest
 from llm_bawt.mcp_server.client import MemoryClient, _MCPShortTermManager
 from llm_bawt.mcp_server.storage_admin import StorageAdminMixin
 from llm_bawt.models.message import Message
-from llm_bawt.tools.executor import ToolExecutor
-from llm_bawt.tools.parser import ToolCall
-
-
-@pytest.mark.parametrize("in_memory", [False, True])
-def test_executor_uses_canonical_reader_and_marks_only_its_results(in_memory):
-    client = Mock()
-    client.get_messages_for_summary.return_value = [
-        {"id": "original", "role": "user", "content": "Early canonical original", "timestamp": 1000}]
-    history = SimpleNamespace(messages=[
-        Message(role="summary", content="Summary A", db_id="summary", timestamp=10000),
-        Message(role="user", content="UNRELATED-NEARBY", db_id="nearby", timestamp=10001),
-    ]) if in_memory else None
-    executor = ToolExecutor(user_id="owner", memory_client=client, history_manager=history)
-    response = executor.execute(ToolCall(name="history", arguments={
-        "action": "recall", "summary_id": "summary"}, raw_text=""))
-    assert "Early canonical original" in response and "UNRELATED" not in response
-    client.get_messages_for_summary.assert_called_once_with("summary")
-    client.mark_messages_recalled.assert_called_once_with(["original"])
-
-
-def test_empty_canonical_reader_never_falls_back_to_nearby_history():
-    client = Mock()
-    client.get_messages_for_summary.return_value = []
-    history = SimpleNamespace(messages=[
-        Message(role="summary", content="Summary A", db_id="summary", timestamp=10000),
-        Message(role="user", content="UNRELATED-NEARBY", db_id="nearby", timestamp=10001)])
-    executor = ToolExecutor(user_id="owner", memory_client=client, history_manager=history)
-    response = executor.execute(ToolCall(name="history", arguments={
-        "action": "recall", "summary_id": "summary"}, raw_text=""))
-    assert "UNRELATED" not in response and "verified session provenance" in response
-    client.mark_messages_recalled.assert_not_called()
 
 
 @pytest.mark.parametrize("user", ["owner", "other", None])

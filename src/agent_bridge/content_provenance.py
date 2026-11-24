@@ -75,15 +75,9 @@ def bridge_remote_source(tool_name: str) -> str | None:
     return remote_mcp_source(tool_name)
 
 
-def write_kind(tool_name: str, arguments: Mapping[str, Any], *, native: bool = False) -> str | None:
+def write_kind(tool_name: str, arguments: Mapping[str, Any]) -> str | None:
     """Identify bot-initiated prompt-persistent writes, not shared storage APIs."""
     action = str(arguments.get("action", "")).strip().lower()
-    if native:
-        if tool_name == "memory" and action in {"store", "update", "delete"}:
-            return "memory"
-        if tool_name in {"self", "profile"} and action in {"set", "update", "delete"}:
-            return "trait"
-        return None
     if tool_name in MEMORY_MUTATORS:
         return "working_memory" if tool_name.startswith("working_memory_") else "memory"
     if tool_name == "facts_extract" and arguments.get("store", True) is not False:

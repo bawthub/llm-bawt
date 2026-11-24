@@ -3,13 +3,12 @@ from __future__ import annotations
 
 import asyncio
 import io
-from datetime import datetime
 from types import SimpleNamespace
 
 import httpx
 import pytest
 
-from llm_bawt.tools.executor import ToolExecutor, parse_date_param
+from llm_bawt.tools.executor import ToolExecutor
 from llm_bawt.tools.parser import ToolCall
 
 
@@ -210,13 +209,6 @@ def test_tool_call_limit_allows_exactly_the_configured_count(limit, expected_ok)
     assert len(ok) == expected_ok
 
 
-def test_explicit_historical_dates_are_kept():
-    since = parse_date_param("2020-01-01")
-    until = parse_date_param("2020-02-01")
-    assert since == datetime(2020, 1, 1).timestamp()
-    assert until == datetime(2020, 2, 1).timestamp()
-
-
 def test_search_honours_n_results_alias_from_react():
     seen = {}
 
@@ -237,48 +229,6 @@ def test_react_list_models_keeps_list_action():
     for alias in ("list_models", "show_models", "available_models"):
         name, args = normalize_legacy_tool_call(_normalize_tool_name(alias), {})
         assert (name, args.get("action")) == ("model", "list")
-
-
-class FakeProfiles:
-    def __init__(self):
-        self.rows = {}
-        self.updates = []
-
-    def set_attribute(self, entity_type, entity_id, category, key, value, **kw):
-        self.rows[(str(entity_type), entity_id, category, key)] = value
-
-    def get_attribute(self, entity_type, entity_id, category, key):
-        return self.rows.get((str(entity_type), entity_id, category, key))
-
-    def delete_attribute(self, entity_type, entity_id, category, key):
-        return self.rows.pop((str(entity_type), entity_id, category, key), None) is not None
-
-    def update_attribute_by_id(self, attribute_id, **kw):
-        self.updates.append(kw)
-        return None
-
-
-def test_self_delete_normalizes_communication_category():
-    profiles = FakeProfiles()
-    ex = _executor(profile_manager=profiles)
-    ex.execute(ToolCall(name="self", arguments={"action": "set", "category": "communication",
-                                                "key": "tone", "value": "dry"}, raw_text=""))
-    assert len(profiles.rows) == 1
-    ex.execute(ToolCall(name="self", arguments={"action": "delete", "category": "communication",
-                                                "key": "tone"}, raw_text=""))
-    assert profiles.rows == {}
-
-
-def test_profile_update_by_id_is_bound_to_current_user():
-    from llm_bawt.profiles import EntityType
-
-    profiles = FakeProfiles()
-    ex = _executor(profile_manager=profiles)
-    out = ex.execute(ToolCall(name="profile", arguments={"action": "update", "attribute_id": 7,
-                                                         "value": "x"}, raw_text=""))
-    assert profiles.updates[0]["entity_type"] == EntityType.USER
-    assert profiles.updates[0]["entity_id"] == "operator"
-    assert "not found" in out
 
 
 def test_home_set_never_auto_picks_among_multiple_matches():

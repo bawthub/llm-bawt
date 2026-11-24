@@ -48,11 +48,21 @@ _SLASH_COMMAND_RE = re.compile(r"^\s*/[a-zA-Z][\w-]*\b")
 
 
 def has_mcp_discovery(bot) -> bool:
-    """BawtHub MCP is opted in, or a remote MCP server is granted (TASK-2610)."""
+    """BawtHub MCP is configured, or a remote MCP server is granted (TASK-2610)."""
     if getattr(bot, "bawthub_mcp", None) is not None:
         return True
     remote = getattr(bot, "remote_mcp", None)
     return remote is not None and remote.has_servers()
+
+
+def mcp_tool_kwargs(bot, turn_capability: str | None) -> dict:
+    """The MCP arguments every tool loop passes to its ToolExecutor."""
+    remote = getattr(bot, "remote_mcp", None)
+    return {
+        "bawthub_mcp": getattr(bot, "bawthub_mcp", None),
+        "turn_capability": turn_capability,
+        "remote_mcp": remote.for_turn() if remote is not None and remote.has_servers() else None,
+    }
 
 
 class BaseLLMBawt(OrchestratorInitializationMixin, PromptSectionsMixin, ABC):
@@ -203,10 +213,9 @@ class BaseLLMBawt(OrchestratorInitializationMixin, PromptSectionsMixin, ABC):
                 if self.bot.uses_tools and self.config.VERBOSE:
                     logger.info(f"Tool calling disabled for model {self.resolved_model_alias} (tool_format=none)")
             else:
-                has_tool_backend = any(
+                has_tool_backend = has_mcp_discovery(self) or any(
                     c is not None
                     for c in (
-                        self.memory,
                         self.home_client,
                         self.ha_native_client,
                         getattr(self, "search_client", None),
@@ -214,33 +223,26 @@ class BaseLLMBawt(OrchestratorInitializationMixin, PromptSectionsMixin, ABC):
                         getattr(self, "web_fetch_client", None),
                     )
                 )
-                use_tools = (self.bot.uses_tools and has_tool_backend) or (
-                    self.memory and not self.bot.uses_tools
-                )
+                use_tools = self.bot.uses_tools and has_tool_backend
             # Resolve per-bot generation parameters once for this query
             gen_kwargs = self._get_generation_kwargs()
 
             if use_tools:
-                if self.bot.uses_tools:
-                    tool_definitions = self._get_tool_definitions()
-                    if not tool_definitions:
-                        use_tools = False
-                else:
-                    # Non-tool memory bots get read-only memory search only
-                    from ..tools.definitions import MEMORY_TOOL
-                    tool_definitions = [MEMORY_TOOL]
+                tool_definitions = self._get_tool_definitions()
+                if not tool_definitions:
+                    use_tools = False
                 if use_tools:
+                    # The CLI has no service turn, so no MCP turn identity:
+                    # BawtHub MCP tools fail closed with a clear error here.
                     assistant_response, tool_context, tool_call_details = query_with_tools(
                         messages=context_messages,
                         client=self.client,
-                        memory_client=self.memory,
-                        profile_manager=self.profile_manager,
-                        search_client=self.search_client if self.bot.uses_tools else None,
-                        home_client=self.home_client if self.bot.uses_tools else None,
-                        ha_native_client=self.ha_native_client if self.bot.uses_tools else None,
-                        news_client=self.news_client if self.bot.uses_tools else None,
-                        web_fetch_client=self.web_fetch_client if self.bot.uses_tools else None,
-                        model_lifecycle=self.model_lifecycle if self.bot.uses_tools else None,
+                        search_client=self.search_client,
+                        home_client=self.home_client,
+                        ha_native_client=self.ha_native_client,
+                        news_client=self.news_client,
+                        web_fetch_client=self.web_fetch_client,
+                        model_lifecycle=self.model_lifecycle,
                         config=self.config,
                         user_id=self.user_id,
                         bot_id=self.bot_id,
@@ -248,8 +250,8 @@ class BaseLLMBawt(OrchestratorInitializationMixin, PromptSectionsMixin, ABC):
                         tool_format=self.tool_format,
                         tools=tool_definitions,
                         adapter=self.adapter,
-                        history_manager=self.history_manager,
                         generation_kwargs=gen_kwargs,
+                        **mcp_tool_kwargs(self, None),
                     )
                 else:
                     # Pass adapter stop sequences even without tools
@@ -588,23 +590,12 @@ class BaseLLMBawt(OrchestratorInitializationMixin, PromptSectionsMixin, ABC):
 
         return messages
 
-    def _uses_bawthub_mcp_native_stream(self) -> bool:
-        """Whether this bot's streamed turns run NativeToolStream with BawtHub MCP.
+    def _get_tool_definitions(self) -> list:
+        """Local tool definitions plus ``tool_search`` for MCP discovery.
 
-        Only that path carries the MCP client and turn identity; ReAct and
-        non-streamed turns keep the local wrappers.
+        Memory, history and profiles come only from BawtHub MCP, loaded on
+        demand through tool_search, on every tool loop.
         """
-        client = getattr(self, "client", None)
-        return (
-            has_mcp_discovery(self)
-            and client is not None
-            and getattr(self, "tool_format", None) in ("native", "NATIVE_OPENAI")
-            and hasattr(client, "stream_with_tools")
-            and bool(client.supports_native_tools())
-        )
-
-    def _get_tool_definitions(self, *, bawthub_mcp: bool = False) -> list:
-        """Tool definitions; ``bawthub_mcp`` swaps in MCP discovery (native stream only)."""
         include_search = self.search_client is not None
         include_news = self.news_client is not None
         include_web_fetch = self.web_fetch_client is not None
@@ -625,13 +616,8 @@ class BaseLLMBawt(OrchestratorInitializationMixin, PromptSectionsMixin, ABC):
             include_model_tools=include_models,
             ha_native_tools=ha_native_tools,
         )
-        if self.memory is None:
-            disallowed = {"memory", "history", "profile", "self"}
-            tools = [t for t in tools if t.name not in disallowed]
-        if bawthub_mcp and has_mcp_discovery(self):
-            from ..tools.definitions import MCP_REPLACED_LOCAL_TOOLS, TOOL_SEARCH_TOOL
-            if getattr(self, "bawthub_mcp", None) is not None:
-                tools = [t for t in tools if t.name not in MCP_REPLACED_LOCAL_TOOLS]
+        if has_mcp_discovery(self):
+            from ..tools.definitions import TOOL_SEARCH_TOOL
             tools.append(TOOL_SEARCH_TOOL)
         return tools
 

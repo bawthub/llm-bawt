@@ -94,10 +94,11 @@ def test_only_an_absent_allowlist_gets_the_default():
 
     assert parse_allowlist(None) is None
     assert parse_allowlist("") == frozenset() and parse_allowlist([]) == frozenset()
-    assert "profile" not in mcp_client.DEFAULT_ALLOWLIST  # can target any entity
+    # Memory, history and profiles come only from BawtHub MCP (TASK-2614).
+    assert {"memory_search", "messages_find", "profile"} <= mcp_client.DEFAULT_ALLOWLIST
 
     def init(allowlist):
-        settings = {"bawthub_mcp_tools": "true", "bawthub_mcp_tool_allowlist": allowlist}
+        settings = {"bawthub_mcp_tool_allowlist": allowlist}
         bot = SimpleNamespace(bot=SimpleNamespace(uses_tools=True), model_definition={},
                               bot_id="fixture-bot",
                               _resolve_setting=lambda key, fallback=None: settings.get(key, fallback))
@@ -105,6 +106,7 @@ def test_only_an_absent_allowlist_gets_the_default():
             bot, SimpleNamespace(MCP_SERVER_URL="http://mcp.example:8001"))
         return bot.bawthub_mcp.allowlist
 
+    # No opt-in switch: every regular tool-using bot gets BawtHub MCP.
     assert init(None) == mcp_client.DEFAULT_ALLOWLIST
     assert init("") == frozenset()
     assert init("messages_find") == {"messages_find"}
@@ -188,17 +190,35 @@ def test_structured_only_result_end_to_end_and_policy_refusal(client, monkeypatc
     refused = executor.execute(ToolCall(name="memory_search", arguments={"query": "x"}, raw_text=""))
     assert tool_result_is_error(refused) and "access_denied" in refused
 
-def test_replaced_local_wrappers_and_aliases_are_refused_in_mcp_mode(client):
-    memory = Mock()
-    executor = ToolExecutor(user_id="fixture-owner", bot_id="fixture-bot", memory_client=memory,
-                            bawthub_mcp=client, turn_capability="turn-token")
+def test_deleted_local_wrappers_are_unknown_tools(client):
+    executor = _executor(client)
     for name, args in (("memory", {"action": "search", "query": "x"}),
                        ("search_memories", {"query": "x"}),
                        ("history", {"action": "recent"}),
+                       ("self", {"action": "get"}),
                        ("get_user_profile", {})):
         result = executor.execute(ToolCall(name=name, arguments=args, raw_text=""))
-        assert tool_result_is_error(result) and "not enabled" in result, name
-    assert memory.method_calls == [] and client.calls == []
+        assert tool_result_is_error(result) and "Unknown tool" in result, name
+    assert client.calls == []
+
+
+def test_profile_defaults_to_this_bot_or_this_turns_user(client):
+    executor = _executor(client)
+    client._allowlist = client._allowlist | {"profile"}
+    executor.execute(ToolCall(name="profile", arguments={"action": "get", "entity_type": "bot"},
+                              raw_text=""))
+    assert client.calls[-1][3] == ("profile", {"action": "get", "entity_type": "bot",
+                                               "entity_id": "fixture-bot"})
+    executor.execute(ToolCall(name="profile", arguments={"action": "get"}, raw_text=""))
+    assert client.calls[-1][3] == ("profile", {"action": "get", "entity_id": "fixture-owner"})
+
+
+def test_react_tool_search_returns_loaded_usage_inline(client):
+    executor = ToolExecutor(user_id="fixture-owner", bot_id="fixture-bot", bawthub_mcp=client,
+                            turn_capability="turn-token", inline_loaded_schemas=True)
+    result = strip_tool_result_tags(executor.execute(
+        ToolCall(name="tool_search", arguments={"query": "select:memory_search"}, raw_text="")))
+    assert "memory_search" in result and "What to find" in result
 
 
 def test_exact_mcp_name_dispatches_before_legacy_aliases(client, monkeypatch):
@@ -221,33 +241,15 @@ def test_server_error_and_unavailable_server_are_error_results(client, monkeypat
     assert tool_result_is_error(down) and "refused" in down
 
 
-def test_opt_in_replaces_local_wrappers_with_tool_search():
+def test_mcp_tool_search_replaces_local_memory_history_and_profile_tools():
     from llm_bawt.core.base import BaseLLMBawt
 
     bot = SimpleNamespace(search_client=None, news_client=None, web_fetch_client=None,
                           home_client=None, model_lifecycle=None, ha_native_client=None,
-                          memory=object(), bawthub_mcp=None)
-    names = {t.name for t in BaseLLMBawt._get_tool_definitions(bot, bawthub_mcp=True)}
-    assert {"memory", "history", "profile"} <= names and "tool_search" not in names
-    bot.bawthub_mcp = object()
-    # ReAct and non-streamed turns can't run MCP discovery: they keep the wrappers.
+                          memory=object(), bawthub_mcp=object())
     names = {t.name for t in BaseLLMBawt._get_tool_definitions(bot)}
-    assert {"memory", "history", "profile"} <= names and "tool_search" not in names
-    names = {t.name for t in BaseLLMBawt._get_tool_definitions(bot, bawthub_mcp=True)}
-    assert "tool_search" in names and not names & {"memory", "history", "profile"}
+    assert "tool_search" in names and not names & {"memory", "history", "profile", "self"}
     assert "time" in names  # Local tools without an MCP equivalent stay.
-
-
-def test_prompt_advertises_discovery_only_on_the_native_stream_path():
-    from llm_bawt.core.base import BaseLLMBawt
-
-    client = SimpleNamespace(stream_with_tools=object(), supports_native_tools=lambda: True)
-    bot = SimpleNamespace(bawthub_mcp=object(), client=client, tool_format="native")
-    assert BaseLLMBawt._uses_bawthub_mcp_native_stream(bot)
-    bot.tool_format = "react"
-    assert not BaseLLMBawt._uses_bawthub_mcp_native_stream(bot)
-    bot.tool_format, bot.bawthub_mcp = "native", None
-    assert not BaseLLMBawt._uses_bawthub_mcp_native_stream(bot)
 
 
 def test_identity_only_turn_owns_no_conversation(monkeypatch):
@@ -283,29 +285,21 @@ def test_identity_only_turn_owns_no_conversation(monkeypatch):
 
 
 
-def test_stream_and_nonstream_prompts_match_their_executors():
-    """Same opted-in native bot: only the streamed turn's prompt offers discovery."""
+def test_every_tool_path_prompt_offers_discovery():
+    """ReAct, streamed and non-streamed turns share one prompt and executor setup."""
     from llm_bawt.core.base import BaseLLMBawt
-    from llm_bawt.core.prompt_sections import PromptSectionsMixin, bawthub_mcp_prompt_turn
+    from llm_bawt.core.prompt_sections import PromptSectionsMixin
 
-    client = SimpleNamespace(stream_with_tools=object(), supports_native_tools=lambda: True)
     bot = SimpleNamespace(search_client=None, news_client=None, web_fetch_client=None,
                           home_client=None, model_lifecycle=None, ha_native_client=None,
-                          memory=object(), bawthub_mcp=object(), client=client,
-                          tool_format="native", bot=SimpleNamespace(uses_tools=True))
-    bot._uses_bawthub_mcp_native_stream = lambda: BaseLLMBawt._uses_bawthub_mcp_native_stream(bot)
-    bot._get_tool_definitions = lambda **kw: BaseLLMBawt._get_tool_definitions(bot, **kw)
-
-    def tools_prompt():
+                          memory=object(), bawthub_mcp=object(),
+                          bot=SimpleNamespace(uses_tools=True))
+    bot._get_tool_definitions = lambda: BaseLLMBawt._get_tool_definitions(bot)
+    for tool_format in ("native", "react"):
+        bot.tool_format = tool_format
         builder = Mock()
         PromptSectionsMixin._sec_tools(bot, builder, "hello")
-        return builder.add_section.call_args.args[1]
-
-    nonstream = tools_prompt()
-    with bawthub_mcp_prompt_turn():
-        stream = tools_prompt()
-    assert "tool_search" in stream and "tool_search" not in nonstream
-    assert "tool_search" not in tools_prompt()  # the mark is scoped to the turn
+        assert "tool_search" in builder.add_section.call_args.args[1], tool_format
 
 
 # --- Real approval interceptor: per-call stamp from the server-owned turn ---

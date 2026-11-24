@@ -30,30 +30,6 @@ _ALT_TOOL_MARKERS = (
 # Map of common tool name variations to actual tool names
 # Models often invent their own tool names; this normalizes them
 TOOL_NAME_ALIASES = {
-    # History retrieval variations
-    "retrieve_conversation_history": "get_recent_history",
-    "get_conversation_history": "get_recent_history",
-    "get_history": "get_recent_history",
-    "conversation_history": "get_recent_history",
-    "fetch_history": "get_recent_history",
-    "show_history": "get_recent_history",
-    "list_history": "get_recent_history",
-    "get_messages": "get_recent_history",
-    "retrieve_messages": "get_recent_history",
-    # Memory search variations
-    "search_memory": "search_memories",
-    "memory_search": "search_memories",
-    "query_memories": "search_memories",
-    "find_memories": "search_memories",
-    # Memory storage variations
-    "save_memory": "store_memory",
-    "add_memory": "store_memory",
-    "remember": "store_memory",
-    # Profile variations
-    "get_profile": "get_user_profile",
-    "user_profile": "get_user_profile",
-    "set_attribute": "set_user_attribute",
-    "set_preference": "set_user_attribute",
     # Web search variations
     "search": "web_search",
     "internet_search": "web_search",
@@ -75,6 +51,12 @@ def _normalize_tool_name(name: str) -> str:
     if normalized in TOOL_NAME_ALIASES:
         return TOOL_NAME_ALIASES[normalized]
     return name.strip()
+
+
+def _local_tool_names() -> frozenset[str]:
+    from ..definitions import ALL_TOOLS, LEGACY_TOOL_MAP
+
+    return frozenset({t.name for t in ALL_TOOLS} | set(LEGACY_TOOL_MAP))
 
 
 def _try_fix_json(json_str: str) -> str | None:
@@ -404,25 +386,14 @@ class ReActFormatHandler(ToolFormatHandler):
         return [], response
 
     def _normalize_arguments(self, tool_name: str, args: dict) -> dict:
-        """Normalize argument keys for a tool call."""
-        # Tool-specific argument mappings
-        # Different tools use different parameter names for similar concepts
-        TOOL_ARG_ALIASES = {
-            "get_recent_history": {
-                "count": "n_messages",
-                "limit": "n_messages",
-                "num_messages": "n_messages",
-                "number_of_messages": "n_messages",
-            },
-            "forget_history": {
-                "n_messages": "count",
-                "num_messages": "count",
-                "number_of_messages": "count",
-                "n": "count",
-                "limit": "count",
-            },
-        }
-        
+        """Normalize argument keys for a local tool call.
+
+        Discovered MCP tools (and tool_search) keep their arguments exactly:
+        their schemas are server-supplied, so a rename would break them.
+        """
+        if tool_name not in _local_tool_names():
+            return dict(args)
+
         # Generic aliases (applied if no tool-specific mapping)
         GENERIC_ARG_ALIASES = {
             "num_results": "n_results",
@@ -434,17 +405,10 @@ class ReActFormatHandler(ToolFormatHandler):
             "message": "content",
         }
         
-        # Get tool-specific aliases, fall back to generic
-        tool_aliases = TOOL_ARG_ALIASES.get(tool_name, {})
-        
         normalized = {}
         for key, value in args.items():
             normalized_key = key.lower().replace("-", "_").replace(" ", "_")
-            # Check tool-specific first, then generic
-            if normalized_key in tool_aliases:
-                normalized_key = tool_aliases[normalized_key]
-            elif normalized_key in GENERIC_ARG_ALIASES:
-                normalized_key = GENERIC_ARG_ALIASES[normalized_key]
+            normalized_key = GENERIC_ARG_ALIASES.get(normalized_key, normalized_key)
             normalized[normalized_key] = value
         return normalized
 

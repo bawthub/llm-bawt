@@ -3,9 +3,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine
 
-from llm_bawt.content_provenance import ContentProvenanceStore, ContentTurn, _writes
+from llm_bawt.content_provenance import ContentProvenanceStore, ContentTurn
 from llm_bawt.tools.executor import ToolExecutor
 from llm_bawt.tools.parser import ToolCall, tool_result_is_error
 
@@ -28,27 +28,6 @@ def executor(store=None, **kwargs):
     )
 
 
-@pytest.mark.parametrize("name,args", [
-    ("memory", {"action": "store"}), ("memory", {"action": "update"}),
-    ("memory", {"action": "delete"}), ("self", {"action": "set"}),
-    ("self", {"action": "delete"}), ("profile", {"action": "set"}),
-    ("profile", {"action": "delete"}), ("store_memory", {"content": "unsafe"}),
-    ("bot_trait", {"key": "tone", "value": "unsafe"}),
-])
-def test_exposed_writes_have_receipts_and_zero_mutator_calls(store, name, args):
-    ex = executor(store)
-    mutators = {key: Mock() for key in ("memory", "self", "profile")}
-    ex._handlers.update(mutators)
-    store.expose(ContentTurn("reader", "owner", "turn", "trigger"))
-    result = ex.execute(call(name, **args))
-    assert "Held:" in result and "untrusted_seen=true" in result and "Receipt" in result
-    for handler in mutators.values():
-        handler.assert_not_called()
-    with store.engine.connect() as conn:
-        receipt = conn.execute(select(_writes)).mappings().one()
-    assert receipt["source_turn"] == "turn" and receipt["decision"] == "held"
-
-
 def test_external_exposure_commits_before_handler_even_when_handler_fails(store):
     ex = executor(store)
 
@@ -61,34 +40,33 @@ def test_external_exposure_commits_before_handler_even_when_handler_fails(store)
     assert tool_result_is_error(result)
     assert '"untrusted_content":true' in result and '"source":"native:web_fetch"' in result
     assert ex.external_content_seen
-    assert "Held:" in ex.execute(call("memory", action="store", content="do not store"))
 
 
 def test_durable_exposure_survives_executor_reset_and_retry(store):
     store.expose(ContentTurn("reader", "owner", "turn", "trigger"))
     ex = executor(store)
     ex.reset_call_count()
-    assert "Held:" in ex.execute(call("self", action="set", key="tone", value="unsafe"))
+    ex.execute(call("time"))
+    assert ex.external_content_seen
     retry = executor(store)
-    assert "Held:" in retry.execute(call("memory", action="delete", memory_id="m"))
+    retry.execute(call("time"))
+    assert retry.external_content_seen
     fresh = ToolExecutor(
         user_id="owner", bot_id="reader", trigger_message_id="next-trigger",
         turn_id="next-turn", content_store=store,
     )
-    handler = Mock(return_value="ok")
-    fresh._handlers["memory"] = handler
-    assert fresh.execute(call("memory", action="store", content="clean")) == "ok"
-    handler.assert_called_once()
+    fresh.execute(call("time"))
+    assert not fresh.external_content_seen
 
 
-def test_provenance_outage_or_missing_identity_never_runs_mutator(store):
+def test_provenance_outage_or_missing_identity_never_runs_the_tool(store):
     for ex in (
         ToolExecutor(user_id="owner", bot_id="reader", content_store=store),
-        executor(SimpleNamespace(admit=Mock(side_effect=RuntimeError("down")))),
+        executor(SimpleNamespace(seen=Mock(side_effect=RuntimeError("down")))),
     ):
         handler = Mock()
-        ex._handlers["memory"] = handler
-        assert "content provenance is unavailable" in ex.execute(call("memory", action="store"))
+        ex._handlers["time"] = handler
+        assert "content provenance is unavailable" in ex.execute(call("time"))
         handler.assert_not_called()
 
 

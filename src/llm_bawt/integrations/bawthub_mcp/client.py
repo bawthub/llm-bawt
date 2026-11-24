@@ -38,12 +38,15 @@ APPROVAL_GATED_TOOLS = frozenset({"ops_run"})
 DEFAULT_MCP_BASE_URL = "http://127.0.0.1:8001"
 CATALOG_TTL_SECONDS = 300.0
 
-# Conversational recall and memory only, each scoped by the server to the
-# signed bot/user. Anything broader (profile, which can target any entity;
-# tasks; messaging other bots; ops) must be named in the bot's allowlist.
+# What a regular chat bot needs for memory, history and profiles; BawtHub MCP
+# is their only source. The server scopes each call to the signed bot/user and
+# the bot's grants. Anything broader (tasks, messaging other bots, ops) must be
+# named in the bot's allowlist.
 DEFAULT_ALLOWLIST = frozenset({
-    "memory_search", "memory_store", "memory_update", "memory_list_recent",
-    "messages_find", "messages_context", "context_recall",
+    "memory_search", "memory_store", "memory_update", "memory_delete",
+    "memory_list_recent", "memory_search_all", "memory_list_sources",
+    "memory_search_source", "messages_find", "messages_context",
+    "messages_get_by_id", "context_recall", "profile",
 })
 
 

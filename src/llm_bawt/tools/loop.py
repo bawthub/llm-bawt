@@ -22,12 +22,9 @@ if TYPE_CHECKING:
     from ..integrations.ha_mcp.client import HomeAssistantMCPClient, HomeAssistantNativeClient
     from ..integrations.newsapi.client import NewsAPIClient
     from ..integrations.web_fetch.client import WebFetchClient
-    from ..mcp_server.client import MemoryClient
-    from ..profiles import ProfileManager
     from ..search.base import SearchClient
     from ..core.model_lifecycle import ModelLifecycleManager
     from ..utils.config import Config
-    from ..utils.history import HistoryManager
     from ..adapters import ModelAdapter
 
 logger = logging.getLogger(__name__)
@@ -41,8 +38,6 @@ class ToolLoop:
     
     def __init__(
         self,
-        memory_client: "MemoryClient | None" = None,
-        profile_manager: "ProfileManager | None" = None,
         search_client: "SearchClient | None" = None,
         home_client: "HomeAssistantMCPClient | None" = None,
         ha_native_client: "HomeAssistantNativeClient | None" = None,
@@ -56,16 +51,16 @@ class ToolLoop:
         tool_format: ToolFormat | str = ToolFormat.REACT,
         tools: list | None = None,
         adapter: "ModelAdapter | None" = None,
-        history_manager: "HistoryManager | None" = None,
         generation_kwargs: dict | None = None,
         ha_mode: bool = False,
         trigger_message_id: str | None = None,
         turn_id: str | None = None,
+        bawthub_mcp=None,
+        turn_capability: str | None = None,
+        remote_mcp=None,
     ):
         """
         Args:
-            memory_client: Client for memory operations.
-            profile_manager: Manager for profile operations.
             search_client: Client for web search operations.
             home_client: Home Assistant MCP client.
             ha_native_client: Home Assistant native MCP client.
@@ -77,17 +72,17 @@ class ToolLoop:
             bot_id: Current bot ID.
             max_iterations: Maximum tool call iterations per turn (None = use config default).
             adapter: Model adapter for model-specific stop sequences and output cleaning.
-            history_manager: History manager for recall operations.
             ha_mode: If True, force tool_choice="required" on first iteration.
             trigger_message_id: Service-owned persisted user message identity.
             turn_id: Service-owned turn identity for durable content provenance.
+            bawthub_mcp: BawtHub MCP client; tool_search loads its tools.
+            turn_capability: This turn's identity-only MCP capability.
+            remote_mcp: Granted remote MCP servers for this turn.
         """
         if not user_id:
             raise ValueError("user_id is required for ToolLoop")
         self._trigger_message_id = trigger_message_id
         self.executor = ToolExecutor(
-            memory_client=memory_client,
-            profile_manager=profile_manager,
             search_client=search_client,
             home_client=home_client,
             ha_native_client=ha_native_client,
@@ -97,9 +92,11 @@ class ToolLoop:
             config=config,
             user_id=user_id,
             bot_id=bot_id,
-            history_manager=history_manager,
             trigger_message_id=trigger_message_id,
             turn_id=turn_id,
+            bawthub_mcp=bawthub_mcp,
+            turn_capability=turn_capability,
+            remote_mcp=remote_mcp,
         )
         # Use config value if not explicitly provided (0 = unlimited, cap at reasonable max)
         if max_iterations is None:
@@ -150,6 +147,8 @@ class ToolLoop:
         handler = self.format_handler
         self._using_native_tools = self._should_use_native_tools() and client.supports_native_tools()
         
+        # Native rounds receive loaded schemas; text formats get them inline.
+        self.executor.inline_loaded_schemas = not self._using_native_tools
         if self._using_native_tools:
             logger.info("🔧 Using native tool calling")
 
@@ -443,7 +442,9 @@ class ToolLoop:
             Either a string response or a dict with tool_calls for native mode.
         """
         if use_native and hasattr(handler, "get_tools_schema"):
-            tools_schema = handler.get_tools_schema(self.tools or [])
+            # Schemas a tool_search loaded join every later round.
+            tools_schema = handler.get_tools_schema(
+                list(self.tools or []) + self.executor.mcp_tool_definitions())
             content, tool_calls = client.query_with_tools(
                 messages,
                 tools_schema=tools_schema,
@@ -476,8 +477,6 @@ class ToolLoop:
 def query_with_tools(
     messages: list["Message"],
     client: "LLMClient",
-    memory_client: "MemoryClient | None" = None,
-    profile_manager: "ProfileManager | None" = None,
     search_client: "SearchClient | None" = None,
     home_client: "HomeAssistantMCPClient | None" = None,
     ha_native_client: "HomeAssistantNativeClient | None" = None,
@@ -492,19 +491,19 @@ def query_with_tools(
     tool_format: ToolFormat | str = ToolFormat.REACT,
     tools: list | None = None,
     adapter: "ModelAdapter | None" = None,
-    history_manager: "HistoryManager | None" = None,
     generation_kwargs: dict | None = None,
     ha_mode: bool = False,
     trigger_message_id: str | None = None,
     turn_id: str | None = None,
+    bawthub_mcp=None,
+    turn_capability: str | None = None,
+    remote_mcp=None,
 ) -> tuple[str, str, list[dict]]:
     """Convenience function for tool-enabled queries.
 
     Args:
         messages: Conversation messages.
         client: LLM client instance.
-        memory_client: Memory client for tool execution.
-        profile_manager: Profile manager for user/bot profile tools.
         search_client: Search client for web search tools.
         home_client: Home Assistant MCP client for smart-home tools.
         ha_native_client: Home Assistant native MCP client.
@@ -519,7 +518,6 @@ def query_with_tools(
         tool_format: Tool format for this model.
         tools: Tool definitions to include in schema/formatting.
         adapter: Model adapter for model-specific stop sequences.
-        history_manager: History manager for recall operations.
         ha_mode: If True, force tool_choice="required" on first iteration.
         trigger_message_id: Service-owned persisted user message identity.
         turn_id: Service-owned turn identity for durable content provenance.
@@ -532,8 +530,6 @@ def query_with_tools(
     if not user_id:
         raise ValueError("user_id is required for query_with_tools")
     loop = ToolLoop(
-        memory_client=memory_client,
-        profile_manager=profile_manager,
         search_client=search_client,
         home_client=home_client,
         ha_native_client=ha_native_client,
@@ -547,11 +543,13 @@ def query_with_tools(
         tool_format=tool_format,
         tools=tools,
         adapter=adapter,
-        history_manager=history_manager,
         generation_kwargs=generation_kwargs,
         ha_mode=ha_mode,
         trigger_message_id=trigger_message_id,
         turn_id=turn_id,
+        bawthub_mcp=bawthub_mcp,
+        turn_capability=turn_capability,
+        remote_mcp=remote_mcp,
     )
     response = loop.run(messages, client, stream_final=stream)
     tool_context = loop.get_tool_context_summary()

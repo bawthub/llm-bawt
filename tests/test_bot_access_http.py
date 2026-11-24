@@ -26,8 +26,6 @@ def test_service_client_signed_http_roundtrip_and_private_other_denial(monkeypat
         return [{"id": "fixture", "role": "assistant", "content": "private synthetic history"}]
 
     from llm_bawt.mcp_server import server as tools
-    from llm_bawt.tools.executor import ToolExecutor
-    from llm_bawt.tools.parser import ToolCall
     from llm_bawt.utils.history import HistoryManager
 
     async def history_rows(**kwargs):
@@ -62,8 +60,8 @@ def test_service_client_signed_http_roundtrip_and_private_other_denial(monkeypat
         with pytest.raises(RuntimeError, match="access_denied"):
             public._call_server("messages_get", {"bot_id": "private_fixture"})
         assert len(seen) == 1
-        # Chat-type callers have no bridge capability: context assembly and native
-        # tools use the construction-bound service client, including protected self.
+        # Chat-type callers have no bridge capability: context assembly uses the
+        # construction-bound service client, including protected self.
         config = SimpleNamespace(HISTORY_FILE=None, SYSTEM_MESSAGE="fixture", MEMORY_N_RESULTS=5,
                                  MEMORY_MIN_RELEVANCE=0.0)
         own.config = config
@@ -75,9 +73,6 @@ def test_service_client_signed_http_roundtrip_and_private_other_denial(monkeypat
         assert [m.content for m in payload.regular_messages] == ["private synthetic history"]
         seed = history.build_context_payload(delivery="seed", max_tokens=0)
         assert seed.regular_messages == payload.regular_messages
-        executor = ToolExecutor(memory_client=own, config=config, user_id="user_a", bot_id="private_fixture")
-        output = executor.execute(ToolCall("memory", {"action": "search", "query": "fixture"}, ""))
-        assert "synthetic private memory" in output
     assert current_bot_access() is None
 
 

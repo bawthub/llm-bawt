@@ -52,209 +52,8 @@ class Tool:
 
 
 # =============================================================================
-# Consolidated Tool Definitions (7 tools total)
+# Local tool definitions (memory, history and profiles come from BawtHub MCP)
 # =============================================================================
-
-# Memory tool - combines search_memories, store_memory, update_memory, delete_memory
-MEMORY_TOOL = Tool(
-    name="memory",
-    description="Search, store, update, or delete facts from long-term memory. Use action='search' to find, 'store' to save, 'update' to modify existing, 'delete' to remove.",
-    parameters=[
-        ToolParameter(
-            name="action",
-            type="string",
-            description="'search', 'store', 'update', or 'delete'"
-        ),
-        ToolParameter(
-            name="query",
-            type="string",
-            description="Search query or delete filter (for search/delete)",
-            required=False
-        ),
-        ToolParameter(
-            name="content",
-            type="string",
-            description="Fact to remember (for store)",
-            required=False
-        ),
-        ToolParameter(
-            name="memory_id",
-            type="string",
-            description="Specific memory ID to update/delete (for update/delete)",
-            required=False
-        ),
-        ToolParameter(
-            name="n_results",
-            type="integer",
-            description="Max search results (default 5)",
-            required=False,
-            default=5
-        ),
-        ToolParameter(
-            name="importance",
-            type="float",
-            description="0.0-1.0 importance score (for store, default 0.6)",
-            required=False,
-            default=0.6
-        ),
-        ToolParameter(
-            name="tags",
-            type="list[string]",
-            description="Categories like ['preference'], ['fact', 'work'] (for store/update)",
-            required=False,
-            default=["misc"]
-        ),
-    ]
-)
-
-# History tool - combines search_history, get_recent_history, forget_history, recall
-HISTORY_TOOL = Tool(
-    name="history",
-    description="Search, retrieve, recall, or forget conversation messages. Use action='search' for keywords, 'recent' for date-based or last-N retrieval, 'recall' to expand a summary back to full messages, 'forget' to delete.",
-    parameters=[
-        ToolParameter(
-            name="action",
-            type="string",
-            description="'search', 'recent', 'recall', or 'forget'"
-        ),
-        ToolParameter(
-            name="query",
-            type="string",
-            description="Keywords to search (for search). Omit for date-only retrieval with since/until (uses action='recent').",
-            required=False
-        ),
-        ToolParameter(
-            name="summary_id",
-            type="string",
-            description="Database ID of a summary message to expand back to full messages (for recall)",
-            required=False
-        ),
-        ToolParameter(
-            name="n_results",
-            type="integer",
-            description="Max results (default 10)",
-            required=False,
-            default=10
-        ),
-        ToolParameter(
-            name="role_filter",
-            type="string",
-            description="'user', 'assistant', or omit for all",
-            required=False
-        ),
-        ToolParameter(
-            name="since",
-            type="string",
-            description="ISO date - get messages after this (e.g., '2026-01-30')",
-            required=False
-        ),
-        ToolParameter(
-            name="until",
-            type="string",
-            description="ISO date - get messages before this",
-            required=False
-        ),
-        ToolParameter(
-            name="count",
-            type="integer",
-            description="Number of messages to forget (for forget)",
-            required=False
-        ),
-        ToolParameter(
-            name="minutes",
-            type="integer",
-            description="Forget messages from last N minutes (for forget)",
-            required=False
-        ),
-    ]
-)
-
-# Profile tool - combines set/get/update/delete user attributes
-PROFILE_TOOL = Tool(
-    name="profile",
-    description="Get, set, update, or delete user profile attributes. Use action='get' for full profile, 'set' to store, 'update' to modify existing, 'delete' to remove.",
-    parameters=[
-        ToolParameter(
-            name="action",
-            type="string",
-            description="'get', 'set', 'update', or 'delete'"
-        ),
-        ToolParameter(
-            name="attribute_id",
-            type="integer",
-            description="Database attribute ID for direct updates (optional for update)",
-            required=False
-        ),
-        ToolParameter(
-            name="category",
-            type="string",
-            description="'preference', 'fact', 'interest', or 'communication' (for set/update/delete)",
-            required=False
-        ),
-        ToolParameter(
-            name="key",
-            type="string",
-            description="Attribute name, e.g., 'occupation' (for set/update/delete)",
-            required=False
-        ),
-        ToolParameter(
-            name="value",
-            type="any",
-            description="Value to store (for set/update)",
-            required=False
-        ),
-        ToolParameter(
-            name="confidence",
-            type="float",
-            description="0.0-1.0 (1.0=explicit, 0.6-0.8=inferred, default 0.8)",
-            required=False,
-            default=0.8
-        ),
-        ToolParameter(
-            name="query",
-            type="string",
-            description="Search term to find/delete matching attributes (for delete)",
-            required=False
-        ),
-    ]
-)
-
-# Self tool - bot personality development (replaces bot_trait)
-SELF_TOOL = Tool(
-    name="self",
-    description="Reflect on and develop your own personality. Use action='get' to see your current traits, 'set' to record new ones, 'update' to modify existing traits, 'delete' to evolve past old ones.",
-    parameters=[
-        ToolParameter(
-            name="action",
-            type="string",
-            description="'get' (view current traits), 'set' (record trait), 'update' (modify trait), or 'delete' (remove trait)"
-        ),
-        ToolParameter(
-            name="category",
-            type="string",
-            description="'personality' (default), 'preference', 'interest', or 'communication_style' (for set/update/delete)",
-            required=False
-        ),
-        ToolParameter(
-            name="key",
-            type="string",
-            description="Trait name, e.g., 'humor_style', 'favorite_topic' (for set/update/delete)",
-            required=False
-        ),
-        ToolParameter(
-            name="value",
-            type="any",
-            description="Trait value (for set/update)",
-            required=False
-        ),
-        ToolParameter(
-            name="query",
-            type="string",
-            description="Search term to find/delete matching traits (for delete)",
-            required=False
-        ),
-    ]
-)
 
 # Search tool - combines web_search, news_search
 SEARCH_TOOL = Tool(
@@ -435,7 +234,7 @@ TIME_TOOL = Tool(
 # =============================================================================
 
 # Core tools always included
-CORE_TOOLS = [MEMORY_TOOL, HISTORY_TOOL, PROFILE_TOOL, SELF_TOOL, TIME_TOOL]
+CORE_TOOLS = [TIME_TOOL]
 
 # Optional tool categories
 SEARCH_TOOLS = [SEARCH_TOOL]
@@ -454,21 +253,6 @@ ALL_TOOLS = CORE_TOOLS + SEARCH_TOOLS + NEWS_TOOLS + WEB_FETCH_TOOLS + HOME_TOOL
 
 # Maps old tool names to (new_tool_name, default_arguments)
 LEGACY_TOOL_MAP = {
-    # Memory tools
-    "search_memories": ("memory", {"action": "search"}),
-    "store_memory": ("memory", {"action": "store"}),
-    "delete_memory": ("memory", {"action": "delete"}),
-    # History tools
-    "search_history": ("history", {"action": "search"}),
-    "get_recent_history": ("history", {"action": "recent"}),
-    "forget_history": ("history", {"action": "forget"}),
-    # Profile tools
-    "set_user_attribute": ("profile", {"action": "set"}),
-    "get_user_profile": ("profile", {"action": "get"}),
-    "delete_user_attribute": ("profile", {"action": "delete"}),
-    # Bot trait (legacy - map to self tool)
-    "bot_trait": ("self", {"action": "set"}),
-    "set_my_trait": ("self", {"action": "set"}),
     # Search tools
     "web_search": ("search", {"type": "web"}),
     "news_search": ("search", {"type": "news"}),
@@ -499,9 +283,6 @@ TOOL_SEARCH_TOOL = Tool(
                       description="Maximum tools to load (1-10, default 5)", required=False),
     ],
 )
-
-# Local wrappers that BawtHub MCP tools replace when a bot opts in.
-MCP_REPLACED_LOCAL_TOOLS = frozenset({"memory", "history", "profile"})
 
 
 # =============================================================================
@@ -574,7 +355,6 @@ def ha_tools_to_tool_definitions(ha_tools: list) -> list[Tool]:
 
 def get_tools_list(
     tools: list[Tool] | None = None,
-    include_profile_tools: bool = True,  # Kept for API compatibility (always included in CORE)
     include_search_tools: bool = False,
     include_news_tools: bool = False,
     include_web_fetch_tools: bool = False,
@@ -611,7 +391,6 @@ def get_tools_list(
 
 def get_tools_prompt(
     tools: list[Tool] | None = None,
-    include_profile_tools: bool = True,
     include_search_tools: bool = False,
     include_news_tools: bool = False,
     include_web_fetch_tools: bool = False,
@@ -624,7 +403,6 @@ def get_tools_prompt(
 
     Args:
         tools: List of tools to include. If None, auto-selects based on flags.
-        include_profile_tools: Kept for API compatibility (profile always included).
         include_search_tools: Whether to include web search tools (default False).
         include_news_tools: Whether to include NewsAPI tools (default False).
         include_web_fetch_tools: Whether to include web fetch tools (default False).
@@ -638,7 +416,6 @@ def get_tools_prompt(
     """
     tools = get_tools_list(
         tools=tools,
-        include_profile_tools=include_profile_tools,
         include_search_tools=include_search_tools,
         include_news_tools=include_news_tools,
         include_web_fetch_tools=include_web_fetch_tools,

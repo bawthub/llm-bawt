@@ -236,6 +236,35 @@ def mint_for_agent_turn(
         return None
 
 
+def mint_mcp_turn_identity(
+    llm_bawt, *, turn_id: str | None, trigger_message_id: str | None,
+) -> str | None:
+    """Identity-only capability for a regular chat bot's BawtHub MCP calls.
+
+    Shared by the streamed, ReAct and non-streamed tool loops. The token's
+    session id is a fresh placeholder that every conversation consumer
+    (association, ownership shortcuts) refuses. Without a turn, or on a
+    signing failure, it returns None and the MCP tools fail closed.
+    """
+    if getattr(llm_bawt, "bawthub_mcp", None) is None or not (turn_id and trigger_message_id):
+        return None
+    try:
+        import uuid
+
+        return mint_task_turn_context(
+            session_id=str(uuid.uuid4()), turn_id=turn_id,
+            trigger_message_id=trigger_message_id,
+            bot_id=llm_bawt.bot_id, user_id=llm_bawt.user_id, identity_only=True,
+        )
+    except Exception as error:  # noqa: BLE001 - tools fail closed instead
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "BawtHub MCP turn identity unavailable for %s: %s", turn_id, error,
+        )
+        return None
+
+
 def open_task_turn_context(
     token: str | None,
     *,

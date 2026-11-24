@@ -377,25 +377,25 @@ class TestMultiFormatParsing:
 
     def test_parse_alt_tool_format_simple(self, handler):
         """Parse # Tool: / # Arguments: format (Dolphin-style)."""
-        response = '''# Tool: retrieve_conversation_history
-# Arguments: {"num_messages": 10}'''
+        response = '''# Tool: internet_search
+# Arguments: {"num_results": 10}'''
         
         calls, remaining = handler.parse_response(response)
         
         assert len(calls) == 1
         # Should normalize tool name
-        assert calls[0].name == "get_recent_history"
+        assert calls[0].name == "web_search"
         # Should normalize argument name
-        assert calls[0].arguments == {"n_messages": 10}
+        assert calls[0].arguments == {"n_results": 10}
 
     def test_parse_alt_tool_format_with_code_block(self, handler):
         """Parse Dolphin-style format inside code block."""
         response = '''Sure, let me retrieve that.
 
 ```
-# Tool: retrieve_conversation_history
+# Tool: internet_search
 # Arguments: {
-  "num_messages": 10
+  "num_results": 10
 }
 ```
 
@@ -404,8 +404,8 @@ Here's what I found.'''
         calls, remaining = handler.parse_response(response)
         
         assert len(calls) == 1
-        assert calls[0].name == "get_recent_history"
-        assert calls[0].arguments == {"n_messages": 10}
+        assert calls[0].name == "web_search"
+        assert calls[0].arguments == {"n_results": 10}
 
     def test_parse_json_code_block_format(self, handler):
         """Parse JSON code block with name/arguments keys."""
@@ -424,11 +424,13 @@ Here's what I found.'''
     def test_tool_name_normalization(self, handler):
         """Various tool name variations should normalize to actual tool names."""
         test_cases = [
-            ("get_conversation_history", "get_recent_history"),
-            ("retrieve_conversation_history", "get_recent_history"),
-            ("search_memory", "search_memories"),
-            ("save_memory", "store_memory"),
-            ("get_profile", "get_user_profile"),
+            ("internet_search", "web_search"),
+            ("google", "web_search"),
+            ("current_model", "get_current_model"),
+            ("show_models", "list_models"),
+            # MCP names pass through; legacy memory aliases no longer exist.
+            ("memory_search", "memory_search"),
+            ("search_memory", "search_memory"),
         ]
         
         for input_name, expected_name in test_cases:
@@ -442,20 +444,28 @@ Here's what I found.'''
     def test_argument_normalization(self, handler):
         """Various argument name variations should normalize."""
         test_cases = [
-            ("num_messages", "n_messages"),
-            ("count", "n_messages"),
-            ("limit", "n_messages"),
             ("num_results", "n_results"),
+            ("max_results", "n_results"),
             ("search_query", "query"),
+            ("q", "query"),
         ]
         
         for input_arg, expected_arg in test_cases:
-            response = f'''Action: get_recent_history
+            response = f'''Action: search
 Action Input: {{"{input_arg}": 10}}'''
             
             calls, _ = handler.parse_response(response)
             assert len(calls) == 1
             assert expected_arg in calls[0].arguments, f"Expected {expected_arg} for {input_arg}"
+
+    def test_mcp_tool_arguments_are_never_renamed(self, handler):
+        """Discovered MCP tools keep their server-defined argument names."""
+        for name in ("tool_search", "memory_search", "messages_find"):
+            response = f'''Action: {name}
+Action Input: {{"query": "tea", "max_results": 3, "text": "x"}}'''
+            calls, _ = handler.parse_response(response)
+            assert calls[0].name == name
+            assert calls[0].arguments == {"query": "tea", "max_results": 3, "text": "x"}
 
     def test_sanitize_alt_format(self, handler):
         """Sanitization removes alternative format markers."""

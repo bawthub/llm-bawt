@@ -248,9 +248,7 @@ class TurnStreamWorker(TurnStreamPublishMixin):
 
             if terminal_follower is not None:
                 terminal_follower.check()
-            from ..core.prompt_sections import bawthub_mcp_prompt_turn
-
-            with selected_history_context("initial"), bawthub_mcp_prompt_turn():
+            with selected_history_context("initial"):
                 messages = llm_bawt.prepare_messages_for_query(
                     user_prompt,
                     user_attachments=user_attachments or None,
@@ -383,6 +381,7 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                     stream_iter = NativeToolStream(ctx).stream(messages, gen_kwargs)
                 else:
                     # Fall back to text-based streaming for non-native models (GGUF, etc.)
+                    from ..core.base import mcp_tool_kwargs
                     from ..tools import stream_with_tools
                     log.debug(f"Using stream_with_tools for tool format: {llm_bawt.tool_format}")
 
@@ -398,8 +397,6 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                     stream_iter = stream_with_tools(
                         messages=messages,
                         stream_fn=stream_fn,
-                        memory_client=llm_bawt.memory,
-                        profile_manager=llm_bawt.profile_manager,
                         search_client=llm_bawt.search_client,
                         home_client=llm_bawt.home_client,
                         ha_native_client=llm_bawt.ha_native_client,
@@ -409,11 +406,11 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                         bot_id=llm_bawt.bot_id,
                         tool_format=llm_bawt.tool_format,
                         adapter=adapter,
-                        history_manager=llm_bawt.history_manager,
                         tool_call_details=tool_call_details_holder,
                         emit_tool_events=True,
                         trigger_message_id=trigger_message_id,
                         turn_id=turn_log_id,
+                        **mcp_tool_kwargs(llm_bawt, getattr(ctx, "mcp_turn_capability", None)),
                     )
             else:
                 # Resolve per-bot generation parameters

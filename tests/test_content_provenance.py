@@ -49,16 +49,6 @@ def test_extraction_only_classifies_bot_initiated_storing_tool():
     assert write_kind("working_memory_list", {}) is None
 
 
-@pytest.mark.parametrize("name,args", [
-    ("memory", {"action": "store"}), ("memory", {"action": "update"}),
-    ("memory", {"action": "delete"}), ("self", {"action": "set"}),
-    ("profile", {"action": "delete"}),
-])
-def test_native_write_admission_set(name, args):
-    assert write_kind(name, args, native=True) in {"memory", "trait"}
-    assert write_kind(name, {"action": "get"}, native=True) is None
-
-
 def test_source_names_are_dispatcher_scoped():
     assert external_source("search", native=True) == "native:search"
     assert external_source("mcp__playwright__browser_snapshot")

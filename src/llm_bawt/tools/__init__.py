@@ -1,26 +1,13 @@
 """Tool calling support for LLMs.
 
-This module provides prompt-based tool calling that works with any model,
-allowing bots to autonomously search memories, store facts, manage profiles,
-search the web, and switch models.
-
-Consolidated tools (8 total):
-- memory: Search/store/delete facts
-- history: Search/retrieve/forget messages (with date filtering)
-- profile: Get/set/delete user attributes
-- self: Bot personality reflection and development
-- search: Web/news search
-- home: Home Assistant control/status
-- model: List/current/switch models
-- time: Get current time
+Local tools: search (web/news), home (Home Assistant), model (list/switch)
+and time. Memory, message history, profiles and bot traits come from BawtHub
+MCP through deferred discovery (``tool_search``), as do tools from connected
+MCP servers.
 """
 
 from .definitions import (
     # Tool instances
-    MEMORY_TOOL,
-    HISTORY_TOOL,
-    PROFILE_TOOL,
-    SELF_TOOL,
     SEARCH_TOOL,
     HOME_TOOL,
     MODEL_TOOL,
@@ -49,10 +36,6 @@ from .streaming import stream_with_tools
 
 __all__ = [
     # Tool instances
-    "MEMORY_TOOL",
-    "HISTORY_TOOL",
-    "PROFILE_TOOL",
-    "SELF_TOOL",
     "SEARCH_TOOL",
     "HOME_TOOL",
     "MODEL_TOOL",

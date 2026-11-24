@@ -290,9 +290,9 @@ def test_native_nonstream_tools_use_service_turn_identity(
     monkeypatch, tmp_path, _isolate, origin, fetch_fails,
 ):
     """Run chat_completion through the real service query and database-backed loop."""
-    from sqlalchemy import JSON, Column, MetaData, String, Table, create_engine, select
+    from sqlalchemy import JSON, Column, MetaData, String, Table, create_engine
 
-    from llm_bawt.content_provenance import ContentProvenanceStore, ContentTurn, _writes
+    from llm_bawt.content_provenance import ContentProvenanceStore, ContentTurn
     from llm_bawt.models.message import Message
     from llm_bawt.service.core import ServiceLLMBawt
 
@@ -310,12 +310,26 @@ def test_native_nonstream_tools_use_service_turn_identity(
                         lambda _config: policy)
     replies = iter([
         'Action: home\nAction Input: {"action": "set", "entity": "light.kitchen", "state": "on"}',
-        'Action: memory\nAction Input: {"action": "store", "content": "clean fact"}',
+        'Action: memory_store\nAction Input: {"content": "clean fact"}',
         'Action: web_fetch\nAction Input: {"url": "https://example.test"}',
-        'Action: memory\nAction Input: {"action": "store", "content": "injected fact"}',
-        'Action: self\nAction Input: {"action": "set", "key": "tone", "value": "injected"}',
         "Final Answer: Done.",
     ])
+    # Memory is BawtHub MCP only (TASK-2614); its server applies the write
+    # admission, so the loop must carry this turn's service identity to it.
+    minted = []
+
+    def mint(**kwargs):
+        minted.append(kwargs)
+        return "turn-capability"
+
+    monkeypatch.setattr("llm_bawt.task_turn_context.mint_task_turn_context", mint)
+    mcp_calls = []
+    bawthub_mcp = SimpleNamespace(
+        allowlist=frozenset({"memory_store"}),
+        allows=lambda name: name == "memory_store",
+        call_tool=lambda capability, name, arguments, tool_use_id=None: (
+            mcp_calls.append((capability, name, arguments)) or "stored"),
+    )
     service = _service(None, model_type="openai")
     llm = service._get_llm_bawt.return_value
     llm.client.supports_native_tools = lambda: False
@@ -324,8 +338,7 @@ def test_native_nonstream_tools_use_service_turn_identity(
     llm.bot.uses_tools = True
     llm.bot_id, llm.user_id = "caid", "operator"
     llm.tool_format, llm.adapter, llm.history_manager, llm._ha_mode = "react", None, None, False
-    llm.memory = SimpleNamespace(store_memory=Mock(return_value=SimpleNamespace(id="clean")))
-    llm.profile_manager = SimpleNamespace(set_attribute=Mock())
+    llm.bawthub_mcp, llm.remote_mcp = bawthub_mcp, None
     llm.home_client = SimpleNamespace(set=Mock(return_value="light on"))
     llm.web_fetch_client = SimpleNamespace(fetch=Mock(
         side_effect=RuntimeError("fetch failed") if fetch_fails else None,
@@ -386,21 +399,13 @@ def test_native_nonstream_tools_use_service_turn_identity(
             assert prepared.kwargs.get("context_prefix") is None
         llm.home_client.set.assert_called_once_with(entity="light.kitchen", state="on", brightness=None)
         llm.web_fetch_client.fetch.assert_called_once_with("https://example.test")
-        if origin == "exposed-delivery":
-            llm.memory.store_memory.assert_not_called()
-        else:
-            llm.memory.store_memory.assert_called_once()
-            assert llm.memory.store_memory.call_args.kwargs["source_message_ids"] == [
-                request.user_message_id,
-            ]
-        llm.profile_manager.set_attribute.assert_not_called()
+        assert mcp_calls == [("turn-capability", "memory_store", {"content": "clean fact"})]
+        assert minted == [{
+            "session_id": minted[0]["session_id"], "turn_id": observed["turn_id"],
+            "trigger_message_id": request.user_message_id,
+            "bot_id": "caid", "user_id": "operator", "identity_only": True,
+        }]
         assert "provenance is unavailable" not in observed["tool_context"]
-        assert "Held:" in observed["tool_context"]
-        with engine.connect() as conn:
-            receipts = conn.execute(select(_writes)).mappings().all()
-        initial = "held" if origin == "exposed-delivery" else "allowed"
-        assert [row["decision"] for row in receipts] == [initial, "held", "held"]
-        assert {row["source_turn"] for row in receipts} == {observed["turn_id"]}
         assert observed["trigger_message_id"] == request.user_message_id
         assert store.seen(ContentTurn("caid", "operator", observed["turn_id"],
                                       request.user_message_id))

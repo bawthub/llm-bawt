@@ -32,6 +32,7 @@ class NativeToolStream:
         cancel_event = ctx.cancel_event
         turn_log_id, trigger_message_id = ctx.turn_log_id, ctx.trigger_message_id
         tool_context_holder = ctx.tool_context_holder
+        from ..core.base import mcp_tool_kwargs
         from ..tools.executor import ToolExecutor
         from ..tools.formats import get_format_handler
         from ..models.message import Message as Msg
@@ -39,7 +40,7 @@ class NativeToolStream:
         log.debug("Using native streaming with tools")
 
         tool_definitions = (
-            llm_bawt._get_tool_definitions(bawthub_mcp=True) if llm_bawt.bot.uses_tools else []
+            llm_bawt._get_tool_definitions() if llm_bawt.bot.uses_tools else []
         )
         handler = get_format_handler(llm_bawt.tool_format)
         tools_schema = handler.get_tools_schema(tool_definitions)
@@ -53,8 +54,6 @@ class NativeToolStream:
         log.info(f"📋 {len(tools_schema)} tools in schema ({len(ha_tools)} HA: {', '.join(ha_tools[:5])}{'...' if len(ha_tools) > 5 else ''})")
 
         executor = ToolExecutor(
-            memory_client=llm_bawt.memory,
-            profile_manager=llm_bawt.profile_manager,
             search_client=llm_bawt.search_client,
             home_client=llm_bawt.home_client,
             ha_native_client=llm_bawt.ha_native_client,
@@ -64,11 +63,7 @@ class NativeToolStream:
             bot_id=llm_bawt.bot_id,
             trigger_message_id=trigger_message_id,
             turn_id=turn_log_id,
-            bawthub_mcp=getattr(llm_bawt, "bawthub_mcp", None),
-            turn_capability=getattr(ctx, "mcp_turn_capability", None),
-            remote_mcp=(llm_bawt.remote_mcp.for_turn()
-                        if getattr(llm_bawt, "remote_mcp", None) is not None
-                        and llm_bawt.remote_mcp.has_servers() else None),
+            **mcp_tool_kwargs(llm_bawt, getattr(ctx, "mcp_turn_capability", None)),
         )
 
         def native_stream_with_tool_loop():
