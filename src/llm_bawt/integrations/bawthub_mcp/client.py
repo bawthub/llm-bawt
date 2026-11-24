@@ -26,7 +26,7 @@ from agent_bridge.mcp_call_context import (
 )
 
 from ...task_turn_context import TASK_TURN_CONTEXT_HEADER
-from ..ha_mcp.client import HomeAssistantNativeClient, run_bounded
+from ..ha_mcp.client import run_bounded
 
 logger = logging.getLogger(__name__)
 
@@ -126,13 +126,49 @@ class BawtHubMcpClient:
         except Exception as error:
             logger.warning("BawtHub MCP call failed: %s: %s", name, error)
             raise BawtHubMcpToolError(f"Error calling {name}: {error}") from error
-        text = HomeAssistantNativeClient._extract_text(result)
-        structured = getattr(result, "structured_content", None) or getattr(result, "structuredContent", None)
+        text, structured = self._result_parts(result)
+        body = text or self._serialize_structured(structured)
         # Policy refusals arrive as is_error inside the structured content.
         if (getattr(result, "isError", False) is True or getattr(result, "is_error", False) is True
                 or (isinstance(structured, dict) and structured.get("is_error") is True)):
-            raise BawtHubMcpToolError(text or f"{name} reported an error")
-        return text
+            raise BawtHubMcpToolError(body or f"{name} reported an error")
+        return body or f"{name} returned no content"
+
+    # --- result formatting ---
+
+    _ABSENT = object()
+
+    @classmethod
+    def _result_parts(cls, result: Any) -> tuple[str, Any]:
+        """Nonblank joined text items, and the structured payload or _ABSENT.
+
+        Never falls back to the SDK object's repr. An explicitly empty dict or
+        list is a real (empty) payload, distinct from an absent one.
+        """
+        parts = []
+        for item in getattr(result, "content", None) or []:
+            item_text = getattr(item, "text", None)
+            if isinstance(item_text, str) and item_text.strip():
+                parts.append(item_text)
+        text = "\n".join(parts).strip()
+        structured = cls._ABSENT
+        for attr in ("structured_content", "structuredContent"):
+            value = getattr(result, attr, None)
+            if value is not None:
+                structured = value
+                break
+        return text, structured
+
+    @classmethod
+    def _serialize_structured(cls, structured: Any) -> str:
+        if structured is cls._ABSENT:
+            return ""
+        import json
+
+        try:
+            return json.dumps(structured, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            return ""
 
     # --- internals ---
 

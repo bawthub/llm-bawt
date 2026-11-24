@@ -155,6 +155,39 @@ def test_allowed_tool_calls_under_turn_identity_and_denied_tool_never_calls(clie
     assert tool_result_is_error(denied) and len(client.calls) == before
 
 
+
+def _sdk_result(text=None, structured=None, is_error=False):
+    content = [mcp_types.TextContent(type="text", text=text)] if text is not None else []
+    return mcp_types.CallToolResult(content=content, structured_content=structured, is_error=is_error)
+
+
+@pytest.mark.parametrize("result, expected", [
+    (_sdk_result(text="found 2", structured={"results": [1, 2]}), "found 2"),
+    (_sdk_result(structured={"results": []}), '{"results": []}'),
+    (_sdk_result(structured={}), "{}"),
+    (_sdk_result(text="   ", structured=[]), "[]"),
+    (_sdk_result(), "memory_search returned no content"),
+])
+def test_result_prefers_text_then_structured_json_never_sdk_repr(client, monkeypatch, result, expected):
+    async def call(self, headers, name, arguments):
+        return result
+    monkeypatch.setattr(BawtHubMcpClient, "_call_async", call)
+    out = client.call_tool("turn-token", "memory_search", {"query": "x"}, tool_use_id="call-1")
+    assert out == expected and "meta=" not in out
+
+
+def test_structured_only_result_end_to_end_and_policy_refusal(client, monkeypatch):
+    async def call(self, headers, name, arguments):
+        return state["result"]
+    state = {"result": _sdk_result(structured={"results": []})}
+    monkeypatch.setattr(BawtHubMcpClient, "_call_async", call)
+    executor = _executor(client)
+    ok = executor.execute(ToolCall(name="memory_search", arguments={"query": "x"}, raw_text=""))
+    assert strip_tool_result_tags(ok) == '{"results": []}' and not tool_result_is_error(ok)
+    state["result"] = _sdk_result(structured={"is_error": True, "error": "access_denied"})
+    refused = executor.execute(ToolCall(name="memory_search", arguments={"query": "x"}, raw_text=""))
+    assert tool_result_is_error(refused) and "access_denied" in refused
+
 def test_replaced_local_wrappers_and_aliases_are_refused_in_mcp_mode(client):
     memory = Mock()
     executor = ToolExecutor(user_id="fixture-owner", bot_id="fixture-bot", memory_client=memory,
