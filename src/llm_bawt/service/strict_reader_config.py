@@ -89,8 +89,13 @@ def parse(raw: Any) -> StrictReaderSnapshot:
     unknown = set(raw) - _FIELDS
     if unknown:
         return fenced(f"strict_reader has unknown fields: {sorted(unknown)}")
-    house = _slug(raw.get("house"))
-    if house is None:
+    from agent_bridge.houses import normalize_house
+
+    try:
+        house = normalize_house(raw.get("house")) if isinstance(raw.get("house"), str) else ""
+    except ValueError:
+        house = ""
+    if not house:  # the mansion is shared; strict needs a named house
         return fenced("strict_reader.house is missing or invalid")
     generation = raw.get("skill_generation")
     layers = raw.get("skill_layers")

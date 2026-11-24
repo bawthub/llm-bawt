@@ -83,6 +83,11 @@ def test_complete_generation_admitted(with_db):
 @pytest.mark.parametrize("patch", [
     {"house": None},
     {"house": "Bad House!"},
+    {"house": "house_x"},  # bridge's normalize_house rejects underscores
+    {"house": ""},
+    {"house": "   "},
+    {"house": "h" * 32},
+    {"house": 7},
     {"skill_generation": None},
     {"skill_generation": "current"},
     {"skill_generation": "gen-../x"},
