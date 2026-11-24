@@ -116,13 +116,14 @@ def _voice_steer_reply(deliveries: Any, record: Any, turns: Any, *, bot_id: str,
             SELECT s.id FROM messages injected
             JOIN messages original ON original.bot_id=injected.bot_id
               AND original.id=:trigger AND original.session_id=injected.session_id
-            JOIN sessions s ON s.id=injected.session_id AND s.bot_id=:bot AND s.user_id=:user
+            JOIN sessions s ON s.id=injected.session_id AND s.bot_id=:bot
+              AND lower(trim(s.user_id))=:user
             WHERE injected.bot_id=:bot AND injected.id=:message AND injected.role='user'
               AND injected.author_entity_type='user' AND injected.author_entity_id=:user
               AND (injected.interrupt_source_message_id IS NULL
                    OR injected.interrupt_source_message_id=:trigger)
               AND s.status <> 'deleted'
-        """), {"bot": bot_id, "user": user_id, "trigger": turn.trigger_message_id,
+        """), {"bot": bot_id, "user": user_id.strip().lower(), "trigger": turn.trigger_message_id,
                  "message": record.user_message_id}).scalar_one_or_none()
     selected = (record.metadata.get("ordinary_chat") or {}).get("session_id")
     if not bound or (selected is not None and str(bound) != selected.strip()):

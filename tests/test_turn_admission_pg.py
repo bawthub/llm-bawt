@@ -381,6 +381,11 @@ def test_voice_reply_observes_only_the_persisted_injections_exact_target(rig):
     assert binding == {"turn_id": rig.turn_id, "session_id": rig.session_id,
                        "run_request_id": "req-active",
                        "steer_rpc_id": f"steer_{decision.delivery_id.replace('-', '_')}"}
+    # TASK-2596: a mixed-case sign-in id binds to the same normalized injection.
+    assert resolve_delivery_reply(
+        deliveries, turns, decision.delivery_id, bot_id=rig.bot, user_id=rig.user.upper(),
+        user_message_id=request.user_message_id, include_voice_binding=True,
+    )["voice_binding"] == binding
     with rig.engine.begin() as conn:
         conn.execute(sa_text("UPDATE turn_logs SET ended_at=now(),status='ok',response_text='exact answer' WHERE id=:id"),
                      {"id": rig.turn_id})
