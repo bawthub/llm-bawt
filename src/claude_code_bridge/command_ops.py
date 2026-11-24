@@ -153,6 +153,14 @@ class ClaudeCommandMixin:
                             asyncio.create_task(
                                 self._handle_rpc(fields, msg_id, async_redis)
                             )
+                        elif action == "chat.steer" and getattr(
+                            getattr(self, "_house_slot", None), "tools_off", False,
+                        ):
+                            # TASK-2590: a tools-off house runs only whole strict
+                            # turns; nothing is injected into a running one.
+                            logger.warning("tools-off house refused a steer: request=%s",
+                                           (fields.get("request_id") or "").strip())
+                            await async_redis.xack(COMMANDS_STREAM, "claude-code-bridge", msg_id)
                         elif action == "chat.steer":
                             # Side-channel into the live ClaudeSDKClient. Never
                             # take the per-session send lock: _handle_send owns it

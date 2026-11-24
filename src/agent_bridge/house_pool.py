@@ -42,7 +42,15 @@ POOL_KEYS = {
     # Optional: the shared dev site the mansion serves, linked from Campus.
     "mansion_origin",
 }
-HOUSE_KEYS = {"id", "harness", "origin", "memory"}
+HOUSE_KEYS = {"id", "harness", "origin", "memory", "profile", "home", "broker_token_volume"}
+# TASK-2590: opt-in profile for a strict tools-off reader house. It is rendered
+# standalone (no mansion ``extends``), with no preview, so it inherits none of
+# the shared SDK state, dev tree, SSH or bridge-token mounts.
+TOOLS_OFF = "tools-off"
+TOOLS_OFF_HOME = "/var/lib/bawt-reader/home"
+TOOLS_OFF_UID = "1001:1001"
+_TOOLS_OFF_KEYS = {"home", "broker_token_volume"}
+_VOLUME_NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}\Z")
 
 
 def _text(value: object, name: str) -> str:
@@ -87,6 +95,33 @@ def _origin(value: object) -> tuple[str, str]:
     return f"{parsed.scheme}://{netloc}", netloc
 
 
+def _tools_off_row(row: dict, house_id: str, harness: str, profile: object,
+                   config: dict) -> dict:
+    """Validate one ``profile: tools-off`` house (TASK-2590)."""
+    if profile != TOOLS_OFF:
+        raise ValueError("profile must be tools-off")
+    if harness != "claude-code":
+        raise ValueError("profile tools-off requires harness claude-code")
+    if "origin" in row:
+        raise ValueError("profile tools-off has no preview origin")
+    home = _text(row.get("home"), "home")
+    path = Path(home)
+    if not path.is_absolute() or ".." in path.parts or str(path) != home or home == "/":
+        raise ValueError("home must be a normalized absolute deployment-local directory")
+    volume = _text(row.get("broker_token_volume"), "broker_token_volume")
+    if not _VOLUME_NAME.fullmatch(volume):
+        raise ValueError("broker_token_volume must be a Docker volume name")
+    return {
+        "id": house_id, "harness": harness, "profile": TOOLS_OFF,
+        "origin": None, "host": None, "home": home, "broker_token_volume": volume,
+        "memory": _memory(row.get("memory", config.get("memory"))),
+    }
+
+
+def is_tools_off(house: dict) -> bool:
+    return house.get("profile") == TOOLS_OFF
+
+
 def validate_houses(config: object) -> list[dict]:
     """The pool's house rows; all a reader of the pool (the app) needs checked."""
     return validate_pool(config, renderer=False)["houses"]
@@ -110,13 +145,23 @@ def validate_pool(config: object, *, renderer: bool = True) -> dict:
     hosts: set[str] = set()
     for row in houses:
         if not isinstance(row, dict) or row.keys() - HOUSE_KEYS:
-            raise ValueError("house must contain only id, harness, origin and memory")
+            raise ValueError("house must contain only id, harness, origin and memory "
+                             "(plus profile, home and broker_token_volume for tools-off)")
         house_id = row.get("id")
         if not isinstance(house_id, str) or not HOUSE_ID.fullmatch(house_id):
             raise ValueError("house id must match ^[a-z0-9][a-z0-9-]{0,30}$")
         harness = row.get("harness")
         if harness not in HARNESSES:
             raise ValueError("harness must be claude-code or codex")
+        profile = row.get("profile")
+        if profile is not None:
+            result["houses"].append(_tools_off_row(row, house_id, harness, profile, config))
+            if house_id in ids:
+                raise ValueError("house ids and preview hostnames must be unique")
+            ids.add(house_id)
+            continue
+        if row.keys() & _TOOLS_OFF_KEYS:
+            raise ValueError("home and broker_token_volume require profile tools-off")
         origin, host = _origin(row.get("origin"))
         if house_id in ids or host in hosts:
             raise ValueError("house ids and preview hostnames must be unique")
@@ -132,6 +177,8 @@ def validate_pool(config: object, *, renderer: bool = True) -> dict:
     for house_id, names in aliases.items():
         if not isinstance(house_id, str) or not HOUSE_ID.fullmatch(house_id):
             raise ValueError("preview_aliases requires valid house ids")
+        if any(h["id"] == house_id and is_tools_off(h) for h in result["houses"]):
+            raise ValueError("a tools-off house has no preview aliases")
         if not isinstance(names, list):
             raise ValueError("preview_aliases requires hostname lists")
         for name in names:
@@ -141,11 +188,12 @@ def validate_pool(config: object, *, renderer: bool = True) -> dict:
                 raise ValueError("preview hostnames and aliases must be unique")
             hosts.add(name)
     # With zero houses nothing else is required and no resources are produced.
+    preview_houses = [h for h in result["houses"] if not is_tools_off(h)]
     if houses and renderer:
-        for key in (
-            "image", "base_image", "preview_network", "service_token_volume",
-            "frontend_env_file",
-        ):
+        for key in ("image", "base_image"):
+            _text(config.get(key), key)
+    if preview_houses and renderer:
+        for key in ("preview_network", "service_token_volume", "frontend_env_file"):
             _text(config.get(key), key)
         if not Path(config["frontend_env_file"]).is_absolute():
             raise ValueError("frontend_env_file must be an absolute deployment-local path")
@@ -161,8 +209,13 @@ def render_compose(config: object, base_compose: Path) -> dict:
     """Overlay the mansion Compose definition; inherit its credentials/mounts."""
     pool = validate_pool(config)
     services = {}
+    broker_volumes: set[str] = set()
     for house in pool["houses"]:
         house_id = house["id"]
+        if is_tools_off(house):
+            services[f"house-{house_id}"] = _tools_off_service(house, pool, base_compose)
+            broker_volumes.add(house["broker_token_volume"])
+            continue
         service = {
             # One definition for either harness. Inherit the existing mansion
             # mount paths, broker files, source, Redis/app/MCP URLs and SSH setup.
@@ -239,14 +292,84 @@ def render_compose(config: object, base_compose: Path) -> dict:
             service["cgroup_parent"] = pool["cgroup_parent"]
         services[f"house-{house_id}"] = service
     output: dict = {"services": services}
-    if services:
+    if any(not is_tools_off(h) for h in pool["houses"]):
         output["networks"] = {
             "house-previews": {"external": True, "name": pool["preview_network"]},
         }
         output["volumes"] = {
             "house-service-token": {"external": True, "name": pool["service_token_volume"]},
         }
+    for name in sorted(broker_volumes):
+        output.setdefault("volumes", {})[name] = {"external": True, "name": name}
     return output
+
+
+def _tools_off_service(house: dict, pool: dict, base_compose: Path) -> dict:
+    """A standalone strict tools-off reader house (TASK-2590).
+
+    Deliberately not ``extends``: every mount and variable is listed here, so
+    the shared ``~/.claude``/``.claude.json``, the dev tree, SSH, agent scripts,
+    skills and the full bridge-token set can never be inherited. The SDK home
+    (its ``.claude``, ``.claude.json`` and project base) is a private,
+    operator-created host directory owned by the bridge UID. Credentials: the
+    Claude token comes from the broker (broker token only, read-only), and app
+    calls use this bridge role's API key directory, read-only.
+    """
+    house_id = house["id"]
+    root = base_compose.resolve().parent
+    home = TOOLS_OFF_HOME
+    service = {
+        "image": pool["image"],
+        "build": {
+            "context": str(root),
+            "dockerfile": "Dockerfile.house",
+            "args": {"AGENT_BRIDGE_IMAGE": pool["base_image"]},
+        },
+        "container_name": f"${{COMPOSE_PROJECT_NAME:-llm-bawt}}-house-{house_id}",
+        "command": ["python", "-m", HARNESSES["claude-code"]],
+        "user": TOOLS_OFF_UID,
+        "init": True,
+        "mem_limit": house["memory"],
+        "restart": "unless-stopped",
+        "working_dir": "/app",
+        "environment": {
+            "BAWT_HOUSE": house_id,
+            "BAWT_HOUSE_TOOLS_OFF": "on",
+            "HOME": home,
+            "CLAUDE_CODE_CWD": f"{home}/work",
+            # No skills path or MCP URLs: the image default skills path is not
+            # mounted (bootstrap links nothing), and a tools-off turn passes
+            # an explicit empty MCP set with --strict-mcp-config.
+            "CLAUDE_CODE_BRIDGE_LOG_LEVEL": "${CLAUDE_CODE_BRIDGE_LOG_LEVEL:-INFO}",
+            "PYTHONPYCACHEPREFIX": "/tmp/llm-bawt-pycache",
+            "LLM_BAWT_API_URL": "http://app:8642",
+            "LLM_BAWT_SERVICE_HOST": "app",
+            # Passed through by name from the deployment .env, as the mansion does.
+            "LLM_BAWT_REDIS_URL": None,
+            "BRIDGE_BROKER_TOKEN_FILE": "/run/llm-bawt-bridge-tokens/broker",
+            "LLM_BAWT_API_KEY_FILE": "/run/llm-bawt-api-key/api-key",
+        },
+        "volumes": [
+            f"{root}/src:/app/src:ro",
+            f"{house['home']}:{home}",
+            f"{house['broker_token_volume']}:/run/llm-bawt-bridge-tokens:ro",
+            "api-key-bridge-claude-code:/run/llm-bawt-api-key:ro",
+        ],
+        "read_only": True,
+        "tmpfs": ["/tmp:size=512m,mode=1777"],
+        "networks": ["default"],
+        "depends_on": {
+            "redis": {"condition": "service_healthy"},
+            "app": {"condition": "service_healthy"},
+        },
+        "healthcheck": {
+            "test": ["CMD", "curl", "-f", "http://localhost:8681/health"],
+            "interval": "15s",
+        },
+    }
+    if pool.get("cgroup_parent"):
+        service["cgroup_parent"] = pool["cgroup_parent"]
+    return service
 
 
 def render_routes(config: object, template: dict) -> dict:
@@ -255,6 +378,8 @@ def render_routes(config: object, template: dict) -> dict:
     routers = {}
     services = {}
     for house in pool["houses"]:
+        if is_tools_off(house):
+            continue  # TASK-2590: no preview, so no route or DNS name.
         if not house["origin"].startswith("https://") or ":" in house["host"]:
             raise ValueError("Traefik preview routes need a bare HTTPS origin (no port)")
         service_name = f"house-{house['id']}"

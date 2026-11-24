@@ -103,6 +103,35 @@ def house_from_env(environ=None) -> str:
     return normalize_house(env.get(HOUSE_ENV, ""))
 
 
+TOOLS_OFF_ENV = "BAWT_HOUSE_TOOLS_OFF"
+
+
+def tools_off_from_env(house: str, environ=None) -> bool:
+    """TASK-2590: a tools-off house admits only strict tools-off sends.
+
+    Set by the ``tools-off`` house profile. It needs a named house: the shared
+    mansion can never be restricted this way, so that combination fails startup.
+    """
+    import os
+
+    env = os.environ if environ is None else environ
+    raw = (env.get(TOOLS_OFF_ENV) or "").strip().lower()
+    if raw in ("", "0", "off", "false"):
+        return False
+    if raw not in ("1", "on", "true"):
+        raise ValueError(f"{TOOLS_OFF_ENV} must be on or off")
+    if not normalize_house(house):
+        raise ValueError(f"{TOOLS_OFF_ENV} requires a named {HOUSE_ENV}")
+    return True
+
+
+def is_tools_off_send(fields: dict) -> bool:
+    """A send the app stamped as a strict tools-off run (with its run proof)."""
+    return (fields.get("tools_disabled") or "") == "1" and bool(
+        (fields.get("strict_run") or "").strip()
+    )
+
+
 def fallback_notice_key(house: str, backend: str) -> str:
     return f"agent:house:{house}:fallback_notified:{backend}"
 
@@ -230,8 +259,15 @@ class HouseSlot:
 
     GRACE_S = 10.0
 
-    def __init__(self, house: str, backend: str, queue: Any) -> None:
+    def __init__(self, house: str, backend: str, queue: Any, *,
+                 tools_off: bool | None = None) -> None:
         self.house = normalize_house(house)
+        # TASK-2590: None reads BAWT_HOUSE_TOOLS_OFF (fails on the mansion).
+        self.tools_off = (
+            tools_off_from_env(self.house) if tools_off is None else bool(tools_off)
+        )
+        if self.tools_off and not self.house:
+            raise ValueError(f"{TOOLS_OFF_ENV} requires a named {HOUSE_ENV}")
         self.backend = backend
         self.stream = commands_stream(self.house)
         self._queue = queue
@@ -311,6 +347,9 @@ class HouseSlot:
         if not self.is_house:
             return True
         if self.superseded or self.closed:
+            return False
+        if self.tools_off and not is_tools_off_send(fields):
+            # TASK-2590: even a misrouted ordinary send never opens the SDK here.
             return False
         return (fields.get(EPOCH_FIELD) or "") == (self.epoch or "-")
 
@@ -565,8 +604,12 @@ async def gate_send(slot: "HouseSlot | None", fields: dict, msg_id: str, redis: 
     from .run_contract import REFUSED
 
     request_id = (fields.get("request_id") or "").strip()
-    logger.warning("house %s fenced a stale send: request=%s epoch=%s current=%s",
-                   slot.house, request_id, fields.get(EPOCH_FIELD), slot.epoch)
+    if slot.tools_off and not is_tools_off_send(fields):
+        logger.warning("tools-off house %s refused an unmarked send: request=%s",
+                       slot.house, request_id)
+    else:
+        logger.warning("house %s fenced a stale send: request=%s epoch=%s current=%s",
+                       slot.house, request_id, fields.get(EPOCH_FIELD), slot.epoch)
     if request_id:
         publisher.publish_run_done(request_id, teardown=REFUSED)
     await redis.xack(slot.stream, group, msg_id)
