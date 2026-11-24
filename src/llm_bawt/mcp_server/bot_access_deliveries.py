@@ -59,4 +59,3 @@ class ScopedDeliveryReader:
 
     def _list(self, kwargs):
         return self.store.list(**kwargs)
-

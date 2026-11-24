@@ -304,3 +304,12 @@ def test_bot_send_http_body_never_carries_a_service_field(monkeypatch):
         reset_reason=None,
     ))
     assert sent and not set(sent) & set(SERVICE_FIELDS)
+
+
+def test_retired_install_addresses_are_refused_before_admission(delivery_route):
+    # TASK-2610: slug@install (TASK-2517) is gone; it must not become a failed local delivery.
+    with pytest.raises(HTTPException) as error:
+        _send(_body(target_bot_id="fixture-target@other-install"))
+    assert error.value.status_code == 422
+    assert error.value.detail["error"] == "remote_addresses_retired"
+    delivery_route.dispatcher.store.enqueue.assert_not_called()

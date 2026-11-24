@@ -305,6 +305,13 @@ class DeliverySender:
     async def admit(self, body: DeliveryCreate, request: Any = None) -> tuple[int, dict[str, Any]]:
         """The single-target route: one call to ``_admit_one``."""
         refuse_server_owned_metadata(body.metadata)
+        if "@" in body.target_bot_id:
+            # The retired slug@install form (TASK-2517) is refused before admission, so it
+            # never becomes a failed local delivery. Other installs are reached by MCP server.
+            raise DeliveryRefused(status_code=422, detail={
+                "error": "remote_addresses_retired",
+                "detail": "slug@install addresses are no longer supported; "
+                          "reach another install through an MCP server added in Settings."})
         return await self._admit_one(body, request)
 
     async def submit(self, body: BatchDeliveryCreate, request: Any = None) -> tuple[int, dict[str, Any]]:

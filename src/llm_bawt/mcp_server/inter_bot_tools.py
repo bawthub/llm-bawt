@@ -1113,4 +1113,3 @@ async def list_available_bots(
                               "steerable": steerable.get(row.slug)}
         listed.append(entry if detail == "full" else _compact_bot(entry))
     return listed
-
