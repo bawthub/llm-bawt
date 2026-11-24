@@ -234,6 +234,10 @@ class PromptSectionsMixin:
         """The family roster reads every bot; strict instances turn it off."""
         return True
 
+    def _skills_fail_closed(self) -> bool:
+        """Ordinary builds omit the section on error; strict instances fail the turn."""
+        return False
+
     def _resolve_skills(self, service_cls, engine):
         """This turn's skill resolution; strict instances resolve their admitted bot only."""
         return service_cls.from_config(engine, self.config).resolve_bot(self.bot_id)
@@ -321,6 +325,8 @@ class PromptSectionsMixin:
                 [(e.ref, e.base_dir, e.body_text) for e in injected])
             manifest = resolution.manifest()
         except Exception:
+            if self._skills_fail_closed():
+                raise
             logger.warning("injected skills unavailable; section skipped", exc_info=True)
             return
         if not body.strip():

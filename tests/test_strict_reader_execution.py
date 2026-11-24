@@ -238,10 +238,14 @@ class ScopedStore:
 
     def __init__(self):
         self.asked = []
+        self.engine = SimpleNamespace(connect=self._connect)
 
     @contextmanager
-    def read(self):
+    def _connect(self):
         yield "conn"
+
+    def read(self):
+        raise AssertionError("bootstrapping store.read() used")
 
     def rows_for(self, conn, slug, tags):
         self.asked.append((slug, frozenset(tags)))
@@ -296,6 +300,8 @@ def skills_world(monkeypatch):
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("tag snapshot read")))
     import llm_bawt.utils.db as db
     monkeypatch.setattr(db, "get_shared_engine", lambda config: "engine")
+    monkeypatch.setattr("sqlalchemy.inspect",
+                        lambda engine: SimpleNamespace(get_table_names=lambda: ["skill_assignments"]))
     return store
 
 
@@ -329,16 +335,26 @@ def test_strict_skills_refuse_before_migration(skills_world, monkeypatch):
     monkeypatch.setattr(skill_service.SkillService, "_is_migrated", lambda self, conn: False)
     inst = _assembling_instance()
     builder = Builder()
-    inst._sec_injected_skills(builder, "")
-    assert inst._skill_resolution is None and "injected_skills" not in builder.sections
+    with pytest.raises(skill_service.SkillServiceError):
+        inst._sec_injected_skills(builder, "")
+    assert "injected_skills" not in builder.sections
 
 
-def test_private_admitted_bot_gets_no_skills(skills_world):
+def test_strict_skills_refuse_missing_schema_without_bootstrap(skills_world, monkeypatch):
+    monkeypatch.setattr("sqlalchemy.inspect",
+                        lambda engine: SimpleNamespace(get_table_names=lambda: []))
+    with pytest.raises(skill_service.SkillServiceError):
+        _assembling_instance()._sec_injected_skills(Builder(), "")
+    assert skills_world.asked == []
+
+
+def test_private_admitted_bot_refuses_before_assignment_reads(skills_world):
     inst = _assembling_instance()
     inst._admitted_bot.include_in_global_search = False
     builder = Builder()
-    inst._sec_injected_skills(builder, "")
-    assert "injected_skills" not in builder.sections
+    with pytest.raises(skill_service.SkillServiceError):
+        inst._sec_injected_skills(builder, "")
+    assert "injected_skills" not in builder.sections and skills_world.asked == []
 
 
 def test_ordinary_turn_assembly_keeps_registry_resolution():

@@ -61,6 +61,9 @@ class StrictReaderLLMBawt(BoundAgentLLMBawt):
         # The family roster lists every bot; a strict turn omits it.
         return False
 
+    def _skills_fail_closed(self) -> bool:
+        return True
+
     def _resolve_skills(self, service_cls, engine):
         from ..skills.service import caps_from_settings
 

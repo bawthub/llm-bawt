@@ -167,13 +167,21 @@ class SkillService:
         migration it refuses (that conversion needs every bot's facts).
         """
         tags = frozenset(bot.tags or ())
-        with self.store.read() as conn:
+        private = BehaviorTag.PRIVATE in tags or not getattr(bot, "include_in_global_search", True)
+        if private:
+            # Refuse before any assignment read; private policy is not supported here.
+            raise SkillServiceError(409, "private bot; scoped resolution unsupported")
+        from sqlalchemy import inspect
+        # Existing schema only: never the bootstrapping store.read().
+        if "skill_assignments" not in inspect(self.store.engine).get_table_names():
+            raise SkillServiceError(409, "skill assignments schema missing; scoped resolution unavailable")
+        with self.store.engine.connect() as conn:
             if not self._is_migrated(conn):
                 raise SkillServiceError(409, "skill assignments not migrated; scoped resolution unavailable")
             rows = self.store.rows_for(conn, bot.slug, tags)
         facts = BotFacts(
             slug=bot.slug, bot_type=bot.bot_type, harness=bot.agent_backend, tags=tags,
-            private=BehaviorTag.PRIVATE in tags or not getattr(bot, "include_in_global_search", True),
+            private=False,
         )
         return resolve(facts, rows, self.source, self._caps())
 
