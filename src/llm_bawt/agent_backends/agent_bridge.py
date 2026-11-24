@@ -27,6 +27,7 @@ from .base import AgentBackend
 from ..seed_framing import resolve_seed_framing
 from ..room_freeze_notice import room_freeze_state, with_room_freeze_notice
 from ..turn_cutoff_notice import with_cutoff_notice
+from ..service.turn_stream_context import STREAM_IDLE_FLUSH_S, STREAM_IDLE_ITEM
 from ..service.upstream_status import upstream_status_queue_item
 from ..utils.config import Config
 
@@ -928,15 +929,24 @@ class AgentBridgeBackend(AgentBackend):
                 execution.attach_stream_thread(t)
 
             # Drain the queue, yielding items to the caller
+            # TASK-2613: after text, wait briefly; if the model goes quiet
+            # (e.g. while writing a tool input), emit one internal
+            # stream_idle so the consumer can flush its buffered text tail.
+            text_pending = False
             while True:
                 try:
-                    item = result_queue.get(timeout=2.0)
+                    item = result_queue.get(timeout=STREAM_IDLE_FLUSH_S if text_pending else 2.0)
                 except queue_mod.Empty:
+                    if text_pending:
+                        text_pending = False
+                        yield dict(STREAM_IDLE_ITEM)
+                        continue
                     if not t.is_alive():
                         break
                     continue
                 if item is None:
                     break
+                text_pending = isinstance(item, str)
                 yield item
 
             if execution is not None and execution.detach_requested() and not run_terminal_seen:

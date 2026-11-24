@@ -26,6 +26,9 @@ class _Tts:
         self.offset += len(s)
         return s if start == 0 else ""
 
+    def end_block(self):
+        return ""
+
 
 def _make(*, agent=True, reaped=(), changed=None, usage=None, tts=None, redis=None):
     published: list[dict] = []
@@ -325,3 +328,66 @@ def test_tool_result_without_id_falls_back_to_name_or_lifo(name):
         {"event": "tool_result", "name": name, "result": "r"},
     ]))
     assert out[1]["_call_id"] == out[0]["_call_id"]
+
+
+def test_stream_idle_flushes_text_tail_without_yielding_or_confirming():
+    """TASK-2613: a quiet stream publishes the sub-threshold tail before the tool_call."""
+    h = _make()
+    tail = "Short tail."
+    assert js_len(tail) < _TEXT_DELTA_FLUSH_CHARS
+    run = h.it.run([
+        tail,
+        {"event": "stream_idle"},
+        {"event": "tool_call", "name": "Bash", "arguments": {}, "tool_use_id": "tu1",
+         "provider": "claude"},
+    ])
+    assert next(run) == tail
+    assert h.published == []  # still buffered below the threshold
+    nxt = next(run)  # consuming past the idle tick publishes the tail
+    assert nxt["event"] == "tool_call"  # stream_idle itself is never yielded
+    deltas = [e for e in h.published if e["_type"] == "text_delta"]
+    assert deltas == [d for d in deltas if d["delta"] == tail and d["text_offset"] == 0]
+    assert len(deltas) == 1
+    # The tail was published before the tool event, and nothing is re-sent.
+    assert h.published[0]["_type"] == "text_delta"
+    observed = [c.args[0] for c in h.pin.observe.call_args_list]
+    assert {"event": "stream_idle"} not in observed  # idle never confirms output
+    list(run)
+    assert len([e for e in h.published if e["_type"] == "text_delta"]) == 1
+
+
+def test_stream_idle_with_empty_buffer_is_a_noop():
+    h = _make()
+    assert list(h.it.run([{"event": "stream_idle"}])) == []
+    assert h.published == []
+    h.pin.observe.assert_not_called()
+
+
+def test_tool_call_ends_the_tts_block_without_waiting_for_the_next_one():
+    """TASK-2613: pre-tool text is spoken at the tool start, once, in order."""
+    from llm_bawt.bots import StreamingTTSScrubber
+
+    h = _make(tts=StreamingTTSScrubber())
+    list(h.it.run([
+        "Checking that now.",
+        {"event": "tool_call", "name": "Bash", "arguments": {}, "tool_use_id": "tu1",
+         "provider": "claude"},
+        {"event": "tool_result", "name": "Bash", "tool_use_id": "tu1", "result": "ok"},
+        "Done.",
+    ]))
+    tts = [e for e in h.published if e["_type"] == "tts_delta"]
+    assert [(e["delta"], e["tts_offset"]) for e in tts] == [("Checking that now.\n", 0)]
+    # Spoken at the tool start, before any later text is published.
+    assert h.published.index(tts[0]) < next(
+        i for i, e in enumerate(h.published) if e["_type"] == "text_delta" and "Done." in e["delta"]
+    )
+    assert h.ctx.tts_scrubber.flush() == "Done."
+
+
+def test_tts_end_block_holds_inside_an_open_code_fence():
+    from llm_bawt.bots import StreamingTTSScrubber
+
+    sc = StreamingTTSScrubber()
+    assert sc.feed("Here:\n```py\nx = 1") == ""
+    assert sc.end_block() == ""
+    assert sc.buf.endswith("x = 1")

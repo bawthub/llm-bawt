@@ -933,6 +933,19 @@ class StreamingTTSScrubber:
         self.buf = ""
         return self._record(scrubbed)
 
+    def end_block(self) -> str:
+        """Close the pending block at a mid-turn text-block end (TASK-2613).
+
+        A tool call ends the model's text block, so its text is complete and
+        can be spoken now instead of waiting for the next block's separator.
+        Held while inside an open ``` fence; separated like ``feed`` output.
+        """
+        if not self.buf or self.buf.count("```") % 2:
+            return ""
+        scrubbed = scrub_for_tts(self.buf)
+        self.buf = ""
+        return self._record(scrubbed + "\n" if scrubbed else "")
+
 
 class StreamingEmoteFilter:
     """Incremental ``strip_emotes`` for streaming text.

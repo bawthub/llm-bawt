@@ -136,10 +136,13 @@ class ToolEventInterceptor:
         # Every turn may be spoken. Feed the SAME raw text through the
         # block-boundary scrubber for audio; text_delta above keeps the
         # original markdown for the visual stream.
+        self._publish_tts(s)
+
+    def _publish_tts(self, s: str, *, end_block: bool = False) -> None:
         tts_scrubber = self.ctx.tts_scrubber
         if tts_scrubber is not None:
             tts_offset = tts_scrubber.offset
-            tts_block = tts_scrubber.feed(s)
+            tts_block = tts_scrubber.end_block() if end_block else tts_scrubber.feed(s)
             if tts_block:
                 self.publish({
                     "_type": "tts_delta",
@@ -186,6 +189,12 @@ class ToolEventInterceptor:
             # already ran keeps its result: publish its end, then stop.
             if stopped and not (isinstance(item, dict) and item.get("event") == "tool_result"):
                 break
+            if isinstance(item, dict) and item.get("event") == "stream_idle":
+                # TASK-2613: internal producer tick, not model output. Publish
+                # the buffered sub-threshold text tail; never yield it on.
+                yield from self.flush_reasoning()
+                self.flush_text()
+                continue
             if not (isinstance(item, dict) and item.get("event") == "reasoning"):
                 yield from self.flush_reasoning()
             if isinstance(item, dict) and item.get("event") == "steer_lifecycle":
@@ -288,6 +297,8 @@ class ToolEventInterceptor:
                     # Flush buffered text BEFORE the tool event so the resume
                     # channel preserves text→tool order.
                     self.flush_text()
+                    # TASK-2613: the tool ends the text block; speak it now.
+                    self._publish_tts("", end_block=True)
                 if evt == "tool_call":
                     self._on_tool_call(item)
                 elif evt == "tool_result":

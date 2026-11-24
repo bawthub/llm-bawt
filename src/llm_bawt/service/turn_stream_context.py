@@ -14,6 +14,11 @@ from typing import Any
 # TASK-286: coalesce assistant text deltas into >= this many chars before
 # publishing a ``text_delta`` to the unified Redis stream.
 _TEXT_DELTA_FLUSH_CHARS = 80
+# TASK-2613: a stream goes quiet after text (e.g. the model is writing a tool
+# input); the producer then emits one internal STREAM_IDLE_ITEM so the
+# sub-threshold text tail is published instead of waiting for the tool_call.
+STREAM_IDLE_FLUSH_S = 0.25
+STREAM_IDLE_ITEM = {"event": "stream_idle"}
 # TASK-306 Section A: bounded retry for the confirmed approval-row commit.
 _APPROVAL_PERSIST_MAX_ATTEMPTS = 3
 _APPROVAL_PERSIST_BACKOFF_S = 0.25
