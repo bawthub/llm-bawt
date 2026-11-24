@@ -61,18 +61,21 @@ class FakeRemote:
         self.registrations = 0
         self.refresh_status = 200
         self.as_scopes: list[str] | None = None
-        self.registered_scopes: list[str] = []
+        self.resource_scopes = True  # the challenge and resource metadata name "mcp"
+        self.registered_scopes: list[str | None] = []
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         self.calls.append(request)
         url = str(request.url).split("?")[0]
         if url == MCP_URL and request.method == "POST":
-            headers = ({"WWW-Authenticate": f'Bearer resource_metadata="{self.prm_url}", scope="mcp"'}
+            scope = ', scope="mcp"' if self.resource_scopes else ""
+            headers = ({"WWW-Authenticate": f'Bearer resource_metadata="{self.prm_url}"{scope}'}
                        if self.www_auth else {})
             return httpx.Response(401, headers=headers)
         if url in (f"{AS}/prm", "https://tools.example.net/.well-known/oauth-protected-resource/mcp"):
-            return httpx.Response(200, json={"resource": self.resource, "authorization_servers": [AS],
-                                             "scopes_supported": ["mcp", "offline_access"]})
+            return httpx.Response(200, json={
+                "resource": self.resource, "authorization_servers": [AS],
+                **({"scopes_supported": ["mcp", "offline_access"]} if self.resource_scopes else {})})
         if url == f"{AS}/.well-known/oauth-authorization-server":
             return httpx.Response(200, json={
                 **({"issuer": self.issuer} if self.issuer else {}),
@@ -85,7 +88,7 @@ class FakeRemote:
             self.registrations += 1
             body = httpx.Request("POST", url, content=request.content).read()
             assert b'"token_endpoint_auth_method":"none"' in body.replace(b" ", b"")
-            self.registered_scopes.append(json.loads(body).get("scope", ""))
+            self.registered_scopes.append(json.loads(body).get("scope"))
             return httpx.Response(201, json={"client_id": f"client-{self.registrations}"})
         if url == f"{AS}/token":
             form = {k: v[0] for k, v in parse_qs(request.content.decode()).items()}
@@ -153,6 +156,47 @@ def test_re_registers_when_the_requested_scope_changes(store):
     _, params, _ = sign_in(oauth)
     assert remote.registrations == 2 and params["client_id"] == "client-2"
     assert remote.registered_scopes == ["mcp", "mcp offline_access"]
+    assert store.load(f"client:{store_id('tools')}").meta["client_id"] == "client-2"
+
+
+def test_omitted_resource_scope_stays_omitted(store):
+    # No scope from the resource means the server's default; offline_access alone must not replace it.
+    remote = FakeRemote()
+    remote.resource_scopes = False
+    remote.as_scopes = ["mcp", "offline_access"]
+    _, params, _ = sign_in(oauth_for(store, remote))
+    assert "scope" not in params and remote.registered_scopes == [None]
+
+
+def _make_legacy(store):
+    """A registration and token saved before the client recorded its scope."""
+    client = store.load(f"client:{store_id('tools')}")
+    client.meta = {k: v for k, v in client.meta.items() if k != "scope"}
+    store.save(client)
+
+
+def test_legacy_registration_is_reused_when_the_scope_did_not_change(store):
+    remote = FakeRemote()
+    oauth = oauth_for(store, remote)
+    sign_in(oauth)
+    _make_legacy(store)
+    sign_in(oauth)
+    assert remote.registrations == 1
+
+
+def test_abandoned_reconnect_keeps_the_working_refresh(store):
+    remote = FakeRemote()
+    oauth = oauth_for(store, remote)
+    sign_in(oauth)
+    _make_legacy(store)
+    remote.as_scopes = ["mcp", "offline_access"]
+    oauth.start(SERVER, ORIGIN, SETTINGS)  # registers client-2, then the browser never returns
+    assert remote.registrations == 2
+    record = store.load(store_id("tools"))
+    record.meta = {**record.meta, "expires_at": time.time() - 1}
+    store.save(record)
+    assert oauth.access_token(SERVER) == "access-2"
+    assert store.load(f"client:{store_id('tools')}").meta["client_id"] == "client-1"
 
 
 def test_falls_back_to_well_known_without_www_authenticate(store):

@@ -208,9 +208,11 @@ def discover(http: httpx.Client, server_url: str) -> dict:
             check_destination(value, server_url)
     # Some authorization servers issue a refresh token only for offline_access. Without
     # one, the sign-in dies when the first access token expires, so ask when offered.
+    # Only extend a scope the resource named: an omitted scope keeps the server's default.
+    base_scope = scope or ""
     offered = metadata.get("scopes_supported")
-    if isinstance(offered, list) and "offline_access" in offered:
-        requested = (scope or "").split()
+    if base_scope and isinstance(offered, list) and "offline_access" in offered:
+        requested = base_scope.split()
         if "offline_access" not in requested:
             scope = " ".join([*requested, "offline_access"])
     return {
@@ -221,6 +223,7 @@ def discover(http: httpx.Client, server_url: str) -> dict:
         "iss_supported": bool(metadata.get("authorization_response_iss_parameter_supported")),
         "resource": resource,
         "scope": scope or "",
+        "base_scope": base_scope,
     }
 
 
@@ -302,11 +305,15 @@ class McpOAuth:
             meta = discover(http, server.url)
             client = self.store.load(f"client:{sid}")
             # Reuse a registration only for the same authorization server, callback and scope.
+            # A registration saved before scopes were recorded asked for the base scope.
             register = not (client and client.meta.get("issuer") == meta["issuer"]
                             and client.meta.get("redirect_uri") == redirect_uri
-                            and client.meta.get("scope", "") == meta["scope"] and owned_by(client, server))
+                            and client.meta.get("scope", meta["base_scope"]) == meta["scope"]
+                            and owned_by(client, server))
             if register:
                 body = _register(http, meta, redirect_uri)
+                # Held on the pending sign-in until its callback succeeds, so abandoning a
+                # reconnect leaves the working token and the client it is bound to in place.
                 client = ConnectionRecord(
                     provider=f"client:{sid}", status="configured",
                     meta={"client_id": str(body["client_id"]), "issuer": meta["issuer"],
@@ -318,13 +325,12 @@ class McpOAuth:
         challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
         with self.fenced(server):
             self.require_current(server)
-            if register:
-                self.store.save(client)
             self.store.save(ConnectionRecord(provider=f"pending:{sid}", status="pending", secret={
                 "state_hash": digest(state), "browser_hash": digest(browser), "verifier": verifier,
                 "expires_at": time.time() + PENDING_SECONDS, "redirect_uri": redirect_uri,
                 "return_to": return_to, "client_id": client.meta["client_id"], "server_url": server.url,
                 "generation": server.generation,
+                **({"new_client": {"meta": client.meta, "secret": client.secret}} if register else {}),
                 **{k: meta[k] for k in ("issuer", "token_endpoint", "resource", "scope", "iss_supported")},
             }))
         params = {"response_type": "code", "client_id": client.meta["client_id"], "redirect_uri": redirect_uri,
@@ -344,7 +350,10 @@ class McpOAuth:
             raise IntegrationError("invalid_state")
         if (iss or pending["iss_supported"]) and iss != pending["issuer"]:
             raise IntegrationError("issuer_mismatch")  # RFC 9207 mix-up defense
-        client = self.store.load(f"client:{sid}")
+        fresh = pending.get("new_client")
+        client = (ConnectionRecord(provider=f"client:{sid}", status="configured",
+                                   meta=dict(fresh["meta"]), secret=dict(fresh["secret"]))
+                  if isinstance(fresh, dict) else self.store.load(f"client:{sid}"))
         if not client or client.meta.get("client_id") != pending["client_id"] or not owned_by(client, server):
             raise IntegrationError("client_not_registered")
         check_destination(pending["token_endpoint"], server.url)
@@ -370,6 +379,8 @@ class McpOAuth:
         with self.fenced(server):
             self.require_current(server)
             self.store.commit_connection(sid, pending["claim"], record)
+            if isinstance(fresh, dict):
+                self.store.save(client)  # the new token is bound to this registration
         return pending["return_to"]
 
     def access_token(self, server: McpServer) -> str:
