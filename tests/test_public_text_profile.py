@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from llm_bawt.public_text_profile import OMITTED_PATHS, capability_present
+from llm_bawt.public_text_profile import OMITTED_OPS_SEED_SLUGS, OMITTED_PATHS, capability_present
 from local_model_bridge import embed_server, pinned_embed_model
 
 REPO = Path(__file__).resolve().parents[1]
@@ -53,6 +53,30 @@ _PROBE = textwrap.dedent(
         return listed, called
 
     listed, called = asyncio.run(tools())
+
+    import os
+    os.environ["LOCAL_MODEL_EMBED_PINNED_DIR"] = "/elsewhere"
+    pinned_override = embed_server.pinned_model_dir()
+    del os.environ["LOCAL_MODEL_EMBED_PINNED_DIR"]
+
+    from llm_bawt.media import response_audio
+    from llm_bawt.service.routes import history_pages
+    audio_reads = []
+
+    class _Store:
+        def get_many_for_messages(self, ids, owner):
+            audio_reads.append(ids)
+            return {i: {"id": i} for i in ids}
+
+    response_audio.get_response_audio_store = lambda: _Store()
+    hydrated = history_pages._hydrate_response_audio_for_page(
+        [{"id": "m1", "role": "assistant"}], "owner")
+
+    from llm_bawt.ops import tenant_catalog
+    from llm_bawt.ops.seeds import active_seeds
+    from llm_bawt.public_text_profile import home_audio_present
+    services = {"app": "a", "pocket-tts": "p", "voice-backend": "v", "local-model-bridge": "l"}
+    aux_plan = tenant_catalog.plan("demo", services).get("llm-bawt.restart-aux", {})
     print(json.dumps({
         "src": [llm_bawt.__file__, local_model_bridge.__file__],
         "openapi": paths, "routes": routes, "tools": listed, "generate_image": called,
@@ -62,6 +86,11 @@ _PROBE = textwrap.dedent(
         } and not m.startswith("llm_bawt.media.response_audio")),
         "media_clients_loaded": "llm_bawt.media.clients" in sys.modules,
         "pinned_dir": embed_server.pinned_model_dir(),
+        "pinned_override": pinned_override,
+        "audio_reads": audio_reads, "audio_hydrated": hydrated,
+        "home_audio_present": home_audio_present(),
+        "seed_slugs": sorted(seed["slug"] for seed in active_seeds()),
+        "aux_schema": aux_plan.get("args_schema_json", ""),
     }))
     """
 )
@@ -115,6 +144,28 @@ def test_public_tree_mcp_has_no_omitted_handlers(public_probe):
 @_apply_real_tree
 def test_public_tree_embeds_only_from_pinned_dir(public_probe):
     assert public_probe["pinned_dir"] == pinned_embed_model.DEFAULT_DIR
+    # The directory override is private-only; the public tree keeps the baked path.
+    assert public_probe["pinned_override"] == pinned_embed_model.DEFAULT_DIR
+
+
+@_apply_real_tree
+def test_public_tree_never_hydrates_saved_reply_audio(public_probe):
+    assert public_probe["audio_reads"] == []
+    assert public_probe["audio_hydrated"] == {}
+
+
+@_apply_real_tree
+def test_public_tree_starts_no_home_audio_worker(public_probe):
+    assert public_probe["home_audio_present"] is False
+
+
+@_apply_real_tree
+def test_public_tree_seeds_no_voice_or_gpu_ops(public_probe):
+    slugs = set(public_probe["seed_slugs"])
+    assert OMITTED_OPS_SEED_SLUGS.isdisjoint(slugs)
+    assert {"llm-bawt.restart-app", "llm-bawt.restart-aux", "llm-bawt.freeze"} <= slugs
+    aux = json.loads(public_probe["aux_schema"])["properties"]["service"]["enum"]
+    assert aux == ["l"]
 
 
 @_apply_real_tree
@@ -124,7 +175,13 @@ def test_private_tree_keeps_every_capability(monkeypatch):
     assert any(p.startswith("/v1/media/generations") for p in probe["openapi"])
     assert OMITTED_TOOLS <= set(probe["tools"])
     assert probe["pinned_dir"] is None
+    assert probe["pinned_override"] == "/elsewhere"
+    assert probe["audio_reads"] == [["m1"]]  # private history still reads saved reply audio
+    assert probe["home_audio_present"] is True
+    assert OMITTED_OPS_SEED_SLUGS <= set(probe["seed_slugs"])
+    assert sorted(json.loads(probe["aux_schema"])["properties"]["service"]["enum"]) == ["l", "p", "v"]
     assert capability_present("llm_bawt.service.routes.media")
+
 
 
 def _fake_pinned(monkeypatch, root: Path) -> None:

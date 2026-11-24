@@ -48,3 +48,37 @@ def capability_present(module: str) -> bool:
         return importlib.util.find_spec(module) is not None
     except ModuleNotFoundError:
         return False
+
+
+#: Ops catalog rows that only drive voice (Moshi, TTS, the voice backend) or the
+#: GPU local-model bridge. The public profile runs the bridge for CPU
+#: embeddings only, so it keeps the generic restarts but never seeds these.
+OMITTED_OPS_SEED_SLUGS: frozenset[str] = frozenset({
+    "bawthub.stop-moshi-stt",
+    "bawthub.stop-moshi-tts",
+    "bawthub.start-moshi-stt",
+    "bawthub.start-moshi-tts",
+    "bawthub.restart-tts",
+    "bawthub.restart-backend",
+    "llm-bawt.reconcile-local-model-bridge-config",
+    "llm-bawt.deploy-local-model-bridge-image",
+    "llm-bawt.rollback-local-model-bridge-image",
+})
+
+#: Voice services the public profile never offers as a restart target.
+OMITTED_AUX_SERVICES: frozenset[str] = frozenset({"pocket-tts", "voice-backend"})
+
+
+def voice_media_present() -> bool:
+    """Voice and media generation ship (the media route source is present)."""
+    return capability_present("llm_bawt.service.routes.media")
+
+
+def response_audio_present() -> bool:
+    """Spoken reply audio ships (its route source is present)."""
+    return capability_present("llm_bawt.service.routes.response_audio")
+
+
+def home_audio_present() -> bool:
+    """Speech/home-audio playback ships (its MCP tool source is present)."""
+    return capability_present("llm_bawt.mcp_server.home_audio_tools")

@@ -44,18 +44,18 @@ _model: Any = None
 def pinned_model_dir() -> str | None:
     """Directory of the pinned local-only model, or None for the named/cache path.
 
-    Set explicitly via ``LOCAL_MODEL_EMBED_PINNED_DIR``. The public text profile
-    ships without the video server and always uses the pinned directory, so it
-    can never fall back to a network download.
+    The public text profile ships without the video server and always uses the
+    fixed baked directory; it ignores ``LOCAL_MODEL_EMBED_PINNED_DIR`` so it can
+    never load other bytes or fall back to a network download. The private tree
+    uses the pinned directory only when that variable is set.
     """
-    from .pinned_embed_model import DEFAULT_DIR, PINNED_DIR_ENV
-
-    explicit = os.getenv(PINNED_DIR_ENV, "").strip()
-    if explicit:
-        return explicit
     from llm_bawt.public_text_profile import capability_present
 
-    return None if capability_present("local_model_bridge.video_server") else DEFAULT_DIR
+    from .pinned_embed_model import DEFAULT_DIR, PINNED_DIR_ENV
+
+    if not capability_present("local_model_bridge.video_server"):
+        return DEFAULT_DIR
+    return os.getenv(PINNED_DIR_ENV, "").strip() or None
 
 
 def load_model() -> Any:
