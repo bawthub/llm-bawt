@@ -43,11 +43,8 @@ def get_service_client(config: Config | None = None):
 def _is_service_mode(args: argparse.Namespace, config: Config) -> bool:
     """Determine if the CLI should operate in service mode.
 
-    Returns False when --local is set. Otherwise True if --service flag
-    or USE_SERVICE config is enabled.
+    True if --service flag or USE_SERVICE config is enabled.
     """
-    if getattr(args, "local", False):
-        return False
     if getattr(args, "service", False):
         return True
     return bool(config.USE_SERVICE)

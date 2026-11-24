@@ -203,9 +203,6 @@ class TestLLMStatus:
         # Should contain service/memory info
         assert any(kw in o for kw in ["Service", "Memory", "Status", "service", "memory"])
 
-    def test_status_local_mode(self):
-        o = assert_ok(run(f"{LLM} --status --local"), "--status --local")
-        assert no_traceback(o)
 
     @pytest.mark.service
     def test_status_shows_postgres_info(self, service_up):
@@ -244,14 +241,6 @@ class TestLLMHistory:
         o = assert_ok(run(f"{LLM} -b {BOT} -ph -1", timeout=15), "-ph -1")
         assert no_traceback(o)
 
-    def test_print_history_local_requires_service(self):
-        """--local + -ph should fail clearly (no local DB fallback anymore)."""
-        r = run(f"{LLM} -b {BOT} -ph 3 --local", timeout=15)
-        o = out(r)
-        assert no_traceback(o)
-        # Either it exits with error about needing service, or succeeds (filesystem history)
-        if r.returncode != 0:
-            assert any(kw in o.lower() for kw in ["service", "history", "require"])
 
     @pytest.mark.service
     def test_delete_history_safe_bot(self, service_up):
@@ -280,14 +269,6 @@ class TestLLMQuery:
         assert "4" in o
         assert no_traceback(o)
 
-    @pytest.mark.llm_call
-    def test_query_local_mode(self):
-        o = assert_ok(
-            run(f"{LLM} --local -m {MODEL} 'what is 2+2'", timeout=60),
-            "--local query",
-        )
-        assert "4" in o
-        assert no_traceback(o)
 
     @pytest.mark.service
     @pytest.mark.llm_call
@@ -336,20 +317,6 @@ class TestLLMQuery:
         )
         assert no_traceback(o)
 
-    @pytest.mark.service
-    @pytest.mark.llm_call
-    def test_query_with_command_flag(self, service_up):
-        if not service_up:
-            pytest.skip("Service not running")
-        o = assert_ok(
-            run(
-                f'echo "hello world" | {LLM} --local -m {MODEL}'
-                f' -c "echo hello world" "what did that output?" --no-stream',
-                timeout=60,
-            ),
-            "-c command flag",
-        )
-        assert no_traceback(o)
 
 
 # ===========================================================================
@@ -492,22 +459,10 @@ class TestLLMSettings:
 
 
 class TestLLMErrors:
-    def test_invalid_bot_fails(self):
-        """In local mode, unknown bot slugs should fail with a clear error."""
-        r = run(f"{LLM} --local -b nonexistent_bot_xyz 'hello'", timeout=15)
-        o = assert_err(r, "invalid bot")
-        assert no_traceback(o)
-        assert any(kw in o.lower() for kw in ["unknown", "invalid", "not found", "list-bots"])
-
-    def test_invalid_model_local_fails(self):
-        r = run(f"{LLM} --local -m nonexistent_model_xyz 'hello'", timeout=15)
-        o = assert_err(r, "invalid model --local")
-        assert no_traceback(o)
-
-    def test_local_with_missing_default_alias(self):
+    def test_missing_default_alias_missing_default_alias(self):
         """Missing DEFAULT_MODEL_ALIAS should be handled cleanly (error or safe fallback)."""
         r = run(
-            f"LLM_BAWT_DEFAULT_MODEL_ALIAS=nonexistent_model_xyz {LLM} --local 'hello'",
+            f"LLM_BAWT_DEFAULT_MODEL_ALIAS=nonexistent_model_xyz {LLM} 'hello'",
             timeout=15,
         )
         o = out(r)

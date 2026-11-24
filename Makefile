@@ -147,7 +147,7 @@ dev: check-uv ## [uv] Sync .venv with all extras (dev, mcp, service, search, mem
 	@echo "$(BLUE)Syncing .venv with all extras...$(NC)"
 	uv sync --inexact --extra dev --extra mcp --extra service --extra search --extra memory --extra huggingface
 	@echo "$(GREEN)✓ .venv synced$(NC)"
-	@echo "  Run: uv run llm --status"
+	@echo "  To check a local server: ./server.sh status (or make docker-status for Compose)"
 
 dev-llama: check-uv ## [uv] Add llama-cpp-python to .venv (CUDA-aware)
 ifeq ($(WITH_CUDA),true)
@@ -166,7 +166,9 @@ dev-vllm: check-uv ## [uv] Add vLLM to .venv (requires NVIDIA GPU + CUDA)
 	@echo "$(GREEN)✓ vLLM installed$(NC)"
 	@echo "$(YELLOW)Note: vLLM requires NVIDIA GPU + CUDA to run$(NC)"
 
-dev-run: ## [uv] Run llm from .venv (e.g. make dev-run ARGS="--status")
+# Keep the legacy target until its CLI callers migrate; use the server's own
+# status or docker-status to check a development deployment.
+dev-run: ## [legacy] Run the old llm client from .venv
 	uv run llm $(ARGS)
 
 

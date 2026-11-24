@@ -1,12 +1,10 @@
 import argparse
-import subprocess
 import traceback
 import sys  # Import sys for exit codes
 from rich.prompt import Prompt
 from llm_bawt.utils.config import Config
 from llm_bawt.utils.config import is_secret_config_field, set_config_value
 from llm_bawt.utils.input_handler import MultilineInputHandler
-from llm_bawt.core import LLMBawt
 from llm_bawt.model_manager import (
     ModelManager,
     delete_model,
@@ -121,7 +119,7 @@ def main():
     config_obj.DEBUG = args.debug
     config_obj.PLAIN_OUTPUT = args.plain
     config_obj.NO_STREAM = args.no_stream
-    config_obj.INTERACTIVE_MODE = not args.question and not args.command  # Set interactive mode flag
+    config_obj.INTERACTIVE_MODE = not args.question  # Set interactive mode flag
 
     # Configure logging via centralized LogConfig
     LogConfig.configure(verbose=args.verbose, debug=args.debug)
@@ -414,13 +412,13 @@ def main():
     ensure_default_user(config_obj, args)
     
     # Check if this is a history-only operation (doesn't need model)
-    history_only = (args.delete_history or args.print_history is not None) and not args.question and not args.command
+    history_only = (args.delete_history or args.print_history is not None) and not args.question
     
     # Check if using service mode (don't validate model locally - let service handle it)
     use_service = _is_service_mode(args, config_obj)
     
     # Determine which bot will be used (needed to get bot's default model)
-    bot_manager = BotManager(config_obj, local_only=getattr(args, 'local', False))
+    bot_manager = BotManager(config_obj, local_only=False)
     if args.bot:
         target_bot = bot_manager.get_bot(args.bot)
         if not target_bot:
@@ -432,8 +430,6 @@ def main():
             else:
                 console.print(f"[bold red]Unknown bot: {args.bot}[/bold red]. Use --list-bots to see available bots.")
                 sys.exit(1)
-    elif args.local:
-        target_bot = bot_manager.get_default_bot(local_mode=True)
     else:
         target_bot = bot_manager.get_bot(config_obj.DEFAULT_BOT)
         if not target_bot:
@@ -455,7 +451,7 @@ def main():
         resolved_alias = args.model or None
     else:
         # Local mode: resolve model fully using bot defaults and config
-        selection = bot_manager.select_model(args.model, bot_slug=target_bot.slug, local_mode=args.local)
+        selection = bot_manager.select_model(args.model, bot_slug=target_bot.slug)
         effective_model = selection.alias
 
         # Auto-switch to service for non-OpenAI model types
@@ -572,22 +568,12 @@ def run_app(
     service_required: bool = False,
 ):
     # Determine which bot to use
-    bot_manager = BotManager(config_obj, local_only=getattr(args, 'local', False))
+    bot_manager = BotManager(config_obj, local_only=False)
     
     # Determine if service is likely in play (for bot validation)
-    service_mode = not args.local and (getattr(args, 'service', False) or config_obj.USE_SERVICE)
+    service_mode = bool(getattr(args, 'service', False) or config_obj.USE_SERVICE)
 
-    # Handle --local with explicit --bot (conflicting intent warning)
-    if args.local and args.bot:
-        bot = bot_manager.get_bot(args.bot)
-        if not bot:
-            console.print(f"[bold red]Unknown bot: {args.bot}[/bold red]. Use --list-bots to see available bots.")
-            sys.exit(1)
-        # Only warn if the bot requires memory (e.g., a memory-enabled assistant)
-        if bot.requires_memory and config_obj.VERBOSE:
-            console.print(f"[dim]Note: Using --local with --bot {args.bot}. The bot will run without database memory.[/dim]")
-        bot_id = bot.slug
-    elif args.bot:
+    if args.bot:
         # Explicit bot selection
         bot = bot_manager.get_bot(args.bot)
         if not bot:
@@ -598,10 +584,6 @@ def run_app(
             else:
                 console.print(f"[bold red]Unknown bot: {args.bot}[/bold red]. Use --list-bots to see available bots.")
                 sys.exit(1)
-        bot_id = bot.slug
-    elif args.local:
-        # Local mode defaults to Spark
-        bot = bot_manager.get_default_bot(local_mode=True)
         bot_id = bot.slug
     else:
         # Default bot from config
@@ -623,7 +605,7 @@ def run_app(
     
     # Determine service mode: --local flag disables, otherwise check config/flags
     # service_required: main() already chose service mode (e.g. a non-OpenAI model).
-    service_explicitly_set = not args.local and (
+    service_explicitly_set = bool(
         getattr(args, 'service', False) or config_obj.USE_SERVICE or service_required
     )
     use_tools = getattr(bot, 'uses_tools', False)
@@ -632,13 +614,13 @@ def run_app(
     # Agent backend bots still go through service for history/memory logging.
     # Only if service is unavailable will they fall back to direct dispatch.
     has_agent_backend = bool(getattr(bot, 'agent_backend', None))
-    if has_agent_backend and not use_service and not args.local:
+    if has_agent_backend and not use_service:
         use_service = True
         if config_obj.VERBOSE:
             console.print(f"[dim]Bot '{bot.name}' uses agent backend; enabling service mode[/dim]")
 
     # Auto-enable service mode when bot uses tools and not in local mode
-    if use_tools and not use_service and not args.local:
+    if use_tools and not use_service:
         use_service = True
         if config_obj.VERBOSE:
             console.print(f"[dim]Bot '{bot.name}' uses tools; enabling service mode[/dim]")
@@ -655,7 +637,6 @@ def run_app(
             # Service mode was explicitly configured (env var / --service flag) or tools require it
             elif service_explicitly_set or use_tools:
                 console.print("[bold red]Service not available.[/bold red] Start with: [yellow]llm-service[/yellow]")
-                console.print("[dim]Or use --local for direct API calls without memory/tools.[/dim]")
                 sys.exit(1)
             # Service mode was auto-detected but not explicitly required — fall back to direct OpenAI
             else:
@@ -663,15 +644,13 @@ def run_app(
                 if config_obj.VERBOSE:
                     console.print("[dim]Service unavailable; falling back to direct API mode (no memory/tools).[/dim]")
 
-    llm_bawt = None
     
     # For history operations, we can use a lightweight path that doesn't require model init
-    history_only = (args.delete_history or args.print_history is not None) and not args.question and not args.command
+    history_only = (args.delete_history or args.print_history is not None) and not args.question
     
     if history_only:
         if not use_service:
             console.print("[yellow]History operations require the service. Start with: llm-service[/yellow]")
-            console.print("[dim]Or use --local with a query for direct API calls without history.[/dim]")
             sys.exit(1)
 
         service_client = get_service_client(config_obj)
@@ -745,56 +724,15 @@ def run_app(
         console.print()
         return
     
-    # For query operations, we need full LLMBawt when not using service
-    # Agent backend bots skip LLMBawt entirely — they dispatch to external agents
     if not use_service and not bot.agent_backend:
-        try:
-            llm_bawt = LLMBawt(
-                resolved_model_alias=resolved_alias,
-                config=config_obj,
-                local_mode=args.local,
-                bot_id=bot_id,
-                user_id=user_id,
-                verbose=args.verbose,
-                debug=args.debug,
-            )
-        except (ImportError, FileNotFoundError, ValueError, Exception) as e:
-             console.print(f"[bold red]Failed to initialize LLM client for '{resolved_alias}':[/bold red] {e}")
-             if config_obj.VERBOSE:
-                 traceback.print_exc()
-             sys.exit(1)
-    console.print("")
-    command_output_str = ""
-    if args.command:
-        if config_obj.VERBOSE:
-            console.print(f"Executing command: [yellow]{args.command}[/yellow]", highlight=False)
-        try:
-            result = subprocess.run(args.command,shell=True,capture_output=True,text=True,check=False)
-            output = result.stdout.strip()
-            error = result.stderr.strip()
-            command_prefix = f"Command `[cyan]{args.command}[/cyan]` executed.\n"
-            command_output_str += command_prefix
-            if output:
-                command_output_str += f"\nOutput:\n```\n{output}\n```\n"
-            if error:
-                command_output_str += f"\nError Output:\n```\n{error}\n```\n"
-            if result.returncode != 0:
-                status_msg = f"\n(Command exited with status {result.returncode})"
-                console.print(f"[yellow]Warning: Command exited with status {result.returncode}[/yellow]", highlight=False)
-                command_output_str += status_msg
-            command_output_str += "\n---\n"
-        except Exception as e:
-            error_msg = f"Error executing command '{args.command}': {e}"
-            console.print(f"[bold red]{error_msg}[/bold red]", highlight=False)
-            command_output_str += f"{error_msg}\n\n---\n"
-        console.print()
+        console.print("[bold red]Queries require the service.[/bold red] Start it, or use [yellow]bh chat[/yellow].")
+        sys.exit(1)
     stream_flag = not config_obj.NO_STREAM
     plaintext_flag = config_obj.PLAIN_OUTPUT
     # use_tools was already set above and factored into use_service decision
     
     def do_query(prompt: str):
         """Execute query via service, agent backend, or local client."""
-        nonlocal llm_bawt
         if bot.agent_backend and not use_service:
             _query_agent_backend(prompt, bot, plaintext_flag)
             return
@@ -817,16 +755,9 @@ def run_app(
             console.print(
                 f"[bold red]Service call failed for model '{resolved_alias}' (bot '{bot_id}').[/bold red]{error_detail}"
             )
-        elif llm_bawt:
-            llm_bawt.query(prompt, plaintext_output=plaintext_flag, stream=stream_flag)
 
     if args.question:
-        question_text = command_output_str + " ".join(args.question)
-        do_query(question_text.strip())
-    elif command_output_str:
-        if config_obj.VERBOSE:
-            console.print("Command output captured, querying LLM with it...", highlight=False)
-        do_query(command_output_str.strip())
+        do_query(" ".join(args.question).strip())
     elif not sys.stdin.isatty():
         # Handle piped input - read once and exit
         piped_input = sys.stdin.read().strip()
@@ -836,8 +767,6 @@ def run_app(
         console.print("[bold green]Entering interactive mode. Type 'exit' or 'quit' to leave.[/bold green]", highlight=False)
         console.print("[bold green]Type '>' at the beginning of a line for multiline input mode (end with Ctrl+D or Ctrl+Z).[/bold green]", highlight=False)
         handler_console = console
-        if llm_bawt and hasattr(llm_bawt.client, 'console') and llm_bawt.client.console:
-            handler_console = llm_bawt.client.console
         input_handler = MultilineInputHandler(console=handler_console)
         while True:
             try:

@@ -28,11 +28,9 @@ WORKDIR /app
 
 # Copy ONLY files needed for dependency installation first (for layer caching)
 # This ensures source code changes don't invalidate the venv cache
-COPY pyproject.toml setup.cfg uv.lock install.sh ./
-RUN chmod +x install.sh
+COPY pyproject.toml setup.cfg uv.lock ./
 
-# Create virtual environment and install dependencies using install.sh
-# install.sh handles CUDA-aware llama-cpp-python installation when available
+# The dependency sync and the CUDA-aware llama-cpp layer below are separate.
 ARG WITH_CUDA=true
 ARG CUDA_ARCHS="120"
 ENV CUDA_ARCHS=$CUDA_ARCHS
@@ -43,7 +41,7 @@ ENV UV_HTTP_TIMEOUT=600
 # Add CUDA stubs for linking during build (no GPU available in docker build)
 ENV LIBRARY_PATH=/usr/local/cuda/lib64/stubs:$LIBRARY_PATH
 # Install dependencies only (without project) - this layer is cached
-RUN ./install.sh --dev --deps-only
+RUN uv sync --frozen --inexact --no-install-project --extra mcp --extra service --extra search --extra memory --extra huggingface
 
 # Install llama-cpp-python with CUDA (separate cached layer)
 # Install from GitHub to get latest llama.cpp with newest arch support (e.g. mistral3)

@@ -42,7 +42,7 @@ for name in (
     "redis", "sqlalchemy", "psycopg2", "websockets", "httpx", "anyio",
     "claude_agent_sdk", "openai_codex_sdk", "openai_codex", "openai",
     "fastapi", "uvicorn", "pydantic", "PIL", "yaml", "tomlkit",
-    "claude_code_bridge.bridge", "codex_bridge.bridge",
+    "claude_code_bridge.bridge", "codex_bridge.bridge", "llm_bawt.api_auth.outbound",
 ):
     importlib.import_module(name)
 for package, suffix in (
@@ -72,5 +72,4 @@ with tempfile.TemporaryDirectory() as directory:
         subprocess.run(command, cwd=directory, check=True, timeout=30)
 print("Python bridge imports, pinned dependencies, harnesses, npx/pnpm execution OK", flush=True)
 PY
-llm --help >/dev/null
 printf '%s\n' 'Agent-bridge toolchain checks passed.'

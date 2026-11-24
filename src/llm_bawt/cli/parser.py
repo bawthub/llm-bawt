@@ -131,18 +131,7 @@ def parse_arguments(config_obj: "Config") -> argparse.Namespace:
         help="Print chat history (optional: number of recent pairs)"
     )
     
-    # Command integration
-    parser.add_argument(
-        "-c", "--command",
-        help="Execute command and add output to question"
-    )
-    
     # Mode selection
-    parser.add_argument(
-        "--local",
-        action="store_true",
-        help="Use local filesystem for history instead of database"
-    )
     parser.add_argument(
         "--service",
         action="store_true",
