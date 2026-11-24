@@ -116,6 +116,7 @@ def test_request_cancel_rpc_never_uses_session_wide_abort():
 @pytest.mark.parametrize("backend", ["claude-code", "codex"])
 def test_app_timeout_cancels_only_supported_request_and_preserves_error(monkeypatch, backend):
     from agent_bridge import subscriber as transport
+    from llm_bawt.agent_backends.agent_bridge import drain_with_idle_flush
 
     source = Path(__file__).parents[1] / "src/llm_bawt/agent_backends/agent_bridge.py"
     tree = ast.parse(source.read_text())
@@ -133,6 +134,7 @@ def test_app_timeout_cancels_only_supported_request_and_preserves_error(monkeypa
         "with_cutoff_notice": lambda prompt, **_kw: prompt,
         "room_freeze_state": lambda *_a, **_kw: None,
         "with_room_freeze_notice": lambda prompt, *_a, **_kw: prompt,
+        "drain_with_idle_flush": drain_with_idle_flush,
     }
     exec(compile(module, str(source), "exec"), scope)
     local = SimpleNamespace(connect=AsyncMock(), close=AsyncMock(), send_command=AsyncMock(),
