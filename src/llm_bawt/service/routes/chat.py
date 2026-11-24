@@ -1030,6 +1030,12 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
     if internal_sender:
         request._internal_inter_bot_sender_id = internal_sender
 
+    from ..strict_reader_execution import is_strict_request
+    if not request.stream and is_strict_request(service, request.bot_id):
+        # TASK-2590: the strict reader serves only streamed turns; refuse
+        # before any ordinary model or bot lookup.
+        raise HTTPException(status_code=400, detail="This bot supports only streaming requests")
+
     if request.stream:
         from ...inspection_admission import INSPECTION_ADMISSION_HEADER, read_web_admission
 

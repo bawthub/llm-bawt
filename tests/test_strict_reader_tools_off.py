@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -39,16 +40,52 @@ def test_bridge_request_parses_tools_disabled_only_when_set():
 
 def test_tools_disabled_options_have_no_tools_no_mcp_and_a_deny_hook():
     off = _options(True)
-    assert off.tools == [] and off.mcp_servers == {}
+    assert off.tools == [] and off.strict_mcp_config is True
     hooks = [h for m in off.hooks["PreToolUse"] for h in m.hooks]
     assert hooks == [deny_all_tools_hook]
     out = asyncio.run(deny_all_tools_hook({"tool_name": "Bash"}, "t1", None))
     assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
+def _cli_args(options) -> list[str]:
+    from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
+
+    transport = SubprocessCLITransport(prompt="hi", options=options)
+    transport._cli_path = "claude"
+    return transport._build_command()
+
+
+def test_tools_disabled_serializes_explicit_empty_strict_mcp_config():
+    args = _cli_args(_options(True))
+    i = args.index("--mcp-config")
+    assert json.loads(args[i + 1]) == {"mcpServers": {}}
+    assert "--strict-mcp-config" in args
+    assert "bawthub" not in " ".join(args)
+    t = args.index("--tools")
+    assert args[t + 1] == ""
+
+
 def test_ordinary_options_keep_tools_and_mcp():
     on = _options(False)
     assert on.tools is None and "bawthub" in on.mcp_servers
+    args = _cli_args(on)
+    assert "--strict-mcp-config" not in args
+    assert "bawthub" in args[args.index("--mcp-config") + 1]
+
+
+def test_non_streaming_strict_request_refused_before_any_lookup():
+    from llm_bawt.service.routes import chat
+
+    req = SimpleNamespace(stream=False, bot_id="sample", user="operator", model="m",
+                          messages=[], session_id=None)
+    http = SimpleNamespace(headers={})
+    with _no_registry(), patch.object(chat, "get_service", return_value=_service()), \
+            patch.object(chat, "_internal_inter_bot_sender", return_value=None), \
+            patch("llm_bawt.service.chat_response_adapter.completion_response",
+                  side_effect=AssertionError("ordinary path")), \
+            pytest.raises(HTTPException) as exc:
+        asyncio.run(chat.chat_completions(req, http))
+    assert exc.value.status_code == 400
 
 
 def test_publisher_sends_tools_disabled_only_when_true():

@@ -341,9 +341,12 @@ class ClaudeStreamMixin:
         tool_options: dict = {}
         if tools_disabled:
             # TASK-2590 strict reader: no MCP server, no built-in tools, and
-            # every tool call that still reaches the hook is denied.
-            mcp_servers = {}
+            # every tool call that still reaches the hook is denied. An empty
+            # dict emits no MCP flag at all, so pass an explicit empty config
+            # and --strict-mcp-config to ignore every other MCP source.
+            mcp_servers = '{"mcpServers": {}}'
             tool_options["tools"] = []
+            tool_options["strict_mcp_config"] = True
             pre_tool_use_cb = deny_all_tools_hook
         return ClaudeAgentOptions(
             **claude_skill_options(selection),
