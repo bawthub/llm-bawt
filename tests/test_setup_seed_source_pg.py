@@ -13,7 +13,7 @@ from sqlmodel import Session
 from llm_bawt.seeding import bot_presets, setup_live_source
 from llm_bawt.seeding.preset_source import read_preset_source
 from llm_bawt.seeding.setup_role_dependencies import SetupRole, SetupRoleConflict, install_missing_roles
-from llm_bawt.seeding.setup_seed_sync import live_setup_snapshot, stage_catalog
+from llm_bawt.seeding.setup_seed_sync import SetupSeedSnapshot, live_setup_snapshot, stage_catalog
 from llm_bawt.utils import db
 from tests.private_postgres import PORT
 from tests.test_bot_tags_pg import legacy_profiles, rig  # noqa: F401
@@ -164,11 +164,25 @@ def test_generated_subset_creates_only_its_roles_and_rolls_back_on_conflict(rig,
     assert store.get(second.slug) is None
 
 
-@pytest.mark.skipif(not bot_presets.GENERATED_CATALOG.is_file(),
-                    reason="no generated setup_catalog.json in this copy (public source export)")
-def test_shipped_catalog_import_is_create_only_on_disposable_pg(rig, monkeypatch):  # noqa: F811
+def _stage_neutral_catalog(target):
+    """A neutral generated roster for copies without the installation's own catalog."""
+    profiles = [{"key": slug, "slug": slug, "name": slug.title(), "summary": "Does a thing.",
+                 "system_prompt": f"Be a useful {slug}.", "role": "Assistant", "tags": tags,
+                 "recommended": slug == "alpha"}
+                for slug, tags in (("alpha", ["audit"]), ("beta", ["coach"]), ("gamma", []), ("delta", []))]
+    roles = {slug: {"slug": slug, "name": slug.title()} for slug in ("audit", "coach")}
+    slugs = {p["slug"] for p in profiles}
+    assert stage_catalog(lambda: SetupSeedSnapshot(slugs, profiles, roles, set()), target)
+
+
+def test_shipped_catalog_import_is_create_only_on_disposable_pg(rig, monkeypatch, tmp_path):  # noqa: F811
     from llm_bawt.service.routes import setup_presets as routes
     from tests.test_bot_presets import _Settings, _USABLE, _client
+
+    if not bot_presets.GENERATED_CATALOG.is_file():
+        # The public source export omits the installation's catalog; import a neutral one instead.
+        _stage_neutral_catalog(tmp_path / "setup_catalog.json")
+        monkeypatch.setattr(bot_presets, "GENERATED_CATALOG", tmp_path / "setup_catalog.json")
 
     stock = bot_presets.all_packs(None)[0]
     assert stock.pack == bot_presets.GENERATED_PACK
