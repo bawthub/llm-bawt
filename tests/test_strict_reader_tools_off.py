@@ -41,6 +41,7 @@ def test_bridge_request_parses_tools_disabled_only_when_set():
 def test_tools_disabled_options_have_no_tools_no_mcp_and_a_deny_hook():
     off = _options(True)
     assert off.tools == [] and off.strict_mcp_config is True
+    assert off.skills == []  # no bridge-side skill listing or lookup
     hooks = [h for m in off.hooks["PreToolUse"] for h in m.hooks]
     assert hooks == [deny_all_tools_hook]
     out = asyncio.run(deny_all_tools_hook({"tool_name": "Bash"}, "t1", None))
@@ -102,19 +103,24 @@ def test_publisher_sends_tools_disabled_only_when_true():
             captured.update(fields)
             return b"1"
 
-        sub._pub_redis = SimpleNamespace(xadd=fake_xadd)
+        async def fake_get(_key):
+            return "epoch-1"
+
+        sub._pub_redis = SimpleNamespace(xadd=fake_xadd, get=fake_get)
         asyncio.run(sub.send_command(session_key="s", message="m", request_id="r", **kwargs))
         return captured
 
-    assert send(tools_disabled=True)["tools_disabled"] == "1"
+    assert send(tools_disabled=True, house="fx-house", backend="claude-code")["tools_disabled"] == "1"
     assert "tools_disabled" not in send()
 
 
 def test_strict_instance_seals_its_client():
     instance = strict.StrictReaderLLMBawt.__new__(strict.StrictReaderLLMBawt)
     instance.client = SimpleNamespace()
+    instance._house = "fx-house"
     instance._seal_tools()
     assert instance.client.tools_disabled is True
+    assert instance.client.strict_house == "fx-house"
 
 
 def _service():

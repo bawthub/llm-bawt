@@ -13,6 +13,9 @@ Unset (the default), every request keeps the ordinary path unchanged.
 """
 from __future__ import annotations
 
+import json
+import re
+
 from ..bot_types import durable_agent_backend
 from ..bots import Bot, load_named_bot
 from .request_model_execution import BoundAgentLLMBawt, build_bound_instance, validate_bound_endpoint
@@ -28,6 +31,63 @@ class StrictReaderRefused(ValueError):
 def strict_reader_slug(service) -> str | None:
     slug = (getattr(service, "strict_reader_bot", None) or "").strip().lower()
     return slug or None
+
+
+LEGACY_GENERATION = "legacy"
+_GENERATION_NAME = re.compile(r"^gen-[A-Za-z0-9_]{1,64}$")
+
+
+def strict_skill_source(service):
+    """The operator-selected skill tree for the strict reader; refuse otherwise.
+
+    ``service.strict_reader_skill_generation`` is either ``"legacy"`` (the
+    ordinary ambient roots, chosen explicitly) or one immutable generation
+    directory name under ``<SKILL_SOURCES_ROOT>/generations``, never the
+    mutable ``current`` link. A generation also needs
+    ``service.strict_reader_skill_layers``, the exact ``{source: revision}``
+    map it must have been built from. Unset, missing, escaping or mismatched
+    fails the turn; nothing falls back to another tree.
+    """
+    from agent_bridge.skill_sources import AmbientSource
+
+    from ..skills.source_config import store_from_env
+    from ..skills.source_store import LAYERS_FILE
+
+    name = (getattr(service, "strict_reader_skill_generation", None) or "").strip()
+    if name == LEGACY_GENERATION:
+        return AmbientSource()
+    if not _GENERATION_NAME.fullmatch(name):
+        raise StrictReaderRefused("Strict reader needs an explicit skill generation")
+    expected = getattr(service, "strict_reader_skill_layers", None)
+    if not isinstance(expected, dict) or not expected:
+        raise StrictReaderRefused("Strict reader skill generation has no pinned layers")
+    store = store_from_env()
+    if not store.enabled:
+        raise StrictReaderRefused("Skill sources root is not configured")
+    generations = store.root / "generations"
+    candidate = generations / name
+    try:
+        if candidate.is_symlink() or not candidate.is_dir():
+            raise StrictReaderRefused("Strict reader skill generation is missing")
+        resolved = candidate.resolve(strict=True)
+        if resolved.parent != generations.resolve(strict=True):
+            raise StrictReaderRefused("Strict reader skill generation escapes the store")
+        layers = json.loads((resolved / LAYERS_FILE).read_text())
+    except (OSError, ValueError) as exc:
+        raise StrictReaderRefused("Strict reader skill generation is unreadable") from exc
+    if layers != {str(k): str(v) for k, v in expected.items()}:
+        raise StrictReaderRefused("Strict reader skill generation does not match its pin")
+    return AmbientSource(roots=(resolved,))
+
+
+def strict_house(service, bot) -> str:
+    """The operator-selected house; the admitted profile must name the same one."""
+    house = (getattr(service, "strict_reader_house", None) or "").strip().lower()
+    if not house:
+        raise StrictReaderRefused("Strict reader needs an explicit house route")
+    if (getattr(bot, "house", None) or "").strip().lower() != house:
+        raise StrictReaderRefused("Strict reader bot is not on its selected house")
+    return house
 
 
 def is_strict_request(service, bot_id: str | None) -> bool:
@@ -58,8 +118,10 @@ class StrictReaderLLMBawt(BoundAgentLLMBawt):
     #: assigned cards) are omitted for this instance.
     turn_context_sealed = True
 
-    def __init__(self, *args, admitted_bot: Bot, **kwargs):
+    def __init__(self, *args, admitted_bot: Bot, skill_source=None, house: str | None = None, **kwargs):
         self._admitted_bot = admitted_bot
+        self._skill_source = skill_source
+        self._house = house
         super().__init__(*args, **kwargs)
         self._seal_tools()
 
@@ -68,6 +130,8 @@ class StrictReaderLLMBawt(BoundAgentLLMBawt):
         # the turn command carries tools_disabled, and the bridge then runs it
         # with no MCP server, no built-in tools and a deny-all tool hook.
         self.client.tools_disabled = True
+        # The publisher routes a tools-off turn only to this house, no fallback.
+        self.client.strict_house = self._house
 
     def _lookup_bot(self, config, slug):
         if (slug or "").strip().lower() != self._admitted_bot.slug:
@@ -90,7 +154,9 @@ class StrictReaderLLMBawt(BoundAgentLLMBawt):
         def no_roster():
             raise StrictReaderRefused("Strict skill resolution may not list bots")
 
-        service = service_cls(engine, list_bots=no_roster,
+        if self._skill_source is None:
+            raise StrictReaderRefused("Strict instance has no selected skill tree")
+        service = service_cls(engine, list_bots=no_roster, source=self._skill_source,
                               caps=lambda: caps_from_settings(self.config))
         return service.resolve_admitted(self._admitted_bot)
 
@@ -118,9 +184,11 @@ def create_strict_instance(service, request, *, read_bot=load_named_bot,
     # Only the Claude Code bridge enforces the tools-off turn field.
     if durable_agent_backend(bot) != STRICT_BACKEND:
         raise StrictReaderRefused("Strict execution requires the claude-code backend")
+    house = strict_house(service, bot)
+    skill_source = strict_skill_source(service)
     model = validate_bound_endpoint(service, bot, request.model)
 
     def build(**kwargs):
-        return instance_type(admitted_bot=bot, **kwargs)
+        return instance_type(admitted_bot=bot, skill_source=skill_source, house=house, **kwargs)
 
     return build_bound_instance(service, request, model, instance_type=build)

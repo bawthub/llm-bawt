@@ -109,6 +109,10 @@ def fallback_notice_key(house: str, backend: str) -> str:
 
 FALLBACK_NOTICE_TTL_S = 900
 
+
+class HouseRouteLost(RuntimeError):
+    """A no-fallback turn's house route is missing or has no live lease."""
+
 FallbackNotifier = Callable[[str, str, str], Awaitable[None]]
 """``(house, backend, bot_id)``: tell the user new work fell back to the mansion."""
 
@@ -123,6 +127,7 @@ async def route_new_command(
     backend: str | None,
     bot_id: str | None,
     notify: FallbackNotifier | None = None,
+    allow_fallback: bool = True,
 ) -> tuple[str, str | None]:
     """Pick the stream for a NEW ``chat.send``: ``(stream, epoch)``.
 
@@ -130,7 +135,23 @@ async def route_new_command(
     house with a live lease for this backend -> its stream plus the lease
     epoch the house bridge will fence on. Otherwise the mansion, with one
     deduplicated notice per outage. Callers decide once; nothing re-routes.
+
+    ``allow_fallback=False`` (a tools-off strict turn, TASK-2590) never uses
+    the mansion: a missing or invalid house, or no live lease, raises
+    :class:`HouseRouteLost` before anything is published.
     """
+    if not allow_fallback:
+        try:
+            house = normalize_house(house)
+        except ValueError:
+            raise HouseRouteLost(f"bot {bot_id} has an invalid house") from None
+        backend = (backend or "").strip()
+        if not house or not backend:
+            raise HouseRouteLost(f"bot {bot_id} has no eligible house route")
+        epoch = await redis.get(lease_key(house, backend))
+        if not epoch:
+            raise HouseRouteLost(f"house {house}/{backend} has no live lease; no fallback")
+        return commands_stream(house), str(epoch)
     try:
         house = normalize_house(house)
     except ValueError:

@@ -40,11 +40,23 @@ _REAL_CLIENT = strict.StrictReaderLLMBawt._initialize_client
 class _RecordingRedis:
     """The publisher's Redis write client: records each published command."""
 
+    #: Live house leases, ``lease_key -> epoch``; set by a test.
+    leases: dict = {}
+    #: The command stream each published command went to.
+    streams: list = []
+
     def __init__(self, published):
         self.published = published
 
+    async def get(self, key):
+        return self.leases.get(key)
+
+    async def set(self, *_a, **_k):
+        return True
+
     async def eval(self, script, numkeys, *args):
         keys, argv = args[:numkeys], args[numkeys:]
+        self.streams.append(keys[1])
         self.published.append(argv)
         return 1, "1-0"
 
@@ -113,6 +125,10 @@ def durable(strict_runtime, rig, monkeypatch):  # noqa: F811
     monkeypatch.setattr(model_catalog, "resolve_model_config", resolve_model)
     published: list = []
     monkeypatch.setattr(_FakeBridge, "published", published)
+    from agent_bridge.houses import lease_key
+    from tests.test_strict_reader_stream_pg import HOUSE
+    monkeypatch.setattr(_RecordingRedis, "leases", {lease_key(HOUSE, "claude-code"): "7"})
+    monkeypatch.setattr(_RecordingRedis, "streams", [])
     root = SimpleNamespace(_redis_url="redis://fixture.invalid/0")
     monkeypatch.setattr(bridge_module, "get_agent_subscriber", lambda: root)
     monkeypatch.setattr("agent_bridge.subscriber.RedisSubscriber", _FakeBridge)
@@ -191,6 +207,9 @@ def _assert_durable(durable, rig, sql, params):
     turn = durable.turns.get_turn(record.turn_id)
     assert turn.status == "ok" and turn.bot_id == rig.bot
     assert len(durable.published) == 1
+    from agent_bridge.houses import commands_stream
+    from tests.test_strict_reader_stream_pg import HOUSE
+    assert _RecordingRedis.streams == [commands_stream(HOUSE)]  # its house, never the mansion
     fields = _command_fields(durable.published[0])
     assert fields["action"] == "chat.send" and fields["bot_id"] == rig.bot
     assert fields["tools_disabled"] == "1" and fields["backend"] == "claude-code"

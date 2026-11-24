@@ -39,7 +39,7 @@ def _row(slug=SLUG, **over):
         prompt_override_id=None, requires_memory=False, voice_optimized=False,
         tts_mode=False, include_summaries=True, include_in_global_search=True,
         uses_tools=False, uses_search=False, uses_home_assistant=False,
-        default_model=None, harness="claude-code", endpoint_id=None, house=None,
+        default_model=None, harness="claude-code", endpoint_id=None, house="fx-house",
         house_pinned=False, color=None, cli_color=None, avatar=None,
         avatar_render=None, default_voice=None, nextcloud_config=None,
         bot_type="agent", agent_backend="claude-code", agent_backend_config=None,
@@ -89,7 +89,8 @@ class Config(SimpleNamespace):
 
 
 def _service(slug=SLUG):
-    return SimpleNamespace(config=Config(), strict_reader_bot=slug)
+    return SimpleNamespace(config=Config(), strict_reader_bot=slug, strict_reader_house="fx-house",
+                           strict_reader_skill_generation="legacy")
 
 
 def _request(bot=SLUG, model="sample-endpoint", user="sample-user"):
@@ -194,6 +195,9 @@ def _bare_strict_instance(bot):
     inst.client = SimpleNamespace()
     inst.resolved_model_alias = "sample-endpoint-ref"
     inst.verbose = False
+    inst._house = "fx-house"
+    from agent_bridge.skill_sources import AmbientSource
+    inst._skill_source = AmbientSource()
     return inst
 
 

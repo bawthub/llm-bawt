@@ -285,6 +285,8 @@ class AgentBackendClient(LLMClient):
             config["task_turn_capability"] = task_turn_capability
         if getattr(self, "tools_disabled", False):
             config["tools_disabled"] = True
+            # TASK-2590: only the operator-selected house; never the profile's.
+            config["house"] = getattr(self, "strict_house", None)
         if bridge_request_id:
             config["request_id"] = bridge_request_id
         if bridge_reset_action:

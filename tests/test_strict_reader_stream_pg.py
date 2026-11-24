@@ -87,12 +87,22 @@ def _stream(service, request):
     return "".join(asyncio.run(run()))
 
 
-def _seed_skills(rig, root, foreign):
+HOUSE = "fx-strict-house"
+GENERATION = "gen-fxcandidate"
+LAYERS = {"fx-source": "a" * 40}
+
+
+def write_skill_tree(root, body=None):
+    body = body or _body
+    root.mkdir(parents=True, exist_ok=True)
     for ref in ROWS:
         skill = root / ref
         skill.mkdir()
         (skill / "SKILL.md").write_text(
-            f"---\nname: {ref}\ndescription: synthetic {ref}\n---\n{_body(ref)}\n")
+            f"---\nname: {ref}\ndescription: synthetic {ref}\n---\n{body(ref)}\n")
+
+
+def _seed_skills(rig, root, foreign):
     tags = BotTagStore(rig.engine)
     for slug in (TAG, FOREIGN_TAG):
         try:
@@ -119,11 +129,16 @@ def strict_runtime(native_runtime, rig, monkeypatch, tmp_path):  # noqa: F811
     def admit(**over):
         profiles.upsert({"slug": rig.bot, "name": "Sample Strict", "bot_type": "agent",
                          "agent_backend": "claude-code", "include_in_global_search": True,
-                         **over})
+                         "house": HOUSE, **over})
 
     admit()
-    root = tmp_path / "skills"
-    root.mkdir()
+    # A synthetic skill-sources store with one immutable candidate generation.
+    store = tmp_path / "skill-store"
+    root = store / "generations" / GENERATION
+    write_skill_tree(root)
+    import json as _json
+    (root / ".layers.json").write_text(_json.dumps(LAYERS))
+    monkeypatch.setenv("SKILL_SOURCES_ROOT", str(store))
     _seed_skills(rig, root, foreign)
     # Synthetic catalog only: the operator's real skill checkout is never read.
     synthetic = skill_service.AmbientSource((root,))
@@ -155,11 +170,14 @@ def strict_runtime(native_runtime, rig, monkeypatch, tmp_path):  # noqa: F811
     monkeypatch.setattr(strict, "validate_bound_endpoint",
                         lambda service, bot, model: model if bot.slug == rig.bot else None)
     rt.service.strict_reader_bot = rig.bot
+    rt.service.strict_reader_house = HOUSE
+    rt.service.strict_reader_skill_generation = GENERATION
+    rt.service.strict_reader_skill_layers = dict(LAYERS)
     rt.service.config = rig.config  # the real PG config for the named reader
     rt.service._get_llm_bawt.side_effect = AssertionError("ordinary instance used")
     _forbid_shared_reads(monkeypatch)
     skill_service._MIGRATED.clear()
-    return SimpleNamespace(rt=rt, built=built, foreign=foreign, admit=admit)
+    return SimpleNamespace(rt=rt, built=built, foreign=foreign, admit=admit, store=store)
 
 
 def _system(call) -> str:

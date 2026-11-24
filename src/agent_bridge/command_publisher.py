@@ -200,11 +200,13 @@ class CommandPublisherMixin:
             fields["access_path_provider"] = access_path_provider
 
         # TASK-2077: decided once, here. No house -> the mansion, unchanged.
+        # TASK-2590: a tools-off turn only runs on its operator-selected house;
+        # route loss fails it instead of falling back to the mansion.
         stream = COMMANDS_STREAM
-        if house:
+        if house or tools_disabled:
             stream, epoch = await route_new_command(
                 self._pub_redis, house=house, backend=backend, bot_id=bot_id,
-                notify=on_house_fallback,
+                notify=on_house_fallback, allow_fallback=not tools_disabled,
             )
             if epoch is not None:
                 fields[EPOCH_FIELD] = epoch

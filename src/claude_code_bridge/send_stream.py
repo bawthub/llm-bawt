@@ -348,8 +348,13 @@ class ClaudeStreamMixin:
             tool_options["tools"] = []
             tool_options["strict_mcp_config"] = True
             pre_tool_use_cb = deny_all_tools_hook
+        skill_options = claude_skill_options(selection)
+        if tools_disabled:
+            # Skills reach a strict turn only as app-injected prompt text; the
+            # CLI lists and loads none from this bridge's own skill roots.
+            skill_options = {**skill_options, "skills": []}
         return ClaudeAgentOptions(
-            **claude_skill_options(selection),
+            **skill_options,
             **tool_options,
             model=model,
             # TASK-1318: the CLI records the system prompt when a session
