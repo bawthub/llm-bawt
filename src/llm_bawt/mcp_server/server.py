@@ -1074,10 +1074,17 @@ def run_server(
         # only the instance that owns the listener may publish it. A start that
         # loses the bind (a standalone/embedded overlap or a slow restart) must
         # not replace the key the serving instance signs with.
+        # bind_socket() sets SO_REUSEADDR and does not listen, and Linux lets
+        # two such sockets bind one port; listen() is the exclusive claim.
         try:
             sock = config.bind_socket()
         except SystemExit as exc:  # uvicorn exits on bind failure
             raise OSError(f"MCP server could not bind {final_host}:{final_port}") from exc
+        try:
+            sock.listen(config.backlog)
+        except OSError:
+            sock.close()
+            raise
         export_inspection_key()
         uvicorn.Server(config).run(sockets=[sock])
 

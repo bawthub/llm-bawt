@@ -115,6 +115,35 @@ def test_mcp_start_that_loses_the_bind_keeps_the_serving_key(tmp_path, monkeypat
     assert not attestation.inspection_key_available()
 
 
+def test_mcp_start_that_loses_listen_after_a_shared_bind_keeps_the_serving_key(tmp_path, monkeypatch):
+    """SO_REUSEADDR lets two non-listening sockets bind; listen() decides."""
+    import socket
+
+    import pytest
+    import uvicorn
+
+    server, path = _mcp_server_env(tmp_path, monkeypatch)
+    path.parent.mkdir()
+    path.write_text("serving-instance-key")
+    monkeypatch.setattr(uvicorn.Server, "run", lambda self, sockets=None: pytest.fail("must not serve"))
+    with socket.socket() as rival:
+        rival.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        rival.bind(("127.0.0.1", 0))
+        port = rival.getsockname()[1]
+        original_bind = uvicorn.Config.bind_socket
+
+        def bind_then_rival_listens(self):
+            sock = original_bind(self)
+            rival.listen()  # the overlapping instance claims the port first
+            return sock
+
+        monkeypatch.setattr(uvicorn.Config, "bind_socket", bind_then_rival_listens)
+        with pytest.raises(OSError):
+            server.run_server(transport="http", host="127.0.0.1", port=port)
+    assert path.read_text() == "serving-instance-key"
+    assert not attestation.inspection_key_available()
+
+
 def test_stdio_and_help_runs_never_publish(tmp_path, monkeypatch):
     import pytest
 
