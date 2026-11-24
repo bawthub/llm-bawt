@@ -38,7 +38,9 @@ class NativeToolStream:
 
         log.debug("Using native streaming with tools")
 
-        tool_definitions = llm_bawt._get_tool_definitions() if llm_bawt.bot.uses_tools else []
+        tool_definitions = (
+            llm_bawt._get_tool_definitions(bawthub_mcp=True) if llm_bawt.bot.uses_tools else []
+        )
         handler = get_format_handler(llm_bawt.tool_format)
         tools_schema = handler.get_tools_schema(tool_definitions)
 

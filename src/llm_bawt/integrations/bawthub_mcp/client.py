@@ -20,7 +20,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ...task_turn_context import TASK_TURN_CONTEXT_HEADER
-from ...api_auth.mcp import app_key_header
 from ..ha_mcp.client import HomeAssistantNativeClient, run_bounded
 
 logger = logging.getLogger(__name__)
@@ -28,11 +27,12 @@ logger = logging.getLogger(__name__)
 DEFAULT_MCP_BASE_URL = "http://127.0.0.1:8001"
 CATALOG_TTL_SECONDS = 300.0
 
-# Conversational recall and memory only; anything broader (tasks, messaging
-# other bots, ops) must be named in the bot's allowlist setting.
+# Conversational recall and memory only, each scoped by the server to the
+# signed bot/user. Anything broader (profile, which can target any entity;
+# tasks; messaging other bots; ops) must be named in the bot's allowlist.
 DEFAULT_ALLOWLIST = frozenset({
     "memory_search", "memory_store", "memory_update", "memory_list_recent",
-    "messages_find", "messages_context", "context_recall", "profile",
+    "messages_find", "messages_context", "context_recall",
 })
 
 
@@ -49,8 +49,13 @@ class McpToolDefinition:
     input_schema: dict[str, Any] = field(default_factory=dict)
 
 
-def parse_allowlist(value: Any) -> frozenset[str]:
-    """Accept a comma/space separated string or a list of tool names."""
+def parse_allowlist(value: Any) -> frozenset[str] | None:
+    """Tool names from a comma/space separated string or a list.
+
+    None means the setting is absent; an explicitly empty value is an empty set.
+    """
+    if value is None:
+        return None
     if not value:
         return frozenset()
     items = value if isinstance(value, (list, tuple, set, frozenset)) else str(value).replace(",", " ").split()
@@ -115,14 +120,15 @@ class BawtHubMcpClient:
         if not capability:
             # Never fall back to an anonymous or service identity.
             raise BawtHubMcpToolError("BawtHub tools need a signed turn identity, which this turn lacks")
-        # The app key only opens the :8001 gate; identity is the turn capability.
-        return {TASK_TURN_CONTEXT_HEADER: capability, **app_key_header()}
+        # The signed turn alone authenticates at the :8001 gate, which refuses
+        # a turn sent together with a service key as ambiguous.
+        return {TASK_TURN_CONTEXT_HEADER: capability}
 
     def _load_catalog(self, capability: str | None) -> list[McpToolDefinition]:
+        headers = self._headers(capability)  # identity first, even on a warm cache
         now = time.monotonic()
         if self._catalog and now - self._catalog_at < CATALOG_TTL_SECONDS:
             return self._catalog
-        headers = self._headers(capability)
         try:
             raw = run_bounded(self._list_async(headers), self._timeout)
         except Exception as error:

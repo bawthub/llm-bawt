@@ -58,7 +58,8 @@ def test_allowlist_filters_the_server_catalog_and_search_ranks_by_name(client):
     assert [t.name for t in client.search_tools("turn-token", "messages")] == ["messages_find"]
     assert client.search_tools("turn-token", "service operation") == []  # ops_run not allowed
     headers = client.calls[0][2]
-    assert headers[TASK_TURN_CONTEXT_HEADER] == "turn-token"
+    # Only the signed turn: the :8001 gate refuses a turn plus a key.
+    assert headers == {TASK_TURN_CONTEXT_HEADER: "turn-token"}
     assert client._url == "http://mcp.example:8001/mcp"
 
 
@@ -67,6 +68,34 @@ def test_no_turn_identity_fails_closed_without_a_request(client):
         ToolCall(name="tool_search", arguments={"query": "memory"}, raw_text=""))
     assert tool_result_is_error(result) and "signed turn identity" in result
     assert client.calls == []
+
+
+def test_warm_cache_still_requires_turn_identity(client):
+    client.search_tools("turn-token", "")  # warms the catalog
+    result = _executor(client, capability=None).execute(
+        ToolCall(name="tool_search", arguments={"query": "memory"}, raw_text=""))
+    assert tool_result_is_error(result) and "signed turn identity" in result
+
+
+def test_only_an_absent_allowlist_gets_the_default():
+    from llm_bawt.core.initialization import OrchestratorInitializationMixin
+
+    assert parse_allowlist(None) is None
+    assert parse_allowlist("") == frozenset() and parse_allowlist([]) == frozenset()
+    assert "profile" not in mcp_client.DEFAULT_ALLOWLIST  # can target any entity
+
+    def init(allowlist):
+        settings = {"bawthub_mcp_tools": "true", "bawthub_mcp_tool_allowlist": allowlist}
+        bot = SimpleNamespace(bot=SimpleNamespace(uses_tools=True), model_definition={},
+                              bot_id="fixture-bot",
+                              _resolve_setting=lambda key, fallback=None: settings.get(key, fallback))
+        OrchestratorInitializationMixin._init_bawthub_mcp(
+            bot, SimpleNamespace(MCP_SERVER_URL="http://mcp.example:8001"))
+        return bot.bawthub_mcp.allowlist
+
+    assert init(None) == mcp_client.DEFAULT_ALLOWLIST
+    assert init("") == frozenset()
+    assert init("messages_find") == {"messages_find"}
 
 
 def test_tool_search_loads_schemas_and_renders_tool_references(client):
@@ -101,6 +130,28 @@ def test_allowed_tool_calls_under_turn_identity_and_denied_tool_never_calls(clie
     assert tool_result_is_error(denied) and len(client.calls) == before
 
 
+def test_replaced_local_wrappers_and_aliases_are_refused_in_mcp_mode(client):
+    memory = Mock()
+    executor = ToolExecutor(user_id="fixture-owner", bot_id="fixture-bot", memory_client=memory,
+                            bawthub_mcp=client, turn_capability="turn-token")
+    for name, args in (("memory", {"action": "search", "query": "x"}),
+                       ("search_memories", {"query": "x"}),
+                       ("history", {"action": "recent"}),
+                       ("get_user_profile", {})):
+        result = executor.execute(ToolCall(name=name, arguments=args, raw_text=""))
+        assert tool_result_is_error(result) and "not enabled" in result, name
+    assert memory.method_calls == [] and client.calls == []
+
+
+def test_exact_mcp_name_dispatches_before_legacy_aliases(client, monkeypatch):
+    from llm_bawt.tools import executor as executor_module
+
+    monkeypatch.setitem(executor_module.normalize_legacy_tool_call.__globals__["LEGACY_TOOL_MAP"],
+                        "messages_find", ("history", {"action": "search"}))
+    _executor(client).execute(ToolCall(name="messages_find", arguments={"query": "x"}, raw_text=""))
+    assert client.calls[-1][3] == ("messages_find", {"query": "x"})
+
+
 def test_server_error_and_unavailable_server_are_error_results(client, monkeypatch):
     executor = _executor(client)
     client.result.isError = True
@@ -118,10 +169,57 @@ def test_opt_in_replaces_local_wrappers_with_tool_search():
     bot = SimpleNamespace(search_client=None, news_client=None, web_fetch_client=None,
                           home_client=None, model_lifecycle=None, ha_native_client=None,
                           memory=object(), bawthub_mcp=None)
-    names = {t.name for t in BaseLLMBawt._get_tool_definitions(bot)}
+    names = {t.name for t in BaseLLMBawt._get_tool_definitions(bot, bawthub_mcp=True)}
     assert {"memory", "history", "profile"} <= names and "tool_search" not in names
     bot.bawthub_mcp = object()
+    # ReAct and non-streamed turns can't run MCP discovery: they keep the wrappers.
     names = {t.name for t in BaseLLMBawt._get_tool_definitions(bot)}
+    assert {"memory", "history", "profile"} <= names and "tool_search" not in names
+    names = {t.name for t in BaseLLMBawt._get_tool_definitions(bot, bawthub_mcp=True)}
     assert "tool_search" in names and not names & {"memory", "history", "profile"}
     assert "time" in names  # Local tools without an MCP equivalent stay.
+
+
+def test_prompt_advertises_discovery_only_on_the_native_stream_path():
+    from llm_bawt.core.base import BaseLLMBawt
+
+    client = SimpleNamespace(stream_with_tools=object(), supports_native_tools=lambda: True)
+    bot = SimpleNamespace(bawthub_mcp=object(), client=client, tool_format="native")
+    assert BaseLLMBawt._uses_bawthub_mcp_native_stream(bot)
+    bot.tool_format = "react"
+    assert not BaseLLMBawt._uses_bawthub_mcp_native_stream(bot)
+    bot.tool_format, bot.bawthub_mcp = "native", None
+    assert not BaseLLMBawt._uses_bawthub_mcp_native_stream(bot)
+
+
+def test_identity_only_turn_owns_no_conversation(monkeypatch):
+    from uuid import uuid4
+
+    from cryptography.fernet import Fernet
+
+    from llm_bawt import task_turn_context as codec
+    from llm_bawt.mcp_server import bot_access_identity, task_association
+
+    fernet = Fernet(Fernet.generate_key())
+    monkeypatch.setattr(codec, "_get_fernet", lambda: fernet)
+    fields = dict(session_id=str(uuid4()), turn_id="turn-" + "c" * 32,
+                  trigger_message_id=str(uuid4()), bot_id="fixture-bot", user_id="fixture-owner")
+    ordinary = codec.mint_task_turn_context(**fields)
+    identity = codec.mint_task_turn_context(**fields, identity_only=True)
+    # Ordinary tokens keep their exact payload shape.
+    assert "identity_only" not in json.loads(fernet.decrypt(ordinary.encode()))
+    assert codec.open_task_turn_context(identity).identity_only is True
+    with pytest.raises(codec.TaskTurnContextError):
+        codec.require_conversation_authority(codec.open_task_turn_context(identity))
+
+    caller = bot_access_identity.TrustedCaller("fixture-bot", "fixture-owner", "turn")
+    for token, owner in ((ordinary, ("fixture-bot", "fixture-owner")), (identity, None)):
+        binding = task_association.set_current_task_turn_capability(token)
+        try:
+            assert bot_access_identity.trusted_session_owner(fields["session_id"], caller) == owner
+            if owner is None:
+                with pytest.raises(codec.TaskTurnContextError):
+                    asyncio.run(task_association.associate_current_task("TASK-1"))
+        finally:
+            task_association.reset_current_task_turn_capability(binding)
 

@@ -580,7 +580,23 @@ class BaseLLMBawt(OrchestratorInitializationMixin, PromptSectionsMixin, ABC):
 
         return messages
 
-    def _get_tool_definitions(self) -> list:
+    def _uses_bawthub_mcp_native_stream(self) -> bool:
+        """Whether this bot's streamed turns run NativeToolStream with BawtHub MCP.
+
+        Only that path carries the MCP client and turn identity; ReAct and
+        non-streamed turns keep the local wrappers.
+        """
+        client = getattr(self, "client", None)
+        return (
+            getattr(self, "bawthub_mcp", None) is not None
+            and client is not None
+            and getattr(self, "tool_format", None) in ("native", "NATIVE_OPENAI")
+            and hasattr(client, "stream_with_tools")
+            and bool(client.supports_native_tools())
+        )
+
+    def _get_tool_definitions(self, *, bawthub_mcp: bool = False) -> list:
+        """Tool definitions; ``bawthub_mcp`` swaps in MCP discovery (native stream only)."""
         include_search = self.search_client is not None
         include_news = self.news_client is not None
         include_web_fetch = self.web_fetch_client is not None
@@ -604,7 +620,7 @@ class BaseLLMBawt(OrchestratorInitializationMixin, PromptSectionsMixin, ABC):
         if self.memory is None:
             disallowed = {"memory", "history", "profile", "self"}
             tools = [t for t in tools if t.name not in disallowed]
-        if getattr(self, "bawthub_mcp", None) is not None:
+        if bawthub_mcp and getattr(self, "bawthub_mcp", None) is not None:
             from ..tools.definitions import MCP_REPLACED_LOCAL_TOOLS, TOOL_SEARCH_TOOL
             tools = [t for t in tools if t.name not in MCP_REPLACED_LOCAL_TOOLS]
             tools.append(TOOL_SEARCH_TOOL)

@@ -231,3 +231,19 @@ def test_exported_service_principal_named_for_mcp_is_admitted(fernet, monkeypatc
     gate, _ = _gate({"mcp_auth_mode": "enforce"})
     assert _call(gate, _key("bawthub-web")) == (200, Principal("bawthub-web", "key"))
     assert _call(gate, _key("bridge-claude-code")) == (401, "key_not_permitted")
+
+
+@pytest.mark.parametrize("mode", ["log", "enforce"])
+def test_regular_bot_mcp_client_credentials_pass_the_real_gate(fernet, mode, monkeypatch):
+    """TASK-2599: the chat-bot client sends only its signed turn, even with an app key set."""
+    from llm_bawt.integrations.bawthub_mcp.client import BawtHubMcpClient
+
+    monkeypatch.setattr(keys, "header_value", lambda p, **_: f"{p}.k")
+    token = codec.mint_task_turn_context(
+        session_id=str(uuid4()), turn_id="turn-" + "b" * 32,
+        trigger_message_id=str(uuid4()), bot_id="caid", user_id="operator",
+        identity_only=True)
+    headers = BawtHubMcpClient._headers(token)
+    assert set(headers) == {TURN}
+    gate, _ = _gate({"mcp_auth_mode": mode})
+    assert _call(gate, *headers.items()) == (200, Principal("caid", "bot"))

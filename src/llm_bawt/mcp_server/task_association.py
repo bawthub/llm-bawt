@@ -19,6 +19,7 @@ from ..task_turn_context import (
     TaskTurnContext,
     is_synthetic_turn_id,
     open_task_turn_context,
+    require_conversation_authority,
 )
 
 logger = logging.getLogger(__name__)
@@ -145,7 +146,7 @@ class TaskTurnCapabilityMiddleware:
 
 async def associate_current_task(task_ref: str) -> dict[str, Any]:
     """Associate the trusted current session+turn to ``task_ref`` as AGENT."""
-    context = current_task_turn_context()
+    context = require_conversation_authority(current_task_turn_context())
 
     # Synthetic inter-bot-delivery turn ids (``turn-delivery-<hex>``) are
     # signed into the capability for audit but are NOT valid ``AgentTaskTurn.turnId``

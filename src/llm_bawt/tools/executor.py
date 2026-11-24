@@ -32,7 +32,7 @@ from .taint import (
     label_untrusted,
     needs_confirmation_reason,
 )
-from .definitions import TOOL_SEARCH_NAME, normalize_legacy_tool_call
+from .definitions import MCP_REPLACED_LOCAL_TOOLS, TOOL_SEARCH_NAME, normalize_legacy_tool_call
 
 if TYPE_CHECKING:
     from ..integrations.ha_mcp.client import HomeAssistantMCPClient, HomeAssistantNativeClient
@@ -295,9 +295,19 @@ class ToolExecutor:
             )
         self._call_count += 1
 
+        # An exact advertised BawtHub MCP name dispatches as itself, before
+        # legacy aliases (e.g. memory_search -> memory) can rewrite it.
+        mcp = self.bawthub_mcp
+        mcp_exact = mcp is not None and (
+            tool_call.name == TOOL_SEARCH_NAME or mcp.allows(tool_call.name)
+        )
+
         # Normalize legacy tool names to consolidated tools
         original_name = tool_call.name
-        new_name, merged_args = normalize_legacy_tool_call(tool_call.name, tool_call.arguments)
+        new_name, merged_args = (
+            (tool_call.name, tool_call.arguments) if mcp_exact
+            else normalize_legacy_tool_call(tool_call.name, tool_call.arguments)
+        )
 
         # Create normalized tool call
         normalized_call = ToolCall(
@@ -328,11 +338,17 @@ class ToolExecutor:
 
             if is_ha_native:
                 return self._execute_ha_native_tool(normalized_call)
-            if self.bawthub_mcp is not None:
+            if mcp_exact:
                 if normalized_call.name == TOOL_SEARCH_NAME:
                     return self._execute_tool_search(normalized_call)
-                if self.bawthub_mcp.allows(normalized_call.name):
-                    return self._execute_bawthub_mcp(normalized_call)
+                return self._execute_bawthub_mcp(normalized_call)
+            if mcp is not None and normalized_call.name in MCP_REPLACED_LOCAL_TOOLS:
+                # MCP mode replaces these local wrappers; hiding the schema is
+                # not enough, so their handlers (and aliases) are refused.
+                return format_tool_result(
+                    original_name, None,
+                    error=f"Tool '{original_name}' is not enabled for this bot",
+                )
 
             handler = self._handlers.get(normalized_call.name)
             if handler:

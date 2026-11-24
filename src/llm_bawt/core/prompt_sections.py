@@ -130,7 +130,8 @@ class PromptSectionsMixin:
         """Chat-model tool instructions (native agent harnesses own theirs)."""
         if self.tool_format != "none":
             if self.bot.uses_tools:
-                tool_definitions = self._get_tool_definitions()
+                tool_definitions = self._get_tool_definitions(
+                    bawthub_mcp=self._uses_bawthub_mcp_native_stream())
                 if tool_definitions:
                     tools_prompt = get_tools_prompt(
                         tools=tool_definitions,

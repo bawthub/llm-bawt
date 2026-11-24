@@ -129,7 +129,7 @@ def _caller_provenance() -> dict[str, str]:
         "caller_user_id": turn.user_id or None,
         "caller_turn_id": turn.turn_id or None,
         # Not a column: the session a direct quiesce job's receipt returns to.
-        "caller_session_id": turn.session_id or None,
+        "caller_session_id": None if turn.identity_only else (turn.session_id or None),
     }
 
 

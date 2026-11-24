@@ -15,6 +15,7 @@ import httpx
 from ..bawthub_auth import service_auth
 from ..bot_tags import BotTags, TagSnapshot
 from .registry import mcp
+from ..task_turn_context import require_conversation_authority
 from .task_association import current_task_turn_context
 
 _INTERNAL_URL = os.getenv(
@@ -23,7 +24,7 @@ _INTERNAL_URL = os.getenv(
 
 
 def _run(tags: TagSnapshot) -> dict[str, Any]:
-    context = current_task_turn_context()
+    context = require_conversation_authority(current_task_turn_context())
     excluded = tags.excluded_reason(context.bot_id)
     if excluded:
         raise ValueError(f"{excluded} is outside initiative scope")

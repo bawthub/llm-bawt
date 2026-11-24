@@ -283,7 +283,9 @@ class OrchestratorInitializationMixin:
 
         allowlist = parse_allowlist(
             self._resolve_setting("bawthub_mcp_tool_allowlist", None)
-        ) or DEFAULT_ALLOWLIST
+        )
+        if allowlist is None:  # only an absent setting gets the default
+            allowlist = DEFAULT_ALLOWLIST
         self.bawthub_mcp = BawtHubMcpClient(config.MCP_SERVER_URL, allowlist)
         logger.info("BawtHub MCP tools enabled for %s (%d allowed)", self.bot_id, len(allowlist))
 

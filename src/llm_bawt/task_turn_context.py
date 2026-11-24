@@ -89,6 +89,21 @@ class TaskTurnContext:
     issued_at: int
     # Present only on ordinary turns admitted by the signed-in web frontend.
     inspection: InspectionClaim | None = None
+    # TASK-2599: proves only which bot/user is calling. The session id is a
+    # fresh placeholder, so consumers that trust it as a conversation (task
+    # association, session-ownership shortcuts, initiative/continuation scope)
+    # must refuse an identity-only context.
+    identity_only: bool = False
+
+
+def require_conversation_authority(context: TaskTurnContext) -> TaskTurnContext:
+    """The context, or an error when it proves identity but owns no conversation."""
+    if getattr(context, "identity_only", False):
+        raise TaskTurnContextError(
+            "This turn's identity owns no conversation; association and "
+            "session-scoped actions are unavailable"
+        )
+    return context
 
 
 def backend_supports_task_turn_context(backend: str | None) -> bool:
@@ -138,6 +153,8 @@ def _validate_context(context: TaskTurnContext) -> TaskTurnContext:
         ):
             raise TaskTurnContextError("Invalid inspection provenance")
         inspection = (inspection[0], inspection[1], inspection[2])
+    if type(context.identity_only) is not bool:
+        raise TaskTurnContextError("identity_only must be a boolean")
     return TaskTurnContext(
         session_id=_canonical_uuid(context.session_id, "session_id"),
         turn_id=turn_id,
@@ -149,6 +166,7 @@ def _validate_context(context: TaskTurnContext) -> TaskTurnContext:
         user_id=_actor_id(context.user_id, "user_id"),
         issued_at=int(context.issued_at),
         inspection=inspection,
+        identity_only=context.identity_only,
     )
 
 
@@ -161,6 +179,7 @@ def mint_task_turn_context(
     user_id: str,
     issued_at: int | None = None,
     inspection: InspectionClaim | None = None,
+    identity_only: bool = False,
 ) -> str:
     """Mint an opaque capability for exactly one server-owned chat turn."""
     context = _validate_context(TaskTurnContext(
@@ -171,10 +190,13 @@ def mint_task_turn_context(
         user_id=user_id,
         issued_at=int(time.time()) if issued_at is None else int(issued_at),
         inspection=inspection,
+        identity_only=identity_only,
     ))
     fields = asdict(context)
     if inspection is None:
         fields.pop("inspection")  # keep the existing token shape when dormant
+    if not identity_only:
+        fields.pop("identity_only")
     payload = json.dumps(fields, separators=(",", ":"), sort_keys=True)
     return _get_fernet().encrypt(payload.encode("utf-8")).decode("ascii")
 

@@ -77,6 +77,8 @@ def trusted_session_owner(session_id: str, caller: TrustedCaller | None, *,
         turn = open_task_turn_context(raw)
     except Exception:
         raise BotAccessError("caller_unavailable") from None
+    if turn.identity_only:  # proves identity, owns no conversation
+        return None
     if (session_id == turn.session_id and caller.bot_id == turn.bot_id
             and caller.user_id == turn.user_id):
         return turn.bot_id, turn.user_id

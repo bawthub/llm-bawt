@@ -80,6 +80,8 @@ async def _continuation_scope_error(bot_id: str, context: TaskTurnContext | None
     if context is None:
         return ("continue_prompt needs a trusted current-turn context. Switch "
                 "without it and ask the user to continue.")
+    if context.identity_only:
+        return "This turn owns no conversation thread. Switch without continue_prompt."
     caller = context.bot_id.strip().lower()
     try:
         active = await _get_active_session(caller)
