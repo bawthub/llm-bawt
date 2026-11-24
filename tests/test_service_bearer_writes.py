@@ -21,6 +21,7 @@ from llm_bawt.service.routes import (
     approval_policies,
     guidance,
     integrations,
+    mcp_servers,
     model_catalog,
     ops,
     providers,
@@ -29,7 +30,7 @@ from llm_bawt.service.routes import (
 )
 from llm_bawt.service.routes.service_auth import require_service_token
 
-ROUTERS = (approval_policies, ops, model_catalog, integrations, providers, guidance, skills)
+ROUTERS = (approval_policies, ops, model_catalog, mcp_servers, integrations, providers, guidance, skills)
 
 PROTECTED = {
     ("POST", "/v1/tool-approval-policies"),
@@ -65,6 +66,14 @@ PROTECTED = {
     ("DELETE", "/v1/integrations/{integration_id}"),
     ("POST", "/v1/integrations/google-tasks/changed"),
     ("POST", "/v1/integrations/google-tasks/sync"),
+    ("POST", "/v1/integrations/mcp-servers"),
+    ("PATCH", "/v1/integrations/mcp-servers/{slug}"),
+    ("DELETE", "/v1/integrations/mcp-servers/{slug}"),
+    ("PUT", "/v1/integrations/mcp-servers/{slug}/bearer"),
+    ("PUT", "/v1/integrations/mcp-servers/{slug}/grants"),
+    ("POST", "/v1/integrations/mcp-servers/{slug}/tools"),
+    ("POST", "/v1/integrations/mcp-servers/{slug}/connect"),
+    ("DELETE", "/v1/integrations/mcp-servers/{slug}/connection"),
     ("POST", "/v1/providers/{provider_id}/connect/api-key"),
     ("POST", "/v1/providers/{provider_id}/connect/endpoint"),
     ("DELETE", "/v1/providers/{provider_id}"),
