@@ -223,3 +223,28 @@ def test_identity_only_turn_owns_no_conversation(monkeypatch):
         finally:
             task_association.reset_current_task_turn_capability(binding)
 
+
+
+def test_stream_and_nonstream_prompts_match_their_executors():
+    """Same opted-in native bot: only the streamed turn's prompt offers discovery."""
+    from llm_bawt.core.base import BaseLLMBawt
+    from llm_bawt.core.prompt_sections import PromptSectionsMixin, bawthub_mcp_prompt_turn
+
+    client = SimpleNamespace(stream_with_tools=object(), supports_native_tools=lambda: True)
+    bot = SimpleNamespace(search_client=None, news_client=None, web_fetch_client=None,
+                          home_client=None, model_lifecycle=None, ha_native_client=None,
+                          memory=object(), bawthub_mcp=object(), client=client,
+                          tool_format="native", bot=SimpleNamespace(uses_tools=True))
+    bot._uses_bawthub_mcp_native_stream = lambda: BaseLLMBawt._uses_bawthub_mcp_native_stream(bot)
+    bot._get_tool_definitions = lambda **kw: BaseLLMBawt._get_tool_definitions(bot, **kw)
+
+    def tools_prompt():
+        builder = Mock()
+        PromptSectionsMixin._sec_tools(bot, builder, "hello")
+        return builder.add_section.call_args.args[1]
+
+    nonstream = tools_prompt()
+    with bawthub_mcp_prompt_turn():
+        stream = tools_prompt()
+    assert "tool_search" in stream and "tool_search" not in nonstream
+    assert "tool_search" not in tools_prompt()  # the mark is scoped to the turn

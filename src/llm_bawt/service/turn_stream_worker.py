@@ -248,7 +248,9 @@ class TurnStreamWorker(TurnStreamPublishMixin):
 
             if terminal_follower is not None:
                 terminal_follower.check()
-            with selected_history_context("initial"):
+            from ..core.prompt_sections import bawthub_mcp_prompt_turn
+
+            with selected_history_context("initial"), bawthub_mcp_prompt_turn():
                 messages = llm_bawt.prepare_messages_for_query(
                     user_prompt,
                     user_attachments=user_attachments or None,

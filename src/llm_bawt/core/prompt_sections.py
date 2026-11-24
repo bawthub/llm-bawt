@@ -8,6 +8,8 @@ orchestrator stays under the monolith gate as new sections are added.
 """
 
 import logging
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 from ..shared.rich_safe import SafeConsole as Console  # never raises (TASK-2434)
 from ..shared.rich_safe import escape
@@ -17,6 +19,21 @@ from .prompt_builder import GLOBAL_SYSTEM_PROMPT, PromptBuilder, SectionPosition
 
 logger = logging.getLogger(__name__)
 console = Console()
+
+# TASK-2599: set only around a streamed turn's prompt build, the one path that
+# executes BawtHub MCP discovery. Per-turn (not a bot attribute): a cached bot
+# instance serves concurrent streamed and non-streamed turns.
+_BAWTHUB_MCP_TURN: ContextVar[bool] = ContextVar("bawthub_mcp_turn", default=False)
+
+
+@contextmanager
+def bawthub_mcp_prompt_turn():
+    """Mark the enclosed prompt build as a native streaming (MCP-capable) turn."""
+    token = _BAWTHUB_MCP_TURN.set(True)
+    try:
+        yield
+    finally:
+        _BAWTHUB_MCP_TURN.reset(token)
 
 
 class PromptSectionsMixin:
@@ -131,7 +148,7 @@ class PromptSectionsMixin:
         if self.tool_format != "none":
             if self.bot.uses_tools:
                 tool_definitions = self._get_tool_definitions(
-                    bawthub_mcp=self._uses_bawthub_mcp_native_stream())
+                    bawthub_mcp=_BAWTHUB_MCP_TURN.get() and self._uses_bawthub_mcp_native_stream())
                 if tool_definitions:
                     tools_prompt = get_tools_prompt(
                         tools=tool_definitions,
