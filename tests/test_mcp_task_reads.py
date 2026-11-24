@@ -54,6 +54,9 @@ class Api:
             end = start + 3
             return {"reviews": self.reviews[start:end], "total": len(self.reviews),
                     "nextCursor": str(end) if end < len(self.reviews) else None}
+        if path == "/tasks/TASK-1907/revisions":
+            return {"revisions": [{"field": "response", "value": "Earlier note", "actorType": "bot",
+                                   "actorId": "al", "createdAt": "2026-11-24T10:00:00.000Z"}]}
         if path == "/projects/project-id":
             if self.fail_project:
                 raise httpx.ConnectError("offline")
@@ -369,3 +372,16 @@ def test_wrappers_preserve_same_detail_and_catalog_inputs(monkeypatch):
     args = {"task_id": "TASK-1907", "path": "/task/steps/0/output"}
     assert run(task_tools.get_task(**args))["text"] == run(project_tools.get_task_context(**args))["text"]
     assert set(inspect.signature(task_tools.get_task).parameters) == set(inspect.signature(project_tools.get_task_context).parameters)
+
+
+def test_replaced_text_is_readable_at_task_revisions(monkeypatch):
+    # TASK-2604: an overwritten response stays restorable through the reader.
+    api = Api()
+    install(monkeypatch, api)
+    value, _, _ = run(complete(task_tools.get_task, {"task_id": "TASK-1907", "path": "/task/revisions"}))
+    assert value == [{"field": "response", "value": "Earlier note", "actorType": "bot",
+                      "actorId": "al", "createdAt": "2026-11-24T10:00:00.000Z"}]
+    assert ("/tasks/TASK-1907/revisions", None) in api.calls
+    summary = run(task_tools.get_task("TASK-1907"))
+    assert "/task/revisions" in summary["paging"]["paths"]
+    assert not any(c[0].endswith("/revisions") for c in api.calls[api.calls.index(("/tasks/TASK-1907/revisions", None)) + 1:])

@@ -208,6 +208,10 @@ async def read_task(api_get: ApiGet, task_id: str, *, tool: str, path: str | Non
         task = await api_get(f"/tasks/{ref}")
         if not isinstance(task, dict) or "error" in task:
             return {"error": "task_not_found"}
+        if parts[:2] == ["task", "revisions"]:
+            # TASK-2604: text an update replaced on the response or description.
+            listed = await api_get(f"/tasks/{ref}/revisions")
+            task = {**task, "revisions": listed.get("revisions", []) if isinstance(listed, dict) else []}
         project = task.get("project")
         reviews = None
         if path is None or parts[0] == "reviews":
@@ -240,7 +244,7 @@ async def read_task(api_get: ApiGet, task_id: str, *, tool: str, path: str | Non
             result = {"view": "summary", "task": _summary(task, reviews, project, size),
                       "detail": _read(tool, task_id, path="/task", max_chars=budget),
                       "paging": {"offset_unit": "characters", "max_chars": budget,
-                                 "paths": ["/task", "/task/description", "/task/steps/0/output", "/reviews", "/project"]}}
+                                 "paths": ["/task", "/task/description", "/task/steps/0/output", "/task/revisions", "/reviews", "/project"]}}
             if len(_json(result)) <= budget:
                 return result
         # A small requested budget still carries current owner/state/blocker and
