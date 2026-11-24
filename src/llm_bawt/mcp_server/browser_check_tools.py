@@ -45,6 +45,16 @@ _MINT_NOT_FOUND = (
     "(then " + _SESSIONS_OFF + ") or BAWTHUB_BROWSER_CHECK_INTERNAL_URL does "
     "not point at the frontend's internal port."
 )
+# TASK-2523: unconfigured says nothing about whether sign-in is on, so don't
+# claim sessions are off (an installed sign-in tenant has this tool unset).
+_NOT_CONFIGURED = (
+    "browser checks are not set up on this deployment, so no session can be "
+    "minted. If its UI opens without sign-in, use it directly (a 401 "
+    "code=user_required means no user is selected, not a login). If it asks "
+    "you to sign in, you have no login there: never ask anyone for a password; "
+    "use inspect_bawthub_tasks if it is available and the owner has authorized "
+    "Bot inspection."
+)
 
 
 def _config() -> tuple[str, str] | None:
@@ -69,7 +79,7 @@ async def browser_check_session() -> dict[str, Any]:
     """
     config = _config()
     if config is None:
-        return {"error": f"browser checks are not configured; {_SESSIONS_OFF}"}
+        return {"error": _NOT_CONFIGURED}
     base, origin = config
     host = _host(origin)
     if not host:

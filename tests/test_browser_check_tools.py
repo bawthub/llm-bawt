@@ -84,7 +84,9 @@ def test_without_a_trusted_turn_nothing_is_requested(rig):
 def test_unconfigured_deployment_refuses(rig, monkeypatch):
     monkeypatch.delenv("BAWTHUB_BROWSER_CHECK_INTERNAL_URL")
     error = _call()["error"]
-    assert "not configured" in error and "sessions are off" in error
+    assert "not set up" in error and "never ask anyone for a password" in error
+    # Unset config says nothing about sign-in, so it must not claim sessions are off.
+    assert "sessions are off" not in error
     assert rig["requests"] == []
 
 

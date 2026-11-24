@@ -29,9 +29,12 @@ class AgentBackend(ABC):
 
         Backends that wrap llm-bawt's rendered prompt (runtime context,
         provider guidance) do it here, so a pinned session captures the exact
-        bytes the bridge receives. The default sends the render unchanged.
+        bytes the bridge receives. The default adds only the installation's
+        UI address (TASK-2523).
         """
-        return system_prompt
+        from .installation_context import with_installation_context
+
+        return with_installation_context(system_prompt)
 
     def system_prompt_delivery(self, is_boundary: bool) -> str | None:
         """How the bridge should deliver a pinned prompt (TASK-1318).

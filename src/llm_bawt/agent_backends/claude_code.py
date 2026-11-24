@@ -71,7 +71,9 @@ class ClaudeCodeBackend(AgentBridgeBackend):
         # the bridge logs `Actual model: ...` to itself, but the agent
         # never sees that line.  Without this block, "what model are you"
         # gets a guess (often wrong) instead of the truth.
-        sp = (system_prompt or "").rstrip()
+        from .installation_context import with_installation_context
+
+        sp = with_installation_context((system_prompt or "").rstrip())
         provider_system_prompt = str(
             config.get("provider_system_prompt") or ""
         ).strip()
