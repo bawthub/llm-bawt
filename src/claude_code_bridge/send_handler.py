@@ -423,6 +423,7 @@ class ClaudeSendMixin(
                         stderr=_log_stderr,
                         task_turn_capability=task_turn_capability,
                         skill_selection=req.skill_selection,
+                        tools_disabled=req.tools_disabled,
                     )
 
                     prompt_cache = TurnPromptCache.from_sdk_env(

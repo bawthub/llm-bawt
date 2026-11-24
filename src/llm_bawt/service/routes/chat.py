@@ -122,7 +122,11 @@ def _run_steer_caps(service, turn) -> tuple[str, frozenset[str]]:
     The bot's current backend is read only for a row that never recorded one.
     """
     from ...steer_capabilities import turn_steer_caps
+    from ..strict_reader_execution import is_strict_request
 
+    if is_strict_request(service, getattr(turn, "bot_id", None)):
+        # TASK-2590: steering is an unsupported control for the strict reader.
+        raise HTTPException(status_code=400, detail="Steering is not supported for this bot")
     bot_backend = ""
     if not (getattr(turn, "agent_backend", None) or "").strip():
         from ...bots import BotManager
@@ -960,7 +964,10 @@ async def session_reset(request: SessionResetRequest) -> SessionResetResponse:
     from ...bots import BotManager
     from ..session_lifecycle.api import NewSessionAPI
     from ..session_lifecycle.intent import Continuity, Origin
+    from ..strict_reader_execution import is_strict_request
 
+    if is_strict_request(service, request.bot_id):
+        raise HTTPException(status_code=400, detail="Session reset is not supported for this bot")
     bot = BotManager(service.config).get_bot(request.bot_id)
     if not bot:
         raise HTTPException(status_code=404, detail=f"Bot '{request.bot_id}' not found")

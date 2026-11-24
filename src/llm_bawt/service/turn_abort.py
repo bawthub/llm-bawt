@@ -215,6 +215,11 @@ def abort_bridge_run_before_app_error(service, turn_id: str, execution, loop) ->
 
 def _bot_backend(service, bot_id: str | None) -> str | None:
     from ..bots import BotManager
+    from .strict_reader_execution import STRICT_BACKEND, is_strict_request
+
+    if is_strict_request(service, bot_id):
+        # Admission already required this backend; no registry read on abort.
+        return STRICT_BACKEND
 
     bot = BotManager(service.config).get_bot(bot_id) if bot_id else None
     return getattr(bot, "agent_backend", None) if bot else None

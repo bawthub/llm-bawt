@@ -13,8 +13,12 @@ Unset (the default), every request keeps the ordinary path unchanged.
 """
 from __future__ import annotations
 
+from ..bot_types import durable_agent_backend
 from ..bots import Bot, load_named_bot
 from .request_model_execution import BoundAgentLLMBawt, build_bound_instance, validate_bound_endpoint
+
+
+STRICT_BACKEND = "claude-code"
 
 
 class StrictReaderRefused(ValueError):
@@ -37,6 +41,13 @@ class StrictReaderLLMBawt(BoundAgentLLMBawt):
     def __init__(self, *args, admitted_bot: Bot, **kwargs):
         self._admitted_bot = admitted_bot
         super().__init__(*args, **kwargs)
+        self._seal_tools()
+
+    def _seal_tools(self) -> None:
+        # Tools are off at the bridge boundary, not just hidden from the prompt:
+        # the turn command carries tools_disabled, and the bridge then runs it
+        # with no MCP server, no built-in tools and a deny-all tool hook.
+        self.client.tools_disabled = True
 
     def _lookup_bot(self, config, slug):
         if (slug or "").strip().lower() != self._admitted_bot.slug:
@@ -69,9 +80,16 @@ def create_strict_instance(service, request, *, read_bot=load_named_bot,
         raise StrictReaderRefused("Request is not for the strict reader's bot")
     if not request.user or not request.model:
         raise StrictReaderRefused("Strict execution needs an explicit user and model")
+    # Only one direct ordinary turn is supported: no inter-bot, scheduled or
+    # routed delivery, and no explicit thread selection.
+    if getattr(request, "inter_bot_delivery_id", None) or getattr(request, "session_id", None):
+        raise StrictReaderRefused("Strict execution supports only a direct ordinary turn")
     bot = read_bot(service.config, slug)
     if bot is None or bot.slug != slug:
         raise StrictReaderRefused("Strict reader bot profile is missing or mismatched")
+    # Only the Claude Code bridge enforces the tools-off turn field.
+    if durable_agent_backend(bot) != STRICT_BACKEND:
+        raise StrictReaderRefused("Strict execution requires the claude-code backend")
     model = validate_bound_endpoint(service, bot, request.model)
 
     def build(**kwargs):

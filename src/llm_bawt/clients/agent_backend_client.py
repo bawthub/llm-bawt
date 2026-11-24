@@ -283,6 +283,8 @@ class AgentBackendClient(LLMClient):
             config.update(thread_binding)
         if task_turn_capability:
             config["task_turn_capability"] = task_turn_capability
+        if getattr(self, "tools_disabled", False):
+            config["tools_disabled"] = True
         if bridge_request_id:
             config["request_id"] = bridge_request_id
         if bridge_reset_action:

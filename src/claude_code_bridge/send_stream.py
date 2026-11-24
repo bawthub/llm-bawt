@@ -64,6 +64,15 @@ logger = logging.getLogger("claude_code_bridge.bridge")
 warnings.filterwarnings("once", message=r"can_use_tool will not be invoked")
 
 
+async def deny_all_tools_hook(input_data, tool_use_id, context):
+    """PreToolUse hook for a tools-disabled turn: refuse every tool."""
+    return {"hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "deny",
+        "permissionDecisionReason": "Tools are disabled for this turn",
+    }}
+
+
 class _BoundedStarts(dict):
     """tool_use_id -> monotonic start, for tool_end ms; bounded so a call
     that never ends can't grow it without limit."""
@@ -304,6 +313,7 @@ class ClaudeStreamMixin:
         stderr,
         task_turn_capability: str | None = None,
         skill_selection: str | None = None,
+        tools_disabled: bool = False,
     ) -> ClaudeAgentOptions:
         """Construct per-attempt options with isolated capability and MCP headers."""
         # Shell helpers resolve Git attribution using this opaque bearer. The SDK
@@ -328,8 +338,16 @@ class ClaudeStreamMixin:
         skill_denials = claude_skill_denials(selection)
         if skill_denials:
             disallowed_tools = [*(disallowed_tools or []), *skill_denials]
+        tool_options: dict = {}
+        if tools_disabled:
+            # TASK-2590 strict reader: no MCP server, no built-in tools, and
+            # every tool call that still reaches the hook is denied.
+            mcp_servers = {}
+            tool_options["tools"] = []
+            pre_tool_use_cb = deny_all_tools_hook
         return ClaudeAgentOptions(
             **claude_skill_options(selection),
+            **tool_options,
             model=model,
             # TASK-1318: the CLI records the system prompt when a session
             # starts (and on the first turn after a manual /compact) and

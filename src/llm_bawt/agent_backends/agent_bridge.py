@@ -391,6 +391,7 @@ class AgentBridgeBackend(AgentBackend):
                                 str(config.get("task_turn_capability") or "").strip()
                                 or None
                             ),
+                            tools_disabled=config.get("tools_disabled") is True,
                             # TASK-1295: the resolved endpoint's access path
                             # picks the bridge credential. Passed through as-is
                             # (None only when the catalog supplied none).
