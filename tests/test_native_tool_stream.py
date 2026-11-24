@@ -344,3 +344,16 @@ def test_chat_completions_adapters_preserve_dependent_rounds(rig, monkeypatch, m
     assert [(item["tool_call_id"], item["content"]) for item in outputs] == [
         ("call-1", "72 degrees"), ("call-2", "72 degrees"),
     ]
+
+
+def test_stop_during_tool_execution_keeps_its_result_then_stops(rig):
+    rig.client.stream_with_tools.return_value = iter(["Checking", tool_result()])
+    def execute(_call):
+        rig.ctx.cancel_event.set()  # Stop pressed while the tool runs.
+        return "<tool_result>light on</tool_result>"
+    rig.executor.execute.side_effect = execute
+    assert list(rig.stream.stream(rig.messages, {})) == ["Checking"]
+    assert [event["event"] for event in rig.events] == ["tool_start", "tool_end"]
+    assert rig.events[-1]["result"] == "light on"
+    assert rig.ctx.tool_call_details_holder[0]["result"] == "light on"
+    rig.client.stream_with_tools.assert_called_once()  # No follow-up round.

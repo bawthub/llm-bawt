@@ -181,8 +181,11 @@ class ToolEventInterceptor:
         ctx = self.ctx
         st = self.state
         for item in inner:
-            if not ctx.is_agent_backend and ctx.cancel_event.is_set():
-                break  # do not publish a post-Stop delta/tool start to Redis
+            stopped = not ctx.is_agent_backend and ctx.cancel_event.is_set()
+            # Do not publish a post-Stop delta or tool start, but a tool that
+            # already ran keeps its result: publish its end, then stop.
+            if stopped and not (isinstance(item, dict) and item.get("event") == "tool_result"):
+                break
             if not (isinstance(item, dict) and item.get("event") == "reasoning"):
                 yield from self.flush_reasoning()
             if isinstance(item, dict) and item.get("event") == "steer_lifecycle":
@@ -294,6 +297,8 @@ class ToolEventInterceptor:
                 st.text_buf.append(item)
                 self.flush_text(min_chars=_TEXT_DELTA_FLUSH_CHARS)
             yield item
+            if stopped:
+                break
 
         # Legacy tail behavior is unchanged; a stopped protocol-native worker
         # must not publish buffered content after the Stop commit.
