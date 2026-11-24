@@ -952,6 +952,8 @@ def _compact_bot(entry: dict) -> dict:
     """One short discovery row (TASK-2249); ``detail="full"`` keeps the rest."""
     row: dict[str, Any] = {"slug": entry["slug"], "tags": entry["tags"],
                            "capabilities": entry["capabilities"]}
+    if entry.get("model"):
+        row["model"] = entry["model"]
     if entry.get("provider"):
         row["provider"] = entry["provider"]
     if entry.get("quota") not in (None, "unknown"):

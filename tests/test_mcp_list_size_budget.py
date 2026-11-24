@@ -52,7 +52,8 @@ def test_a_compact_bot_row_fits_its_budget_and_keeps_the_routing_facts():
 
     assert _chars(row) <= BOT_ROW_BUDGET, row
     assert row == {
-        "slug": "fixture-coder", "tags": ["coder"], "capabilities": ["implement"], "provider": "vendor-a",
+        "slug": "fixture-coder", "tags": ["coder"], "capabilities": ["implement"],
+        "model": "fixture-model@fixture-path", "provider": "vendor-a",
         "turn": {"kind": "executing", "task": "TASK-1234", "started_at": "2026-11-14T04:40:00+00:00"},
         "last_turn": {"ended_at": "2026-11-14T04:30:00+00:00", "task": "TASK-1234"},
         "queued": 2, "pending_approvals": 1, "location": "h1", "prompt_stale": True,
