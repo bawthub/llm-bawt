@@ -20,7 +20,7 @@ ORIGIN = "https://hub.example.com"
 MCP_URL = "https://tools.example.net/mcp"
 AS = "https://auth.example.net"
 SERVER = McpServer("tools", "Tools", MCP_URL, "streamable_http", "oauth", True)
-SETTINGS = "/tools/settings/mcp-servers"
+SETTINGS = "/settings/mcp-servers"
 
 
 @pytest.fixture

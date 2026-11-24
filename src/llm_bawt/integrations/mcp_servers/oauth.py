@@ -33,7 +33,7 @@ from ...service.providers.base import ConnectionRecord
 from .store import McpServer
 
 CALLBACK_PREFIX = "/api/chat/proxy/v1/integrations/mcp-servers"
-RETURN_PATHS = {"/tools/settings/mcp-servers"}
+RETURN_PATHS = {"/settings/mcp-servers"}
 PENDING_SECONDS = 600
 CLIENT_NAME = "BawtHub"
 _INIT_BODY = {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
