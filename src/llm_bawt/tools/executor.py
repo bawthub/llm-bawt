@@ -32,7 +32,7 @@ from .taint import (
     label_untrusted,
     needs_confirmation_reason,
 )
-from .definitions import normalize_legacy_tool_call
+from .definitions import TOOL_SEARCH_NAME, normalize_legacy_tool_call
 
 if TYPE_CHECKING:
     from ..integrations.ha_mcp.client import HomeAssistantMCPClient, HomeAssistantNativeClient
@@ -128,6 +128,8 @@ class ToolExecutor:
         trigger_message_id: str | None = None,
         turn_id: str | None = None,
         content_store=None,
+        bawthub_mcp=None,
+        turn_capability: str | None = None,
     ):
         """Initialize the executor.
 
@@ -163,6 +165,11 @@ class ToolExecutor:
         self.trigger_message_id = trigger_message_id
         self.turn_id = turn_id
         self._content_store = content_store
+        # BawtHub MCP (TASK-2599): allowlisted, called under this turn's own
+        # identity; schemas a tool_search loaded join later rounds.
+        self.bawthub_mcp = bawthub_mcp
+        self.turn_capability = turn_capability
+        self.mcp_loaded: dict = {}
         self.external_content_seen = False
         # Get max tool calls from config (0 = unlimited)
         self._max_tool_calls = getattr(config, 'MAX_TOOL_CALLS_PER_TURN', self.DEFAULT_MAX_TOOL_CALLS) if config else self.DEFAULT_MAX_TOOL_CALLS
@@ -321,6 +328,11 @@ class ToolExecutor:
 
             if is_ha_native:
                 return self._execute_ha_native_tool(normalized_call)
+            if self.bawthub_mcp is not None:
+                if normalized_call.name == TOOL_SEARCH_NAME:
+                    return self._execute_tool_search(normalized_call)
+                if self.bawthub_mcp.allows(normalized_call.name):
+                    return self._execute_bawthub_mcp(normalized_call)
 
             handler = self._handlers.get(normalized_call.name)
             if handler:
@@ -352,6 +364,54 @@ class ToolExecutor:
             slog.tool_result(normalized_call.name, result)
 
         return result
+
+    def mcp_tool_definitions(self) -> list:
+        """Tools a tool_search loaded this turn, for the next round's schema."""
+        from .definitions import ha_tools_to_tool_definitions
+
+        return ha_tools_to_tool_definitions(list(self.mcp_loaded.values()))
+
+    def _execute_tool_search(self, tool_call: ToolCall) -> str:
+        """Deferred discovery: load matching tool schemas for the next step.
+
+        ``select:a,b`` loads exact names; any other query searches names and
+        descriptions. The result is the tool_reference list the chat renders.
+        """
+        import json
+
+        from ..integrations.bawthub_mcp.client import BawtHubMcpToolError
+
+        query = str(tool_call.arguments.get("query") or "").strip()
+        try:
+            limit = max(1, min(10, int(tool_call.arguments.get("max_results") or 5)))
+        except (TypeError, ValueError):
+            limit = 5
+        try:
+            if query.lower().startswith("select:"):
+                wanted = [n.strip() for n in query[7:].split(",") if n.strip()]
+                catalog = {t.name: t for t in self.bawthub_mcp.search_tools(
+                    self.turn_capability, "", limit=len(self.bawthub_mcp.allowlist) or 1)}
+                found = [catalog[n] for n in wanted if n in catalog]
+            else:
+                found = self.bawthub_mcp.search_tools(self.turn_capability, query, limit=limit)
+        except BawtHubMcpToolError as error:
+            return format_tool_result(tool_call.name, None, error=str(error))
+        if not found:
+            return format_tool_result(tool_call.name, "No matching tools found.")
+        for tool in found:
+            self.mcp_loaded[tool.name] = tool
+        return format_tool_result(tool_call.name, json.dumps(
+            [{"type": "tool_reference", "tool_name": tool.name} for tool in found]))
+
+    def _execute_bawthub_mcp(self, tool_call: ToolCall) -> str:
+        from ..integrations.bawthub_mcp.client import BawtHubMcpToolError
+
+        arguments = {k: v for k, v in (tool_call.arguments or {}).items() if v is not None}
+        try:
+            text = self.bawthub_mcp.call_tool(self.turn_capability, tool_call.name, arguments)
+        except BawtHubMcpToolError as error:
+            return format_tool_result(tool_call.name, None, error=str(error))
+        return format_tool_result(tool_call.name, text)
 
     def _held_after_external_content(
         self, tool_name: str, arguments: dict, *, ha_native: bool = False,

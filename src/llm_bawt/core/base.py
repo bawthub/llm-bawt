@@ -604,6 +604,10 @@ class BaseLLMBawt(OrchestratorInitializationMixin, PromptSectionsMixin, ABC):
         if self.memory is None:
             disallowed = {"memory", "history", "profile", "self"}
             tools = [t for t in tools if t.name not in disallowed]
+        if getattr(self, "bawthub_mcp", None) is not None:
+            from ..tools.definitions import MCP_REPLACED_LOCAL_TOOLS, TOOL_SEARCH_TOOL
+            tools = [t for t in tools if t.name not in MCP_REPLACED_LOCAL_TOOLS]
+            tools.append(TOOL_SEARCH_TOOL)
         return tools
 
     def _retrieve_cold_start_memories(self, prompt: str) -> str:

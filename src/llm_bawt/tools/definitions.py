@@ -482,6 +482,28 @@ LEGACY_TOOL_MAP = {
 }
 
 
+# BawtHub MCP deferred discovery (TASK-2599): only this tool is always offered;
+# the schemas it loads join the following rounds.
+TOOL_SEARCH_NAME = "tool_search"
+TOOL_SEARCH_TOOL = Tool(
+    name=TOOL_SEARCH_NAME,
+    description=(
+        "Find and load more tools (memory, message history, profiles and other "
+        "BawtHub tools). Search by keywords, or load exact names with "
+        "'select:name_a,name_b'. Matching tools become callable on your next step."
+    ),
+    parameters=[
+        ToolParameter(name="query", type="string",
+                      description="Keywords, or 'select:' followed by exact tool names"),
+        ToolParameter(name="max_results", type="integer",
+                      description="Maximum tools to load (1-10, default 5)", required=False),
+    ],
+)
+
+# Local wrappers that BawtHub MCP tools replace when a bot opts in.
+MCP_REPLACED_LOCAL_TOOLS = frozenset({"memory", "history", "profile"})
+
+
 # =============================================================================
 # Tool Selection Functions
 # =============================================================================

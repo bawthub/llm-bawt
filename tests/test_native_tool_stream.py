@@ -17,7 +17,8 @@ from llm_bawt.service.tool_event_interceptor import ToolEventInterceptor
 def rig(monkeypatch):
     schema = [{"type": "function", "function": {"name": "GetLiveContext"}}]
     events, queued = [], []
-    executor = SimpleNamespace(execute=Mock(return_value="<tool_result>72 degrees</tool_result>"))
+    executor = SimpleNamespace(execute=Mock(return_value="<tool_result>72 degrees</tool_result>"),
+                               mcp_loaded={}, mcp_tool_definitions=Mock(return_value=[]))
     factory = Mock(return_value=executor)
     monkeypatch.setattr("llm_bawt.tools.executor.ToolExecutor", factory)
     monkeypatch.setattr("llm_bawt.tools.formats.get_format_handler", lambda _format:
@@ -357,3 +358,19 @@ def test_stop_during_tool_execution_keeps_its_result_then_stops(rig):
     assert rig.events[-1]["result"] == "light on"
     assert rig.ctx.tool_call_details_holder[0]["result"] == "light on"
     rig.client.stream_with_tools.assert_called_once()  # No follow-up round.
+
+
+def test_schemas_loaded_by_tool_search_join_later_rounds(rig):
+    def execute(_call):
+        rig.executor.mcp_loaded["memory_search"] = object()  # tool_search loaded one
+        return "<tool_result>loaded</tool_result>"
+    rig.executor.execute.side_effect = execute
+    requests = []
+    def stream(messages, **kwargs):
+        requests.append(kwargs["tools_schema"])
+        return iter([tool_result()] if len(requests) == 1 else ["Done"])
+    rig.client.stream_with_tools.side_effect = stream
+    assert list(rig.stream.stream(rig.messages, {})) == ["Done"]
+    assert requests[0] == rig.schema
+    assert requests[1] == rig.schema + rig.schema  # base + loaded definitions
+    rig.executor.mcp_tool_definitions.assert_called()

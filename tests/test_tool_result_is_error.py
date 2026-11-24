@@ -88,7 +88,7 @@ def test_native_stream_flags_failed_tool_end(monkeypatch):
     from llm_bawt.models.message import Message
     from llm_bawt.service.native_tool_stream import NativeToolStream
 
-    executor = SimpleNamespace(execute=Mock(return_value=ERROR))
+    executor = SimpleNamespace(execute=Mock(return_value=ERROR), mcp_loaded={})
     monkeypatch.setattr("llm_bawt.tools.executor.ToolExecutor", Mock(return_value=executor))
     monkeypatch.setattr("llm_bawt.tools.formats.get_format_handler",
                         lambda _f: SimpleNamespace(get_tools_schema=lambda _d: []))

@@ -163,6 +163,9 @@ class OrchestratorInitializationMixin:
         # Initialize Home Assistant client
         self._init_home_assistant(config)
 
+        # BawtHub MCP tools for regular bots (opt-in, TASK-2599)
+        self._init_bawthub_mcp(config)
+
         # Initialize NewsAPI client
         self._init_newsapi()
 
@@ -260,6 +263,29 @@ class OrchestratorInitializationMixin:
                 logger.debug("Legacy Home Assistant MCP client initialized")
         except Exception as e:
             logger.warning(f"Failed to initialize legacy HA MCP client: {e}")
+
+    def _init_bawthub_mcp(self, config: Config) -> None:
+        """Opt-in BawtHub MCP tools for a regular (non-agent) tool-using bot.
+
+        Off by default: ``bawthub_mcp_tools`` enables it per bot, and
+        ``bawthub_mcp_tool_allowlist`` names the MCP tools the model may
+        discover and call. The server still applies the bot's own grants.
+        """
+        self.bawthub_mcp = None
+        if not self.bot.uses_tools or self.model_definition.get("type") in ("agent_backend", "claude-code"):
+            return
+        enabled = self._resolve_setting("bawthub_mcp_tools", False)
+        if str(enabled).strip().lower() not in ("1", "true", "yes", "on"):
+            return
+        from ..integrations.bawthub_mcp.client import (
+            DEFAULT_ALLOWLIST, BawtHubMcpClient, parse_allowlist,
+        )
+
+        allowlist = parse_allowlist(
+            self._resolve_setting("bawthub_mcp_tool_allowlist", None)
+        ) or DEFAULT_ALLOWLIST
+        self.bawthub_mcp = BawtHubMcpClient(config.MCP_SERVER_URL, allowlist)
+        logger.info("BawtHub MCP tools enabled for %s (%d allowed)", self.bot_id, len(allowlist))
 
     def _init_newsapi(self) -> None:
         """Initialize NewsAPI client if API key is available."""

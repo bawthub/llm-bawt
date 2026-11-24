@@ -78,6 +78,8 @@ class TurnStreamContext:
     # TASK-701: opaque, signed current-turn capability forwarded only to
     # harnesses that support request-local MCP headers (Claude SDK today).
     task_turn_capability: str | None = None
+    # TASK-2599: identity-only token for a regular bot's BawtHub MCP calls.
+    mcp_turn_capability: str | None = None
     execution: Any = None
     terminal_follower: Any = None
     terminal_history_session_id: str | None = None

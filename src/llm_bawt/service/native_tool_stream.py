@@ -62,6 +62,8 @@ class NativeToolStream:
             bot_id=llm_bawt.bot_id,
             trigger_message_id=trigger_message_id,
             turn_id=turn_log_id,
+            bawthub_mcp=getattr(llm_bawt, "bawthub_mcp", None),
+            turn_capability=getattr(ctx, "mcp_turn_capability", None),
         )
 
         def native_stream_with_tool_loop():
@@ -100,6 +102,10 @@ class NativeToolStream:
                 # function_call_output when its schema disappears. Keeping it
                 # does not require forcing text after every successful round.
                 current_tools = tools_schema
+                if executor.mcp_loaded:
+                    # Schemas a tool_search loaded join every later round.
+                    current_tools = tools_schema + handler.get_tools_schema(
+                        executor.mcp_tool_definitions())
                 current_tool_choice = "none" if final_pass else "auto"
 
                 # TASK-216: stream text tokens immediately instead

@@ -524,6 +524,27 @@ class ChatStreamingMixin(BridgeSessionResetMixin):
                 resolved_session_id=session_id or getattr(request, "session_id", None),
                 is_agent=is_agent_backend,
             )
+        mcp_turn_capability: str | None = None
+        if not is_agent_backend and getattr(llm_bawt, "bawthub_mcp", None) is not None:
+            # TASK-2599: opted-in regular bots call BawtHub MCP under this
+            # turn's own bot/user identity. The session id is fresh, so the
+            # token proves who is calling but owns no conversation (a request's
+            # session_id is not proof of ownership). On failure the tools fail
+            # closed with a clear error. Kept apart from task_turn_capability,
+            # which the worker may bind as a conversation-ownership proof.
+            try:
+                import uuid as _uuid
+
+                from ..task_turn_context import mint_task_turn_context
+
+                mcp_turn_capability = mint_task_turn_context(
+                    session_id=str(_uuid.uuid4()), turn_id=turn_log_id,
+                    trigger_message_id=trigger_message_id,
+                    bot_id=bot_id, user_id=user_id,
+                )
+            except Exception as exc:  # noqa: BLE001 - tools fail closed instead
+                log.warning("BawtHub MCP turn identity unavailable for %s: %s",
+                            turn_log_id, safe_error_text(exc))
         # Record which continuation turn carried the answer back to the agent.
         if answered_question_id:
             try:
@@ -567,6 +588,7 @@ class ChatStreamingMixin(BridgeSessionResetMixin):
             chat_reset=chat_reset,
             selected_history=selected_history,
             task_turn_capability=task_turn_capability,
+            mcp_turn_capability=mcp_turn_capability,
             cancel_event=cancel_event,
             done_event=done_event,
             chunk_queue=chunk_queue,
