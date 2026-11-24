@@ -229,26 +229,37 @@ async def test_structured_results_carry_the_label_where_codex_reads_them(signer,
 
 
 @pytest.mark.asyncio
-async def test_real_sdk_transport_logs_never_carry_the_upstream_path(monkeypatch, caplog):
+async def test_real_sdk_transport_logs_never_carry_the_upstream_url(monkeypatch, caplog):
+    # The pinned SDK's own client stack (httpx2), with only the network swapped for a mock.
     import anyio
+    import httpx2
     import mcp.shared._httpx_utils as httpx_utils
 
     from llm_bawt.integrations.mcp_servers import service
 
-    path_secret = "path-credential-0123456789"
+    path_secret, query_secret = "path-credential-0123456789", "query-credential-9876543210"
 
     def handler(request):  # every request is redirected off-origin, keeping the credential path
-        return httpx.Response(307, headers={"location": f"https://other.example.net/{path_secret}/mcp"})
+        return httpx2.Response(307, headers={"location": f"https://other.example.net/{path_secret}/mcp"})
 
-    monkeypatch.setattr(httpx_utils, "create_mcp_http_client", lambda headers=None, **_k: httpx.AsyncClient(
-        transport=httpx.MockTransport(handler), headers=headers))
+    real = httpx_utils.create_mcp_http_client
+
+    def mocked(headers=None, timeout=None, auth=None):
+        client = real(headers=headers, timeout=timeout, auth=auth)
+        client._transport = httpx2.MockTransport(handler)
+        return client
+
+    monkeypatch.setattr(httpx_utils, "create_mcp_http_client", mocked)
     with caplog.at_level(logging.DEBUG):
         with pytest.raises(BaseException):
             with anyio.fail_after(10):
-                async with service.open_session(f"https://mcp.example.com/{path_secret}/mcp",
-                                                "streamable_http", {}):
+                async with service.open_session(
+                        f"https://mcp.example.com/{path_secret}/mcp?key={query_secret}", "streamable_http", {}):
                     pass
-    assert path_secret not in caplog.text
-    assert service.REDACTED_LOG in caplog.text  # the SDK did log; only its details were withheld
-    logging.getLogger("mcp.client.streamable_http").warning("after %s", path_secret)
+    assert path_secret not in caplog.text and query_secret not in caplog.text
+    redacted = {r.name for r in caplog.records if r.getMessage() == service.REDACTED_LOG}
+    assert "httpx2" in redacted  # the request summary was logged, without its URL
+    assert "mcp.client.streamable_http" in redacted  # and so was the unfollowed redirect
+    with caplog.at_level(logging.DEBUG):
+        logging.getLogger("httpx2").warning("after %s", path_secret)
     assert path_secret in caplog.text  # outside a remote session nothing is touched

@@ -216,11 +216,15 @@ class McpServers:
         return [{"name": tool_name(slug, t.name), "description": (t.description or "")[:300]} for t in tools]
 
 
-# Third-party transport loggers that can write an upstream URL (path credentials
-# included) or exception chain. While a remote MCP session is open in this
-# context, their records keep level and logger name but lose the details.
-_SDK_LOGGERS = ("mcp.client.streamable_http", "mcp.client.sse", "mcp.client.session",
-                "mcp.shared.session", "httpx", "httpcore")
+# Third-party transport loggers can write an upstream URL (path or query
+# credentials included) or an exception chain. While a remote MCP session is
+# open in this context, their records keep level and logger name but lose the
+# details. Filters don't apply to child loggers, so every logger under these
+# roots gets one (MCP 2.3.0 uses httpx2/httpcore2; ``client`` is its session logger).
+_SDK_LOGGER_ROOTS = ("mcp", "httpx", "httpx2", "httpcore", "httpcore2")
+_SDK_LOGGER_NAMES = ("client", "mcp.client.streamable_http", "mcp.client.sse", "mcp.shared.session",
+                     "httpx2", "httpcore2.connection", "httpcore2.http11", "httpcore2.http2",
+                     "httpcore2.proxy", "httpcore2.socks")
 _IN_REMOTE_SESSION = contextvars.ContextVar("remote_mcp_session", default=False)
 REDACTED_LOG = "Remote MCP transport diagnostic withheld"
 
@@ -234,9 +238,17 @@ class _RedactRemoteSession(logging.Filter):
 
 
 _REDACTOR = _RedactRemoteSession()
-for _name in _SDK_LOGGERS:
-    if _REDACTOR not in logging.getLogger(_name).filters:
-        logging.getLogger(_name).addFilter(_REDACTOR)
+
+
+def _install_redactor() -> None:
+    """Filter every transport logger that exists now; cheap and idempotent."""
+    names = set(_SDK_LOGGER_NAMES)
+    names.update(name for name in list(logging.Logger.manager.loggerDict)
+                 if name.split(".", 1)[0] in _SDK_LOGGER_ROOTS)
+    for name in names:
+        target = logging.getLogger(name)
+        if _REDACTOR not in target.filters:
+            target.addFilter(_REDACTOR)
 
 
 @asynccontextmanager
@@ -245,6 +257,9 @@ async def open_session(server_url: str, transport: str, headers: dict[str, str])
 
     Tasks the SDK starts inherit this context, so its transport logs are redacted.
     """
+    import mcp.client.sse  # noqa: F401 - their loggers exist before the filter is installed
+    import mcp.client.streamable_http  # noqa: F401
+    _install_redactor()
     token = _IN_REMOTE_SESSION.set(True)
     try:
         async with _open_session(server_url, transport, headers) as session:
