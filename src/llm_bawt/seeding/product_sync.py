@@ -134,6 +134,13 @@ def main(argv: list[str] | None = None) -> int:
 
     terms = [t.strip() for t in (*args.install_term, *os.environ.get("PROMPT_SYNC_INSTALL_TERMS", "").split(","))
              if t.strip()]
+    if args.setup_catalog:
+        # No pattern recognizes a bare host or owner name, so the operator
+        # names them. An excluded bot named in another bot's prompt is held too.
+        if not terms:
+            parser.error("--setup-catalog requires --install-term or PROMPT_SYNC_INSTALL_TERMS"
+                         " (host, owner and other installation names)")
+        terms += sorted({form for slug in excluded for form in (slug, slug.capitalize(), slug.upper())})
     try:
         result = sync_product(api=args.api or "", keys=args.key, shipped=SYNCED_DIR, stage=args.stage,
                               install_terms=terms, read_snapshot=read_snapshot)

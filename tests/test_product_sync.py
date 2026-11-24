@@ -131,6 +131,11 @@ def test_main_reads_live_lineup_and_reports_held_bots(paths, monkeypatch, capsys
     assert exc.value.code == 2
     assert "--excluded-bots" in capsys.readouterr().err
     argv += ["--excluded-bots", "Fixture-Protected"]
+    with pytest.raises(SystemExit) as exc:
+        sync.main(argv)
+    assert exc.value.code == 2
+    assert "--install-term" in capsys.readouterr().err
+    argv += ["--install-term", "fixturehost"]
     assert sync.main(argv) == 1  # role prompt is not a shipped product default
     catalog = json.loads(capsys.readouterr().out)["catalog"]
     assert catalog["status"] == "held" and catalog["previous_catalog_reusable"] is False
@@ -144,6 +149,12 @@ def test_main_reads_live_lineup_and_reports_held_bots(paths, monkeypatch, capsys
     assert catalog["held_bots"] == {"other": ["system_prompt contains an email address"]}
     assert "user@example.test" not in output
     assert [p["slug"] for p in json.loads((stage / sync.CATALOG_FILE).read_bytes())["presets"]] == ["example"]
+
+    for prompt in ("Never message Fixture-protected.", "Deploy on fixturehost now"):
+        source = live(None, system_prompt=prompt)
+        assert sync.main(argv) == 1
+        catalog = json.loads(capsys.readouterr().out)["catalog"]
+        assert catalog["held_bots"] == {"other": ["system_prompt contains an installation-specific term"]}
 
     source = live(None, system_prompt="Be kind.")
     assert sync.main(argv) == 0

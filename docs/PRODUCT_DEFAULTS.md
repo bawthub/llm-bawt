@@ -105,12 +105,15 @@ the release base:
 ```sh
 mkdir -m 700 "$PRODUCT_SYNC_STAGE"
 python -m llm_bawt.seeding.product_sync --stage "$PRODUCT_SYNC_STAGE" --setup-catalog \
-  --excluded-bots "$PRODUCT_SYNC_EXCLUDED_BOTS"
+  --excluded-bots "$PRODUCT_SYNC_EXCLUDED_BOTS" --install-term "$INSTALL_HOST"
 ```
 
 `--pgq` reads through the operator's `pgq` instead of app configuration.
 `--excluded-bots` is required (explicitly empty if none) and keeps protected
-bots out without reading them. Add `--api "$LLM_BAWT_API" --key role.example`
+bots out without reading them; their names also join the scrub terms, so a
+prompt that mentions one is held. At least one `--install-term` or
+`PROMPT_SYNC_INSTALL_TERMS` entry is required: no pattern recognizes a bare
+host or owner name. Add `--api "$LLM_BAWT_API" --key role.example`
 (repeat `--key`) only when exact global prompt changes are also approved for
 export; no `--key` means no prompt API read.
 
@@ -146,8 +149,9 @@ staging files when no longer needed. No timer, publication, or deployment
 action is performed here.
 
 The catalog names the source installation's bots and their prompts may name
-its operator, so the general-use contract skips only its bot-slug and
-operator-identity rules for this one file; every other rule still applies.
+its operator, so the general-use contract skips only its operator-identity
+rule and its bot-slug rule for the file's own preset slugs, for this one file;
+any other bot name and every other rule still count.
 
 ## Verification and drift
 

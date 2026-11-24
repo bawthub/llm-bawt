@@ -120,14 +120,21 @@ class ContractTests(unittest.TestCase):
                          {"bot_slugs", "rfc1918"})
 
     def test_operator_roster_skips_only_roster_rules_in_that_file(self):
-        line = "alice vexbot personal.invalid 10.1.2.3 /home/someone\n"
+        line = "alice vexbot personal.invalid 10.1.2.3 /home/someone"
         (roster,) = guard.OPERATOR_ROSTER_FILES
-        self.tracked(roster, line)
-        self.tracked("src/other.json", line)
+        roster_text = json.dumps({"presets": [{"slug": "vexbot", "system_prompt": line}]}, indent=1) + "\n"
+        self.tracked(roster, roster_text)
+        self.tracked("src/other.json", line + "\n")
         hits, _, _ = guard.scan(self.repo, policy(
             operator_identities=["alice"], personal_domains=["personal.invalid"], bot_slugs=["vexbot"]))
         self.assertEqual({hit.rule for hit in hits if hit.path == roster},
                          {"personal_domains", "rfc1918", "host_path"})
+        # A bot that is not one of the roster's presets (e.g. a protected one) still counts.
+        self.tracked(roster, roster_text.replace(line, line + " hiddenbot"))
+        hits, _, _ = guard.scan(self.repo, policy(
+            operator_identities=["alice"], personal_domains=["personal.invalid"],
+            bot_slugs=["vexbot", "hiddenbot"]))
+        self.assertEqual(sum(n for hit, n in hits.items() if hit.path == roster and hit.rule == "bot_slugs"), 1)
         self.assertEqual({hit.rule for hit in hits if hit.path == "src/other.json"},
                          {"operator_identities", "bot_slugs", "personal_domains", "rfc1918", "host_path"})
 
