@@ -78,6 +78,10 @@ def admit_agent_request(
     """Submit one ordinary request through the durable dispatcher."""
     # Preserve omission provenance before the queued request is normalized.
     queued_request = request
+    from .strict_reader_execution import is_strict_request, strict_selection_fingerprint
+
+    if is_strict_request(service, bot_id):
+        queued_request._strict_selection_stamp = strict_selection_fingerprint(service)
     queue = getattr(service, "_ordinary_turn_queue", None)
     if queue is None:
         dispatcher = getattr(service, "_inter_bot_dispatcher", None)
@@ -180,6 +184,10 @@ class OrdinaryTurnQueue:
             }}
             if voice_input:
                 metadata["ordinary_chat"]["voice_input"] = True
+            stamp = getattr(request, "_strict_selection_stamp", None)
+            if isinstance(stamp, dict):
+                # TASK-2590: the strict selection at receipt; drain must match it.
+                metadata["strict_reader"] = dict(stamp)
             # Preserve the exact visible command. Only a trusted claimed
             # follow-up may override the bridge's outbound message with its task.
             from .session_lifecycle.execution import NewSessionExecution

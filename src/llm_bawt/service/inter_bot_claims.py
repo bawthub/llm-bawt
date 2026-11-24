@@ -74,6 +74,8 @@ def validate_inter_bot_claim(service: Any, request: Any):
             # Only this validated claim marks the turn as an ordinary human
             # start; no request field can (TASK-2590 strict reader).
             request._ordinary_start_claim = delivery_id
+            stamp = metadata.get("strict_reader")
+            request._strict_selection_stamp = dict(stamp) if isinstance(stamp, dict) else None
         if (
             inspection_origin() and getattr(request, "stream", False)
             and producer == "ordinary" and isinstance(ordinary, dict) and ordinary.get("stream") is True

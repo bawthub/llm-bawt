@@ -278,6 +278,15 @@ class TurnStreamWorker(TurnStreamPublishMixin):
             # TASK-1318: send (and log) the session's pinned system prompt.
             system_prompt_pin = None
             if is_agent_backend:
+                strict_selection = getattr(llm_bawt, "strict_selection", None)
+                if isinstance(strict_selection, dict):
+                    # TASK-2590: resume only an SDK session started under this
+                    # strict selection; any other starts fresh and re-pins.
+                    from .strict_reader_execution import bind_session_selection
+
+                    ctx.thread_binding = bind_session_selection(
+                        self._turn_log_store.engine, ctx.thread_binding, strict_selection,
+                    )
                 messages, system_prompt_pin = apply_session_pin(
                     ctx, llm_bawt.client, messages, turn_id=turn_log_id,
                     sections=working_memory.sections,

@@ -110,6 +110,11 @@ def legacy_claude_skill_roots() -> tuple[Path, ...]:
                 return (Path(current),)
         except OSError:
             pass
+    return configured_claude_skill_roots()
+
+
+def configured_claude_skill_roots() -> tuple[Path, ...]:
+    """The configured legacy roots only, never a store's ``SKILL_SOURCES_CURRENT``."""
     configured = os.environ.get("CLAUDE_CODE_SKILLS_PATH")
     return tuple(
         Path(value) for value in configured.split(os.pathsep) if value

@@ -116,6 +116,9 @@ class ChatCompletionRequest(BaseModel):
     # The delivery id of a validated claim on an ordinary human streamed start,
     # stamped only by the claim validator (TASK-2590 strict reader).
     _ordinary_start_claim: str | None = PrivateAttr(default=None)
+    # The strict-reader selection the durable row was admitted under, restored
+    # only by the claim validator (TASK-2590); drain refuses on any change.
+    _strict_selection_stamp: dict | None = PrivateAttr(default=None)
     inter_bot_turn_id: str | None = Field(default=None, description="Deterministic reserved turn id for a durable delivery.")
     inter_bot_bridge_request_id: str | None = Field(default=None, description="Deterministic bridge run id used to deduplicate transport retries.")
     inter_bot_claim_token: str | None = Field(default=None, description="Private dispatcher claim token; rejected unless it matches the durable delivery row.")
@@ -175,6 +178,8 @@ class ChatCompletionRequest(BaseModel):
         copied._inspection_web_admission = None
         copied.__dict__.pop("_ordinary_start_claim", None)
         copied._ordinary_start_claim = None
+        copied.__dict__.pop("_strict_selection_stamp", None)
+        copied._strict_selection_stamp = None
         return copied
 
 

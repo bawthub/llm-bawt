@@ -42,21 +42,121 @@ def _system_of(durable, rig):
     return _command_fields(durable.published[-1]).get("system_prompt", "")
 
 
-def test_candidate_and_legacy_are_each_explicit(durable, rig, tmp_path, monkeypatch):
-    from agent_bridge import skill_sources
+def _generations():
+    import os
+    from pathlib import Path
+    return Path(os.environ["SKILL_SOURCES_ROOT"]) / "generations"
 
+
+SECOND = "gen-fxsecond"
+SECOND_LAYERS = {"fx-source": "c" * 40}
+
+
+def _second_body(ref: str) -> str:
+    return f"SECOND-BODY-{ref.upper()}"
+
+
+def _add_second_generation():
+    root = _generations() / SECOND
+    write_skill_tree(root, _second_body)
+    (root / ".layers.json").write_text(json.dumps(SECOND_LAYERS))
+
+
+def _select_second(service):
+    service.strict_reader_skill_generation = SECOND
+    service.strict_reader_skill_layers = dict(SECOND_LAYERS)
+
+
+def _turn(durable, rig):
+    before = len(durable.published)
+    receipt = _stream(durable.rt.service, _request(rig))
+    assert '"delivery_id"' in receipt, receipt
+    _drain(durable.dispatcher, rig.bot)
+    assert len(durable.published) == before + 1, "turn did not publish"
+    return _command_fields(durable.published[-1])
+
+
+def _active_session(rig):
+    from sqlalchemy import text
+    with rig.engine.connect() as conn:
+        return conn.execute(text(
+            "SELECT id, session_metadata FROM sessions WHERE bot_id=:b AND user_id=:u"
+            " AND status='active' AND ended_at IS NULL"), {"b": rig.bot, "u": rig.user}).one()
+
+
+def _bind_sdk(rig, session_id, sdk_id):
+    """What the bridge persists when it binds an SDK session to the thread."""
+    from sqlalchemy import text
+    with rig.engine.begin() as conn:
+        conn.execute(text(
+            "UPDATE sessions SET session_metadata = COALESCE(session_metadata, '{}'::jsonb)"
+            " || jsonb_build_object('agent_session_keys', jsonb_build_object('claude_code', CAST(:k AS text)))"
+            " WHERE id=:sid"), {"k": sdk_id, "sid": session_id})
+
+
+def test_persisted_resume_binding_follows_the_selection(durable, rig):
+    service = durable.rt.service
+    _turn(durable, rig)
+    session_id, _ = _active_session(rig)
+    _bind_sdk(rig, session_id, "sdk-fx-a")
+
+    # Same selection: the persisted SDK session resumes.
+    assert _turn(durable, rig).get("thread_resume_id") == "sdk-fx-a"
+
+    # Selection changes: the old SDK session (and its pinned prompt) is not
+    # resumed, and the new render carries the new generation's text.
+    _add_second_generation()
+    _select_second(service)
+    fields = _turn(durable, rig)
+    assert not fields.get("thread_resume_id")
+    for ref in APPROVED:
+        assert _second_body(ref) in fields.get("system_prompt", ""), ref
+    _, metadata = _active_session(rig)
+    recorded = metadata[strict.SESSION_SELECTION_KEY]
+    assert recorded["selection"]["generation"] == SECOND
+    assert recorded["replaced_resume_id"] == "sdk-fx-a"
+
+    # Until the bridge binds a new SDK session, the replaced one never resumes.
+    assert not _turn(durable, rig).get("thread_resume_id")
+    _bind_sdk(rig, session_id, "sdk-fx-b")
+    assert _turn(durable, rig).get("thread_resume_id") == "sdk-fx-b"
+
+
+def test_selection_change_between_receipt_and_drain_refuses(durable, rig):
+    from sqlalchemy import text
+    service = durable.rt.service
+    receipt = _stream(service, _request(rig))
+    assert '"delivery_id"' in receipt, receipt
+    with rig.engine.connect() as conn:
+        stamp = conn.execute(text(
+            "SELECT metadata_json->'strict_reader' FROM inter_bot_deliveries"
+            " WHERE target_bot_id=:b ORDER BY created_at DESC LIMIT 1"), {"b": rig.bot}).scalar_one()
+    assert stamp == strict.strict_selection_fingerprint(service)
+    assert stamp["generation"] == GENERATION and stamp["house"] == HOUSE
+
+    _add_second_generation()
+    _select_second(service)  # a valid selection, but not the one admitted
+    _drain(durable.dispatcher, rig.bot)
+    assert durable.published == [] and _RecordingRedis.streams == []
+
+
+def test_candidate_and_legacy_are_each_explicit(durable, rig, tmp_path, monkeypatch):
     # Explicit candidate: bodies come from the pinned generation.
     candidate = _system_of(durable, rig)
     for ref in APPROVED:
         assert _body(ref) in candidate and _legacy_body(ref) not in candidate, ref
 
-    # Explicit legacy (the inverse): the ordinary ambient tree, never the generation.
+    # Explicit legacy (the inverse): the configured legacy roots, never the
+    # generation, even while a store's SKILL_SOURCES_CURRENT link is set and
+    # points at that candidate.
     legacy_root = tmp_path / "legacy"
     write_skill_tree(legacy_root, _legacy_body)
-    monkeypatch.setattr(skill_sources, "legacy_claude_skill_roots", lambda: (legacy_root,),
-                        raising=False)
-    monkeypatch.setattr("agent_bridge.skill_selection.legacy_claude_skill_roots",
-                        lambda: (legacy_root,))
+    monkeypatch.setenv("CLAUDE_CODE_SKILLS_PATH", str(legacy_root))
+    current = tmp_path / "current-link"
+    current.symlink_to(_generations() / GENERATION)
+    monkeypatch.setenv("SKILL_SOURCES_CURRENT", str(current))
+    from agent_bridge.skill_selection import legacy_claude_skill_roots
+    assert legacy_claude_skill_roots() == (current,)  # ordinary legacy follows CURRENT
     durable.rt.service.strict_reader_skill_generation = strict.LEGACY_GENERATION
     legacy = _system_of(durable, rig)
     for ref in APPROVED:

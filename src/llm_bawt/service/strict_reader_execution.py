@@ -13,6 +13,7 @@ Unset (the default), every request keeps the ordinary path unchanged.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 
@@ -55,7 +56,11 @@ def strict_skill_source(service):
 
     name = (getattr(service, "strict_reader_skill_generation", None) or "").strip()
     if name == LEGACY_GENERATION:
-        return AmbientSource()
+        # Explicit legacy is the configured roots, even while a store's
+        # mutable SKILL_SOURCES_CURRENT link is set.
+        from agent_bridge.skill_selection import configured_claude_skill_roots
+
+        return AmbientSource(roots=configured_claude_skill_roots())
     if not _GENERATION_NAME.fullmatch(name):
         raise StrictReaderRefused("Strict reader needs an explicit skill generation")
     expected = getattr(service, "strict_reader_skill_layers", None)
@@ -78,6 +83,72 @@ def strict_skill_source(service):
     if layers != {str(k): str(v) for k, v in expected.items()}:
         raise StrictReaderRefused("Strict reader skill generation does not match its pin")
     return AmbientSource(roots=(resolved,))
+
+
+def strict_selection_fingerprint(service) -> dict:
+    """The operator's strict selection as data: generation, pinned layers, house.
+
+    Reads configuration only. A queued start stores it at receipt and its
+    drain must see the same value; a session records it and resumes only
+    under the same one.
+    """
+    name = (getattr(service, "strict_reader_skill_generation", None) or "").strip()
+    layers = getattr(service, "strict_reader_skill_layers", None)
+    digest = None
+    if name != LEGACY_GENERATION and isinstance(layers, dict) and layers:
+        canonical = json.dumps({str(k): str(v) for k, v in layers.items()},
+                               sort_keys=True, separators=(",", ":"))
+        digest = hashlib.sha256(canonical.encode()).hexdigest()
+    return {
+        "generation": name,
+        "layers_sha256": digest,
+        "house": (getattr(service, "strict_reader_house", None) or "").strip().lower(),
+    }
+
+
+#: ``sessions.session_metadata`` key: the strict selection this session's SDK
+#: transcript was started under, and the resume id it replaced.
+SESSION_SELECTION_KEY = "strict_reader_selection"
+
+
+def bind_session_selection(engine, binding: dict | None, fingerprint: dict) -> dict | None:
+    """Resume only a session started under ``fingerprint``; otherwise start fresh.
+
+    The pinned prompt carries the selected generation's skill text, so a
+    resumed SDK session started under another selection would keep the old
+    skills. On any mismatch, or a session with no recorded selection, the
+    resume id is dropped (a cold start re-pins the current render) and the
+    replaced id is remembered: until the bridge binds a new SDK session, that
+    id is never resumed again, even if this turn fails before running.
+    """
+    from sqlalchemy import text
+
+    binding = dict(binding or {})
+    session_id = str(binding.get("thread_session_id") or "").strip()
+    if not session_id:
+        return binding
+    resume_id = str(binding.get("thread_resume_id") or "").strip() or None
+    if engine is None:
+        binding["thread_resume_id"] = None  # nothing proves the session's selection
+        return binding
+    with engine.begin() as conn:
+        metadata = conn.execute(
+            text("SELECT session_metadata FROM sessions WHERE id=:sid FOR UPDATE"),
+            {"sid": session_id},
+        ).scalar_one_or_none()
+        recorded = (metadata or {}).get(SESSION_SELECTION_KEY) if isinstance(metadata, dict) else None
+        same = isinstance(recorded, dict) and recorded.get("selection") == fingerprint
+        stale = recorded.get("replaced_resume_id") if isinstance(recorded, dict) else None
+        if same and (resume_id is None or resume_id != stale):
+            return binding
+        value = {"selection": fingerprint, "replaced_resume_id": resume_id if not same else stale}
+        conn.execute(
+            text("UPDATE sessions SET session_metadata = COALESCE(session_metadata, '{}'::jsonb)"
+                 " || jsonb_build_object(CAST(:key AS text), CAST(:value AS jsonb)) WHERE id=:sid"),
+            {"key": SESSION_SELECTION_KEY, "value": json.dumps(value), "sid": session_id},
+        )
+    binding["thread_resume_id"] = None
+    return binding
 
 
 def strict_house(service, bot) -> str:
@@ -178,6 +249,11 @@ def create_strict_instance(service, request, *, read_bot=load_named_bot,
         raise StrictReaderRefused("Strict execution supports only a direct ordinary turn")
     if getattr(request, "session_id", None):
         raise StrictReaderRefused("Strict execution supports only a direct ordinary turn")
+    fingerprint = strict_selection_fingerprint(service)
+    if delivery_id and getattr(request, "_strict_selection_stamp", None) != fingerprint:
+        # The selection changed between receipt and drain (or the row was
+        # admitted before strict mode): never run it under another tree.
+        raise StrictReaderRefused("Strict reader selection changed since this turn was received")
     bot = read_bot(service.config, slug)
     if bot is None or bot.slug != slug:
         raise StrictReaderRefused("Strict reader bot profile is missing or mismatched")
@@ -189,6 +265,8 @@ def create_strict_instance(service, request, *, read_bot=load_named_bot,
     model = validate_bound_endpoint(service, bot, request.model)
 
     def build(**kwargs):
-        return instance_type(admitted_bot=bot, skill_source=skill_source, house=house, **kwargs)
+        instance = instance_type(admitted_bot=bot, skill_source=skill_source, house=house, **kwargs)
+        instance.strict_selection = fingerprint
+        return instance
 
     return build_bound_instance(service, request, model, instance_type=build)
