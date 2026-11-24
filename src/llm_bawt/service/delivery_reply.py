@@ -29,6 +29,12 @@ def is_accepted_receipt(value: Any) -> bool:
     return isinstance(value, dict) and value.get("object") in ACCEPTED_RECEIPTS
 
 
+def _same_user(stored: Any, requested: Any) -> bool:
+    """User ids match case-insensitively, as stored authors are normalized."""
+    return (str(stored or "").strip().lower() == str(requested or "").strip().lower()
+            and bool(str(requested or "").strip()))
+
+
 class DeliveryReplyMismatch(ValueError):
     """The receipt does not belong to the supplied original request."""
 
@@ -58,7 +64,9 @@ def resolve_delivery_reply(
     if (
         record.target_bot_id != bot_id
         or record.author_entity_type != "user"
-        or record.author_entity_id != user_id
+        # Delivery authors are stored normalized (AuthorReference.user lowercases),
+        # while callers pass the raw sign-in id, which may be mixed case.
+        or not _same_user(record.author_entity_id, user_id)
         or record.user_message_id != user_message_id
         or not (record.metadata or {}).get("ordinary_chat")
     ):
@@ -101,7 +109,7 @@ def _voice_steer_reply(deliveries: Any, record: Any, turns: Any, *, bot_id: str,
     engine = getattr(deliveries, "engine", None)
     turn = turns.get_turn(record.target_turn_id) if record.target_turn_id else None
     if (engine is None or record.transport_accepted_at is None or turn is None
-            or turn.bot_id != bot_id or turn.user_id != user_id):
+            or turn.bot_id != bot_id or not _same_user(turn.user_id, user_id)):
         return receipt
     with engine.connect() as conn:
         bound = conn.execute(text("""
@@ -158,7 +166,7 @@ def _receipt(
     if (
         turn is None
         or turn.bot_id != bot_id
-        or turn.user_id != user_id
+        or not _same_user(turn.user_id, user_id)
         or turn.trigger_message_id != user_message_id
     ):
         receipt["status"] = "UNRESOLVED"
@@ -189,7 +197,7 @@ def resolve_direct_turn_reply(
     turn = turns.get_turn(turn_id)
     if turn is None:
         return None
-    if (turn.bot_id != bot_id or turn.user_id != user_id
+    if (turn.bot_id != bot_id or not _same_user(turn.user_id, user_id)
             or turn.trigger_message_id != user_message_id):
         raise DeliveryReplyMismatch("direct turn does not match the original request")
     if turn.ended_at is None:

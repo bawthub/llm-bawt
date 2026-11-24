@@ -76,6 +76,20 @@ def test_receipt_requires_exact_original_identity(field, value):
         lookup(delivery(**{field: value}), turn())
 
 
+def test_mixed_case_sign_in_id_matches_its_normalized_author():
+    """TASK-2596: a fresh tenant's sign-in id is mixed case; the delivery stores
+    the author lowercased and the turn keeps the raw id. Both still match."""
+    result = lookup(delivery("DELIVERED", author_entity_id="vxdk6owner"),
+                    turn(user_id="vxDK6Owner"), user_id="vxDK6Owner")
+    assert result["status"] == "DELIVERED"
+    assert result["response_text"] == "Actual reply"
+
+
+def test_mixed_case_id_still_refuses_a_different_user():
+    with pytest.raises(DeliveryReplyMismatch):
+        lookup(delivery(author_entity_id="vxdk6owner"), turn(), user_id="vxDK6Other")
+
+
 @pytest.mark.parametrize("status", ["QUEUED", "DISPATCHING", "FAILED", "CANCELLED"])
 def test_pending_and_failed_deliveries_never_expose_reply(status):
     result = lookup(delivery(status), turn())
