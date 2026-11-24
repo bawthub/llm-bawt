@@ -1,6 +1,8 @@
 """TASK-2610: the remote MCP gateway for agent-bridge bots."""
 from __future__ import annotations
 
+import json
+import logging
 import uuid
 from contextlib import asynccontextmanager
 
@@ -32,10 +34,16 @@ class FakeServers:
 
 
 class FakeSession:
-    seen: list = []
+    fail_list = False
 
-    async def list_tools(self):
-        return types.ListToolsResult(tools=[types.Tool(name="lookup", inputSchema={"type": "object"})])
+    async def list_tools(self, params=None):
+        if self.fail_list:
+            raise RuntimeError(f"GET https://mcp.example.com/mcp?key={SECRET} failed")
+        if params is None:  # two pages: the gateway must follow the cursor
+            return types.ListToolsResult(tools=[types.Tool(name="lookup", inputSchema={"type": "object"})],
+                                         next_cursor="page-2")
+        assert params.cursor == "page-2"
+        return types.ListToolsResult(tools=[types.Tool(name="second", inputSchema={"type": "object"})])
 
     async def call_tool(self, name, arguments):
         if name == "boom":
@@ -75,8 +83,18 @@ async def inner(scope, receive, send):
     await send({"type": "http.response.body", "body": b"inner"})
 
 
-def app(servers):
-    return gw.WithRemoteMcp(inner, gw.RemoteMcpGateway(lambda: servers))
+class Exposure:
+    def __init__(self, fail=False):
+        self.fail, self.turns = fail, []
+
+    def __call__(self, turn):
+        if self.fail:
+            raise RuntimeError("ledger down")
+        self.turns.append(turn.bot_id)
+
+
+def app(servers, expose=None):
+    return gw.WithRemoteMcp(inner, gw.RemoteMcpGateway(lambda: servers, expose=expose or Exposure()))
 
 
 async def rpc(client, path, method, params=None, headers=None):
@@ -130,19 +148,49 @@ async def test_ungranted_and_unavailable_storage(signer, fake_upstream):
 @pytest.mark.asyncio
 async def test_proxies_list_and_call_with_the_server_credential(signer, fake_upstream):
     headers = {codec.TASK_TURN_CONTEXT_HEADER: capability()}
-    async with client_for(app(FakeServers())) as client:
+    exposure = Exposure()
+    async with client_for(app(FakeServers(), exposure)) as client:
         listed = await rpc(client, "/remote-mcp/alpha/mcp", "tools/list", headers=headers)
         called = await rpc(client, "/remote-mcp/alpha/mcp", "tools/call",
                            {"name": "lookup", "arguments": {"q": "x"}}, headers=headers)
         failed = await rpc(client, "/remote-mcp/alpha/mcp", "tools/call",
                            {"name": "boom", "arguments": {}}, headers=headers)
     assert listed.status_code == 200, listed.text
-    assert [t["name"] for t in listed.json()["result"]["tools"]] == ["lookup"]
-    assert called.json()["result"]["content"][0]["text"] == "lookup:{'q': 'x'}"
+    assert [t["name"] for t in listed.json()["result"]["tools"]] == ["lookup", "second"]
+    assert "nextCursor" not in listed.json()["result"]
+    labelled = called.json()["result"]
+    assert json.loads(labelled["content"][0]["text"]) == {
+        "untrusted_content": True, "source": "mcp:alpha", "data": "lookup:{'q': 'x'}"}
+    assert labelled["_meta"]["content_provenance"]["source"] == "mcp:alpha"
+    assert exposure.turns == ["reader"] * 3  # list and both calls, before upstream data
     result = failed.json()["result"]
     assert result["isError"] is True and SECRET not in failed.text
     assert all(h == {"Authorization": f"Bearer {SECRET}"} for _, _, h in fake_upstream)
     assert SECRET not in listed.text + called.text
+
+
+@pytest.mark.asyncio
+async def test_nothing_upstream_without_recorded_exposure(signer, fake_upstream):
+    headers = {codec.TASK_TURN_CONTEXT_HEADER: capability()}
+    async with client_for(app(FakeServers(), Exposure(fail=True))) as client:
+        listed = await rpc(client, "/remote-mcp/alpha/mcp", "tools/list", headers=headers)
+        called = await rpc(client, "/remote-mcp/alpha/mcp", "tools/call",
+                           {"name": "lookup", "arguments": {}}, headers=headers)
+    assert "error" in listed.json() and "result" not in listed.json()
+    assert called.json()["result"]["isError"] is True
+    assert fake_upstream == []
+
+
+@pytest.mark.asyncio
+async def test_list_failure_is_a_fixed_redacted_error(signer, fake_upstream, monkeypatch, caplog):
+    monkeypatch.setattr(FakeSession, "fail_list", True)
+    headers = {codec.TASK_TURN_CONTEXT_HEADER: capability()}
+    with caplog.at_level(logging.DEBUG):
+        async with client_for(app(FakeServers())) as client:
+            listed = await rpc(client, "/remote-mcp/alpha/mcp", "tools/list", headers=headers)
+    assert listed.json()["error"]["message"] == gw.LIST_FAILED
+    assert SECRET not in listed.text and "mcp.example.com" not in listed.text
+    assert SECRET not in caplog.text and "mcp.example.com" not in caplog.text
 
 
 @pytest.mark.asyncio

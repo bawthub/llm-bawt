@@ -7,8 +7,9 @@ the following rounds, and a call goes to that server with a fresh credential.
 
 The bot-level :class:`RemoteMcpTools` is cached on the bot instance, so it
 keeps only tool catalogs (keyed by server and URL, never credentials). Each
-turn gets a :class:`RemoteMcpTurn`, which resolves the bot's servers and their
-access tokens at most once, and only if the model actually uses them.
+turn gets a :class:`RemoteMcpTurn`, which resolves the bot's servers once for
+discovery, only if the model uses them; every call re-resolves its server's
+grant and credential, so a sign-out, disable or revoked grant applies at once.
 """
 from __future__ import annotations
 
@@ -20,7 +21,8 @@ from typing import Any
 
 from ..bawthub_mcp.client import BawtHubMcpClient, McpToolDefinition
 from ..ha_mcp.client import run_bounded
-from .service import TOOL_SEPARATOR, McpServers, ResolvedServer, open_session, tool_name
+from .service import (TOOL_SEPARATOR, McpServers, ResolvedServer, list_all_tools, open_session,
+                      tool_name)
 
 logger = logging.getLogger(__name__)
 
@@ -160,9 +162,16 @@ class RemoteMcpTurn:
 
     def call_tool(self, name: str, arguments: dict[str, Any]) -> str:
         parts = split_tool_name(name)
-        server = self.servers.get(parts[0]) if parts else None
-        if server is None:
+        if parts is None or parts[0] not in self.servers:
             raise RemoteMcpToolError(f"Tool '{name}' is not enabled for this bot")
+        try:
+            # Current authority, never the turn's discovery snapshot.
+            server = self._tools._servers().resolve_one(self._tools.bot_slug, parts[0])
+        except Exception as exc:  # noqa: BLE001 - storage outage
+            logger.warning("Remote MCP server %s unavailable: %s", parts[0], type(exc).__name__)
+            server = None
+        if server is None:
+            raise RemoteMcpToolError(f"Tool '{name}' is not available right now")
         try:
             result = run_bounded(_call(server, parts[1], arguments), CALL_TIMEOUT_SECONDS)
         except Exception as exc:  # never echo transport details or credentials
@@ -177,7 +186,7 @@ class RemoteMcpTurn:
 
 async def _list(server: ResolvedServer):
     async with open_session(server.url, server.transport, server.headers) as session:
-        return (await session.list_tools()).tools
+        return await list_all_tools(session)
 
 
 async def _call(server: ResolvedServer, tool: str, arguments: dict[str, Any]):

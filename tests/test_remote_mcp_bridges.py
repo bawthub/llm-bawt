@@ -75,7 +75,8 @@ async def test_claude_hooks_label_remote_results_and_errors():
     out = (await hook({"tool_name": "mcp__alpha__lookup", "tool_response": data}, "t", {}))
     specific = out["hookSpecificOutput"]
     assert "mcp:alpha; untrusted_content=true" in specific["additionalContext"]
-    assert json.loads(specific["updatedMCPToolOutput"]["content"][0]["text"])["source"] == "mcp:alpha"
+    # The gateway already labelled the result; the hook adds context, never a second wrap.
+    assert "updatedMCPToolOutput" not in specific
     failed = bridge._make_external_failure_hook(("alpha",))
     assert "untrusted_content=true" in (await failed({"tool_name": "mcp__alpha__x"}, "t", {}))[
         "hookSpecificOutput"]["additionalContext"]

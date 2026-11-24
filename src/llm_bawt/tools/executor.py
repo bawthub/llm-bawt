@@ -430,13 +430,16 @@ class ToolExecutor:
                 errors.append(str(error))
         remote = self.remote_mcp
         if remote is not None:
-            # Remote names and descriptions are server-supplied: namespaced,
-            # bounded, and their results are labelled untrusted when called.
+            # Remote names, descriptions and schemas are server-supplied and
+            # reach the model, so the turn is marked exposed before they do.
+            extra = remote.select(wanted) if selecting else remote.search_tools(query, limit=limit)
+            if extra and not self._expose_remote_discovery():
+                extra = []
+                errors.append("Remote MCP tools withheld: content provenance is unavailable")
             if selecting:
-                found = found + remote.select(wanted)
+                found = found + extra
             else:
                 # Interleave the two ranked lists so neither starves the other.
-                extra = remote.search_tools(query, limit=limit)
                 merged = [t for pair in zip_longest(found, extra) for t in pair if t is not None]
                 found = merged[:limit]
             if remote.unavailable:
@@ -467,11 +470,24 @@ class ToolExecutor:
             return format_tool_result(tool_call.name, None, error=str(error))
         return format_tool_result(tool_call.name, text)
 
+    def _expose_remote_discovery(self) -> bool:
+        """Record untrusted exposure before remote tool metadata reaches the model."""
+        try:
+            store = self._provenance_store()
+            if store is not None:
+                store.expose(self._content_turn())
+        except Exception:
+            logger.warning("Content provenance unavailable; remote MCP discovery withheld")
+            return False
+        self.external_content_seen = True
+        return True
+
     def _execute_remote_mcp(self, tool_call: ToolCall) -> str:
         """Call a granted remote MCP server's tool; the caller labels the result untrusted."""
         from ..integrations.mcp_servers.tools import RemoteMcpToolError
 
-        arguments = {k: v for k, v in (tool_call.arguments or {}).items() if v is not None}
+        # The remote schema may distinguish null from missing: send what was submitted.
+        arguments = dict(tool_call.arguments or {})
         try:
             text = self.remote_mcp.call_tool(tool_call.name, arguments)
         except RemoteMcpToolError as error:

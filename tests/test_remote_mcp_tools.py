@@ -42,6 +42,10 @@ class FakeServers:
         self.resolved += 1
         return list(self.servers.values())
 
+    def resolve_one(self, bot_slug, slug):
+        assert bot_slug == "fixture-bot"
+        return self.servers.get(slug)
+
 
 @pytest.fixture
 def remote(monkeypatch):
@@ -137,7 +141,8 @@ def test_remote_results_are_labelled_untrusted_with_the_server_source(remote):
     body = strip_tool_result_tags(result).replace(UNTRUSTED_LABEL, "").strip()
     envelope = json.loads(body)
     assert envelope["untrusted_content"] is True and envelope["source"] == "mcp:docs"
-    assert remote.calls[-1] == ("call", "docs", "search_docs", {"query": "setup"})
+    # null is sent, not dropped: the remote schema may tell it from missing
+    assert remote.calls[-1] == ("call", "docs", "search_docs", {"query": "setup", "page": None})
     assert executor.external_content_seen
 
 
@@ -183,3 +188,67 @@ def test_grant_check_is_cached_and_fails_closed(monkeypatch):
         raise RuntimeError("db down")
 
     assert RemoteMcpTools(broken, "fixture-bot").has_servers() is False
+
+
+class Store:
+    def __init__(self, fail=False):
+        self.fail, self.exposed = fail, []
+
+    def expose(self, turn):
+        if self.fail:
+            raise RuntimeError("ledger down")
+        self.exposed.append(turn.bot_id)
+
+    def seen(self, turn):
+        return False
+
+
+def test_remote_discovery_records_exposure_before_the_model_sees_it(remote):
+    executor = _executor(remote.for_turn(), trigger_message_id="msg-1")
+    executor._content_store = store = Store()
+    _run(executor, "tool_search", query="documentation")
+    assert store.exposed == ["fixture-bot"] and executor.external_content_seen
+
+
+def test_remote_discovery_is_withheld_without_recorded_exposure(remote):
+    executor = _executor(remote.for_turn(), trigger_message_id="msg-1")
+    executor._content_store = Store(fail=True)
+    result = _run(executor, "tool_search", query="documentation")
+    assert tool_result_is_error(result) and "withheld" in result
+    assert "docs__search_docs" not in result and not executor.mcp_tool_definitions()
+    assert not executor.external_content_seen
+
+
+def test_a_sign_out_after_discovery_blocks_the_next_call(remote):
+    executor = _executor(remote.for_turn())
+    _run(executor, "tool_search", query="documentation")
+    del remote.fake.servers["docs"]  # signed out / revoked mid-turn
+    result = _run(executor, "docs__search_docs", query="x")
+    assert tool_result_is_error(result) and "not available right now" in result
+    assert not [c for c in remote.calls if c[0] == "call"]
+
+
+def test_list_follows_every_page_within_bounds(monkeypatch):
+    from llm_bawt.integrations.mcp_servers import service
+
+    class Pages:
+        def __init__(self):
+            self.cursors = []
+
+        async def list_tools(self, params=None):
+            cursor = params.cursor if params else None
+            self.cursors.append(cursor)
+            nxt = {None: "b", "b": "c"}.get(cursor)
+            return mcp_types.ListToolsResult(
+                tools=[mcp_types.Tool(name=f"t{cursor}", input_schema=_EMPTY)], next_cursor=nxt)
+
+    pages = Pages()
+    tools = asyncio.run(service.list_all_tools(pages))
+    assert [t.name for t in tools] == ["tNone", "tb", "tc"] and pages.cursors == [None, "b", "c"]
+
+    class Endless:
+        async def list_tools(self, params=None):
+            return mcp_types.ListToolsResult(tools=[], next_cursor="again")
+
+    monkeypatch.setattr(service, "MAX_TOOL_PAGES", 3)
+    assert asyncio.run(service.list_all_tools(Endless())) == []

@@ -9,7 +9,10 @@ server's credential here and forwards ``tools/list`` and ``tools/call``, so
 access and refresh tokens never leave llm-bawt and a revoked grant takes
 effect on the next call.
 
-Bridges label everything returned as untrusted with source ``mcp:<slug>``.
+Everything upstream is untrusted. Before any of it is returned (tool
+definitions included) the gateway records the verified turn's exposure, so
+write admission holds later memory/trait writes whatever the bridge; call
+results also come back labelled with source ``mcp:<slug>``.
 """
 from __future__ import annotations
 
@@ -24,8 +27,11 @@ import mcp.types as types
 from mcp.server.lowlevel import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
+from mcp.shared.exceptions import MCPError
+
+from agent_bridge.content_provenance import label_mcp_output
 from ...task_turn_context import TASK_TURN_CONTEXT_HEADER, open_task_turn_context
-from .service import McpServers, ResolvedServer, open_session
+from .service import McpServers, ResolvedServer, list_all_tools, open_session
 from .store import McpServerError, validate_slug
 
 logger = logging.getLogger(__name__)
@@ -34,8 +40,18 @@ PREFIX = "/remote-mcp/"
 CALL_TIMEOUT_SECONDS = 120.0
 LIST_TIMEOUT_SECONDS = 30.0
 
-_current: contextvars.ContextVar[ResolvedServer | None] = contextvars.ContextVar(
+_current: contextvars.ContextVar[tuple[ResolvedServer, Any] | None] = contextvars.ContextVar(
     "remote_mcp_gateway_server", default=None)
+LIST_FAILED = "The remote MCP server could not list its tools"
+
+
+def _expose(turn) -> None:
+    from ...content_provenance import ContentTurn
+    from ...service.dependencies import get_content_provenance_store
+    from ...utils.config import Config
+
+    get_content_provenance_store(Config()).expose(
+        ContentTurn(turn.bot_id, turn.user_id, turn.turn_id, turn.trigger_message_id))
 
 
 def gateway_path(slug: str) -> str:
@@ -53,16 +69,17 @@ def _slug_of(path: str) -> str | None:
         return None
 
 
-def _turn_bot(scope: dict) -> str | None:
-    """The bot proven by exactly one valid current-turn capability header."""
+def _turn(scope: dict):
+    """The verified current turn from exactly one valid capability header, else None."""
     name = TASK_TURN_CONTEXT_HEADER.lower().encode("ascii")
     values = [v for k, v in scope.get("headers", []) if k.lower() == name]
     if len(values) != 1:
         return None
     try:
-        return open_task_turn_context(values[0].decode("ascii")).bot_id or None
+        turn = open_task_turn_context(values[0].decode("ascii"))
     except Exception:  # noqa: BLE001 - invalid, expired or undecodable: refuse
         return None
+    return turn if turn.bot_id else None
 
 
 async def _refuse(send, status: int, code: str) -> None:
@@ -75,8 +92,10 @@ async def _refuse(send, status: int, code: str) -> None:
 class RemoteMcpGateway:
     """ASGI app serving ``/remote-mcp/<slug>/mcp``; mount beside the BawtHub MCP app."""
 
-    def __init__(self, servers: Callable[[], McpServers], *, security_settings=None):
+    def __init__(self, servers: Callable[[], McpServers], *, security_settings=None,
+                 expose: Callable[[Any], None] = _expose):
         self._servers = servers
+        self._expose = expose
         server = Server("bawthub-remote-mcp", on_list_tools=self._list_tools, on_call_tool=self._call_tool)
         self.manager = StreamableHTTPSessionManager(
             app=server, json_response=True, stateless=True, security_settings=security_settings)
@@ -90,7 +109,8 @@ class RemoteMcpGateway:
         if slug is None:
             await _refuse(send, 404, "not_found")
             return
-        bot = _turn_bot(scope)
+        turn = _turn(scope)
+        bot = turn.bot_id if turn is not None else None
         if bot is None:
             await _refuse(send, 401, "turn_capability_required")
             return
@@ -104,40 +124,66 @@ class RemoteMcpGateway:
             # Unknown, not granted, turned off and signed out all look the same to the bot.
             await _refuse(send, 404, "not_available")
             return
-        token = _current.set(resolved)
+        token = _current.set((resolved, turn))
         try:
             await self.manager.handle_request(scope, receive, send)
         finally:
             _current.reset(token)
 
     @staticmethod
-    def _server() -> ResolvedServer:
-        server = _current.get()
-        if server is None:  # only reachable by a request that skipped __call__
+    def _request() -> tuple[ResolvedServer, Any]:
+        current = _current.get()
+        if current is None:  # only reachable by a request that skipped __call__
             raise RuntimeError("no remote MCP server for this request")
-        return server
+        return current
+
+    async def _exposed(self, turn) -> bool:
+        """Record the turn's untrusted exposure before upstream data can return."""
+        try:
+            await anyio.to_thread.run_sync(self._expose, turn)
+            return True
+        except Exception as exc:  # noqa: BLE001 - fail closed: nothing upstream is returned
+            logger.warning("Remote MCP gateway: content provenance unavailable (%s)", type(exc).__name__)
+            return False
 
     async def _list_tools(self, _ctx, _params) -> types.ListToolsResult:
-        server = self._server()
-        with anyio.fail_after(LIST_TIMEOUT_SECONDS):
-            async with open_session(server.url, server.transport, server.headers) as session:
-                result = await session.list_tools()
-        return types.ListToolsResult(tools=list(result.tools))
+        # Every page is fetched here and returned at once, so the result has no cursor.
+        server, turn = self._request()
+        if not await self._exposed(turn):
+            raise MCPError(-32603, "Content provenance is unavailable; remote tools withheld")
+        try:
+            with anyio.fail_after(LIST_TIMEOUT_SECONDS):
+                async with open_session(server.url, server.transport, server.headers) as session:
+                    tools = await list_all_tools(session)
+        except Exception as exc:  # fixed error: never the upstream diagnostics or URL
+            logger.warning("Remote MCP gateway listing %s failed: %s", server.slug, type(exc).__name__)
+            raise MCPError(-32603, LIST_FAILED) from None
+        return types.ListToolsResult(tools=list(tools))
 
     async def _call_tool(self, _ctx, params: types.CallToolRequestParams) -> types.CallToolResult:
-        server = self._server()
+        server, turn = self._request()
+        if not await self._exposed(turn):
+            return _error("Content provenance is unavailable; nothing was executed.")
         arguments: dict[str, Any] = dict(params.arguments or {})
         try:
             with anyio.fail_after(CALL_TIMEOUT_SECONDS):
                 async with open_session(server.url, server.transport, server.headers) as session:
-                    return await session.call_tool(params.name, arguments)
+                    result = await session.call_tool(params.name, arguments)
         except Exception as exc:  # never echo transport details or credentials
             logger.warning("Remote MCP gateway call %s/%s failed: %s", server.slug, params.name,
                            type(exc).__name__)
-            return types.CallToolResult(
-                content=[types.TextContent(type="text",
-                                           text=f"{server.name} could not run {params.name} ({type(exc).__name__})")],
-                is_error=True)
+            return _error(f"{server.name} could not run {params.name} ({type(exc).__name__})")
+        return labelled(result, f"mcp:{server.slug}")
+
+
+def _error(text: str) -> types.CallToolResult:
+    return types.CallToolResult(content=[types.TextContent(type="text", text=text)], is_error=True)
+
+
+def labelled(result: types.CallToolResult, source: str) -> types.CallToolResult:
+    """The upstream result with every text block wrapped as untrusted ``source`` data."""
+    data = result.model_dump(by_alias=True, mode="json", exclude_none=True)
+    return types.CallToolResult.model_validate(label_mcp_output(data, source))
 
 
 class WithRemoteMcp:

@@ -23,6 +23,8 @@ logger = logging.getLogger(__name__)
 TOOL_SEPARATOR = "__"
 LIST_TIMEOUT_SECONDS = 20
 MAX_GRANTS = 200
+MAX_TOOL_PAGES = 20
+MAX_TOOLS = 1000
 
 
 @dataclass(frozen=True)
@@ -233,6 +235,22 @@ async def open_session(server_url: str, transport: str, headers: dict[str, str])
                 yield session
 
 
+async def list_all_tools(session) -> list:
+    """Every page of a server's tool catalog, bounded in pages and tools."""
+    from mcp.types import PaginatedRequestParams
+
+    tools: list = []
+    cursor = None
+    for _ in range(MAX_TOOL_PAGES):
+        result = await (session.list_tools(params=PaginatedRequestParams(cursor=cursor)) if cursor
+                        else session.list_tools())
+        tools.extend(result.tools)
+        cursor = getattr(result, "next_cursor", None) or getattr(result, "nextCursor", None)
+        if not cursor or len(tools) >= MAX_TOOLS:
+            break
+    return tools[:MAX_TOOLS]
+
+
 async def _list_tools(server: McpServer, headers: dict[str, str]):
     async with open_session(server.url, server.transport, headers) as session:
-        return (await session.list_tools()).tools
+        return await list_all_tools(session)
