@@ -83,10 +83,14 @@ class ClaudeCodeBridge(
         # Shared session queue — serializes sends per session and tracks
         # active tasks for abort support.
         self._session_queue = SessionQueue()
+        # TASK-2590: a tools-off reader house never joins inbox delivery or the
+        # fleet-wide inbox repair (it must not claim another bot's work).
+        from agent_bridge.houses import house_from_env, tools_off_from_env
+
         self._inbox_consumer = InboxConsumer(
             InboxAPI(app_api_url), self._session_queue, owner=f"bridge-{uuid.uuid4().hex}",
             backend=backend_name,
-        ) if app_api_url else None
+        ) if app_api_url and not tools_off_from_env(house_from_env()) else None
         # request_id → frontend user-message UUID, populated in _handle_send
         # and read by _publish_event so every emitted AgentEvent (tool_*,
         # assistant_*, etc.) carries the originating message id.  Cleared on

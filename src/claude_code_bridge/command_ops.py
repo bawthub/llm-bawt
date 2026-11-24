@@ -28,6 +28,9 @@ from ._bridge_helpers import (
 
 logger = logging.getLogger("claude_code_bridge.bridge")
 
+# TASK-2590: commands a tools-off reader house refuses (acked, never handled).
+TOOLS_OFF_REFUSED_ACTIONS = frozenset({"chat.steer", "chat.tool_result", "approval.grant"})
+
 
 class ClaudeCommandMixin:
     """Claude Redis command listener + tool-result/RPC handlers (TASK-555).
@@ -105,6 +108,13 @@ class ClaudeCommandMixin:
         self._command_ack_owner.start()
         self._command_ready = True
         logger.info("Command listener started on %s (group=claude-code-bridge)", COMMANDS_STREAM)
+        if getattr(getattr(self, "_house_slot", None), "tools_off", False):
+            # TASK-2590 startup marker: operators grep this after launch.
+            logger.warning(
+                "tools-off house active: house=%s inbox_consumer=%s refused=%s",
+                self._house_slot.house, getattr(self, "_inbox_consumer", None) is not None,
+                ",".join(sorted(TOOLS_OFF_REFUSED_ACTIONS)),
+            )
 
         # TASK-291: subscribe to approval-policy reload broadcasts so admin
         # edits drop the cached bundle without a restart. Best-effort.
@@ -153,14 +163,10 @@ class ClaudeCommandMixin:
                             asyncio.create_task(
                                 self._handle_rpc(fields, msg_id, async_redis)
                             )
-                        elif action == "chat.steer" and getattr(
+                        elif action in TOOLS_OFF_REFUSED_ACTIONS and getattr(
                             getattr(self, "_house_slot", None), "tools_off", False,
                         ):
-                            # TASK-2590: a tools-off house runs only whole strict
-                            # turns; nothing is injected into a running one.
-                            logger.warning("tools-off house refused a steer: request=%s",
-                                           (fields.get("request_id") or "").strip())
-                            await async_redis.xack(COMMANDS_STREAM, "claude-code-bridge", msg_id)
+                            await self._refuse_on_tools_off(action, fields, msg_id, async_redis)
                         elif action == "chat.steer":
                             # Side-channel into the live ClaudeSDKClient. Never
                             # take the per-session send lock: _handle_send owns it
@@ -199,6 +205,23 @@ class ClaudeCommandMixin:
                 self._house_slot.listener_failed()
                 logger.exception("Command listener error")
                 await asyncio.sleep(2)
+
+    async def _refuse_on_tools_off(self, action: str, fields: dict, msg_id: str, async_redis) -> None:
+        """TASK-2590: a tools-off house runs only whole strict turns.
+
+        Steer gets the normal negative RPC result; tool results and approval
+        grants are dropped before any handler. Every refusal is acked.
+        """
+        request_id = (fields.get("request_id") or "").strip()
+        logger.warning("tools-off house refused %s: request=%s", action, request_id)
+        if action == "chat.steer" and request_id:
+            try:
+                self._publisher.publish_rpc_result(
+                    request_id, {"ok": False, "error": "tools-off house refuses steer"},
+                )
+            except Exception:
+                logger.exception("tools-off steer refusal result failed: request=%s", request_id)
+        await async_redis.xack(COMMANDS_STREAM, "claude-code-bridge", msg_id)
 
     async def _handle_steer(
         self, fields: dict, msg_id: str, async_redis,
