@@ -35,6 +35,13 @@ class ResolvedServer:
     headers: dict[str, str] = field(repr=False, default_factory=dict)
 
 
+def _bearer(token: str | None) -> str:
+    token = (token or "").strip()
+    if not token or len(token) > 8192 or any(c in token for c in "\r\n"):
+        raise McpServerError("invalid_bearer_token")
+    return token
+
+
 def tool_name(slug: str, tool: str) -> str:
     return f"{slug}{TOOL_SEPARATOR}{tool}"
 
@@ -47,6 +54,9 @@ class McpServers:
         self.store = McpServerStore(engine)
         self.credentials = credentials if credentials is not None else IntegrationStore(config)
         self.oauth = oauth if oauth is not None else McpOAuth(config, store=self.credentials)
+        # Credential writes are fenced to the exact row (slug, URL, generation)
+        # they began for, under the slug's lifecycle lock shared with create/remove.
+        self.oauth.current = self.store.get
 
     # --- configuration ------------------------------------------------------
 
@@ -74,13 +84,15 @@ class McpServers:
             raise McpServerError("https_required")  # never send a credential in plaintext
         if auth_kind == "bearer" and not (bearer_token or "").strip():
             raise McpServerError("bearer_token_required")
-        if self.store.get(slug) is not None:
-            raise McpServerError("slug_taken")
-        # Stale secrets from an earlier server with this slug must never attach to the new one.
-        self.oauth.disconnect(slug)
-        self.store.create(server, actor)
-        if auth_kind == "bearer":
-            self.set_bearer(slug, bearer_token or "")
+        token = _bearer(bearer_token) if auth_kind == "bearer" else None
+        with self.oauth.fenced(server):
+            if self.store.get(slug) is not None:
+                raise McpServerError("slug_taken")
+            # Stale secrets from an earlier server with this slug must never attach to the new one.
+            self.oauth.disconnect(slug)
+            self.store.create(server, actor)
+            if token:
+                self._write_bearer(server, token)
         return self.describe(server)
 
     def update(self, slug: str, *, name: str | None, enabled: bool | None, actor: str | None) -> dict:
@@ -91,26 +103,27 @@ class McpServers:
         return self.describe(self.get(slug))
 
     def delete(self, slug: str) -> bool:
-        removed = self.store.delete(slug)
-        self.oauth.disconnect(slug)
+        with self.credentials.lifecycle(store_id(slug)):
+            removed = self.store.delete(slug)
+            self.oauth.disconnect(slug)
         return removed
 
     def set_bearer(self, slug: str, token: str) -> None:
         server = self.get(slug)
-        token = token.strip()
-        if server.auth_kind != "bearer" or not token or len(token) > 8192 or any(c in token for c in "\r\n"):
+        if server.auth_kind != "bearer":
             raise McpServerError("invalid_bearer_token")
-        self.credentials.save(ConnectionRecord(
-            provider=store_id(slug), status="connected", auth_method="bearer",
-            meta={"server_url": server.url, "generation": server.generation}, secret={"token": token}))
-        # A concurrent remove/re-add can replace the row while we save: never leave
-        # this token behind for a different server with the same slug.
-        current = self.store.get(slug)
-        if current is None or current.generation != server.generation:
-            record = self.credentials.load(store_id(slug))
-            if record and record.meta.get("generation") == server.generation:
-                self.credentials.delete(store_id(slug))
+        token = _bearer(token)
+        with self.oauth.fenced(server):
+            self._write_bearer(server, token)
+
+    def _write_bearer(self, server: McpServer, token: str) -> None:
+        """Under the slug's lifecycle lock: save only for the row this request read."""
+        current = self.store.get(server.slug)
+        if current is None or current.generation != server.generation or current.url != server.url:
             raise McpServerError("not_found")
+        self.credentials.save(ConnectionRecord(
+            provider=store_id(server.slug), status="connected", auth_method="bearer",
+            meta={"server_url": server.url, "generation": server.generation}, secret={"token": token}))
 
     def set_grants(self, slug: str, grants: list[dict], actor: str | None) -> dict:
         if not isinstance(grants, list) or len(grants) > MAX_GRANTS:
@@ -138,17 +151,33 @@ class McpServers:
             return {"Authorization": f"Bearer {record.secret['token']}"}
         return {"Authorization": f"Bearer {self.oauth.access_token(server)}"}
 
+    def granted(self, bot_slug: str, tags: list[str] | None = None) -> list[McpServer]:
+        """Enabled servers granted to the bot directly or by tag; no credentials touched."""
+        if tags is None:
+            from ...bot_tags.store import BotTagStore
+            tags = BotTagStore(self.store.engine).tags_for(bot_slug)
+        return self.store.servers_for(bot_slug, tags)
+
+    def resolve_one(self, bot_slug: str, slug: str) -> ResolvedServer | None:
+        """One granted server with a live credential, or None (ungranted, off or signed out)."""
+        server = next((s for s in self.granted(bot_slug) if s.slug == slug), None)
+        if server is None:
+            return None
+        try:
+            headers = self.headers(server)
+        except IntegrationError as exc:
+            logger.warning("MCP server %s unavailable for %s: %s", slug, bot_slug, exc)
+            return None
+        return ResolvedServer(server.slug, server.name, server.url, server.transport, headers)
+
     def resolve_for_bot(self, bot_slug: str, tags: list[str] | None = None) -> list[ResolvedServer]:
         """Servers granted to the bot (directly or by tag) that have a usable credential.
 
         A server that can't produce a credential right now is skipped and logged,
         so one expired sign-in never takes a bot's other tools down.
         """
-        if tags is None:
-            from ...bot_tags.store import BotTagStore
-            tags = BotTagStore(self.store.engine).tags_for(bot_slug)
         resolved = []
-        for server in self.store.servers_for(bot_slug, tags):
+        for server in self.granted(bot_slug, tags):
             try:
                 headers = self.headers(server)
             except IntegrationError as exc:
