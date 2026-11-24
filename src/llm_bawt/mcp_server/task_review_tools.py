@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from typing import Any, Literal, NotRequired, TypedDict
 from urllib.parse import quote
 
@@ -34,6 +35,19 @@ from .task_api import (
 )
 
 logger = logging.getLogger(__name__)
+_GIT_REVIEW_PIN = re.compile(
+    r"(?:(?:bawthub|llm-bawt|agent-skills|bawthub-cli|bawthub-public-site|bawthub-skills|"
+    r"bawthub-android-app|deployment|frontend|backend)(?:\s*[:=]\s*|\s+))?(`?)[0-9a-f]{7,40}\1",
+    re.IGNORECASE,
+)
+_OPS_REVIEW_PIN = re.compile(r"ops-catalog:[a-z0-9_-]+@v[1-9][0-9]*#sha256:[0-9a-f]{64}")
+
+
+def _review_target_is_verifiable(target: str) -> bool:
+    value = target.strip()
+    return bool(_OPS_REVIEW_PIN.fullmatch(value)) or all(
+        _GIT_REVIEW_PIN.fullmatch(part.strip()) for part in re.split(r"[;+,]|\s+[&/]\s+", value)
+    )
 
 # The same internal listener as task association and initiative state.
 _INTERNAL_URL = os.getenv(
@@ -203,8 +217,9 @@ async def add_task_review(
         verdict: APPROVE, APPROVE_WITH_CHANGES, REQUEST_CHANGES, or COMMENT.
         body: Non-empty review text; for an approval without notes use a short rationale.
         bot_id: Your own bot ID, sent as actor context, not as a review author field.
-        target_revision: Optional description digest or commit reference. For an
-            ops catalog revision, use the same canonical tagged reference as FIXED.revision.
+        target_revision: For code, the exact reviewed commit SHA(s). Put packet
+            and patch digests in the body. For an ops catalog revision, use the
+            same canonical tagged reference as FIXED.revision.
         idempotency_key: Stable key to safely retry the same submission.
         findings: Optional, in order (max 40). BLOCKER needs REQUEST_CHANGES
             and failure_scenario; line needs file.
@@ -229,6 +244,12 @@ async def add_task_review(
     )
     if isinstance(result, dict) and not result.get("error"):
         await notify_review_owner(task_id, bot_id, result)
+        if (stage == "IMPLEMENTATION" and verdict in ("APPROVE", "APPROVE_WITH_CHANGES")
+                and target_revision is not None and not _review_target_is_verifiable(target_revision)):
+            return {**result, "targetRevisionWarning": (
+                "Review recorded. For code approvals, set target_revision to the exact reviewed Git commit SHA(s); "
+                "put packet and patch digests in the body."
+            )}
     return result
 
 

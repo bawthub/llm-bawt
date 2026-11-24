@@ -89,3 +89,26 @@ def test_add_notifies_only_on_a_recorded_review(monkeypatch):
     fake_record.result = {"id": "rev-2", "verdict": "APPROVE"}
     run(task_review_tools.add_task_review("TASK-7", "IMPLEMENTATION", "APPROVE", "ok", "byte"))
     assert notified == [("TASK-7", "byte", "rev-2")]
+
+
+def test_non_git_target_warns_only_after_recording_implementation_approval(monkeypatch):
+    saved, notified = [], []
+    receipt = {"id": "rev-3", "verdict": "APPROVE"}
+
+    async def fake_record(*args):
+        saved.append(args[5])
+        return receipt
+
+    async def fake_notify(task_id, reviewer, review):
+        notified.append(review)
+
+    monkeypatch.setattr(task_review_tools, "_record_review", fake_record)
+    monkeypatch.setattr(task_review_tools, "notify_review_owner", fake_notify)
+    for target in ("patch deadbeef", "sha256:" + "a" * 64):
+        result = run(task_review_tools.add_task_review("TASK-7", "IMPLEMENTATION", "APPROVE", "ok", "byte", target))
+        assert saved[-1] == target and notified[-1] == receipt
+        assert result["id"] == receipt["id"]
+        assert "Review recorded" in result["targetRevisionWarning"]
+    for target in ("a" * 40, f"llm-bawt:{'c' * 40}; agent-skills:{'b' * 40}", "ops-catalog:cleanup@v1#sha256:" + "d" * 64):
+        assert run(task_review_tools.add_task_review("TASK-7", "IMPLEMENTATION", "APPROVE", "ok", "byte", target)) == receipt
+    assert run(task_review_tools.add_task_review("TASK-7", "DESIGN", "APPROVE", "ok", "byte", "plan digest")) == receipt

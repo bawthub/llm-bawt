@@ -58,6 +58,8 @@ def test_reviews_add_forwards_typed_contract_and_bot_actor(monkeypatch, stage, v
         "TASK-1144", stage, verdict, "Review text", "snark",
         target_revision="sha256:abc", idempotency_key="review:1144:r1",
     ))
+    if stage == "IMPLEMENTATION" and verdict in ("APPROVE", "APPROVE_WITH_CHANGES"):
+        assert "Review recorded" in receipt.pop("targetRevisionWarning")
     assert receipt == {"id": "review-1", "authorActorId": "snark", "body": "Review text"}
     assert calls == [("/tasks/TASK-1144/reviews", {
         "stage": stage,
