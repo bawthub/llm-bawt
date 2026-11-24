@@ -6,6 +6,7 @@ import json
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import mcp.types as mcp_types
 import pytest
 
 from llm_bawt.integrations.bawthub_mcp import client as mcp_client
@@ -16,13 +17,15 @@ from llm_bawt.task_turn_context import TASK_TURN_CONTEXT_HEADER
 from llm_bawt.tools.executor import ToolExecutor
 from llm_bawt.tools.parser import ToolCall, strip_tool_result_tags, tool_result_is_error
 
+_EMPTY = {"type": "object", "properties": {}}
+# Real SDK objects, so the client reads the field the installed SDK exposes.
 CATALOG = [
-    SimpleNamespace(name="memory_search", description="Search stored memories",
-                    inputSchema={"type": "object", "properties": {
-                        "query": {"type": "string", "description": "What to find"}},
-                        "required": ["query"]}),
-    SimpleNamespace(name="messages_find", description="Find past messages", inputSchema=None),
-    SimpleNamespace(name="ops_run", description="Run a service operation", inputSchema=None),
+    mcp_types.Tool(name="memory_search", description="Search stored memories",
+                   input_schema={"type": "object", "properties": {
+                       "query": {"type": "string", "description": "What to find"}},
+                       "required": ["query"]}),
+    mcp_types.Tool(name="messages_find", description="Find past messages", input_schema=_EMPTY),
+    mcp_types.Tool(name="ops_run", description="Run a service operation", input_schema=_EMPTY),
 ]
 
 

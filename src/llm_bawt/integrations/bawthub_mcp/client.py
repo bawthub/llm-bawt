@@ -138,7 +138,9 @@ class BawtHubMcpClient:
             McpToolDefinition(
                 name=t.name,
                 description=t.description or "",
-                input_schema=getattr(t, "inputSchema", None) or {"type": "object", "properties": {}},
+                # mcp SDK 2.x names it input_schema; 1.x used inputSchema.
+                input_schema=(getattr(t, "input_schema", None) or getattr(t, "inputSchema", None)
+                              or {"type": "object", "properties": {}}),
             )
             for t in raw
             if t.name in self._allowlist
