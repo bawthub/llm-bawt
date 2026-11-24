@@ -267,6 +267,38 @@ def _load_bot_tags(engine) -> dict[str, list[str]] | None:
         return None
 
 
+class _ReadOnlyProfileReader:
+    """Slug-filtered profile read over the existing schema.
+
+    Unlike BotProfileStore it never bootstraps (no DDL, column migration or the
+    fleet-wide tag migration); a schema that is not ready refuses instead.
+    """
+
+    def __init__(self, engine):
+        self.engine = engine
+
+    @classmethod
+    def open(cls, config):
+        from llm_bawt.utils.config import has_database_credentials
+        from llm_bawt.utils.db import get_shared_engine
+        if not has_database_credentials(config):
+            raise BotRegistryUnavailable("strict reader needs a configured database")
+        engine = get_shared_engine(config)
+        if engine is None:
+            raise BotRegistryUnavailable("bot profiles DB engine unavailable")
+        from sqlalchemy import inspect
+        names = set(inspect(engine).get_table_names())
+        if not {"bot_profiles", "bot_profile_tags"} <= names:
+            raise BotRegistryUnavailable("bot profile schema not bootstrapped; strict reader refuses")
+        return cls(engine)
+
+    def get(self, slug: str):
+        from sqlmodel import Session, select
+        from llm_bawt.runtime_settings import BotProfile
+        with Session(self.engine) as session:
+            return session.exec(select(BotProfile).where(BotProfile.slug == slug)).first()
+
+
 def load_named_bot(config, slug: str, *, profile_store=None, tag_store=None) -> Bot | None:
     """Read exactly one bot by slug, bypassing the shared registry.
 
@@ -279,10 +311,7 @@ def load_named_bot(config, slug: str, *, profile_store=None, tag_store=None) -> 
     if not normalized:
         return None
     if profile_store is None:
-        from llm_bawt.runtime_settings import BotProfileStore
-        profile_store = BotProfileStore(config)
-        if profile_store.engine is None:
-            raise BotRegistryUnavailable(profile_store.init_error or "bot profiles DB engine unavailable")
+        profile_store = _ReadOnlyProfileReader.open(config)
     row = profile_store.get(normalized)
     if row is None or (row.slug or "").strip().lower() != normalized:
         return None

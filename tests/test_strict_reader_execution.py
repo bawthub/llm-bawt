@@ -355,3 +355,60 @@ def test_ordinary_turn_assembly_keeps_registry_resolution():
     assert ordinary._tag_context_enabled() is True
     assert ordinary._resolve_skills(OrdinarySvc, "engine") == "resolution"
     assert seen == ["engine", SLUG]
+
+
+# --- Production reader and ingress (Codex cmwu4ge0j009u0mojv2mk0exg) ---
+
+def _sqlite_engine(monkeypatch, *, tables):
+    from sqlalchemy import create_engine, text
+
+    from llm_bawt.runtime_settings import BotProfile, BotProfileStore
+    from llm_bawt.utils import config as config_mod
+    from llm_bawt.utils import db as db_mod
+
+    engine = create_engine("sqlite://")
+    if tables:
+        BotProfile.__table__.create(engine)
+        with engine.begin() as conn:
+            conn.execute(text("CREATE TABLE bot_profile_tags (bot_slug TEXT, tag_slug TEXT)"))
+    monkeypatch.setattr(config_mod, "has_database_credentials", lambda c: True)
+    monkeypatch.setattr(db_mod, "get_shared_engine", lambda c: engine)
+
+    def no_bootstrap(*_a, **_k):
+        raise AssertionError("BotProfileStore bootstrap ran")
+
+    monkeypatch.setattr(BotProfileStore, "__init__", no_bootstrap)
+    return engine
+
+
+def test_production_reader_refuses_unbootstrapped_schema_without_migrating(monkeypatch):
+    _sqlite_engine(monkeypatch, tables=False)
+    with pytest.raises(bots.BotRegistryUnavailable):
+        load_named_bot(None, SLUG, tag_store=TagStore())
+
+
+def test_production_reader_reads_one_row_over_existing_schema(monkeypatch):
+    from sqlmodel import Session
+
+    from llm_bawt.runtime_settings import BotProfile
+
+    engine = _sqlite_engine(monkeypatch, tables=True)
+    with Session(engine) as s:
+        s.add(BotProfile(slug=SLUG, name="Sample", system_prompt="hi"))
+        s.add(BotProfile(slug="other-agent", name="Other", system_prompt="hi"))
+        s.commit()
+    tags = TagStore()
+    bot = load_named_bot(None, SLUG, tag_store=tags)
+    assert bot.slug == SLUG and tags.calls == [SLUG]
+    assert load_named_bot(None, "missing-agent", tag_store=tags) is None
+
+
+def test_typed_new_for_strict_bot_refuses_before_registry():
+    from fastapi import HTTPException
+
+    from llm_bawt.service.routes.chat import _reject_reset_for_unknown_bot
+
+    req = SimpleNamespace(bot_id=SLUG, messages=[{"role": "user", "content": "/new"}])
+    with pytest.raises(HTTPException) as exc:
+        _reject_reset_for_unknown_bot(_service(), req)
+    assert exc.value.status_code == 400

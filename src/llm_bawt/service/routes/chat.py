@@ -989,6 +989,10 @@ def _reject_reset_for_unknown_bot(service, request: ChatCompletionRequest) -> No
     bot_id = (request.bot_id or "").strip()
     if not bot_id or not is_new_command(last_user_text(request.messages) or ""):
         return
+    from ..strict_reader_execution import is_strict_request
+    if is_strict_request(service, bot_id):
+        # Unsupported control for the strict reader; refuse before any registry lookup.
+        raise HTTPException(status_code=400, detail="/new is not supported for this bot")
     # BotManager retries a pending registry reload; the bare cache lookup would not.
     if BotManager(getattr(service, "config", None)).get_bot(bot_id) is None:
         raise HTTPException(status_code=404, detail=f"Bot '{bot_id}' not found")
