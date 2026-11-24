@@ -52,6 +52,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_ops_approvals_pg.py::",
     "test_approval_fanout_pg.py::",
     "test_skill_assignments_pg.py::",
+    "test_mcp_servers_pg.py::",
     "test_bot_profile_patch_pg.py::",
     "test_bot_slug_aliases_pg.py::",
     "test_notify_user_pg.py::",

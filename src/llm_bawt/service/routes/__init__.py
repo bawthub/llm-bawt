@@ -28,6 +28,7 @@ from .prompts import router as prompts_router
 from .profiles import router as profiles_router
 from .providers import router as providers_router
 from .integrations import router as integrations_router
+from .mcp_servers import router as mcp_servers_router
 from .settings import router as settings_router
 from .bot_purge_preview import router as bot_purge_preview_router
 from .turn_tasks import router as turn_tasks_router
@@ -97,6 +98,7 @@ all_routers = [
     prompts_router,
     providers_router,
     nextcloud_setup_router,  # Specific setup routes precede generic integration paths.
+    mcp_servers_router,
     integrations_router,
     settings_router,
     bot_purge_preview_router,

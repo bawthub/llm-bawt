@@ -84,6 +84,7 @@ RETAINED = (
         "recall_evidence_ledgers", "notify_log", "ops_resume_notices", "system_events",
     )),
     scoped("skill_assignments", disposition="retained", reason=_RETAINED_REASON),
+    scoped("mcp_server_grants", disposition="retained", reason=_RETAINED_REASON),
     owned("message_routes", "selected_bot_id", disposition="retained", reason="Routing receipts are retained; other actor references are not exhaustively counted."),
     owned("ops_jobs", "caller_bot_id", disposition="retained", reason="Operational jobs/provenance are retained, not cancelled."),
     InventorySpec("profile_session_pointer_effects", "bot_profiles", ("last_session_id",),
