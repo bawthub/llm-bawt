@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import aclosing
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from .delivery_reply import resolve_delivery_reply
 
@@ -132,11 +132,25 @@ class FreshTurnText:
         return False, tail
 
 
+FRESH_DURABLE_CHECK_SECONDS = 1.0
+
+
 async def _stream_fresh_turn(reader: Any, fresh: FreshTurnText, on_text: Callable[[str], None],
-                             *, deadline: float) -> None:
+                             *, deadline: float,
+                             still_running: Callable[[], Awaitable[bool]]) -> None:
+    """Release live text; stop when Redis ends it or the durable delivery settles.
+
+    A missed terminal event must not hide a persisted reply, so the durable
+    delivery is re-checked at least every FRESH_DURABLE_CHECK_SECONDS.
+    """
     loop = asyncio.get_running_loop()
+    next_check = loop.time() + FRESH_DURABLE_CHECK_SECONDS
     async with aclosing(reader.events(timeout_s=max(0, deadline - loop.time()))) as events:
         async for event in events:
+            if loop.time() >= next_check or event is None:
+                if not await still_running():
+                    return
+                next_check = loop.time() + FRESH_DURABLE_CHECK_SECONDS
             if event is None:
                 continue
             stop, text = fresh.accept(event)
@@ -207,7 +221,17 @@ async def observe_voice_step(service: Any, request: Any, receipt: dict, reader: 
                     # The request's own fresh turn is running: speak its text as
                     # it streams, then wait for the persisted reply's remainder.
                     fresh = FreshTurnText(resolved["turn_id"], bot, user)
-                    await _stream_fresh_turn(reader, fresh, on_text, deadline=deadline)
+                    async def still_running() -> bool:
+                        current = await asyncio.to_thread(
+                            resolve_delivery_reply, deliveries, service._turn_log_store,
+                            receipt["delivery_id"], bot_id=bot, user_id=user,
+                            user_message_id=receipt["user_message_id"], include_voice_binding=True,
+                        )
+                        return bool(current) and current.get("status") in {
+                            "QUEUED", "STEERING", "DISPATCHING", "IN_FLIGHT"}
+
+                    await _stream_fresh_turn(reader, fresh, on_text, deadline=deadline,
+                                             still_running=still_running)
                     continue
                 await asyncio.sleep(min(0.25, max(0, deadline - loop.time())))
             step = VoiceStep(binding, receipt["user_message_id"], bot, user)

@@ -118,25 +118,32 @@ async def _wait_stream_reply(
         yield frame
 
 
-def _live_frame(request: ChatCompletionRequest, response_id: str, text: str) -> str:
+def _live_frame(request: ChatCompletionRequest, response_id: str, created: int, text: str,
+                *, first: bool) -> str:
+    delta = {"role": "assistant", "content": text} if first else {"content": text}
     return _data({
-        "id": response_id, "object": "chat.completion.chunk", "created": int(time.time()),
+        "id": response_id, "object": "chat.completion.chunk", "created": created,
         "model": _model(request),
-        "choices": [{"index": 0, "finish_reason": None, "delta": {"content": text}}],
+        "choices": [{"index": 0, "finish_reason": None, "delta": delta}],
     })
 
 
 def _reply_frames(
     request: ChatCompletionRequest, text: str, *, extensions: str = "none",
-    animation: str | None = None,
+    animation: str | None = None, continued: tuple[str, int] | None = None,
 ):
-    response_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
-    created, model = int(time.time()), _model(request)
-    yield _data({
-        "id": response_id, "object": "chat.completion.chunk", "created": created,
-        "model": model, "choices": [{"index": 0, "finish_reason": None,
-                               "delta": {"role": "assistant", "content": text}}],
-    })
+    """Whole reply, or (``continued``) the tail of an already-started completion."""
+    if continued is None:
+        response_id, created = f"chatcmpl-{uuid.uuid4().hex[:12]}", int(time.time())
+    else:
+        response_id, created = continued
+    model = _model(request)
+    if continued is None or text:
+        delta = {"content": text} if continued else {"role": "assistant", "content": text}
+        yield _data({
+            "id": response_id, "object": "chat.completion.chunk", "created": created,
+            "model": model, "choices": [{"index": 0, "finish_reason": None, "delta": delta}],
+        })
     if animation:
         payload = {"object": "service.animation", "animation": animation}
         yield from _openai_frames(_data(payload), payload, extensions)
@@ -265,8 +272,8 @@ async def completion_stream(
                     # Route on the durable outcome, not just the advisory busy
                     # snapshot: another admission can start before this claim.
                     reply = None
-                    streamed = False
                     live_id: str | None = None
+                    live_created = 0
                     busy = payload.get("busy") is True
                     if not busy or payload.get("steer_capable") is True:
                         deadline = voice_deadline if busy else (
@@ -289,20 +296,25 @@ async def completion_stream(
                             while True:
                                 if live:
                                     text, live[:] = "".join(live), []
-                                    streamed = True
-                                    live_id = live_id or f"chatcmpl-{uuid.uuid4().hex[:12]}"
-                                    yield _live_frame(request, live_id, text)
+                                    first = live_id is None
+                                    if first:
+                                        live_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+                                        live_created = int(time.time())
+                                    yield _live_frame(request, live_id, live_created, text,
+                                                      first=first)
                                 if observer.done():
                                     break
                                 arrived.clear()
                                 waiter = asyncio.ensure_future(arrived.wait())
-                                done, _ = await asyncio.wait(
-                                    {observer, waiter}, timeout=15.0,
-                                    return_when=asyncio.FIRST_COMPLETED,
-                                )
-                                if not waiter.done():
-                                    waiter.cancel()
-                                    await asyncio.gather(waiter, return_exceptions=True)
+                                try:
+                                    done, _ = await asyncio.wait(
+                                        {observer, waiter}, timeout=15.0,
+                                        return_when=asyncio.FIRST_COMPLETED,
+                                    )
+                                finally:
+                                    if not waiter.done():
+                                        waiter.cancel()
+                                        await asyncio.gather(waiter, return_exceptions=True)
                                 if not done:
                                     yield ": waiting for voice reply\n\n"
                             reply = await observer
@@ -310,9 +322,10 @@ async def completion_stream(
                             if not observer.done():
                                 observer.cancel()
                                 await asyncio.gather(observer, return_exceptions=True)
-                    if reply is None and streamed:
+                    if reply is None and live_id:
                         # Live text was spoken; end cleanly without a warning.
-                        for frame in _reply_frames(request, "", extensions=extensions):
+                        for frame in _reply_frames(request, "", extensions=extensions,
+                                                   continued=(live_id, live_created)):
                             yield frame
                     elif reply is None:
                         warning = {"object": "service.warning", "warnings": ["voice_step_unavailable"]}
@@ -322,6 +335,7 @@ async def completion_stream(
                     else:
                         for frame in _reply_frames(
                             request, reply.text, extensions=extensions, animation=reply.animation,
+                            continued=(live_id, live_created) if live_id else None,
                         ):
                             yield frame
                 else:

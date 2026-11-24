@@ -1017,7 +1017,6 @@ def test_fresh_turn_text_is_released_live_and_only_the_unspoken_tail_follows(res
         ]
         spoken: list[str] = []
         reader = _Reader([
-            None,
             _fresh("text_delta", text_offset=0, delta="First block."),
             {**_fresh("text_delta", text_offset=0, delta="other"), "turn_id": "turn-other"},
             _fresh("tool_event", event="tool_start", text_offset=12),
@@ -1084,5 +1083,65 @@ def test_adapter_streams_live_frames_then_a_clean_finish(monkeypatch):
         assert "".join(c for c in contents if c) == "First block. Second."
         assert frames[-1] == DONE
         assert not any("voice_step_unavailable" in f for f in frames)
+
+    asyncio.run(scenario())
+
+
+def test_fresh_turn_missed_terminal_recovers_the_durable_remainder(resolver):
+    async def scenario():
+        resolver.side_effect = [
+            _fresh_resolved(),
+            _fresh_resolved(),  # idle tick: still running
+            {"status": "DELIVERED", "voice_direct_reply": True, "response_text": "Start. End."},
+            {"status": "DELIVERED", "voice_direct_reply": True, "response_text": "Start. End."},
+        ]
+        spoken: list[str] = []
+        # Prefix, then only idle ticks: the terminal Redis event never arrives.
+        reader = _Reader([_fresh("text_delta", text_offset=0, delta="Start."), None, None, None])
+        assert await _observe_live(_service(), reader, spoken) == voice_step.VoiceReply(" End.")
+        assert spoken == ["Start."]
+        assert resolver.call_count == 4
+
+    asyncio.run(scenario())
+
+
+def test_adapter_live_and_final_frames_share_one_completion(monkeypatch):
+    async def scenario():
+        async def observer(*_args, on_text, **_kwargs):
+            on_text("Live.")
+            await asyncio.sleep(0)
+            return voice_step.VoiceReply(" Tail.")
+
+        monkeypatch.setattr(voice_step, "observe_voice_step", observer)
+        service = _stream_service({**RECEIPT, "busy": False}, _Reader())
+        chunks = [c for c in _chunks(await _collect(service)) if c.get("choices")]
+        assert len({(c["id"], c["created"]) for c in chunks}) == 1
+        roles = [c["choices"][0]["delta"].get("role") for c in chunks]
+        assert roles[0] == "assistant" and roles[1:] == [None] * (len(roles) - 1)
+        assert "".join(c["choices"][0]["delta"].get("content") or "" for c in chunks) == "Live. Tail."
+        assert chunks[-1]["choices"][0]["finish_reason"] == "stop"
+
+    asyncio.run(scenario())
+
+
+def test_adapter_cancellation_joins_the_live_waiter(monkeypatch):
+    async def scenario():
+        entered = asyncio.Event()
+
+        async def observer(*_args, **_kwargs):
+            entered.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(voice_step, "observe_voice_step", observer)
+        service = _stream_service({**RECEIPT, "busy": False}, _Reader())
+        task = asyncio.create_task(_collect(service))
+        await entered.wait()
+        await asyncio.sleep(0)
+        before = {t for t in asyncio.all_tasks() if t is not asyncio.current_task()}
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(0)
+        assert not [t for t in before if not t.done()]
 
     asyncio.run(scenario())
