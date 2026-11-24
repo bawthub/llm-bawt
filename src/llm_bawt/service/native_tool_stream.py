@@ -188,7 +188,10 @@ class NativeToolStream:
                             }
 
                             tool_call_obj = ToolCall(
-                                name=name, arguments=args, raw_text="", tool_use_id=call_id)
+                                # Only the provider's own id; the invented
+                                # display id must never sign a tool call.
+                                name=name, arguments=args, raw_text="",
+                                tool_use_id=str(tc.get("id") or ""))
                             if time.monotonic() >= deadline:
                                 limit_reason = "tool time budget"
                                 raw_result = format_tool_result(

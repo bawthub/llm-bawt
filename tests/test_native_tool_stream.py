@@ -374,3 +374,14 @@ def test_schemas_loaded_by_tool_search_join_later_rounds(rig):
     assert requests[0] == rig.schema
     assert requests[1] == rig.schema + rig.schema  # base + loaded definitions
     rig.executor.mcp_tool_definitions.assert_called()
+
+
+@pytest.mark.parametrize("call_id, expected", [("call-fixture", "call-fixture"), (None, "")])
+def test_only_the_provider_call_id_reaches_the_executor(rig, call_id, expected):
+    call = {"function": {"name": "GetLiveContext", "arguments": "{}"}}
+    if call_id:
+        call["id"] = call_id
+    rounds = iter([["", {"tool_calls": [call]}], ["done"]])
+    rig.client.stream_with_tools.side_effect = lambda messages, **kwargs: iter(next(rounds))
+    list(rig.stream.stream(rig.messages, {}))
+    assert rig.executor.execute.call_args.args[0].tool_use_id == expected

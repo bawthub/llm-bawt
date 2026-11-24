@@ -188,7 +188,7 @@ class BawtHubMcpClient:
                               or {"type": "object", "properties": {}}),
             )
             for t in raw
-            if t.name in self._allowlist
+            if t.name in self._allowlist and t.name not in APPROVAL_GATED_TOOLS
         ]
         self._catalog_at = now
         return self._catalog

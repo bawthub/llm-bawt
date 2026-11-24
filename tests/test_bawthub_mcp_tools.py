@@ -362,3 +362,14 @@ def test_without_provider_call_id_or_for_gated_tools_nothing_is_sent(monkeypatch
         with pytest.raises(mcp_client.BawtHubMcpToolError):
             client.call_tool(capability, name, {"query": "x"}, tool_use_id=call_id)
     assert sent == [] and executed == []
+
+
+def test_gated_tool_stays_out_of_discovery_even_when_allowlisted(monkeypatch):
+    client, capability, _, _ = _interceptor_rig(monkeypatch)
+    monkeypatch.setattr(BawtHubMcpClient, "_list_async",
+                        lambda self, headers: _return(CATALOG))
+    assert [t.name for t in client.search_tools(capability, "", limit=10)] == ["memory_search"]
+
+
+async def _return(value):
+    return value
