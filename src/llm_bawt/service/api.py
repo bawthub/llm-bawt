@@ -134,14 +134,14 @@ async def lifespan(app):
     # The normalized catalog is the only model authority. Migration/repair is
     # transactional and intentionally fatal: serving with unresolved bot pins is
     # worse than refusing startup with a concrete error.
-    from ..memory.model_catalog_migration import migrate_model_catalog
+    from ..memory.model_catalog_migration import prepare_model_catalog_on_startup
     from ..model_catalog import ModelCatalogStore
     from ..utils.db import get_shared_engine
 
     model_engine = get_shared_engine(config)
     if model_engine is None:
         raise RuntimeError("Normalized model catalog database unavailable")
-    catalog_result = migrate_model_catalog(model_engine)
+    catalog_result = prepare_model_catalog_on_startup(model_engine)
     log.info("normalized model catalog ready: %s", catalog_result)
     normalized_catalog = ModelCatalogStore(model_engine).load()
     config.install_model_catalog(normalized_catalog)

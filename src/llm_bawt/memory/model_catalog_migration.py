@@ -16,9 +16,10 @@ No normalized row is ever reconstructed from the removed flat catalog.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from sqlalchemy import Engine, text
@@ -199,6 +200,32 @@ DROP FUNCTION IF EXISTS bot_profiles_check_model_backend();
 """
 
 
+_BOT_CONSTRAINT_SQL = """
+ALTER TABLE bot_profiles
+    ALTER COLUMN harness SET DEFAULT 'chat',
+    ALTER COLUMN harness SET NOT NULL,
+    ADD CONSTRAINT bot_profiles_harness_check
+        CHECK (harness IN ('chat','claude-code','codex','claude-proxy')),
+    ADD CONSTRAINT bot_profiles_endpoint_fk
+        FOREIGN KEY (endpoint_id) REFERENCES model_endpoints(id)
+        ON UPDATE CASCADE ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
+CREATE INDEX IF NOT EXISTS idx_bot_profiles_endpoint_id ON bot_profiles(endpoint_id);
+"""
+_RETIRE_LEGACY_SQL = """
+DROP VIEW IF EXISTS model_definitions_compat;
+DROP TABLE IF EXISTS model_definitions CASCADE;
+ALTER TABLE model_endpoints DROP COLUMN IF EXISTS legacy_type;
+"""
+_BOT_TRIGGER_BODY = _BOT_TRIGGER_SQL.split("AS $$", 1)[1].split("$$ LANGUAGE", 1)[0]
+_CATALOG_VERSION = "llm-bawt model catalog " + hashlib.sha256(json.dumps([
+    _CREATE_SCHEMA_SQL, _BOT_TRIGGER_SQL, _BOT_CONSTRAINT_SQL, _RETIRE_LEGACY_SQL,
+    [asdict(seed) for seed in STANDARD_ACCESS_PATHS],
+], sort_keys=True).encode()).hexdigest()
+# Adopt only the exact already-deployed baseline without forcing a write on
+# upgrade. Never advance this value when changing the bootstrap DDL or seeds.
+_UNSTAMPED_BASELINE_VERSION = "llm-bawt model catalog 6ed183b73e9c1f15e3c88b38657270c3a74f39ab7328d91ad4a607caf3696be0"
+
+
 def _compatible(harness: str, vendor: str, protocol: str) -> bool:
     if harness == "chat":
         return protocol == "chat-completions"
@@ -286,6 +313,14 @@ def _refuse_removed_harness(conn) -> None:
         )
 
 
+def _valid_assignment(bot, endpoint) -> bool:
+    return (
+        endpoint is not None
+        and _compatible((bot["harness"] or "").strip().lower(), endpoint["vendor"], endpoint["protocol"])
+        and bot["default_model"] == endpoint["key"]
+    )
+
+
 def _repair_bot_assignments(conn) -> list[str]:
     table_exists = conn.execute(
         text("""
@@ -325,15 +360,9 @@ def _repair_bot_assignments(conn) -> list[str]:
     for bot in bots:
         slug = str(bot["slug"])
         backend = (bot["agent_backend"] or "").strip().lower()
-        harness = (bot["harness"] or "").strip().lower()
         endpoint = endpoints_by_id.get(int(bot["endpoint_id"])) if bot["endpoint_id"] is not None else None
 
-        valid = (
-            endpoint is not None
-            and _compatible(harness, endpoint["vendor"], endpoint["protocol"])
-            and bot["default_model"] == endpoint["key"]
-        )
-        if valid:
+        if _valid_assignment(bot, endpoint):
             continue
 
         candidates = endpoints_by_model.get(str(bot["default_model"] or ""), [])
@@ -378,17 +407,7 @@ def _repair_bot_assignments(conn) -> list[str]:
         )
         repaired.append(slug)
 
-    conn.execute(text("""
-        ALTER TABLE bot_profiles
-            ALTER COLUMN harness SET DEFAULT 'chat',
-            ALTER COLUMN harness SET NOT NULL,
-            ADD CONSTRAINT bot_profiles_harness_check
-                CHECK (harness IN ('chat','claude-code','codex','claude-proxy')),
-            ADD CONSTRAINT bot_profiles_endpoint_fk
-                FOREIGN KEY (endpoint_id) REFERENCES model_endpoints(id)
-                ON UPDATE CASCADE ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED
-    """))
-    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_bot_profiles_endpoint_id ON bot_profiles(endpoint_id)"))
+    conn.execute(text(_BOT_CONSTRAINT_SQL))
     conn.execute(text(_BOT_TRIGGER_SQL))
 
     invalid = conn.execute(text("""
@@ -411,6 +430,129 @@ def _repair_bot_assignments(conn) -> list[str]:
     return repaired
 
 
+_CATALOG_SCHEMA_READY = """
+SELECT
+    to_regclass('public.model_definitions') IS NULL
+    AND to_regclass('public.model_definitions_compat') IS NULL
+    AND to_regprocedure('public.bot_profiles_check_model_backend()') IS NULL
+    AND NOT EXISTS (
+        SELECT FROM (VALUES
+            ('models','compact_threshold',false,NULL),
+            ('models','pricing_threshold',false,NULL),
+            ('access_paths','system_prompt_overrides',true,'''{}''::jsonb'),
+            ('bot_profiles','harness',true,'''chat''::character varying'),
+            ('bot_profiles','endpoint_id',false,NULL)
+        ) AS required(rel,col,not_null,default_expr)
+        WHERE NOT EXISTS (
+            SELECT FROM pg_attribute a
+            LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum
+            WHERE a.attrelid=to_regclass('public.' || required.rel) AND a.attname=required.col
+              AND NOT a.attisdropped AND (NOT required.not_null OR a.attnotnull)
+              AND (required.default_expr IS NULL OR pg_get_expr(d.adbin,d.adrelid)=required.default_expr)
+        )
+    ) AND NOT EXISTS (
+        SELECT FROM pg_attribute WHERE attrelid=to_regclass('public.model_endpoints')
+          AND attname='legacy_type' AND NOT attisdropped
+    ) AND NOT EXISTS (
+        SELECT FROM (VALUES
+            ('bot_profiles','bot_profiles_harness_check'),
+            ('bot_profiles','bot_profiles_endpoint_fk'),
+            ('models','models_compact_threshold_positive'),
+            ('models','models_pricing_threshold_nonnegative')
+        ) AS required(rel,name)
+        WHERE NOT EXISTS (
+            SELECT FROM pg_constraint c WHERE c.conrelid=to_regclass('public.' || required.rel)
+              AND c.conname=required.name AND c.convalidated
+        )
+    ) AND NOT EXISTS (
+        SELECT FROM pg_constraint WHERE conrelid=to_regclass('public.bot_profiles')
+          AND conname='bot_profiles_default_model_fk'
+    ) AND NOT EXISTS (
+        SELECT FROM (VALUES
+            ('model_endpoints','idx_model_endpoints_model_id'),
+            ('model_endpoints','idx_model_endpoints_access_path_id'),
+            ('bot_profiles','idx_bot_profiles_endpoint_id')
+        ) AS required(rel,name)
+        WHERE NOT EXISTS (
+            SELECT FROM pg_index i WHERE i.indrelid=to_regclass('public.' || required.rel)
+              AND i.indexrelid=to_regclass('public.' || required.name) AND i.indisvalid AND i.indisready
+        )
+    ) AND EXISTS (
+        SELECT FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid
+        WHERE t.tgrelid=to_regclass('public.bot_profiles')
+          AND t.tgname='bot_profiles_model_endpoint_check' AND t.tgenabled IN ('O','A')
+          AND t.tgtype=23 AND t.tgattr='' AND t.tgqual IS NULL
+          AND p.oid=to_regprocedure('public.bot_profiles_check_model_endpoint()') AND p.prosrc=:body
+          AND (obj_description(p.oid,'pg_proc')=:version
+               OR (:version=:baseline AND obj_description(p.oid,'pg_proc') IS NULL))
+    )
+"""
+
+
+def _catalog_ready(conn) -> bool:
+    if not conn.execute(text(_CATALOG_SCHEMA_READY), {
+        "body": _BOT_TRIGGER_BODY, "version": _CATALOG_VERSION, "baseline": _UNSTAMPED_BASELINE_VERSION,
+    }).scalar_one():
+        return False
+    keys = set(conn.execute(text("SELECT key FROM access_paths")).scalars())
+    if not keys.issuperset(seed.key for seed in STANDARD_ACCESS_PATHS):
+        return False
+    rows = conn.execute(text("""
+        SELECT b.harness, b.agent_backend, b.default_model, m.key, a.vendor, a.protocol
+          FROM bot_profiles b
+          LEFT JOIN model_endpoints e ON e.id=b.endpoint_id
+          LEFT JOIN models m ON m.id=e.model_id
+          LEFT JOIN access_paths a ON a.id=e.access_path_id
+    """)).mappings()
+    return all(
+        _REMOVED_HARNESS not in ((row["harness"] or "").lower(), (row["agent_backend"] or "").lower())
+        and _valid_assignment(row, row if row["key"] is not None else None)
+        for row in rows
+    )
+
+
+def _catalog_result(conn, repaired_bots: list[str]) -> dict[str, Any]:
+    return {
+        "models": conn.execute(text("SELECT COUNT(*) FROM models")).scalar_one(),
+        "endpoints": conn.execute(text("SELECT COUNT(*) FROM model_endpoints")).scalar_one(),
+        "access_paths": conn.execute(text("SELECT COUNT(*) FROM access_paths")).scalar_one(),
+        "repaired_bots": repaired_bots,
+        "legacy_catalog_removed": True,
+    }
+
+
+_CATALOG_LOCK = "SELECT pg_advisory_xact_lock(hashtext('normalized-model-catalog'))"
+
+
+def _migrate_catalog(conn) -> dict[str, Any]:
+    conn.execute(text(_CREATE_SCHEMA_SQL))
+    _seed_access_paths(conn)
+    repaired_bots = _repair_bot_assignments(conn)
+    # Remove compatibility objects and stamp only after repair and validation.
+    # Whatever fails above rolls back along with the stamp.
+    conn.execute(text(_RETIRE_LEGACY_SQL))
+    if conn.execute(text("SELECT to_regprocedure('public.bot_profiles_check_model_endpoint()') IS NOT NULL")).scalar_one():
+        conn.execute(text("COMMENT ON FUNCTION public.bot_profiles_check_model_endpoint() IS :version"),
+                     {"version": _CATALOG_VERSION})
+    return _catalog_result(conn, repaired_bots)
+
+
+def prepare_model_catalog_on_startup(engine: Engine) -> dict[str, Any]:
+    """Avoid queuing exclusive locks on a catalog that is already current."""
+    with engine.connect() as conn:
+        if _catalog_ready(conn):
+            return {**_catalog_result(conn, []), "startup_path": "read-only"}
+
+    # Release the first transaction's read locks before waiting for another
+    # starter. With the lock held, recheck in case it finished bootstrap.
+    with engine.begin() as conn:
+        conn.execute(text(_CATALOG_LOCK))
+        if _catalog_ready(conn):
+            return {**_catalog_result(conn, []), "startup_path": "read-only-after-lock"}
+        logger.info("Normalized model catalog requires bootstrap or repair")
+        return {**_migrate_catalog(conn), "startup_path": "repair"}
+
+
 def migrate_model_catalog(engine: Engine, dry_run: bool = False) -> dict[str, Any]:
     """Install/repair the normalized catalog and delete obsolete flat storage."""
     if dry_run:
@@ -426,28 +568,8 @@ def migrate_model_catalog(engine: Engine, dry_run: bool = False) -> dict[str, An
         return {"dry_run": True, "tables": sorted(tables)}
 
     with engine.begin() as conn:
-        conn.execute(text("SELECT pg_advisory_xact_lock(hashtext('normalized-model-catalog'))"))
-        conn.execute(text(_CREATE_SCHEMA_SQL))
-        _seed_access_paths(conn)
-        repaired_bots = _repair_bot_assignments(conn)
-
-        # Remove compatibility objects only after normalized repair and strict
-        # validation succeed; any exception above rolls the whole transaction back.
-        conn.execute(text("DROP VIEW IF EXISTS model_definitions_compat"))
-        conn.execute(text("DROP TABLE IF EXISTS model_definitions CASCADE"))
-        conn.execute(text("ALTER TABLE model_endpoints DROP COLUMN IF EXISTS legacy_type"))
-
-        model_count = conn.execute(text("SELECT COUNT(*) FROM models")).scalar_one()
-        endpoint_count = conn.execute(text("SELECT COUNT(*) FROM model_endpoints")).scalar_one()
-        access_count = conn.execute(text("SELECT COUNT(*) FROM access_paths")).scalar_one()
-
-    return {
-        "models": model_count,
-        "endpoints": endpoint_count,
-        "access_paths": access_count,
-        "repaired_bots": repaired_bots,
-        "legacy_catalog_removed": True,
-    }
+        conn.execute(text(_CATALOG_LOCK))
+        return _migrate_catalog(conn)
 
 
 def main() -> None:
