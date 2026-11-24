@@ -726,6 +726,7 @@ class ClaudeApprovalMixin:
         session_key: str,
         seq_holder: list[int],
         task_turn_capability: str | None = None,
+        remote_mcp: tuple[str, ...] = (),
     ):
         """Build the per-run PreToolUse hook bound to this turn (TASK-292).
 
@@ -740,10 +741,10 @@ class ClaudeApprovalMixin:
         async def pre_tool_use(input_data, tool_use_id, context):
             decision = await decide(input_data, tool_use_id, context)
             if not self._hook_denies(decision):
-                from agent_bridge.content_provenance import external_source
+                from agent_bridge.remote_mcp import bridge_source
 
                 name = (input_data or {}).get("tool_name") or ""
-                source = external_source(name)
+                source = bridge_source(name, remote_mcp)
                 if source and not name.startswith("mcp__bawthub__"):
                     # Register BEFORE remote dispatch, even if its eventual
                     # response is an error. Failure cannot silently lose taint.

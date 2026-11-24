@@ -76,6 +76,7 @@ class CommandPublisherMixin:
         explicit_thread: bool = False,
         inbox_next: bool = False,
         task_turn_capability: str | None = None,
+        remote_mcp: Sequence[str] | None = None,
         tools_disabled: bool = False,
         strict_run: str | None = None,
         access_path: str | None = None,
@@ -193,6 +194,12 @@ class CommandPublisherMixin:
                 fields["explicit_thread"] = "1"
         if task_turn_capability:
             fields["task_turn_capability"] = task_turn_capability
+            if remote_mcp and not tools_disabled:  # TASK-2610: granted server slugs only
+                from .remote_mcp import FIELD, remote_mcp_field
+
+                value = remote_mcp_field(remote_mcp)
+                if value:
+                    fields[FIELD] = value
         if tools_disabled:
             fields["tools_disabled"] = "1"
             if strict_run:

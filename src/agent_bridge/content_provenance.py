@@ -63,6 +63,18 @@ def remote_mcp_source(tool_name: str) -> str | None:
     return f"mcp:{slug}" if sep and slug and tool else None
 
 
+def bridge_remote_source(tool_name: str) -> str | None:
+    """``mcp:<slug>`` for an agent-bridge tool of an owner-added remote server.
+
+    Bridge tools are ``mcp__<server>__<tool>``; anything not already covered by
+    :func:`external_source` and not first-party is treated as untrusted.
+    Over-labeling is safe (it only adds taint); under-labeling is not.
+    """
+    if not tool_name.startswith("mcp__") or tool_name.startswith("mcp__bawthub__"):
+        return None
+    return remote_mcp_source(tool_name)
+
+
 def write_kind(tool_name: str, arguments: Mapping[str, Any], *, native: bool = False) -> str | None:
     """Identify bot-initiated prompt-persistent writes, not shared storage APIs."""
     action = str(arguments.get("action", "")).strip().lower()

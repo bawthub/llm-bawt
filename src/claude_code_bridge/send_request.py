@@ -20,6 +20,7 @@ from agent_bridge.continuity import (
     reset_skills_from_field,
 )
 from agent_bridge.prompt_cache import normalize_prompt_cache_ttl
+from agent_bridge.remote_mcp import FIELD as REMOTE_MCP_FIELD, parse_remote_mcp
 from agent_bridge.room_freeze import ROOM_FREEZE_FIELD
 from agent_bridge.skill_selection import INJECTED_FIELD, SELECTION_FIELD
 
@@ -73,6 +74,8 @@ class SendRequest:
     skill_selection: str | None = None
     # TASK-2590: strict-reader turn; the bridge runs it with no tools at all.
     tools_disabled: bool = False
+    # TASK-2610: slugs of granted remote MCP servers, reached via the gateway.
+    remote_mcp: tuple[str, ...] = ()
     # TASK-2590: the app's strict run token, echoed on this run's key writeback.
     strict_run: str | None = None
     # TASK-1691: comma-separated refs whose bodies the system prompt carries.
@@ -305,6 +308,7 @@ class SendRequest:
             task_turn_capability=task_turn_capability,
             skill_selection=fields.get(SELECTION_FIELD),
             tools_disabled=(fields.get("tools_disabled") or "").strip() == "1",
+            remote_mcp=parse_remote_mcp(fields.get(REMOTE_MCP_FIELD)),
             strict_run=(fields.get("strict_run") or "").strip() or None,
             injected_skills=fields.get(INJECTED_FIELD),
             room_freeze=fields.get(ROOM_FREEZE_FIELD),

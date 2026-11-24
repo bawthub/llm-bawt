@@ -74,6 +74,13 @@ def test_exposure_api_uses_only_signed_identity_and_does_not_accept_taint_flags(
             assert client.post("/v1/agent-content/exposure", headers=headers, json={
                 "tool_name": "Read",
             }).status_code == 422
+            assert client.post("/v1/agent-content/exposure", headers=headers, json={
+                "tool_name": "mcp__bawthub__memory_search",
+            }).status_code == 422
+            # TASK-2610: an owner-added remote server's tool registers like any external read.
+            assert client.post("/v1/agent-content/exposure", headers=headers, json={
+                "tool_name": "mcp__alpha__lookup",
+            }).json()["registered"] is True
             response = client.post("/v1/agent-content/exposure", headers=headers, json={
                 "tool_name": "WebFetch",
             })

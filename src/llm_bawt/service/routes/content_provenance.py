@@ -2,7 +2,7 @@
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict
 
-from agent_bridge.content_provenance import external_source
+from agent_bridge.content_provenance import bridge_remote_source, external_source
 from ...content_provenance import ContentTurn
 from ...task_turn_context import (
     TASK_TURN_CONTEXT_HEADER, TaskTurnContextError, open_task_turn_context,
@@ -26,7 +26,9 @@ async def register_exposure(body: ExposureRequest, request: Request):
         context = open_task_turn_context(request.headers.get(TASK_TURN_CONTEXT_HEADER))
     except TaskTurnContextError:
         raise HTTPException(403, "Verified turn capability required") from None
-    source = external_source(body.tool_name)
+    # TASK-2610: a remote MCP server tool (mcp__<slug>__<tool>) also registers;
+    # registering only adds taint, so the name needs no grant check here.
+    source = external_source(body.tool_name) or bridge_remote_source(body.tool_name)
     if source is None or source.startswith("bawthub:"):
         raise HTTPException(422, "Not a covered remote external tool")
     turn = ContentTurn(

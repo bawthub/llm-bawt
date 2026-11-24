@@ -1055,8 +1055,14 @@ def run_server(
         # TASK-2381: outer per-caller gate (mode mcp_auth_mode); the inner
         # bot-access middleware still decides who each call acts for.
         mcp_auth.ensure_store()  # standalone: no app startup attached it
-        app = mcp_auth.wrap(BotAccessMiddleware(TaskTurnCapabilityMiddleware(
-            mcp.streamable_http_app(**HTTP_APP_OPTIONS, host=final_host))))
+        from llm_bawt.integrations.mcp_servers.gateway import with_remote_mcp
+
+        # TASK-2610: agent-bridge bots reach granted remote MCP servers at
+        # /remote-mcp/<slug>/mcp, behind the same caller gate.
+        app = mcp_auth.wrap(with_remote_mcp(
+            BotAccessMiddleware(TaskTurnCapabilityMiddleware(
+                mcp.streamable_http_app(**HTTP_APP_OPTIONS, host=final_host))),
+            security_settings=HTTP_APP_OPTIONS["transport_security"]))
         config = uvicorn.Config(
             app,
             host=final_host,

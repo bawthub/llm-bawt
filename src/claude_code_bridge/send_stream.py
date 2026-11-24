@@ -314,6 +314,7 @@ class ClaudeStreamMixin:
         task_turn_capability: str | None = None,
         skill_selection: str | None = None,
         tools_disabled: bool = False,
+        remote_mcp: tuple[str, ...] = (),
     ) -> ClaudeAgentOptions:
         """Construct per-attempt options with isolated capability and MCP headers."""
         # Shell helpers resolve Git attribution using this opaque bearer. The SDK
@@ -328,6 +329,11 @@ class ClaudeStreamMixin:
                 headers = dict(bawthub.get("headers") or {})
                 headers["X-LLM-Bawt-Task-Turn-Context"] = task_turn_capability
                 bawthub["headers"] = headers
+            # TASK-2610: granted remote servers, this turn only, via the gateway.
+            if isinstance(bawthub, dict) and bawthub.get("url"):
+                from agent_bridge.remote_mcp import claude_servers
+                mcp_servers.update(claude_servers(
+                    remote_mcp, mcp_servers, str(bawthub["url"]), task_turn_capability))
         from agent_bridge.skill_selection import (
             ManagedSelection,
             claude_skill_denials,
@@ -400,7 +406,8 @@ class ClaudeStreamMixin:
                     ),
                 ],
                 "PostToolUseFailure": [
-                    HookMatcher(matcher=None, hooks=[self._make_external_failure_hook()]),
+                    HookMatcher(matcher=None, hooks=[(self._make_external_failure_hook(remote_mcp) if remote_mcp
+                                                 else self._make_external_failure_hook())]),
                 ],
             },
             # The SDK's stdio reader defaults to a 1 MiB JSON buffer

@@ -353,10 +353,16 @@ class CodexCommandMixin(CodexAppServerMixin):
                         from agent_bridge.skill_selection import SELECTION_FIELD, ManagedSelection
                         from .context_window import compact_config_overrides
                         from .exec_patch import CONFIG_OVERRIDES
+                        # TASK-2610: granted remote MCP servers, only with a turn capability.
+                        from agent_bridge.remote_mcp import FIELD as REMOTE_MCP_FIELD, parse_remote_mcp
+                        from .local_plugins import remote_mcp_config_overrides
+                        remote_mcp = (parse_remote_mcp(fields.get(REMOTE_MCP_FIELD))
+                                      if task_turn_capability else ())
                         CONFIG_OVERRIDES.set(tuple(codex_config_overrides(
                             ManagedSelection.from_field(fields.get(SELECTION_FIELD)),
                             env=codex_environment or os.environ,
-                        )) + compact_config_overrides(fields.get("compact_threshold")))
+                        )) + compact_config_overrides(fields.get("compact_threshold"))
+                            + tuple(remote_mcp_config_overrides(remote_mcp)))
                     except CodexMcpContextConfigError as context_error:
                         seq += 1
                         self._publish_event(

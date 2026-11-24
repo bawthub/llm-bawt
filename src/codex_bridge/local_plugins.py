@@ -413,6 +413,30 @@ def ensure_bawthub_mcp_config(
     )
 
 
+def remote_mcp_config_overrides(slugs, *, codex_home: Path | None = None) -> list[str]:
+    """Per-turn ``--config`` overrides for granted remote MCP servers (TASK-2610).
+
+    Each slug points at the llm-bawt gateway beside the BawtHub MCP server and
+    sends the turn capability from the run environment. Names already in
+    ``config.toml`` (bawthub, crawl4ai, owner-installed servers) always win.
+    """
+    import tomllib
+
+    from agent_bridge.mcp_call_context import MCP_TASK_TURN_CONTEXT_ENV
+    from agent_bridge.remote_mcp import codex_overrides
+
+    if not slugs:
+        return []
+    home = codex_home or Path(os.getenv("CODEX_HOME") or Path.home() / ".codex")
+    try:
+        existing = set((tomllib.loads((home / "config.toml").read_text()).get("mcp_servers") or {}))
+    except (OSError, ValueError):
+        existing = set()
+    existing |= {"bawthub", "crawl4ai"}
+    return codex_overrides(slugs, existing, os.getenv("CODEX_BAWTHUB_MCP_URL", _DEFAULT_BAWTHUB_MCP_URL),
+                           MCP_TASK_TURN_CONTEXT_ENV)
+
+
 def _ensure_mcp_context_shell_filter(
     *, config_path: Path, logger: logging.Logger
 ) -> None:

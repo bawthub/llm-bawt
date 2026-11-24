@@ -386,11 +386,13 @@ class ClaudeSendMixin(
                         session_key=session_key,
                         seq_holder=seq_holder,
                         task_turn_capability=task_turn_capability,
+                        remote_mcp=req.remote_mcp,
                     )
                     worker_liveness = WorkerLiveness()  # TASK-1148 resumed-worker containment
                     post_tool_use_cb = self._make_post_tool_use_hook(
                         session_key=session_key,
                         worker_liveness=worker_liveness,
+                        remote_mcp=req.remote_mcp,
                         screenshot_artifacts_by_tool_use_id=(
                             screenshot_artifacts_by_tool_use_id
                         ),
@@ -425,6 +427,7 @@ class ClaudeSendMixin(
                         task_turn_capability=task_turn_capability,
                         skill_selection=req.skill_selection,
                         tools_disabled=req.tools_disabled,
+                        remote_mcp=req.remote_mcp,
                     )
 
                     prompt_cache = TurnPromptCache.from_sdk_env(

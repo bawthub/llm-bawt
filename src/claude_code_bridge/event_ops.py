@@ -7,7 +7,8 @@ from datetime import datetime, timezone
 from agent_bridge.events import AgentEvent, AgentEventKind, synthesize_event_id
 from agent_bridge.tool_images import ToolImageMixin
 from agent_bridge.user_scope import session_user
-from agent_bridge.content_provenance import external_source, label_mcp_output
+from agent_bridge.content_provenance import label_mcp_output
+from agent_bridge.remote_mcp import bridge_source
 
 
 logger = logging.getLogger("claude_code_bridge.bridge")
@@ -41,6 +42,7 @@ class ClaudeEventMixin(ToolImageMixin):
         session_key: str,
         screenshot_artifacts_by_tool_use_id: dict[str, list[dict]],
         worker_liveness=None,
+        remote_mcp: tuple[str, ...] = (),
     ):
         """Persist Playwright images before the SDK resumes model reasoning.
 
@@ -66,7 +68,7 @@ class ClaudeEventMixin(ToolImageMixin):
                         "additionalContext": worker_stop.parent_note(),
                     }
                 }
-            source = external_source(tool_name)
+            source = bridge_source(tool_name, remote_mcp)
             specific = {"hookEventName": "PostToolUse"}
             if source and not tool_name.startswith("mcp__bawthub__"):
                 specific["additionalContext"] = (
@@ -109,10 +111,10 @@ class ClaudeEventMixin(ToolImageMixin):
 
         return post_tool_use
 
-    def _make_external_failure_hook(self):
+    def _make_external_failure_hook(self, remote_mcp: tuple[str, ...] = ()):
         async def failed(input_data, tool_use_id, context):
             del tool_use_id, context
-            source = external_source(input_data.get("tool_name") or "")
+            source = bridge_source(input_data.get("tool_name") or "", remote_mcp)
             if source is None:
                 return {}
             return {"hookSpecificOutput": {

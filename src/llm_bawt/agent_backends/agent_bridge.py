@@ -127,6 +127,22 @@ def _friendly_tool_name(name: str, arguments: dict[str, Any]) -> str:
     return name
 
 
+def granted_remote_mcp(app_config, bot_id: str) -> list[str]:
+    """Slugs of the enabled remote MCP servers granted to ``bot_id`` (TASK-2610).
+
+    Fails closed: any lookup error means no remote servers this turn, never a
+    failed turn. The gateway re-checks the grant and credential per request.
+    """
+    if not bot_id:
+        return []
+    try:
+        from ..integrations.mcp_servers.service import McpServers
+        return [s.slug for s in McpServers(app_config).granted(bot_id)]
+    except Exception as exc:  # noqa: BLE001 - storage outage or missing table
+        logger.warning("Remote MCP grants unavailable for %s: %s", bot_id, type(exc).__name__)
+        return []
+
+
 class AgentBridgeBackend(AgentBackend):
     """Agent backend that sends messages through the agent-bridge transport.
 
@@ -257,6 +273,14 @@ class AgentBridgeBackend(AgentBackend):
         seed_framing = resolve_seed_framing(
             config.get("inject_messages"), str(config.get("bot_id") or "").strip() or None,
         )
+
+        # TASK-2610: slugs of the owner-added MCP servers granted to this bot.
+        # Only with a turn capability (the gateway's proof) and tools enabled.
+        remote_mcp: list[str] = []
+        if (str(config.get("task_turn_capability") or "").strip()
+                and config.get("tools_disabled") is not True):
+            # stream_raw runs on a worker thread, so a direct DB read is fine here.
+            remote_mcp = granted_remote_mcp(self._config, str(config.get("bot_id") or "").strip())
 
         request_started = time.time()
         first_delta_at: float | None = None
@@ -392,6 +416,7 @@ class AgentBridgeBackend(AgentBackend):
                                 or None
                             ),
                             tools_disabled=config.get("tools_disabled") is True,
+                            remote_mcp=remote_mcp,
                             strict_run=(
                                 str(config.get("strict_run") or "").strip() or None
                             ),
