@@ -15,6 +15,8 @@ from urllib.parse import urlsplit
 
 import yaml
 
+from agent_bridge.bridge_token import BROKER
+
 HOUSE_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,30}\Z")
 HOSTNAME = re.compile(
     r"(?=.{1,253}\Z)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
@@ -348,7 +350,7 @@ def _tools_off_service(house: dict, pool: dict, base_compose: Path) -> dict:
             "LLM_BAWT_SERVICE_HOST": "app",
             # Passed through by name from the deployment .env, as the mansion does.
             "LLM_BAWT_REDIS_URL": None,
-            "BRIDGE_BROKER_TOKEN_FILE": f"{READER_BROKER_DIR}/broker",
+            BROKER.file_env: f"{READER_BROKER_DIR}/broker",
             "LLM_BAWT_API_KEY_FILE": "/run/llm-bawt-api-key/api-key",
         },
         "volumes": [
