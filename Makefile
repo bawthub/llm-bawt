@@ -120,7 +120,7 @@ check-uv: ## Verify uv is installed
 
 dev: check-uv ## [uv] Sync .venv with all extras (dev, mcp, service, search, memory, hf, tui)
 	@echo "$(BLUE)Syncing .venv with all extras...$(NC)"
-	uv sync --inexact --extra dev --extra mcp --extra service --extra search --extra memory --extra huggingface
+	uv sync --frozen --inexact --extra dev --extra mcp --extra service --extra search --extra memory --extra huggingface
 	@echo "$(GREEN)✓ .venv synced$(NC)"
 	@echo "  To check a local server: ./server.sh status (or make docker-status for Compose)"
 

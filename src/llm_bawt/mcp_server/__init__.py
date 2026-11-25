@@ -35,6 +35,6 @@ def __getattr__(name: str):
         except ImportError as e:
             raise ImportError(
                 f"The '{name}' component requires the 'mcp' package. "
-                "Install it with: pipx runpip llm-bawt install 'mcp[cli]'"
+                "Install it with: uv sync --extra mcp"
             ) from e
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -303,7 +303,7 @@ def get_search_unavailable_reason(
             if not is_tavily_available():
                 return (
                     "Tavily API key is set but tavily-python isn't installed. "
-                    "Install with: pipx runpip llm-bawt install tavily-python"
+                    "Install with: uv sync --extra search"
                 )
             return "Tavily is configured but unavailable. Check your API key and network."
 
@@ -330,8 +330,7 @@ def get_search_unavailable_reason(
         if not is_ddgs_available():
             return (
                 "DuckDuckGo search requires the ddgs package. "
-                "Install with: ./install.sh --with-search "
-                "or pipx runpip llm-bawt install ddgs"
+                "Install with: uv sync --extra search"
             )
         return "No search provider available. Configure Tavily, Brave, or Reddit credentials, or install ddgs."
 
@@ -345,7 +344,7 @@ def get_search_unavailable_reason(
         if not is_tavily_available():
             return (
                 "Tavily search requires tavily-python. "
-                "Install with: pipx runpip llm-bawt install tavily-python"
+                "Install with: uv sync --extra search"
             )
         return "Tavily is configured but unavailable. Check your API key and network."
 
@@ -354,8 +353,7 @@ def get_search_unavailable_reason(
         if not is_ddgs_available():
             return (
                 "DuckDuckGo search requires the ddgs package. "
-                "Install with: ./install.sh --with-search "
-                "or pipx runpip llm-bawt install ddgs"
+                "Install with: uv sync --extra search"
             )
         return "DuckDuckGo search is configured but unavailable."
 

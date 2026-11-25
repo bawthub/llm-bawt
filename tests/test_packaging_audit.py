@@ -17,20 +17,16 @@ def stub(directory, name, body):
     path.chmod(0o755)
 
 
-@pytest.mark.parametrize("deps_only", [False, True])
-def test_install_dev_sync_uses_lock(tmp_path, deps_only):
+def test_make_dev_sync_uses_lock(tmp_path):
+    """`make dev` is the supported development install; it must honor uv.lock."""
     log = tmp_path / "commands.jsonl"
     stub(tmp_path, "uv", "import json, os, sys\nwith open(os.environ['COMMAND_LOG'], 'a') as f:\n    f.write(json.dumps(sys.argv[1:]) + '\\n')\n")
-    args = ["bash", str(REPO / "install.sh"), "--dev", "--no-cuda"]
-    if deps_only:
-        args.append("--deps-only")
-    subprocess.run(args, cwd=tmp_path, check=True, capture_output=True, text=True,
+    subprocess.run(["make", "-s", "-C", str(REPO), "dev"], check=True, capture_output=True, text=True,
                    env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}", "COMMAND_LOG": str(log)})
     calls = [json.loads(line) for line in log.read_text().splitlines()]
     syncs = [call for call in calls if call[0] == "sync"]
     assert len(syncs) == 1
     assert {"--frozen", "--inexact"} <= set(syncs[0])
-    assert ("--no-install-project" in syncs[0]) is deps_only
 
 
 def test_gpu_docker_recipe_copies_lock_before_both_syncs():
@@ -61,7 +57,7 @@ def test_images_copy_metadata_policy_before_install(dockerfile):
     assert "setup.cfg" in metadata_copy.split()
     install = min(
         recipe.index(marker)
-        for marker in ("uv sync", "uv pip install", "./install.sh --dev")
+        for marker in ("uv sync", "uv pip install")
         if marker in recipe
     )
     assert recipe.index(metadata_copy) < install
