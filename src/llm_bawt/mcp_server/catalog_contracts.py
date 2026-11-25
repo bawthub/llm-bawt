@@ -156,6 +156,7 @@ TOOL_SUMMARIES: dict[str, str] = {
     "notifications_list": "Read-only bell history (replies, pushes, approvals, tasks, alerts). Filter kind, since, limit.",
     "notify_user": "Push to the user's phone. Only for: an approval waiting on the user, a release/deploy finished or failed, or a decision blocking work. Never routine progress. high passes quiet hours. Rate limited; dedupe_key collapses repeats. link: app path.",
     "playground_send": "Send the user an artifact (chat card + Playground). Never open/fetch/screenshot your own. Source: asset_id or content+format.",
+    "ui_navigate": "Move the user's app view to an in-app path beside your chat; phones get a link instead. outcome says if they moved.",
     "attachment_get": "See an uploaded image: ma_ id, upload URL/path, or TASK-N for its card images.",
     "generate_image":"Generate or edit an image; provider: grok (default)|openai. reference_asset_id reuses an image. Returns inline image and asset_id/URLs for iteration.",
     "web_search": "Search current web sources; provider: brave|reddit|tavily|duckduckgo, or omit for configured fan-out. max_results is per provider. Use crawl4ai for page content.",
@@ -171,7 +172,7 @@ REFERENCE_GROUPS: dict[str, tuple[str, ...]] = {
     "tasks": ("tasks_", "steps_", "projects_", "activity_", "initiative_", "inspect_bawthub_"),
     "memory-history": ("memory_", "messages_", "context_", "facts_", "system_", "profile", "working_memory_", "tool_calls"),
     "sessions-delivery": ("sessions_", "bots_", "agent_", "self_", "schedule_"),
-    "ops-media": ("ops_", "host_access_", "monitors_", "media_", "generate_", "web_", "x_", "speech_", "home_audio_", "notify_", "notifications_", "browser_", "attachment_", "usage_", "playground_"),
+    "ops-media": ("ops_", "host_access_", "monitors_", "media_", "generate_", "web_", "x_", "speech_", "home_audio_", "notify_", "notifications_", "browser_", "attachment_", "usage_", "playground_", "ui_"),
 }
 
 

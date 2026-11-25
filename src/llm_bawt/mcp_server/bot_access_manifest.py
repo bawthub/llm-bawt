@@ -35,7 +35,7 @@ NON_HISTORY_TOOLS = frozenset({
     "ops_job_status", "ops_quiesce_ack", "media_lookup", "media_add", "media_queue", "media_history",
     "media_pipeline_status", "media_library_stats", "generate_image", "attachment_get", "speech_generate",
     "home_audio_devices", "home_audio_enqueue", "home_audio_status", "home_audio_cancel",
-    "notify_user", "notifications_list", "schedule_wakeup", "playground_send",
+    "notify_user", "notifications_list", "schedule_wakeup", "playground_send", "ui_navigate",
     "x_search", "x_counts", "web_search", "bots_list_available",
     "monitors_list", "monitors_upsert", "monitors_mute", "monitors_test",
     "ops_approvals_list", "ops_approvals_get", "ops_approval_resolve", "ops_approval_withdraw", "browser_check_session",

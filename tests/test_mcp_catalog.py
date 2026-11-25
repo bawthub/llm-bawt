@@ -211,7 +211,8 @@ async def test_catalog_token_budgets():
     # partial-order caveats. Measured descriptions: 5,158.
     # TASK-1712: monitors_list/upsert/mute/test over BawtHub monitors (+115): 5,273.
     # TASK-2569: host_access_list, historical registration and login evidence (+55).
-    assert sum(descriptions) <= 5328, f"Descriptions grew to {sum(descriptions)} tokens"
+    # TASK-2626: ui_navigate moves the user's app view beside the chat (+40): 5,368.
+    assert sum(descriptions) <= 5368, f"Descriptions grew to {sum(descriptions)} tokens"
     definitions = [{"name": f"mcp__bawthub__{t.name}", "description": t.description or "", "input_schema": t.input_schema} for t in tools]
     total = len(encoder.encode(json.dumps(definitions, ensure_ascii=False, separators=(",", ":"))))
     # TASK-900: explicit X search adds ~160 tokens; measured catalog 11,239.
@@ -359,7 +360,9 @@ async def test_catalog_token_budgets():
     # TASK-2569: host_access_list has no scope or execution arguments (+83).
     # TASK-2625: optional playground_send replaces=<artifact id> revises a sent
     # artifact in place (schema only, no description text). Measured 20,002.
-    assert total <= 20002, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-2626: ui_navigate(bot_id, path, reason) moves the user's app view
+    # beside the chat and reports whether it did. Measured 20,111 (+109).
+    assert total <= 20111, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 
