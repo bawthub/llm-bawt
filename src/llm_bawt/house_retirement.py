@@ -31,6 +31,31 @@ def ensure_schema(conn: Any) -> None:
         _metadata.create_all(conn)
 
 
+_guard = None
+
+
+def ensure_ready(engine: Any) -> None:
+    """Create house_retirements if missing, without other profile DDL.
+
+    A ready tenant takes no locks beyond a catalog read. A missing table is
+    created under the shared schema-bootstrap advisory lock, so it serializes
+    with the app's profile-store bootstrap (TASK-2637)."""
+    global _guard
+    from sqlalchemy import inspect
+
+    with engine.connect() as conn:
+        if conn.dialect.name == "postgresql":
+            from .bot_tags.catalog import owned
+            if owned(conn, "house_retirements"):
+                return
+        elif inspect(conn).has_table("house_retirements"):
+            return
+    if _guard is None:
+        from .utils.schema import SchemaBootstrapGuard
+        _guard = SchemaBootstrapGuard()
+    _guard.run(engine, "house-retirements", ensure_schema)
+
+
 def reservations(conn: Any) -> dict[str, str]:
     """The caller's transaction sees reservations; failures never mean free."""
     return {house: reconcile_id for house, reconcile_id in conn.execute(select(

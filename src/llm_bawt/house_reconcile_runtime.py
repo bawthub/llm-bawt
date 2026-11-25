@@ -106,19 +106,18 @@ def main() -> int:
             raise ValueError("invalid request fields")
         from .house_pool_config import configured_pool
         from .house_tenancy import _stream_busy, read_house_state
-        from .runtime_settings import BotProfileStore
+        from .house_retirement import ensure_ready
         from .utils.config import Config
+        from .utils.db import get_shared_engine
         import redis
 
         config = Config()
-        # Run the profile store's own idempotent bootstrap (bot_profiles,
-        # house_retirements, ...) under its advisory lock. The host runs this
-        # CLI right after the app reports healthy, which does not prove the
-        # app has bootstrapped those tables yet (TASK-2637).
-        store = BotProfileStore(config)
-        engine = store.engine
+        engine = get_shared_engine(config)
         if engine is None:
             raise RuntimeError("database unavailable")
+        # The host runs this right after the app reports healthy, which does
+        # not prove the app has created house_retirements yet (TASK-2637).
+        ensure_ready(engine)
         client = redis.Redis.from_url(
             config.REDIS_URL, decode_responses=True,
             socket_timeout=3, socket_connect_timeout=3,
