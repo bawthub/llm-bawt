@@ -55,6 +55,9 @@ ERROR_CODES = frozenset({
 # evidence itself cannot provoke. Bad model output (invalid/ungrounded) never
 # degrades to raw evidence, nor do budget, authorization or busy errors.
 DEGRADABLE_SYNTHESIS_ERRORS = frozenset({"timeout", "model_unavailable", "empty_response"})
+# A rejected model answer is retried once while enough of the deadline remains;
+# it never falls back to raw evidence (TASK-2654).
+SYNTHESIS_RETRY_MIN_SECONDS = 8.0
 
 
 logger = logging.getLogger(__name__)
@@ -219,6 +222,26 @@ class RecallService:
         self.ledger = ledger
         self._slots = threading.BoundedSemaphore(4)
         self._ledger_writes: set[asyncio.Task] = set()
+
+    async def _synthesize_once(self, system, question, evidence, request, scope, deadline):
+        # Leave a small packing reserve inside the overall deadline.
+        # Transport timeouts (normally 22 s) and this remaining-budget
+        # timeout both preserve only already authorized/admitted evidence.
+        remaining = max(0, deadline - time.monotonic() - 0.25)
+        bot_token = CALLING_BOT.set(scope.bot_id)
+        try:
+            async with asyncio.timeout(remaining):
+                raw = await self.synthesizer.synthesize(system, question, evidence, request.output_tokens)
+        finally:
+            CALLING_BOT.reset(bot_token)
+        if not isinstance(raw, str) or len(raw.encode("utf-8")) > MAX_MODEL_BYTES:
+            raise RecallError("invalid_synthesis")
+        if tokens(raw) > request.output_tokens:
+            raise RecallError("invalid_synthesis")
+        try:
+            return raw, Synthesis.model_validate_json(raw)
+        except (ValidationError, ValueError) as error:
+            raise RecallError("invalid_synthesis") from error
 
     async def recall(self, request: RecallRequest, scope: RecallScope, *,
                      deadline: float | None = None) -> dict:
@@ -418,24 +441,18 @@ class RecallService:
         if evidence:
             model_calls = 1
             try:
-                # Leave a small packing reserve inside the overall deadline.
-                # Transport timeouts (normally 22 s) and this remaining-budget
-                # timeout both preserve only already authorized/admitted evidence.
-                remaining = max(0, deadline - time.monotonic() - 0.25)
-                bot_token = CALLING_BOT.set(scope.bot_id)
-                try:
-                    async with asyncio.timeout(remaining):
-                        raw = await self.synthesizer.synthesize(system, question, evidence, request.output_tokens)
-                finally:
-                    CALLING_BOT.reset(bot_token)
-                if not isinstance(raw, str) or len(raw.encode("utf-8")) > MAX_MODEL_BYTES:
-                    raise RecallError("invalid_synthesis")
-                if tokens(raw) > request.output_tokens:
-                    raise RecallError("invalid_synthesis")
-                try:
-                    parsed = Synthesis.model_validate_json(raw)
-                except (ValidationError, ValueError) as error:
-                    raise RecallError("invalid_synthesis") from error
+                while True:
+                    try:
+                        raw, parsed = await self._synthesize_once(
+                            system, question, evidence, request, scope, deadline)
+                        break
+                    except RecallError as error:
+                        # One retry for a rejected answer, never a raw fallback.
+                        if (error.code != "invalid_synthesis" or model_calls > 1
+                                or deadline - time.monotonic() < SYNTHESIS_RETRY_MIN_SECONDS):
+                            raise
+                        model_calls += 1
+                        logger.warning("recall synthesis rejected; retrying once")
             except (TimeoutError, RecallError) as error:
                 # Model-side failures after retrieval keep the already authorized
                 # evidence as degraded quotes (TASK-1751); policy errors stay errors.

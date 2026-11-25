@@ -255,8 +255,10 @@ class MessageSource(PostgresSource):
     # Every candidate tier is capped before coverage/rank or full content is
     # projected. Literal exact tiers use the existing trigram-backed semantics of
     # messages_find; lexical tiers use the stored indexed content_tsv. The broad
-    # OR is a fallback only when stricter tiers returned nothing. No excluded
-    # partition participates even in candidate limiting.
+    # OR runs beside the strong conjunction, ranked by relevance rather than
+    # newest-first: a recent recap that repeats every question word must not
+    # hide the older original that uses different words (TASK-2654). No
+    # excluded partition participates even in candidate limiting.
     statement = f"""
         WITH focused AS MATERIALIZED (
             SELECT m.id, m.bot_id AS partition, p.source_bot, m.session_id, m.timestamp,
@@ -339,13 +341,15 @@ class MessageSource(PostgresSource):
               AND NOT EXISTS (SELECT 1 FROM exact_topic)
               AND NOT EXISTS (SELECT 1 FROM exact_all)
               AND NOT EXISTS (SELECT 1 FROM exact_any)
-              AND NOT EXISTS (SELECT 1 FROM strong)
-            ORDER BY __LEXICAL_ORDER__ m.timestamp DESC, m.id LIMIT :candidate_limit
+            ORDER BY __LEXICAL_ORDER__ ts_rank(m.content_tsv, to_tsquery('english', :query)) DESC,
+                     m.timestamp DESC, m.id LIMIT :candidate_limit
         ), candidates AS MATERIALIZED (
-            SELECT * FROM focused UNION ALL SELECT * FROM exact_topic
-            UNION ALL SELECT * FROM exact_all UNION ALL SELECT * FROM exact_any
-            UNION ALL SELECT * FROM strong
-            UNION ALL SELECT * FROM loose
+            SELECT DISTINCT ON (partition, id) * FROM (
+                SELECT * FROM focused UNION ALL SELECT * FROM exact_topic
+                UNION ALL SELECT * FROM exact_all UNION ALL SELECT * FROM exact_any
+                UNION ALL SELECT * FROM strong
+                UNION ALL SELECT * FROM loose) tiers
+            ORDER BY partition, id
         ), query_lexemes AS (
             SELECT ARRAY(SELECT DISTINCT unnest(tsvector_to_array(
                        to_tsvector('english', array_to_string(CAST(:terms AS text[]), ' '))))) AS lexemes
@@ -353,8 +357,14 @@ class MessageSource(PostgresSource):
             SELECT c.id, c.partition, c.source_bot, c.session_id, c.timestamp, c.exact_match,
                    (m.author_entity_type = 'bot'
                     AND m.author_entity_id = ANY(CAST(:named_bots AS text[]))) AS named_author,
-                   cardinality(ARRAY(SELECT unnest(q.lexemes)
-                                     INTERSECT SELECT unnest(tsvector_to_array(m.content_tsv)))) AS matched,
+                   -- A bot rarely writes its own name: its own message counts
+                   -- the question's mention of it as matched (TASK-2654).
+                   LEAST(cardinality(q.lexemes),
+                         cardinality(ARRAY(SELECT unnest(q.lexemes)
+                                     INTERSECT SELECT unnest(tsvector_to_array(m.content_tsv))))
+                         + CASE WHEN m.author_entity_type = 'bot'
+                                     AND m.author_entity_id = ANY(CAST(:named_bots AS text[]))
+                                THEN 1 ELSE 0 END) AS matched,
                    cardinality(q.lexemes) AS possible,
                    ts_rank(m.content_tsv, to_tsquery('english', :query))
                    / (1 + GREATEST(0, LEAST(extract(epoch FROM now()), :rank_at) - c.timestamp)

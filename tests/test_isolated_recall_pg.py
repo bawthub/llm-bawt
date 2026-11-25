@@ -378,6 +378,27 @@ def test_review_reference_is_omitted_if_one_excerpt_mentions_two_reviews():
     assert review_ref("R2 storage") is None
 
 
+def test_fresh_recap_does_not_hide_the_named_bots_older_original(rig):
+    """TASK-2654 live miss: today's recap repeated the five longest question
+    words, so the strong tier matched only it and the broad tier never ran.
+    The original, written by the named bot weeks earlier, never says its own
+    name or "audit"/"recommendation"."""
+    public = f"auditor{uuid.uuid4().hex[:8]}"
+    session = rig.add_session(str(uuid.uuid4()), bot=public)
+    originals = [rig.add(body, at=rig.now - 70 * DAY + i * 60, partition=public, session=session,
+                         author=public, author_type="bot") for i, body in enumerate([
+        "The gateway is not a carrier-compatible fiber terminal; keep the provider ONT.",
+        "Use one of the gateway's SFP+ ports as WAN with a multigig module for the fiber plan.",
+    ])]
+    recap = rig.add(f"{public} audited the network: the fiber plan recommendation was an SFP+ "
+                    "module on the gateway; full audit recommendation summary.", at=rig.now - 60)
+    question = f"Fiber plan and gateway SFP+ module recommendation from {public}'s network audit"
+    rows = rig.recall(question, allowed=frozenset({public}))
+    hits = [row.id for row in rows if row.follows is None]
+    assert recap in hits
+    assert set(originals) <= set(hits)
+
+
 def test_received_deliveries_follow_the_current_allowed_policy(rig):
     query = "What did Caid say about the maintenance_model and query_bounded for TASK-1210?"
     body = "TASK-1210: maintenance_model stays unset; query_bounded caps the read."

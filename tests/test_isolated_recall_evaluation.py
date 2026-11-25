@@ -128,7 +128,8 @@ async def test_bad_synthesis_never_falls_back_to_raw_evidence(response):
     service = RecallService(providers=[FixtureProvider("messages", [evidence])], synthesizer=synth)
     result = await service.recall(RecallRequest(query="Was deployment approved?", sources=("messages",)),
                                  _scope())
-    assert synth.calls == 1
+    # A rejected answer is retried once (TASK-2654), never replaced by raw evidence.
+    assert synth.calls in {1, 2}
     assert result["status"] in {"error", "insufficient_evidence"}
     assert not result.get("findings")
     assert "BULK_HISTORY_NOT_FOR_PARENT" not in json.dumps(result)

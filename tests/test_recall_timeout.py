@@ -139,6 +139,37 @@ async def test_other_model_failures_do_not_gain_a_fallback(code):
 
 
 @pytest.mark.asyncio
+async def test_rejected_synthesis_is_retried_once_and_can_recover():
+    """TASK-2654: one malformed model answer no longer empties the recall."""
+    class FlakyOnce(Model):
+        def __init__(self):
+            super().__init__()
+            self.attempts = 0
+
+        async def synthesize(self, *args):
+            self.attempts += 1
+            if self.attempts == 1:
+                return "not json"
+            return await super().synthesize(*args)
+
+    model = FlakyOnce()
+    result = await RecallService([Source()], model).recall(request(), SCOPE)
+    assert model.attempts == 2 and result["status"] == "ok"
+    assert result["metrics"]["model_calls"] == 2
+
+    class AlwaysBad(Model):
+        attempts = 0
+
+        async def synthesize(self, *args):
+            AlwaysBad.attempts += 1
+            return "not json"
+
+    result = await RecallService([Source()], AlwaysBad()).recall(request(), SCOPE)
+    assert AlwaysBad.attempts == 2 and result["status"] == "error"
+    assert result["error_code"] == "invalid_synthesis" and result["findings"] == []
+
+
+@pytest.mark.asyncio
 async def test_partial_coverage_kept_and_no_protected_rows_reach_fallback():
     good = Source(EvidenceBatch(Source().rows, withheld=1))
     bad = Source(error=RecallError("timeout"))
