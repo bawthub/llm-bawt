@@ -425,23 +425,29 @@ class McpOAuth:
         self._announce(server, record, "warning", f"{server.name}: sign in again to keep using its tools")
 
     def _announce(self, server: McpServer, record: ConnectionRecord, tone: str, summary: str) -> None:
-        """One live event to whoever signed in, else the server's last editor, else the
-        deployment's configured default user (connections made before either was recorded).
+        """One live event to whoever signed in, else the server's last editor. A connection
+        made before either was recorded has no owner to pick, so every user gets it: the
+        server list is shared, and the event carries only its name and status.
         Best effort; the page also refreshes on resync."""
-        from ...default_user import default_user_id
-
         engine = getattr(getattr(self.store, "_store", None), "engine", None)
-        owner = record.meta.get("owner") or server.updated_by or default_user_id()
-        if engine is None or not owner:
+        if engine is None:
             return
+        owner = record.meta.get("owner") or server.updated_by
         try:
+            from sqlmodel import select
+
+            from ...profiles import EntityProfile, EntityType
             from ...system_events import SystemEventEmitter
             emitter = SystemEventEmitter(engine)
+            stamp = time.time_ns()
             with engine.begin() as conn:
-                emitter.append(
-                    conn, event_key=f"mcp_server_auth:{server.slug}:{server.generation}:{time.time_ns()}",
-                    kind="mcp_server_auth", source="integrations", user_id=owner,
-                    tone=tone, summary=summary, subject_type="mcp_server", subject_id=server.slug)
+                recipients = [owner] if owner else list(conn.execute(select(EntityProfile.entity_id).where(
+                    EntityProfile.entity_type == EntityType.USER)).scalars())
+                for user_id in recipients:
+                    emitter.append(
+                        conn, event_key=f"mcp_server_auth:{server.slug}:{server.generation}:{stamp}:{user_id}",
+                        kind="mcp_server_auth", source="integrations", user_id=user_id,
+                        tone=tone, summary=summary, subject_type="mcp_server", subject_id=server.slug)
         except Exception:  # noqa: BLE001 - best effort; the page also refreshes on resync
             logger.warning("MCP server %s: sign-in status event not sent", server.slug)
 
@@ -483,7 +489,7 @@ class McpOAuth:
         token = _json(response)
         if not token or not token.get("access_token"):
             raise IntegrationError("server_unreachable")
-        spent = (record.secret.get("access_token"), refresh)
+        original_meta, original_secret = dict(record.meta), dict(record.secret)
         fresh = {"access_token": token["access_token"],
                  **({"refresh_token": token["refresh_token"]} if token.get("refresh_token") else {})}
         was_flagged = bool(record.meta.get("reauth_required"))
@@ -496,13 +502,12 @@ class McpOAuth:
             if not (winner and winner.status == "connected" and winner.auth_method == "oauth_mcp"
                     and owned_by(winner, server)):
                 raise IntegrationError("reauthorization_required")
-            if (winner.secret.get("access_token"), winner.secret.get("refresh_token")) == spent:
+            if (winner.secret == original_secret and winner.meta.get("reauth_required")
+                    and {k: v for k, v in winner.meta.items() if k != "reauth_required"}
+                    == {k: v for k, v in original_meta.items() if k != "reauth_required"}):
                 # Only a concurrent failure's marker changed: this renewal still holds the
                 # live credential, so it commits over the marker (once more, still CAS).
-                was_flagged = was_flagged or bool(winner.meta.get("reauth_required"))
-                record.meta = {**{k: v for k, v in winner.meta.items() if k != "reauth_required"},
-                               "expires_at": record.meta["expires_at"]}
-                record.secret = {**winner.secret, **fresh}
+                was_flagged = True
                 if not self.store.replace(sid, now, record):
                     raise IntegrationError("reauthorization_required")
             elif winner.secret.get("access_token"):

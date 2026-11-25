@@ -419,19 +419,27 @@ def test_renewal_event_reaches_whoever_signed_in(store, monkeypatch):
         ("mcp_server_auth", "user-1", "tools", "warning")]
 
 
-def test_renewal_event_falls_back_to_the_server_editor(store, monkeypatch):
+def test_renewal_event_falls_back_to_the_editor_then_every_user(store, monkeypatch):
     from dataclasses import replace
+
+    from llm_bawt.profiles import EntityProfile, EntityType
+    from sqlmodel import Session
 
     appended = _capture_events(monkeypatch)
     oauth = oauth_for(store, FakeRemote())
+    engine = store._store.engine
+    SQLModel.metadata.create_all(engine, tables=[EntityProfile.__table__])
+    with Session(engine) as session:
+        for uid in ("user-a", "user-b"):
+            session.add(EntityProfile(entity_type=EntityType.USER, entity_id=uid))
+        session.commit()
     record = ConnectionRecord(provider=store_id("tools"), status="connected", meta={})
     oauth._announce(replace(SERVER, updated_by="owner-1"), record, "warning", "x")
-    from llm_bawt import default_user
-    monkeypatch.setattr(default_user, "default_user_id", lambda: "")
-    oauth._announce(SERVER, record, "warning", "x")  # nobody recorded or configured: nothing to address
-    monkeypatch.setattr(default_user, "default_user_id", lambda: "default-1")
-    oauth._announce(SERVER, record, "warning", "x")  # a connection from before owners were recorded
-    assert [e["user_id"] for e in appended] == ["owner-1", "default-1"]
+    assert [e["user_id"] for e in appended] == ["owner-1"]
+    appended.clear()
+    oauth._announce(SERVER, record, "warning", "x")  # made before owners were recorded: nobody to pick
+    assert sorted(e["user_id"] for e in appended) == ["user-a", "user-b"]
+    assert len({e["event_key"] for e in appended}) == 2
 
 
 def _overlap(store, monkeypatch, first_status):
@@ -635,3 +643,23 @@ def test_the_default_client_uses_the_policy_transport():
 def test_members_see_only_the_origin(url, shown):
     public = McpServer("tools", "Tools", url, "streamable_http", "none", True, "g").public()
     assert public["url"] == shown and "secret" not in str(public)
+
+
+def test_a_renewal_never_overwrites_a_newer_sign_in_with_the_same_tokens(store, monkeypatch):
+    """Matching token strings alone don't prove only a marker changed."""
+    remote = FakeRemote()
+    oauth = oauth_for(store, remote)
+    sign_in(oauth)
+    _expire(store)
+    real = oauth._http
+
+    def overlapping(server):
+        monkeypatch.setattr(oauth, "_http", real)
+        sign_in(oauth)  # the provider issues the same token strings again; a fresh connection
+        return real(server)
+
+    monkeypatch.setattr(oauth, "_http", overlapping)
+    assert oauth.access_token(SERVER) == "access-1"  # the newer sign-in's token wins
+    saved = store.load(store_id("tools"))
+    assert saved.secret["access_token"] == "access-1" and saved.secret["refresh_token"] == "refresh-1"
+    assert saved.meta["expires_at"] > time.time() + 60
