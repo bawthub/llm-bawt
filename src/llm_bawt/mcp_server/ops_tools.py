@@ -340,16 +340,17 @@ async def ops_catalog_edit(
     approves or rejects the whole batch. A moved version makes it stale:
     read again and propose again.
     """
+    if action not in ("read", "propose"):
+        raise ValueError("action must be read or propose")
+    # Both actions need a signed bot turn: read returns full command scripts,
+    # including disabled rows. Identity never comes from args.
+    turn = await asyncio.to_thread(current_task_turn_context)
+    if not turn.bot_id:
+        raise PermissionError("catalog edits need a signed bot turn")
     if action == "read":
         if not slug:
             raise ValueError("read needs slug")
         return await asyncio.to_thread(_catalog_read, slug)
-    if action != "propose":
-        raise ValueError("action must be read or propose")
-    # Identity comes only from the signed per-turn capability, never from args.
-    turn = await asyncio.to_thread(current_task_turn_context)
-    if not turn.bot_id:
-        raise PermissionError("proposals need a bot turn")
     result = await asyncio.to_thread(_catalog_propose, items or [], reason or "", turn.bot_id)
     result["next"] = "The user approves in Approvals; you are not notified. Do not apply it yourself."
     return result

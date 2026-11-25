@@ -45,6 +45,7 @@ PROTECTED = {
     ("POST", "/v1/ops/operations/{slug}/soft-delete"),
     ("POST", "/v1/ops/operations/{slug}/enable"),
     ("POST", "/v1/ops/seed-defaults"),
+    ("GET", "/v1/ops/catalog-proposals"),
     ("POST", "/v1/ops/catalog-proposals/{batch_id}/decide"),
     ("POST", "/v1/ops/jobs"),
     ("POST", "/v1/ops/jobs/{job_id}/cancel"),

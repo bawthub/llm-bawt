@@ -192,18 +192,12 @@ class ProposalDecision(BaseModel):
     actor: str = Field(..., min_length=1, max_length=128)
 
 
-@router.get("/v1/ops/catalog-proposals", tags=["Ops"])
-def list_catalog_proposals(status: Literal["pending", "approved", "rejected", "stale", "partial"] | None = "pending",
+@router.get("/v1/ops/catalog-proposals", tags=["Ops"], dependencies=_SERVICE)
+def list_catalog_proposals(status: Literal["pending", "approved", "rejected", "stale"] | None = "pending",
                            limit: int = Query(50, ge=1, le=200)):
+    """Full diffs of unapplied catalog edits: operator read, behind the bearer."""
     from ...ops import catalog_proposals
-    store = _store()
-    if status == "partial":
-        # Mixed batches have no single row status; filter after grouping.
-        rows = [b for b in catalog_proposals.list_batches(store, status=None, limit=limit)
-                if b["status"] == "partial"]
-    else:
-        rows = catalog_proposals.list_batches(store, status=status, limit=limit)
-    return {"batches": rows}
+    return {"batches": catalog_proposals.list_batches(_store(), status=status, limit=limit)}
 
 
 @router.post("/v1/ops/catalog-proposals/{batch_id}/decide", tags=["Ops"], dependencies=_SERVICE)

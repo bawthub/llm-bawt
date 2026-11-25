@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import json
 import uuid
-from copy import copy
 from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
@@ -117,13 +116,7 @@ def propose(store, *, items: Sequence[Mapping[str, Any]], reason: str, proposed_
         after = {k: v for k, v in clean.items() if before[k] != v}
         if not after:
             raise ProposalError(f"{slug}: changes match the current operation")
-        trial = copy(current)
-        for k, v in after.items():
-            setattr(trial, k, v)
-        try:
-            store._validate_op(trial)
-        except ValueError as exc:
-            raise ProposalError(f"{slug}: {exc}") from exc
+        _dry_run(store, slug, after)
         rows.append(OpsCatalogProposal(
             batch_id=batch_id, position=position, operation_slug=slug, base_version=version,
             before_json=json.dumps({k: before[k] for k in after}), after_json=json.dumps(after),
@@ -133,6 +126,20 @@ def propose(store, *, items: Sequence[Mapping[str, Any]], reason: str, proposed_
         _emit(store, session, batch_id, PENDING, proposed_by, len(rows), reason)
         session.commit()
     return {"batch_id": batch_id, "status": PENDING, "items": len(rows)}
+
+
+def _dry_run(store, slug: str, after: Mapping[str, Any]) -> None:
+    """Run the edit through the real write path, flush, and roll back, so a
+    proposal can never record an edit the catalog would refuse on approval."""
+    with Session(store.engine) as session:
+        try:
+            row = store._lock_operation(session, slug)
+            store.apply_update_in(session, row, store._clean_op(dict(after)), actor="dry-run",
+                                  side_effects=False)
+        except ValueError as exc:
+            raise ProposalError(f"{slug}: {exc}") from exc
+        finally:
+            session.rollback()
 
 
 def _emit(store, session, batch_id: str, status: str, actor: str, count: int, reason: str) -> None:
@@ -181,7 +188,7 @@ def list_batches(store, *, status: str | None = PENDING, limit: int = 50) -> lis
         b["items"].append(_item_api(row))
     for b in batches.values():
         states = {i["status"] for i in b["items"]}
-        b["status"] = states.pop() if len(states) == 1 else "partial"
+        b["status"] = states.pop()
     return list(batches.values())
 
 
@@ -197,60 +204,70 @@ def _refuse_bot(engine, actor: str) -> None:
 
 
 def decide(store, *, batch_id: str, decided_by: str, approve: bool) -> dict[str, Any]:
-    """One-shot decision for a whole batch. Approval applies every item or,
-    when any operation moved since the proposal, none (status ``stale``)."""
+    """One-shot decision for a whole batch, in one transaction.
+
+    The proposal rows and every target operation are locked (operations in
+    slug order), every base version is rechecked under the locks, and the
+    edits, revisions, pending-approval invalidation and the decision commit
+    together: all applied, or none (``stale`` when an operation moved). A
+    repeated decision reports the recorded result and changes nothing.
+    """
     store._require()
     ensure_schema(store.engine)
     _refuse_bot(store.engine, decided_by)
-    now = _utcnow()
     with Session(store.engine) as session:
         items = session.exec(select(OpsCatalogProposal).where(
             OpsCatalogProposal.batch_id == batch_id).order_by(OpsCatalogProposal.position)).all()
         if not items:
             raise LookupError("no such proposal")
-        # Claim the batch atomically so a second decision cannot also apply it.
+        # Locks the batch rows (write lock first, also on SQLite) and refuses a second decision.
         claimed = session.execute(update(OpsCatalogProposal).where(
             OpsCatalogProposal.batch_id == batch_id, OpsCatalogProposal.status == PENDING,
-        ).values(status="deciding", decided_by=decided_by, decided_at=now)
+        ).values(decided_by=decided_by, decided_at=_utcnow())
             .execution_options(synchronize_session=False)).rowcount
         if claimed != len(items):
             session.rollback()
-            raise ProposalError(f"proposal already {items[0].status}")
-        session.expunge_all()  # keep the loaded values; the claim needs no refresh
-        session.commit()
-    results: dict[str, tuple[str, int | None]] = {}
-    if not approve:
-        outcome = REJECTED
-        results = {i.id: (REJECTED, None) for i in items}
-    else:
-        moved = [i.operation_slug for i in items
-                 if (op := store.get_operation_by_slug(i.operation_slug)) is None
-                 or op.version != i.base_version]
-        if moved:
-            outcome = STALE
-            results = {i.id: (STALE, None) for i in items}
+            return {"batch_id": batch_id, "status": _recorded_status(store, batch_id), "recorded": True}
+        reason, count = items[0].reason, len(items)
+        targets = sorted(items, key=lambda i: i.operation_slug)
+        if not approve:
+            outcome, versions, moved = REJECTED, {}, []
         else:
-            outcome = APPROVED
-            for i in items:
+            ops = {i.operation_slug: store._lock_operation(session, i.operation_slug) for i in targets}
+            moved = [slug for slug, op in ops.items()
+                     if op is None or op.soft_deleted_at is not None
+                     or op.version != next(i.base_version for i in items if i.operation_slug == slug)]
+            versions = {}
+            if moved:
+                outcome = STALE
+            else:
+                outcome = APPROVED
                 try:
-                    row = store.update_operation(i.operation_slug, json.loads(i.after_json),
-                                                 actor=decided_by, expect_version=i.base_version)
-                except ValueError:
-                    row = None
-                results[i.id] = (APPROVED, row.version) if row is not None else (STALE, None)
-            if any(s == STALE for s, _ in results.values()):
-                outcome = "partial"
-    with Session(store.engine) as session:
-        for item_id, (status, version) in results.items():
-            session.execute(update(OpsCatalogProposal).where(OpsCatalogProposal.id == item_id)
-                            .values(status=status, result_version=version)
+                    for i in targets:
+                        row = store.apply_update_in(session, ops[i.operation_slug],
+                                                    store._clean_op(json.loads(i.after_json)),
+                                                    actor=decided_by)
+                        versions[i.id] = row.version
+                except ValueError as exc:
+                    session.rollback()
+                    raise ProposalError(f"nothing applied: {exc}") from exc
+        for i in items:
+            session.execute(update(OpsCatalogProposal).where(OpsCatalogProposal.id == i.id)
+                            .values(status=outcome, result_version=versions.get(i.id))
                             .execution_options(synchronize_session=False))
-        _emit(store, session, batch_id, STALE if outcome == "partial" else outcome,
-              decided_by, len(items), items[0].reason)
+        applied = {i.operation_slug: versions[i.id] for i in items if i.id in versions}
+        _emit(store, session, batch_id, outcome, decided_by, count, reason)
         session.commit()
     out: dict[str, Any] = {"batch_id": batch_id, "status": outcome}
     if outcome == STALE:
         out["moved"] = moved
-    if outcome in (APPROVED, "partial"):
-        out["applied"] = {i.operation_slug: results[i.id][1] for i in items}
+    if outcome == APPROVED:
+        out["applied"] = applied
     return out
+
+
+def _recorded_status(store, batch_id: str) -> str:
+    with Session(store.engine) as session:
+        states = set(session.exec(select(OpsCatalogProposal.status).where(
+            OpsCatalogProposal.batch_id == batch_id)).all())
+    return states.pop() if states else "unknown"

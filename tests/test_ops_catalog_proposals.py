@@ -53,8 +53,8 @@ def test_batch_approves_with_one_decision_and_records_revisions(store):
         revisions, total = store.list_revisions(slug)
         assert total == 2 and revisions[0].actor == "person"
     assert cp.list_batches(store) == []
-    with pytest.raises(cp.ProposalError):
-        cp.decide(store, batch_id=batch["batch_id"], decided_by="person", approve=True)
+    again = cp.decide(store, batch_id=batch["batch_id"], decided_by="other", approve=False)
+    assert again == {"batch_id": batch["batch_id"], "status": "approved", "recorded": True}
 
 
 def test_moved_operation_makes_whole_batch_stale(store):
@@ -81,9 +81,48 @@ def test_bot_cannot_decide_and_reject_applies_nothing(store):
     ({"slug": "test.one", "expect_version": 1, "changes": {"slug": "x"}}, "not editable"),
     (_edit("test.one", name="old-repo"), "match the current"),
     ({"slug": "test.one", "expect_version": 1, "changes": {"timeout_seconds": 0}}, "timeout_seconds"),
+    ({"slug": "test.one", "expect_version": 1, "changes": {"target_host": None}}, "cannot store"),
     (_edit("test.missing"), "no such operation"),
 ])
 def test_invalid_proposals_are_refused(store, item, message):
     with pytest.raises(cp.ProposalError, match=message):
         cp.propose(store, items=[item], reason="r", proposed_by="vex")
     assert cp.list_batches(store) == []
+
+
+def test_failure_mid_apply_applies_nothing_and_keeps_the_card_pending(store, monkeypatch):
+    batch = cp.propose(store, items=[_edit("test.one"), _edit("test.two")],
+                       reason="rename repo", proposed_by="vex")
+    real = store.apply_update_in
+    calls = []
+
+    def flaky(session, row, clean, **kw):
+        calls.append(row.slug)
+        if len(calls) == 2:
+            raise ValueError("interrupted")
+        return real(session, row, clean, **kw)
+    monkeypatch.setattr(store, "apply_update_in", flaky)
+    with pytest.raises(cp.ProposalError, match="nothing applied"):
+        cp.decide(store, batch_id=batch["batch_id"], decided_by="person", approve=True)
+    assert [store.get_operation_by_slug(s).version for s in ("test.one", "test.two")] == [1, 1]
+    assert store.list_revisions("test.one")[1] == 1
+    assert cp.list_batches(store)[0]["status"] == "pending"
+    monkeypatch.setattr(store, "apply_update_in", real)
+    assert cp.decide(store, batch_id=batch["batch_id"], decided_by="person", approve=True)["status"] == "approved"
+
+
+def test_edit_after_proposal_but_before_lock_is_stale_not_partial(store, monkeypatch):
+    batch = cp.propose(store, items=[_edit("test.one"), _edit("test.two")],
+                       reason="rename repo", proposed_by="vex")
+    real = store._lock_operation
+
+    def racing(session, slug):
+        row = real(session, slug)
+        if slug == "test.two":
+            row.version += 1  # another writer got there first
+        return row
+    monkeypatch.setattr(store, "_lock_operation", racing)
+    out = cp.decide(store, batch_id=batch["batch_id"], decided_by="person", approve=True)
+    assert out["status"] == "stale" and out["moved"] == ["test.two"]
+    monkeypatch.setattr(store, "_lock_operation", real)
+    assert store.get_operation_by_slug("test.one").version == 1

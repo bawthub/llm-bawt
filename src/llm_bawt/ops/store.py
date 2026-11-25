@@ -469,31 +469,49 @@ class OpsStore:
                 return None
             if expect_version is not None and row.version != expect_version:
                 return None
-            if "slug" in clean and clean["slug"] != row.slug:
-                raise ValueError("operation slug is immutable; create a new operation")
-            if row.soft_deleted_at is not None and clean.get("enabled"):
-                raise ValueError("soft-deleted operations cannot be enabled")
-            for field, value in clean.items():
-                setattr(row, field, value)
-            if _delete:
-                if row.soft_deleted_at is not None:
-                    return row
-                row.enabled = False
-                row.soft_deleted_at = _utcnow()
-            self._validate_op(row)
-            row.version += 1
-            row.script_hash = _script_hash(row.command_script)
-            row.updated_at = _utcnow()
-            row.updated_by = actor
-            session.add(row)
-            self._record_revision(session, row)
-            from ..approval_ops_revision import invalidate_pending_ops
-
-            invalidate_pending_ops(session, row, getattr(self, "events", None))
-            self._notify_catalog(session, row.slug)
+            if _delete and row.soft_deleted_at is not None:
+                return row
+            self.apply_update_in(session, row, clean, actor=actor, _delete=_delete)
             session.commit()
             session.refresh(row)
             return row
+
+    def apply_update_in(self, session, row, clean, *, actor, _delete=False, side_effects=True):
+        """Apply cleaned fields to a locked row inside the caller's session.
+
+        The one write path for catalog edits: manual PATCH and approved
+        proposals (TASK-2630) share it. ``side_effects=False`` is a dry run:
+        it validates, bumps and flushes so database constraints are checked,
+        but records no revision, invalidation or notification; the caller
+        rolls back.
+        """
+        if "slug" in clean and clean["slug"] != row.slug:
+            raise ValueError("operation slug is immutable; create a new operation")
+        if row.soft_deleted_at is not None and clean.get("enabled"):
+            raise ValueError("soft-deleted operations cannot be enabled")
+        for field, value in clean.items():
+            setattr(row, field, value)
+        if _delete:
+            row.enabled = False
+            row.soft_deleted_at = _utcnow()
+        self._validate_op(row)
+        row.version += 1
+        row.script_hash = _script_hash(row.command_script)
+        row.updated_at = _utcnow()
+        row.updated_by = actor
+        session.add(row)
+        if not side_effects:
+            try:
+                session.flush()
+            except IntegrityError as exc:
+                raise ValueError(f"the catalog cannot store this edit: {exc.orig}") from exc
+            return row
+        self._record_revision(session, row)
+        from ..approval_ops_revision import invalidate_pending_ops
+
+        invalidate_pending_ops(session, row, getattr(self, "events", None))
+        self._notify_catalog(session, row.slug)
+        return row
 
     def soft_delete_operation(self, slug_or_id, *, actor=None):
         return self.update_operation(slug_or_id, {}, actor=actor, _delete=True) is not None
