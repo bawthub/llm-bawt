@@ -3,7 +3,6 @@
 # ─────────────────────────────────────────────────────────────────
 #
 # Workflow:
-#   make install         Editable uv tool install — CLI client from local repo
 #   make up / docker-dev Start the service stack in Docker
 #   make dev             Sync local .venv for source development
 #   make test / lint     Run tests and linting (uv-based)
@@ -48,7 +47,6 @@ else
 endif
 
 # ── Configurable variables ──────────────────────────────────────
-REPO           ?= git+https://github.com/bawthub/llm-bawt.git
 CUDA_ARCHS     ?= 75;80;86;89;90;120  # used by dev-llama
 WITH_CUDA      ?= true                # used by dev-llama
 
@@ -112,36 +110,13 @@ check-uv: ## Verify uv is installed
 	@echo "$(GREEN)✓ uv OK$(NC)"
 
 
-.PHONY: install install-github uninstall
-
-install: check-python check-uv ## [uv tool] Editable install from local repo (recommended)
-	@echo "$(BLUE)Installing llm-bawt via uv tool (editable, local repo)...$(NC)"
-	-uv tool uninstall llm-bawt 2>$(NULL) || true
-	uv tool install --force --editable .
-	@echo "$(GREEN)✓ llm-bawt installed (editable)$(NC)"
-	@echo "  Run: llm --status"
-	@echo "  Source changes in this repo are reflected immediately"
-	@echo "  Service deps (memory, search, etc.) run in Docker — see: make up"
-
-install-github: check-python check-uv ## [uv tool] Non-editable install from GitHub
-	@echo "$(BLUE)Installing llm-bawt via uv tool from GitHub...$(NC)"
-	-uv tool uninstall llm-bawt 2>$(NULL) || true
-	uv tool install --force "$(REPO)"
-	@echo "$(GREEN)✓ llm-bawt installed (GitHub)$(NC)"
-
-# To add extra packages into the tool env (rarely needed):
-#   uv tool install --with <package> llm-bawt
-
-uninstall: ## [uv tool] Uninstall llm-bawt
-	@echo "$(YELLOW)Uninstalling llm-bawt...$(NC)"
-	-uv tool uninstall llm-bawt 2>$(NULL) || true
-	@echo "$(GREEN)✓ llm-bawt uninstalled$(NC)"
+# The terminal client is the BawtHub CLI: `bh chat`, `bh jobs`, `bh status`.
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # DEVELOPMENT (uv-based local .venv)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-.PHONY: dev dev-llama dev-run
+.PHONY: dev dev-llama
 
 dev: check-uv ## [uv] Sync .venv with all extras (dev, mcp, service, search, memory, hf, tui)
 	@echo "$(BLUE)Syncing .venv with all extras...$(NC)"
@@ -165,11 +140,6 @@ dev-vllm: check-uv ## [uv] Add vLLM to .venv (requires NVIDIA GPU + CUDA)
 	uv pip install vllm
 	@echo "$(GREEN)✓ vLLM installed$(NC)"
 	@echo "$(YELLOW)Note: vLLM requires NVIDIA GPU + CUDA to run$(NC)"
-
-# Keep the legacy target until its CLI callers migrate; use the server's own
-# status or docker-status to check a development deployment.
-dev-run: ## [legacy] Run the old llm client from .venv
-	uv run llm $(ARGS)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -222,7 +192,7 @@ docker-status: ## Show container status
 docker-shell: ## Open bash shell in app container
 	docker compose exec app bash
 
-docker-exec: ## Run command in container (make docker-exec CMD="llm --status")
+docker-exec: ## Run command in container (make docker-exec CMD="curl -s localhost:8642/health")
 	docker compose exec app $(CMD)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

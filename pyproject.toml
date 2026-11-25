@@ -121,8 +121,6 @@ search = [
 
 
 [project.scripts]
-llm-bawt = "llm_bawt.main:main"
-llm = "llm_bawt.main:main"
 llm-bawt-service = "llm_bawt.service.server:main"
 llm-service = "llm_bawt.service.server:main"
 llm-mcp-server = "llm_bawt.mcp_server:run_server"

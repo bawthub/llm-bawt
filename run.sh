@@ -58,7 +58,7 @@ EXAMPLES:
     ./run.sh shell
 
     # Run a command in container
-    ./run.sh exec llm --status
+    ./run.sh exec curl -s localhost:8642/health
 
 DEVELOPMENT:
     Dev mode mounts ./src for live code changes.
@@ -127,14 +127,14 @@ case "${1:-help}" in
     echo "Container status:"
     docker compose ps
     echo ""
-    echo "To check service health: llm --status"
+    echo "To check service health: ./run.sh exec curl -s localhost:8642/health"
     ;;
 
   exec)
     shift
     if [[ $# -eq 0 ]]; then
       echo "Usage: ./run.sh exec <command>"
-      echo "Example: ./run.sh exec llm --status"
+      echo "Example: ./run.sh exec curl -s localhost:8642/health"
       exit 1
     fi
     docker compose exec app "$@"

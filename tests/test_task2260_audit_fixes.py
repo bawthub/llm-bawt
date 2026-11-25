@@ -428,17 +428,3 @@ def test_multiline_input_survives_eof(monkeypatch):
     handler.console = SimpleNamespace(print=lambda *a, **k: None)
     assert handler._get_multiline_input() == "first\nsecond"
 
-
-@pytest.mark.parametrize("value", ["2026-11-14T05:00:00Z", "2026-11-14T05:00:00+02:00", "2026-11-14T05:00:00"])
-def test_job_timestamps_are_timezone_aware(value):
-    from llm_bawt.cli.display_cmd import _aware_utc
-
-    assert _aware_utc(value).tzinfo is not None
-
-
-@pytest.mark.parametrize("args", ["{}", {}])
-def test_empty_tool_args_render_without_stopiteration(args):
-    from llm_bawt.cli.tool_render import _format_tool_call, _summarize_tool_args
-
-    assert _format_tool_call("NoArgs", args) == "NoArgs"
-    _summarize_tool_args(args)

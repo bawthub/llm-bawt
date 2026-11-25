@@ -17,9 +17,7 @@ Do not use `sudo npm` or change the host Node installation for this upgrade.
 versions from the deployed bridge image during this Node rebuild. Update these
 constraints deliberately when upgrading Python harnesses; bumping an SDK lower
 bound without updating its constraint will correctly fail dependency resolution.
-The separate full-dependency `llm` CLI environment is not pinned by this file.
-It explicitly includes `httpx`, whose absence already broke `llm --help` in the
-old image. OS packages, Python patch version, uv and CLI-tool dependencies can
+OS packages, Python patch version, uv and CLI-tool dependencies can
 still advance in a fresh build; this is not a fully reproducible image lock.
 
 ## Build and validate without affecting services
@@ -37,8 +35,8 @@ docker run --rm --network none --cap-drop ALL \
 
 The smoke script runs as `bridge`, checks exact versions/PATH, absence of apt
 Node/npm binaries, Node ESM/fetch/WebSocket/crypto, Python bridge module imports,
-all constrained Python versions, bundled Claude/Codex `--version`, uv and
-`llm --help`. A temporary package.json exercises npx and pnpm command execution.
+all constrained Python versions, bundled Claude/Codex `--version` and uv.
+A temporary package.json exercises npx and pnpm command execution.
 No service is started, no live home/config/source mount is attached, and no bot
 or credential is used. Only amd64 was exercised on the deployment host; arm64
 has a verified upstream checksum but still needs a native build/runtime test.

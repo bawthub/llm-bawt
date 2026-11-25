@@ -1,6 +1,6 @@
 # llm-bawt
 
-`llm-bawt` is the backend behind [BawtHub](https://bawthub.com/). It keeps each bot, thread, memory, profile, and task on the server so the same conversation can continue across the web app, voice surfaces, and the `llm` CLI.
+`llm-bawt` is the backend behind [BawtHub](https://bawthub.com/). It keeps each bot, thread, memory, profile, and task on the server so the same conversation can continue across the web app, voice surfaces, and the `bh` CLI.
 
 The public site describes BawtHub as "one conversation, every device." This repo is the part that makes that true: one API, one history store, one memory system, one bot registry, and optional agent bridges that let bots do real work.
 
@@ -19,7 +19,7 @@ The public site describes BawtHub as "one conversation, every device." This repo
 
 ```text
 BawtHub surfaces
-  web app          voice pipeline         llm CLI
+  web app          voice pipeline         bh CLI 
       \                 |                  /
        \                |                 /
         -> llm-bawt service (:8642) <----
@@ -121,7 +121,7 @@ make docker-status
 ```bash
 git clone https://github.com/bawthub/llm-bawt.git
 cd llm-bawt
-./install.sh --dev
+make dev
 ./server.sh start --dev --stdout
 ```
 
@@ -196,7 +196,7 @@ src/local_model_bridge/    embeddings + local inference service
 The important design choice is that the thread does not live in the client. BawtHub surfaces are just views into server-side state held here:
 
 - A phone voice turn and a desktop text turn can hit the same bot thread.
-- A CLI `llm -b loopy "status?"` turn can resume the same conversation BawtHub shows in the browser.
+- A terminal `bh chat -b loopy "status?"` turn can resume the same conversation BawtHub shows in the browser.
 - Tool calls, summaries, memories, and task progress are stored centrally instead of inside one app session.
 - Bots can hand work to other bots through bridge and MCP tooling while the UI stays attached to the same thread.
 

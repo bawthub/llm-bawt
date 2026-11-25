@@ -187,18 +187,8 @@ COPY tenant-skills/ /opt/bawthub/skills/
 
 USER bridge
 
-# uv tool-installed `llm` CLI (editable, full deps).
-# Mirrors `make install` — gives the bridge user a working `llm` command
-# in an isolated env at ~/.local/share/uv/tools/llm-bawt while keeping
-# /app/.venv lean (bridge runtime deps only). Editable means changes to
-# /app/src (bind-mounted in dev) are picked up without reinstall.
-# The CLI imports httpx directly; newer provider SDKs no longer supply it
-# transitively. Include it explicitly in this separate tool environment.
-RUN uv tool install --force --editable /app --with "httpx==0.28.1"
-
-# /home/bridge/.local/bin first so uv tool `llm` shadows the dep-less stub
-# in /app/.venv/bin. `python` still resolves to /app/.venv/bin/python,
-# so `python -m claude_code_bridge` etc. continue to use the bridge venv.
+# `python` resolves to /app/.venv/bin/python, so `python -m
+# claude_code_bridge` etc. use the bridge venv.
 # /opt/agent-skills/bin holds bind-mounted scripts from the agent-skills
 # repo (see agent-skills/scripts/README.md); this is intentionally last
 # so agent helpers never shadow the project's own binaries.
