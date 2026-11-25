@@ -11,7 +11,9 @@ Apply the [reviewer selection and provider fallback policy](../peer-review/SKILL
 
 Use `BLOCKER` for a concrete failure in supported conditions: explain the state, wrong result, and evidence. Use `SHOULD_FIX`, `NIT`, `QUESTION`, or `PRE_EXISTING` for findings that do not prevent this change from working. Future generality and unrelated cleanup are follow-ups.
 
-Record `APPROVE`, `APPROVE_WITH_CHANGES`, or `REQUEST_CHANGES` with `tasks_reviews_add`, pinned to the reviewed revision. State what you checked and any material limit. For a recheck, focus on outstanding blockers and regressions introduced by the fix. Preserve review history using supported recheck or linked-review records; do not invent resolved evidence.
+Record `APPROVE`, `APPROVE_WITH_CHANGES`, or `REQUEST_CHANGES` with `tasks_reviews_add`, pinned to the reviewed revision. For implementation spanning repos, set `targetRevision` to every reviewed pin (for example, `bawthub:<sha>; llm-bawt:<sha>`); release intake does not look for SHAs in the body. State what you checked and any material limit. For a recheck, focus on outstanding blockers and regressions introduced by the fix. Preserve review history using supported recheck or linked-review records; do not invent resolved evidence.
+
+For an IMPLEMENTATION review of code, set `targetRevision` to the exact full Git commit SHA(s) you approved; put packet or patch digests in the review body.
 
 When reviewing, do not edit the change you are judging. If you help implement a fix, another reviewer checks those lines. This restriction applies to the review assignment, not every other job held by a reviewer-capable bot.
 

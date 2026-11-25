@@ -82,10 +82,10 @@ auto-repairs from regex. `--no-repair` = strictly read-only. Delivery-shape
 turn IDs (`turn-delivery-<hex>`) are filtered from resolve batches and PUT
 bodies alike; attribution rides on `trigger_message_id` alone for those turns.
 
-**Runtime config** — default internal URL `http://frontend-prod:3002` (the
-always-on service, NOT the optional HMR `frontend`). No per-endpoint auth
-(TASK-793): the internal port stays inside the docker network, and that
-boundary is the auth layer.
+**Runtime config** — MCP task tools default to `http://frontend-prod:3000`,
+the stable production frontend, not the optional HMR `frontend`. This base
+URL is distinct from the internal association listener above. See the
+authoritative [task API routing and deploy order](../../llm-bawt/reference/task-conversation.md#task-api-routing-and-deploy-order).
 
 ### Event-driven worker callbacks
 

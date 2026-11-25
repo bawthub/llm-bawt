@@ -15,7 +15,7 @@ arguments and executor failures are errors, not invitations to use Bash/SSH.
 Never retry an approval-required call: wait for its persisted result.
 
 Keep job_id. Approval-gated jobs deliver their terminal receipt as a new turn;
-do not poll (llm-bawt/reference/ops-actions.md step 3). Verify state/exit_code
+do not poll (see [ops service notes](../../llm-bawt/reference/ops-actions.md)). Verify state/exit_code
 plus target health from that receipt; ops_job_status is a one-shot read; the reconciler records progress.
 output_tail_bytes adds bounded output. Queued or approved is not completed.
 Bridge/Redis restarts and production release need an approved card per run.
@@ -29,16 +29,29 @@ may decide other bots' pending ops_run approval cards:
 - ops_approvals_list(): the pending ops_run cards you may decide, oldest
   first, with sensitive args masked. Cards your own bot filed, cards from
   private bots and other users' cards are never listed.
+- ops_approvals_get(request_id): read one eligible card by ID, pending or
+  resolved, with sensitive args masked. Use it for an approval notice; the
+  resolver's reason is visible only to that resolver.
 - ops_approval_resolve(request_id, decision="approve"|"deny", reason): the
   reason is required and shown on the card as "Approved/Denied by <you>". The
   approved job then runs and delivers its receipt exactly as for a person's
   approval.
 
+Approver notices use runtime setting `approver_fanout_mode`: `notify` (default),
+`report` (log pending count without writes), or `off`. In notify mode,
+`approval_approver_fanout` deduplicates each card/eligible-approver pair into one
+`APPROVAL_REQUEST` delivery with masked args. Eligibility is rechecked at enqueue,
+claim and read; the notice grants no authority. Resolution cancels undelivered
+notices; an approver already notified gets one `steer_only` `APPROVAL_RESOLVED`
+follow-up, except the resolver. That follow-up steers an active turn or settles
+not-needed if idle; it is not the job's completion receipt. Cards already pending
+when the fanout table is first created are baselined, not notified retroactively.
+
 You act only as yourself (the signed turn decides who you are). Refusal codes:
 grant_required (you don't hold approve_ops), self_approval_refused (your own
-bot's card: another holder or the user decides it), not_ops_card (only ops_run
+bot's card: another holder or the operator decides it), not_ops_card (only ops_run
 cards; other approvals stay with a person), not_found, already_resolved (with
-the stored decision; first decision wins, the user's included), unauthorized /
+the stored decision; first decision wins, the operator's included), unauthorized /
 turn_capability_required / turn_capability_invalid (no valid signed turn).
 
 The grant moves only through bots_grant_set(bot_id, tag, granted, reason), or
@@ -176,10 +189,16 @@ page rather than treating snippets as the full document.
 
 `x_search(query, max_results=10, start_time?, end_time?, next_token?, sort_order="recency", include_authors=false)`
 and `x_counts(query, granularity="hour", start_time?, end_time?, next_token?)` use the
-X API directly, not web indexing. Requires the **X (Twitter)** connection in
-BawtHub provider accounts (also available as optional first-run setup). The
-app-only bearer token uses the existing encrypted CredentialStore; it is not
-an xAI/Grok key. Connection checks `/2/usage/tweets`, not a paid post search.
+X API directly, not web indexing. Connect **X (Twitter)** under **Settings →
+Integrations → Search** (`/settings/integrations#integration-accounts-search`),
+or during optional first-run setup. Get an app-only bearer token from the
+[X Developer Console](https://console.x.com/) and enter it in the provider card;
+it is not an xAI/Grok key. The connection check uses `/2/usage/tweets`, not a
+paid post search.
+
+For `not_connected`, say “I couldn’t search X because it isn’t connected” and
+point to that card. A web search may find indexed posts, but cannot stand in
+for the requested X API search or confirm no posts matched.
 
 - Paid, explicit only: not part of automatic `web_search` fan-out. One page per
   call; max_results is 10–100 (X's minimum is 10). Never automatically paginate
@@ -218,7 +237,7 @@ browser or `curl` gets the sign-in page or a 401. `browser_check_session`
 `browser-check` account on your behalf:
 - The bot is taken from your trusted turn and recorded on the session.
 - The session lasts at most 1h and never renews. Call the tool again for a fresh one.
-- It is non-admin. Admin-only pages need the user.
+- It is non-admin. Admin-only pages need the operator.
 
 It returns `{origin, entityId, expiresAt, cookies}`. The cookies are
 already in Playwright's `addCookies` shape:
@@ -226,5 +245,8 @@ already in Playwright's `addCookies` shape:
 - **curl:** send them as one header, `-H "Cookie: name1=value1; name2=value2"`.
 
 The cookie values are a bearer. Never echo them in chat, task fields or
-files. If the tool says it isn't configured, the deployment hasn't set
-`BAWTHUB_BROWSER_CHECK_INTERNAL_URL` / `BAWTHUB_BROWSER_CHECK_ORIGIN`.
+files. If the tool says it isn't configured because sign-in sessions are off,
+that deployment needs no session: open the UI directly as the selected picker
+user (a sign-in mode of `enroll` with no verified identity is normal there, not
+a blocker). Treat only a real 401/403 on the action you are testing as a
+blocker, and report its route and status.

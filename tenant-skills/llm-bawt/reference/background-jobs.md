@@ -11,7 +11,7 @@ A loop that writes prod state without a user action needs, in order: one owner
 (say whether it's leader-only), a cadence constant, a dry run or report-only
 mode, an audit stamp on every row it changes, and a row in this table. A job
 that is coded but not wired in goes under a **Built, not running** section
-(none today), with what is missing. Never describe an unwired job as live.
+with what is missing. Never describe an unwired or unpublished job as live.
 
 **Jobs never run blocking work on the app event loop.** One blocking call
 there stalls everything else on the loop: the delivery dispatcher, SSE,
@@ -25,6 +25,20 @@ themselves (a bounded pool waiting on itself deadlocks). Async loops that
 must live on the loop push every DB/HTTP call through
 `asyncio.to_thread`/`run_in_executor`; the scheduler DB loop, prompt sweep
 and idle context reset were checked against this rule for TASK-1358.
+
+## Built, not running
+
+| Job | Owner and cadence | Writes and rollout | Code |
+|---|---|---|---|
+| Terminal recovery (TASK-1242; task-worktree implementation, not published/deployed) | Each API lifespan with DB and configured Redis; reuses the shared subscriber or lazily retries private recovery-only pools if startup transport failed. Not leader-only, per-turn DB leases fence replicas. Every 15 s after a pass; batch 16, concurrency 4, bounded observation/stop/projection. DB/settings reads off-loop. Shutdown stops/cancels before Redis closes. | Global `terminal_recovery_mode`: `report` by default (discovery only), `recover` explicitly enables mutation, `off` skips discovery; unknown values report only. Never adopts legacy NULL-marker rows or unconsumed reservations. Recovery stamps `request_json.recovery`, freezes one terminal snapshot, inserts pinned immutable history, publishes ordered idempotent completion, then records ACK. Never reruns inference/tools/approval effects. Separate bot-aware `turn_terminal_protocol_enabled=false` gates new eligible admissions and also requires recovery mode `recover`; reset/receipt-rewriting turns remain legacy. No live setting has been enabled. Implementation review and focused tests passed; source publication, scheduled app activation and usable acceptance are still pending. | `service/turn_terminal_pump.py`, `turn_terminal_recovery.py`, `turn_terminal_projection.py`, `api.py` |
+
+Terminal-protocol rollback: turn off `turn_terminal_protocol_enabled` first and
+keep recovery mode `recover` until every already-marked row is published (or
+publication-expired with history durably projected), or its unstarted reservation
+has been safely released. Then switch recovery to report/off. An empty expired-
+candidate discovery pass is **not** enough: healthy leased turns may still be
+in flight. Never reclassify marked rows as legacy or backfill historical replies
+as part of this rollback.
 
 ## Running now (app container, started in `service/api.py` lifespan)
 
@@ -55,7 +69,7 @@ and idle context reset were checked against this rule for TASK-1358.
 
 The schedule is data. Read the live set instead of trusting this snapshot:
 `pgq llm-bawt -c "select job_type, bot_id, enabled, interval_minutes, next_run_at from scheduled_jobs order by 1,2"`.
-Each run is recorded in `job_runs`. Snapshot 2026-10-22: `IDLE_CONTEXT_RESET` (all bots, every 5 min: resets idle agent sessions, which is the `/new` from `system` in delivery lists), `HISTORY_SUMMARIZATION`, `MEMORY_EXTRACTION` and `PROFILE_MAINTENANCE` (all bots, every 30 min), `MEDIA_GC` and `TOOL_RESULT_GC` (daily), `SEND_PROMPT` (one coordinator bot, disabled). `bot_id='*'` expands to every bot at run time.
+Each run is recorded in `job_runs`. Job types include `IDLE_CONTEXT_RESET` (resets idle agent sessions; appears as `/new` from `system` in delivery lists), `HISTORY_SUMMARIZATION`, `MEMORY_EXTRACTION`, `PROFILE_MAINTENANCE`, `MEDIA_GC`, `TOOL_RESULT_GC` and `SEND_PROMPT`. `bot_id='*'` expands to every bot at run time.
 
 | Job | Cadence / owner | Writes and fences | Code |
 |---|---|---|---|
@@ -75,7 +89,7 @@ Each run is recorded in `job_runs`. Snapshot 2026-10-22: `IDLE_CONTEXT_RESET` (a
 
 ## Runs once per leadership term
 
-**Startup recovery check (TASK-1232 Phase 2)**: `service/recovery/`, runner in `inter_bot_dispatcher_recovery.py`, bound in `api.py` lifespan (`startup_recovery=`). The user, 2026-10-22: a startup check only, never a recurring job.
+**Startup recovery check (TASK-1232 Phase 2)**: `service/recovery/`, runner in `inter_bot_dispatcher_recovery.py`, bound in `api.py` lifespan (`startup_recovery=`). Run a startup check only, never a recurring job.
 - **When:** once per dispatcher leadership term, at its start, after that term's first `recover_expired`. The first term is the app start; since llm-bawt `4339a0c` (TASK-1311) a re-acquired term (the lock session died with Postgres) counts as a new start and runs it again. A crash re-entry of the dispatcher loop under the same term does not rerun it, and nothing reruns it on a timer. A previous term's pass still running is never doubled: the new term is marked pending and its pass starts when that one settles, but only if this process still leads at that moment; leaderless, nothing starts and the next acquired term runs it. Dispatch waits up to 30s for the first pass of a term; a pending pass is not waited for (its end wakes the loop). Holds an asyncio lock and a PG advisory lock; `dry_run` takes neither and writes nothing. Every boot logs one `startup recovery check <run_id>` INFO line, plus one line per open turn it left.
 - **Steps:**
   - `orphan_turns`: settles an open, unowned turn created before this process started. It only settles when the bridge recorded on the turn (`turn_logs.agent_backend`) answers `run.status` with `not_found` (`BridgeRunProbe`, 60s timeout, concurrent). Limits:
@@ -87,13 +101,13 @@ Each run is recorded in `job_runs`. Snapshot 2026-10-22: `IDLE_CONTEXT_RESET` (a
   - `unresolved_tools`: marks open tool calls on ended turns as interrupted.
   - `post_check`: read-only.
   - `purge_ops`: only on an explicit `run(purge_ops=True)`, never at startup.
-- **Status:** committed `4adb798` on llm-bawt master, local and not pushed (reviewed by two same-provider reviewers). The first run is the next app restart; an app process started before that commit doesn't have it. Check with `docker compose logs app | grep "startup recovery check"`. No admin route exists.
-- **First mutating run:** `unresolved_tools` backfills every historical open tool call: 745 calls on 438 turns, June to September 2026, no Mira rows (as of 2026-10-22).
+- **Verification:** Check with `docker compose logs app | grep "startup recovery check"`. No admin route exists.
+- **First mutating run:** `unresolved_tools` can backfill historical open tool calls. Use the read-only detection query below to bound the candidate set before planned maintenance.
 
 ## How to answer "what is it doing right now"
 
 1. **Wired in?** grep `api.py` lifespan for the `create_task`/`start()` call. Being imported is not being run.
-2. **Running?** on the host, `cd ~/dev/llm-bawt && docker compose logs --since 30m app | grep -i <job>`.
+2. **Running?** on the host, `docker compose logs --since 30m app | grep -i <job>`.
 3. **What did it change?** Read the table it writes plus its audit stamp (`request_json.recovery`, `metadata_json.recovery`, `continuation_last_error`, `job_runs`).
 4. **What would it touch?** Run the step's detect SQL read-only through `pgq`. Never run a mutating pass to find out.
 

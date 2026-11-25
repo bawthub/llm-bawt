@@ -5,7 +5,7 @@ description: Work in llm-bawt, the orchestration backend for bots, memory, tools
 
 # llm-bawt
 
-LLM orchestration, bots, memory, tools and agent bridges. Repo `~/dev/llm-bawt`; app port 8642, MCP 8001. Canonical branch `master`.
+LLM orchestration, bots, memory, tools and agent bridges. In the llm-bawt checkout, the default ports are app port 8642, MCP 8001. Canonical branch `master`.
 
 Use [git-commits](../git-commits/SKILL.md) for isolated worktrees and publication, [agent-system](../agent-system/SKILL.md) for tasks, and [bawthub-ops](../bawthub-ops/SKILL.md) for service changes. These are their authoritative homes; do not add parallel workflow rules here.
 
@@ -14,6 +14,14 @@ Configuration lives in the DB. Bots resolve pinned endpoint IDs and tags/capabil
 Prompt DB edits are tenant overrides, not automatic product releases. For default inheritance, reset, selected approved fixture export and drift, use [product defaults](reference/product-defaults.md); never hand-maintain a second prompt body.
 
 Keep changes bounded and verify the actual behavior. Routine design details belong to the owner. Refactoring is justified by the change, not a file-size threshold.
+
+## Stopping jobs safely
+
+On the host or inside the bridge, never stop jobs by name/pattern with `pkill`, `killall`, or `pkill -f`: bot processes carry skill words in their argv and can match. Use the PID or process group recorded at launch, or the queue's own cancel command. If the PID is unknown, list candidates with `pgrep -a` and read their command lines before selecting a target.
+
+## Long-running work
+
+The Claude bridge aborts a turn after 300 s with no SDK output, or when a background subagent is still running after 900 s. Don't block a turn on a scrub, VM push, bootstrap or gate: launch it as a durable host job (`systemd-run`/`nohup` with a log and receipt), read its state once, record it on the card, and set a wake-up or callback for the result. An SDK background shell dies with an aborted turn, so it can't carry such work. After an abort, check with `pgrep -a` for a surviving run before starting another.
 
 ## Technical references
 

@@ -58,8 +58,8 @@ clients remain outside a universal bridge hook.
 - Engine (pure, the matching semantics): `src/agent_bridge/approval.py`
 - Storage + request audit + seed defaults: `src/llm_bawt/approval_policies.py`
 - Admin/resolve routes: `src/llm_bawt/service/routes/approval_policies.py`
-- Rules table: **`tool_approval_policies`** in the **`askllm`** DB
-  (`pgq askllm`). Audit log of every gated call: `tool_approval_requests`.
+- Rules table: **`tool_approval_policies`** in the llm-bawt database
+  (`pgq llm-bawt`). Audit log of every gated call: `tool_approval_requests`.
 - Admin UI: bawthub **`/tools/approval-policies`**. Inline approve/deny card in
   chat: `ApprovalCard.tsx` + `/api/chat/approvals/{id}/resolve`.
 
@@ -73,15 +73,14 @@ clients remain outside a universal bridge hook.
   sorted by `(order, id)`; **no match → allow** (default-allow). Put a low-order
   `allow` rule above a broad `require_approval` to carve a safe exception.
 
-**Inspect / change rules** (API is proxied through the frontend at
-`/api/chat/proxy/v1/*`; reach it from the bridge with `-H "Host: <dev-host>"
-http://$HOST`, `HOST` = the Traefik host's LAN address):
+**Inspect / change rules** (the configured frontend origin proxies the API at
+`/api/chat/proxy/v1/*`; the routes below are relative to the llm-bawt API):
 - List: `GET /v1/tool-approval-policies` · bundle: `GET …/bundle`
 - Create `POST`, update `PATCH /v1/tool-approval-policies/{id}`, delete `DELETE`
 - **After any change, `POST /v1/admin/reload-tool-approval-policies`** requests
   Claude cache invalidation (the UI does this); inspect publication status,
   never assume every bridge installed it.
-- Raw read: `pgq askllm -c 'SELECT order_index,enabled,tool_name,matcher_type,pattern,action FROM tool_approval_policies ORDER BY order_index;'`
+- Raw read: `pgq llm-bawt -c 'SELECT order_index,enabled,tool_name,matcher_type,pattern,action FROM tool_approval_policies ORDER BY order_index;'`
 
 **The subject = whole Bash command string gotcha (this WILL bite you):**
 because the `Bash` subject is the entire command line, a rule's regex also
@@ -98,7 +97,7 @@ coordinated deployment before the live bridge gains that behavior.
 
 Approval replay arguments must remain byte-exact. Do not shorten home paths or
 normalize commands in stored authority/replay payloads; formatting belongs only
-in display data. A 2026-09-08 regression saved `/home/bridge/...` as `~/...`, causing
+in display data. A 2026-09-08 regression saved an absolute bridge path as `~/...`, causing
 the continuation to re-gate despite an approved original invocation.
 
 **Historical deployed rules (2026-06; not a current inventory):** two
@@ -118,4 +117,4 @@ seeds as well; use the API for actual current rules, not this historical list.
 
 ## Approval-gated tool policies
 
-**"This action requires user approval" on an agent bot's tool call is THIS system (llm-bawt), NOT the Claude Code harness `settings.json`** — don't edit harness settings to fix it. Rules live in `tool_approval_policies` (askllm DB), engine in `agent_bridge/approval.py`, admin UI at bawthub `/tools/approval-policies`; after changes `POST /v1/admin/reload-tool-approval-policies`. **Gotcha that WILL bite:** Bash policies inspect command text; wrappers and literal data can false-positive. Inspect the matched rule and fix matching with regression coverage; never conceal a gated action in a script to evade approval. Supported service actions belong in ops. The source matcher excludes proven inert heredocs and narrow direct rg/grep arguments, but requires deployment before live behavior changes. Semantics, current rules, API: **`reference/approval-policies.md`**.
+**"This action requires user approval" on an agent bot's tool call is THIS system (llm-bawt), NOT the Claude Code harness `settings.json`** — don't edit harness settings to fix it. Rules live in `tool_approval_policies` (llm-bawt database), engine in `agent_bridge/approval.py`, admin UI at bawthub `/tools/approval-policies`; after changes `POST /v1/admin/reload-tool-approval-policies`. **Gotcha that WILL bite:** Bash policies inspect command text; wrappers and literal data can false-positive. Inspect the matched rule and fix matching with regression coverage; never conceal a gated action in a script to evade approval. Supported service actions belong in ops. The source matcher excludes proven inert heredocs and narrow direct rg/grep arguments, but requires deployment before live behavior changes. Semantics, current rules, API: **`reference/approval-policies.md`**.

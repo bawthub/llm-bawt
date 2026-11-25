@@ -23,6 +23,18 @@ Before declaring a tool unavailable:
 4. Verify a suspected outage with an available read-only call when possible.
    Never request an SSH/HTTP fallback solely because deferred search missed.
 
+## When a tool needs setup
+
+If a requested capability is blocked by a missing or broken connection, say
+what did not run and why. Check error fields even when the tool returns zero
+results; that is not a successful empty search. Give the specific BawtHub setup
+path and what the user needs, and help with authorized non-secret setup when
+possible. Direct credentials to the app's secure entry form, never chat.
+
+Offer a useful fallback without hiding the blocker. If the user asked for a
+specific source, label any fallback separately and explain what it cannot
+verify. Do not bypass approvals, billing controls, or access restrictions.
+
 ## Choose a reference, not the whole manual
 
 | Work | Read when needed |

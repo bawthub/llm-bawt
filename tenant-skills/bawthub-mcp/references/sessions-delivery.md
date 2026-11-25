@@ -36,6 +36,10 @@ requires an idle turn; queue_if_busy=true is the legacy equivalent.
 - session_policy: continue, reset_retain_history, reset_without_history.
   For durable delivery the reset waits for safe idle execution. Prefer this
   explicit field over legacy reset_session_before_delivery/retain_history flags.
+  To reset yourself, send yourself the follow-up with
+  session_policy=reset_retain_history and delivery=when_idle; it resets after
+  your current turn ends. A message that is only a slash command (`/new`) is
+  refused: delivered text never runs as a command.
 - fire_and_forget is a compatibility option; prefer the explicit current fields.
 - bots_list_available is discovery, not permission to contact protected bots.
 
@@ -65,9 +69,11 @@ unknown tag is an error, not an empty list. The default `detail="compact"`
 returns one flat row per bot: slug, tags, capabilities, provider, known
 quota, `turn` {kind, task, started_at}, `last_turn` {ended_at, task},
 `queued` count, `gated`/`gate` only when held or unreadable,
-`pending_approvals`, `location`, `prompt_stale` and `unavailable`; null and
-empty fields are left out, except `gated: null`, which means the gate
-couldn't be read (never "not gated"). `location` is the house slug when its
+`pending_approvals`, `location`, `prompt_stale`, `steerable` (only when not
+true) and `unavailable`; null and empty fields are left out, except
+`gated: null`, which means the gate couldn't be read (never "not gated"), and
+`steerable: null` (unknown). `steerable: false` means a message to that bot
+while it is busy waits for a new turn instead of joining the current one. `location` is the house slug when its
 lease is live, else e.g. `house (h1 down)` or `house (h1 lease unknown)`. `detail="full"` returns every route field and the
 whole `state`, which holds:
 
@@ -76,6 +82,8 @@ whole `state`, which holds:
   would see right now. Your own row shows your current turn as executing.
 - `last_turn` {ended_at, status ok/aborted/error, end_reason}.
 - `queued_deliveries` {count, oldest_at}: non-terminal inbound deliveries.
+- `steerable`: true when the dispatcher would steer a busy run of this bot
+  (same helper it claims with), false when it would queue, null if unknown.
 - `gated` + `gate` (quiesce/restart hold), `pending_approvals` count,
   `session` {id, started_at}.
 
@@ -187,8 +195,8 @@ restart that ships it).
   (`tag_locked`). An endpoint outside the target's catalog is
   `unknown_endpoint`; no null endpoint. Your own model is `self_model`.
 - Private and unknown bots both answer `access_denied`. The `private` tag can't
-  be added or removed here; that is the user's UI action. You can't change your own
-  tags (`self_tag_edit_refused`); ask another bot or the user. Your other fields are
+  be added or removed here; that is the operator's UI action. You can't change your own
+  tags (`self_tag_edit_refused`); ask another bot or the operator. Your other fields are
   editable.
 - Every write is a compare-and-set. Pass `expected` with the values you read
   when you are acting on an earlier read; fields you leave out are pinned to

@@ -40,8 +40,8 @@ foreign keys**.
 
 | Database | Owner | Owns |
 |---|---|---|
-| BawtHub (`echo`) | BawtHub | `AgentTask`, `AgentTaskSession`, `AgentTaskTurn`, `AgentConversationIdentity`, all `AgentTask*` associations |
-| llm-bawt (`askllm`) | llm-bawt | `sessions`, partitioned `messages`, `turn_logs`, `turn_changed_files`, immutable before/after diff bytes |
+| BawtHub | BawtHub | `AgentTask`, `AgentTaskSession`, `AgentTaskTurn`, `AgentConversationIdentity`, all `AgentTask*` associations |
+| llm-bawt | llm-bawt | `sessions`, partitioned `messages`, `turn_logs`, `turn_changed_files`, immutable before/after diff bytes |
 
 Cross-database identifiers (`sessionId`, `botId`, `userId`, `triggerMessageId`,
 `turnId`) are **logical joins** — BawtHub knows the shape, llm-bawt owns the
@@ -189,7 +189,7 @@ AgentTaskSession_one_primary_per_task
 (Declared in `frontend/prisma/sql/2026_08_02_task_conversation_associations.sql`
 because Prisma cannot express a filtered unique index.)
 
-### llm-bawt — live in askllm DB
+### llm-bawt conversation database
 
 `sessions` (verified live via `pgq llm-bawt`):
 
@@ -517,8 +517,8 @@ call it merely because the string appears in a quote or negative reference.
 
 Each invariant anchored to source or live-schema receipts.
 
-1. **No cross-DATABASE FK.** BawtHub owns association tables in `echo`;
-   llm-bawt owns conversation tables in `askllm`; every join between them
+1. **No cross-DATABASE FK.** BawtHub owns association tables in its database;
+   llm-bawt owns conversation tables in its separate database; every join between them
    is logical. **The intra-bawthub `AgentTaskSession → AgentConversationIdentity`
    FK is by design and does not violate this** — both tables live in the
    bawthub database.
@@ -625,11 +625,10 @@ pgq llm-bawt -c '\d turn_changed_files'
 pgq llm-bawt -c '\d sessions'           # note idx_sessions_one_active_per_bot_user
 ```
 
-
 commit-recon end-to-end (dry-run repair via file):
 
 ```bash
-commit-recon --repo ~/dev/bawthub --json --repair-out-file /tmp/repair.json \
+commit-recon --repo "$BAWTHUB_REPO" --json --repair-out-file /tmp/repair.json \
   --repair-attach <trigger>:TASK-706
 ```
 

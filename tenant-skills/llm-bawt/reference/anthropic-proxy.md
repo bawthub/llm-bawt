@@ -1,6 +1,6 @@
 # Anthropic-compatible proxy (TASK-270) — non-Anthropic providers on the Claude Agent SDK
 
-> Part of the llm-bawt skill. Read before touching `src/claude_code_bridge/proxy/`, adding a provider adapter, flipping a bot to the proxy path, or debugging ChatGPT-OAuth/Responses-API issues.
+> Part of the llm-bawt skill. Read before touching `src/claude_code_bridge/proxy/`, adding a provider adapter, flipping a bot to the proxy path, or debugging ChatGPT-OAuth/Responses-API issues. For oversized file edits, follow the [generated/large-file exception to Edit/Write](../../git-commits/SKILL.md#git-workflow).
 
 The `claude_code_bridge` daemon now hosts an in-process FastAPI proxy that
 accepts Anthropic Messages API requests and forwards them to other providers
@@ -69,7 +69,7 @@ Translates SSE back to Anthropic Messages SSE events.
 - Native Codex bridge materializes its container-local auth.json from
   `GET /v1/providers/openai_chatgpt/bundle` at startup. Host auth.json is NOT
   bind-mounted. Host config.toml and sessions mounts do not imply an auth mount.
-- A host `codex` command can fail `refresh_token_reused` while both bridges work.
+- A host `codex` command can fail `refresh_token_reused` while the bridge works.
   That proves the host credential path failed, not that the provider or bridge
   failed. Inspect actual container mounts, CODEX_HOME/CODEX_AUTH_PATH and binary;
   run bridge tests in that context without printing tokens.
@@ -98,12 +98,12 @@ Translates SSE back to Anthropic Messages SSE events.
 
 **Rollback (Codex SDK is preserved):**
 
-The native package remains, but the separate `codex-bridge` mansion service
-and its catalog targets are retired. A profile flip alone is not rollback:
-restore/start the retained native service and verify its health first, then
-move the bot between turns with its original model/endpoint and native
-transport configuration. Follow llm-bawt `docs/CODEX_BRIDGE.md` for the
-retained-container/image and catalog restoration procedure.
+The native package remains in source, but the separate `codex-bridge` service
+and its catalog targets are retired, and an installation may no longer keep its
+container or image. A profile flip alone is not rollback: build and start the
+native service and verify its health first, then move the bot between turns
+with its original model/endpoint and native transport configuration. See
+llm-bawt `docs/CODEX_BRIDGE.md`.
 
 **Adding a new provider (e.g. Grok, Kimi):**
 

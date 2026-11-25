@@ -48,7 +48,7 @@ narrow screens.
 - Never block user input during animations
 - Never require pixel-perfect taps
 
-### Drag and drop (the user's standard)
+### Drag and drop
 
 - The dragged item follows the cursor: a lifted copy of the card (shadow + accent ring, slight scale) rendered in a drag overlay (dnd-kit `DragOverlay`, high `zIndex`). Never a drag with no visible moving item.
 - Source stays in place but dimmed; the valid drop target highlights (tint + inset ring) while hovered.
@@ -124,6 +124,19 @@ Before writing any layout:
 - Max 1-2 animated elements per view
 - Skeleton/shimmer for loading >300ms (not spinners)
 
+**State vocabulary:** idle → slate-400, busy/live activity → emerald-400,
+attention (approval/unread) → amber-400, error → red-400, offline → slate-500.
+Use the corresponding semantic outline/tint token, plus text/icon information;
+keep existing action colors (e.g. red Stop) and bot palettes.
+Live work may loop; persistent attention/error gets a finite entry, then settles.
+Paint a glow once on a decorative layer and animate only its opacity/transform,
+not shadow/filter/background or custom properties that drive them. Keep motion
+out of backdrop-filtered ancestry. Pause live loops when hidden, offscreen or
+reduced-motion is requested; do not replay suppressed attention on return.
+BawtHub provides `.motion-breathe`, `useMotionVisibility` and
+`useStateChangePulse`; see its `docs/ui-motion.md` for usage and the audit.
+Headless software-path measurements are not evidence of real GPU performance.
+
 ## 6. Forms & Feedback (MEDIUM)
 
 - **One editor per record.** Do not append a full record editor to an already-rendered form/configuration surface or keep parallel desktop/mobile field trees. Default full-form editing to the shared `EditorDialog` popup, reusing the existing fields and state owner. An inline edit must replace the displayed value/control in place, not duplicate an existing editor. Read-only summaries, immediate-save toggles, single-field replacement edits and navigation/workspace inspectors are not competing editors.
@@ -150,13 +163,13 @@ Before writing any layout:
 - Modals are not for primary navigation
 - Dangerous actions (delete, logout) visually and spatially separated
 
-### Overlays and split screen (the user's standard)
+### Overlays and split screen
 
 BawtHub can pin a chat beside any app page (`WorkspaceSplitLayout`). The routed pane is a CSS container (`container-type: inline-size`), and that makes it the containing block for `position: fixed`. A `fixed inset-0` overlay rendered inline is therefore laid out inside the pane and under the chat (TASK-1407).
 
 - **Never use an inline viewport overlay.** Anything that uses `position: fixed` to cover or position against the viewport (a modal, fullscreen view or viewport drawer) portals to `document.body`. New modals use `ViewportOverlay` (or `EditorDialog` for editors) from `@/lib/ui`, which portal for you. Keep the overlays that already portal.
 - **Modal overlays** (backdrop, blocks the page): the backdrop covers the whole viewport, both panes included, and the panel centres on the viewport, not the pane. Escape and a backdrop click close it, and focus returns to the trigger.
-- **Editor modal size (TASK-1407).** A modal that edits a record (many fields, code or JSON textareas) uses `EditorDialog` from `@/lib/ui`: up to `max-w-5xl` wide, the full viewport height less an even 1rem margin (no nav offset), header and footer pinned, only the body scrolls, full screen below `sm`. Fields that pair up sit in two columns; code textareas get 10+ rows. Short forms (a confirm with a few arguments) use `size="form"`: `max-w-2xl`, natural height, capped at the viewport. Plain confirms stay small (`max-w-sm`). Never cram an editor into a 500px card.
+- **Popup sizing.** Use `PopupShell` from `@/lib/ui` (or `EditorDialog` / `FormSheet` for their form chrome). Content drives width: stay compact when sparse, grow up to the viewport minus safe gutters, then wrap, reflow, or scroll. Don’t force full width or cap the ordinary panel. The shell limits paragraphs and explicitly marked `data-popup-prose` blocks to a readable line length without capping grids. Keep an editor’s header and actions visible with only the body scrolling; short forms use `size="form"` for natural height. Choose a shared presentation for intentionally sized workspaces, sheets, or drawers; anchored controls stay attached to their trigger.
 - **Expandable rows.** The whole row header is the toggle (a `button` with `aria-expanded` and a hover lift), not just the chevron. Row actions sit outside that button.
 - **Dismissal guards override the close rule.** An in-flight action (a `working` or `sending` state), unsaved changes, or a nested widget that consumes Escape first (an open select, autocomplete or menu) may veto or defer the close. The guard has to be visible: a disabled close control or a confirm, never a silently ignored key.
 - **Non-modal and anchored surfaces** (popovers, menus, slash-command lists, side drawers that share the page) keep their own anchoring and need no backdrop or viewport centring. They must still escape the pane's containing block when they position against the viewport, and close on Escape unless a guard above applies.

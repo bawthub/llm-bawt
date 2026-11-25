@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# vault — tenant secrets, encrypted at rest in Postgres via pgcrypto.
+#
+# ONE master key (BAWTHUB_MASTER_KEY) encrypts/decrypts every secret. The key
+# and values never touch the command line: psql `\getenv` pulls them from this
+# process env and `:'var'` quoting keeps them out of argv / the host `ps` table
+# (same threat model as pgq). Requires psql >= 16 (\getenv) and the vault schema
+# (bootstrap's provision_vault_schema creates pgcrypto + vault.secrets).
+#
+# Usage:
+#   vault get NAME                 # decrypt + print one secret
+#   vault set NAME         # encrypt+store (value from stdin only)
+#   vault list                     # names + updated_at (no plaintext)
+#   vault rm  NAME
+set -euo pipefail
+
+usage() { echo "usage: vault {get NAME | set NAME | list | rm NAME}" >&2; exit 2; }
+cmd="${1:-}"; name="${2:-}"
+
+[ -n "${BAWTHUB_MASTER_KEY:-}" ] || { echo "vault: BAWTHUB_MASTER_KEY not set in env" >&2; exit 3; }
+
+host="${LLM_BAWT_POSTGRES_HOST:-postgres}"
+port="${LLM_BAWT_POSTGRES_PORT:-5432}"
+user="${LLM_BAWT_POSTGRES_USER:-llm_bawt}"
+db="${LLM_BAWT_POSTGRES_DATABASE:-llm_bawt}"
+
+# DB password resolution (mirrors pgq): env → app .env → pgpass file.
+if [ -z "${PGPASSFILE:-}" ] && [ -z "${PGPASSWORD:-}" ]; then
+  if [ -n "${LLM_BAWT_POSTGRES_PASSWORD:-}" ]; then
+    export PGPASSWORD="$LLM_BAWT_POSTGRES_PASSWORD"
+  else
+    for f in "$HOME/.pgpass"; do
+      [ -f "$f" ] && { export PGPASSFILE="$f"; break; }
+    done
+  fi
+fi
+
+psql_do() { psql -qtA -v ON_ERROR_STOP=1 -h "$host" -p "$port" -U "$user" -d "$db" "$@"; }
+
+case "$cmd" in
+  get)
+    [ -n "$name" ] || usage
+    export VAULT_NAME="$name"
+    psql_do <<'SQL'
+\getenv key BAWTHUB_MASTER_KEY
+\getenv nm  VAULT_NAME
+SELECT pgp_sym_decrypt(ciphertext, :'key') FROM vault.secrets WHERE name = :'nm';
+SQL
+    ;;
+  set)
+    [ -n "$name" ] || usage
+    [ "$#" -eq 2 ] || usage
+    val="$(cat)"
+    export VAULT_NAME="$name" VAULT_VALUE="$val"
+    psql_do >/dev/null <<'SQL'
+\getenv key BAWTHUB_MASTER_KEY
+\getenv nm  VAULT_NAME
+\getenv val VAULT_VALUE
+INSERT INTO vault.secrets(name, ciphertext, updated_at)
+VALUES (:'nm', pgp_sym_encrypt(:'val', :'key'), now())
+ON CONFLICT (name) DO UPDATE SET ciphertext = EXCLUDED.ciphertext, updated_at = now();
+SQL
+    echo "vault: set $name" >&2
+    ;;
+  list)
+    psql_do -c "SELECT name, updated_at FROM vault.secrets ORDER BY name;"
+    ;;
+  rm)
+    [ -n "$name" ] || usage
+    export VAULT_NAME="$name"
+    psql_do >/dev/null <<'SQL'
+\getenv nm VAULT_NAME
+DELETE FROM vault.secrets WHERE name = :'nm';
+SQL
+    echo "vault: removed $name" >&2
+    ;;
+  *) usage ;;
+esac

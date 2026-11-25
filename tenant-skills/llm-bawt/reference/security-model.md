@@ -1,18 +1,20 @@
-# Security model — deliberate design decisions (NOT vulnerabilities)
+# Security model — authentication and coordination boundaries
 
 > Part of the llm-bawt skill. Read BEFORE writing up any security finding against llm-bawt.
 
-llm-bawt is a **self-hosted, LAN-only** service whose security model is a network trust boundary, not per-request auth. Before writing up a security "finding," know these are **intentional** and are the correct design for this system — flagging them as bugs is applying least-privilege/fail-closed dogma where it doesn't belong:
+llm-bawt is self-hosted, but network placement does not replace the requested caller authentication. Keep user sessions, service authentication and fleet coordination distinct:
 
-- **No app-level auth on `/v1/*` is BY DESIGN.** It's an integration API for home services on the LAN; the network boundary IS the auth. The app API (`:8642`) and MCP server (`:8001`) are **not** internet-reachable (NAT + no port-forward + split-horizon DNS — verify with the exposure checks in the `bridge-container-network` skill). Do NOT propose bolting a bearer/API-key gate onto the whole surface.
+- **API caller authentication is intentional.** `/v1/*` uses the `api_auth_mode` rollout (`off`, `log`, `enforce`); MCP has its own `mcp_auth_mode`. A per-caller API key identifies a program; existing verified turn, service and bridge credentials retain their distinct principals and route-specific checks. `log` observes missing credentials without enforcing the outer gate. Inspect actual modes and `GET /v1/admin/auth-observations` rather than assuming source publication or elapsed observation time enables enforcement. See the repository's `api_auth/` implementation and `docs/MCP_SERVER.md`.
+- **BawtHub user sign-in is separate.** Enrollment/password sessions and trusted-proxy identity determine the UI user; a server API key does not sign that user in. A route's 401 can mean missing legacy identity, not an enabled password/session gate. Check `/api/chat/auth` and the installation's auth configuration; see [BawtHub authentication](../../bawthub/references/auth-and-personas.md).
 - **The approval gate's default-allow is BY DESIGN.** `agent_bridge/approval.py` `evaluate()` returns ALLOW on no-match on purpose — the gate exists to catch **specific operator-defined dangerous patterns** (via regex rules), NOT to block every command an agent runs in its sandbox. "Default-allow / no-match → allow" is the intended behavior, not a fail-open bug.
-- **Approvals and turn capabilities are coordination, not a security boundary.** All bots share one uid in one container and could act outside the approval system; the fleet runs on the honor system. Approval cards make sure a restart fits what else is happening. Exposure of internal tokens (turn context, approval grants, LAN service keys) gets a short note to the user, not an incident investigation or a rotation rollout.
-- **The GitHub git-credential endpoint being open on the internal network is BY DESIGN.** It's a secret-broker that mints short-lived, repo-scoped GitHub App installation tokens on demand so no static secret sits on the tenant disk. `BRIDGE_GIT_CREDENTIAL_TOKEN` (`X-Bridge-Token`) is an *optional* defense-in-depth knob, not the primary control.
+- **Approvals and turn capabilities are coordination, not a security boundary.** All bots share one uid in one container and could act outside the approval system; the fleet runs on the honor system. Approval cards make sure a restart fits what else is happening. Exposure of internal tokens (turn context, approval grants, LAN service keys) gets a short note to the operator, not an incident investigation or a rotation rollout.
+- **The GitHub git-credential endpoint is a credential broker.** It mints short-lived, repo-scoped GitHub App installation tokens. Inspect its current bridge gate and outer API authentication instead of assuming LAN reachability makes it anonymous.
 - **What IS genuinely sound (verified):** provider-credential encryption at rest — `service/providers/crypto.py` uses real Fernet (no hardcoded key; env `LLM_BAWT_SECRET_KEY` → 0600 keyfile), and the write path always encrypts.
 
 ## Approval lifecycle boundaries (TASK-861)
 
-Network trust and deliberate no-match allow remain unchanged. Enforcement is
+Deliberate approval no-match allow remains unchanged; it is independent of API
+caller authentication. Approval enforcement is
 server-side for first-party bawthub MCP and hook-side for Claude native/external
 MCP tools. Codex native tools and direct clients are **uncovered**.
 Preview/status/reload APIs are operational controls, not new authentication.
@@ -39,10 +41,4 @@ cannot be promoted, and bridge process-local pending authority is lost safely on
 restart. Re-attempt the operation to create a new approval request; do not replay
 old approvals. Coordinate deployment rather than restarting active agents.
 
-**Rule for audits:** a real finding here requires tracing *intent* + the *deployment* (bootstrap scripts, NAT/DNS/proxy topology), not pattern-matching a route handler or a `docker-compose ports:` line. If the "vuln" dissolves once you understand the trust boundary, it wasn't one.
-
-## Summary formerly in the parent SKILL.md (TASK-1640)
-
-## Security model — deliberate design, NOT vulnerabilities
-
-LAN-only service; the network boundary IS the auth. **Intentional, do not "fix" or file findings on:** no app-level auth on `/v1/*`; approval gate default-allow on no-match; open internal git-credential endpoint (short-lived scoped tokens by design). A real finding requires tracing intent + deployment topology, not pattern-matching a route. Full rationale: **`reference/security-model.md`**.
+**Rule for audits:** trace intended behavior, effective auth modes and deployment topology (bootstrap scripts, NAT/DNS/proxy configuration), not just a route handler or a `docker-compose ports:` line. Distinguish a staged log-only rollout from enforcement and from unrelated approval policy.

@@ -3,7 +3,7 @@
 How the system prompt and conversation context reach **agent backends**
 (claude-code / codex bridges) vs **chatbots** (direct LLM clients), and why
 prompt caching behaves the way it does. Hard-won; verified against the
-claude-code source in `~/dev/claude-code-source` + a live SDK POC (2026-06-21).
+Claude Code source + a live SDK POC (2026-06-21).
 
 > ✅ **TASK-1318 (2026-10-23): the system prompt is pinned per session.** The
 > Claude Code CLI keeps the prompt it recorded at session start, so llm-bawt pins
@@ -41,7 +41,7 @@ messages array (`agent_backends/agent_bridge.py` send_command ~L191).
 ## 2. The CLI DOES freeze the system prompt per session (TASK-1318)
 
 TASK-288 concluded the opposite from source reading; a wire probe proved it wrong
-on CLI 2.1.283 / SDK 0.2.160 (2026-10-23). The CLI writes a
+on CLI 2.1.283 / SDK 0.2.160 (verified 2026-10-23). The CLI writes a
 `prompt_snapshot` attachment into the session transcript and, on resume, sends
 **that** snapshot, ignoring a changed `--system-prompt`:
 

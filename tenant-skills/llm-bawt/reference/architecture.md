@@ -50,6 +50,8 @@ src/local_model_bridge/ # GPU inference + embeddings (ports 8683/8684)
 
 ## API Endpoints
 
+Direct calls need a caller key (TASK-2380): prefer MCP tools and keyed helpers (`bawt-upload`, `llm`); for raw curl/urllib, send `X-LLM-Bawt-Key: $(cat "$LLM_BAWT_API_KEY_FILE")`.
+
 | Route | Method | Purpose |
 |-------|--------|---------|
 | `/v1/chat/completions` | POST | OpenAI-compatible chat (streaming/non-streaming) |
@@ -88,6 +90,10 @@ remain compatibility code. Both harnesses use the shared `AgentEvent` format.
 ### Bridge incident routing
 
 "Claude bridge bots not responding" → check the llm-bawt Claude bridge path first (bridge container health/logs, Redis flow, app routing) — NOT legacy `ask-llm`/webhook docs.
+
+### Reading logs
+
+Containers log one line per event in logfmt: `<UTC ISO ts> <LEVEL> <component> <event> req=… bot=… task=… <fields>`, e.g. `2026-11-14T09:11:07.692Z INFO bridge tool_end req=req_delivery_… tool=Edit tool_use=toolu_… session=<bot>:<user> ms=52 error=False`. Grep the event name or a correlation field (`grep 'req=req_delivery_7f95'`, `grep ' ERROR '`), not prose. INFO means a state change worth having in an incident; per-poll, per-chunk and successful token/health checks are DEBUG. 2xx/3xx on polling paths are not access-logged; 4xx/5xx always are. Tokens, headers and message bodies are never logged. `LOG_FORMAT=json` switches to JSON. Older prose messages (`startup recovery check`, `quiesce control`, `cancel notice`) are still greppable as written. `docker logs` only covers the current container and is lost on recreate; where a deployment keeps copies, its local-infrastructure skill says where.
 
 ## Agent Task Execution
 

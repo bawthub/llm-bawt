@@ -1,6 +1,6 @@
 {
   "source": "agent-skills",
-  "revision": "53d8ab1c85a59f63e572df5488819502994c9571",
+  "revision": "2224841ca493e076789973abf2cb689562f7418b",
   "dirty": false,
   "skills": [
     "agent-system",
@@ -15,6 +15,7 @@
     "peer-review-reviewer",
     "skill-creation",
     "skill-maintenance",
+    "tenant-tools",
     "ui-ux-guidelines"
   ]
 }

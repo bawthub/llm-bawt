@@ -7,7 +7,7 @@ pool, preview launcher) and `docs/HEAVY_QUEUE.md` (queue containment).
 ## What a house is
 
 A house is a capped bridge container for one harness (`claude-code` or
-`codex`) on the shared `/home/bridge/dev` filesystem. Worktrees, sessions and
+`codex`) on the shared project filesystem. Worktrees, sessions and
 skills are the same files the mansion sees; nothing persistent lives in the
 container. The mansion is the shared Claude bridge, which runs Anthropic and
 proxy-routed GPT bots. The separate native Codex mansion service is retired;
@@ -23,7 +23,7 @@ not a removed Codex service.
 - Each house bridge holds `agent:house:<id>:lease:<harness>` (TTL 30 s,
   renewed every 10 s) and a start epoch. New turns go to the house only while
   that lease exists.
-- Lease missing: new turns run in the mansion, and the user gets one push/bell
+- Lease missing: new turns run in the mansion, and the operator gets one push/bell
   notice per outage. In-flight turns never move; a command from an older epoch
   is refused, never run late or twice.
 - Steer, approval, answer and abort follow the turn's recorded location, not
@@ -56,8 +56,9 @@ Every `house` write shares one lock, so it cannot race a self-move.
 ## UI work goes in a house
 
 A coder on BawtHub UI work moves into a free house (`self_house move_in`), or
-its coordinator pins it there, and puts the house's `preview_host` on the card
-so the user can give live feedback before review and publish. The preview serves
+its coordinator pins it there, and uses the house's `preview_host` for its own
+visual checks and screenshots for the task. Follow the
+[preview-to-dev workflow](../../agent-system/SKILL.md). The preview serves
 the occupant's most recently used `.wt-bawthub-<bot>-TASK-N` worktree by
 itself; `house-preview <worktree>/frontend` picks a different one. No house
 free: say so on the card and continue; this is not a gate.
@@ -77,7 +78,7 @@ empty; delete the bots and their retained rows afterwards.
 | Focused tests (named files/nodes), lint on changed files | In place, in your task worktree: pytest in a house (`/opt/house-tests`), or `make test-target NODES=…` on the host from a bridge (see testing.md). Node/pnpm in either. |
 | Broad pytest/vitest subsets, project-wide `tsc`, mypy, repo-wide lint | The heavy queue (`heavy-queue submit … -- <cmd>`), which runs one capped job at a time and calls you back. Only prepared, self-contained checks: no network, PostgreSQL or other external service. Bridge guards refuse these locally. |
 | Full llm-bawt unit suite or full gate | Not the queue and not a house: neither is a full-unit or full-gate environment. If you genuinely need a full pre-check, ask the integrator for one solo host `make gate` on your reviewed tip. Its passing exact-SHA receipt is reused for publication, never rerun. |
-| Live UI for your change | Your house preview: `house-preview <worktree>/frontend`, then the house's HTTPS origin with real sign-in. Shared `<dev-host>` shows integrated `main`, not branch work. |
+| Live UI for your change | Your house preview: `house-preview <worktree>/frontend`, then the house's HTTPS origin with real sign-in. Shared `dev.example.test` shows integrated `main`, not branch work. |
 | Browser checks and screenshots | Playwright MCP against the house origin or the deployed dev surface, at phone and desktop width. |
 
 Rules:

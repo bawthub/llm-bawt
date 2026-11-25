@@ -7,7 +7,7 @@ description: Arrange independent review of consequential changes and resolve con
 
 Use a self-check for wording, documentation, and simple low-risk changes. Consequential behavior changes get one independent implementation review. Discuss design first when the actual change affects data integrity, security, concurrency, or recovery; a separate design-review stage is otherwise optional.
 
-Choose an available bot with the `review` capability who did not author the change. Give the reviewer the exact revision or executable maintenance plan, scope, relevant evidence, and remaining uncertainty.
+Choose an available bot with the `review` capability who did not author the change. Among eligible reviewers, check `bots_list_available(capability="review")` and prefer an idle one, then the shortest `queued`, then one not marked `steerable: false`; mention the load you saw in the request. Give the reviewer the exact revision or executable maintenance plan, scope, relevant evidence, and remaining uncertainty.
 
 Prefer a different provider when one is available. If the other provider's subscription, quota, authentication or service is unavailable, use an available independent reviewer on the same provider immediately. Record the fallback reason with the verdict; no exception request, provider retry/probe, model switch or wait for subscription recovery is needed. This applies to code, design and operational/maintenance reviews. Provider diversity is a preference, not a blocking gate; non-author independence, technical findings and required operation approvals still apply.
 

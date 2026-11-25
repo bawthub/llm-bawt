@@ -47,10 +47,11 @@ activation with its owner.
   Detached legacy trees stay untouched. A detached task-qualified path may be
   resumed only for its original task, clean and with its detached tip already
   in published canonical history.
-- Duplicate task branches, a branch checked out at a mismatched owner/task or
-  outside the dev root, unregistered path collisions, symlinked paths, missing
-  registered directories and locked mutable targets refuse. No automatic
-  repair, pruning, reset, force, ref deletion or migration is provided.
+- `start`, `status` and `sync` refuse duplicate task branches and unregistered
+  path collisions. A branch checked out at a mismatched owner/task or outside the
+  dev root, symlinked paths, missing registered directories and locked mutable
+  targets refuse. No automatic repair, pruning, reset, force, ref deletion or
+  migration is provided.
 - `status` does not fetch; it reports task/owner/path, branch, HEAD, dirty/lock
   state and cached canonical origin. `sync` preserves the existing rule against
   rebasing a separately published task branch. `done` requires a clean tree,
@@ -58,6 +59,36 @@ activation with its owner.
   it then removes the tree and keeps the branch. If the tree holds ignored
   files other than known caches/dependencies (for example `.env` or notes), it
   only detaches and lists those paths. `done --keep` only detaches.
+
+### Explicit cleanup of published trees
+
+`done` alone can resolve multiple task branches from the tree's own checked-out
+branch, but **every** task branch, including backup refs, must be ancestry-merged
+or patch-published on the fetched canonical target. Exact restacks/cherry-picks
+pass `git cherry`; changed patches and unique merge commits still refuse. A
+coordinator's acceptance of a small conflict resolution is not exact patch
+equivalence and cannot automatically authorize deletion.
+
+For a task-qualified orphan (or a parked legacy path with an unambiguous task),
+`done` first requires the positive missing-admin proofs used by orphan trimming.
+It then requires an exact match to one published task branch: raw tracked blob
+bytes, executable bits and symlinks, with no untracked files or non-disposable
+ignored files. The comparison uses a temporary private index, never repairs
+registration and never changes the canonical index. Multiple matching branches
+are ambiguous and refuse. Orphan `--keep` refuses rather than inventing metadata.
+Visible processes, task-local container mounts and detected filesystem mounts
+protect both registered and orphan trees. Explicit `done` ignores only its own
+PID and ancestor chain so it can run from inside the tree; unrelated processes
+(including children) still protect it. Branches and unrelated registrations
+are always retained. `reap`'s orphan policy below is unchanged.
+
+With different host/container mount views, a peer's global `git worktree prune`
+can destroy a live registration because its absolute `gitdir` path is invisible.
+Use targeted removal, not a global prune against shared metadata. A repo-local
+`gc.worktreePruneExpire=never` prevents GC-driven worktree pruning without disabling
+object GC; a direct `git worktree prune` ignores it, even without an expiry
+argument. This is a GC-only guard, not protection against direct pruning. Do not
+enable `extensions.relativeWorktrees` while any client lacks that extension.
 
 ## Automatic removal (TASK-1996)
 
@@ -81,7 +112,7 @@ tree (an integrator reading a REVIEW tree) associates that task first or locks
 the tree. Work outside a bot turn that must keep a tree (a long-lived server, a
 manual hold) uses `git worktree lock`; locked trees are never reaped. Run
 `git worktree` commands from the same path alias the tree was registered under
-(the host's dev root vs `/home/bridge/dev`); `reap` does this itself. Never remove
+(the host and container paths for the same shared workspace); `reap` does this itself. Never remove
 review-held/unmerged/dirty work or a branch/ref by hand to make room.
 
 ### Orphan cache trimming (TASK-2132, Nick24h)
@@ -95,7 +126,7 @@ trees continue through the existing rules above, not this orphan path.
 An orphan requires positively absent repository `.git/worktrees/<name>` admin
 metadata. Git-command failure alone is not evidence: existing metadata, permission
 errors, unsafe/unknown pointers and inaccessible alternate aliases are retained.
-The helper recognizes `/home/bridge/dev` and the host's dev root as shared aliases
+The helper recognizes the configured container and host workspace paths as shared aliases
 and checks the corresponding local admin path too. It never repairs metadata.
 
 **Nick24h is a separate, stricter rule:** the task must be `COMPLETED` **or**
@@ -162,6 +193,7 @@ not publication or migration of real worktrees:
 
 ```sh
 python3 scripts/test_bawt_wt.py
+python3 scripts/test_bawt_wt_done.py
 python3 scripts/test_bawt_wt_hooks.py
 python3 scripts/test_commit_slice.py
 python3 scripts/test_commit_recon.py

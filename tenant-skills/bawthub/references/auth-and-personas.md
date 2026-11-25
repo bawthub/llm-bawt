@@ -4,10 +4,13 @@
 
 ## Authentication & user model
 
-Reverse proxy injects `x-forwarded-email`/`x-forwarded-user` on OAuth-gated hosts; absent on `<dev-host>` (LAN, no auth). Email → llm-bawt `entity_id` via `/v1/profiles/lookup` (cached 5 min). User-switcher (`AppMainNav.tsx`) lists `entity_type=user` profiles, writes `selectedUser` to Zustand + localStorage (`bawthub-selected-user`); a real lookup `entity_id` always beats stale localStorage. `display_name` comes from the llm-bawt profile (`/tools/profile`).
+User identity depends on the installation's configured sign-in path: owner enrollment/password session, trusted reverse-proxy identity, or legacy identity selection. Inspect `GET /api/chat/auth` (`sign_in`, `user`, `email`, `entity_id`) and the auth configuration; LAN placement or a single route's 401 does not establish that password/session enforcement is enabled. `sign_in="enroll"` with null identity is not an authenticated owner session.
 
-A Playwright MCP context can be pre-seeded with a `bawthub-subject=<user>` cookie and the `bawthub-selected-user` localStorage record so the dev host opens without the "Who are you?" picker; use the installation's own owner identity, never a guessed one.
+Trusted proxy headers (`x-forwarded-email`/`x-forwarded-user`) are not interchangeable with a local password session. Email maps to llm-bawt `entity_id` through `/v1/profiles/lookup` (cached 5 min). The legacy user-switcher (`AppMainNav.tsx`) stores `selectedUser` in Zustand and localStorage (`bawthub-selected-user`); a real lookup `entity_id` beats stale localStorage. `display_name` comes from the llm-bawt profile (`/tools/profile`).
 
+**Backend caller authentication is independent.** Hono/voice service keys identify those programs to llm-bawt; they do not authenticate the browser user. The backend's `api_auth_mode` and MCP's `mcp_auth_mode` are separate from BawtHub sign-in. Finishing an observation window does not change any of these settings automatically. See [llm-bawt security boundaries](../../llm-bawt/reference/security-model.md).
+
+A Playwright MCP context can be pre-seeded with a `bawthub-subject=<user>` cookie and `bawthub-selected-user` localStorage for legacy identity selection; use the installation's owner identity, never a guessed one. Those values do not create a password session or bypass enrollment/session enforcement.
 
 ### Personas (TASK-477)
 

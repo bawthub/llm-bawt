@@ -6,7 +6,7 @@ Canonical, multi-provider plan-usage (Claude `/usage`-style limits) for the UI.
 `?provider=claude` (one provider) · `?bot_id=<slug>` (resolve provider) · no
 filter (all registered). Only **Claude** is implemented; z.ai/codex are
 stubs. Code: `src/llm_bawt/service/usage/`. **Full config + troubleshooting:
-`~/dev/llm-bawt/docs/usage-endpoint.md`.**
+`docs/usage-endpoint.md` in llm-bawt.**
 
 **Claude credential model (TASK-635, live 2026-07-21): ONE app-owned login
 feeds EVERYTHING — usage AND claude-code bridge inference.**
@@ -27,7 +27,7 @@ feeds EVERYTHING — usage AND claude-code bridge inference.**
 - **Everything else is a read-only consumer.** The usage adapter reads
   in-process. The claude-code bridge resolves tokens (per turn, no restart
   needed after a re-login): ro-mounted bundle at
-  `/home/bridge/.claude-broker/.credentials.json` → broker endpoint
+  `$HOME/.claude-broker/.credentials.json` → broker endpoint
   `GET /v1/providers/claude/token` (`?force=true` after a 401; optional
   `BRIDGE_CLAUDE_TOKEN_SECRET`/`X-Bridge-Token` guard) → legacy
   `~/.claude/.credentials.json` (read-only) → env `CLAUDE_CODE_OAUTH_TOKEN`

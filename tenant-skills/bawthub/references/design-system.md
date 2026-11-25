@@ -4,7 +4,7 @@
 
 ### Shared notifications — one system
 
-**All user-facing notifications use the shared notification system unless the user
+**All user-facing notifications use the shared notification system unless the operator
 explicitly approves an exception.** Do not add component-local toast state,
 portals, stacks, dismissal/expiry timers, or a second notification library.
 Refactor an existing custom result popup through the shared system when touching
@@ -25,6 +25,17 @@ inter-bot relay pills), reuse their existing event handlers and shared history
 integration rather than adding a parallel notification path. Form-field
 validation and ordinary inline content are not toast notifications.
 
+### Desktop uses the space
+
+Responsive means each width gets its own layout, not the phone layout stretched.
+At desktop widths, put related groups side by side (multi-column forms and
+cards, inline sections instead of drill-in panels, pickers inside the open
+popup instead of a second one), size controls to their content (short fields
+and buttons are not full width) and use compact desktop controls rather than
+touch tiles. Phone keeps the single column and drill-ins. Visual acceptance for
+a desktop-facing change includes a 1440 px screenshot showing no large empty
+areas or oversized controls.
+
 ### Design elements — the three icon systems
 
 BawtHub uses **three** distinct icon treatments. Picking the wrong one is the
@@ -37,7 +48,7 @@ most common visual regression; they are not interchangeable.
 | **In-page controls** — buttons, rows, menus | lucide stroke icon, `white/60`–`white/90` | component-local |
 
 **Launcher tiles are emoji, not line icons.** When "main menu" / "home tiles"
-comes up, the user means the **emoji launcher**, not the nav pills. Twelve thin
+comes up, the operator means the **emoji launcher**, not the nav pills. Twelve thin
 monochrome strokes at tile size read as one texture and force you to read the
 label to find anything — which defeats a launcher. A color pictograph is
 identifiable pre-attentively. Do NOT "upgrade" a launcher to lucide icons, and
@@ -118,73 +129,53 @@ Rules:
 - **Not a bot tag:** bot taxonomy tags are a separate system (`BotChip` and tag pills). Don't reuse TaskTag colours for them.
 - **Where it's used:** Spotlight task results, the task modal header (`TaskDetailView`, whose `pr-8` keeps the badges clear of the modal's ×), and `AllTasksMobileList`. New task surfaces should use it rather than a gray mono span.
 
-### Section bar — page controls live in the third menu (TASK-1382)
+### Menu layers: section bar and page header row (TASK-2168)
 
-The section bar is the third row of chrome: app nav, then the section bar
-(`SecondaryNav`, fed by `MainMenuSubNav`), then the page. It holds the
-section's tabs and, after a divider, the current page's own controls: view
-switches, search, filters, sort, counts and page tools such as Columns or
-New. One row, never wrapped. It folds by measured width (labels to icons,
-inline pickers into one Filters menu, search to an icon, tabs into a picker),
-and once every fold step is spent the row scrolls sideways.
-
-Rules:
-- **Tabs read as menus.** Every tab-style menu has a visibly darker, recessed
-  track, not a transparent row of labels. `globals.css` applies the shared
-  `--tab-track` treatment to `[role="tablist"]`; segmented menus without tab
-  semantics use `tab-menu-track`. Keep selected tabs visibly raised/contrasting,
-  focus rings visible, and narrow tab rows intentionally scrollable.
-- **No page-level toolbar in the page body.** Don't put a filter row,
-  search box or view toggle above the content, in a `PageHeader` action slot,
-  or as a separate phone-only filter panel. Register the page's controls in
-  its section's toolbar map instead (`TasksToolbar.tsx` `TOOLBARS`:
-  `{ label, Controls, foldSteps }`). Controls inside one card, row or pane
-  stay with that card, row or pane. Exception: a page migrated to the
-  three-layer model (below) puts its views and actions in `ViewBar` at the top
-  of its content.
-- **State the bar can reach.** The layout renders the bar, so page-option
-  state lives in the URL or a small store shared with the page, never in the
-  page component's local state (Board: URL + prefs; All Tasks:
-  `all/allTasksView.ts`).
-- **Fold, then scroll.** Read the current step with `useSectionBarFold()` and
-  give each step one change. Never wrap to a second row or squeeze a control
-  below its 32px box (`touch-hit` supplies the 44px tap area).
-- **Reuse the bar's controls:** `CONTROL`, `toolButton` and `SearchControl`
-  from `tasks/board/BoardViewControls.tsx`, `Select size="sm"`, `BotSelect`
-  for agents, and `AnchoredPopover` + `floating-glass-surface` for folded
-  menus.
-- **Examples:** `/tasks` (Relay), `/tasks/board`, `/tasks/all`, Repos
-  (`RepoWorkspaceChrome`). Tools has no page-controls hook yet, so Tools
-  pages that still have in-page toolbars are tracked as follow-up cards.
-
-### Three layers and the fold rule (TASK-2173)
-
-Navigation has three layers, one component each:
+Navigation has three layers, each with one component and one overflow rule:
 
 1. **Sections**: the app top bar (`AppMainNav`).
-2. **Pages**: the section bar (`SecondaryNav` via `MainMenuSubNav`).
-3. **Views** of one page: `ViewTabs` (`lib/ui/ViewTabs.tsx`). It sits in its
-   own row at the top of the page content, on the shared tab track, and is never
-   put in the section bar.
+2. **Pages**: the section bar (`SecondaryNav` via `MainMenuSubNav`), holding
+   the section's tabs and nothing else. Tabs that don't fit go behind
+   "More ▾"; the current page always shows and the tabs never collapse into a
+   lone picker (`SectionTabStrip`).
+3. **Views** of one page: `ViewTabs` (`lib/ui/ViewTabs.tsx`). A narrow view
+   row scrolls sideways, fades its clipped edge and keeps the active view in
+   sight. Views never become a dropdown.
 
-Page actions such as refresh and new go in `PageToolbar`
-(`lib/ui/PageToolbar.tsx`). It sits to the right of the views; `ViewBar` lays
-out both, and on a phone the toolbar takes its own row.
-
-**Fold rule:** only the toolbar folds, first from labels to icons, then into one
-"⋯" menu. Views never become a dropdown. A narrow view row scrolls sideways,
-fades its clipped edge and keeps the active view in sight.
+**Page controls are not a layer.** Search, filters, sort, counts, refresh and
+New share the **page header row** with the views: `[ views ] …… [ controls ]`.
+`SecondaryNav` renders it as a second row under the section bar, sliding with
+it on phones, so the chrome is at most top bar, section bar and header row. A
+page with neither views nor controls has no header row. Only the controls fold,
+by measured width (labels to icons, inline pickers into one Filters menu,
+search to an icon); past the last step the views scroll in their own space.
 
 Rules:
-- `ViewTabs` is real ARIA tabs over one `ViewTabPanel`. Arrow keys, Home and End
-  move focus; Enter or Space opens the view. Views that are separate routes keep
-  link semantics, not tabs.
-- Hold the view in the URL with `useUrlView(param, keys, fallback, { clear })`
-  (`lib/useUrlView.ts`), so Back, Forward, reload and deep links all work.
-  `clear` drops params that belong to the previous view.
-- Proof page: `/tools/approvals` (`?tab=`). Other pages still put their views in
-  the section bar until they migrate. Don't change the look of the top bar or
-  the section bar for this.
+- **Register, don't render in the body.** Tools-family pages publish with
+  `useToolsPageControls(path, …)` and are listed in `ToolsToolbar.tsx`
+  `TOOLBARS`; mark the page's view choice `view: true` and it renders as
+  `ViewTabs` at the start of the row. Tasks pages register `{ label, Controls,
+  foldSteps }` in `TasksToolbar.tsx`. Don't put a filter row, search box or
+  view toggle above the content, in a `PageHeader` action slot, or in a
+  phone-only filter panel. Controls inside one card, row or pane stay there.
+- **State the row can reach.** The layout renders the row, so page-option state
+  lives in the URL or a small store shared with the page, never in the page
+  component's local state.
+- **Fold, never wrap.** Read the step with `useSectionBarFold()` and give each
+  step one change. Never squeeze a control below its 32px box (`touch-hit`
+  supplies the 44px tap area).
+- **Tabs read as menus.** `globals.css` gives `[role="tablist"]` the shared
+  `--tab-track`; segmented menus without tab semantics use `tab-menu-track`.
+- `ViewTabs` is real ARIA tabs. Arrow keys, Home and End move focus; Enter or
+  Space opens the view. Pass `panel={false}` when there is no `ViewTabPanel`
+  (header-row views). Views that are separate routes keep link semantics.
+- Hold a view in the URL where it matters (`useUrlView`, `lib/useUrlView.ts`),
+  so Back, reload and deep links work.
+- **Reuse the controls:** `toolButton` and `SearchControl` from
+  `tasks/board/BoardViewControls.tsx`, `Select size="sm"`, `BotSelect`, and
+  `AnchoredPopover` + `floating-glass-surface` for folded menus.
+- Approvals and Playground still lay out views and `PageToolbar` in an in-body
+  `ViewBar` (TASK-2173) until they move onto the header row.
 
 ### Floating glass surfaces — reuse, do not recreate
 
@@ -218,7 +209,7 @@ Rules:
 
 Reference implementation for dense, multi-pane work surfaces (file lists, diff
 documents, grouped rails): `repos/page.tsx`, `repos/workspace/GroupedFileRail.tsx`,
-`diffs/DiffDocumentSection.tsx`, `diffs/ContinuousDiffViewer.tsx`. The user iterated
+`diffs/DiffDocumentSection.tsx`, `diffs/ContinuousDiffViewer.tsx`. The operator iterated
 on this directly; these are his calls, not taste to relitigate.
 
 **Separation = wireframe + space, never colored rails.** Distinguish items (a file,
@@ -241,7 +232,7 @@ sticky element gets a `top` offset, scroll-landing math must add it
 Document headers (the per-file band) stay mostly solid for contrast against code:
 `bg-slate-800/70` + `from-sky-300/[0.08]` sheen + inset top highlight.
 
-**"Selected/active" = background lift, never a border.** The user: *the effect is
+**"Selected/active" = background lift, never a border.** *the effect is
 applied to the background within the element* — do not add solid/bright borders
 or rings to show state. Active group/file: `bg-sky-400/[0.055]` (he halved it
 from 11%; subtle is the target). Siblings of an active scope dim to
@@ -265,9 +256,9 @@ Mouse only; touch keeps native scroll.
 
 Building/modifying UI components → load the **`ui-ux-guidelines`** skill (container-first thinking, flex/grid decision tree). Design treatments → **`references/design-system.md`** before touching launcher tiles, nav icons, or floating surfaces. Hot rules:
 
-- **Three icon systems, not interchangeable:** launcher tiles (home + `/tools`) = **color emoji, no frame** (when the user says "main menu"/"home tiles" he means the emoji launcher — do NOT "upgrade" to lucide or add a disc); nav pills = lucide + per-tone color (`AppMainNav.tsx`); in-page controls = lucide `white/60`–`white/90`.
-- **Which "menu" the user means:** "Tools menu" = the `/tools` launcher tiles (`TOOLS_MENU_ITEMS` in `tools/page.tsx`). The **top menu** (`AppMainNav`) is fixed `NAV_ITEMS` + the user's toggleable favorites (bookmark icon / Settings → Appearance) — never hardcode extra links there (TASK-866 wrongly pinned Approvals/Models; removed in TASK-940).
-- **Page controls go in the section bar (the third menu).** Filters, search, view switches and page tools sit after the section tabs on one row that folds, then scrolls sideways. No in-page toolbar rows or phone-only filter panels. See `references/design-system.md` § Section bar.
+- **Three icon systems, not interchangeable:** launcher tiles (home + `/tools`) = **color emoji, no frame** (when the operator says "main menu"/"home tiles" he means the emoji launcher — do NOT "upgrade" to lucide or add a disc); nav pills = lucide + per-tone color (`AppMainNav.tsx`); in-page controls = lucide `white/60`–`white/90`.
+- **Which "menu" the operator means:** "Tools menu" = the `/tools` launcher tiles (`TOOLS_MENU_ITEMS` in `tools/page.tsx`). The **top menu** (`AppMainNav`) is fixed `NAV_ITEMS` + the user's toggleable favorites (bookmark icon / Settings → Appearance) — never hardcode extra links there (TASK-866 wrongly pinned Approvals/Models; removed in TASK-940).
+- **Views and page controls go in the page header row, not the section bar.** The section bar holds only the section's tabs (overflow into More). Views (`ViewTabs`, never a dropdown) and controls (which fold) share one row under it. No in-page toolbar rows or phone-only filter panels. See § Menu layers.
 - **Floating surfaces reuse `floating-glass-surface`** (globals.css) — never copy the gradient/filter inline; children stay transparent; no `transform` on ancestors of backdrop-filtered UI; never nest backdrop filters.
 - **Home tiles must mirror `AppMainNav` `NAV_ITEMS`** — new nav route ⇒ new tile.
 - **Bots are never a plain list.** Bots are the product: every place a bot is chosen or shown uses the shared bot-display suite in `src/app/chat/` — choose = `BotSelect` (avatar + palette, `groupByKind`, `zClassName` inside modals), label = `BotChip`, avatar = `BotAvatar`/`BotPickerAvatar`, data = `useBots()` (`BotRecord`) + `useBotColors()`. **Never** a native `<select>`, `@/lib/ui` `Select`, or a private `/v1/bots` query for bots. Bot-specific defaults come from the bot too (e.g. a new bot tile's emoji = the bot's avatar). Inventory: `references/design-system.md` § Bot display suite.

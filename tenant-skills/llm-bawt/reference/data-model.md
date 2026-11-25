@@ -1,4 +1,4 @@
-# llm-bawt data model (PostgreSQL, DB `askllm`)
+# llm-bawt data model (PostgreSQL)
 
 Read this before reasoning about conversation storage, session/thread scoping,
 history retrieval, tool-call rendering, or any query against the chat tables.
@@ -85,6 +85,7 @@ NULL-`user_id` rows leaked (~503) and are reaped by the migration step.
 | Cluster | Tables |
 |---|---|
 | **Memory** | `memories` (pgvector, partitioned by `bot_id`), `forgotten_messages` (soft-deleted bubbles, partitioned), `entity_profiles`, `entity_profile_attributes`, `user_profiles` |
+| **Agent execution** | `agent_runs`, `agent_events`, `agent_session_state` |
 | **Approvals** | `tool_approval_policies` (rules), `tool_approval_requests` (audit), `chat_pending_questions` |
 | **Config / models** | `bot_profiles`, `runtime_settings`, `prompt_templates` (+`prompt_template_versions`), `models`, `model_endpoints`, `access_paths`, `model_definitions`, `model_definitions_compat` |
 | **Jobs** | `scheduled_jobs` → `job_runs` |
@@ -122,11 +123,11 @@ WHERE c.contype = 'f' AND c.connamespace = 'public'::regnamespace
 ## Cross-database task ↔ conversation joins (TASK-700–706)
 
 BawtHub owns three additional association tables in its own database
-(`echo`) that logically join to the llm-bawt conversation chain. **No
+that logically join to the llm-bawt conversation chain. **No
 foreign key crosses the boundary** — everything is a logical join by
 canonical identifier.
 
-| BawtHub table (`echo` DB) | Logical join to llm-bawt (`askllm` DB) | Meaning |
+| BawtHub table  | Logical join to llm-bawt  | Meaning |
 |---|---|---|
 | `AgentConversationIdentity.sessionId` | `sessions.id` | Durable session ownership anchor; survives task detach (intra-bawthub FK RESTRICT). |
 | `AgentTaskSession.sessionId` | `sessions.id` (via identity FK) | `(taskId, sessionId)` grain — navigation/context. Partial unique `WHERE isPrimary=true`. |
@@ -172,7 +173,7 @@ pgq llm-bawt -c "SELECT slug, harness, default_model, endpoint_id FROM bot_profi
 ```bash
 pgq llm-bawt -c "\d sessions"                 # or \d messages / \d messages_p_loopy / \d turn_logs / \d tool_call_records
 pgq llm-bawt -tAc "SELECT count(*) FROM information_schema.table_constraints WHERE constraint_type='FOREIGN KEY' AND table_schema='public';"  # → 4
-pgq llm-bawt -tAc "SELECT role, count(*) FROM messages WHERE bot_id='<bot>' GROUP BY role;"   # user/assistant/summary/system only
+pgq llm-bawt -tAc "SELECT role, count(*) FROM messages WHERE bot_id='example-bot' GROUP BY role;"   # user/assistant/summary/system only
 ```
 
 ## Summary formerly in the parent SKILL.md (TASK-1640)

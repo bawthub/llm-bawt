@@ -28,10 +28,20 @@ authority. BawtHub owns the association tables (`AgentTaskSession`,
 Native Codex cannot safely vary MCP headers per turn today and fails closed
 with a clear error.
 
-Runtime config: default internal URL `http://frontend-prod:3002` (the
-always-on service, NOT the optional HMR `frontend`). No per-endpoint auth
-(TASK-793): the internal port stays inside the docker network, and that
-boundary is the auth layer.
+#### Task API routing and deploy order
+
+MCP task tools use `LLM_BAWT_TASK_API_URL`, defaulting to
+`http://frontend-prod:3000` (`utils/config.py::DEFAULT_TASK_API_URL`;
+`mcp_server/task_api.py::BASE_URL`). This is the stable production frontend,
+not the optional HMR `frontend`; the trusted association listener described
+above is a separate surface.
+
+BawtHub task-API changes reach bots only after a production frontend release;
+DEV HMR does not update the server used by MCP task tools. When an llm-bawt
+change needs new task-API fields, release the compatible BawtHub frontend to
+production first, then activate the consuming llm-bawt change with an app
+restart. Keep this routing rather than adding another llm-bawt instance on
+the same database.
 
 #### Non-activating sessions for dispatch (TASK-702)
 
@@ -41,7 +51,7 @@ active thread and does NOT participate in the one-active-per-`(bot, user)`
 partial unique invariant. Response carries `status: "archived"`, `rotated:
 false`; `session_metadata.created_inactive = true` marks the row so operators
 can distinguish background/task threads from UI-archived ones. Background
-task dispatch uses this so a queued task never disturbs the user's live
+task dispatch uses this so a queued task never disturbs the operator's live
 conversation. Subsequent `POST /v1/chat/completions` with an explicit
 `session_id` continues the archived thread untouched.
 

@@ -4,10 +4,9 @@
 
 ## Frontend surfaces
 
-Two frontend surfaces, both fronted by Traefik on the host: a **dev/HMR** surface (`bawthub-frontend-1`, live `./frontend` mount, instant `.ts/.tsx/.css` pickup) and a **baked prod** surface (`bawthub-frontend-prod-1`, changes only on a prod image rebuild). Each installation configures its own hostnames and sign-in; read them from its Traefik routes and environment rather than assuming another installation's.
+Two frontend surfaces, both fronted by Traefik on the host: a **dev/HMR** surface (`frontend`, live `./frontend` mount, instant `.ts/.tsx/.css` pickup) and a **baked prod** surface (`frontend-prod`, changes only on a prod image rebuild). Each installation configures its own hostnames and sign-in; read them from its Traefik routes and environment rather than assuming another installation's.
 
-
-**Host-only Make commands** (on the host from `~/dev/bawthub`; from a bridge, run them over SSH to the host): `make mode-status` (always run first if unsure) · `make dev-mode` / `make prod-mode` (toggle HMR only — **neither changes that canonical = baked prod**) · `make up-dev` · `make logs / logs-backend / logs-prod`.
+**Host-only Make commands** (on the host from the BawtHub checkout; from a bridge, run them over SSH to the host): `make mode-status` (always run first if unsure) · `make dev-mode` / `make prod-mode` (toggle HMR only — **neither changes that canonical = baked prod**) · `make up-dev` · `make logs / logs-backend / logs-prod`.
 
 ## Architecture
 
@@ -19,7 +18,6 @@ Traefik (host:80)
 │   └─ same /api/* prefixes (priority=200)         → frontend
 └─ /api/* catch-all (priority=100)                 → backend (Python FastAPI)
 ```
-
 
 ```
 External: llm-bawt :8642 (BAWTHUB_LLM_URL=http://host.docker.internal:8642) · STT :8090 · TTS :8089 · PostgreSQL :5432
@@ -39,7 +37,7 @@ bawthub/
 │   ├── server/                      # Hono API (was Next.js src/app/api/*)
 │   │   ├── index.ts                 # entry; serves dist/client + /api/*
 │   │   ├── routes/                  # chat.ts (llm-bawt proxy + approvals), tasks.ts,
-│   │   │                            #   docker-unraid.ts, remaining.ts, health.ts
+│   │   │                            #   container, capacity, and health routes
 │   │   ├── middleware/              # auth (entity_id from proxy headers), proxy helper
 │   │   └── lib/                     # prisma client, llmUrl, agentActivity, botInfo…
 │   └── src/                         # Vite SPA (client ONLY — no Prisma/server code)
@@ -63,8 +61,7 @@ Frontend proxies `/api/chat/*` → llm-bawt `/v1/*`: `POST /api/chat` → `/v1/c
 
 ## Environment
 
-Check where you are first (`whoami`/`pwd`). The host has node/npm/gh/docker/git locally. Agent bridges = `bridge` (`/home/bridge/dev`): Node 24.21.0, npm/npx 11.19.0, Corepack 0.36.0, pnpm 10.32.1, make and gh are installed (TASK-1061/1062). Run focused checks (named test files, lint on changed files) in the worktree; project-wide `tsc`, full suites and Python suites follow [houses and test placement](../../llm-bawt/reference/houses.md).
-
+Check the active checkout and installed tools first. Run focused checks (named test files, lint on changed files) in the worktree; project-wide `tsc`, full suites and Python suites follow [houses and test placement](../../llm-bawt/reference/houses.md).
 
 ## When a rebuild is needed beyond a code edit (moved from SKILL.md, TASK-1640)
 
@@ -75,9 +72,9 @@ Check where you are first (`whoami`/`pwd`). The host has node/npm/gh/docker/git 
 | `vite.config.ts`, `package.json`, `tsconfig.json`, `.env` | dev server auto-restarts (kills SSE/ws — one reconnect is normal) | prod rebuild |
 | add a dependency (`pnpm add`) | Authorized `make restart-ui` workflow: recreates frontend, installs shared deps and generates Prisma; **not equivalent to the plain restart op** | prod rebuild |
 | `Dockerfile.vite` / `hot-reloading.Dockerfile` | `make rebuild-ui` | prod rebuild |
-| `prisma/schema.prisma` | `make db-push-ui` then `make db-generate-ui`, then request `bawthub.restart-frontend` through `ops_run`; generation does not restart the frontend (push re-applies the HNSW DDL Prisma can't model). If it warns about data loss, **stop and fix the drift** — never work around it with hand-written SQL. Raw-SQL tables must declare their DB defaults in the schema (`@default(now()) @updatedAt`); removing a model/field = drop it in the DB too | — |
+| `prisma/schema.prisma` | Client: dev `tsx watch` restarts on the schema edit and its startup preflight runs `prisma generate` when the client has drifted (client only; logged as `[prisma] …`). If that generate fails, `/api/*` stays 503, so fix the error, or fall back to the [back-to-back Prisma publication/restart sequence](pitfalls.md#prisma-schema-publication-can-leave-dev-apis-returning-503). Database: still a deliberate `make db-push-ui`, which re-applies the HNSW DDL Prisma can't model. If it warns about data loss, **stop and fix the drift** — never work around it with hand-written SQL. Raw-SQL tables must declare their DB defaults in the schema (`@default(now()) @updatedAt`); removing a model/field = drop it in the DB too | prod rebuild (strict drift guard) |
 
-**Adding a hostname or a frontend-owned `/api/*` prefix:** → **`references/routing-hostnames.md`** (AdGuard + `deploy/traefik/dynamic/routes.yml` + Vite allowedHosts; both `frontend-api` AND `frontprod-api` rules must stay aligned or the Python backend's priority-100 catch-all swallows the route → 404).
+**Adding a hostname:** configure the installation’s DNS and edge router, update the corresponding host rules in `deploy/traefik/dynamic/routes.yml`, and allow dev hosts in Vite’s `server.allowedHosts`, HMR and CORS as needed. For a frontend-owned `/api/*` prefix, update both `frontend-api` and `frontprod-api`; otherwise the Python backend’s priority-100 catch-all may return a 404. Check the routed prefixes with `python3 deploy/traefik/check_routes.py` on the Docker host.
 **Background jobs:** the delivery dispatcher, approval callbacks, scheduled resets, maintenance, recovery and the ops reconciler all run in llm-bawt, not here. Before answering what one is doing, read **`../llm-bawt/reference/background-jobs.md`**: cadence, leader-only or not, what it writes, and what's built but not wired in.
 
 ## Frontend conventions (moved from SKILL.md, TASK-1640)
@@ -90,4 +87,4 @@ Check where you are first (`whoami`/`pwd`). The host has node/npm/gh/docker/git 
 
 ## MCP memory
 
-Use **`bot_id="claude"`** for conversation-history MCP tools (`get_messages`, `get_recent_context`, `search_memories`, …) — the default `bot_id` returns empty/test data.
+Specify the bot whose conversation history you want in history MCP calls; the default may be a different bot.

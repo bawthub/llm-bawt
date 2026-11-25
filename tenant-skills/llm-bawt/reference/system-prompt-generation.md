@@ -93,7 +93,7 @@ Starts from `self._prompt_builder.copy()`, then conditionally adds:
 
 | Section | pos | Gate | Notes |
 |---------|----:|------|-------|
-| `tools` | 4 | **chat bots only**, plus `tool_format != "none"` AND (`bot.uses_tools` → full tool set, else `self.memory` → read-only `MEMORY_TOOL`) | Native agent harnesses own their tool schemas/protocol and receive no app-generated tool prompt. Chat bots use the model-specific ReAct/native prompt from `get_tools_prompt(tool_format=...)`. |
+| `tools` | 4 | **chat bots only**, plus `tool_format != "none"` AND `bot.uses_tools` | Native agent harnesses own their tool schemas/protocol and receive no app-generated tool prompt. Chat bots use the model-specific ReAct/native prompt from `get_tools_prompt(tool_format=...)`. Memory, history and profile come only from BawtHub MCP through `tool_search`; there are no local wrappers. |
 | `client_context` | 5 | `self._client_system_context` set | `## Client Context\n{...}` — e.g. HA device list passed by the caller. |
 | `cold_start_memory` | 3 | `self.memory and not _ha_mode` AND `history ≤ 3 msgs` | Injects top memories only when history is thin; steady-state bots use the memory tool on-demand instead. |
 | `tts_output` | 50 | `_tts_mode` **and NOT agent backend** | `chat.tts_output_instructions` from prompt registry. Agent bots get a user-message prefix instead (see §6) — injecting both double-doses the constraint. |
@@ -235,7 +235,7 @@ their memory). Summaries/history reach them via the **session seed**: on
 `history_scope`. So an agent set to `summaries` gets a dense summary-only seed;
 `none` gets a cold session. No separate agent flag.
 
-**The old summary-delivery finding is obsolete:** it described summaries failing to reach an
+**The old summary-reach finding is obsolete:** it described summaries failing to reach an
 agent because `include_summaries` was inert and `seed_summary_on_new_session` was
 absent. That whole split is gone — a single `history_scope` now drives delivery
 for every bot, verified end-to-end (seed endpoint + turn logs, TASK-518).
@@ -251,8 +251,8 @@ Fields in `bot_profiles` (see `bots.py`, `runtime_settings.py`). "Prompt impact"
 |------|----------------|---------------|
 | `system_prompt` | text / "You are a helpful assistant." | **`base_prompt` section** (pos 2), unless persona override active. |
 | `prompt_override_id` | int / NULL | **Replaces** `base_prompt` body with a persona template (TASK-477). NULL = base. |
-| `requires_memory` | bool / true | Gates `global_instructions` (GLOBAL_SYSTEM_PROMPT), cold-start memory, and profile sections. On chat bots it also allows the read-only memory tool; native agent harnesses provide their own MCP memory tools. |
-| `uses_tools` | bool / false | Chat bots: gates the **full** app-generated tools section. If false but `requires_memory`, a chat bot still gets the read-only memory tool. Native agents receive no app-generated tools section because Claude Code/Codex own their schemas and protocol. |
+| `requires_memory` | bool / true | Gates `global_instructions` (GLOBAL_SYSTEM_PROMPT), cold-start memory, and profile sections. It grants no tools; chat bots reach memory through BawtHub MCP only when `uses_tools` is on. |
+| `uses_tools` | bool / false | Chat bots: gates the app-generated tools section, including BawtHub MCP discovery (`tool_search`) for memory, history and profile. Without it a chat bot has no tools. Native agents receive no app-generated tools section because Claude Code/Codex own their schemas and protocol. |
 | `uses_search` | bool / false | Adds web-search tools **inside** the tools section (requires `uses_tools`). |
 | `uses_home_assistant` | bool / false | Adds HA tools inside the tools section (requires `uses_tools`). |
 | `history_scope` (runtime setting) | str / `inline+summaries` | **The live control (both bot types):** 4-value enum → two independent flags gating raw messages + summaries (§7). |

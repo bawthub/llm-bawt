@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# pgq — query the tenant Postgres with NO credentials on the command line.
+#
+# Why this exists: an inline password (PGPASSWORD=… psql, or a
+# postgresql://user:pass@host URL) leaks into the LLM API payload, turn logs,
+# shell history, and the host `ps` table. This wrapper keeps the secret off the
+# command line — psql reads it from a pgpass file or from this process env.
+#
+# Tenant-parameterized: host/port/user/db come from the standard LLM_BAWT_POSTGRES_*
+# env (injected into the bridge via the app .env), defaulting to the in-stack
+# `postgres` service and the `llm_bawt` database. A single tenant DB backs both
+# the app and the frontend, so an optional leading {llm-bawt|bawthub} target is
+# accepted for muscle-memory/compat but maps to the same DB.
+#
+# Usage:
+#   pgq -c "SELECT ..."                 # bare — hits the tenant DB
+#   pgq llm-bawt -c "SELECT ..."        # optional target (compat), same DB
+#   pgq bawthub -tAc 'SELECT count(*) FROM "AgentTask"'
+set -euo pipefail
+
+# Optional target keyword for tenant compatibility.
+case "${1:-}" in
+  llm-bawt|bawthub) shift ;;
+esac
+
+host="${LLM_BAWT_POSTGRES_HOST:-postgres}"
+port="${LLM_BAWT_POSTGRES_PORT:-5432}"
+user="${LLM_BAWT_POSTGRES_USER:-llm_bawt}"
+db="${LLM_BAWT_POSTGRES_DATABASE:-llm_bawt}"
+
+# Credential resolution (first hit wins; none touches the command line):
+#   1. $PGPASSFILE / $PGPASSWORD already in env
+#   2. $LLM_BAWT_POSTGRES_PASSWORD (injected via the bridge .env)
+#   3. ~/.pgpass (0600, psql reads natively)
+if [ -z "${PGPASSFILE:-}" ] && [ -z "${PGPASSWORD:-}" ]; then
+  if [ -n "${LLM_BAWT_POSTGRES_PASSWORD:-}" ]; then
+    export PGPASSWORD="$LLM_BAWT_POSTGRES_PASSWORD"
+  else
+    for f in "$HOME/.pgpass"; do
+      [ -f "$f" ] && { export PGPASSFILE="$f"; break; }
+    done
+  fi
+fi
+
+if [ -z "${PGPASSFILE:-}" ] && [ -z "${PGPASSWORD:-}" ]; then
+  echo "pgq: no credentials (set LLM_BAWT_POSTGRES_PASSWORD, or add ~/.pgpass)" >&2
+  exit 3
+fi
+
+exec psql -h "$host" -p "$port" -U "$user" -d "$db" "$@"
