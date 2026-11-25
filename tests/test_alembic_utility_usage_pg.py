@@ -13,6 +13,7 @@ from tests.test_alembic_ops_store_pg import HEAD, make_db, stamp  # noqa: F401
 
 pytest.importorskip("alembic")
 
+from llm_bawt.playground.store import bootstrap_playground_schema
 from llm_bawt.service.usage import utility_usage as usage
 from llm_bawt.utils import alembic_state
 
@@ -69,6 +70,10 @@ def test_alembic_path_matches_runtime_schema(make_db):
 def test_complete_catalog_upgrade_preserves_rows_sequence_and_issues_no_ddl(make_db):
     engine = make_db()
     bootstrap(engine)
+    # TASK-2625: a complete catalog also has the current Playground schema,
+    # so 0007 (revision columns, retired-blob table) must issue no DDL either.
+    with engine.begin() as conn:
+        bootstrap_playground_schema(conn)
     seed(engine)
     before_schema, before_data = schema(engine), data_and_sequence(engine)
     stamp(engine, "0005_playground")
