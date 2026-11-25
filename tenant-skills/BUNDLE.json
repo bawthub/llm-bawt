@@ -1,6 +1,6 @@
 {
   "source": "agent-skills",
-  "revision": "e09e992c22d88904f5a71c454bef58b9c815064d",
+  "revision": "fb4275165763a187764209da72a92b30fe37cc4d",
   "dirty": false,
   "skills": [
     "agent-system",

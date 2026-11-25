@@ -19,10 +19,10 @@ cmd="${1:-}"; name="${2:-}"
 
 [ -n "${BAWTHUB_MASTER_KEY:-}" ] || { echo "vault: BAWTHUB_MASTER_KEY not set in env" >&2; exit 3; }
 
-host="${LLM_BAWT_POSTGRES_HOST:-postgres}"
-port="${LLM_BAWT_POSTGRES_PORT:-5432}"
-user="${LLM_BAWT_POSTGRES_USER:-llm_bawt}"
-db="${LLM_BAWT_POSTGRES_DATABASE:-llm_bawt}"
+host="${LLM_BAWT_POSTGRES_HOST:-${PGHOST:-postgres}}"
+port="${LLM_BAWT_POSTGRES_PORT:-${PGPORT:-5432}}"
+user="${LLM_BAWT_POSTGRES_USER:-${PGUSER:-llm_bawt}}"
+db="${LLM_BAWT_POSTGRES_DATABASE:-${PGDATABASE:-llm_bawt}}"
 
 # DB password resolution (mirrors pgq): env → app .env → pgpass file.
 if [ -z "${PGPASSFILE:-}" ] && [ -z "${PGPASSWORD:-}" ]; then
