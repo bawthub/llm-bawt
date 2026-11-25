@@ -407,9 +407,9 @@ def test_many_strong_recaps_do_not_spend_the_broad_pool(rig):
     original = rig.add("Use the gateway's SFP+ port as WAN with a multigig module on the fiber plan.",
                        at=rig.now - 70 * DAY, partition=public, session=session,
                        author=public, author_type="bot")
+    # Every strong term (the five longest), none of the original's other words.
     for i in range(100):
-        rig.add(f"{public} network audit recommendation: gateway module, fiber plan ({i}).",
-                at=rig.now - 3600 - i)
+        rig.add(f"{public} network recommendation: gateway module ({i}).", at=rig.now - 3600 - i)
     question = f"Fiber plan and gateway SFP+ module recommendation from {public}'s network audit"
     rows = rig.recall(question, allowed=frozenset({public}))
     assert original in [row.id for row in rows if row.follows is None]
@@ -417,7 +417,8 @@ def test_many_strong_recaps_do_not_spend_the_broad_pool(rig):
 
 def test_naming_a_bot_does_not_admit_its_one_word_replies(rig):
     """Review B1: authorship ranks admitted answers; it never waives coverage."""
-    public = f"orchid{uuid.uuid4().hex[:8]}"
+    # Letters only: a digit-bearing name would be searched as an exact literal.
+    public = "orchid" + "".join(chr(97 + int(c, 16) % 26) for c in uuid.uuid4().hex[:8])
     session = rig.add_session(str(uuid.uuid4()), bot=public)
     answer = rig.add("Dashboard exports now write CSV nightly.", at=rig.now - 5 * DAY)
     noise = {rig.add(f"Raised the dashboard brightness a notch ({i}).", at=rig.now - 60 * (i + 1),
