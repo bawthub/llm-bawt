@@ -109,10 +109,12 @@ def test_0007_adds_revision_columns_to_a_0006_table(make_db):
     with engine.begin() as conn:
         conn.execute(text("ALTER TABLE playground_artifacts DROP COLUMN revision"))
         conn.execute(text("ALTER TABLE playground_artifacts DROP COLUMN updated_at"))
+        conn.execute(text("DROP TABLE playground_retired_blobs"))
     stamp(engine, "0006_utility_usage")
     assert alembic_state.upgrade_on_startup(engine) == HEAD
     names = {c["name"] for c in inspect(engine).get_columns(store.TABLE_NAME)}
     assert {"revision", "updated_at"} <= names
+    assert inspect(engine).has_table(store.RETIRED_TABLE)
 
 
 def test_runtime_bootstrap_only_runs_before_ownership(make_db, monkeypatch):

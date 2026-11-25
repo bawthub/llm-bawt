@@ -145,7 +145,8 @@ def test_sweep_purges_only_old_trash(pg):
             trashed_at=None, opened_at=datetime.now(timezone.utc) - timedelta(days=90)))
         conn.execute(update(artifacts).where(artifacts.c.id == old["id"]).values(
             trashed_at=datetime.now(timezone.utc) - timedelta(days=31)))
-    assert pg.sweep(30) == {"purged": 1, "blobs_deleted": 0, "blob_delete_failures": 0}
+    assert pg.sweep(30) == {"purged": 1, "blobs_deleted": 0, "retired_blobs_deleted": 0,
+                            "blob_delete_failures": 0}
     assert not _blob_path(pg, old).exists()
     assert _blob_path(pg, recent).exists() and _blob_path(pg, read).exists()
     assert pg.store.get(read["id"], USER)["expired_at"] is None
@@ -457,18 +458,55 @@ def test_revise_swaps_content_keeps_read_and_folder_state(pg):
     assert public_view(again)["revision"] == 3 and again["kind"] == "markdown"
 
 
-def test_revise_between_inline_and_file_cleans_up_old_blobs(pg):
+def _age_retired(pg, minutes=11):
+    from llm_bawt.playground.store import retired_blobs
+
+    with pg.store.engine.begin() as conn:
+        conn.execute(update(retired_blobs).values(
+            retired_at=datetime.now(timezone.utc) - timedelta(minutes=minutes)))
+
+
+def test_revise_retires_replaced_blobs_and_the_sweep_deletes_them_after_grace(pg):
     row = _send_png(pg)
     first_blob = _blob_path(pg, row)
     revised = pg.revise(row["id"], user_id=USER, bot_id="vex", title="t", note=None,
                         source=Source(kind="image", mime="image/png", filename="b.png",
                                       data=PNG + b"2"))
-    assert revised["blob_key"] != row["blob_key"] and not first_blob.exists()
+    assert revised["blob_key"] != row["blob_key"]
     assert _blob_path(pg, revised).read_bytes() == PNG + b"2"
+    # A read that selected v1 just before the swap still completes.
+    assert pg.read(row, None).data == PNG
     inline = pg.revise(row["id"], user_id=USER, bot_id="vex", title="t", note=None,
                        source=_inline("text", "text"))
-    assert inline["blob_key"] is None and not _blob_path(pg, revised).exists()
-    assert pg.read(inline, None) == "text"
+    assert inline["blob_key"] is None and pg.read(inline, None) == "text"
+    assert pg.sweep(30)["retired_blobs_deleted"] == 0  # still in grace
+    assert first_blob.exists() and _blob_path(pg, revised).exists()
+    _age_retired(pg)
+    assert pg.sweep(30)["retired_blobs_deleted"] == 2
+    assert not first_blob.exists() and not _blob_path(pg, revised).exists()
+    assert pg.store.retired_before(datetime.now(timezone.utc)) == []
+
+
+def test_failed_retired_delete_is_retried_and_delete_forever_leaves_nothing(pg, monkeypatch):
+    row = _send_png(pg)
+    revised = pg.revise(row["id"], user_id=USER, bot_id="vex", title="t", note=None,
+                        source=Source(kind="image", mime="image/png", filename="b.png",
+                                      data=PNG + b"2"))
+    _age_retired(pg)
+    real_delete = pg.backend.delete
+
+    def down(key):
+        raise BlobBackendUnavailable("down")
+
+    monkeypatch.setattr(pg.backend, "delete", down)
+    assert pg.sweep(30)["blob_delete_failures"] == 1
+    assert _blob_path(pg, row).exists()
+    monkeypatch.setattr(pg.backend, "delete", real_delete)
+    pg.store.set_state(row["id"], USER, "trash")
+    pg.expire(row["id"], USER, in_trash=True)
+    pg.sweep(30)
+    assert not _blob_path(pg, row).exists() and not _blob_path(pg, revised).exists()
+    assert not list((pg.backend.root / "playground").glob("*"))
 
 
 @pytest.mark.parametrize("user,bot,code", [

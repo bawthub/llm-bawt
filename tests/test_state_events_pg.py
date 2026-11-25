@@ -154,6 +154,10 @@ def test_catalog_mailbox_and_utility_writers_publish_their_topics(private_app_pg
         "id": artifact, "user_id": "u", "sender_bot_id": "b", "title": "t", "kind": "text",
         "mime": "text/plain", "size_bytes": 1, "inline_content": "x"}))
     assert check() == {"playground"}
+    assert _notifies(engine, lambda: playground.revise(artifact, user_id="u", sender_bot_id="b", values={
+        "title": "t", "note": None, "kind": "text", "mime": "text/plain", "filename": None,
+        "size_bytes": 1, "blob_key": None, "inline_content": "y"}))
+    assert check() == {"playground"}
     for action in ("read", "archive", "trash", "restore"):
         assert _notifies(engine, lambda action=action: playground.set_state(artifact, "u", action))
         assert check() == {"playground"}, action

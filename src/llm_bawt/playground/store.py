@@ -16,7 +16,8 @@ stays set until the blob is really gone, so a failed delete is retried.
 Revisions (TASK-2625). The sender can replace a live artifact's content in
 place. ``revision`` counts versions (NULL on older rows means 1) and
 ``updated_at`` is when the last revision landed. Read and folder state are
-kept, so a revision never re-notifies.
+kept, so a revision never re-notifies. A replaced blob goes to
+``playground_retired_blobs`` and the sweep deletes it after a grace period.
 """
 
 from __future__ import annotations
@@ -85,6 +86,20 @@ artifacts = Table(
     Column("updated_at", DateTime(timezone=True)),
     Index(f"idx_{TABLE_NAME}_user_created", "user_id", "created_at"),
     Index(f"idx_{TABLE_NAME}_opened_live", "opened_at"),
+)
+
+RETIRED_TABLE = "playground_retired_blobs"
+#: Blobs a revision replaced (TASK-2625). Recorded in the revision's own
+#: transaction, so no committed swap can lose track of the old bytes; the
+#: sweep deletes each after a grace period, so a read that picked the old key
+#: just before the swap still finishes.
+retired_blobs = Table(
+    RETIRED_TABLE,
+    metadata,
+    Column("blob_key", String(80), primary_key=True),
+    Column("artifact_id", String(40), nullable=False),
+    Column("retired_at", DateTime(timezone=True), nullable=False),
+    Index(f"idx_{RETIRED_TABLE}_retired", "retired_at"),
 )
 
 #: Columns safe to return to any reader: never content or the token hash.
@@ -214,14 +229,14 @@ class PlaygroundStore:
         return values
 
     def revise(self, artifact_id: str, *, user_id: str, sender_bot_id: str,
-               values: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+               values: dict[str, Any]) -> dict[str, Any]:
         """Replace a live artifact's content and bump its revision (TASK-2625).
 
         Only the sender of that user's artifact may revise it. Read and folder
-        state are kept. Returns ``(row, previous_blob_key)``; the caller deletes
-        the previous blob once this has committed. Raises ``ReviseRefused`` with
-        ``not_found`` (also for another sender's artifact), ``trashed`` or
-        ``expired``.
+        state are kept. A replaced blob is recorded as retired in the same
+        transaction; the sweep deletes it after a grace period. Raises
+        ``ReviseRefused`` with ``not_found`` (also for another sender's
+        artifact), ``trashed`` or ``expired``.
         """
         mine = [artifacts.c.id == artifact_id, artifacts.c.user_id == user_id,
                 artifacts.c.sender_bot_id == sender_bot_id]
@@ -246,8 +261,26 @@ class PlaygroundStore:
             ).mappings().first()
             if row is None:  # unreachable while the row lock is held
                 raise ReviseRefused("not_found")
-        previous = current["blob_key"]
-        return dict(row), (previous if previous and previous != row["blob_key"] else None)
+            previous = current["blob_key"]
+            if previous and previous != row["blob_key"]:
+                conn.execute(insert(retired_blobs).values(
+                    blob_key=previous, artifact_id=artifact_id, retired_at=_now()))
+        return dict(row)
+
+    def retired_before(self, cutoff: datetime, limit: int = 500) -> list[str]:
+        """Retired blob keys past their grace period (the sweep's work list)."""
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                select(retired_blobs.c.blob_key)
+                .where(retired_blobs.c.retired_at < cutoff)
+                .order_by(retired_blobs.c.retired_at)
+                .limit(limit)
+            ).all()
+        return [r[0] for r in rows]
+
+    def forget_retired(self, blob_key: str) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(retired_blobs.delete().where(retired_blobs.c.blob_key == blob_key))
 
     def open(self, artifact_id: str, user_id: str) -> tuple[dict[str, Any], str]:
         """Open (or reopen) a live artifact and mint a view token (TASK-2195).

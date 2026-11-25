@@ -1,7 +1,9 @@
-"""Playground revision columns: nullable ``revision`` and ``updated_at``.
+"""Playground revisions: nullable ``revision``/``updated_at`` and the retired-blob table.
 
 Uses the runtime's idempotent bootstrap, with no data transitions; existing
-rows read as revision 1. A table that already has the columns needs no DDL.
+rows read as revision 1. ``playground_retired_blobs`` records blobs a revision
+replaced until the sweep deletes them. A catalog that already has both needs
+no DDL.
 Online only because the bootstrap inspects the actual catalog.
 
 Revision ID: 0007_playground_revisions

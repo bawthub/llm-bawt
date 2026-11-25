@@ -28,6 +28,8 @@ logger = logging.getLogger(__name__)
 
 TRASH_SETTING = "playground_trash_days"
 DEFAULT_TRASH_DAYS = 30
+#: How long a blob a revision replaced stays readable before the sweep deletes it.
+RETIRED_GRACE = timedelta(minutes=10)
 #: Inline HTML/Markdown/text cap; anything bigger should be a file asset.
 MAX_INLINE_BYTES = 1024 * 1024
 INLINE_FORMATS = {
@@ -132,10 +134,11 @@ class Playground:
                note: str | None, source: Source) -> dict[str, Any]:
         """Replace the content of an artifact this bot sent (TASK-2625).
 
-        A file source gets a fresh blob key, so a viewer mid-read keeps the old
-        bytes until the row commits; the previous blob is deleted afterwards.
-        Raises ``ReviseRefused`` when the artifact is unknown, not this bot's,
-        in Trash or deleted forever.
+        A file source gets a fresh blob key. The replaced blob is recorded as
+        retired with the swap and the sweep deletes it after
+        ``RETIRED_GRACE``, so a read that selected it just before the swap
+        still completes. Raises ``ReviseRefused`` when the artifact is
+        unknown, not this bot's, in Trash or deleted forever.
         """
         assert source.kind in KINDS
         blob_key = None
@@ -148,15 +151,12 @@ class Playground:
             "blob_key": blob_key, "inline_content": source.inline,
         }
         try:
-            row, previous = self.store.revise(artifact_id, user_id=user_id,
-                                              sender_bot_id=bot_id, values=values)
+            return self.store.revise(artifact_id, user_id=user_id,
+                                     sender_bot_id=bot_id, values=values)
         except Exception:
             if blob_key:
                 self._delete_blob_quietly(blob_key)
             raise
-        if previous:
-            self._delete_blob_quietly(previous)
-        return row
 
     def open(self, artifact_id: str, user_id: str):
         """``(row, token)``: open or reopen; marks it read and keeps it."""
@@ -204,7 +204,18 @@ class Playground:
                 deleted += 1
             else:
                 failed += 1
-        return {"purged": purged, "blobs_deleted": deleted, "blob_delete_failures": failed}
+        retired = 0
+        for blob_key in self.store.retired_before(datetime.now(timezone.utc) - RETIRED_GRACE):
+            try:
+                self.backend.delete(blob_key)
+            except Exception as exc:  # stays recorded; the next sweep retries
+                logger.warning("playground retired blob delete failed: %s", type(exc).__name__)
+                failed += 1
+                continue
+            self.store.forget_retired(blob_key)
+            retired += 1
+        return {"purged": purged, "blobs_deleted": deleted, "retired_blobs_deleted": retired,
+                "blob_delete_failures": failed}
 
     def _delete_blob(self, artifact_id: str, blob_key: str) -> bool:
         try:

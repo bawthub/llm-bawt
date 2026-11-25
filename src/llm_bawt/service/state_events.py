@@ -105,7 +105,8 @@ _FINGERPRINTS: dict[str, str] = {
     PLAYGROUND: (
         "SELECT count(*), md5(coalesce(string_agg(id || ':' || coalesce(opened_at::text, '')"
         "  || ':' || coalesce(archived_at::text, '') || ':' || coalesce(trashed_at::text, '')"
-        "  || ':' || coalesce(expired_at::text, ''), ',' ORDER BY id), ''))"
+        "  || ':' || coalesce(expired_at::text, '') || ':' || coalesce(revision, 1)::text,"
+        "  ',' ORDER BY id), ''))"
         " FROM playground_artifacts"
     ),
     # Append-only; the primary key index answers this without a scan.
