@@ -1,0 +1,60 @@
+"""A confirmed name reaches every profile render (TASK-2643)."""
+from __future__ import annotations
+
+import asyncio
+import sys
+
+import pytest
+from sqlalchemy.pool import StaticPool
+from sqlmodel import SQLModel, create_engine
+
+# The server registers its tool modules; importing profile_tools first is circular.
+from llm_bawt.mcp_server import server  # noqa: F401
+from llm_bawt.profiles import (
+    EntityProfile,
+    EntityType,
+    ProfileAttribute,
+    ProfileManager,
+)
+
+U = EntityType.USER
+profile_tools = sys.modules["llm_bawt.mcp_server.profile_tools"]
+
+
+@pytest.fixture
+def manager(monkeypatch):
+    engine = create_engine("sqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(engine, tables=[EntityProfile.__table__, ProfileAttribute.__table__])
+    manager = ProfileManager.__new__(ProfileManager)
+    manager.engine = engine
+    monkeypatch.setattr(profile_tools, "_get_profile_manager", lambda: manager)
+    yield manager
+    engine.dispose()
+
+
+def set_name(entity_id: str, value: str, *, category: str | None = None, key: str = "name") -> str:
+    return asyncio.run(profile_tools.profile(
+        action="set", entity_type="user", entity_id=entity_id, category=category, key=key, value=value))
+
+
+def test_name_fills_empty_display_name_behind_a_legacy_summary(manager):
+    manager.get_or_create_profile(U, "sample")
+    manager.update_profile(U, "sample", summary="Likes garden walks.")
+    set_name("sample", "  Avery  ")
+    assert manager.get_profile(U, "sample").display_name == "Avery"
+    # The default render returns the stored summary early; the name still shows.
+    assert "User's name: Avery" in manager.get_profile_summary(U, "sample")
+
+
+def test_existing_display_name_is_never_replaced(manager):
+    manager.get_or_create_profile(U, "sample")
+    manager.update_profile(U, "sample", display_name="Sam")
+    set_name("sample", "Avery")
+    assert manager.get_profile(U, "sample").display_name == "Sam"
+
+
+def test_other_keys_and_categories_leave_display_name_alone(manager):
+    manager.get_or_create_profile(U, "sample")
+    set_name("sample", "Avery", key="nickname")
+    set_name("sample", "Avery", category="preference")
+    assert not manager.get_profile(U, "sample").display_name

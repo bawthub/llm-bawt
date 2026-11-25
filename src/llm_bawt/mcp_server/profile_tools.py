@@ -96,6 +96,14 @@ async def profile(
             return "Error: 'key' and 'value' are required for action='set'."
         selected = category or AttributeCategory.FACT
         manager.set_attribute(entity, entity_id, selected, key, value)
+        if entity == EntityType.USER and selected == AttributeCategory.FACT and key.strip().lower() == "name":
+            # A stored legacy summary hides attributes in the default render,
+            # but display_name always shows, so a confirmed name fills it if
+            # empty (TASK-2643). An existing display name is never replaced.
+            profile = manager.get_profile(EntityType.USER, entity_id)
+            name = value.strip()[:100]
+            if profile is not None and name and not (profile.display_name or "").strip():
+                manager.set_display_name(EntityType.USER, entity_id, name)
         return f"Set [{selected}] {key} = {value}"
     if action == "delete":
         if not key:
