@@ -430,6 +430,20 @@ def test_naming_a_bot_does_not_admit_its_one_word_replies(rig):
     assert not noise & set(hits)
 
 
+def test_private_caller_reads_its_own_history_and_no_other_partition(rig):
+    """TASK-2654: the private self-scope from owner_scope, end to end in SQL."""
+    peer = f"peer{uuid.uuid4().hex[:8]}"
+    peer_session = rig.add_session(str(uuid.uuid4()), bot=peer)
+    own = rig.add("The greenhouse sensor moved to the north shelf.", at=rig.now - 3 * DAY)
+    rig.add("The greenhouse sensor moved to the south shelf.", at=rig.now - 60,
+            partition=peer, session=peer_session, author=peer, author_type="bot")
+    delivered = rig.add("Greenhouse sensor shelf update from a peer.", at=rig.now - 30,
+                        role="user", author=peer, author_type="bot")
+    rows = rig.recall("greenhouse sensor shelf", allowed=frozenset(), excluded=frozenset({peer}))
+    assert [row.id for row in rows if row.follows is None] == [own]
+    assert delivered not in [row.id for row in rows]
+
+
 def test_received_deliveries_follow_the_current_allowed_policy(rig):
     query = "What did Caid say about the maintenance_model and query_bounded for TASK-1210?"
     body = "TASK-1210: maintenance_model stays unset; query_bounded caps the read."
