@@ -84,6 +84,26 @@ def test_multi_word_search_ranks_partial_matches_instead_of_returning_nothing(cl
     assert client.search_tools("turn-token", "service operation") == []
 
 
+def test_mixed_intent_query_reaches_every_tool_family_in_the_shipped_catalog():
+    # The real server's descriptions and the default allowlist: every
+    # description links memory-history.md, so "memory" and "history" match
+    # all of them and flat ranking let near-identical memory tools fill the
+    # default five, hiding profile and history (messages) discovery.
+    import llm_bawt.mcp_server.server  # noqa: F401  registers tools
+    from llm_bawt.integrations.bawthub_mcp.client import DEFAULT_ALLOWLIST, McpToolDefinition, rank_tools
+    from llm_bawt.mcp_server.registry import mcp
+
+    catalog = [McpToolDefinition(t.name, t.description or "")
+               for t in asyncio.run(mcp.list_tools()) if t.name in DEFAULT_ALLOWLIST]
+    assert {t.name for t in catalog} == DEFAULT_ALLOWLIST
+    found = [t.name for t in rank_tools(catalog, "memory store search facts recall history profile", 5)]
+    assert {"context_recall", "profile", "memory_store"} <= set(found)
+    assert any(name.startswith("messages_") for name in found)
+    assert any(name.startswith("memory_search") for name in found)
+    # A single-intent query still keeps to its family.
+    assert [t.name for t in rank_tools(catalog, "find past messages", 5)][0] == "messages_find"
+
+
 def test_no_turn_identity_fails_closed_without_a_request(client):
     result = _executor(client, capability=None).execute(
         ToolCall(name="tool_search", arguments={"query": "memory"}, raw_text=""))

@@ -65,23 +65,39 @@ class McpToolDefinition:
 
 
 def rank_tools(tools: Iterable[McpToolDefinition], query: str, limit: int) -> list[McpToolDefinition]:
-    """Best matches for a keyword query, most matched words first.
+    """Best matches for a keyword query, covering as many of its words as possible.
 
     A tool qualifies when any query word appears in its name or description;
     a name hit counts double. Models often send several keywords at once, so
-    requiring every word would hide tools that plainly match. An empty query
-    lists everything, by name.
+    requiring every word would hide tools that plainly match. Each pick
+    favours the words earlier picks haven't covered yet, then a tool family
+    (name prefix) not shown yet, so a mixed-intent query isn't filled by
+    near-identical tools. An empty query lists everything, by name.
     """
+    tools, limit = list(tools), max(1, limit)
     words = list(dict.fromkeys(w for w in (query or "").lower().split() if w))
+    if not words:
+        return sorted(tools, key=lambda t: t.name)[:limit]
+    texts = {id(t): (t.name.lower(), f"{t.name} {t.description}".lower()) for t in tools}
 
-    def score(tool: McpToolDefinition) -> int:
-        if not words:
-            return 0
-        name, text = tool.name.lower(), f"{tool.name} {tool.description}".lower()
-        return sum(2 if w in name else 1 for w in words if w in text) or -1
+    def hits(tool: McpToolDefinition, wanted: Iterable[str]) -> int:
+        name, text = texts[id(tool)]
+        return sum(2 if w in name else 1 for w in wanted if w in text)
 
-    ranked = sorted(((score(t), t) for t in tools), key=lambda pair: (-pair[0], pair[1].name))
-    return [tool for s, tool in ranked if s >= 0][: max(1, limit)]
+    def family(tool: McpToolDefinition) -> str:
+        return tool.name.split("_", 1)[0]
+
+    pool = sorted((t for t in tools if hits(t, words)), key=lambda t: (-hits(t, words), t.name))
+    picked: list[McpToolDefinition] = []
+    uncovered, families = set(words), set()
+    while pool and len(picked) < limit:
+        # max() keeps the first of equals, so ties fall back to overall score, then name.
+        best = max(pool, key=lambda t: (hits(t, uncovered), family(t) not in families))
+        pool.remove(best)
+        picked.append(best)
+        families.add(family(best))
+        uncovered -= {w for w in words if w in texts[id(best)][1]}
+    return picked
 
 
 def parse_allowlist(value: Any) -> frozenset[str] | None:
