@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
+import re
 import threading
 from collections import Counter
 import time
@@ -41,6 +42,22 @@ class Synthesis(BaseModel):
     # one malformed or misquoted pick cannot discard the grounded ones.
     model_config = ConfigDict(extra="forbid", strict=True)
     findings: list[Any] = Field(max_length=6)
+    # Optional so an older tenant prompt that never emits it keeps working.
+    answers_question: bool = True
+
+
+UNANSWERED_NOTE = ("Nothing found answers the question. Ask again with the specific names, "
+                   "products or identifiers involved before concluding.")
+# "what did <bot> say/recommend ..." asks for that bot's own words.
+_ATTRIBUTION = re.compile(
+    r"\b(?:did|does|has|have|had)\s+([a-z][\w-]*)\s+(?:say|said|recommend|suggest|decide|propose|"
+    r"conclude|think|find|report|advise|tell|write|mention)\w*\b", re.IGNORECASE)
+
+
+def attributed_bots(query: str, scope: RecallScope) -> set[str]:
+    """Readable bots whose own statement the question asks for."""
+    names = {match.lower() for match in _ATTRIBUTION.findall(query)}
+    return names & set(scope.allowed_bot_ids)
 
 
 # Codes are server-owned; even an injected/provider-raised RecallError may not
@@ -438,6 +455,9 @@ class RecallService:
         answers = AnswerSet(bool(unavailable), 0)
         model_calls = 0
         model_output_tokens = 0
+        # The selector's own verdict on whether its quotes answer the question;
+        # related-but-unanswering quotes must not report ok (TASK-2654).
+        answered = True
         if evidence:
             model_calls = 1
             try:
@@ -471,6 +491,7 @@ class RecallService:
             else:
                 model_output_tokens = tokens(raw)
                 proposed_findings = parsed.findings
+                answered = parsed.answers_question
             index = {(item.source, item.id): item for item in evidence}
             for proposed in proposed_findings:
                 try:
@@ -525,8 +546,9 @@ class RecallService:
             "rejected_findings": answers.rejected,
             "coverage": coverage,
             # Static and short: it is paid in every packet's output budget.
-            "scope": ("Public searchable history for trusted user; caller memories; shared tasks; "
-                      "tool metadata and clone facts, never commands."),
+            "scope": ("Searchable bots' history and the caller's own, for the trusted user; "
+                      + ("caller memories; " if "memories" in request.sources else "")
+                      + "shared tasks; tool metadata and clone facts, never commands."),
             "bounded": True,
             "truncated": clipped or answers.shortened > 0 or answers.omitted > 0,
             "handle": None,
@@ -543,6 +565,17 @@ class RecallService:
         }
         if answers.degraded:
             packet.update(status="partial", degraded=True, error_code=answers.degraded_code)
+        else:
+            named = attributed_bots(request.query, scope)
+            if findings and named and not any(
+                    (entry.get("provenance") or {}).get("source_bot") in named for entry in findings):
+                # Asked what a bot said, but only others' recaps were found.
+                answered = False
+            if findings and not answered:
+                # Related quotes stay visible, but the miss is admitted, never "ok".
+                packet["status"] = "insufficient_evidence"
+        if packet["status"] == "insufficient_evidence":
+            packet["note"] = UNANSWERED_NOTE
         admitted_keys = {(row.source, row.id) for row in evidence}
         for entry in read:
             entry["admitted"] = (entry["source"], entry["id"]) in admitted_keys

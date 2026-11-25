@@ -93,6 +93,45 @@ async def test_failure_distinct_from_no_match_and_irrelevant_evidence():
 
 
 @pytest.mark.asyncio
+async def test_related_quotes_that_do_not_answer_admit_the_miss():
+    """TASK-2654: off-topic quotes must never report ok."""
+    raw = compact_json({"findings": [{"source": "messages", "id": "m1", "quote": "The relay background"}],
+                        "answers_question": False})
+    result = await RecallService([Source()], Model(raw)).recall(request(), SCOPE)
+    assert result["status"] == "insufficient_evidence"
+    assert result["findings"] and "Nothing found answers" in result["note"]
+    answered = compact_json({"findings": [{"source": "messages", "id": "m1", "quote": "The relay background"}],
+                             "answers_question": True})
+    ok = await RecallService([Source()], Model(answered)).recall(request(), SCOPE)
+    assert ok["status"] == "ok" and "note" not in ok
+    assert "answers_question" in DEFAULT_RECALL_SYSTEM_PROMPT
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("query,status", [
+    ("what did peer recommend about the relay background", "insufficient_evidence"),
+    ("what did reviewer say about the relay background", "ok"),
+    ("why is peer's relay background broken", "ok"),
+])
+async def test_asking_what_a_bot_said_needs_that_bots_own_words(query, status):
+    """TASK-2654: a recap by another bot is not the named bot's statement."""
+    rows = [Evidence("messages", "m1", "reviewer", "operator", "The relay background is cool glass.",
+                     source_bot="reviewer")]
+    result = await RecallService([Source(rows)], Model()).recall(
+        RecallRequest(query=query, sources=("messages",)), SCOPE)
+    assert result["status"] == status
+    assert ("note" in result) == (status == "insufficient_evidence")
+
+
+@pytest.mark.asyncio
+async def test_scope_label_matches_the_caller_and_sources():
+    """TASK-2654: no "Public" label for private callers; memories only when searched."""
+    result = await RecallService([Source()], Model()).recall(request(), SCOPE)
+    assert "Public" not in result["scope"] and "the caller's own" in result["scope"]
+    assert "memories" not in result["scope"]
+
+
+@pytest.mark.asyncio
 async def test_fixed_prompt_leaves_no_evidence_room_is_not_no_match():
     class LargePromptModel(Model):
         def system_prompt(self, bot_id):
