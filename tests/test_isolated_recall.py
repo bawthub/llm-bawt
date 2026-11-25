@@ -108,19 +108,36 @@ async def test_related_quotes_that_do_not_answer_admit_the_miss():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("query,status", [
-    ("what did peer recommend about the relay background", "insufficient_evidence"),
-    ("what did reviewer say about the relay background", "ok"),
-    ("why is peer's relay background broken", "ok"),
+@pytest.mark.parametrize("query,partition,speaker,status", [
+    # A user's recap inside Peer's own conversation is not Peer's statement.
+    ("What did Peer recommend for the shelf?", "peer", "user", "insufficient_evidence"),
+    # Peer's own words delivered into Reviewer's conversation are.
+    ("What did Peer recommend for the shelf?", "reviewer", "bot:peer", "ok"),
+    ("what did reviewer say about the shelf", "reviewer", "assistant", "ok"),
+    ("What has Peer written about the shelf?", "reviewer", "assistant", "insufficient_evidence"),
+    # Topic and event questions are left to the selector.
+    ("why is peer's shelf broken", "reviewer", "user", "ok"),
+    ("Did Peer find the shelf in storage?", "reviewer", "user", "ok"),
 ])
-async def test_asking_what_a_bot_said_needs_that_bots_own_words(query, status):
-    """TASK-2654: a recap by another bot is not the named bot's statement."""
-    rows = [Evidence("messages", "m1", "reviewer", "operator", "The relay background is cool glass.",
-                     source_bot="reviewer")]
+async def test_asking_what_a_bot_said_needs_that_bots_own_words(query, partition, speaker, status):
+    """TASK-2654: attribution follows the recorded speaker, not the conversation owner."""
+    rows = [Evidence("messages", "m1", "reviewer", "operator", "I recommend the steel shelf.",
+                     source_bot=partition, speaker=speaker)]
     result = await RecallService([Source(rows)], Model()).recall(
         RecallRequest(query=query, sources=("messages",)), SCOPE)
     assert result["status"] == status
     assert ("note" in result) == (status == "insufficient_evidence")
+
+
+@pytest.mark.asyncio
+async def test_each_named_bot_needs_its_own_words():
+    """TASK-2654: a match for one named bot does not satisfy another."""
+    rows = [Evidence("messages", "m1", "reviewer", "operator", "I recommend the steel shelf.",
+                     source_bot="reviewer", speaker="assistant")]
+    result = await RecallService([Source(rows)], Model()).recall(RecallRequest(
+        query="What did Reviewer recommend for the shelf, and what did Peer recommend?",
+        sources=("messages",)), SCOPE)
+    assert result["status"] == "insufficient_evidence" and result["findings"]
 
 
 @pytest.mark.asyncio

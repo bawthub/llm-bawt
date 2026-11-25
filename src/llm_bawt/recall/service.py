@@ -48,16 +48,32 @@ class Synthesis(BaseModel):
 
 UNANSWERED_NOTE = ("Nothing found answers the question. Ask again with the specific names, "
                    "products or identifiers involved before concluding.")
-# "what did <bot> say/recommend ..." asks for that bot's own words.
+# Deliberately narrow, high-confidence backstop: "did/has <bot> say,
+# recommend, suggest, propose, advise, tell or write" asks for that bot's own
+# words. Event verbs ("did Peer find ...") are left to the selector.
 _ATTRIBUTION = re.compile(
-    r"\b(?:did|does|has|have|had)\s+([a-z][\w-]*)\s+(?:say|said|recommend|suggest|decide|propose|"
-    r"conclude|think|find|report|advise|tell|write|mention)\w*\b", re.IGNORECASE)
+    r"\b(?:did|does|has|have|had)\s+([a-z][\w-]*)\s+(?:say|said|recommend|suggest|propose|"
+    r"advise|tell|told|writ|wrote)\w*\b", re.IGNORECASE)
 
 
 def attributed_bots(query: str, scope: RecallScope) -> set[str]:
     """Readable bots whose own statement the question asks for."""
     names = {match.lower() for match in _ATTRIBUTION.findall(query)}
     return names & set(scope.allowed_bot_ids)
+
+
+def speaking_bot(item: Evidence) -> str | None:
+    """The bot whose own words this record is, from server-recorded fields only.
+
+    A message's assistant turn speaks for its partition owner; an authorized
+    ``bot:<slug>`` delivery speaks for that slug. User turns, tool metadata and
+    tasks are nobody's direct statement.
+    """
+    if item.source != "messages" or not item.speaker:
+        return None
+    if item.speaker.startswith("bot:"):
+        return item.speaker[4:] or None
+    return item.source_bot if item.speaker == "assistant" else None
 
 
 # Codes are server-owned; even an injected/provider-raised RecallError may not
@@ -567,9 +583,12 @@ class RecallService:
             packet.update(status="partial", degraded=True, error_code=answers.degraded_code)
         else:
             named = attributed_bots(request.query, scope)
-            if findings and named and not any(
-                    (entry.get("provenance") or {}).get("source_bot") in named for entry in findings):
-                # Asked what a bot said, but only others' recaps were found.
+            index = {(item.source, item.id): item for item in evidence}
+            speakers = {speaking_bot(index[key]) for key in
+                        {(entry["source"], entry["id"]) for entry in findings} if key in index}
+            if findings and named and not named <= speakers:
+                # Asked what each named bot said; a recap by anyone else, or a
+                # match for only one of several named bots, is not an answer.
                 answered = False
             if findings and not answered:
                 # Related quotes stay visible, but the miss is admitted, never "ok".
