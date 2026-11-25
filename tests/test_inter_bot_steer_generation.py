@@ -314,6 +314,19 @@ def test_a_definitive_rejection_advances_so_the_next_target_is_never_refused_by_
     assert bridge.calls[-1] == ("turn-newer", f"{BASE_ID}_g1")
 
 
+def test_unsupported_next_steer_falls_back_even_while_the_target_is_open(monkeypatch):
+    bridge = _Bridge(registers_after=0)
+    bridge.forced = ["next_unsupported"]
+    dispatcher = _dispatcher(monkeypatch, bridge)
+
+    row = _steer_once(dispatcher)
+
+    assert row.status == "QUEUED" and row.delivery_mode == "steer_rejected"
+    assert row.attempt_count == 0
+    assert row.metadata == {"source": "test", "steer_generation": 1}
+    assert bridge.request_ids == [BASE_ID]
+
+
 def test_a_target_that_never_registers_falls_back_after_the_bound(monkeypatch):
     """B: bounded. After NOT_READY_BOUND not-ready generations the delivery
     waits for the turn to end, as before TASK-1251."""

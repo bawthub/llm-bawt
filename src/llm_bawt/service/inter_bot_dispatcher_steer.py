@@ -57,6 +57,8 @@ BRIDGE_RUN_NOT_READY = frozenset({"no_active_run", "active_run_mismatch"})
 # (the run's pinned capabilities) or the bridge's backstop, both before the
 # model sees anything.
 DEFINITIVE_NOT_ACCEPTED = BRIDGE_RUN_NOT_READY | STEER_CAPABILITY_REFUSALS | frozenset({
+    # The legacy bridge refuses before it registers or writes a next command.
+    "next_unsupported",
     "maintenance_active",
     "maintenance_command_requires_turn",
     STEER_UNFRAMED,

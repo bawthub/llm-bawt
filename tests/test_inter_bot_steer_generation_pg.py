@@ -110,6 +110,28 @@ def test_a_genuinely_ended_target_still_falls_back(rig):
     assert row.attempt_count == 0
 
 
+def test_unsupported_next_waits_then_reserves_one_idle_turn(rig):
+    rig.bridge.forced = ["next_unsupported"]
+    steering = _claim(rig)
+    row = _steer(rig, steering)
+    assert row.status == QUEUED and row.delivery_mode == "steer_rejected"
+    assert row.attempt_count == 0
+    assert row.target_turn_id == rig.first.turn_id
+    with rig.store.engine.begin() as conn:
+        conn.execute(sa_text(
+            "UPDATE inter_bot_deliveries SET available_at=now() WHERE id=:id"
+        ), {"id": row.id})
+    assert _claim(rig) is None
+
+    _end_turn(rig, rig.first.turn_id)
+    fallback = _claim(rig)
+    assert fallback.id == rig.second.id and fallback.status == DISPATCHING
+    assert fallback.target_turn_id == rig.second.turn_id
+    assert fallback.attempt_count == 1
+    assert _claim(rig) is None
+    assert rig.bridge.request_ids == [SteerGeneration.of(steering).request_id]
+
+
 def test_a_crash_before_the_requeue_replays_the_cached_generation_then_advances(rig):
     """Design test 8: the dispatcher died after the bridge answered g0 and
     before the requeue. Recovery replays g0, which re-reads the cached
