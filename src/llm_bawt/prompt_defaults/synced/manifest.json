@@ -13,6 +13,12 @@
         "taskUrl"
       ]
     },
+    "chat.global_recall_guidance": {
+      "title": "Global Recall / Cross-Bot Memory Guidance",
+      "category": "chat",
+      "format": "plain_text",
+      "required_vars": []
+    },
     "repos.workspace.commit_aggregate": {
       "title": "Repos workspace: commit aggregate",
       "category": "repos",

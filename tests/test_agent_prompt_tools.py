@@ -92,8 +92,9 @@ def test_native_agent_harness_prompt_omits_app_tool_protocol(model_type, harness
 def test_registered_recall_seed_prefers_bounded_evidence_over_bulk_history():
     # The shipped default is the synced body when present (TASK-2127).
     body = DEFAULT_PROMPT_DEFINITIONS["chat.global_recall_guidance"].default_body()
-    ordered = ("tasks_board", "context_recall", "messages_find", "messages_context",
-               "messages_get_by_id", "messages_get", "messages_search_all")
+    # TASK-2654: recall is the one history tool; message tools open what it cited.
+    ordered = ("tasks_board", "context_recall", "messages_context",
+               "messages_get_by_id", "messages_find", "messages_get", "messages_search_all")
     positions = [body.index(f"`{name}`") for name in ordered]
     assert positions == sorted(positions)
     assert "insufficient_evidence" in body

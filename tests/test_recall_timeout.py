@@ -264,3 +264,26 @@ async def test_adapter_passes_its_earlier_deadline_after_scope_lookup(monkeypatc
     packet = json.loads(await recall_tools.context_recall(request()))
     assert packet["status"] == "partial" and packet["findings"]
     assert captured == [clock[0] - 3 + recall_tools.MAX_SECONDS]
+
+
+@pytest.mark.asyncio
+async def test_adapter_accepts_a_plain_question_string(monkeypatch):
+    """TASK-2654: a deferred-discovery caller may pass the question itself."""
+    from llm_bawt.mcp_server import recall_tools
+    seen = []
+    async def scope(_):
+        return SCOPE
+    service = RecallService([Source()], TimeoutModel())
+    original = service.recall
+    async def recall(req, *args, deadline):
+        seen.append(req)
+        return await original(req, *args, deadline=deadline)
+    monkeypatch.setattr(service, "recall", recall)
+    monkeypatch.setattr(recall_tools, "current_task_turn_context", lambda: object())
+    monkeypatch.setattr(recall_tools, "_runtime", lambda: (SimpleNamespace(scope=scope), service))
+    packet = json.loads(await recall_tools.context_recall("what did we decide about the router"))
+    assert packet["status"] == "partial"
+    assert seen[0].query == "what did we decide about the router"
+    assert seen[0].sources == RecallRequest(query="x").sources
+    blank = json.loads(await recall_tools.context_recall("   "))
+    assert blank["status"] == "error" and blank["error_code"] == "invalid_request"
