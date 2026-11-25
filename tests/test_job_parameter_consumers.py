@@ -9,8 +9,10 @@ from llm_bawt.service.background_tasks import BackgroundTasksMixin
 
 
 @pytest.mark.parametrize("job_type", ["memory_consolidation", "memory_decay"])
-def test_maintenance_identity_is_documented_routing_not_a_memory_owner_filter(job_type):
+def test_maintenance_identity_is_documented_routing_not_a_memory_owner_filter(job_type, monkeypatch):
     import json
+
+    monkeypatch.setattr("llm_bawt.memory_switch.memory_system_enabled", lambda *a, **k: True)
 
     from llm_bawt.service.job_parameters import JobParameterRegistry
     from llm_bawt.service.scheduler import JobScheduler, JobType, ScheduledJob
@@ -20,6 +22,7 @@ def test_maintenance_identity_is_documented_routing_not_a_memory_owner_filter(jo
     assert "not a memory-owner filter" in schema["description"]
     assert "all memories for the target bot" in schema["description"]
     service = BackgroundTasksMixin()
+    service.config = SimpleNamespace()
     client = SimpleNamespace(run_maintenance=Mock(return_value={"dry_run": True}))
     service.get_memory_client = Mock(return_value=client)
     scheduler = JobScheduler(None, None)
