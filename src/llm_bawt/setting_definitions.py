@@ -224,6 +224,21 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
             "See docs/WORKING_MEMORY.md."
         ),
     ),
+    "memory_system_enabled": SettingDefinition(
+        key="memory_system_enabled",
+        type="bool",
+        default=True,
+        applies_to=BOT_TYPES_ALL,
+        storage=STORAGE_RUNTIME_SETTING,
+        label="Long-term memory system",
+        help=(
+            "TASK-2653: bot row > global row > on. False stops automatic "
+            "extraction, hides and refuses the memory_* tools, skips memory "
+            "injection into prompts and refuses the memories source in "
+            "context_recall. A bot row keeps one bot on while the global value "
+            "is off. Stored memories are kept; true restores it."
+        ),
+    ),
     # TASK-1309: global only. llm_bawt.skills reads them with
     # resolve_global_runtime_setting, which ignores bot rows.
     "skills_skill_token_cap": SettingDefinition(

@@ -172,7 +172,7 @@ def test_request_validation(kwargs):
 
 
 def test_default_sources_search_task_key_fields_and_details_are_opt_in():
-    assert RecallRequest(query="hello").sources == ("messages", "memories", "tasks")
+    assert RecallRequest(query="hello").sources == ("messages", "tasks")
     # task_ids narrows either task depth, so a details-only request may name tasks.
     assert RecallRequest(query="hello", sources=("task_details",), task_ids=("TASK-42",)).task_ids == ("TASK-42",)
     assert RecallRequest(query="hello", task_ids=("TASK-42",)).sources[-1] == "tasks"
@@ -261,7 +261,7 @@ async def test_worker_keeps_slot_until_cancelled_call_actually_finishes():
 async def test_partial_source_failure_preserves_healthy_grounded_evidence(caplog):
     failing = Source(error=RecallError("source_unavailable"))
     failing.source = "memories"
-    result = await RecallService([Source(), failing], Model()).recall(RecallRequest(query="relay"), SCOPE)
+    result = await RecallService([Source(), failing], Model()).recall(RecallRequest(query="relay", sources=("messages", "memories")), SCOPE)
     assert result["status"] == "ok" and result["findings"][0]["id"] == "m1"
     assert result["coverage"]["messages"]["status"] == "ok"
     assert result["coverage"]["memories"]["status"] == "unavailable"
@@ -273,7 +273,7 @@ async def test_partial_source_failure_preserves_healthy_grounded_evidence(caplog
 async def test_failed_source_and_empty_healthy_source_never_claim_no_match():
     failing = Source(error=RuntimeError("PRIVATE DB EXCEPTION"))
     failing.source = "memories"
-    result = await RecallService([Source([]), failing], Model()).recall(RecallRequest(query="relay"), SCOPE)
+    result = await RecallService([Source([]), failing], Model()).recall(RecallRequest(query="relay", sources=("messages", "memories")), SCOPE)
     assert result["status"] == "insufficient_evidence" and not result["findings"]
     assert result["coverage"]["memories"]["status"] == "unavailable"
     assert "PRIVATE DB EXCEPTION" not in compact_json(result)
@@ -498,7 +498,7 @@ def test_fit_reports_insufficient_only_when_no_single_quote_fits():
 async def test_authority_and_provenance_denials_remain_fatal_with_healthy_source(code):
     denied = Source(error=RecallError(code))
     denied.source = "memories"
-    result = await RecallService([Source(), denied], Model()).recall(RecallRequest(query="relay"), SCOPE)
+    result = await RecallService([Source(), denied], Model()).recall(RecallRequest(query="relay", sources=("messages", "memories")), SCOPE)
     assert result["error_code"] == code and result["findings"] == []
 
 

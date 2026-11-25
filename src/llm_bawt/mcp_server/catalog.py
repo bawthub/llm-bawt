@@ -15,12 +15,20 @@ from typing import Any
 
 from mcp.types import CallToolResult, TextContent, Tool
 
+from mcp.server.mcpserver.exceptions import ToolError
+
+from llm_bawt.memory_switch import current_turn_memory_enabled, is_memory_tool
 from .approval_interceptor import ApprovalAwareFastMCP, PolicyResult
 from .catalog_contracts import TOOL_SUMMARIES, tool_description
 from .bot_access import ToolBotAccess, invocation_context
 from .content_provenance import ToolContentProvenance
 from agent_bridge.content_provenance import external_source, provenance_envelope
 from agent_bridge.mcp_call_context import MCP_CALL_CONTEXT_KEY
+
+MEMORY_DISABLED_ERROR = (
+    "The memory system is disabled (memory_system_enabled=false). "
+    "Use context_recall or messages_find for history."
+)
 
 # JSON Schema locations that hold schemas (not arbitrary user data/defaults).
 _SCHEMA_MAPS = ("properties", "patternProperties", "$defs", "definitions", "dependentSchemas")
@@ -129,6 +137,8 @@ class CatalogFastMCP(ApprovalAwareFastMCP):
     async def call_tool(self, name, arguments, context=None):
         public = dict(arguments or {})
         public.pop(MCP_CALL_CONTEXT_KEY, None)
+        if is_memory_tool(name) and not current_turn_memory_enabled():
+            raise ToolError(MEMORY_DISABLED_ERROR)
         with invocation_context(name, public):
             # Avoid doomed ASK cards. The registered callable checks again at
             # execution, including approved execution's bypass of call_tool.
@@ -138,12 +148,16 @@ class CatalogFastMCP(ApprovalAwareFastMCP):
             return label_external_result(result, external_source(name))
 
     async def call_approved_tool(self, name, arguments, **kwargs):
+        if is_memory_tool(name) and not current_turn_memory_enabled():
+            raise ToolError(MEMORY_DISABLED_ERROR)
         with invocation_context(name, arguments):
             result = compact_call_result(await super().call_approved_tool(name, arguments, **kwargs))
             return label_external_result(result, external_source(name))
 
     async def list_tools(self) -> list[Tool]:
         tools = await super().list_tools()
+        if not current_turn_memory_enabled():
+            tools = [tool for tool in tools if not is_memory_tool(tool.name)]
         return [
             tool.model_copy(update={
                 # Unmigrated/new tools remain callable and discoverable. Tests

@@ -250,6 +250,13 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
 
 
 @pytest.fixture(autouse=True)
+def memory_system_on(monkeypatch):
+    """Existing memory tests assume the system is on; switch tests set False (TASK-2653)."""
+    from llm_bawt import memory_switch
+    monkeypatch.setattr(memory_switch, "_override", True)
+
+
+@pytest.fixture(autouse=True)
 def force_fs_media_backend(monkeypatch):
     """Never let the unit suite talk to Garage (TASK-847).
 

@@ -156,7 +156,8 @@ class PromptSectionsMixin:
 
         Skip for HA-mode — device commands don't need semantic memories.
         """
-        if self.memory and not self._ha_mode:
+        from llm_bawt.memory_switch import memory_system_enabled
+        if self.memory and not self._ha_mode and memory_system_enabled(self.config, self.bot_id):
             history_count = len(self.history_manager.messages)
             if history_count <= 3:
                 cold_start_context = self._retrieve_cold_start_memories(prompt)

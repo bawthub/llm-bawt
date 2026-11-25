@@ -11,8 +11,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 Source = Literal["messages", "memories", "tasks", "task_details", "tool_evidence", "tool_args"]
 # Shared tasks are searched by default (key fields only); their reviews and
 # step outputs (task_details) are opt-in, as are tool metadata and recognized
-# command facts (tool_args) (TASK-1557).
-DEFAULT_SOURCES: tuple[Source, ...] = ("messages", "memories", "tasks")
+# command facts (tool_args) (TASK-1557). Memories are opt-in and refused while
+# the memory system is switched off (TASK-2653, memory_system_enabled).
+DEFAULT_SOURCES: tuple[Source, ...] = ("messages", "tasks")
 TASK_SOURCES = frozenset({"tasks", "task_details"})
 # Fixed reasons a source's coverage is partial beyond withheld records.
 PARTIAL_REASONS = frozenset({"reviews_truncated", "reviews_unavailable", "paths_unavailable"})

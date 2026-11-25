@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from llm_bawt.recall.budgets import compact_json
 from llm_bawt.recall.completion import UtilitySynthesizer
+from llm_bawt.memory_switch import memory_system_enabled
 from llm_bawt.recall.contracts import MAX_SECONDS, RecallError, RecallRequest
 from llm_bawt.recall.ledger import PostgresLedger
 from llm_bawt.recall.postgres import (
@@ -49,7 +50,7 @@ async def context_recall(
 ) -> str:
     """Research caller-owned history in isolated utility context; return bounded cited quotes.
 
-    Default sources are messages, memories and tasks (shared task key fields:
+    Default sources are messages and tasks (shared task key fields:
     title, status, description, response, outcome). Add task_details for task
     reviews and step outputs; tool_evidence for tool metadata; tool_args for
     attempted repository clones (repo and destination only). task_ids narrows
@@ -61,6 +62,8 @@ async def context_recall(
         context = current_task_turn_context()
         deadline = time.monotonic() + MAX_SECONDS
         async with asyncio.timeout(MAX_SECONDS):
+            if "memories" in request.sources and not memory_system_enabled(bot_id=context.bot_id):
+                raise RecallError("source_unavailable")
             database, service = _runtime()
             scope = await database.scope(context)
             result = await service.recall(request, scope, deadline=deadline)

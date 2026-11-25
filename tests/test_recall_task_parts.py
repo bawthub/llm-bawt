@@ -272,7 +272,7 @@ class Model(Synthesizer):
 async def test_default_caller_without_task_access_is_partial_never_no_match():
     service = RecallService([Empty("messages"), Empty("memories"), Fake(Reader(owner="excluded"))], Model([]))
     result = await service.recall(RecallRequest(query="retry rewrite"), SCOPE)
-    assert set(result["coverage"]) == {"messages", "memories", "tasks"}
+    assert set(result["coverage"]) == {"messages", "tasks"}
     assert result["coverage"]["tasks"]["status"] == "partial"
     assert result["coverage"]["tasks"]["withheld"] == 1
     assert result["coverage"]["tasks"]["depth"] == "key_fields"

@@ -579,12 +579,16 @@ class BackgroundTasksMixin:
         profile_user_id = task.user_id
         if not profile_user_id or profile_user_id == "system":
             profile_user_id = getattr(self.config, "DEFAULT_USER", None) or "system"
-        extraction_results = self._extract_from_summaries(
-            result.get("results", []),
-            bot_id=bot_id,
-            user_id=profile_user_id,
-            parameters=task.payload,
-        )
+        from llm_bawt.memory_switch import memory_system_enabled
+        if memory_system_enabled(self.config, bot_id):
+            extraction_results = self._extract_from_summaries(
+                result.get("results", []),
+                bot_id=bot_id,
+                user_id=profile_user_id,
+                parameters=task.payload,
+            )
+        else:
+            extraction_results = {"skipped": True, "reason": "Memory system disabled (memory_system_enabled=false)"}
         result["extraction"] = extraction_results
 
         # Summary writes change context composition; invalidate cached history views
@@ -610,7 +614,10 @@ class BackgroundTasksMixin:
         bot_id = task.bot_id or self._default_bot
         batch_size = max(1, min(int(task.payload.get("batch_size", 50)), 1000))
 
-        # Check config gate
+        # Check config gate (TASK-2653: the global memory switch wins)
+        from llm_bawt.memory_switch import memory_system_enabled
+        if not memory_system_enabled(self.config, bot_id):
+            return {"skipped": True, "reason": "Memory system disabled (memory_system_enabled=false)"}
         if not task.payload.get("extraction_enabled", getattr(self.config, "MEMORY_EXTRACTION_ENABLED", True)):
             return {"skipped": True, "reason": "Memory extraction disabled in config"}
 
