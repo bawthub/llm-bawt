@@ -22,7 +22,7 @@ class Bot:
 
     slug: str  # Unique identifier (e.g., "helper", "reviewer")
     name: str  # Display name (e.g., "Helper", "Reviewer")
-    description: str  # Short description for --list-bots
+    description: str  # Short description shown in bot listings
     system_prompt: str  # The system message sent to the LLM
     prompt_override_id: int | None = None  # Active persona override (prompt_templates.id); None => use system_prompt
     requires_memory: bool = True  # Whether this bot needs database/memory persistence

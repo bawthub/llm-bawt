@@ -2,7 +2,7 @@
 
 Extracted verbatim from ``cli/app.py``: service-mode query streaming, effective
 config inspection, status/job/bots displays. ``app`` re-imports these names so
-the ``cli.__init__`` facade (``show_status``, ``show_bots``, ...) is unchanged.
+the ``cli.__init__`` facade (``show_status``) is unchanged.
 """
 
 import argparse
@@ -15,10 +15,8 @@ from rich.panel import Panel
 from rich.table import Table
 
 from llm_bawt.bot_colors import cli_color_for
-from llm_bawt.bot_types import format_bot_type
 from llm_bawt.bots import BotManager
 from llm_bawt.service.delivery_reply import is_accepted_receipt
-from llm_bawt.utils.bot_identity import optional_default_bot_id
 from llm_bawt.utils.config import Config
 from llm_bawt.utils.streaming import render_complete_response, render_streaming_response
 
@@ -304,40 +302,6 @@ def query_via_service(
     return False
 
 
-def inspect_effective_config(config: Config, args: argparse.Namespace) -> None:
-    """Print the effective-config inspection for a bot (TASK-487).
-
-    Agent-backend bots are never built as local LLMBawt instances (they dispatch
-    to external agents), so this queries the service endpoint that constructs the
-    bot the same way a live turn does. Requires a running service.
-    """
-    import json as _json
-    import urllib.parse
-    import urllib.request
-
-    bot_id = (getattr(args, "inspect_config", "") or "").strip().lower()
-    user_id = (getattr(args, "user", "") or config.DEFAULT_USER or "").strip()
-
-    service_url = getattr(config, "SERVICE_URL", None)
-    if not service_url and hasattr(config, "SERVICE_PORT"):
-        host = getattr(config, "SERVICE_HOST", "localhost") or "localhost"
-        service_url = f"http://{host}:{config.SERVICE_PORT}"
-    if not service_url:
-        console.print("[bold red]No service URL configured[/bold red] — the inspector needs a running service.")
-        sys.exit(1)
-
-    params = urllib.parse.urlencode({"bot": bot_id, "user": user_id})
-    url = f"{service_url.rstrip('/')}/v1/config/effective?{params}"
-    try:
-        with urllib.request.urlopen(url, timeout=30) as resp:
-            data = _json.loads(resp.read().decode("utf-8"))
-    except Exception as e:
-        console.print(f"[bold red]Inspection failed:[/bold red] {e}")
-        sys.exit(1)
-
-    console.print_json(_json.dumps(data))
-
-
 def show_status(config: Config, args: argparse.Namespace | None = None):
     """Display overall system status including dependencies, bots, memory, and configuration."""
     from llm_bawt.core.status import collect_system_status
@@ -605,113 +569,12 @@ def show_status(config: Config, args: argparse.Namespace | None = None):
     console.print(
         "[dim]Useful:[/dim] "
         "[cyan]--job-status[/cyan]  "
-        "[cyan]--list-models[/cyan]  "
-        "[cyan]--list-bots[/cyan]  "
-        "[cyan]--list-users[/cyan]  "
-        "[cyan]--user-profile[/cyan]  "
-        "[cyan]--list-config[/cyan]"
+        "[cyan]--list-models[/cyan]"
     )
 
     if missing_deps:
         console.print()
         console.print(f"  [dim]Install missing:[/dim] {', '.join(missing_deps)}")
-
-
-def show_bots(config: Config, service_mode: bool = False):
-    """Display available bots.
-
-    In service mode, queries the running service. Otherwise uses local YAML only.
-    """
-    if service_mode:
-        client = get_service_client(config)
-        if client and client.is_available():
-            service_bots = client.list_bots()
-            if service_bots is not None:
-                _show_bots_from_service(config, service_bots)
-                return
-        console.print("[yellow]Service not reachable — showing local bots.[/yellow]")
-
-    _show_bots_from_local(config)
-
-
-def _show_bots_from_service(config: Config, bots_data: list[dict]):
-    """Render bot list from service API response."""
-    default_slug = (config.DEFAULT_BOT or "").strip().lower()
-
-    console.print(Panel.fit("[bold cyan]Available Bots[/bold cyan] [dim](service)[/dim]", border_style="cyan"))
-    console.print()
-
-    table = Table(show_header=True, box=None, padding=(0, 2))
-    table.add_column("Slug", style="cyan")
-    table.add_column("Name", style="bold")
-    table.add_column("Type")
-    table.add_column("Color")
-    table.add_column("Description")
-    table.add_column("Default Model")
-    table.add_column("Memory", justify="center")
-
-    for bot in sorted(bots_data, key=lambda b: b.get("slug", "")):
-        slug = bot.get("slug", "")
-        is_default = " ⭐" if slug == default_slug else ""
-        requires_memory = bot.get("requires_memory", False)
-        memory_icon = "[green]✓[/green]" if requires_memory else "[dim]✗[/dim]"
-        default_model = bot.get("default_model") or f"[dim]{config.DEFAULT_MODEL_ALIAS or 'global'}[/dim]"
-        color = bot.get("color")
-        table.add_row(
-            f"{slug}{is_default}",
-            bot.get("name", slug),
-            format_bot_type(bot.get("bot_type"), bot.get("agent_backend")),
-            f"[{color}]{color}[/]" if color else "[dim]default[/dim]",
-            bot.get("description", ""),
-            default_model,
-            memory_icon,
-        )
-
-    console.print(table)
-    console.print()
-    console.print("[dim]⭐ = default bot | ✓ = requires database | Use -b/--bot <slug> to select[/dim]")
-    console.print()
-
-
-def _show_bots_from_local(config: Config):
-    """Render bot list from local BotManager (YAML only, no DB)."""
-    bot_manager = BotManager(config, local_only=True)
-    bots = bot_manager.list_bots()
-    # Listing is read-only: a botless or default-less install still lists (TASK-2413).
-    default_slug = optional_default_bot_id(config)
-
-    console.print(Panel.fit("[bold cyan]Available Bots[/bold cyan] [dim](local)[/dim]", border_style="cyan"))
-    console.print()
-
-    table = Table(show_header=True, box=None, padding=(0, 2))
-    table.add_column("Slug", style="cyan")
-    table.add_column("Name", style="bold")
-    table.add_column("Type")
-    table.add_column("Color")
-    table.add_column("Description")
-    table.add_column("Default Model")
-    table.add_column("Memory", justify="center")
-
-    for bot in bots:
-        is_default = " ⭐" if bot.slug == default_slug else ""
-        memory_icon = "[green]✓[/green]" if bot.requires_memory else "[dim]✗[/dim]"
-        selection = bot_manager.select_model(None, bot_slug=bot.slug)
-        default_model = selection.alias or f"[dim]{config.DEFAULT_MODEL_ALIAS or 'global'}[/dim]"
-        table.add_row(
-            f"{bot.slug}{is_default}",
-            bot.name,
-            format_bot_type(bot.bot_type, bot.agent_backend),
-            f"[{cli_color_for(bot)}]{escape(bot.cli_color or bot.color)}[/]"
-            if (bot.cli_color or bot.color) else "[dim]default[/dim]",
-            bot.description,
-            default_model,
-            memory_icon
-        )
-
-    console.print(table)
-    console.print()
-    console.print("[dim]⭐ = default bot | ✓ = requires database | Use -b/--bot <slug> to select[/dim]")
-    console.print()
 
 
 def _render_job_status_from_service(config: Config) -> bool:

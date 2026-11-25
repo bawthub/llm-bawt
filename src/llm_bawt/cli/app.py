@@ -1,49 +1,21 @@
 import argparse
 import traceback
 import sys  # Import sys for exit codes
-from rich.prompt import Prompt
 from llm_bawt.utils.config import Config
-from llm_bawt.utils.config import is_secret_config_field, set_config_value
 from llm_bawt.utils.input_handler import MultilineInputHandler
-from llm_bawt.model_manager import (
-    ModelManager,
-    delete_model,
-    list_models,
-    set_model_context_window,
-    update_models_interactive,
-)
-from llm_bawt.gguf_handler import handle_add_gguf
-from llm_bawt.cli.bot_create import handle_add_chat_bot
-from llm_bawt.cli.vllm_handler import handle_add_vllm
+from llm_bawt.model_manager import ModelManager, list_models
 from llm_bawt.bots import BotManager
 from llm_bawt.utils.streaming import render_complete_response
 from llm_bawt.shared.logging import LogConfig
-from pathlib import Path
 
-# CLI command handlers were split out of this module (TASK-554). They are
-# re-imported here so this module stays the facade: the cli.__init__ re-exports
-# (show_status, show_bots, show_users, ...) and main()/run_app() references all
-# resolve unchanged.
-from ._common import console, get_service_client, _is_service_mode
+# Admin, setup and local-model flags were retired (TASK-2563): the web UI and
+# service API own bot, model, user, settings and install management now.
+from ._common import console, get_service_client, _is_service_mode, ensure_default_user
 from .display_cmd import (
     query_via_service,
-    inspect_effective_config,
     show_status,
-    show_bots,
     show_job_status,
     trigger_job,
-)
-from .admin_cmd import ensure_user_profile as ensure_user_profile  # re-export for cli/__init__ and commands.profile
-from .admin_cmd import (
-    show_user_profile,
-    show_users,
-    show_runtime_settings,
-    set_runtime_setting,
-    delete_runtime_setting,
-    bootstrap_runtime_settings,
-    migrate_bots_to_db,
-    run_user_profile_setup,
-    ensure_default_user,
 )
 
 
@@ -51,28 +23,6 @@ def parse_arguments(config_obj: Config) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Query LLM models from the command line using model aliases defined in models.yaml")
     parser.add_argument("-m","--model",type=str,default=None,help=f"Model alias defined in {config_obj.MODELS_CONFIG_PATH}. Supports partial matching. (Default: bot's default or {config_obj.DEFAULT_MODEL_ALIAS or 'None'})")
     parser.add_argument("--list-models",action="store_true",help="List available model aliases defined in the configuration file and exit.")
-    parser.add_argument("--add-gguf",type=str,metavar="REPO_ID",help="(Deprecated: use --add-model gguf) Add a GGUF model from a Hugging Face repo ID.")
-    parser.add_argument("--add-model",type=str,choices=['ollama', 'openai', 'grok', 'codex', 'gguf', 'vllm'],metavar="TYPE",help="Add models: 'ollama' (refresh from server), 'openai' (query API), 'grok' (query xAI API), 'codex' (install Codex agent model aliases), 'gguf' (add from HuggingFace repo), 'vllm' (add vLLM model from HuggingFace)")
-    parser.add_argument("--add-bot", type=str, choices=["chat"], metavar="TYPE", help="Add bots: 'chat' (create a chat bot profile)")
-    parser.add_argument("--delete-model",type=str,metavar="ALIAS",help="Delete the specified model alias from the configuration file after confirmation.")
-    parser.add_argument(
-        "--set-context-window",
-        nargs=2,
-        metavar=("ALIAS", "TOKENS"),
-        help="Set per-model context window in the model catalog. Creates missing aliases (e.g., grok-* from --list-models).",
-    )
-    parser.add_argument("--config-set", nargs=2, metavar=("KEY", "VALUE"), help="Set a configuration value (e.g., DEFAULT_MODEL_ALIAS) in the .env file.")
-    parser.add_argument("--list-config", action="store_true", help="List the current effective configuration settings.")
-    parser.add_argument("--setup", action="store_true", help="Walk through client .env settings interactively (pre-filled with current values).")
-    parser.add_argument("--settings-scope", choices=["bot", "global"], default="bot", help="Scope for runtime settings operations (default: bot)")
-    parser.add_argument("--settings-list", action="store_true", help="List runtime settings from DB for selected scope")
-    parser.add_argument("--settings-set", nargs=2, metavar=("KEY", "VALUE"), help="Set runtime setting in DB for selected scope")
-    parser.add_argument("--settings-delete", metavar="KEY", help="Delete runtime setting from DB for selected scope")
-    parser.add_argument("--settings-bootstrap", action="store_true", help="Seed DB runtime settings from current bot/template/env config")
-    parser.add_argument("--settings-bootstrap-overwrite", action="store_true", help="When bootstrapping, overwrite existing DB keys")
-    parser.add_argument("--settings-edit", action="store_true", help="Edit global runtime settings in your editor and save to DB")
-    parser.add_argument("--bot-edit", metavar="SLUG", help="Edit a single bot config in your editor and save to DB")
-    parser.add_argument("--migrate-bots", action="store_true", help="Migrate merged YAML bots to bot_profiles and runtime_settings DB")
     parser.add_argument("question", nargs="*", help="Your question for the LLM model")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose output")
     parser.add_argument("-dh", "--delete-history", action="store_true", help="Clear chat history")
@@ -80,18 +30,12 @@ def parse_arguments(config_obj: Config) -> argparse.Namespace:
     parser.add_argument("-c", "--command", help="Execute command and add output to question")
     parser.add_argument("--plain", action="store_true", help="Use plain text output")
     parser.add_argument("--no-stream", action="store_true", default=False, help="Disable streaming output")
-    parser.add_argument("--local", action="store_true", help="Use local filesystem for history instead of database")
     parser.add_argument("--service", action="store_true", help="Route queries through the background service (if running)")
-    parser.add_argument("-b", "--bot", type=str, default=None, help="Bot slug to use. Use --list-bots to see all.")
-    parser.add_argument("--list-bots", action="store_true", help="List available bots and exit")
+    parser.add_argument("-b", "--bot", type=str, default=None, help="Bot slug to use.")
     parser.add_argument("--status", action="store_true", help="Show memory system status and configuration")
     parser.add_argument("--job-status", action="store_true", help="Show scheduled background jobs and recent run history")
     parser.add_argument("--run-job", type=str, metavar="TYPE", help="Trigger a scheduled job immediately (profile_maintenance, memory_consolidation, memory_decay)")
-    parser.add_argument("--user", type=str, default=None, help="User profile to use (creates if not exists). Defaults to config.DEFAULT_USER")
-    parser.add_argument("--list-users", action="store_true", help="List all user profiles")
-    parser.add_argument("--user-profile", action="store_true", help="Show current user profile")
-    parser.add_argument("--user-profile-set", metavar="FIELD=VALUE", help="Set a user profile field (e.g., name=\"Alex\")")
-    parser.add_argument("--user-profile-setup", action="store_true", help="Run user profile setup wizard")
+    parser.add_argument("--user", type=str, default=None, help="User profile to use. Defaults to config.DEFAULT_USER")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging output.")
     return parser.parse_args()
 
@@ -124,140 +68,7 @@ def main():
     # Configure logging via centralized LogConfig
     LogConfig.configure(verbose=args.verbose, debug=args.debug)
 
-    # Interactive config setup walkthrough
-    if getattr(args, 'setup', False):
-        from llm_bawt.cli.config_setup import run_config_setup
-        sys.exit(run_config_setup(config_obj, console))
-
-    # Handle setting config values, guard missing attribute in stubbed args
-    if getattr(args, 'config_set', None):
-        key, value = args.config_set
-        success = set_config_value(key, value, config_obj)
-        if success:
-            shown = "****" if is_secret_config_field(key) else value
-            console.print(f"[green]Configuration '{key}' set to '{shown}' in {config_obj.model_config.get('env_file', 'unknown')}.[/green]")
-            sys.exit(0)
-        else:
-            console.print(f"[bold red]Failed to set configuration '{key}'.[/bold red]")
-            sys.exit(1)
-    elif getattr(args, "set_context_window", None):
-        alias, token_value = args.set_context_window
-        try:
-            context_window = int(token_value)
-        except ValueError:
-            console.print(f"[bold red]Invalid token count:[/bold red] '{token_value}' is not an integer.")
-            sys.exit(1)
-
-        service_mode = _is_service_mode(args, config_obj)
-        svc_client = None
-        if service_mode:
-            svc_client = get_service_client(config_obj)
-            if not svc_client or not svc_client.is_available():
-                console.print("[bold red]Service not available.[/bold red] Start with: [yellow]llm-service[/yellow]")
-                sys.exit(1)
-
-        success = set_model_context_window(alias, context_window, config_obj, service_client=svc_client)
-        sys.exit(0 if success else 1)
-    # Handle listing config values
-    elif getattr(args, 'list_config', False):
-        env_file_path = config_obj.model_config.get('env_file', 'unknown')
-        console.print("[bold magenta]Current Configuration Settings[/bold magenta]")
-        console.print(f"[dim]Config file: {env_file_path}[/dim]\n")
-        
-        # Define which settings are important and should be set by the user
-        # Format: field_name -> (is_secret, is_required, description)
-        important_settings = {
-            'DEFAULT_MODEL_ALIAS': (False, False, "Default model to use"),
-            'DEFAULT_BOT': (False, False, "Default bot personality"),
-            'DEFAULT_USER': (False, False, "Default user profile"),
-            'POSTGRES_PASSWORD': (True, True, "Required for memory features"),
-            'POSTGRES_HOST': (False, False, "PostgreSQL server hostname"),
-            'OLLAMA_URL': (False, False, "Ollama server URL"),
-        }
-        
-        # Check for missing important settings
-        missing_settings = []
-        for field_name, (is_secret, is_required, desc) in important_settings.items():
-            value = getattr(config_obj, field_name, None)
-            if not value or (isinstance(value, str) and not value.strip()):
-                if is_required:
-                    missing_settings.append((field_name, desc))
-        
-        if missing_settings:
-            console.print("[yellow]⚠ Missing recommended settings:[/yellow]")
-            for field_name, desc in missing_settings:
-                env_var = f"LLM_BAWT_{field_name}"
-                console.print(f"  [red]✗[/red] {env_var} - {desc}")
-            console.print()
-        
-        # Show all settings grouped by category
-        exclude_fields = {'defined_models', 'available_ollama_models', 'ollama_checked', 'model_config', 'SYSTEM_MESSAGE'}
-        secret_fields = {name for name in config_obj.model_fields if is_secret_config_field(name)}
-        
-        console.print("[bold]All Settings:[/bold]")
-        for field_name, field_info in sorted(config_obj.model_fields.items()):
-            if field_name not in exclude_fields:
-                current_value = getattr(config_obj, field_name)
-                if isinstance(current_value, Path):
-                    current_value_str = str(current_value)
-                elif field_name in secret_fields and current_value:
-                    # Mask secrets
-                    current_value_str = "[green]****[/green] (set)"
-                elif field_name in secret_fields:
-                    current_value_str = "[dim]not set[/dim]"
-                elif current_value is None or (isinstance(current_value, str) and not current_value.strip()):
-                    current_value_str = "[dim]not set[/dim]"
-                else:
-                    current_value_str = repr(current_value)
-
-                console.print(f"  [cyan]{field_name}[/cyan]: {current_value_str}")
-        
-        console.print("\n  [dim]SYSTEM_MESSAGE: (set by bot profile in database)[/dim]")
-        console.print("\n[dim]To set a value: llm --config-set KEY value[/dim]")
-        console.print(f"[dim]Or edit: {env_file_path}[/dim]")
-        sys.exit(0)
-    elif getattr(args, "settings_list", False):
-        ok = show_runtime_settings(config_obj, scope=args.settings_scope, bot_id=args.bot)
-        sys.exit(0 if ok else 1)
-    elif getattr(args, "settings_set", None):
-        key, value = args.settings_set
-        ok = set_runtime_setting(
-            config_obj,
-            scope=args.settings_scope,
-            bot_id=args.bot,
-            key=key,
-            raw_value=value,
-        )
-        sys.exit(0 if ok else 1)
-    elif getattr(args, "settings_delete", None):
-        ok = delete_runtime_setting(
-            config_obj,
-            scope=args.settings_scope,
-            bot_id=args.bot,
-            key=args.settings_delete,
-        )
-        sys.exit(0 if ok else 1)
-    elif getattr(args, "settings_bootstrap", False):
-        ok = bootstrap_runtime_settings(
-            config_obj,
-            bot_id=args.bot if args.settings_scope == "bot" else None,
-            overwrite=bool(getattr(args, "settings_bootstrap_overwrite", False)),
-        )
-        sys.exit(0 if ok else 1)
-    elif getattr(args, "settings_edit", False):
-        from llm_bawt.cli.bot_editor import edit_global_settings
-
-        ok = edit_global_settings(config_obj)
-        sys.exit(0 if ok else 1)
-    elif getattr(args, "bot_edit", None):
-        from llm_bawt.cli.bot_editor import edit_bot_yaml
-        ok = edit_bot_yaml(config_obj, args.bot_edit)
-        sys.exit(0 if ok else 1)
-    elif getattr(args, "migrate_bots", False):
-        ok = migrate_bots_to_db(config_obj)
-        sys.exit(0 if ok else 1)
-
-    elif getattr(args, 'status', False):
+    if getattr(args, 'status', False):
         show_status(config_obj, args)
         sys.exit(0)
 
@@ -269,145 +80,9 @@ def main():
         trigger_job(config_obj, args.run_job)
         sys.exit(0)
 
-    elif getattr(args, 'list_bots', False):
-        show_bots(config_obj, service_mode=_is_service_mode(args, config_obj))
-        sys.exit(0)
-
-    elif getattr(args, 'inspect_config', None):
-        inspect_effective_config(config_obj, args)
-        sys.exit(0)
-
-    elif getattr(args, 'list_users', False):
-        show_users(config_obj)
-        sys.exit(0)
-
-    elif getattr(args, 'user_profile', False):
-        ensure_default_user(config_obj, args)
-        user_id = args.user if args.user else config_obj.DEFAULT_USER
-        show_user_profile(config_obj, user_id)
-        sys.exit(0)
-    
-    elif getattr(args, 'user_profile_setup', False):
-        ensure_default_user(config_obj, args)
-        user_id = args.user if args.user else config_obj.DEFAULT_USER
-        success = run_user_profile_setup(config_obj, user_id)
-        sys.exit(0 if success else 1)
-    
-    elif getattr(args, 'user_profile_set', None):
-        ensure_default_user(config_obj, args)
-        try:
-            field, value = args.user_profile_set.split("=", 1)
-            field = field.strip()
-            value = value.strip().strip('"').strip("'")
-            user_id = args.user if args.user else config_obj.DEFAULT_USER
-
-            # Parse field: category.key or just key
-            valid_categories = {"preference", "fact", "interest", "communication", "context"}
-            if "." in field:
-                category_str, key = field.split(".", 1)
-                if category_str.lower() not in valid_categories:
-                    console.print(f"[red]Invalid category: {category_str}[/red]")
-                    console.print("[dim]Valid categories: preference, fact, interest, communication, context[/dim]")
-                    sys.exit(1)
-                category_str = category_str.lower()
-            else:
-                key = field
-                category_str = "fact"
-
-            client = get_service_client(config_obj)
-            if not client or not client.is_available():
-                console.print("[yellow]Service not available. Start with: llm-service[/yellow]")
-                sys.exit(1)
-
-            if client.upsert_profile_attribute("user", user_id, category_str, key, value) is None:
-                console.print(f"[red]Saving {category_str}.{key} failed (or its outcome is unknown).[/red]")
-                sys.exit(1)
-            console.print(f"[green]Set {category_str}.{key} = {value}[/green]")
-        except ValueError:
-            console.print("[red]Use format: --user-profile-set category.key=value[/red]")
-        except Exception as e:
-            console.print(f"[red]Error: {e}[/red]")
-        sys.exit(0)
-
     elif args.list_models:
         list_models(config_obj, service_mode=_is_service_mode(args, config_obj))
         sys.exit(0)
-        return
-    if args.delete_model:
-        service_mode = _is_service_mode(args, config_obj)
-        svc_client = None
-        if service_mode:
-            svc_client = get_service_client(config_obj)
-            if not svc_client or not svc_client.is_available():
-                console.print("[bold red]Service not available.[/bold red] Start with: [yellow]llm-service[/yellow]")
-                sys.exit(1)
-        success = False
-        try:
-            success = delete_model(args.delete_model, config_obj, service_client=svc_client)
-            if success:
-                console.print(f"[green]Model alias '{args.delete_model}' deleted successfully.[/green]")
-        except Exception as e:
-            console.print(f"[bold red]Error during delete model operation:[/bold red] {e}")
-            if config_obj.VERBOSE:
-                traceback.print_exc()
-            success = False
-        sys.exit(0 if success else 1)
-        return
-    if args.add_bot:
-        success = False
-        try:
-            if args.add_bot == "chat":
-                success = handle_add_chat_bot(config_obj)
-            if success:
-                console.print(f"[green]Bot add for '{args.add_bot}' completed.[/green]")
-            else:
-                console.print(f"[red]Bot add for '{args.add_bot}' failed or was cancelled.[/red]")
-        except KeyboardInterrupt:
-            console.print("[bold red]Bot add cancelled.[/bold red]")
-            success = False
-        except Exception as e:
-            console.print(f"[bold red]Error during bot add:[/bold red] {e}")
-            if config_obj.VERBOSE:
-                traceback.print_exc()
-            success = False
-        sys.exit(0 if success else 1)
-        return
-    if args.add_model:
-        service_mode = _is_service_mode(args, config_obj)
-        svc_client = None
-        if service_mode:
-            svc_client = get_service_client(config_obj)
-            if not svc_client or not svc_client.is_available():
-                console.print("[bold red]Service not available.[/bold red] Start with: [yellow]llm-service[/yellow]")
-                sys.exit(1)
-        success = False
-        try:
-            if args.add_model in ('openai', 'grok', 'ollama', 'codex'):
-                success = update_models_interactive(config_obj, provider=args.add_model, service_client=svc_client)
-            elif args.add_model == 'gguf':
-                # Prompt for HuggingFace repo ID
-                repo_id = Prompt.ask("Enter HuggingFace repo ID (e.g., TheBloke/Llama-2-7B-GGUF)")
-                if repo_id and repo_id.strip():
-                    success = handle_add_gguf(repo_id.strip(), config_obj, service_client=svc_client)
-                else:
-                    console.print("[red]No repo ID provided. Cancelled.[/red]")
-                    success = False
-            elif args.add_model == 'vllm':
-                success = handle_add_vllm(config_obj, service_client=svc_client)
-            if success:
-                console.print(f"[green]Model add for '{args.add_model}' completed.[/green]")
-            else:
-                console.print(f"[red]Model add for '{args.add_model}' failed or was cancelled.[/red]")
-        except KeyboardInterrupt:
-            console.print("[bold red]Model add cancelled.[/bold red]")
-            success = False # Ensure failure on interrupt
-        except Exception as e:
-            console.print(f"[bold red]Error during model add:[/bold red] {e}")
-            if config_obj.VERBOSE:
-                traceback.print_exc()
-            success = False
-        sys.exit(0 if success else 1)
-        return
 
     ensure_default_user(config_obj, args)
     
@@ -428,7 +103,7 @@ def main():
                 from llm_bawt.bots import Bot
                 target_bot = Bot(slug=args.bot.lower().strip(), name=args.bot, description="", system_prompt="")
             else:
-                console.print(f"[bold red]Unknown bot: {args.bot}[/bold red]. Use --list-bots to see available bots.")
+                console.print(f"[bold red]Unknown bot: {args.bot}[/bold red].")
                 sys.exit(1)
     else:
         target_bot = bot_manager.get_bot(config_obj.DEFAULT_BOT)
@@ -582,7 +257,7 @@ def run_app(
                 from llm_bawt.bots import Bot
                 bot = Bot(slug=args.bot.lower().strip(), name=args.bot, description="", system_prompt="")
             else:
-                console.print(f"[bold red]Unknown bot: {args.bot}[/bold red]. Use --list-bots to see available bots.")
+                console.print(f"[bold red]Unknown bot: {args.bot}[/bold red].")
                 sys.exit(1)
         bot_id = bot.slug
     else:

@@ -768,7 +768,7 @@ class ModelManager:
                 "type": provider_type,
                 "model_id": alias,
                 "description": (
-                    f"{provider_type.capitalize()} model (added via --set-context-window override)"
+                    f"{provider_type.capitalize()} model (added via context window override)"
                 ),
             }
             models[alias] = entry

@@ -125,8 +125,8 @@ class TestLLMInfo:
         o = assert_ok(run(f"{LLM} --help"), "--help")
         assert "Query LLM models" in o
         assert "--list-models" in o
-        assert "--add-bot" in o
-        assert "--list-bots" in o
+        assert "--add-bot" not in o
+        assert "--list-bots" not in o
         assert no_traceback(o)
 
     def test_list_models(self):
@@ -140,24 +140,6 @@ class TestLLMInfo:
         o = assert_ok(run(f"{LLM} --list-models"), "--list-models service section")
         assert "Service Models" in o
         assert no_traceback(o)
-
-    def test_list_config(self):
-        o = assert_ok(run(f"{LLM} --list-config"), "--list-config")
-        assert "USE_SERVICE" in o
-        assert "DEFAULT_BOT" in o
-        assert "POSTGRES_HOST" in o
-        assert no_traceback(o)
-
-    def test_list_bots(self):
-        o = assert_ok(run(f"{LLM} --list-bots"), "--list-bots")
-        assert "nova" in o
-        assert "spark" in o
-        assert no_traceback(o)
-
-    def test_list_bots_shows_default(self):
-        o = assert_ok(run(f"{LLM} --list-bots"), "--list-bots default marker")
-        # Default bot should be marked
-        assert "⭐" in o or "default" in o.lower()
 
 
 # ===========================================================================
@@ -344,88 +326,6 @@ class TestLLMJobs:
 
 
 # ===========================================================================
-# llm — Users / Profiles
-# ===========================================================================
-
-
-class TestLLMUsers:
-    @pytest.mark.service
-    def test_list_users(self, service_up):
-        if not service_up:
-            pytest.skip("Service not running")
-        o = assert_ok(run(f"{LLM} --list-users", timeout=15), "--list-users")
-        assert no_traceback(o)
-
-    @pytest.mark.service
-    def test_user_profile(self, service_up):
-        if not service_up:
-            pytest.skip("Service not running")
-        o = assert_ok(run(f"{LLM} --user-profile", timeout=15), "--user-profile")
-        assert no_traceback(o)
-
-    @pytest.mark.service
-    def test_user_profile_with_explicit_user(self, service_up):
-        if not service_up:
-            pytest.skip("Service not running")
-        o = assert_ok(run(f"{LLM} --user operator --user-profile", timeout=15), "--user operator --user-profile")
-        assert no_traceback(o)
-
-
-# ===========================================================================
-# llm — Runtime Settings
-# ===========================================================================
-
-
-class TestLLMSettings:
-    @pytest.mark.service
-    def test_settings_list_bot_scope(self, service_up):
-        if not service_up:
-            pytest.skip("Service not running")
-        o = assert_ok(run(f"{LLM} --settings-list", timeout=15), "--settings-list")
-        assert no_traceback(o)
-
-    @pytest.mark.service
-    def test_settings_list_global_scope(self, service_up):
-        if not service_up:
-            pytest.skip("Service not running")
-        o = assert_ok(
-            run(f"{LLM} --settings-scope global --settings-list", timeout=15),
-            "--settings-scope global --settings-list",
-        )
-        assert no_traceback(o)
-
-    @pytest.mark.service
-    def test_settings_list_explicit_bot(self, service_up):
-        if not service_up:
-            pytest.skip("Service not running")
-        o = assert_ok(
-            run(f"{LLM} -b {BOT} --settings-list", timeout=15),
-            f"-b {BOT} --settings-list",
-        )
-        assert no_traceback(o)
-
-    @pytest.mark.service
-    def test_settings_set_and_delete(self, service_up):
-        """Round-trip: set a test key, verify it appears, then delete it."""
-        if not service_up:
-            pytest.skip("Service not running")
-        key = "test_cli_integration_key"
-        val = "test_value_42"
-
-        set_r = run(f"{LLM} -b {BOT} --settings-set {key} {val}", timeout=15)
-        assert_ok(set_r, "--settings-set")
-
-        list_o = assert_ok(run(f"{LLM} -b {BOT} --settings-list", timeout=15), "--settings-list after set")
-        assert key in list_o
-
-        del_r = run(f"{LLM} -b {BOT} --settings-delete {key}", timeout=15)
-        assert_ok(del_r, "--settings-delete")
-
-        list_o2 = assert_ok(run(f"{LLM} -b {BOT} --settings-list", timeout=15), "--settings-list after delete")
-        assert key not in list_o2
-
-
-# ===========================================================================
 # llm — Error handling
 # ===========================================================================
 
@@ -456,7 +356,7 @@ class TestLLMErrors:
             pytest.skip("Service not running — cannot test normal service path")
         # If service is up, --service flag should succeed
         o = assert_ok(
-            run(f"{LLM} --service --list-bots", timeout=15),
+            run(f"{LLM} --service --list-models", timeout=15),
             "--service flag with service up",
         )
         assert no_traceback(o)

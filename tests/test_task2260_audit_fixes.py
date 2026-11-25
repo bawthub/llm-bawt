@@ -403,16 +403,6 @@ def test_native_context_cap_applies_on_fallback(monkeypatch):
 
 # --- CLI (items 28-30, 34-38) ----------------------------------------------
 
-def test_settings_yaml_keeps_nested_values_under_their_key():
-    import yaml
-
-    from llm_bawt.cli.bot_editor import _build_settings_yaml
-
-    settings = {"summarization_job": {"model": None, "trigger_tokens": 6000},
-                "temperature": 0.8, "tags": ["a", "b"], "note": "line1\nline2"}
-    assert yaml.safe_load(_build_settings_yaml(settings))["settings"] == settings
-
-
 def test_secret_fields_are_masked_by_name():
     from llm_bawt.utils.config import is_secret_config_field
 
@@ -452,88 +442,3 @@ def test_empty_tool_args_render_without_stopiteration(args):
 
     assert _format_tool_call("NoArgs", args) == "NoArgs"
     _summarize_tool_args(args)
-
-
-def test_setup_rejects_invalid_values_before_persisting(tmp_path, monkeypatch):
-    from llm_bawt.cli import config_setup
-    from llm_bawt.utils.config import Config
-
-    config = Config()
-    env = tmp_path / ".env"
-    port = SimpleNamespace(key="POSTGRES_PORT", env_only=False)
-    assert not config_setup._save_value(config, port, "abc", env, "LLM_BAWT_")
-    assert not env.exists()
-    flag = SimpleNamespace(key="USE_SERVICE", env_only=False)
-    monkeypatch.delenv("LLM_BAWT_USE_SERVICE", raising=False)
-    assert config_setup._save_value(config, flag, "on", env, "LLM_BAWT_")
-    assert config.USE_SERVICE is True
-
-
-# --- CLI bot editor writes (items 29, 30) ----------------------------------
-
-class FakeServiceClient:
-    def __init__(self, upsert_result=None):
-        self.upserts = []
-        self.upsert_result = upsert_result
-
-    def is_available(self):
-        return True
-
-    def get_settings(self, scope_type="bot", scope_id=None):
-        return {"settings": []}
-
-    def upsert_bot_profile(self, slug, payload):
-        self.upserts.append(payload)
-        return self.upsert_result
-
-    def set_setting(self, *a):
-        return {"ok": True}
-
-    def delete_setting(self, *a, **k):
-        return {"ok": True}
-
-
-@pytest.fixture
-def editor(monkeypatch):
-    import llm_bawt.bots as bots
-    from llm_bawt.cli import bot_editor
-
-    bot = SimpleNamespace(
-        name="Fixture", color="#fff", description="d", system_prompt="p", requires_memory=False,
-        voice_optimized=False, tts_mode=False, include_summaries=False, include_in_global_search=False,
-        uses_tools=False, uses_search=False, uses_home_assistant=False, default_model=None,
-        default_voice="voice-1", bot_type="chat", agent_backend=None, agent_backend_config=None)
-    monkeypatch.setattr(bots, "get_bot", lambda slug: bot)
-    monkeypatch.setattr(bots, "get_raw_bot_data", lambda slug: {})
-    monkeypatch.setattr(bots, "get_bot_settings_template", lambda: {"temperature": 0.7})
-    monkeypatch.setattr(bots, "invalidate_bots_cache", lambda: None, raising=False)
-    monkeypatch.setattr(bot_editor, "_notify_service_reload", lambda config: None)
-    monkeypatch.setattr(bot_editor.sys.stdin, "isatty", lambda: False, raising=False)
-    edits = {}
-
-    def open_editor(text, suffix):
-        import yaml
-
-        data = yaml.safe_load(text)
-        data.update(edits)
-        return data
-
-    monkeypatch.setattr(bot_editor, "_open_yaml_editor", open_editor)
-    return bot_editor, edits
-
-
-def test_unchanged_bot_edit_writes_nothing(editor, monkeypatch):
-    bot_editor, _ = editor
-    client = FakeServiceClient(upsert_result={"ok": True})
-    monkeypatch.setattr(bot_editor, "_get_service_client", lambda config: client)
-    assert bot_editor.edit_bot_yaml(SimpleNamespace(), "fixture") is True
-    assert client.upserts == []
-
-
-def test_name_edit_keeps_default_voice_and_reports_failed_save(editor, monkeypatch):
-    bot_editor, edits = editor
-    edits["name"] = "Renamed"
-    client = FakeServiceClient(upsert_result=None)  # service write failed
-    monkeypatch.setattr(bot_editor, "_get_service_client", lambda config: client)
-    assert bot_editor.edit_bot_yaml(SimpleNamespace(), "fixture") is False
-    assert client.upserts[0]["default_voice"] == "voice-1"

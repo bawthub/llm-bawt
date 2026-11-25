@@ -262,11 +262,6 @@ def test_add_gguf_without_service_refuses_before_download(monkeypatch):
     assert not gguf_handler.handle_add_gguf("org/repo", SimpleNamespace(), service_client=None)
 
 
-def test_add_vllm_without_service_refuses():
-    from llm_bawt.cli import vllm_handler
-
-    assert not vllm_handler.handle_add_vllm(SimpleNamespace(), service_client=None)
-
 
 def test_save_without_service_does_not_overwrite_models_yaml(tmp_path):
     manager = manager_with({"gpt-5.5": {"type": "openai", "endpoint_id": 7}}, service=False)
