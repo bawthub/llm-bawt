@@ -4,7 +4,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import re
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -66,6 +66,14 @@ class RecallRequest(BaseModel):
     task_ids: tuple[str, ...] = Field(default=(), max_length=3)
     handle: str | None = Field(default=None, max_length=64)
     output_tokens: int = Field(default=1000, ge=400, le=1600, strict=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def plain_question(cls, value: Any) -> Any:
+        # Deferred-discovery callers can call before loading the schema and
+        # pass the question itself; keeps the published schema unchanged
+        # (TASK-2654).
+        return {"query": value} if isinstance(value, str) else value
 
     @field_validator("query")
     @classmethod

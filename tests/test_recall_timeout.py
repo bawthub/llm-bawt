@@ -6,6 +6,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 
 from llm_bawt.recall.budgets import compact_json, tokens
 from llm_bawt.recall.contracts import Evidence, EvidenceBatch, RecallError, RecallRequest
@@ -281,9 +282,12 @@ async def test_adapter_accepts_a_plain_question_string(monkeypatch):
     monkeypatch.setattr(service, "recall", recall)
     monkeypatch.setattr(recall_tools, "current_task_turn_context", lambda: object())
     monkeypatch.setattr(recall_tools, "_runtime", lambda: (SimpleNamespace(scope=scope), service))
-    packet = json.loads(await recall_tools.context_recall("what did we decide about the router"))
+    # The MCP layer validates the argument into RecallRequest, which accepts
+    # a bare string without widening the published schema.
+    plain = RecallRequest.model_validate("what did we decide about the router")
+    packet = json.loads(await recall_tools.context_recall(plain))
     assert packet["status"] == "partial"
     assert seen[0].query == "what did we decide about the router"
     assert seen[0].sources == RecallRequest(query="x").sources
-    blank = json.loads(await recall_tools.context_recall("   "))
-    assert blank["status"] == "error" and blank["error_code"] == "invalid_request"
+    with pytest.raises(ValidationError):
+        RecallRequest.model_validate("   ")

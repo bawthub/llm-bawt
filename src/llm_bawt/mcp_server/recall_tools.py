@@ -46,7 +46,7 @@ def _runtime() -> tuple[RecallDatabase, RecallService]:
 
 @mcp.tool(name="context_recall")
 async def context_recall(
-    request: RecallRequest | str,
+    request: RecallRequest,
 ) -> str:
     """Research caller-owned history in isolated utility context; return bounded cited quotes.
 
@@ -57,13 +57,9 @@ async def context_recall(
     tasks/task_details. Follow-ups must repeat sources/task_ids, retain intent,
     and refresh evidence. All identity is inherited from the signed current-turn capability.
     Synthesis timeouts return degraded, bounded source quotes, not a model answer.
-    A plain question string is accepted as the query with default sources.
+    A plain string is the query.
     """
     try:
-        if isinstance(request, str):
-            # Deferred-discovery callers can call before loading the schema
-            # and pass the question itself (TASK-2654).
-            request = RecallRequest(query=request)
         context = current_task_turn_context()
         deadline = time.monotonic() + MAX_SECONDS
         async with asyncio.timeout(MAX_SECONDS):
