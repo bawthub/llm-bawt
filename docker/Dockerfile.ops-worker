@@ -86,4 +86,8 @@ LABEL llm-bawt.ops.compose-secrets-write="1"
 # read-only binds) and models a read-only root filesystem on the built kind.
 LABEL llm-bawt.ops.compose-overlay-render="1"
 LABEL llm-bawt.ops.read-only-profile="1"
+# Source revision (same as Dockerfile.app-cpu). Declared last so a new SHA
+# doesn't invalidate the cached layers above.
+ARG SOURCE_SHA=unknown
+LABEL org.opencontainers.image.revision="${SOURCE_SHA}"
 ENTRYPOINT ["python3", "-I", "/ops/worker.py"]

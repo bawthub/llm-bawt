@@ -243,5 +243,10 @@ USER bridge
 ENV BAWT_AGENT_BRIDGE=1 \
     NODE_OPTIONS="--require=/usr/local/libexec/bridge-node-check-preload.cjs"
 
+# Source revision (same as Dockerfile.app-cpu). Declared last so a new SHA
+# doesn't invalidate the cached layers above.
+ARG SOURCE_SHA=unknown
+LABEL org.opencontainers.image.revision="${SOURCE_SHA}"
+
 # Default command — overridden per service in docker-compose.yml
 CMD ["python", "-m", "claude_code_bridge"]
