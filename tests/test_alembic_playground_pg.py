@@ -91,12 +91,28 @@ def test_legacy_timestamp_columns_added_without_changing_existing_state(make_db)
     with engine.begin() as conn:
         conn.execute(text("ALTER TABLE playground_artifacts DROP COLUMN archived_at"))
         conn.execute(text("ALTER TABLE playground_artifacts DROP COLUMN trashed_at"))
+        conn.execute(text("ALTER TABLE playground_artifacts DROP COLUMN revision"))
+        conn.execute(text("ALTER TABLE playground_artifacts DROP COLUMN updated_at"))
     stamp(engine, "0004_gates")
     assert alembic_state.upgrade_on_startup(engine) == HEAD
     result = store.PlaygroundStore(engine).list("sample-user")
     states = {r["id"]: store.public_view(r)["status"] for r in result}
     assert states == {"artifact-a": "unopened", "artifact-b": "opened"}
     assert all(r["archived_at"] is None and r["trashed_at"] is None for r in result)
+    assert {store.public_view(r)["revision"] for r in result} == {1}
+
+
+def test_0007_adds_revision_columns_to_a_0006_table(make_db):
+    engine = make_db()
+    store.PlaygroundStore(engine)
+    seed(engine)
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE playground_artifacts DROP COLUMN revision"))
+        conn.execute(text("ALTER TABLE playground_artifacts DROP COLUMN updated_at"))
+    stamp(engine, "0006_utility_usage")
+    assert alembic_state.upgrade_on_startup(engine) == HEAD
+    names = {c["name"] for c in inspect(engine).get_columns(store.TABLE_NAME)}
+    assert {"revision", "updated_at"} <= names
 
 
 def test_runtime_bootstrap_only_runs_before_ownership(make_db, monkeypatch):

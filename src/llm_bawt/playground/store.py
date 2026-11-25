@@ -12,6 +12,11 @@ a row from the Inbox; ``trashed_at`` moves it to Trash, where it can be
 restored. Only "delete forever" or the trash purge removes the content, which
 sets ``expired_at`` and leaves a content-gone tombstone row. The blob key
 stays set until the blob is really gone, so a failed delete is retried.
+
+Revisions (TASK-2625). The sender can replace a live artifact's content in
+place. ``revision`` counts versions (NULL on older rows means 1) and
+``updated_at`` is when the last revision landed. Read and folder state are
+kept, so a revision never re-notifies.
 """
 
 from __future__ import annotations
@@ -29,6 +34,7 @@ from sqlalchemy import (
     Column,
     DateTime,
     Index,
+    Integer,
     MetaData,
     String,
     Table,
@@ -75,6 +81,8 @@ artifacts = Table(
     Column("expired_at", DateTime(timezone=True)),
     Column("archived_at", DateTime(timezone=True)),
     Column("trashed_at", DateTime(timezone=True)),
+    Column("revision", Integer),
+    Column("updated_at", DateTime(timezone=True)),
     Index(f"idx_{TABLE_NAME}_user_created", "user_id", "created_at"),
     Index(f"idx_{TABLE_NAME}_opened_live", "opened_at"),
 )
@@ -83,13 +91,20 @@ artifacts = Table(
 PUBLIC_COLUMNS = (
     "id", "user_id", "sender_bot_id", "title", "note", "kind", "mime", "filename",
     "size_bytes", "created_at", "opened_at", "expired_at", "archived_at", "trashed_at",
+    "revision", "updated_at",
 )
 
 #: Inbox views. ``None`` (the default list) is the Inbox, so unread counts
 #: built from the default list follow the Inbox.
 VIEWS = ("inbox", "archive", "trash", "all")
-_DATE_COLUMNS = ("created_at", "opened_at", "expired_at", "archived_at", "trashed_at")
-_ADDED_COLUMNS = ("archived_at", "trashed_at")
+_DATE_COLUMNS = ("created_at", "opened_at", "expired_at", "archived_at", "trashed_at", "updated_at")
+#: Nullable columns added after the table first shipped: name -> SQL type.
+_ADDED_COLUMNS = {
+    "archived_at": "timestamp",
+    "trashed_at": "timestamp",
+    "revision": "INTEGER",
+    "updated_at": "timestamp",
+}
 
 
 def new_artifact_id() -> str:
@@ -131,22 +146,26 @@ def public_view(row: dict[str, Any]) -> dict[str, Any]:
             if value.tzinfo is None:  # SQLite drops the zone
                 value = value.replace(tzinfo=timezone.utc)
             out[name] = value.isoformat()
+    out["revision"] = out["revision"] or 1
     out["status"] = status_of(row)
     out["folder"] = folder_of(row)
     return out
 
 
 def _add_columns(conn) -> None:
-    """Add the TASK-2195 columns to a table created before them; data untouched."""
+    """Add later nullable columns to a table created before them; data untouched."""
     present = {c["name"] for c in inspect(conn).get_columns(TABLE_NAME)}
-    for name in _ADDED_COLUMNS:
-        if name not in present:
-            conn.execute(text(f"ALTER TABLE {TABLE_NAME} ADD COLUMN {name} TIMESTAMP WITH TIME ZONE"
-                              if conn.dialect.name == "postgresql"
-                              else f"ALTER TABLE {TABLE_NAME} ADD COLUMN {name} TIMESTAMP"))
+    for name, kind in _ADDED_COLUMNS.items():
+        if name in present:
+            continue
+        if kind == "timestamp":
+            kind = "TIMESTAMP WITH TIME ZONE" if conn.dialect.name == "postgresql" else "TIMESTAMP"
+        conn.execute(text(f"ALTER TABLE {TABLE_NAME} ADD COLUMN {name} {kind}"))
 
 
-PLAYGROUND_SCHEMA_REVISION = "0005_playground"
+#: The newest revision whose DDL this bootstrap covers; older states keep the
+#: runtime bootstrap so the added columns exist before any query uses them.
+PLAYGROUND_SCHEMA_REVISION = "0007_playground_revisions"
 
 
 def bootstrap_playground_schema(conn) -> None:
@@ -161,6 +180,14 @@ def _now() -> datetime:
 
 class OpenRefused(Exception):
     """The artifact can't be opened: ``not_found`` or ``expired``."""
+
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
+
+
+class ReviseRefused(Exception):
+    """A revision can't land: ``not_found``, ``trashed`` or ``expired``."""
 
     def __init__(self, code: str):
         super().__init__(code)
@@ -185,6 +212,42 @@ class PlaygroundStore:
             notify_in_transaction(conn)  # TASK-1184: open mailboxes refresh (topic ``playground``)
             conn.execute(insert(artifacts).values(**values))
         return values
+
+    def revise(self, artifact_id: str, *, user_id: str, sender_bot_id: str,
+               values: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+        """Replace a live artifact's content and bump its revision (TASK-2625).
+
+        Only the sender of that user's artifact may revise it. Read and folder
+        state are kept. Returns ``(row, previous_blob_key)``; the caller deletes
+        the previous blob once this has committed. Raises ``ReviseRefused`` with
+        ``not_found`` (also for another sender's artifact), ``trashed`` or
+        ``expired``.
+        """
+        mine = [artifacts.c.id == artifact_id, artifacts.c.user_id == user_id,
+                artifacts.c.sender_bot_id == sender_bot_id]
+        with self.engine.begin() as conn:
+            current = conn.execute(
+                select(artifacts.c.blob_key, artifacts.c.expired_at, artifacts.c.trashed_at)
+                .where(*mine).with_for_update()
+            ).mappings().first()
+            if current is None:
+                raise ReviseRefused("not_found")
+            if current["expired_at"] is not None:
+                raise ReviseRefused("expired")
+            if current["trashed_at"] is not None:
+                raise ReviseRefused("trashed")
+            notify_in_transaction(conn)  # open viewers and mailboxes refresh (topic ``playground``)
+            row = conn.execute(
+                update(artifacts)
+                .where(*mine, artifacts.c.expired_at.is_(None), artifacts.c.trashed_at.is_(None))
+                .values(**values, revision=func.coalesce(artifacts.c.revision, 1) + 1,
+                        updated_at=_now())
+                .returning(*artifacts.c)
+            ).mappings().first()
+            if row is None:  # unreachable while the row lock is held
+                raise ReviseRefused("not_found")
+        previous = current["blob_key"]
+        return dict(row), (previous if previous and previous != row["blob_key"] else None)
 
     def open(self, artifact_id: str, user_id: str) -> tuple[dict[str, Any], str]:
         """Open (or reopen) a live artifact and mint a view token (TASK-2195).

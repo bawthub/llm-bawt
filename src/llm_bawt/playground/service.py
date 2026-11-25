@@ -2,12 +2,14 @@
 
 Bytes from an existing media asset are copied into Playground's own blob at
 send time, so expiry never touches the source asset or a chat attachment that
-shares its bytes. Inline text is kept in the row until expiry.
+shares its bytes. Inline text is kept in the row until expiry. The sender can
+revise a live artifact in place (TASK-2625).
 """
 
 from __future__ import annotations
 
 import logging
+import secrets
 import threading
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
@@ -125,6 +127,36 @@ class Playground:
             if blob_key:
                 self._delete_blob_quietly(blob_key)
             raise
+
+    def revise(self, artifact_id: str, *, user_id: str, bot_id: str, title: str,
+               note: str | None, source: Source) -> dict[str, Any]:
+        """Replace the content of an artifact this bot sent (TASK-2625).
+
+        A file source gets a fresh blob key, so a viewer mid-read keeps the old
+        bytes until the row commits; the previous blob is deleted afterwards.
+        Raises ``ReviseRefused`` when the artifact is unknown, not this bot's,
+        in Trash or deleted forever.
+        """
+        assert source.kind in KINDS
+        blob_key = None
+        if source.data is not None:
+            blob_key = f"{blob_key_for(artifact_id)}.{secrets.token_hex(4)}"
+            self.backend.put(blob_key, source.data, source.mime)
+        values = {
+            "title": title, "note": note, "kind": source.kind, "mime": source.mime,
+            "filename": source.filename, "size_bytes": source.size,
+            "blob_key": blob_key, "inline_content": source.inline,
+        }
+        try:
+            row, previous = self.store.revise(artifact_id, user_id=user_id,
+                                              sender_bot_id=bot_id, values=values)
+        except Exception:
+            if blob_key:
+                self._delete_blob_quietly(blob_key)
+            raise
+        if previous:
+            self._delete_blob_quietly(previous)
+        return row
 
     def open(self, artifact_id: str, user_id: str):
         """``(row, token)``: open or reopen; marks it read and keeps it."""

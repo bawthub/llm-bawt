@@ -430,3 +430,115 @@ def test_delete_forever_refuses_an_item_restored_after_the_check(client, pg, mon
     kept = pg.store.get(row["id"], USER)
     assert kept["expired_at"] is None
     assert _blob_path(pg, kept).read_bytes() == PNG
+
+
+# -- revisions (TASK-2625) ----------------------------------------------------
+
+
+def _inline(text, fmt="html"):
+    return source_from_inline(text, fmt)
+
+
+def test_revise_swaps_content_keeps_read_and_folder_state(pg):
+    row = pg.send(user_id=USER, bot_id="vex", title="Mock", note=None, source=_inline("<p>1</p>"))
+    assert public_view(row)["revision"] == 1
+    opened, token = pg.open(row["id"], USER)
+    pg.store.set_state(row["id"], USER, "archive")
+    revised = pg.revise(row["id"], user_id=USER, bot_id="vex", title="Mock v2", note="n",
+                        source=_inline("<p>2</p>"))
+    view = public_view(revised)
+    assert view["revision"] == 2 and view["updated_at"] and view["title"] == "Mock v2"
+    assert view["status"] == "opened" and view["folder"] == "archive"
+    # The open viewer's token still reads, and now gets the new content.
+    live = pg.store.viewable(row["id"], USER, token)
+    assert pg.read(live, None) == "<p>2</p>"
+    again = pg.revise(row["id"], user_id=USER, bot_id="vex", title="Mock", note=None,
+                      source=_inline("# three", "markdown"))
+    assert public_view(again)["revision"] == 3 and again["kind"] == "markdown"
+
+
+def test_revise_between_inline_and_file_cleans_up_old_blobs(pg):
+    row = _send_png(pg)
+    first_blob = _blob_path(pg, row)
+    revised = pg.revise(row["id"], user_id=USER, bot_id="vex", title="t", note=None,
+                        source=Source(kind="image", mime="image/png", filename="b.png",
+                                      data=PNG + b"2"))
+    assert revised["blob_key"] != row["blob_key"] and not first_blob.exists()
+    assert _blob_path(pg, revised).read_bytes() == PNG + b"2"
+    inline = pg.revise(row["id"], user_id=USER, bot_id="vex", title="t", note=None,
+                       source=_inline("text", "text"))
+    assert inline["blob_key"] is None and not _blob_path(pg, revised).exists()
+    assert pg.read(inline, None) == "text"
+
+
+@pytest.mark.parametrize("user,bot,code", [
+    ("someone-else", "vex", "not_found"),
+    (USER, "byte", "not_found"),
+])
+def test_revise_is_scoped_to_the_sender_and_user(pg, user, bot, code):
+    from llm_bawt.playground.store import ReviseRefused
+
+    row = pg.send(user_id=USER, bot_id="vex", title="Mock", note=None, source=_inline("<p>1</p>"))
+    with pytest.raises(ReviseRefused) as refused:
+        pg.revise(row["id"], user_id=user, bot_id=bot, title="x", note=None,
+                  source=_inline("<p>x</p>"))
+    assert refused.value.code == code
+    assert pg.read(pg.store.get(row["id"], USER), None) == "<p>1</p>"
+
+
+def test_revise_refuses_trash_and_deleted_and_removes_the_new_blob(pg):
+    from llm_bawt.playground.store import ReviseRefused
+
+    row = _send_png(pg)
+    pg.store.set_state(row["id"], USER, "trash")
+    png = Source(kind="image", mime="image/png", filename="b.png", data=PNG)
+    with pytest.raises(ReviseRefused) as refused:
+        pg.revise(row["id"], user_id=USER, bot_id="vex", title="t", note=None, source=png)
+    assert refused.value.code == "trashed"
+    assert sorted(p.name for p in (pg.backend.root / "playground").iterdir()) == [row["id"]]
+    pg.expire(row["id"], USER, in_trash=True)
+    with pytest.raises(ReviseRefused) as refused:
+        pg.revise(row["id"], user_id=USER, bot_id="vex", title="t", note=None, source=png)
+    assert refused.value.code == "expired"
+
+
+def test_tool_revises_without_a_new_bell(tool, pg, monkeypatch):
+    _caller(monkeypatch, SimpleNamespace(bot_id="vex", user_id=USER))
+    sent = _run(bot_id="vex", title="Mock", content="<p>1</p>", format="html")
+    assert sent["revision"] == 1 and tool == [sent["id"]]
+    pg.open(sent["id"], USER)
+    revised = _run(bot_id="vex", title="Mock", content="<p>2</p>", format="html",
+                   replaces=f" {sent['id']} ")
+    assert revised["id"] == sent["id"] and revised["revision"] == 2
+    assert revised["status"] == "opened"
+    assert tool == [sent["id"]]  # no second bell
+    assert "replaces" in playground_tools.playground_send.__doc__
+
+
+def test_tool_revise_refusals_are_clear(tool, pg, monkeypatch):
+    _caller(monkeypatch, SimpleNamespace(bot_id="vex", user_id=USER))
+    assert "no artifact" in _run(bot_id="vex", title="t", content="x", format="text",
+                                 replaces="pg_missing")["error"]
+    assert "no artifact" in _run(bot_id="vex", title="t", content="x", format="text",
+                                 replaces="p" * 65)["error"]
+    sent = _run(bot_id="vex", title="t", content="x", format="text")
+    pg.store.set_state(sent["id"], USER, "trash")
+    error = _run(bot_id="vex", title="t", content="y", format="text", replaces=sent["id"])["error"]
+    assert "Trash" in error and "without replaces" in error
+    assert tool == [sent["id"]]
+
+
+def test_tool_binds_replaces_only_when_given(tool, pg, monkeypatch):
+    """Omitting replaces keeps the signed-call argument set exactly as before."""
+    from llm_bawt.mcp_server import bot_access_identity
+
+    seen = []
+
+    def trusted(name, arguments):
+        seen.append(dict(arguments))
+        return SimpleNamespace(bot_id="vex", user_id=USER)
+
+    monkeypatch.setattr(bot_access_identity, "trusted_caller", trusted)
+    sent = _run(bot_id="vex", title="t", content="x", format="text")
+    _run(bot_id="vex", title="t", content="y", format="text", replaces=sent["id"])
+    assert "replaces" not in seen[0] and seen[1]["replaces"] == sent["id"]
