@@ -444,7 +444,7 @@ class McpOAuth:
                 recipients = [owner] if owner else list(conn.execute(select(EntityProfile.entity_id).where(
                     EntityProfile.entity_type == EntityType.USER)).scalars())
                 for user_id in recipients:
-                    emitter.append(
+                    emitter.append_at_commit(
                         conn, event_key=f"mcp_server_auth:{server.slug}:{server.generation}:{stamp}:{user_id}",
                         kind="mcp_server_auth", source="integrations", user_id=user_id,
                         tone=tone, summary=summary, subject_type="mcp_server", subject_id=server.slug)

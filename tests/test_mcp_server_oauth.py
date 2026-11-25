@@ -391,7 +391,7 @@ def _capture_events(monkeypatch):
         def __init__(self, engine):
             pass
 
-        def append(self, conn, **fields):
+        def append_at_commit(self, conn, **fields):
             appended.append(fields)
 
     monkeypatch.setattr(system_events, "SystemEventEmitter", Emitter)
