@@ -351,6 +351,58 @@ def test_revoked_refresh_requires_reauthorization(store):
         oauth.access_token(SERVER)
 
 
+def test_failed_renewal_shows_sign_in_again_once_until_a_new_sign_in(store, monkeypatch):
+    remote = FakeRemote()
+    oauth = oauth_for(store, remote)
+    announced = []
+    monkeypatch.setattr(oauth, "_announce_reauth", lambda server: announced.append(server.slug))
+    sign_in(oauth)
+    assert oauth.status(SERVER)["needs_reauth"] is False
+    record = store.load(store_id("tools"))
+    record.meta = {**record.meta, "expires_at": time.time() - 1}
+    store.save(record)
+    remote.refresh_status = 400
+    for _ in range(2):
+        with pytest.raises(IntegrationError, match="reauthorization_required"):
+            oauth.access_token(SERVER)
+    assert oauth.status(SERVER)["needs_reauth"] is True
+    assert announced == ["tools"]
+    remote.refresh_status = 200
+    sign_in(oauth)
+    assert oauth.status(SERVER)["needs_reauth"] is False
+
+
+def test_expired_token_without_refresh_needs_sign_in_again(store):
+    oauth = oauth_for(store, FakeRemote())
+    sign_in(oauth)
+    record = store.load(store_id("tools"))
+    record.meta = {**record.meta, "expires_at": time.time() - 1}
+    record.secret = {k: v for k, v in record.secret.items() if k != "refresh_token"}
+    store.save(record)
+    assert oauth.status(SERVER)["needs_reauth"] is True
+
+
+def test_renewal_event_targets_the_server_owner(store, monkeypatch):
+    from dataclasses import replace
+
+    from llm_bawt import system_events
+    appended = []
+
+    class Emitter:
+        def __init__(self, engine):
+            pass
+
+        def append(self, conn, **fields):
+            appended.append(fields)
+
+    monkeypatch.setattr(system_events, "SystemEventEmitter", Emitter)
+    oauth = oauth_for(store, FakeRemote())
+    oauth._announce_reauth(replace(SERVER, updated_by="owner-1"))
+    oauth._announce_reauth(SERVER)  # no owner recorded: nothing to address
+    assert [(e["kind"], e["user_id"], e["subject_id"]) for e in appended] == [
+        ("mcp_server_auth", "owner-1", "tools")]
+
+
 def test_token_is_bound_to_the_server_url(store):
     oauth = oauth_for(store, FakeRemote())
     sign_in(oauth)

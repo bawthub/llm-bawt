@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
 from sqlalchemy import text
@@ -69,6 +69,8 @@ class McpServer:
     #: Random per-row identity. Every stored secret records it, so a slug that
     #: was removed and re-added never uses the earlier server's credentials.
     generation: str = ""
+    #: Who last changed the row; the person told when its sign-in needs renewal.
+    updated_by: str | None = field(default=None, compare=False)
 
     def public(self) -> dict:
         """What any signed-in person may see: the server's origin, never its path or query."""
@@ -114,7 +116,8 @@ def display_url(url: str) -> str:
 
 
 def _row(r) -> McpServer:
-    return McpServer(r.slug, r.name, r.url, r.transport, r.auth_kind, r.enabled, r.generation)
+    return McpServer(r.slug, r.name, r.url, r.transport, r.auth_kind, r.enabled, r.generation,
+                     getattr(r, "updated_by", None))
 
 
 class McpServerStore:

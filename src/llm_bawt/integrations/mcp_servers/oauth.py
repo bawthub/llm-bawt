@@ -16,6 +16,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import ipaddress
+import logging
 import secrets
 import socket
 import time
@@ -35,6 +36,8 @@ from mcp.shared.auth_utils import check_resource_allowed, resource_url_from_serv
 from ..connections import IntegrationError, IntegrationStore, digest
 from ...service.providers.base import ConnectionRecord
 from .store import McpServer
+
+logger = logging.getLogger(__name__)
 
 CALLBACK_PREFIX = "/api/chat/proxy/v1/integrations/mcp-servers"
 RETURN_PATHS = {"/settings/mcp-servers"}
@@ -390,7 +393,51 @@ class McpOAuth:
         return pending["return_to"]
 
     def access_token(self, server: McpServer) -> str:
-        """A live access token, refreshed centrally near expiry (compare-and-set)."""
+        """A live access token, refreshed centrally near expiry (compare-and-set).
+
+        When the sign-in can't be renewed, the record is marked so Settings shows
+        "Sign in again" instead of Ready, and its owner gets one live event.
+        """
+        try:
+            return self._access_token(server)
+        except IntegrationError as exc:
+            if str(exc) == "reauthorization_required":
+                self._mark_reauth(server)
+            raise
+
+    def _mark_reauth(self, server: McpServer) -> None:
+        sid = store_id(server.slug)
+        try:
+            snap = self.store.snapshot(sid)
+            record = snap.record
+            if (not record or record.status != "connected" or record.auth_method != "oauth_mcp"
+                    or not owned_by(record, server) or record.meta.get("reauth_required")):
+                return
+            record.meta = {**record.meta, "reauth_required": True}
+            if not self.store.replace(sid, snap, record):
+                return  # a concurrent writer (a refresh or new sign-in) decides the state
+        except Exception:  # noqa: BLE001 - status bookkeeping never breaks the tool call
+            logger.warning("MCP server %s: could not record that sign-in needs renewal", server.slug)
+            return
+        self._announce_reauth(server)
+
+    def _announce_reauth(self, server: McpServer) -> None:
+        engine = getattr(getattr(self.store, "_store", None), "engine", None)
+        if engine is None or not server.updated_by:
+            return
+        try:
+            from ...system_events import SystemEventEmitter
+            emitter = SystemEventEmitter(engine)
+            with engine.begin() as conn:
+                emitter.append(
+                    conn, event_key=f"mcp_server_auth:{server.slug}:{server.generation}:{time.time_ns()}",
+                    kind="mcp_server_auth", source="integrations", user_id=server.updated_by,
+                    tone="warning", summary=f"{server.name}: sign in again to keep using its tools",
+                    subject_type="mcp_server", subject_id=server.slug)
+        except Exception:  # noqa: BLE001 - best effort; the page also refreshes on resync
+            logger.warning("MCP server %s: sign-in renewal event not sent", server.slug)
+
+    def _access_token(self, server: McpServer) -> str:
         sid = store_id(server.slug)
         snap = self.store.snapshot(sid)
         record = snap.record
@@ -455,7 +502,12 @@ class McpOAuth:
             return {"connected": False}
         if server.auth_kind == "bearer":
             return {"connected": record.auth_method == "bearer" and owned_by(record, server)}
-        return {"connected": record.auth_method == "oauth_mcp" and owned_by(record, server),
+        connected = record.auth_method == "oauth_mcp" and owned_by(record, server)
+        expires_at = record.meta.get("expires_at")
+        expired = expires_at is not None and expires_at <= time.time() + 60
+        needs_reauth = connected and bool(
+            record.meta.get("reauth_required") or (expired and "refresh_token" not in record.secret))
+        return {"connected": connected, "needs_reauth": needs_reauth,
                 "scope": record.meta.get("scope", ""), "connected_at": record.connected_at,
                 "refreshable": "refresh_token" in record.secret}
 
