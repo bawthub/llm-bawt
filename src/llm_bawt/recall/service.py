@@ -441,18 +441,22 @@ class RecallService:
         if evidence:
             model_calls = 1
             try:
-                while True:
+                try:
+                    raw, parsed = await self._synthesize_once(
+                        system, question, evidence, request, scope, deadline)
+                except RecallError as error:
+                    # One retry for a rejected answer, never a raw fallback:
+                    # any failure of the retry stays invalid_synthesis.
+                    if (error.code != "invalid_synthesis"
+                            or deadline - time.monotonic() < SYNTHESIS_RETRY_MIN_SECONDS):
+                        raise
+                    model_calls += 1
+                    logger.warning("recall synthesis rejected; retrying once")
                     try:
                         raw, parsed = await self._synthesize_once(
                             system, question, evidence, request, scope, deadline)
-                        break
-                    except RecallError as error:
-                        # One retry for a rejected answer, never a raw fallback.
-                        if (error.code != "invalid_synthesis" or model_calls > 1
-                                or deadline - time.monotonic() < SYNTHESIS_RETRY_MIN_SECONDS):
-                            raise
-                        model_calls += 1
-                        logger.warning("recall synthesis rejected; retrying once")
+                    except (TimeoutError, RecallError) as retry_error:
+                        raise RecallError("invalid_synthesis") from retry_error
             except (TimeoutError, RecallError) as error:
                 # Model-side failures after retrieval keep the already authorized
                 # evidence as degraded quotes (TASK-1751); policy errors stay errors.

@@ -170,6 +170,25 @@ async def test_rejected_synthesis_is_retried_once_and_can_recover():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("second", [RecallError("timeout"), RecallError("model_unavailable"),
+                                    RecallError("empty_response"), TimeoutError()])
+async def test_failed_retry_after_rejection_never_degrades_to_raw_quotes(second):
+    class BadThenFail(Model):
+        attempts = 0
+
+        async def synthesize(self, *args):
+            BadThenFail.attempts += 1
+            if BadThenFail.attempts == 1:
+                return "not json"
+            raise second
+
+    result = await RecallService([Source()], BadThenFail()).recall(request(), SCOPE)
+    assert BadThenFail.attempts == 2
+    assert result["status"] == "error" and result["error_code"] == "invalid_synthesis"
+    assert result["findings"] == [] and result["handle"] is None
+
+
+@pytest.mark.asyncio
 async def test_partial_coverage_kept_and_no_protected_rows_reach_fallback():
     good = Source(EvidenceBatch(Source().rows, withheld=1))
     bad = Source(error=RecallError("timeout"))

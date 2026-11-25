@@ -399,6 +399,36 @@ def test_fresh_recap_does_not_hide_the_named_bots_older_original(rig):
     assert set(originals) <= set(hits)
 
 
+def test_many_strong_recaps_do_not_spend_the_broad_pool(rig):
+    """Review B2: 100 high-rank recaps with every strong term must not fill the
+    broad tier's candidate cap and hide a differently worded original."""
+    public = f"auditor{uuid.uuid4().hex[:8]}"
+    session = rig.add_session(str(uuid.uuid4()), bot=public)
+    original = rig.add("Use the gateway's SFP+ port as WAN with a multigig module on the fiber plan.",
+                       at=rig.now - 70 * DAY, partition=public, session=session,
+                       author=public, author_type="bot")
+    for i in range(100):
+        rig.add(f"{public} network audit recommendation: gateway module, fiber plan ({i}).",
+                at=rig.now - 3600 - i)
+    question = f"Fiber plan and gateway SFP+ module recommendation from {public}'s network audit"
+    rows = rig.recall(question, allowed=frozenset({public}))
+    assert original in [row.id for row in rows if row.follows is None]
+
+
+def test_naming_a_bot_does_not_admit_its_one_word_replies(rig):
+    """Review B1: authorship ranks admitted answers; it never waives coverage."""
+    public = f"orchid{uuid.uuid4().hex[:8]}"
+    session = rig.add_session(str(uuid.uuid4()), bot=public)
+    answer = rig.add("Dashboard exports now write CSV nightly.", at=rig.now - 5 * DAY)
+    noise = {rig.add(f"Raised the dashboard brightness a notch ({i}).", at=rig.now - 60 * (i + 1),
+                     partition=public, session=session, author=public, author_type="bot")
+             for i in range(6)}
+    rows = rig.recall(f"{public} dashboard exports", allowed=frozenset({public}))
+    hits = [row.id for row in rows if row.follows is None]
+    assert answer in hits
+    assert not noise & set(hits)
+
+
 def test_received_deliveries_follow_the_current_allowed_policy(rig):
     query = "What did Caid say about the maintenance_model and query_bounded for TASK-1210?"
     body = "TASK-1210: maintenance_model stays unset; query_bounded caps the read."

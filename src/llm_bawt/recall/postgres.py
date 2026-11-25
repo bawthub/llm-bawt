@@ -337,6 +337,8 @@ class MessageSource(PostgresSource):
             WHERE {PUBLIC_HISTORY_AUTHORITY} {_IN_WINDOW}
               AND :allow_lexical
               AND m.content_tsv @@ to_tsquery('english', :query)
+              -- Its own pool: strong matches cannot spend the broad slots.
+              AND NOT (m.content_tsv @@ plainto_tsquery('english', :strong))
               AND NOT EXISTS (SELECT 1 FROM focused)
               AND NOT EXISTS (SELECT 1 FROM exact_topic)
               AND NOT EXISTS (SELECT 1 FROM exact_all)
@@ -357,14 +359,8 @@ class MessageSource(PostgresSource):
             SELECT c.id, c.partition, c.source_bot, c.session_id, c.timestamp, c.exact_match,
                    (m.author_entity_type = 'bot'
                     AND m.author_entity_id = ANY(CAST(:named_bots AS text[]))) AS named_author,
-                   -- A bot rarely writes its own name: its own message counts
-                   -- the question's mention of it as matched (TASK-2654).
-                   LEAST(cardinality(q.lexemes),
-                         cardinality(ARRAY(SELECT unnest(q.lexemes)
-                                     INTERSECT SELECT unnest(tsvector_to_array(m.content_tsv))))
-                         + CASE WHEN m.author_entity_type = 'bot'
-                                     AND m.author_entity_id = ANY(CAST(:named_bots AS text[]))
-                                THEN 1 ELSE 0 END) AS matched,
+                   cardinality(ARRAY(SELECT unnest(q.lexemes)
+                                     INTERSECT SELECT unnest(tsvector_to_array(m.content_tsv)))) AS matched,
                    cardinality(q.lexemes) AS possible,
                    ts_rank(m.content_tsv, to_tsquery('english', :query))
                    / (1 + GREATEST(0, LEAST(extract(epoch FROM now()), :rank_at) - c.timestamp)
