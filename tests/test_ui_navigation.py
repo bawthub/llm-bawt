@@ -28,6 +28,17 @@ STREAM = f"events:vex:{USER}"
     ("/api/chat/proxy/v1/x", None),
     ("/api?x=1", None),
     ("/tasks\nx", None),
+    ("/tasks/../voice", None),
+    ("/tasks/../api/x", None),
+    ("/tasks/%2e%2e/api", None),
+    ("/tasks/./x", None),
+    ("/tasks//x", None),
+    ("/tasks%2f..%2fapi", None),
+    ("/tasks%5capi", None),
+    ("/tasks/%ff", None),
+    ("/%61pi/x", None),
+    ("/tasks/TASK-1/", "/tasks/TASK-1/"),
+    ("/tasks?next=/../api", "/tasks?next=/../api"),
     ("", None),
     ("/" + "a" * nav.MAX_PATH, None),
 ])
@@ -83,6 +94,46 @@ def test_offered_only(monkeypatch):
 def test_no_answer_means_no_client(monkeypatch):
     outcome, _, _ = asyncio.run(_wait_with([], monkeypatch, first=0.2))
     assert outcome == "no_client"
+
+
+def test_late_ack_after_the_tool_answered_is_refused(monkeypatch):
+    """A tab replaying the event after no_client cannot claim (so cannot make) a move."""
+    async def run():
+        outcome, published, client = await _wait_with([], monkeypatch, first=0.1)
+        assert outcome == "no_client"
+        rid = published["request_id"]
+        assert not await nav.record_ack(client, request_id=rid, bot_id="vex",
+                                        user_id=USER, outcome="navigated")
+        assert await client.exists(nav.request_key(rid), nav.ack_key(rid)) == 0
+    asyncio.run(run())
+
+
+def test_late_competing_tab_after_offered_is_refused(monkeypatch):
+    async def run():
+        outcome, published, client = await _wait_with(["offered"], monkeypatch, upgrade=0.1)
+        assert outcome == "offered"
+        assert not await nav.record_ack(client, request_id=published["request_id"],
+                                        bot_id="vex", user_id=USER, outcome="navigated")
+    asyncio.run(run())
+
+
+def test_ack_landing_just_before_close_is_counted(monkeypatch):
+    """An ack accepted after the wait ended but before the close still counts."""
+    async def run():
+        monkeypatch.setattr(nav, "FIRST_ACK_SECONDS", 0.1)
+        client = fakeredis.aioredis.FakeRedis(decode_responses=True)
+        real_delete = client.delete
+        event = _event()
+
+        async def delete(*keys):
+            if keys == (nav.request_key(event["request_id"]),):
+                assert await nav.record_ack(client, request_id=event["request_id"],
+                                            bot_id="vex", user_id=USER, outcome="navigated")
+            return await real_delete(*keys)
+
+        client.delete = delete
+        assert await nav.publish_and_wait(client, event) == "navigated"
+    asyncio.run(run())
 
 
 def test_ack_refuses_another_user_bot_or_unknown_request():
