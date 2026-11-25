@@ -304,4 +304,55 @@ async def ops_quiesce_ack(status: QuiesceAckStatus, note: QuiesceAckNote = None)
     return {"recorded": True, "gate_id": gate_id}
 
 
-__all__ = ["ops_list_operations", "ops_run", "ops_job_status", "ops_quiesce_ack"]
+# ---------------------------------------------------------------------------
+# ops_catalog_edit (TASK-2630)
+# ---------------------------------------------------------------------------
+
+def _catalog_read(slug: str) -> dict:
+    from ..ops.catalog_proposals import EDITABLE
+
+    row = _get_ops_service().store.get_operation_by_slug(slug)
+    if row is None or row.soft_deleted_at is not None:
+        raise LookupError(f"no such operation: {slug}")
+    return {"slug": row.slug, "version": row.version,
+            "fields": {k: getattr(row, k) for k in sorted(EDITABLE)}}
+
+
+def _catalog_propose(items: list, reason: str, bot_id: str) -> dict:
+    from ..ops import catalog_proposals
+
+    return catalog_proposals.propose(_get_ops_service().store, items=items, reason=reason,
+                                     proposed_by=bot_id)
+
+
+@mcp.tool(name="ops_catalog_edit")
+async def ops_catalog_edit(
+    action: Annotated[str, Field(description="read|propose")],
+    slug: Annotated[str | None, Field(description="read: the operation to read")] = None,
+    items: Annotated[list[dict] | None, Field(description=(
+        "propose: [{slug, expect_version, changes: {field: new value}}]; one batch"))] = None,
+    reason: Annotated[str | None, Field(description="propose: one line the user sees")] = None,
+) -> dict:
+    """Propose ops catalog edits for the user to approve; you never apply them.
+
+    ``read`` returns an operation's version and editable fields. ``propose``
+    records one batch of exact changes against the versions you read; the user
+    approves or rejects the whole batch. A moved version makes it stale:
+    read again and propose again.
+    """
+    if action == "read":
+        if not slug:
+            raise ValueError("read needs slug")
+        return await asyncio.to_thread(_catalog_read, slug)
+    if action != "propose":
+        raise ValueError("action must be read or propose")
+    # Identity comes only from the signed per-turn capability, never from args.
+    turn = await asyncio.to_thread(current_task_turn_context)
+    if not turn.bot_id:
+        raise PermissionError("proposals need a bot turn")
+    result = await asyncio.to_thread(_catalog_propose, items or [], reason or "", turn.bot_id)
+    result["next"] = "The user approves in Approvals; you are not notified. Do not apply it yourself."
+    return result
+
+
+__all__ = ["ops_list_operations", "ops_run", "ops_job_status", "ops_quiesce_ack", "ops_catalog_edit"]

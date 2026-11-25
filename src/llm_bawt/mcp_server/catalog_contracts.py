@@ -133,6 +133,7 @@ TOOL_SUMMARIES: dict[str, str] = {
     "host_access_list": "List up to 25 registered SSH hosts and recorded login outcomes for this installation. Trusted turn required. No probe; verification is historical, not live reachability or permission. Unmanaged SSH is not listed.",
     "ops_list_operations": "List ops before ops_run; slug= gives its schema; include_disabled grants no run permission.",
     "ops_run": "Run a discovered op with validated args and idempotency_key. Approval/queued is not success; verify ops_job_status and target health. Never bypass a denial.",
+    "ops_catalog_edit": "read an op's version and editable fields; propose one batch of exact changes for the user to approve. You never apply; stale needs re-read.",
     "ops_job_status": "Read-only ops job state and exit code; the reconciler records progress. output_tail_bytes: bounded output.",
     # TASK-2121: the user required their "finished" definition verbatim in this
     # description; it is the one tool exempt from the 100-token cap.

@@ -183,6 +183,44 @@ def enable_operation(slug: str, body: EnableRequest | None = None):
     return row.to_api(include_script=False)
 
 
+# TASK-2630: bots propose catalog edits (MCP ops_propose_catalog_edit); a
+# person decides through BawtHub's admin check, which adds the bearer.
+
+class ProposalDecision(BaseModel):
+    model_config = {"extra": "forbid", "strict": True}
+    approve: bool
+    actor: str = Field(..., min_length=1, max_length=128)
+
+
+@router.get("/v1/ops/catalog-proposals", tags=["Ops"])
+def list_catalog_proposals(status: Literal["pending", "approved", "rejected", "stale", "partial"] | None = "pending",
+                           limit: int = Query(50, ge=1, le=200)):
+    from ...ops import catalog_proposals
+    store = _store()
+    if status == "partial":
+        # Mixed batches have no single row status; filter after grouping.
+        rows = [b for b in catalog_proposals.list_batches(store, status=None, limit=limit)
+                if b["status"] == "partial"]
+    else:
+        rows = catalog_proposals.list_batches(store, status=status, limit=limit)
+    return {"batches": rows}
+
+
+@router.post("/v1/ops/catalog-proposals/{batch_id}/decide", tags=["Ops"], dependencies=_SERVICE)
+def decide_catalog_proposal(batch_id: str, body: ProposalDecision):
+    from ...ops import catalog_proposals
+    store = _store()
+    try:
+        return catalog_proposals.decide(store, batch_id=batch_id, decided_by=body.actor,
+                                        approve=body.approve)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @router.get("/v1/ops/catalog-drift", tags=["Ops"])
 def catalog_drift():
     """Where live catalog rows differ from the code seeds. Read-only (TASK-1861)."""
