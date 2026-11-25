@@ -426,8 +426,58 @@ def test_renewal_event_falls_back_to_the_server_editor(store, monkeypatch):
     oauth = oauth_for(store, FakeRemote())
     record = ConnectionRecord(provider=store_id("tools"), status="connected", meta={})
     oauth._announce(replace(SERVER, updated_by="owner-1"), record, "warning", "x")
-    oauth._announce(SERVER, record, "warning", "x")  # nobody recorded: nothing to address
-    assert [e["user_id"] for e in appended] == ["owner-1"]
+    from llm_bawt import default_user
+    monkeypatch.setattr(default_user, "default_user_id", lambda: "")
+    oauth._announce(SERVER, record, "warning", "x")  # nobody recorded or configured: nothing to address
+    monkeypatch.setattr(default_user, "default_user_id", lambda: "default-1")
+    oauth._announce(SERVER, record, "warning", "x")  # a connection from before owners were recorded
+    assert [e["user_id"] for e in appended] == ["owner-1", "default-1"]
+
+
+def _overlap(store, monkeypatch, first_status):
+    """Two callers renew one expired token; the second's request starts before the first finishes."""
+    remote = FakeRemote()
+    oauth = oauth_for(store, remote)
+    announced = []
+    monkeypatch.setattr(oauth, "_announce", lambda server, record, tone, summary: announced.append(tone))
+    sign_in(oauth)
+    _expire(store)
+    real = oauth._http
+    outcome = {}
+
+    def overlapping(server):
+        monkeypatch.setattr(oauth, "_http", real)
+        remote.refresh_status = first_status
+        try:
+            outcome["first"] = oauth.access_token(SERVER)
+        except IntegrationError as exc:
+            outcome["first"] = str(exc)
+        remote.refresh_status = 400 if first_status == 200 else 200
+        return real(server)
+
+    monkeypatch.setattr(oauth, "_http", overlapping)
+    try:
+        outcome["second"] = oauth.access_token(SERVER)
+    except IntegrationError as exc:
+        outcome["second"] = str(exc)
+    return oauth, outcome, announced
+
+
+def test_a_success_commits_over_a_concurrent_failure_marker(store, monkeypatch):
+    oauth, outcome, announced = _overlap(store, monkeypatch, first_status=400)
+    assert outcome == {"first": "reauthorization_required", "second": "access-2"}
+    saved = store.load(store_id("tools"))
+    assert saved.secret["access_token"] == "access-2" and saved.secret["refresh_token"] == "refresh-2"
+    assert oauth.status(SERVER)["needs_reauth"] is False
+    assert announced == ["warning", "success"]
+
+
+def test_a_failure_after_a_concurrent_success_leaves_it_alone(store, monkeypatch):
+    oauth, outcome, announced = _overlap(store, monkeypatch, first_status=200)
+    assert outcome["first"] == "access-2" and outcome["second"] == "reauthorization_required"
+    assert store.load(store_id("tools")).secret["access_token"] == "access-2"
+    assert oauth.status(SERVER)["needs_reauth"] is False
+    assert announced == []
 
 
 def test_a_late_renewal_failure_never_flags_a_newer_sign_in(store, monkeypatch):

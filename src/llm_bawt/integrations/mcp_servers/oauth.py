@@ -425,9 +425,13 @@ class McpOAuth:
         self._announce(server, record, "warning", f"{server.name}: sign in again to keep using its tools")
 
     def _announce(self, server: McpServer, record: ConnectionRecord, tone: str, summary: str) -> None:
-        """One live event to whoever signed in (else the server's last editor), best effort."""
+        """One live event to whoever signed in, else the server's last editor, else the
+        deployment's configured default user (connections made before either was recorded).
+        Best effort; the page also refreshes on resync."""
+        from ...default_user import default_user_id
+
         engine = getattr(getattr(self.store, "_store", None), "engine", None)
-        owner = record.meta.get("owner") or server.updated_by
+        owner = record.meta.get("owner") or server.updated_by or default_user_id()
         if engine is None or not owner:
             return
         try:
@@ -479,18 +483,33 @@ class McpOAuth:
         token = _json(response)
         if not token or not token.get("access_token"):
             raise IntegrationError("server_unreachable")
-        record.secret = {**record.secret, "access_token": token["access_token"],
-                         **({"refresh_token": token["refresh_token"]} if token.get("refresh_token") else {})}
+        spent = (record.secret.get("access_token"), refresh)
+        fresh = {"access_token": token["access_token"],
+                 **({"refresh_token": token["refresh_token"]} if token.get("refresh_token") else {})}
         was_flagged = bool(record.meta.get("reauth_required"))
+        record.secret = {**record.secret, **fresh}
         record.meta = {k: v for k, v in record.meta.items() if k != "reauth_required"}
         record.meta["expires_at"] = _expires_at(token)
         if not self.store.replace(sid, snap, record):
-            # A concurrent refresher won; with rotating refresh tokens only its result is valid.
-            winner = self.store.load(sid)
-            if (winner and winner.status == "connected" and winner.auth_method == "oauth_mcp"
-                    and owned_by(winner, server) and winner.secret.get("access_token")):
+            now = self.store.snapshot(sid)
+            winner = now.record
+            if not (winner and winner.status == "connected" and winner.auth_method == "oauth_mcp"
+                    and owned_by(winner, server)):
+                raise IntegrationError("reauthorization_required")
+            if (winner.secret.get("access_token"), winner.secret.get("refresh_token")) == spent:
+                # Only a concurrent failure's marker changed: this renewal still holds the
+                # live credential, so it commits over the marker (once more, still CAS).
+                was_flagged = was_flagged or bool(winner.meta.get("reauth_required"))
+                record.meta = {**{k: v for k, v in winner.meta.items() if k != "reauth_required"},
+                               "expires_at": record.meta["expires_at"]}
+                record.secret = {**winner.secret, **fresh}
+                if not self.store.replace(sid, now, record):
+                    raise IntegrationError("reauthorization_required")
+            elif winner.secret.get("access_token"):
+                # A concurrent refresh or sign-in won; with rotating refresh tokens only its result is valid.
                 return winner.secret["access_token"]
-            raise IntegrationError("reauthorization_required")
+            else:
+                raise IntegrationError("reauthorization_required")
         if was_flagged:
             self._announce(server, record, "success", f"{server.name}: sign-in renewed")
         return token["access_token"]
