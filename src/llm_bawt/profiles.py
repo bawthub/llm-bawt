@@ -391,7 +391,28 @@ class ProfileManager:
         # Ensure profile exists
         self.get_or_create_profile(entity_type, entity_id)
         return self.update_profile(entity_type, entity_id, display_name=display_name)
-    
+
+    def fill_display_name_if_empty(self, entity_type: EntityType, entity_id: str, display_name: str) -> bool:
+        """Set display_name only where it is still blank, in one conditional UPDATE.
+
+        A name saved concurrently (e.g. from Settings) is never overwritten.
+        Returns whether this call filled it.
+        """
+        entity_id = entity_id.lower().strip()
+        display_name = display_name.strip()[:100]
+        if not display_name:
+            return False
+        column = EntityProfile.display_name
+        with Session(self.engine) as session:
+            result = session.exec(
+                update(EntityProfile)
+                .where(EntityProfile.entity_type == entity_type, EntityProfile.entity_id == entity_id)
+                .where((column.is_(None)) | (text("trim(display_name) = ''")))
+                .values(display_name=display_name, updated_at=datetime.now(timezone.utc))
+            )
+            session.commit()
+            return bool(result.rowcount)
+
     # =========================================================================
     # Attribute CRUD
     # =========================================================================

@@ -53,6 +53,31 @@ def test_existing_display_name_is_never_replaced(manager):
     assert manager.get_profile(U, "sample").display_name == "Sam"
 
 
+def test_settings_edit_committed_mid_save_is_kept(manager, monkeypatch):
+    manager.get_or_create_profile(U, "sample")
+    settings = ProfileManager.__new__(ProfileManager)
+    settings.engine = manager.engine
+    original = manager.set_attribute
+
+    def set_then_settings_edit(*args, **kwargs):
+        # The name was blank when this save began; Settings commits Sam before the fill runs.
+        result = original(*args, **kwargs)
+        settings.update_profile(U, "sample", display_name="Sam")
+        return result
+
+    monkeypatch.setattr(manager, "set_attribute", set_then_settings_edit)
+    set_name("sample", "Avery")
+    assert manager.get_profile(U, "sample").display_name == "Sam"
+
+
+def test_blank_display_name_counts_as_empty(manager):
+    manager.get_or_create_profile(U, "sample")
+    manager.update_profile(U, "sample", display_name="   ")
+    assert manager.fill_display_name_if_empty(U, "sample", "Avery") is True
+    assert manager.fill_display_name_if_empty(U, "sample", "Other") is False
+    assert manager.get_profile(U, "sample").display_name == "Avery"
+
+
 def test_other_keys_and_categories_leave_display_name_alone(manager):
     manager.get_or_create_profile(U, "sample")
     set_name("sample", "Avery", key="nickname")

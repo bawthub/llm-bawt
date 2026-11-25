@@ -99,11 +99,9 @@ async def profile(
         if entity == EntityType.USER and selected == AttributeCategory.FACT and key.strip().lower() == "name":
             # A stored legacy summary hides attributes in the default render,
             # but display_name always shows, so a confirmed name fills it if
-            # empty (TASK-2643). An existing display name is never replaced.
-            profile = manager.get_profile(EntityType.USER, entity_id)
-            name = value.strip()[:100]
-            if profile is not None and name and not (profile.display_name or "").strip():
-                manager.set_display_name(EntityType.USER, entity_id, name)
+            # empty (TASK-2643). The fill is one conditional UPDATE, so an
+            # existing or concurrently saved display name is never replaced.
+            manager.fill_display_name_if_empty(EntityType.USER, entity_id, value)
         return f"Set [{selected}] {key} = {value}"
     if action == "delete":
         if not key:
