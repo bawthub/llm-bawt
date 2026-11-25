@@ -1180,10 +1180,10 @@ a commit, dispatch the publisher for it, wait for the run, then file the deploy
 with that run's ID and the digest its receipt reports:
 
 ```sh
-gh workflow run publish-tenant-voice.yml -R bawthub/bawthub -f sha=<SHA on main>
-gh run list -R bawthub/bawthub -w publish-tenant-voice.yml -e workflow_dispatch -L 1
-gh run watch <run-id> -R bawthub/bawthub --exit-status
-gh run download <run-id> -R bawthub/bawthub -n pocket-tts-publish-receipt-<attempt>
+gh workflow run publish-tenant-voice.yml -R bawthub/bawthub-private -f sha=<SHA on main>
+gh run list -R bawthub/bawthub-private -w publish-tenant-voice.yml -e workflow_dispatch -L 1
+gh run watch <run-id> -R bawthub/bawthub-private --exit-status
+gh run download <run-id> -R bawthub/bawthub-private -n pocket-tts-publish-receipt-<attempt>
 ```
 
 The workflow refuses a SHA its canonical branch doesn't contain. Any commit on
