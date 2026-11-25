@@ -113,21 +113,33 @@ def test_a_genuinely_ended_target_still_falls_back(rig):
 def test_unsupported_next_waits_then_reserves_one_idle_turn(rig):
     rig.bridge.forced = ["next_unsupported"]
     steering = _claim(rig)
+    assert steering.id == rig.second.id and steering.status == STEERING
     row = _steer(rig, steering)
     assert row.status == QUEUED and row.delivery_mode == "steer_rejected"
     assert row.attempt_count == 0
+    assert row.metadata["steer_generation"] == 1
     assert row.target_turn_id == rig.first.turn_id
     with rig.store.engine.begin() as conn:
         conn.execute(sa_text(
             "UPDATE inter_bot_deliveries SET available_at=now() WHERE id=:id"
         ), {"id": row.id})
     assert _claim(rig) is None
+    assert _turn_rows(rig.store, rig.second.turn_id) == 0
 
     _end_turn(rig, rig.first.turn_id)
+    # The fixture's first turn came from a delivery, which remains the FIFO
+    # head after turn end until the dispatcher settles its claim.
+    first = rig.store.get(rig.first.id)
+    settled = rig.store.mark_delivered(
+        first.id, first.claim_token or "", response_model=None, response_chars=0,
+    )
+    assert settled.status == DELIVERED
     fallback = _claim(rig)
+    assert fallback is not None
     assert fallback.id == rig.second.id and fallback.status == DISPATCHING
     assert fallback.target_turn_id == rig.second.turn_id
     assert fallback.attempt_count == 1
+    assert _turn_rows(rig.store, rig.second.turn_id) == 1
     assert _claim(rig) is None
     assert rig.bridge.request_ids == [SteerGeneration.of(steering).request_id]
 
