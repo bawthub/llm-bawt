@@ -357,7 +357,9 @@ async def test_catalog_token_budgets():
     # bounded agent-history read used by the app's MCP client (schema only, no
     # description text). Measured 19,901 (+42).
     # TASK-2569: host_access_list has no scope or execution arguments (+83).
-    assert total <= 19984, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-2625: optional playground_send replaces=<artifact id> revises a sent
+    # artifact in place (schema only, no description text). Measured 20,002.
+    assert total <= 20002, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 
