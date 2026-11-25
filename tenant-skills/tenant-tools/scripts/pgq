@@ -7,7 +7,8 @@
 # command line — psql reads it from a pgpass file or from this process env.
 #
 # Tenant-parameterized: host/port/user/db come from the standard LLM_BAWT_POSTGRES_*
-# env (injected into the bridge via the app .env), defaulting to the in-stack
+# env (injected into the bridge via the app .env), then standard PGHOST/PGPORT/
+# PGUSER/PGDATABASE, then the in-stack
 # `postgres` service and the `llm_bawt` database. A single tenant DB backs both
 # the app and the frontend, so an optional leading {llm-bawt|bawthub} target is
 # accepted for muscle-memory/compat but maps to the same DB.
@@ -23,10 +24,10 @@ case "${1:-}" in
   llm-bawt|bawthub) shift ;;
 esac
 
-host="${LLM_BAWT_POSTGRES_HOST:-postgres}"
-port="${LLM_BAWT_POSTGRES_PORT:-5432}"
-user="${LLM_BAWT_POSTGRES_USER:-llm_bawt}"
-db="${LLM_BAWT_POSTGRES_DATABASE:-llm_bawt}"
+host="${LLM_BAWT_POSTGRES_HOST:-${PGHOST:-postgres}}"
+port="${LLM_BAWT_POSTGRES_PORT:-${PGPORT:-5432}}"
+user="${LLM_BAWT_POSTGRES_USER:-${PGUSER:-llm_bawt}}"
+db="${LLM_BAWT_POSTGRES_DATABASE:-${PGDATABASE:-llm_bawt}}"
 
 # Credential resolution (first hit wins; none touches the command line):
 #   1. $PGPASSFILE / $PGPASSWORD already in env
