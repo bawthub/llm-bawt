@@ -46,9 +46,11 @@ def test_card_lines_cap_and_title_trim():
 
 
 def test_fleet_line():
-    assert acn.fleet_line(ROWS) == "al TASK-2 W1; vex TASK-7 W1"
-    assert acn.fleet_line([row(1, "WAITING", bot="nova")]) == "nova idle W1"
-    assert acn.fleet_line([]) == "no open assigned cards"
+    assert acn.fleet_line(ROWS, {"al": "idle", "vex": "reserved"}) == "al idle TASK-2 W1; vex reserved TASK-7 W1"
+    waiting = [row(1, "WAITING", bot="worker")]
+    assert acn.fleet_line(waiting, {"worker": "busy"}) == "worker busy — W1"
+    assert acn.fleet_line(waiting, {}) == "worker unknown — W1"
+    assert acn.fleet_line([], {}) == "no open assigned cards"
 
 
 def test_render_default_body_coordinator_and_not():
@@ -58,7 +60,32 @@ def test_render_default_body_coordinator_and_not():
     assert "- TASK-7 IN_PROGRESS" in text and "Fleet" not in text
     cards, fleet = acn.render([], "snark", coordinator=True)
     text = render_template(ASSIGNED_CARDS, {"cards": cards, "fleet": fleet})
-    assert "- none\nFleet (bot, IN_PROGRESS card, W=waiting): no open assigned cards\n" in text
+    assert "- none\nFleet (bot, live turn, IN_PROGRESS card, W=waiting): no open assigned cards\n" in text
+
+
+@pytest.mark.parametrize("unavailable", [False, True])
+def test_coordinator_reads_live_turns_for_visible_board_bots(stubs, monkeypatch, unavailable):
+    from llm_bawt.bot_tags.facade import TagSnapshot
+    from llm_bawt.service.turn_admission import TargetState
+
+    rows = [row(12, "WAITING", bot="worker"), row(13, "QUEUED", bot="private-worker")]
+    tags = TagSnapshot(tags={"worker": frozenset(), "private-worker": frozenset({"private"})})
+    monkeypatch.setattr(acn, "board_rows", lambda: rows)
+    monkeypatch.setattr(acn, "is_coordinator", lambda *_: True)
+    monkeypatch.setattr("llm_bawt.bot_tags.facade.BotTags.snapshot", lambda _: tags)
+    monkeypatch.setattr(acn, "render_block", lambda _bot, cards, fleet: cards + fleet)
+
+    def peek(_engine, bots):
+        assert bots == ["worker"]
+        if unavailable:
+            raise RuntimeError("turn log unavailable")
+        return {"worker": TargetState(({"status": "streaming"},))}
+
+    monkeypatch.setattr("llm_bawt.service.turn_admission.peek_targets", peek)
+    out = acn.assigned_cards_notice(object(), bot_id="coordinator", session_id="s", decision=object())
+    status = "unknown" if unavailable else "busy"
+    assert out is not None and f"worker {status} — W1" in out
+    assert "private-worker unknown — W0" in out
 
 
 def test_own_card_after_many_others_is_kept():

@@ -66,13 +66,16 @@ def card_lines(rows: list[dict], bot_id: str) -> list[str]:
     return lines
 
 
-def fleet_line(rows: list[dict]) -> str:
-    """Per bot with open cards: its IN_PROGRESS card (or "idle") and WAITING count."""
+def _fleet_rows(rows: list[dict]):
+    return (r for r in rows if isinstance(r.get("agentBotId"), str) and r["agentBotId"]
+            and not r.get("archivedAt") and r.get("status") in STATUS_ORDER)
+
+
+def fleet_line(rows: list[dict], activity: dict[str, str]) -> str:
+    """Show live turn activity independently of cards and waiting counts."""
     bots: dict[str, dict[str, Any]] = {}
-    for r in rows:
-        bot = r.get("agentBotId")
-        if not bot or r.get("archivedAt") or r.get("status") not in STATUS_ORDER:
-            continue
+    for r in _fleet_rows(rows):
+        bot = r["agentBotId"]
         entry = bots.setdefault(bot, {"active": [], "waiting": 0})
         if r["status"] == "IN_PROGRESS":
             entry["active"].append(str(r.get("shortId")))
@@ -81,16 +84,18 @@ def fleet_line(rows: list[dict]) -> str:
     parts = []
     for bot in sorted(bots):
         entry = bots[bot]
-        active = "+".join(sorted(entry["active"])) or "idle"
-        parts.append(f"{bot} {active} W{entry['waiting']}")
+        cards = "+".join(sorted(entry["active"])) or "—"
+        parts.append(f"{bot} {activity.get(bot, 'unknown')} {cards} W{entry['waiting']}")
     return "; ".join(parts) if parts else "no open assigned cards"
 
 
-def render(rows: list[dict], bot_id: str, coordinator: bool) -> tuple[str, str]:
+def render(rows: list[dict], bot_id: str, coordinator: bool, *,
+           activity: dict[str, str] | None = None) -> tuple[str, str]:
     """``(cards, fleet)`` placeholder values; fleet is empty for non-coordinators."""
     lines = card_lines(rows, bot_id)
     cards = "\n".join(lines) if lines else "- none"
-    fleet = f"\nFleet (bot, IN_PROGRESS card, W=waiting): {fleet_line(rows)}" if coordinator else ""
+    fleet = (f"\nFleet (bot, live turn, IN_PROGRESS card, W=waiting): {fleet_line(rows, activity or {})}"
+             if coordinator else "")
     return cards, fleet
 
 
@@ -128,6 +133,24 @@ def is_coordinator(engine, bot_id: str) -> bool:
         return grants.holds_capability(conn, bot_id, FLEET_CAPABILITY)
 
 
+def fleet_activity(engine, rows: list[dict]) -> dict[str, str]:
+    """One advisory admission snapshot, only for visible bots on this board."""
+    from .bot_tags.facade import BotTags
+    from .service.turn_admission import peek_targets
+
+    bots = {row["agentBotId"] for row in _fleet_rows(rows)}
+    if not bots:
+        return {}
+    try:
+        tags = BotTags(engine).snapshot()
+        visible = [bot for bot in sorted(bots & tags.searchable_bots) if not tags.excluded_reason(bot)]
+        labels = {"executing": "busy", "reserved": "reserved", "ambiguous": "busy (ambiguous)", "idle": "idle"}
+        return {bot: labels[state.kind] for bot, state in peek_targets(engine, visible).items()} if visible else {}
+    except Exception:
+        logger.warning("Fleet turn state unavailable; keeping the task list", exc_info=True)
+        return {}
+
+
 def render_block(bot_id: str, cards: str, fleet: str) -> str:
     from .prompt_registry import PromptResolver, get_prompt_resolver, render_template
 
@@ -156,7 +179,10 @@ def assigned_cards_notice(engine, *, bot_id: str | None, session_id: str | None,
 
         if is_protected(bot_id, engine):
             return None
-        cards, fleet = render(board_rows(), bot_id, is_coordinator(engine, bot_id))
+        rows = board_rows()
+        coordinator = is_coordinator(engine, bot_id)
+        activity = fleet_activity(engine, rows) if coordinator else None
+        cards, fleet = render(rows, bot_id, coordinator, activity=activity)
         return render_block(bot_id, cards, fleet)
     except Exception:
         logger.warning("assigned cards block failed for %s session %s; the turn continues without it",
