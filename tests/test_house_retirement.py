@@ -151,7 +151,8 @@ def test_json_cli_reuses_stream_rules_for_a_stopped_house(monkeypatch, capsys, p
     })))
     monkeypatch.setattr("llm_bawt.utils.config.Config",
                         lambda: SimpleNamespace(REDIS_URL="redis://fixture/0"))
-    monkeypatch.setattr("llm_bawt.utils.db.get_shared_engine", lambda config: store.engine)
+    monkeypatch.setattr("llm_bawt.runtime_settings.BotProfileStore",
+                        lambda config: SimpleNamespace(engine=store.engine))
     monkeypatch.setattr(redis.Redis, "from_url", lambda *args, **kwargs: client)
     monkeypatch.setattr("llm_bawt.house_pool_config.configured_pool", lambda: [
         {"id": "h3", "harness": "claude-code", "preview_host": "https://h3.example.test"},
@@ -161,3 +162,50 @@ def test_json_cli_reuses_stream_rules_for_a_stopped_house(monkeypatch, capsys, p
     assert ("error" in result) == pending
     with store.engine.connect() as conn:
         assert reservations(conn) == ({} if pending else {"h3": "fixture-run"})
+
+
+def test_json_cli_bootstraps_house_retirements_before_first_read(monkeypatch, capsys):
+    """TASK-2637: on a fresh tenant the host runs this CLI as soon as the app
+    reports healthy, before anything has created house_retirements. The CLI
+    must run the profile store's bootstrap itself rather than rely on the app."""
+    import redis
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.exc import OperationalError
+    from sqlalchemy.pool import StaticPool
+    from llm_bawt.house_reconcile_runtime import main
+    from llm_bawt.house_retirement import ensure_schema
+    from tests.test_house_tenancy import FakeRedis
+
+    engine = create_engine("sqlite://", poolclass=StaticPool,
+                           connect_args={"check_same_thread": False})
+    with engine.begin() as conn:  # bot_profiles exists (frontend migrations); retirements does not
+        conn.execute(text("CREATE TABLE bot_profiles (slug TEXT PRIMARY KEY, bot_type TEXT, "
+                          "agent_backend TEXT, house TEXT, house_pinned BOOLEAN)"))
+    with pytest.raises(OperationalError, match="house_retirements"):
+        operate(SimpleNamespace(engine=engine), state(), "reserve", ["h1"], "run-0")
+
+    bootstrapped = []
+
+    class ProfileStore:  # stands in for BotProfileStore's real bootstrap
+        def __init__(self, config):
+            with engine.begin() as conn:
+                ensure_schema(conn)
+            bootstrapped.append(config)
+            self.engine = engine
+
+    client = FakeRedis()
+    client.close = lambda: None
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({
+        "action": "reserve", "houses": ["h3"], "reconcile_id": "fixture-run",
+    })))
+    monkeypatch.setattr("llm_bawt.utils.config.Config",
+                        lambda: SimpleNamespace(REDIS_URL="redis://fixture/0"))
+    monkeypatch.setattr("llm_bawt.runtime_settings.BotProfileStore", ProfileStore)
+    monkeypatch.setattr(redis.Redis, "from_url", lambda *args, **kwargs: client)
+    monkeypatch.setattr("llm_bawt.house_pool_config.configured_pool", lambda: [
+        {"id": "h3", "harness": "claude-code"},
+    ])
+    assert main() == 0, capsys.readouterr().out
+    assert bootstrapped
+    with engine.connect() as conn:
+        assert reservations(conn) == {"h3": "fixture-run"}
