@@ -28,34 +28,87 @@ def test_switch_ships_on_and_is_bot_overridable():
     assert set(definition.applies_to) == {"chat", "agent"}
 
 
-def test_bot_row_wins_over_global(monkeypatch):
-    import llm_bawt.runtime_setting_resolution as resolution
+class FakeStore:
+    """RuntimeSettingsStore.get_raw_value_json stand-in: rows by (scope, id)."""
 
+    def __init__(self, rows=None, engine=True):
+        self.rows, self.engine = rows or {}, engine
+
+    def get_raw_value_json(self, scope_type, scope_id, key):
+        if not self.engine:
+            raise RuntimeError("Runtime settings DB unavailable")
+        assert key == "memory_system_enabled"
+        return self.rows.get((scope_type, scope_id))
+
+
+@pytest.fixture
+def store(monkeypatch):
+    from llm_bawt.service import dependencies
+
+    holder = {"store": FakeStore()}
     monkeypatch.setattr(memory_switch, "_override", None)
-    monkeypatch.setattr(resolution, "resolve_global_runtime_setting", lambda *a, **k: False)
-    monkeypatch.setattr(resolution, "resolve_bot_runtime_setting",
-                        lambda config, bot_id, key, fallback=None: bot_id == "kept")
+    monkeypatch.setattr(dependencies, "get_runtime_settings_store", lambda config: holder["store"])
+    return holder
+
+
+def test_absent_rows_default_on(store):
+    assert memory_switch.memory_system_enabled(object(), "sample") is True
+
+
+def test_bot_row_wins_over_global(store):
+    store["store"] = FakeStore({("global", "*"): "false", ("bot", "kept"): "true"})
     assert memory_switch.memory_system_enabled(object()) is False
-    assert memory_switch.memory_system_enabled(object(), "kept") is True
+    assert memory_switch.memory_system_enabled(object(), "Kept") is True
     assert memory_switch.memory_system_enabled(object(), "other") is False
 
 
-def test_unreadable_setting_counts_as_off(monkeypatch):
-    import llm_bawt.runtime_setting_resolution as resolution
+@pytest.mark.parametrize("rows,engine", [
+    ({}, False),                                 # store has no engine
+    ({("global", "*"): "not json"}, True),       # undecodable row
+    ({("global", "*"): '"yes"'}, True),          # truthy non-boolean
+    ({("bot", "sample"): "1"}, True),            # non-boolean bot row
+])
+def test_unreadable_or_invalid_counts_as_off(store, rows, engine):
+    store["store"] = FakeStore(rows, engine)
+    assert memory_switch.memory_system_enabled(object(), "sample") is False
 
-    def boom(*args, **kwargs):
-        raise RuntimeError("db down")
 
-    monkeypatch.setattr(memory_switch, "_override", None)
-    monkeypatch.setattr(resolution, "resolve_global_runtime_setting", boom)
-    assert memory_switch.memory_system_enabled(object()) is False
+@pytest.mark.anyio
+async def test_approved_call_uses_recorded_caller(store, monkeypatch):
+    from llm_bawt.mcp_server.approval_interceptor import ApprovalAwareFastMCP, ApprovedCallerContext
+
+    store["store"] = FakeStore({("bot", "off-bot"): "false", ("global", "*"): "false",
+                                ("bot", "kept"): "true"})
+    reached = []
+
+    async def fake_approved(self, name, arguments, **kwargs):
+        reached.append(kwargs["caller_context"].bot_id)
+        from mcp.types import CallToolResult
+        return CallToolResult(content=[])
+
+    monkeypatch.setattr(ApprovalAwareFastMCP, "call_approved_tool", fake_approved)
+    with pytest.raises(ToolError, match="memory system is disabled"):
+        await mcp.call_approved_tool("memory_store", {}, expected_invocation_hash="h",
+                                     caller_context=ApprovedCallerContext(bot_id="off-bot"))
+    await mcp.call_approved_tool("memory_store", {}, expected_invocation_hash="h",
+                                 caller_context=ApprovedCallerContext(bot_id="kept"))
+    assert reached == ["kept"]
 
 
-def test_memory_tool_names():
-    assert memory_switch.is_memory_tool("memory_search_all")
-    assert memory_switch.is_memory_tool("facts_extract")
-    assert not memory_switch.is_memory_tool("working_memory_list")
-    assert not memory_switch.is_memory_tool("context_recall")
+def test_off_skips_memory_maintenance(memory_off):
+    from types import SimpleNamespace
+
+    from llm_bawt.service.background_tasks import BackgroundTasksMixin
+
+    processor = BackgroundTasksMixin()
+    processor.config = SimpleNamespace()
+    processor.get_memory_client = lambda bot_id: pytest.fail("must not reach memory client")
+    task = SimpleNamespace(bot_id="sample", payload={})
+    assert processor._process_maintenance(task)["skipped"] is True
+
+
+def test_maintenance_tool_is_a_memory_tool():
+    assert memory_switch.is_memory_tool("system_run_maintenance")
 
 
 @pytest.mark.anyio

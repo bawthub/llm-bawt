@@ -152,6 +152,10 @@ class BackgroundTasksMixin:
         bot_id = task.bot_id
         payload = task.payload
 
+        from llm_bawt.memory_switch import memory_system_enabled
+        if not memory_system_enabled(self.config, bot_id):
+            return {"skipped": True, "reason": "Memory system disabled (memory_system_enabled=false)"}
+
         memory_client = self.get_memory_client(bot_id)
         if not memory_client:
             return {"error": "Memory client unavailable"}

@@ -11,6 +11,7 @@ import logging
 import threading
 
 from ..memory.embedding_repair import EmbeddingRepair
+from ..memory_switch import memory_system_enabled
 from ..runtime_setting_resolution import resolve_global_runtime_setting
 
 log = logging.getLogger(__name__)
@@ -34,6 +35,8 @@ def run_pass(config, engine, stop: threading.Event) -> bool:
     for bot_id in sorted(counts):
         if stop.is_set():
             break
+        if not memory_system_enabled(config, bot_id):  # TASK-2653: no writes while off
+            continue
         result = repair.repair_bot(bot_id, stop=stop)
         if result.get("excluded") or result["busy"]:
             continue

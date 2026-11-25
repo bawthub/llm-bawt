@@ -11,6 +11,7 @@ systems and are not affected.
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -18,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 SETTING_KEY = "memory_system_enabled"
 # Tools that read or write the ``memories`` table, plus extraction into it.
-EXTRA_MEMORY_TOOLS = frozenset({"facts_extract"})
+EXTRA_MEMORY_TOOLS = frozenset({"facts_extract", "system_run_maintenance"})
 # Test seam only: the unit suite pins this so memory tests run without a DB.
 _override: bool | None = None
 
@@ -27,22 +28,36 @@ def is_memory_tool(name: str) -> bool:
     return name.startswith("memory_") or name in EXTRA_MEMORY_TOOLS
 
 
-def memory_system_enabled(config: Any = None, bot_id: str | None = None) -> bool:
-    """Resolve the switch for ``bot_id`` (global when None); unreadable counts as off."""
-    from .runtime_setting_resolution import (
-        resolve_bot_runtime_setting,
-        resolve_global_runtime_setting,
-    )
+def _stored_bool(store: Any, scope_type: str, scope_id: str) -> bool | None:
+    """The stored boolean, None when the row is absent; anything else raises."""
+    text = store.get_raw_value_json(scope_type, scope_id, SETTING_KEY)
+    if text is None:
+        return None
+    value = json.loads(text)
+    if not isinstance(value, bool):
+        raise ValueError(f"{SETTING_KEY} must be a JSON boolean")
+    return value
 
+
+def memory_system_enabled(config: Any = None, bot_id: str | None = None) -> bool:
+    """Resolve bot row > global row > on. Fails closed: an unavailable store,
+    undecodable row or non-boolean value counts as off."""
     if _override is not None:
         return _override
     if config is None:
         from .utils.config import Config
         config = Config()
     try:
-        if bot_id:
-            return bool(resolve_bot_runtime_setting(config, bot_id, SETTING_KEY, True))
-        return bool(resolve_global_runtime_setting(config, SETTING_KEY, True))
+        from .service.dependencies import get_runtime_settings_store
+
+        store = get_runtime_settings_store(config)
+        slug = (bot_id or "").strip().lower()
+        if slug:
+            value = _stored_bool(store, "bot", slug)
+            if value is not None:
+                return value
+        value = _stored_bool(store, "global", "*")
+        return True if value is None else value
     except Exception:
         logger.warning("memory_system_enabled unreadable; treating memory as disabled", exc_info=True)
         return False

@@ -17,7 +17,7 @@ from mcp.types import CallToolResult, TextContent, Tool
 
 from mcp.server.mcpserver.exceptions import ToolError
 
-from llm_bawt.memory_switch import current_turn_memory_enabled, is_memory_tool
+from llm_bawt.memory_switch import current_turn_memory_enabled, is_memory_tool, memory_system_enabled
 from .approval_interceptor import ApprovalAwareFastMCP, PolicyResult
 from .catalog_contracts import TOOL_SUMMARIES, tool_description
 from .bot_access import ToolBotAccess, invocation_context
@@ -148,7 +148,11 @@ class CatalogFastMCP(ApprovalAwareFastMCP):
             return label_external_result(result, external_source(name))
 
     async def call_approved_tool(self, name, arguments, **kwargs):
-        if is_memory_tool(name) and not current_turn_memory_enabled():
+        # Approved replays run outside the original turn: resolve the switch
+        # for the server-owned caller recorded on the approval (TASK-2653).
+        caller = kwargs.get("caller_context")
+        if is_memory_tool(name) and not memory_system_enabled(
+                bot_id=getattr(caller, "bot_id", None) or None):
             raise ToolError(MEMORY_DISABLED_ERROR)
         with invocation_context(name, arguments):
             result = compact_call_result(await super().call_approved_tool(name, arguments, **kwargs))
