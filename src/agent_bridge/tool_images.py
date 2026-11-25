@@ -23,7 +23,11 @@ class ToolImageMixin:
     #: - browser_take_screenshot: Playwright screenshots.
     #: - generate_image: Grok Imagine output (TASK-599). The tool already stored
     #:   the identical raw bytes, so this re-upload dedups to the same asset.
-    _IMAGE_RESULT_TOOL_TAILS = frozenset({"browser_take_screenshot", "generate_image"})
+    #: - inspect_bawthub_tasks: read-only Tasks inspection snapshot (TASK-2642);
+    #:   without this the user sees only a placeholder, never the picture.
+    _IMAGE_RESULT_TOOL_TAILS = frozenset({
+        "browser_take_screenshot", "generate_image", "inspect_bawthub_tasks",
+    })
 
     @classmethod
     def _is_image_result_tool(cls, tool_name: str | None) -> bool:
