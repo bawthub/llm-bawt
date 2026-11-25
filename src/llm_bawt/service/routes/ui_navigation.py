@@ -20,7 +20,7 @@ async def ack_navigation(
     request_id: str,
     user: str | None = Query(None),
     bot_id: str = Body(..., embed=True, max_length=64),
-    outcome: Literal["navigated", "offered"] = Body(..., embed=True),
+    outcome: Literal["claimed", "navigated", "released", "offered"] = Body(..., embed=True),
 ):
     """Accept one tab's outcome. Unknown, expired or another user's request: 404."""
     import redis.asyncio as aioredis

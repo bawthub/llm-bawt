@@ -7,11 +7,13 @@ which pushes onto a per-request Redis list the tool is blocked on. Nothing
 polls; an unanswered request simply means no tab showed it.
 
 Outcomes: ``navigated`` (a wide tab with that bot's chat open moved its app
-pane), ``offered`` (a tab showing the chat left the user in place; the tool
-card in chat is the link) and ``no_client``.
+pane, observed after the move), ``offered`` (a tab showing the chat left the
+user in place; the tool card in chat is the link), ``unconfirmed`` (a tab
+claimed the move but never confirmed it) and ``no_client``.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -22,7 +24,14 @@ EVENT_TYPE = "ui_navigate"
 NAVIGATED = "navigated"
 OFFERED = "offered"
 NO_CLIENT = "no_client"
-CLIENT_OUTCOMES = frozenset({NAVIGATED, OFFERED})
+#: A tab claimed the request but never confirmed or released it in time.
+UNCONFIRMED = "unconfirmed"
+#: Tab acks: ``claimed`` before moving (the tab moves only if it is accepted),
+#: then ``navigated`` once the move is observed or ``released`` if the tab
+#: re-checked and left the user where they were. ``offered``: link only.
+CLAIMED = "claimed"
+RELEASED = "released"
+CLIENT_OUTCOMES = frozenset({CLAIMED, NAVIGATED, RELEASED, OFFERED})
 
 MAX_PATH = 512
 MAX_REASON = 160
@@ -30,6 +39,8 @@ MAX_REASON = 160
 #: over one that only offered the link.
 FIRST_ACK_SECONDS = 4.0
 UPGRADE_ACK_SECONDS = 1.0
+#: How long an accepted claim may take to confirm or release.
+CONFIRM_SECONDS = 2.0
 #: Request and ack keys outlive the wait so a late ack is accepted and dropped.
 KEY_TTL_SECONDS = 60
 #: Tabs ignore a replayed event older than this (stream resume after sleep).
@@ -109,23 +120,42 @@ async def publish_and_wait(client, event: dict) -> str:
                      owner_value(event["bot_id"], event["user_id"]), ex=KEY_TTL_SECONDS)
     await publish_user_event(client, event["bot_id"], event["user_id"],
                              json.dumps(event, ensure_ascii=False))
+    loop = asyncio.get_running_loop()
     outcomes: list[str] = []
-    first = await client.blpop([ack_key(request_id)], timeout=FIRST_ACK_SECONDS)
-    if first:
-        outcomes.append(first[1])
-        if first[1] != NAVIGATED:
-            upgrade = await client.blpop([ack_key(request_id)], timeout=UPGRADE_ACK_SECONDS)
-            if upgrade:
-                outcomes.append(upgrade[1])
-    # Close the request before answering. A tab claims "navigated" with its ack
-    # *before* it moves, and record_ack refuses once the request is gone, so a
-    # tab that wakes later cannot move the user after this reports no move.
-    # Acks accepted before the close are drained here and counted.
+    base_deadline = loop.time() + FIRST_ACK_SECONDS
+    claim_deadline = 0.0
+    while NAVIGATED not in outcomes:
+        deadline = base_deadline if _pending_claims(outcomes) == 0 else max(base_deadline, claim_deadline)
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            break
+        got = await client.blpop([ack_key(request_id)], timeout=remaining)
+        if not got:
+            break
+        outcomes.append(got[1])
+        if got[1] == CLAIMED:
+            claim_deadline = loop.time() + CONFIRM_SECONDS
+        else:
+            base_deadline = min(base_deadline, loop.time() + UPGRADE_ACK_SECONDS)
+    # Close the request before answering: record_ack refuses afterwards, so a
+    # tab that wakes later can't even claim it. Acks accepted before the close
+    # are drained here and counted.
     await client.delete(request_key(request_id))
     outcomes.extend(await client.lrange(ack_key(request_id), 0, -1))
     await client.delete(ack_key(request_id))
+    return _summarize(outcomes)
+
+
+def _pending_claims(outcomes: list[str]) -> int:
+    return outcomes.count(CLAIMED) - outcomes.count(RELEASED)
+
+
+def _summarize(outcomes: list[str]) -> str:
+    """Only an observed move is ``navigated``; an unresolved claim is ``unconfirmed``."""
     if NAVIGATED in outcomes:
         return NAVIGATED
+    if _pending_claims(outcomes) > 0:
+        return UNCONFIRMED
     return OFFERED if outcomes else NO_CLIENT
 
 
@@ -134,7 +164,7 @@ async def record_ack(client, *, request_id: str, bot_id: str, user_id: str, outc
 
     WATCH makes the owner check and the push atomic against the tool closing
     the request: an ack either lands before the close (and is counted) or is
-    refused, and a refused "navigated" claim means the tab must not move.
+    refused, and a refused ``claimed`` ack means the tab must not move.
     """
     from redis.exceptions import WatchError
 

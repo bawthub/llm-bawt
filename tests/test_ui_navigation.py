@@ -59,9 +59,10 @@ async def _requested(client) -> dict:
     raise AssertionError("no event published")
 
 
-async def _wait_with(acks, monkeypatch, *, first=0.5, upgrade=0.2):
+async def _wait_with(acks, monkeypatch, *, first=0.5, upgrade=0.2, confirm=0.2):
     monkeypatch.setattr(nav, "FIRST_ACK_SECONDS", first)
     monkeypatch.setattr(nav, "UPGRADE_ACK_SECONDS", upgrade)
+    monkeypatch.setattr(nav, "CONFIRM_SECONDS", confirm)
     client = fakeredis.aioredis.FakeRedis(decode_responses=True)
     event = _event()
     waiter = asyncio.create_task(nav.publish_and_wait(client, event))
@@ -89,6 +90,36 @@ def test_a_tab_that_navigated_wins_over_one_that_only_offered(monkeypatch):
 def test_offered_only(monkeypatch):
     outcome, _, _ = asyncio.run(_wait_with(["offered"], monkeypatch))
     assert outcome == "offered"
+
+
+@pytest.mark.parametrize("acks,expected", [
+    (["claimed", "navigated"], "navigated"),
+    # A tab that re-checked after its claim and stayed put: no move is claimed.
+    (["claimed", "released"], "offered"),
+    (["claimed", "released", "offered"], "offered"),
+    # A claim that never confirms is not reported as a move.
+    (["claimed"], "unconfirmed"),
+    (["offered", "claimed"], "unconfirmed"),
+])
+def test_only_an_observed_move_counts_as_navigated(monkeypatch, acks, expected):
+    outcome, _, _ = asyncio.run(_wait_with(acks, monkeypatch, first=0.3, upgrade=0.1, confirm=0.1))
+    assert outcome == expected
+
+
+def test_a_pending_claim_extends_the_wait_until_it_confirms(monkeypatch):
+    async def run():
+        monkeypatch.setattr(nav, "FIRST_ACK_SECONDS", 0.1)
+        monkeypatch.setattr(nav, "CONFIRM_SECONDS", 1.0)
+        client = fakeredis.aioredis.FakeRedis(decode_responses=True)
+        event = _event()
+        waiter = asyncio.create_task(nav.publish_and_wait(client, event))
+        published = await _requested(client)
+        rid = published["request_id"]
+        assert await nav.record_ack(client, request_id=rid, bot_id="vex", user_id=USER, outcome="claimed")
+        await asyncio.sleep(0.3)  # past FIRST_ACK_SECONDS; the claim keeps it open
+        assert await nav.record_ack(client, request_id=rid, bot_id="vex", user_id=USER, outcome="navigated")
+        assert await waiter == "navigated"
+    asyncio.run(run())
 
 
 def test_no_answer_means_no_client(monkeypatch):
@@ -179,6 +210,7 @@ def _tool(monkeypatch, outcome="navigated"):
     ("navigated", "now shows /tasks"),
     ("offered", "was not moved"),
     ("no_client", "was not moved"),
+    ("unconfirmed", "don't assume"),
 ])
 def test_tool_reports_the_outcome_for_the_signed_caller(monkeypatch, outcome, phrase):
     _caller(monkeypatch, SimpleNamespace(bot_id="vex", user_id=USER))

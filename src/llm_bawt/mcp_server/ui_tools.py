@@ -21,6 +21,8 @@ _RESULTS = {
     nav.OFFERED: "The user was not moved; your chat shows them a link to {path}.",
     nav.NO_CLIENT: "No open app window took the request; the user was not moved. "
                    "The link stays in your chat.",
+    nav.UNCONFIRMED: "An app window accepted the request but did not confirm the move; "
+                     "don't assume the user now sees {path}. The link stays in your chat.",
 }
 
 
