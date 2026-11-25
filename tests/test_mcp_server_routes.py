@@ -46,7 +46,8 @@ def test_each_server_has_its_own_sign_in_cookie(monkeypatch, client):
     seen = {}
 
     class Flow:
-        def start(self, server, origin, return_to):
+        def start(self, server, origin, return_to, owner=None):
+            seen["owner"] = owner
             return {"authorization_url": "https://auth.example.net/authorize", "browser": "b-" + server.slug}
 
         def finish(self, server, state, browser, code, error, iss):
@@ -55,14 +56,14 @@ def test_each_server_has_its_own_sign_in_cookie(monkeypatch, client):
 
     client.fake.oauth = Flow()
     client.fake.get = lambda slug: type("S", (), {"slug": slug})()
-    response = client.post("/v1/integrations/mcp-servers/alpha/connect", json={},
+    response = client.post("/v1/integrations/mcp-servers/alpha/connect?user_id=user-1", json={},
                            headers={"origin": "https://hub.example.com"})
     cookie = response.headers["set-cookie"]
     assert cookie.startswith("__Secure-bawthub-mcp-login=b-alpha")
     assert "Path=/api/chat/proxy/v1/integrations/mcp-servers/alpha/callback" in cookie
     client.cookies.set("__Secure-bawthub-mcp-login", "b-alpha")
     done = client.get("/v1/integrations/mcp-servers/alpha/callback?state=s&code=c", follow_redirects=False)
-    assert seen == {"alpha": "b-alpha"} and done.status_code == 303
+    assert seen == {"owner": "user-1", "alpha": "b-alpha"} and done.status_code == 303
     cleared = done.headers["set-cookie"]
     assert "__Secure-bawthub-mcp-login=" in cleared and "mcp-servers/alpha/callback" in cleared
     assert "bawthub-integration" not in cleared
@@ -87,3 +88,18 @@ def test_malformed_body_never_echoes_input(client, body):
     response = client.post("/v1/integrations/mcp-servers", json=body)
     assert response.status_code == 400 and response.json() == {"detail": "invalid_field"}
     assert "secret-value" not in response.text
+
+
+def test_routes_declare_the_proxy_injected_user():
+    """BawtHub's proxy injects ``user_id`` only into declared query parameters."""
+    schema = TestClient(FastAPI(routes=mcp_servers.router.routes)).app.openapi()
+    for path, method in [("/v1/integrations/mcp-servers", "post"), ("/v1/integrations/mcp-servers/{slug}", "patch"),
+                         ("/v1/integrations/mcp-servers/{slug}/grants", "put"),
+                         ("/v1/integrations/mcp-servers/{slug}/connect", "post")]:
+        params = schema["paths"][path][method].get("parameters", [])
+        assert any(p["name"] == "user_id" and p["in"] == "query" for p in params), (method, path)
+
+
+def test_create_records_the_signed_in_user(client):
+    client.post("/v1/integrations/mcp-servers?user_id=user-1", json={"slug": "alpha", "url": "https://a.example.net/mcp"})
+    assert client.fake.created[0]["actor"] == "user-1"

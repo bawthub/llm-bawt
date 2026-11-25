@@ -33,7 +33,7 @@ from mcp.client.auth.utils import (
 )
 from mcp.shared.auth_utils import check_resource_allowed, resource_url_from_server_url
 
-from ..connections import IntegrationError, IntegrationStore, digest
+from ..connections import IntegrationError, IntegrationStore, RowSnapshot, digest
 from ...service.providers.base import ConnectionRecord
 from .store import McpServer
 
@@ -294,7 +294,7 @@ class McpOAuth:
             return httpx.Client(timeout=20, follow_redirects=False, transport=policy_transport(server.url))
         return self.client_factory(timeout=20, follow_redirects=False)  # tests inject a mock transport
 
-    def start(self, server: McpServer, origin: str, return_to: str) -> dict:
+    def start(self, server: McpServer, origin: str, return_to: str, owner: str | None = None) -> dict:
         if server.auth_kind != "oauth":
             raise IntegrationError("not_oauth")
         if return_to not in RETURN_PATHS:
@@ -332,7 +332,7 @@ class McpOAuth:
                 "state_hash": digest(state), "browser_hash": digest(browser), "verifier": verifier,
                 "expires_at": time.time() + PENDING_SECONDS, "redirect_uri": redirect_uri,
                 "return_to": return_to, "client_id": client.meta["client_id"], "server_url": server.url,
-                "generation": server.generation,
+                "generation": server.generation, **({"owner": owner} if owner else {}),
                 **({"new_client": {"meta": client.meta, "secret": client.secret}} if register else {}),
                 **{k: meta[k] for k in ("issuer", "token_endpoint", "resource", "scope", "iss_supported")},
             }))
@@ -377,6 +377,8 @@ class McpOAuth:
                   "server_url": server.url, "generation": server.generation,
                   "scope": str(token.get("scope") or pending["scope"]),
                   "expires_at": _expires_at(token), "verified_at": time.time(),
+                  # Who signed in: the recipient of this sign-in's live status events.
+                  **({"owner": pending["owner"]} if pending.get("owner") else {}),
                   # The client's token-endpoint auth travels with the token it is bound to,
                   # so one commit publishes both and refresh never needs another row.
                   "token_endpoint_auth_method": str(client.meta.get("token_endpoint_auth_method") or "none")},
@@ -400,30 +402,33 @@ class McpOAuth:
         """
         try:
             return self._access_token(server)
-        except IntegrationError as exc:
-            if str(exc) == "reauthorization_required":
-                self._mark_reauth(server)
-            raise
+        except _RenewalFailed as exc:
+            self._mark_reauth(server, exc.snap)
+            raise IntegrationError("reauthorization_required") from None
 
-    def _mark_reauth(self, server: McpServer) -> None:
+    def _mark_reauth(self, server: McpServer, failed: RowSnapshot) -> None:
+        """Flag exactly the credential that failed; a newer sign-in or refresh is left alone."""
         sid = store_id(server.slug)
+        record = failed.record
+        if (not record or record.status != "connected" or record.auth_method != "oauth_mcp"
+                or not owned_by(record, server) or record.meta.get("reauth_required")):
+            return
+        flagged = ConnectionRecord(provider=record.provider, status=record.status, auth_method=record.auth_method,
+                                   meta={**record.meta, "reauth_required": True}, secret=dict(record.secret),
+                                   connected_at=record.connected_at)
         try:
-            snap = self.store.snapshot(sid)
-            record = snap.record
-            if (not record or record.status != "connected" or record.auth_method != "oauth_mcp"
-                    or not owned_by(record, server) or record.meta.get("reauth_required")):
-                return
-            record.meta = {**record.meta, "reauth_required": True}
-            if not self.store.replace(sid, snap, record):
-                return  # a concurrent writer (a refresh or new sign-in) decides the state
+            if not self.store.replace(sid, failed, flagged):
+                return  # the failing credential was already replaced; the newer one decides the state
         except Exception:  # noqa: BLE001 - status bookkeeping never breaks the tool call
             logger.warning("MCP server %s: could not record that sign-in needs renewal", server.slug)
             return
-        self._announce_reauth(server)
+        self._announce(server, record, "warning", f"{server.name}: sign in again to keep using its tools")
 
-    def _announce_reauth(self, server: McpServer) -> None:
+    def _announce(self, server: McpServer, record: ConnectionRecord, tone: str, summary: str) -> None:
+        """One live event to whoever signed in (else the server's last editor), best effort."""
         engine = getattr(getattr(self.store, "_store", None), "engine", None)
-        if engine is None or not server.updated_by:
+        owner = record.meta.get("owner") or server.updated_by
+        if engine is None or not owner:
             return
         try:
             from ...system_events import SystemEventEmitter
@@ -431,11 +436,10 @@ class McpOAuth:
             with engine.begin() as conn:
                 emitter.append(
                     conn, event_key=f"mcp_server_auth:{server.slug}:{server.generation}:{time.time_ns()}",
-                    kind="mcp_server_auth", source="integrations", user_id=server.updated_by,
-                    tone="warning", summary=f"{server.name}: sign in again to keep using its tools",
-                    subject_type="mcp_server", subject_id=server.slug)
+                    kind="mcp_server_auth", source="integrations", user_id=owner,
+                    tone=tone, summary=summary, subject_type="mcp_server", subject_id=server.slug)
         except Exception:  # noqa: BLE001 - best effort; the page also refreshes on resync
-            logger.warning("MCP server %s: sign-in renewal event not sent", server.slug)
+            logger.warning("MCP server %s: sign-in status event not sent", server.slug)
 
     def _access_token(self, server: McpServer) -> str:
         sid = store_id(server.slug)
@@ -459,9 +463,9 @@ class McpOAuth:
             client = self.store.load(f"client:{sid}")
             if (not client or client.meta.get("client_id") != record.meta.get("client_id")
                     or not owned_by(client, server)):
-                raise IntegrationError("reauthorization_required")
+                raise _RenewalFailed(snap)
         if not refresh:
-            raise IntegrationError("reauthorization_required")
+            raise _RenewalFailed(snap)
         check_destination(record.meta["token_endpoint"], server.url)
         try:
             with self._http(server) as http:
@@ -471,13 +475,15 @@ class McpOAuth:
         except httpx.HTTPError as exc:
             raise IntegrationError("server_unreachable") from exc
         if response.status_code in (400, 401):
-            raise IntegrationError("reauthorization_required")
+            raise _RenewalFailed(snap)
         token = _json(response)
         if not token or not token.get("access_token"):
             raise IntegrationError("server_unreachable")
         record.secret = {**record.secret, "access_token": token["access_token"],
                          **({"refresh_token": token["refresh_token"]} if token.get("refresh_token") else {})}
-        record.meta = {**record.meta, "expires_at": _expires_at(token)}
+        was_flagged = bool(record.meta.get("reauth_required"))
+        record.meta = {k: v for k, v in record.meta.items() if k != "reauth_required"}
+        record.meta["expires_at"] = _expires_at(token)
         if not self.store.replace(sid, snap, record):
             # A concurrent refresher won; with rotating refresh tokens only its result is valid.
             winner = self.store.load(sid)
@@ -485,6 +491,8 @@ class McpOAuth:
                     and owned_by(winner, server) and winner.secret.get("access_token")):
                 return winner.secret["access_token"]
             raise IntegrationError("reauthorization_required")
+        if was_flagged:
+            self._announce(server, record, "success", f"{server.name}: sign-in renewed")
         return token["access_token"]
 
     def disconnect(self, slug: str) -> bool:
@@ -510,6 +518,14 @@ class McpOAuth:
         return {"connected": connected, "needs_reauth": needs_reauth,
                 "scope": record.meta.get("scope", ""), "connected_at": record.connected_at,
                 "refreshable": "refresh_token" in record.secret}
+
+
+class _RenewalFailed(IntegrationError):
+    """The credential in ``snap`` can't be renewed; only that exact row may be flagged."""
+
+    def __init__(self, snap: RowSnapshot):
+        super().__init__("reauthorization_required")
+        self.snap = snap
 
 
 def _expires_at(token: dict) -> float | None:

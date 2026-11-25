@@ -9,7 +9,7 @@ Bodies are parsed by hand: a FastAPI 422 would echo a bearer token.
 """
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, RedirectResponse
 
@@ -63,8 +63,9 @@ def _str(body: dict, key: str, default: str | None = None) -> str | None:
     return value
 
 
-def _actor(request: Request) -> str | None:
-    return request.query_params.get("user_id") or None
+# BawtHub's proxy injects the signed-in user only into query parameters the route
+# declares, so every route that records an actor declares ``user_id``.
+_USER = Query(None, description="Signed-in user, bound by the trusted caller")
 
 
 @router.get("")
@@ -73,22 +74,22 @@ async def list_servers():
 
 
 @router.post("", dependencies=_SERVICE)
-async def create_server(request: Request):
+async def create_server(request: Request, user_id: str | None = _USER):
     body = await body_of(request, {"slug", "name", "url", "transport", "auth_kind", "bearer_token"})
     result = await call(servers().create, slug=_str(body, "slug", ""), name=_str(body, "name", ""),
                         url=_str(body, "url", ""), transport=_str(body, "transport", "streamable_http"),
                         auth_kind=_str(body, "auth_kind", "oauth"), bearer_token=_str(body, "bearer_token"),
-                        actor=_actor(request))
+                        actor=user_id or None)
     return JSONResponse(result, status_code=201, headers=_NO_STORE)
 
 
 @router.patch("/{slug}", dependencies=_SERVICE)
-async def update_server(slug: str, request: Request):
+async def update_server(slug: str, request: Request, user_id: str | None = _USER):
     body = await body_of(request, {"name", "enabled"})
     enabled = body.get("enabled")
     if enabled is not None and not isinstance(enabled, bool):
         raise HTTPException(400, "invalid_field")
-    return await call(servers().update, slug, name=_str(body, "name"), enabled=enabled, actor=_actor(request))
+    return await call(servers().update, slug, name=_str(body, "name"), enabled=enabled, actor=user_id or None)
 
 
 @router.delete("/{slug}", dependencies=_SERVICE)
@@ -105,9 +106,9 @@ async def set_bearer(slug: str, request: Request):
 
 
 @router.put("/{slug}/grants", dependencies=_SERVICE)
-async def set_grants(slug: str, request: Request):
+async def set_grants(slug: str, request: Request, user_id: str | None = _USER):
     body = await body_of(request, {"grants"})
-    return await call(servers().set_grants, slug, body.get("grants"), _actor(request))
+    return await call(servers().set_grants, slug, body.get("grants"), user_id or None)
 
 
 @router.post("/{slug}/tools", dependencies=_SERVICE)
@@ -117,12 +118,12 @@ async def list_tools(slug: str):
 
 
 @router.post("/{slug}/connect", dependencies=_SERVICE)
-async def connect(slug: str, request: Request):
+async def connect(slug: str, request: Request, user_id: str | None = _USER):
     service = servers()
     server = await call(service.get, slug)
     body = await body_of(request, {"return_to"})
     result = await call(service.oauth.start, server, request.headers.get("origin", ""),
-                        _str(body, "return_to", SETTINGS_PATH))
+                        _str(body, "return_to", SETTINGS_PATH), user_id or None)
     browser = result.pop("browser")
     response = JSONResponse(result, headers=_NO_STORE)
     response.set_cookie(COOKIE, browser, max_age=600, path=cookie_path(server.slug), **_COOKIE_FLAGS)

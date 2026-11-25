@@ -12,6 +12,7 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel, create_engine
 
 from llm_bawt.integrations.connections import IntegrationError, IntegrationStore
+from llm_bawt.service.providers.base import ConnectionRecord
 from llm_bawt.integrations.mcp_servers import oauth as oauth_module
 from llm_bawt.integrations.mcp_servers.oauth import McpOAuth, callback_path, check_destination, store_id
 from llm_bawt.integrations.mcp_servers.store import McpServer, McpServerError, validate_slug, validate_url
@@ -111,8 +112,8 @@ def oauth_for(store, remote):
                     client_factory=lambda **kw: httpx.Client(transport=httpx.MockTransport(remote.handle), **kw))
 
 
-def sign_in(oauth, **finish):
-    flow = oauth.start(SERVER, ORIGIN, SETTINGS)
+def sign_in(oauth, owner=None, **finish):
+    flow = oauth.start(SERVER, ORIGIN, SETTINGS, owner)
     params = {k: v[0] for k, v in parse_qs(urlsplit(flow["authorization_url"]).query).items()}
     args = {"state": params["state"], "browser": flow["browser"], "code": "the-code", "error": "", "iss": "", **finish}
     return flow, params, oauth.finish(SERVER, args["state"], args["browser"], args["code"], args["error"], args["iss"])
@@ -355,7 +356,7 @@ def test_failed_renewal_shows_sign_in_again_once_until_a_new_sign_in(store, monk
     remote = FakeRemote()
     oauth = oauth_for(store, remote)
     announced = []
-    monkeypatch.setattr(oauth, "_announce_reauth", lambda server: announced.append(server.slug))
+    monkeypatch.setattr(oauth, "_announce", lambda server, record, tone, summary: announced.append(server.slug))
     sign_in(oauth)
     assert oauth.status(SERVER)["needs_reauth"] is False
     record = store.load(store_id("tools"))
@@ -382,9 +383,7 @@ def test_expired_token_without_refresh_needs_sign_in_again(store):
     assert oauth.status(SERVER)["needs_reauth"] is True
 
 
-def test_renewal_event_targets_the_server_owner(store, monkeypatch):
-    from dataclasses import replace
-
+def _capture_events(monkeypatch):
     from llm_bawt import system_events
     appended = []
 
@@ -396,11 +395,85 @@ def test_renewal_event_targets_the_server_owner(store, monkeypatch):
             appended.append(fields)
 
     monkeypatch.setattr(system_events, "SystemEventEmitter", Emitter)
+    return appended
+
+
+def _expire(store):
+    record = store.load(store_id("tools"))
+    record.meta = {**record.meta, "expires_at": time.time() - 1}
+    store.save(record)
+
+
+def test_renewal_event_reaches_whoever_signed_in(store, monkeypatch):
+    """A server added in Settings has no recorded editor; the sign-in itself names the recipient."""
+    appended = _capture_events(monkeypatch)
+    remote = FakeRemote()
+    oauth = oauth_for(store, remote)
+    sign_in(oauth, owner="user-1")
+    assert store.load(store_id("tools")).meta["owner"] == "user-1"
+    _expire(store)
+    remote.refresh_status = 400
+    with pytest.raises(IntegrationError, match="reauthorization_required"):
+        oauth.access_token(SERVER)
+    assert [(e["kind"], e["user_id"], e["subject_id"], e["tone"]) for e in appended] == [
+        ("mcp_server_auth", "user-1", "tools", "warning")]
+
+
+def test_renewal_event_falls_back_to_the_server_editor(store, monkeypatch):
+    from dataclasses import replace
+
+    appended = _capture_events(monkeypatch)
     oauth = oauth_for(store, FakeRemote())
-    oauth._announce_reauth(replace(SERVER, updated_by="owner-1"))
-    oauth._announce_reauth(SERVER)  # no owner recorded: nothing to address
-    assert [(e["kind"], e["user_id"], e["subject_id"]) for e in appended] == [
-        ("mcp_server_auth", "owner-1", "tools")]
+    record = ConnectionRecord(provider=store_id("tools"), status="connected", meta={})
+    oauth._announce(replace(SERVER, updated_by="owner-1"), record, "warning", "x")
+    oauth._announce(SERVER, record, "warning", "x")  # nobody recorded: nothing to address
+    assert [e["user_id"] for e in appended] == ["owner-1"]
+
+
+def test_a_late_renewal_failure_never_flags_a_newer_sign_in(store, monkeypatch):
+    remote = FakeRemote()
+    oauth = oauth_for(store, remote)
+    sign_in(oauth)
+    _expire(store)
+    remote.refresh_status = 400
+    real = oauth._http
+
+    raced = []
+
+    def slow_refresh(server):
+        if not raced:  # the user signs in again while the doomed refresh is in flight
+            raced.append(True)
+            monkeypatch.setattr(oauth, "_http", real)
+            remote.refresh_status = 200
+            sign_in(oauth)
+            remote.refresh_status = 400
+        return real(server)
+
+    monkeypatch.setattr(oauth, "_http", slow_refresh)
+    with pytest.raises(IntegrationError, match="reauthorization_required"):
+        oauth.access_token(SERVER)
+    assert raced
+    assert oauth.status(SERVER)["needs_reauth"] is False
+    assert "reauth_required" not in store.load(store_id("tools")).meta
+
+
+def test_a_successful_renewal_clears_sign_in_again_and_says_so(store, monkeypatch):
+    remote = FakeRemote()
+    oauth = oauth_for(store, remote)
+    announced = []
+    monkeypatch.setattr(oauth, "_announce", lambda server, record, tone, summary: announced.append(tone))
+    sign_in(oauth)
+    _expire(store)
+    remote.refresh_status = 400
+    with pytest.raises(IntegrationError):
+        oauth.access_token(SERVER)
+    assert oauth.status(SERVER)["needs_reauth"] is True
+    remote.refresh_status = 200  # the provider recovers; the stored refresh token works again
+    assert oauth.access_token(SERVER) == "access-2"
+    assert oauth.status(SERVER)["needs_reauth"] is False
+    assert announced == ["warning", "success"]
+    assert oauth.access_token(SERVER) == "access-2"
+    assert announced == ["warning", "success"]  # nothing more once it's healthy
 
 
 def test_token_is_bound_to_the_server_url(store):
