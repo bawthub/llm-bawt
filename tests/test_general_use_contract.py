@@ -127,8 +127,9 @@ class ContractTests(unittest.TestCase):
         self.tracked("src/other.json", line + "\n")
         hits, _, _ = guard.scan(self.repo, policy(
             operator_identities=["alice"], personal_domains=["personal.invalid"], bot_slugs=["vexbot"]))
+        # Presets are name-free (TASK-2643): an operator identity still counts here.
         self.assertEqual({hit.rule for hit in hits if hit.path == roster},
-                         {"personal_domains", "rfc1918", "host_path"})
+                         {"operator_identities", "personal_domains", "rfc1918", "host_path"})
         # A bot that is not one of the roster's presets (e.g. a protected one) still counts.
         self.tracked(roster, roster_text.replace(line, line + " hiddenbot"))
         hits, _, _ = guard.scan(self.repo, policy(

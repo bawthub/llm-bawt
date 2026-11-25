@@ -387,15 +387,21 @@ def load_setup_first_chat_prompt() -> str:
         "Welcome them in one short message. Your selected connection and bridge "
         "passed setup checks, and this reply demonstrates that chat works. "
         "Don't claim that tools, repositories, or host access were verified. "
-        "Ask one question about what they want to accomplish first. A repository "
-        "is optional. Don't call tools, change settings, or perform work yet."
+        "If their profile gives their name, greet them by it; if it doesn't, ask what "
+        "they'd like you to call them. Ask one question about what they want to "
+        "accomplish first. A repository is optional. Don't call tools, change settings, "
+        "or perform work yet. Never call them \"the user\" or \"the operator\" to their face."
     )
 
 
 def load_setup_orientation_prompt() -> str:
     return (
         "This conversation is for the user's optional BawtHub orientation. "
-        "Use what the user wants to do to explain relevant capabilities and suggest "
+        "If their profile has no name yet, make getting it part of orientation: ask what "
+        "they'd like to be called and save it to their user profile with the profile "
+        "tool (category fact, key name) when you have it, then use it. "
+        "Use what they want to do to explain relevant capabilities and suggest "
         "a practical next step. Be clear about what is configured and what still needs "
-        "permission or setup. Follow the usual authorization and approval rules."
+        "permission or setup. Follow the usual authorization and approval rules. "
+        "Address them by name or as \"you\", never as \"the user\" or \"the operator\"."
     )
