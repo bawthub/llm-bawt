@@ -170,12 +170,12 @@ class RecallDatabase:
             # no_global_search, and the legacy column false is private.
             allowed = tags.searchable_bots
             if bot_id not in allowed:
-                # A private (or no_global_search) bot still recalls its own
-                # history, and only that: every other bot stays excluded, and
-                # it never joins anyone else's allowed set (TASK-2654).
+                # A private (or no_global_search) bot recalls searchable bots
+                # plus its own history, matching BotAccess.aggregate_scope; it
+                # never joins anyone else's allowed set (TASK-2654).
                 if bot_id not in tags.known_bots:
                     raise RecallError("unauthorized")
-                allowed = frozenset({bot_id})
+                allowed = allowed | {bot_id}
             excluded = tags.known_bots - allowed
             # Sanitation collisions must never broaden partition scope.
             identities = [partition_id(r["slug"]) for r in rows]

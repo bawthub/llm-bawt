@@ -1,4 +1,7 @@
-"""TASK-2654: a private bot recalls its own history and nothing else."""
+"""TASK-2654: a private bot recalls searchable bots plus its own history.
+
+Matches BotAccess.aggregate_scope; no other bot ever sees the private one.
+"""
 import pytest
 
 from llm_bawt.recall.contracts import RecallError
@@ -18,11 +21,24 @@ class PolicyOnly(RecallDatabase):
 
 
 @pytest.mark.asyncio
-async def test_private_caller_scope_is_its_own_partition_only():
+async def test_private_caller_scope_is_searchable_bots_plus_itself():
     scope = await PolicyOnly().owner_scope("fixture-private", "sample-user", "s1")
-    assert scope.allowed_bot_ids - scope.excluded_bot_ids == {"fixture-private"}
-    assert {"fixture-public", "fixture-peer"} <= scope.excluded_bot_ids
-    assert delivery_authors(scope) == []
+    assert scope.allowed_bot_ids - scope.excluded_bot_ids == {
+        "fixture-private", "fixture-public", "fixture-peer"}
+    assert set(delivery_authors(scope)) <= {"fixture-public", "fixture-peer"}
+
+
+@pytest.mark.asyncio
+async def test_private_caller_never_gains_another_private_bot():
+    rows = ROWS + [{"slug": "fixture-other-private", "include_in_global_search": False}]
+
+    class TwoPrivate(PolicyOnly):
+        def read(self, statement, params, timeout_ms=2000, retry_transient=True):
+            return [dict(row) for row in rows]
+
+    scope = await TwoPrivate().owner_scope("fixture-private", "sample-user", "s1")
+    assert "fixture-other-private" in scope.excluded_bot_ids
+    assert "fixture-other-private" not in scope.allowed_bot_ids
 
 
 @pytest.mark.asyncio

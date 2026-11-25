@@ -222,11 +222,12 @@ async def test_policy_loading_fails_closed_and_never_reads_bot_content(monkeypat
     assert scope.allowed_bot_ids == frozenset({"reviewer"})
     assert len(queries) == 1 and "bot_profiles" in queries[0]
     assert "memories" not in queries[0] and "messages" not in queries[0]
-    # A private caller recalls only itself (TASK-2654); unknown stays refused.
+    # A private caller recalls searchable bots plus itself (TASK-2654);
+    # unknown stays refused.
     context.bot_id = "excluded"
     private = await db.scope(context)
-    assert private.allowed_bot_ids == frozenset({"excluded"})
-    assert private.excluded_bot_ids == frozenset({"reviewer"})
+    assert private.allowed_bot_ids == frozenset({"reviewer", "excluded"})
+    assert private.excluded_bot_ids == frozenset()
     context.bot_id = "unknown"
     with pytest.raises(RecallError, match="unauthorized"):
         await db.scope(context)
