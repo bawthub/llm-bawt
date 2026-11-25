@@ -116,6 +116,11 @@ def test_tool_search_loads_namespaced_remote_schemas(remote):
     assert [r["tool_name"] for r in json.loads(strip_tool_result_tags(selected))] == ["files__read_file"]
 
 
+def test_remote_multi_word_search_ranks_partial_matches(remote):
+    found = remote.for_turn().search_tools("read shared documentation files wiki", limit=5)
+    assert [t.name for t in found] == ["files__read_file", "docs__search_docs"]
+
+
 def test_catalogs_are_cached_without_credentials(remote):
     remote.for_turn().search_tools("")
     remote.for_turn().search_tools("")

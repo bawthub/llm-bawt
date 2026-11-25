@@ -19,7 +19,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from ..bawthub_mcp.client import BawtHubMcpClient, McpToolDefinition
+from ..bawthub_mcp.client import BawtHubMcpClient, McpToolDefinition, rank_tools
 from ..ha_mcp.client import run_bounded
 from .service import (TOOL_SEPARATOR, McpServers, ResolvedServer, list_all_tools, open_session,
                       tool_name)
@@ -41,13 +41,6 @@ def split_tool_name(name: str) -> tuple[str, str] | None:
     """``(slug, tool)`` for a namespaced remote tool name, else None."""
     slug, sep, tool = (name or "").partition(TOOL_SEPARATOR)
     return (slug, tool) if sep and slug and tool else None
-
-
-def _score(tool: McpToolDefinition, words: list[str]) -> int:
-    name, text = tool.name.lower(), f"{tool.name} {tool.description}".lower()
-    if not all(w in text for w in words):
-        return -1
-    return sum(2 if w in name else 1 for w in words)
 
 
 class RemoteMcpTools:
@@ -159,12 +152,7 @@ class RemoteMcpTurn:
             return []
 
     def search_tools(self, query: str = "", limit: int = 5) -> list[McpToolDefinition]:
-        words = [w for w in (query or "").lower().split() if w]
-        ranked = sorted(
-            ((_score(t, words), t) for s in self.servers.values() for t in self._catalog(s)),
-            key=lambda pair: (-pair[0], pair[1].name),
-        )
-        return [tool for score, tool in ranked if score >= 0][: max(1, limit)]
+        return rank_tools((t for s in self.servers.values() for t in self._catalog(s)), query, limit)
 
     def select(self, names: list[str]) -> list[McpToolDefinition]:
         found = []

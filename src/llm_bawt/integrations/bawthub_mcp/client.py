@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
@@ -63,6 +64,26 @@ class McpToolDefinition:
     input_schema: dict[str, Any] = field(default_factory=dict)
 
 
+def rank_tools(tools: Iterable[McpToolDefinition], query: str, limit: int) -> list[McpToolDefinition]:
+    """Best matches for a keyword query, most matched words first.
+
+    A tool qualifies when any query word appears in its name or description;
+    a name hit counts double. Models often send several keywords at once, so
+    requiring every word would hide tools that plainly match. An empty query
+    lists everything, by name.
+    """
+    words = list(dict.fromkeys(w for w in (query or "").lower().split() if w))
+
+    def score(tool: McpToolDefinition) -> int:
+        if not words:
+            return 0
+        name, text = tool.name.lower(), f"{tool.name} {tool.description}".lower()
+        return sum(2 if w in name else 1 for w in words if w in text) or -1
+
+    ranked = sorted(((score(t), t) for t in tools), key=lambda pair: (-pair[0], pair[1].name))
+    return [tool for s, tool in ranked if s >= 0][: max(1, limit)]
+
+
 def parse_allowlist(value: Any) -> frozenset[str] | None:
     """Tool names from a comma/space separated string or a list.
 
@@ -95,23 +116,11 @@ class BawtHubMcpClient:
         return name in self._allowlist
 
     def search_tools(self, capability: str | None, query: str = "", limit: int = 5) -> list[McpToolDefinition]:
-        """Allowlisted tools matching every query word in name or description.
+        """Allowlisted tools ranked by how many query words they match.
 
         An empty query lists the allowlisted catalog (bounded by ``limit``).
         """
-        catalog = self._load_catalog(capability)
-        words = [w for w in (query or "").lower().split() if w]
-
-        def score(tool: McpToolDefinition) -> int:
-            name, text = tool.name.lower(), f"{tool.name} {tool.description}".lower()
-            if not all(w in text for w in words):
-                return -1
-            return sum(2 if w in name else 1 for w in words)
-
-        ranked = sorted(
-            ((score(t), t) for t in catalog), key=lambda pair: (-pair[0], pair[1].name),
-        )
-        return [tool for s, tool in ranked if s >= 0][: max(1, limit)]
+        return rank_tools(self._load_catalog(capability), query, limit)
 
     def call_tool(
         self, capability: str | None, name: str, arguments: dict[str, Any], *, tool_use_id: str = "",

@@ -75,6 +75,15 @@ def test_allowlist_filters_the_server_catalog_and_search_ranks_by_name(client):
     assert client._url == "http://mcp.example:8001/mcp"
 
 
+def test_multi_word_search_ranks_partial_matches_instead_of_returning_nothing(client):
+    # No tool has every word; a model's keyword list must still find tools.
+    query = "memory store search facts recall history profile"
+    assert [t.name for t in client.search_tools("turn-token", query)] == ["memory_search"]
+    assert [t.name for t in client.search_tools("turn-token", "find past memories", limit=5)] == [
+        "messages_find", "memory_search"]
+    assert client.search_tools("turn-token", "service operation") == []
+
+
 def test_no_turn_identity_fails_closed_without_a_request(client):
     result = _executor(client, capability=None).execute(
         ToolCall(name="tool_search", arguments={"query": "memory"}, raw_text=""))
