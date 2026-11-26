@@ -212,11 +212,19 @@ The same cooldown setting and single-probe rule apply.
 Recovery is push-based: `POST /v1/maintenance/primary-available` (no body) pulls
 every `unreachable` record's `until` to now, so the next maintenance call is
 the probe and a success switches back. The announce itself clears nothing
-and never touches a spending-limit record, so it needs no credential: a
-stray or early call costs one probe that falls through to the backup. The
-lazy cooldown probe remains the safety net when no announcer is installed.
-The announcer is deployment-side (e.g. run on model-server start), not
-product code.
+and never touches a spending-limit record: a stray or early call costs one
+probe that falls through to the backup. The lazy cooldown probe remains the
+safety net when no announcer is installed. The announcer is deployment-side
+(e.g. run on model-server start), not product code.
+
+Like every `/v1` route, the announce needs a credential once API auth
+enforces. An announcer on another machine uses the key for the principal
+`primary-available-notifier`, sent as `X-LLM-Bawt-Key`. That key is
+admitted only for this exact `POST` (no query string) and refused on every
+other route, so a copied key can do no more than an announce. Derive it in
+the app container with
+`python -c "from llm_bawt.api_auth.keys import header_value; print(header_value('primary-available-notifier'))"`
+and store it where only the announcer's account can read it.
 
 ## Out of scope
 
