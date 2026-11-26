@@ -77,7 +77,7 @@ def test_force_override():
 
 
 # --- middleware -----------------------------------------------------------
-def _run(mw, path="/v1/chat/completions", headers=(), kind="http", method="POST"):
+def _run(mw, path="/v1/chat/completions", headers=(), kind="http", method="POST", query=b""):
     sent, reached = [], []
 
     async def app(scope, receive, send):
@@ -89,7 +89,7 @@ def _run(mw, path="/v1/chat/completions", headers=(), kind="http", method="POST"
     mw.app = app
 
     scope = {"type": kind, "path": path, "method": method, "client": ("10.0.0.5", 1),
-             "headers": [(k.encode(), v.encode()) for k, v in headers]}
+             "query_string": query, "headers": [(k.encode(), v.encode()) for k, v in headers]}
     asyncio.run(mw(scope, None, send))
     return sent, reached
 
@@ -127,6 +127,25 @@ def test_bad_or_repeated_key_refused(mode):
     good = keys.header_value("house", root=ROOT)
     sent, _ = _run(_mw(mode), headers=[("x-llm-bawt-key", good), ("x-llm-bawt-key", good)])
     assert _status(sent) == 401
+
+
+@pytest.mark.parametrize("mode", ["log", "enforce"])
+def test_route_limited_key_only_reaches_its_route(mode):
+    notifier = [("x-llm-bawt-key", keys.header_value("primary-available-notifier", root=ROOT))]
+    route = "/v1/maintenance/primary-available"
+    sent, reached = _run(_mw(mode), path=route, headers=notifier)
+    assert not sent and reached == [Principal("primary-available-notifier", "key")]
+    for kwargs in ({"path": "/v1/chat/completions"},          # another route
+                   {"path": route, "method": "GET"},           # same path, other method
+                   {"path": route + "/"},                      # alias
+                   {"path": route, "query": b"x=1"},           # arguments
+                   {"path": route, "kind": "websocket"}):
+        sent, reached = _run(_mw(mode), headers=notifier, **kwargs)
+        assert _status(sent) in (401, 4401) and not reached, kwargs
+    # A bot turn header doesn't let the limited key through elsewhere either.
+    bot = lambda h: Principal("nova", "bot")  # noqa: E731
+    sent, reached = _run(_mw(mode, checkers=[bot]), headers=notifier)
+    assert _status(sent) == 401 and not reached
 
 
 def test_off_passes_everything_including_bad_keys():

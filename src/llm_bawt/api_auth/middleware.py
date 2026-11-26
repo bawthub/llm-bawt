@@ -6,7 +6,7 @@ per-route checks (service bearer, bridge gate, turn capability) stay in place.
 Credential precedence: turn capability (``bot:<id>``, identity only), then
 ``X-LLM-Bawt-Key``, then the BawtHub service bearer, then ``X-Bridge-Token``.
 A malformed, invalid or repeated ``X-LLM-Bawt-Key`` is refused in every mode
-but ``off``. Missing credentials are counted in ``log`` and refused (401, or
+but ``off``, as is a route-limited key used outside its routes. Missing credentials are counted in ``log`` and refused (401, or
 WebSocket close 4401) in ``enforce``; while the mode is unresolved protected
 routes answer 503 ``auth_mode_unresolved``.
 """
@@ -35,6 +35,13 @@ ALLOWED_PATHS = frozenset({
     "/integrations/google-home/fulfillment",
     "/webhook/nextcloud",
 })
+# Key principals that may only call these exact (method, raw path) pairs. The
+# list lives in code so a garbled setting can never widen it. A single-purpose
+# caller outside the hub (a desktop's "local model is back" notifier) gets one
+# of these instead of a general key.
+ROUTE_LIMITED_PRINCIPALS: dict[str, frozenset[tuple[str, str]]] = {
+    "primary-available-notifier": frozenset({("POST", "/v1/maintenance/primary-available")}),
+}
 OBSERVATION_CAP = 2000
 OBSERVATION_MAX_AGE = 48 * 3600
 _LOG_INTERVAL = 60.0
@@ -135,6 +142,10 @@ class ApiAuthMiddleware:
                 return None, f"key_{result.reason}"
             if self._key_allowed is not None and not self._key_allowed(result.principal):
                 return None, "key_not_permitted"
+            limited = ROUTE_LIMITED_PRINCIPALS.get(result.principal)
+            if limited is not None and (scope.get("type") != "http" or scope.get("query_string")
+                                        or (scope.get("method"), scope.get("path")) not in limited):
+                return None, "key_route_not_permitted"
             key_principal = Principal(result.principal, "key")
         for check in self.checkers:  # turn capability first, then key, then legacy
             found = check(headers)

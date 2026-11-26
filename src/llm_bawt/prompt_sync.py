@@ -257,11 +257,20 @@ def export_report(
             "root": str(root), "suffix": BODY_SUFFIX}
 
 
-def _fetch_report(api: str) -> dict[str, Any]:
-    # Stdlib only: the exporter runs from a source checkout without app deps.
-    from urllib.request import urlopen
+def _get(url: str):
+    """GET with this caller's API key (``LLM_BAWT_API_KEY_FILE``) when it has one.
 
-    with urlopen(f"{api.rstrip('/')}/v1/prompts/sync/drift?include_body=false", timeout=30) as response:
+    Stdlib only: the exporter runs from a source checkout without app deps.
+    """
+    from urllib.request import Request, urlopen
+
+    from .api_auth.client import auth_headers
+
+    return urlopen(Request(url, headers=auth_headers()), timeout=30)
+
+
+def _fetch_report(api: str) -> dict[str, Any]:
+    with _get(f"{api.rstrip('/')}/v1/prompts/sync/drift?include_body=false") as response:
         return json.loads(response.read().decode("utf-8"))
 
 
@@ -269,13 +278,12 @@ def _fetch_selected(api: str, keys: Iterable[str]) -> dict[str, Any]:
     """Read exactly the approved global rows; never enumerate bots/private scopes."""
     from types import SimpleNamespace
     from urllib.parse import quote
-    from urllib.request import urlopen
 
     items = []
     for key in sorted(set(keys)):
         body_path(key)  # reject invalid keys before network access
         url = f"{api.rstrip('/')}/v1/prompts/{quote(key, safe='')}?scope_type=global&exact=true"
-        with urlopen(url, timeout=30) as response:
+        with _get(url) as response:
             row = json.loads(response.read().decode("utf-8"))
         if row.get("key") != key:
             raise ValueError("selected prompt response key does not match request")

@@ -477,3 +477,25 @@ def test_install_notes_follow_the_agent_global_prompt(notes, expected) -> None:
     builder = PromptBuilder()
     PromptSectionsMixin._sec_agent_global_prompt(probe, builder, "hi")
     assert builder.get_section("agent_global_prompt").content == expected
+
+
+def test_check_sends_the_callers_api_key(tmp_path, monkeypatch):
+    """The CLI runs from a bridge; with a key file it authenticates (TASK-2380)."""
+    import io
+    import urllib.request
+
+    from llm_bawt import prompt_sync
+
+    key_file = tmp_path / "api-key"
+    key_file.write_text("bridge-example.abc123")
+    monkeypatch.setenv("LLM_BAWT_API_KEY_FILE", str(key_file))
+    seen = []
+
+    def fake_urlopen(request, timeout):
+        seen.append((request.full_url, request.get_header("X-llm-bawt-key")))
+        return io.BytesIO(json.dumps({"in_sync": True, "drift_count": 0, "drift": []}).encode())
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    assert prompt_sync._fetch_report("http://app.example:8642/")["in_sync"] is True
+    assert seen == [("http://app.example:8642/v1/prompts/sync/drift?include_body=false",
+                     "bridge-example.abc123")]

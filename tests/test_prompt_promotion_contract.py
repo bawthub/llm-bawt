@@ -118,7 +118,8 @@ class PromptPromotionContractTests(unittest.TestCase):
 
         calls = []
 
-        def urlopen(url, **_kwargs):
+        def urlopen(request, **_kwargs):
+            url = getattr(request, "full_url", request)
             calls.append(url)
             key = "portable.first" if "portable.first?" in url else "portable.second"
             return BytesIO(json.dumps(item(key=key, metadata={"sync": "product"})).encode())
