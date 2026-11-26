@@ -82,6 +82,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_bot_session_state_pg.py::",
     "test_shared_memory_schema_startup_pg.py::",
     "test_runtime_switch_pointer_pg.py::",
+    "test_runtime_settings_upsert_pg.py::",
     "test_new_session_receipt_pg.py::",
     "test_new_session_receipt_review_pg.py::",
     "test_new_session_typed_pg.py::",
