@@ -91,10 +91,20 @@ def test_name_summary_is_name_only(manager):
     manager.update_profile(U, "sample", display_name="Sample Owner", summary="Likes garden walks.")
     manager.set_attribute(U, "sample", "preference", "food", "tacos")
     assert manager.get_user_name_summary("sample") == "User's name: Sample Owner"
-    set_name("sample", "Avery")
+    # A free-form name fact can carry other details; it never crosses over.
+    manager.set_attribute(
+        U, "sample", "fact", "name",
+        "User's name is Avery. They work at Example Studio.",
+    )
     out = manager.get_user_name_summary("sample")
-    assert out == "User's name: Sample Owner\nThey asked to be called: Avery"
-    assert "garden" not in out and "tacos" not in out
+    assert out == "User's name: Sample Owner"
+    assert "garden" not in out and "tacos" not in out and "Example Studio" not in out
+
+
+def test_name_summary_follows_display_name_filled_by_orientation(manager):
+    manager.get_or_create_profile(U, "sample")
+    set_name("sample", "Avery")
+    assert manager.get_user_name_summary("sample") == "User's name: Avery"
 
 
 def test_bot_without_memory_gets_the_name_in_its_prompt(manager):
