@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 from typing import Any, Protocol
 
 from sqlalchemy import BigInteger, Boolean, Column, DateTime, Integer, String, Text, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, Session, SQLModel, select
 
@@ -912,25 +913,44 @@ class RuntimeSettingsStore:
             (scope_type, scope_id, key, json.dumps(value, ensure_ascii=False))
             for scope_type, scope_id, key, value in writes
         ]
+        def _existing(session: Session, scope_type: str, scope_id: str, key: str):
+            return session.exec(
+                select(RuntimeSetting).where(
+                    RuntimeSetting.scope_type == scope_type,
+                    RuntimeSetting.scope_id == scope_id,
+                    RuntimeSetting.key == key,
+                )
+            ).first()
+
+        # pysqlite cannot nest a savepoint in its implicit transaction (the
+        # release commits earlier rows), and SQLite here is single-writer test
+        # storage, so the conflict guard is PostgreSQL-only.
+        guard_conflicts = self.engine.dialect.name == "postgresql"
         with Session(self.engine) as session:
             for scope_type, scope_id, key, value_json in encoded:
-                row = session.exec(
-                    select(RuntimeSetting).where(
-                        RuntimeSetting.scope_type == scope_type,
-                        RuntimeSetting.scope_id == scope_id,
-                        RuntimeSetting.key == key,
-                    )
-                ).first()
-                if row:
-                    row.value_json = value_json
-                    row.updated_at = datetime.now(timezone.utc)
-                else:
-                    row = RuntimeSetting(
-                        scope_type=scope_type,
-                        scope_id=scope_id,
-                        key=key,
-                        value_json=value_json,
-                    )
+                row = _existing(session, scope_type, scope_id, key)
+                if row is None and not guard_conflicts:
+                    row = RuntimeSetting(scope_type=scope_type, scope_id=scope_id, key=key)
+                elif row is None:
+                    # Another writer (installer seed, second tab) can insert
+                    # the same key between our read and insert. Insert inside
+                    # a savepoint so a unique-key conflict rolls back only this
+                    # attempt; then update the row that won (TASK-2661).
+                    try:
+                        with session.begin_nested():
+                            session.add(RuntimeSetting(
+                                scope_type=scope_type,
+                                scope_id=scope_id,
+                                key=key,
+                                value_json=value_json,
+                            ))
+                        continue
+                    except IntegrityError:
+                        row = _existing(session, scope_type, scope_id, key)
+                        if row is None:
+                            raise
+                row.value_json = value_json
+                row.updated_at = datetime.now(timezone.utc)
                 session.add(row)
                 # Flush per item so a repeated key in one batch updates the
                 # row just added instead of inserting a duplicate.
