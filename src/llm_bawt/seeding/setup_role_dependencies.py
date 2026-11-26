@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 
+from ..bot_tags.catalog import STARTER_ROLES
 from ..bot_tags.store import RoleFields, TagValidationError
 from ..prompt_promotion import validate_promotion_item
 from ..prompt_sync import install_terms_in
@@ -112,8 +113,16 @@ class SetupRoleConflict(PresetError):
     """Local role or prompt is not safe to attach to a generated bot."""
 
 
+# Only the exact shipped role definition may carry the shipped starter grants.
+# The portable catalog still never imports capabilities into a tenant.
+_STARTER_GRANTS = {
+    SetupRole(slug, name, description, None, f"role.{slug}"): list(grants)
+    for slug, name, description, grants in STARTER_ROLES
+}
+
+
 def install_missing_roles(conn, roles: tuple[SetupRole, ...]) -> None:
-    """Create or reuse exact, privilege-free roles in the bot's write transaction."""
+    """Create privilege-free roles or reuse exact local matches, including stock starters."""
     if not roles:
         return
     from sqlalchemy import inspect, text
@@ -145,7 +154,7 @@ def install_missing_roles(conn, roles: tuple[SetupRole, ...]) -> None:
                   "color": role.color, "prompt_key": role.prompt_key}
         if matches:
             if (len(matches) != 1 or matches[0]["kind"] != "role" or matches[0]["system"]
-                    or matches[0]["capabilities"] != []
+                    or matches[0]["capabilities"] not in ([], _STARTER_GRANTS.get(role, []))
                     or any(matches[0][key] != value for key, value in fields.items())):
                 raise SetupRoleConflict(f"Required role '{role.name}' conflicts with an existing local tag.")
         if role.prompt_key is not None and prompts_exist:

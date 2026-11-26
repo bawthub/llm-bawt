@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy import event, text
 from sqlmodel import Session
 
+from llm_bawt.bot_tags.catalog import STARTER_ROLES, seed_starter_roles
 from llm_bawt.seeding import bot_presets, setup_live_source
 from llm_bawt.seeding.preset_source import read_preset_source
 from llm_bawt.seeding.setup_role_dependencies import SetupRole, SetupRoleConflict, install_missing_roles
@@ -175,26 +176,10 @@ def _stage_neutral_catalog(target):
     assert stage_catalog(lambda: SetupSeedSnapshot(slugs, profiles, roles, set()), target)
 
 
-def test_shipped_catalog_import_is_create_only_on_disposable_pg(rig, monkeypatch, tmp_path):  # noqa: F811
+def _setup_client(monkeypatch, store):
     from llm_bawt.service.routes import setup_presets as routes
     from tests.test_bot_presets import _Settings, _USABLE, _client
 
-    if not bot_presets.GENERATED_CATALOG.is_file():
-        # The public source export omits the installation's catalog; import a neutral one instead.
-        _stage_neutral_catalog(tmp_path / "setup_catalog.json")
-        monkeypatch.setattr(bot_presets, "GENERATED_CATALOG", tmp_path / "setup_catalog.json")
-
-    stock = bot_presets.all_packs(None)[0]
-    assert stock.pack == bot_presets.GENERATED_PACK
-    # Exercise a strict subset with two independent role dependencies.
-    by_role = {p.tags[0]: p for p in stock.presets if len(p.tags) == 1}
-    first, second = list(by_role.values())[:2]
-    existing = next(p for p in stock.presets if p.slug not in {first.slug, second.slug})
-    assert len(stock.presets) > 3
-    store = rig.store()
-    assert rig.scalar("SELECT count(*) FROM bot_tag_catalog WHERE kind='role'") == 0
-    store.upsert({"slug": existing.slug, "name": "Fixture local", "system_prompt": "Private fixture body"})
-    local_before = store.get(existing.slug).model_dump()
     settings = _Settings()
     writes = []
 
@@ -211,8 +196,28 @@ def test_shipped_catalog_import_is_create_only_on_disposable_pg(rig, monkeypatch
     monkeypatch.setattr(routes, "check_agent_runtime", AsyncMock(return_value=SimpleNamespace(ready=True)))
     monkeypatch.setattr(routes, "_persist_bot_profile", persist)
     monkeypatch.setattr(routes, "_record_first_default_bot", lambda *_: None)
+    return _client(), writes
+
+
+def test_shipped_catalog_import_is_create_only_on_disposable_pg(rig, monkeypatch, tmp_path):  # noqa: F811
+    if not bot_presets.GENERATED_CATALOG.is_file():
+        # The public source export omits the installation's catalog; import a neutral one instead.
+        _stage_neutral_catalog(tmp_path / "setup_catalog.json")
+        monkeypatch.setattr(bot_presets, "GENERATED_CATALOG", tmp_path / "setup_catalog.json")
+
+    stock = bot_presets.all_packs(None)[0]
+    assert stock.pack == bot_presets.GENERATED_PACK
+    # Exercise a strict subset with two independent role dependencies.
+    by_role = {p.tags[0]: p for p in stock.presets if len(p.tags) == 1}
+    first, second = list(by_role.values())[:2]
+    existing = next(p for p in stock.presets if p.slug not in {first.slug, second.slug})
+    assert len(stock.presets) > 3
+    store = rig.store()
+    assert rig.scalar("SELECT count(*) FROM bot_tag_catalog WHERE kind='role'") == 0
+    store.upsert({"slug": existing.slug, "name": "Fixture local", "system_prompt": "Private fixture body"})
+    local_before = store.get(existing.slug).model_dump()
     selection = {"selection": [item.ref for item in (first, second, existing)]}
-    client = _client()
+    client, writes = _setup_client(monkeypatch, store)
 
     def actions():
         response = client.post("/v1/setup/bot-presets", json=selection)
@@ -239,3 +244,70 @@ def test_shipped_catalog_import_is_create_only_on_disposable_pg(rig, monkeypatch
     assert len(writes) == 2
     assert store.get(first.slug).model_dump() == edited
     assert store.get(existing.slug).model_dump() == local_before
+
+
+def test_setup_retries_stock_presets_with_seeded_roles(rig, monkeypatch, tmp_path):  # noqa: F811
+    if not bot_presets.GENERATED_CATALOG.is_file():
+        # Exercise real starter roles even in exports without the installation's roster.
+        target = tmp_path / "setup_catalog.json"
+        roles = {slug: {"slug": slug, "name": name, "description": description, "prompt_key": f"role.{slug}"}
+                 for slug, name, description, _ in STARTER_ROLES}
+        profiles = [{"key": f"fixture-{slug}", "slug": f"fixture-{slug}", "name": f"Fixture {slug}",
+                     "summary": "Does a thing.", "system_prompt": "Be useful.",
+                     "tags": [slug] if slug in roles else []} for slug in (*roles, "plain")]
+        keys = {role["prompt_key"] for role in roles.values()}
+        assert stage_catalog(lambda: SetupSeedSnapshot({p["slug"] for p in profiles}, profiles, roles, keys), target)
+        monkeypatch.setattr(bot_presets, "GENERATED_CATALOG", target)
+
+    stock = bot_presets.load_generated_pack(bot_presets.GENERATED_CATALOG)
+    existing = next(p for p in stock.presets if not p.tags)
+    store = rig.store()
+    with store.engine.begin() as conn:
+        seed_starter_roles(conn)
+
+    def seeded_rows():
+        with store.engine.connect() as conn:
+            return {r.slug: r for r in conn.execute(text("SELECT * FROM bot_tag_catalog WHERE kind='role'"))}
+
+    stock_coder = next(p for p in stock.presets if "coder" in p.tags)
+    coder = seeded_rows()["coder"]
+    assert coder.capabilities == ["implement"]
+    store.upsert({"slug": existing.slug, "name": "Fixture already created"})
+    existing_before = store.get(existing.slug).model_dump()
+    client, writes = _setup_client(monkeypatch, store)
+    for column, operator_value, shipped_value in (
+        ("capabilities", '["implement", "tenant_grant"]', json.dumps(coder.capabilities)),
+        ("description", "Operator instructions", coder.description),
+    ):
+        def set_role_field(value):
+            expr = "CAST(:value AS jsonb)" if column == "capabilities" else ":value"
+            with store.engine.begin() as conn:
+                conn.execute(text(f"UPDATE bot_tag_catalog SET {column}={expr} WHERE slug='coder'"), {"value": value})
+
+        set_role_field(operator_value)
+        edited = seeded_rows()["coder"]
+        response = client.post("/v1/setup/bot-presets", json={"selection": [stock_coder.ref, existing.ref]})
+        assert response.status_code == 200, response.text
+        results = {p["ref"]: p for p in response.json()["results"]}
+        assert results[stock_coder.ref]["action"] == "blocked"
+        assert "conflicts with an existing local tag" in results[stock_coder.ref]["reason"]
+        assert results[existing.ref]["action"] == "skip"
+        assert store.get(stock_coder.slug) is None
+        assert seeded_rows()["coder"] == edited
+        set_role_field(shipped_value)
+
+    before = seeded_rows()
+    writes.clear()
+    response = client.post("/v1/setup/bot-presets", json={"selection": [p.ref for p in stock.presets]})
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["ok"], result["results"]
+    assert {row["ref"]: row["action"] for row in result["results"]} == {
+        p.ref: "skip" if p == existing else "created" for p in stock.presets
+    }
+    assert set(writes) == {p.slug for p in stock.presets if p != existing}
+    assert store.get(existing.slug).model_dump() == existing_before
+    for preset in stock.presets:
+        assert rig.tags(preset.slug) == list(preset.tags)
+    after = seeded_rows()
+    assert {slug: after[slug] for slug in before} == before
