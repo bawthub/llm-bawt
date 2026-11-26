@@ -107,8 +107,9 @@ def record_choice(conn, profile, *, opted_in: bool, user_id: str | None, prompt:
                 "prefer_steer": False, "reply_mode": "async", "stream": True,
                 # augment_memory=False would run the turn in local mode, which
                 # skips the profile, so the welcome could not greet the person
-                # by their profile name (TASK-2643). The setup cue itself is
-                # still never extracted into memory.
+                # by their profile name (TASK-2643). extract_memory=False only
+                # skips this turn's own fact extraction; history summaries may
+                # still include the cue.
                 "augment_memory": True, "extract_memory": False,
             },
             metadata={"setup_owner_user_id": user_id},
