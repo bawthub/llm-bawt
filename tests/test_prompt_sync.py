@@ -489,9 +489,10 @@ def test_check_sends_the_callers_api_key(tmp_path, monkeypatch):
     key_file = tmp_path / "api-key"
     key_file.write_text("bridge-example.abc123")
     monkeypatch.setenv("LLM_BAWT_API_KEY_FILE", str(key_file))
-    seen = []
+    seen, sent = [], []
 
     def fake_urlopen(request, timeout):
+        sent.append(request)
         seen.append((request.full_url, request.get_header("X-llm-bawt-key")))
         return io.BytesIO(json.dumps({"in_sync": True, "drift_count": 0, "drift": []}).encode())
 
@@ -499,3 +500,9 @@ def test_check_sends_the_callers_api_key(tmp_path, monkeypatch):
     assert prompt_sync._fetch_report("http://app.example:8642/")["in_sync"] is True
     assert seen == [("http://app.example:8642/v1/prompts/sync/drift?include_body=false",
                      "bridge-example.abc123")]
+    # A redirect elsewhere must not carry the key (urllib's own redirect handler).
+    moved = urllib.request.HTTPRedirectHandler().redirect_request(
+        sent[0], io.BytesIO(), 302, "Found", {}, "http://elsewhere.example/v1/prompts/sync/drift")
+    assert moved is not None and moved.full_url.startswith("http://elsewhere.example/")
+    assert moved.get_header("X-llm-bawt-key") is None
+    assert not any(k.lower() == "x-llm-bawt-key" for k, _ in moved.header_items())

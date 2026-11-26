@@ -51,6 +51,14 @@ def service_principals(environ=None) -> frozenset[str]:
         exported = {spec.principal for spec in parse(env.get(EXPORTS_ENV))}
     except ValueError:
         exported = set()
+    from .middleware import ROUTE_LIMITED_PRINCIPALS
+
+    limited = wanted & ROUTE_LIMITED_PRINCIPALS.keys()
+    if limited:  # a single-route key is never an MCP service, whatever the config says
+        logging.getLogger(__name__).error(
+            "MCP auth: %s names route-limited %s; not admitted",
+            SERVICE_PRINCIPALS_ENV, ", ".join(sorted(limited)))
+        wanted -= limited
     missing = wanted - exported - {APP_PRINCIPAL}
     if missing:
         logging.getLogger(__name__).error(

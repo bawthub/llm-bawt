@@ -260,13 +260,18 @@ def export_report(
 def _get(url: str):
     """GET with this caller's API key (``LLM_BAWT_API_KEY_FILE``) when it has one.
 
-    Stdlib only: the exporter runs from a source checkout without app deps.
+    The key is an unredirected header: urllib copies ordinary headers onto a
+    redirect, which could hand the key to another origin. Stdlib only: the
+    exporter runs from a source checkout without app deps.
     """
     from urllib.request import Request, urlopen
 
     from .api_auth.client import auth_headers
 
-    return urlopen(Request(url, headers=auth_headers()), timeout=30)
+    request = Request(url)
+    for name, value in auth_headers().items():
+        request.add_unredirected_header(name, value)
+    return urlopen(request, timeout=30)
 
 
 def _fetch_report(api: str) -> dict[str, Any]:

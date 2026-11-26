@@ -258,3 +258,9 @@ def test_service_principals_need_a_matching_key_export():
     assert mcp.service_principals({
         "LLM_BAWT_MCP_SERVICE_PRINCIPALS": "bawthub-web",
         "LLM_BAWT_API_KEY_EXPORTS": "not valid"}) == {mcp.APP_PRINCIPAL}
+    # A route-limited key never becomes an MCP service, even when exported and named
+    # (TASK-2380): the gate and the diagnostics endpoint both read this set.
+    assert mcp.service_principals({
+        "LLM_BAWT_MCP_SERVICE_PRINCIPALS": "bawthub-web,primary-available-notifier",
+        "LLM_BAWT_API_KEY_EXPORTS": exports + ",primary-available-notifier=/run/k/n",
+    }) == {mcp.APP_PRINCIPAL, "bawthub-web"}

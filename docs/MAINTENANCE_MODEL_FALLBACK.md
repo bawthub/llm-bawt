@@ -221,10 +221,13 @@ Like every `/v1` route, the announce needs a credential once API auth
 enforces. An announcer on another machine uses the key for the principal
 `primary-available-notifier`, sent as `X-LLM-Bawt-Key`. That key is
 admitted only for this exact `POST` (no query string) and refused on every
-other route, so a copied key can do no more than an announce. Derive it in
-the app container with
-`python -c "from llm_bawt.api_auth.keys import header_value; print(header_value('primary-available-notifier'))"`
-and store it where only the announcer's account can read it.
+other route, so a copied key can do no more than an announce. Export it
+like any caller's key: add `primary-available-notifier=/dir` to
+`LLM_BAWT_API_KEY_EXPORTS` and the app writes `/dir/api-key` (mode 0600).
+Copy that file to the announcer's machine as a file (for example `scp`),
+into a location only the announcer's account can read, and have the
+announcer read it from there. Never print the key or pass it as a command
+argument: it would land in shell history, logs or transcripts.
 
 ## Out of scope
 
