@@ -94,6 +94,9 @@ def test_two_setup_submissions_commit_only_one_first_chat(private_app_pg):
     assert delivery_audience(row, default_user="unrelated").user_id == f"user-{target}"
     assert "orientation-model, connection anthropic-api" in row.message
     assert deliveries.payload(row.id)["prefer_steer"] is False
+    # Not local mode: the welcome turn must read the profile name (TASK-2643).
+    assert deliveries.payload(row.id)["augment_memory"] is True
+    assert deliveries.payload(row.id)["extract_memory"] is False
 
     claimed = deliveries.claim_next(target, claim_owner="fixture", steer_capable=False)
     assert claimed is not None and claimed.id == row.id

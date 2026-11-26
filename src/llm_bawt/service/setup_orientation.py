@@ -105,7 +105,11 @@ def record_choice(conn, profile, *, opted_in: bool, user_id: str | None, prompt:
                 "bot_id": profile.slug, "user": user_id,
                 "messages": [{"role": "user", "content": body}],
                 "prefer_steer": False, "reply_mode": "async", "stream": True,
-                "augment_memory": False, "extract_memory": False,
+                # augment_memory=False would run the turn in local mode, which
+                # skips the profile, so the welcome could not greet the person
+                # by their profile name (TASK-2643). The setup cue itself is
+                # still never extracted into memory.
+                "augment_memory": True, "extract_memory": False,
             },
             metadata={"setup_owner_user_id": user_id},
             connection=conn, producer=PRODUCER, on_gate="hold",
