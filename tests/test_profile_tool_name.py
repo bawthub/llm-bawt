@@ -83,3 +83,34 @@ def test_other_keys_and_categories_leave_display_name_alone(manager):
     set_name("sample", "Avery", key="nickname")
     set_name("sample", "Avery", category="preference")
     assert not manager.get_profile(U, "sample").display_name
+
+
+def test_name_summary_is_name_only(manager):
+    assert manager.get_user_name_summary("sample") == ""
+    manager.get_or_create_profile(U, "sample")
+    manager.update_profile(U, "sample", display_name="Sample Owner", summary="Likes garden walks.")
+    manager.set_attribute(U, "sample", "preference", "food", "tacos")
+    assert manager.get_user_name_summary("sample") == "User's name: Sample Owner"
+    set_name("sample", "Avery")
+    out = manager.get_user_name_summary("sample")
+    assert out == "User's name: Sample Owner\nThey asked to be called: Avery"
+    assert "garden" not in out and "tacos" not in out
+
+
+def test_bot_without_memory_gets_the_name_in_its_prompt(manager):
+    from types import SimpleNamespace as NS
+
+    from llm_bawt.core import prompt_sections
+    from llm_bawt.core.prompt_builder import PromptBuilder
+
+    manager.get_or_create_profile(U, "sample")
+    manager.update_profile(U, "sample", display_name="Sample Owner")
+    manager.set_attribute(U, "sample", "preference", "food", "tacos")
+    owner = NS(_db_available=True, profile_manager=None, profile_name_reader=manager,
+               user_id="sample", verbose=False,
+               _resolve_setting=lambda _key, default=None: default)
+    builder = PromptBuilder()
+    prompt_sections.PromptSectionsMixin._sec_user_context(owner, builder, "")
+    prompt = builder.build()
+    assert "User's name: Sample Owner" in prompt
+    assert "tacos" not in prompt

@@ -43,6 +43,19 @@ class PromptSectionsMixin:
                         console.print(f"[dim]{'─' * 30}[/dim]")
             except Exception as e:
                 logger.warning(f"Failed to load user profile: {e}")
+        elif self._db_available and self.profile_name_reader:
+            # TASK-2643: a bot without memory gets only the person's name.
+            try:
+                name_context = self.profile_name_reader.get_user_name_summary(self.user_id)
+                if name_context:
+                    builder.add_section(
+                        "user_context",
+                        f"## About the User\n{name_context}",
+                        position=SectionPosition.USER_CONTEXT,
+                        metadata={"source": "profile_db:user_name", "gate": "db_available & name-only"},
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to load user name: {e}")
 
     def _sec_user_guidance(self, builder: PromptBuilder, prompt: str) -> None:
         """TASK-893: the user's approved guidance, per turn so an approval,

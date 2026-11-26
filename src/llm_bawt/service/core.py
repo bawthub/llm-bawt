@@ -306,6 +306,13 @@ class ServiceLLMBawt(BaseLLMBawt):
         if not self.bot.requires_memory:
             logger.debug(f"Bot '{self.bot.name}' has requires_memory=false")
             self._db_available = True  # DB available but not needed
+            # Still address the person by their profile name (TASK-2643).
+            try:
+                from .dependencies import get_profile_manager
+
+                self.profile_name_reader = get_profile_manager(config)
+            except Exception as e:
+                logger.debug(f"Profile name reader unavailable: {e}")
             return
 
         try:

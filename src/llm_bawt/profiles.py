@@ -985,6 +985,23 @@ class ProfileManager:
         """
         return self.get_profile_summary(EntityType.USER, user_id, use_summary=not curated)
     
+    def get_user_name_summary(self, user_id: str) -> str:
+        """Name-only profile text for a bot that doesn't carry the full profile.
+
+        The display name, plus the name they asked to be called (fact ``name``)
+        when that differs. Empty when the profile gives no name (TASK-2643).
+        """
+        profile = self.get_profile(EntityType.USER, user_id)
+        display = ((profile.display_name if profile else None) or "").strip()
+        attr = self.get_attribute(EntityType.USER, user_id, AttributeCategory.FACT, "name")
+        called = str(attr.value).strip()[:100] if attr and attr.value is not None else ""
+        lines = []
+        if display:
+            lines.append(f"User's name: {display}")
+        if called and called.lower() != display.lower():
+            lines.append(f"They asked to be called: {called}")
+        return "\n".join(lines)
+
     def get_bot_profile_summary(self, bot_id: str) -> str:
         """Get profile summary for a bot (personality traits, preferences)."""
         return self.get_profile_summary(

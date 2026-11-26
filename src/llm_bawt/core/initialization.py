@@ -73,6 +73,8 @@ class OrchestratorInitializationMixin:
         # Will be initialized below
         self.memory: MemoryClient | None = None
         self.profile_manager: ProfileManager | None = None
+        # Bots without memory read only the person's name (TASK-2643).
+        self.profile_name_reader: ProfileManager | None = None
         self.search_client: SearchClient | None = None
         self.home_client: HomeAssistantMCPClient | None = None
         self.ha_native_client: HomeAssistantNativeClient | None = None
