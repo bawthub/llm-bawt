@@ -11,7 +11,7 @@ import hashlib
 import json
 import logging
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from llm_bawt.api_auth.client import add_auth_header
 
@@ -22,6 +22,18 @@ _TIMEOUT_SECONDS = 1.5
 _MAX_RESPONSE_BYTES = 256 * 1024
 
 
+class _NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, *_args, **_kwargs):
+        return None
+
+
+_OPENER = build_opener(_NoRedirect)
+
+
+def _open(request: Request, *, timeout: float):
+    return _OPENER.open(request, timeout=timeout)
+
+
 def fetch_compact_prompt(api_url: str | None) -> str | None:
     """Return the latest registry body or None on bounded, logged failure."""
     if not api_url:
@@ -30,10 +42,13 @@ def fetch_compact_prompt(api_url: str | None) -> str | None:
     url = f"{api_url.rstrip('/')}/v1/prompts/{COMPACT_PROMPT_KEY}"
     try:
         # Explicit key: the PreCompact CLI hook is its own process, outside the
-        # bridge's installed urllib hook (TASK-2380).
-        headers = add_auth_header({"Accept": "application/json", "Cache-Control": "no-cache"})
-        request = Request(url, headers=dict(headers))
-        with urlopen(request, timeout=_TIMEOUT_SECONDS) as response:
+        # bridge's installed urllib hook (TASK-2380). It is an unredirected
+        # header and this fixed endpoint never follows redirects, so the key
+        # cannot reach another origin.
+        request = Request(url, headers={"Accept": "application/json", "Cache-Control": "no-cache"})
+        for name, value in add_auth_header({}).items():
+            request.add_unredirected_header(name, value)
+        with _open(request, timeout=_TIMEOUT_SECONDS) as response:
             raw = response.read(_MAX_RESPONSE_BYTES + 1)
         if len(raw) > _MAX_RESPONSE_BYTES:
             raise ValueError("prompt response too large")

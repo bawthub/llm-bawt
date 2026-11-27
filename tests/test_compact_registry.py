@@ -63,7 +63,7 @@ def registry_api(monkeypatch):
                 raise HTTPError(request.full_url, response.status_code, "registry unavailable", None, None)
             return io.BytesIO(response.content)
 
-        monkeypatch.setattr("claude_code_bridge.compact_prompt_lookup.urlopen", local_urlopen)
+        monkeypatch.setattr("claude_code_bridge.compact_prompt_lookup._open", local_urlopen)
         try:
             yield client, store, counts
         finally:
@@ -130,7 +130,7 @@ def test_editor_save_immediately_updates_explicit_and_auto_existing_session(regi
         raise TimeoutError("fixture timeout")
 
     with monkeypatch.context() as outage:
-        outage.setattr("claude_code_bridge.compact_prompt_lookup.urlopen", timed_out)
+        outage.setattr("claude_code_bridge.compact_prompt_lookup._open", timed_out)
         assert _preflight(bridge, "/compact").message == "/compact"
         assert _hook() == ""
 

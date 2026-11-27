@@ -120,3 +120,42 @@ def test_command_hook_sends_api_key(registry_server, tmp_path):
     assert result.stdout == COMPACT_SUMMARY_DEFAULT + "\n"
     assert state["keys"] == ["sample-bridge.secretvalue"]
     assert "secretvalue" not in result.stderr
+
+
+@pytest.mark.real_process(reason="the CLI hook process must not carry its API key across a redirect")
+def test_command_hook_does_not_follow_redirect_with_key(registry_server, tmp_path):
+    url, other_state = registry_server  # Stands in for a different origin.
+    hits = {"requests": 0, "keys": []}
+
+    class Redirector(BaseHTTPRequestHandler):
+        def do_GET(self):
+            hits["requests"] += 1
+            hits["keys"].append(self.headers.get("X-LLM-Bawt-Key"))
+            self.send_response(302)
+            self.send_header("Location", f"{url}{self.path}")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, format, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Redirector)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        key_file = tmp_path / "api-key"
+        key_file.write_text("sample-bridge.secretvalue\n", encoding="utf-8")
+        command = _ensure_compact_hook({})["hooks"]["PreCompact"][0]["hooks"][0]["command"]
+        env = {**os.environ, "LLM_BAWT_API_URL": f"http://127.0.0.1:{server.server_port}",
+               "LLM_BAWT_API_KEY_FILE": str(key_file)}
+        result = subprocess.run(shlex.split(command), input=json.dumps({"trigger": "auto"}), text=True,
+                                capture_output=True, check=True, timeout=10, env=env)
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+    assert hits["keys"] == ["sample-bridge.secretvalue"]  # Configured origin is still authenticated.
+    assert other_state["requests"] == 0  # Redirect target never contacted.
+    assert result.stdout == ""
+    assert "unavailable" in result.stderr
+    assert "secretvalue" not in result.stderr
