@@ -103,8 +103,14 @@ def test_two_setup_submissions_commit_only_one_first_chat(private_app_pg):
     assert state == {"bot_id": target, "opted_in": True, "milestone": "first_chat", "delivery_id": row.id}
     assert delivery_audience(row, default_user="unrelated").user_id == f"user-{target}"
     assert "orientation-model, connection anthropic-api" in row.message
-    # The welcome cue states the profile name next to its instruction (TASK-2643).
-    assert row.message.startswith("Welcome\n\nTheir profile name: Avery Example.\n\nChecked in setup:")
+    # The model's welcome cue states the profile name next to its instruction,
+    # but the ledger message and its compact preview stay name-free even with a
+    # short cue like this one (TASK-2643).
+    cue = deliveries.payload(row.id)["messages"][0]["content"]
+    assert cue.startswith("Welcome\n\nTheir profile name: Avery Example.\n\nChecked in setup:")
+    assert row.message.startswith("Welcome\n\nChecked in setup:")
+    assert "Avery" not in row.message
+    assert "Avery" not in str(row.to_compact())
     assert deliveries.payload(row.id)["prefer_steer"] is False
     # Not local mode: the welcome turn must read the profile name (TASK-2643).
     assert deliveries.payload(row.id)["augment_memory"] is True

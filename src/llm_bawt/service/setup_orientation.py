@@ -109,12 +109,16 @@ def record_choice(conn, profile, *, opted_in: bool, user_id: str | None, prompt:
             SELECT a.key FROM model_endpoints e JOIN access_paths a ON a.id=e.access_path_id
             WHERE e.id=:endpoint_id
         """), {"endpoint_id": profile.endpoint_id}).scalar_one()
-        body = f"{prompt}{profile_name_line(conn, user_id)}\n\nChecked in setup: model {profile.default_model}, connection {access}."
+        checked = f"\n\nChecked in setup: model {profile.default_model}, connection {access}."
+        body = f"{prompt}{profile_name_line(conn, user_id)}{checked}"
         record, _ = store.enqueue(
             sender_bot_id=SYSTEM_BOT_ID,
             target_bot_id=profile.slug,
             author=AuthorReference.user(SYSTEM_BOT_ID),
-            message=body,
+            # The ledger message feeds the compact delivery preview, which is
+            # not scoped to the setup owner, so it stays name-free. The model
+            # reads payload.messages, which carries the name (TASK-2643).
+            message=f"{prompt}{checked}",
             idempotency_key="setup:first-chat:v1",
             message_kind="SETUP_ORIENTATION",
             payload={
