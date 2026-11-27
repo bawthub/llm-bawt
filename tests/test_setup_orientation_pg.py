@@ -23,7 +23,9 @@ from llm_bawt.service.inter_bot_claims import validate_inter_bot_claim
 from llm_bawt.service.prompt_stale import STALE_KEY
 from llm_bawt.service.routes.setup import _write_first_bot_settings
 from llm_bawt.service.schemas import ChatCompletionRequest
-from llm_bawt.service.setup_orientation import ORIENTATION_PROMPT_KEY, SETTING_KEY, record_choice
+from llm_bawt.service.setup_orientation import (
+    ORIENTATION_PROMPT_KEY, SETTING_KEY, profile_name_line, record_choice,
+)
 from llm_bawt.service.system_prompt_pin import COMPACTION, SystemPromptPinStore, apply_session_pin
 from llm_bawt.service.turn_admission import lock_target
 from llm_bawt.service.turn_logs import TurnLogStore
@@ -75,6 +77,14 @@ def test_two_setup_submissions_commit_only_one_first_chat(private_app_pg):
     globals_after_rollback = settings.get_scope_settings("global", "*")
     assert not {SETTING_KEY, "default_bot", "tenant.voice_enabled"} & globals_after_rollback.keys()
 
+    with profiles.engine.begin() as conn:
+        assert profile_name_line(conn, "user-introduction-a") == ""
+        for user in ("user-introduction-a", "user-introduction-b"):
+            conn.execute(text("""
+                INSERT INTO entity_profiles (entity_type, entity_id, display_name, created_at, updated_at)
+                VALUES ('USER', :user, '  Avery   Example ', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """), {"user": user})
+
     with ThreadPoolExecutor(max_workers=2) as pool:
         first = pool.submit(create, "introduction-a", race=True)
         second = pool.submit(create, "introduction-b", race=True)
@@ -93,6 +103,8 @@ def test_two_setup_submissions_commit_only_one_first_chat(private_app_pg):
     assert state == {"bot_id": target, "opted_in": True, "milestone": "first_chat", "delivery_id": row.id}
     assert delivery_audience(row, default_user="unrelated").user_id == f"user-{target}"
     assert "orientation-model, connection anthropic-api" in row.message
+    # The welcome cue states the profile name next to its instruction (TASK-2643).
+    assert row.message.startswith("Welcome\n\nTheir profile name: Avery Example.\n\nChecked in setup:")
     assert deliveries.payload(row.id)["prefer_steer"] is False
     # Not local mode: the welcome turn must read the profile name (TASK-2643).
     assert deliveries.payload(row.id)["augment_memory"] is True

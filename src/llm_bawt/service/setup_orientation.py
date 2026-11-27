@@ -70,6 +70,22 @@ def prepare_first_chat(config) -> str:
     return resolved.body
 
 
+def profile_name_line(conn, user_id: str) -> str:
+    """State the person's profile display name in the welcome cue itself.
+
+    The name is already in the system prompt, but with thinking on the welcome
+    still asked for it about once in ten turns (TASK-2643); stating it next to
+    the instruction made it reliable. Same normalization as the name-only
+    profile section. Empty when the profile has no display name.
+    """
+    name = conn.execute(text("""
+        SELECT display_name FROM entity_profiles
+        WHERE entity_type::text IN ('USER', 'user') AND entity_id=:user
+    """), {"user": user_id}).scalar_one_or_none()
+    name = " ".join((name or "").split())[:100]
+    return f"\n\nTheir profile name: {name}." if name else ""
+
+
 def record_choice(conn, profile, *, opted_in: bool, user_id: str | None, prompt: str | None, store):
     """Called inside the serialized bot-create transaction, after both readiness gates.
 
@@ -93,7 +109,7 @@ def record_choice(conn, profile, *, opted_in: bool, user_id: str | None, prompt:
             SELECT a.key FROM model_endpoints e JOIN access_paths a ON a.id=e.access_path_id
             WHERE e.id=:endpoint_id
         """), {"endpoint_id": profile.endpoint_id}).scalar_one()
-        body = f"{prompt}\n\nChecked in setup: model {profile.default_model}, connection {access}."
+        body = f"{prompt}{profile_name_line(conn, user_id)}\n\nChecked in setup: model {profile.default_model}, connection {access}."
         record, _ = store.enqueue(
             sender_bot_id=SYSTEM_BOT_ID,
             target_bot_id=profile.slug,
