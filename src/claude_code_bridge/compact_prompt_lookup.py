@@ -13,6 +13,8 @@ import logging
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from llm_bawt.api_auth.client import add_auth_header
+
 logger = logging.getLogger(__name__)
 
 COMPACT_PROMPT_KEY = "agents.compaction_summary"
@@ -27,7 +29,10 @@ def fetch_compact_prompt(api_url: str | None) -> str | None:
         return None
     url = f"{api_url.rstrip('/')}/v1/prompts/{COMPACT_PROMPT_KEY}"
     try:
-        request = Request(url, headers={"Accept": "application/json", "Cache-Control": "no-cache"})
+        # Explicit key: the PreCompact CLI hook is its own process, outside the
+        # bridge's installed urllib hook (TASK-2380).
+        headers = add_auth_header({"Accept": "application/json", "Cache-Control": "no-cache"})
+        request = Request(url, headers=dict(headers))
         with urlopen(request, timeout=_TIMEOUT_SECONDS) as response:
             raw = response.read(_MAX_RESPONSE_BYTES + 1)
         if len(raw) > _MAX_RESPONSE_BYTES:

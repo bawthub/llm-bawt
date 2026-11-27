@@ -50,11 +50,12 @@ def test_bootstrap_preserves_existing_hook_and_is_idempotent():
 
 @pytest.fixture
 def registry_server():
-    state = {"body": COMPACT_SUMMARY_DEFAULT, "requests": 0, "status": 200}
+    state = {"body": COMPACT_SUMMARY_DEFAULT, "requests": 0, "status": 200, "keys": []}
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             state["requests"] += 1
+            state["keys"].append(self.headers.get("X-LLM-Bawt-Key"))
             assert self.path == "/v1/prompts/agents.compaction_summary"
             content = json.dumps({"key": "agents.compaction_summary", "body": state["body"],
                                   "source": "db_override", "updated_at": "v1"}).encode()
@@ -105,3 +106,17 @@ def test_command_hook_fetches_each_time_and_skips_custom_and_outage(registry_ser
     assert failure.stdout == ""
     assert "unavailable" in failure.stderr
     assert state["requests"] == 3
+
+
+@pytest.mark.real_process(reason="the CLI hook process must send the bridge's API key itself")
+def test_command_hook_sends_api_key(registry_server, tmp_path):
+    url, state = registry_server
+    key_file = tmp_path / "api-key"
+    key_file.write_text("sample-bridge.secretvalue\n", encoding="utf-8")
+    command = _ensure_compact_hook({})["hooks"]["PreCompact"][0]["hooks"][0]["command"]
+    env = {**os.environ, "LLM_BAWT_API_URL": url, "LLM_BAWT_API_KEY_FILE": str(key_file)}
+    result = subprocess.run(shlex.split(command), input=json.dumps({"trigger": "auto"}), text=True,
+                            capture_output=True, check=True, timeout=10, env=env)
+    assert result.stdout == COMPACT_SUMMARY_DEFAULT + "\n"
+    assert state["keys"] == ["sample-bridge.secretvalue"]
+    assert "secretvalue" not in result.stderr
