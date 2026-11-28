@@ -31,7 +31,7 @@ uv run python -m llm_bawt.mcp_server --transport http --host 0.0.0.0 --port 8001
 HTTP requests pass a per-caller gate whose mode is the global runtime setting
 `mcp_auth_mode` (`off|log|enforce`; default from `LLM_BAWT_MCP_AUTH_MODE`,
 operator override `LLM_BAWT_MCP_AUTH_MODE_FORCE`), independent of `/v1`'s
-`api_auth_mode`. Accepted callers: a bot's signed turn capability
+`api_auth_mode` ([API_AUTH.md](API_AUTH.md)). Accepted callers: a bot's signed turn capability
 (`X-LLM-Bawt-Task-Turn-Context`, sent by the agent bridges) or
 `X-LLM-Bawt-Key` for the service principal `llm-bawt-app` (the app's own
 client). Bot keys, and a turn capability presented together with a key, are

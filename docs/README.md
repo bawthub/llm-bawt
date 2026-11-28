@@ -6,6 +6,7 @@ have been removed.
 
 ## Current docs
 
+- [API_AUTH.md](./API_AUTH.md) — `/v1/*` caller authentication, keys and rollout
 - [MCP_SERVER.md](./MCP_SERVER.md)
 - [INTER_BOT_COMMUNICATION.md](./INTER_BOT_COMMUNICATION.md)
 - [CLAUDE_CODE_BRIDGE.md](./CLAUDE_CODE_BRIDGE.md)
