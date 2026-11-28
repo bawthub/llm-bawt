@@ -197,6 +197,60 @@ def test_followed_row_takes_the_new_required_vars_and_custom_rows_keep_theirs(st
     assert json.loads(rows["k.custom"].required_vars_json) == ["a", "b"]
 
 
+def test_contract_only_default_change_reaches_following_rows_not_overrides(store) -> None:
+    """TASK-2590: a definition that adds required vars without changing its body
+    used to leave following rows on the old contract forever."""
+    s, defs = store
+    for key in ("k.follow", "k.custom"):
+        defs[key] = PromptDefinition(key=key, title=key, category="agents",
+                                     loader=lambda: "{a} {b}", required_vars=("b",))
+    s.seed_defaults()
+    seeded = _bodies(s)
+    s.upsert(key="k.custom", body="{a} {b}", required_vars=["b"],
+             metadata=json.loads(seeded["k.custom"].metadata_json), updated_by="operator")
+    before = _bodies(s)
+    versions_before = [v.version for v in s.list_versions("k.follow")]
+    for key in ("k.follow", "k.custom"):
+        defs[key] = PromptDefinition(key=key, title=key, category="agents",
+                                     loader=lambda: "{a} {b}", required_vars=("a", "b"))
+    result = s.seed_defaults()
+    assert result["adopted_keys"] == ["k.follow"] and result["followed_keys"] == []
+    rows = _bodies(s)
+    follow = rows["k.follow"]
+    assert json.loads(follow.required_vars_json) == ["a", "b"]
+    # Body, provenance, writer, timestamps and history are untouched.
+    assert follow.body == before["k.follow"].body
+    assert follow.metadata_json == before["k.follow"].metadata_json
+    assert follow.updated_by == before["k.follow"].updated_by
+    assert [v.version for v in s.list_versions("k.follow")] == versions_before
+    assert json.loads(rows["k.custom"].required_vars_json) == ["b"]
+    assert s.seed_defaults()["adopted_keys"] == []
+
+
+def test_contract_repair_loses_to_a_concurrent_save(store, monkeypatch, tmp_path) -> None:
+    s, defs = store
+    s.engine = create_engine(f"sqlite:///{tmp_path / 'contract-race.db'}")
+    SQLModel.metadata.create_all(s.engine, tables=[PromptTemplate.__table__, PromptTemplateVersion.__table__])
+    defs["k.follow"] = PromptDefinition(key="k.follow", title="k.follow", category="agents",
+                                        loader=lambda: "{a}", required_vars=())
+    s.seed_defaults()
+    defs["k.follow"] = PromptDefinition(key="k.follow", title="k.follow", category="agents",
+                                        loader=lambda: "{a}", required_vars=("a",))
+    original = PromptTemplateStore._follow_default
+
+    def interleaved(session, row, body, sha, now, *rest):
+        if row.key == "k.follow":
+            other = PromptTemplateStore.__new__(PromptTemplateStore)
+            other.engine = s.engine
+            other.upsert(key="k.follow", body="{a}", required_vars=["x"], updated_by="tenant",
+                         metadata=json.loads(row.metadata_json))
+        return original(session, row, body, sha, now, *rest)
+
+    monkeypatch.setattr(PromptTemplateStore, "_follow_default", staticmethod(interleaved))
+    assert "k.follow" not in s.seed_defaults()["adopted_keys"]
+    assert json.loads(_bodies(s)["k.follow"].required_vars_json) == ["x"]
+
+
 def test_explicit_override_matching_new_default_stays_overridden_until_reset(store) -> None:
     s, defs = store
     s.seed_defaults()

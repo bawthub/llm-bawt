@@ -418,18 +418,25 @@ class PromptTemplateStore:
         The guard re-checks the exact body, metadata and writer this pass read,
         so a prompt save that commits in between makes the update a no-op and
         the customization stands (TASK-2127 review). Nothing is written through
-        the ORM row, which may be stale. A followed row also takes the
-        definition's required variables, so its contract matches its new body.
+        the ORM row, which may be stale. A following row always takes the
+        definition's required variables, so its contract matches its body,
+        including when only the contract changed and the body did not
+        (TASK-2590).
         """
         seen_body, seen_meta, seen_by = row.body, row.metadata_json, row.updated_by
+        seen_vars = row.required_vars_json
         metadata = _parse_json_dict(seen_meta)
         if not is_following(row):
             return None
         if body_sha256(seen_body) == sha:
-            if metadata.get(DEFAULT_SHA_KEY) == sha:
+            values: dict[str, Any] = {}
+            if metadata.get(DEFAULT_SHA_KEY) != sha:
+                metadata[DEFAULT_SHA_KEY] = sha
+                values["metadata_json"] = json.dumps(metadata)
+            if seen_vars != required_vars_json:
+                values["required_vars_json"] = required_vars_json
+            if not values:
                 return None
-            metadata[DEFAULT_SHA_KEY] = sha
-            values: dict[str, Any] = {"metadata_json": json.dumps(metadata)}
             outcome = "adopted"
         else:
             metadata[DEFAULT_SHA_KEY] = sha
@@ -445,6 +452,7 @@ class PromptTemplateStore:
                 table.c.body == seen_body,
                 table.c.metadata_json.is_not_distinct_from(seen_meta),
                 table.c.updated_by.is_not_distinct_from(seen_by),
+                table.c.required_vars_json.is_not_distinct_from(seen_vars),
             )
             .values(**values)
         )
