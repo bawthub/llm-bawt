@@ -167,3 +167,24 @@ def test_fanout_rows_publish_deliveries_and_other_rows_do_not(monkeypatch):
     asyncio.run(InterBotDeliveryDispatcher._emit(me, row("bot", {"batch_id": "b2"})))
     assert len(sub.tool_events) == 3
     assert sub.events == [{"_type": "state_changed", "topics": ["deliveries"]}]
+
+
+def test_voice_service_marks_its_cloning_topic(monkeypatch):
+    """TASK-2664: the separate voice service marks voice_cloning over HTTP."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from llm_bawt.service.routes import voice_state
+
+    marked: list[tuple] = []
+    service = SimpleNamespace()
+    monkeypatch.setattr(voice_state, "get_service", lambda: service)
+    monkeypatch.setattr(voice_state, "mark", lambda svc, *topics: marked.append((svc, topics)))
+    app = FastAPI()
+    app.include_router(voice_state.router)
+    response = TestClient(app).post("/v1/state/voice-cloning")
+    assert response.status_code == 204
+    assert marked == [(service, ("voice_cloning",))]
+    assert state_changed_event(["voice_cloning"]) == {
+        "_type": "state_changed", "topics": ["voice_cloning"],
+    }

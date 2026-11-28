@@ -64,11 +64,16 @@ GOOGLE_TASKS = "google_tasks"
 GUIDANCE = "guidance"
 #: A profile summary was saved. The event carries no profile identity or content.
 PROFILE_SUMMARY = "profile_summary"
+#: TASK-2664: BawtHub's voice service changed its cloning setup (token saved or
+#: removed, model download progress, ready or failed). Marked over HTTP by that
+#: service, the only writer; the UI refetches its cloning status.
+VOICE_CLONING = "voice_cloning"
 
 #: Every topic a browser may receive. Closed: the client ignores anything else.
 TOPICS = frozenset({OPS_JOBS, OPS_RELEASES, GPU, QUEUE_HOLD, APPROVAL_POLICIES, MEDIA, SCHEDULES,
                     MAINTENANCE_JOBS, DELIVERIES, NOTIFICATIONS, FREEZE, OPS_CATALOG, PLAYGROUND,
-                    UTILITY_USAGE, NEXTCLOUD_TALK, GOOGLE_TASKS, GUIDANCE, PROFILE_SUMMARY})
+                    UTILITY_USAGE, NEXTCLOUD_TALK, GOOGLE_TASKS, GUIDANCE, PROFILE_SUMMARY,
+                    VOICE_CLONING})
 
 #: Bursts of commits inside this window produce one fingerprint pass.
 MIN_INTERVAL_SECONDS = 1.0

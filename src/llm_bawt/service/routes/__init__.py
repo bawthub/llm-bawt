@@ -16,6 +16,7 @@ from .health import router as health_router
 from .google_home_probe import router as google_home_probe_router
 from .history import router as history_router
 from .jobs import router as jobs_router
+from .voice_state import router as voice_state_router
 from .prompt_schedules import router as prompt_schedules_router
 from .message_routing import router as message_routing_router
 from .llm import router as llm_router
@@ -90,6 +91,7 @@ all_routers = [
     agent_context_router,
     usage_router,
     jobs_router,
+    voice_state_router,
     prompt_schedules_router,
     message_routing_router,
     history_router,
